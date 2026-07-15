@@ -131,4 +131,16 @@
     <WriteLinesToFile File="$(OutDir)clublog_key.txt" Lines="$(_ClubLogKey)" Overwrite="true" />
   </Target>
 
+  <!-- clublog_key.txt is written straight to $(OutDir) above rather than being a
+       tracked MSBuild item, so "dotnet publish" would otherwise never copy it into
+       the publish output. This adds it to the publish file set explicitly. -->
+  <Target Name="JimmyIncludeClubLogKeyInPublish" BeforeTargets="ComputeFilesToPublish">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(OutDir)clublog_key.txt" Condition="Exists('$(OutDir)clublog_key.txt')">
+        <RelativePath>clublog_key.txt</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
+
 </Project>

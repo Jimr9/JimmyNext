@@ -24,6 +24,7 @@ Setup1/build_log*.txt
 # WiX build outputs and tool cache
 Setup_WiX/.wix/
 Setup_WiX/Release/
+Setup_WiX/PublishOutput/
 *.wixpdb
 debug/
 installer_build.log

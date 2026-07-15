@@ -1,13 +1,23 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Jimmy installer - WiX 4 source
+  Jimmy installer - WiX 5 source (migration Stage B7)
   Product  : Jimmy (WSJT-X Controller)
-  Version  : 1.89.0
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
-  Sounds   : installed to Resources\ subfolder
-  UpgradeCode retained from original vdproj
+  UpgradeCode retained unchanged from the original vdproj / WiX 4 source, for
+  MajorUpgrade continuity with every prior public release.
+
+  Packaging model changed for the .NET 10 self-contained port: instead of a
+  framework-dependent build with a hand-maintained file list (net472 had ~40
+  files total), this harvests the entire self-contained win-x64 publish
+  output (300+ files: Jimmy's own assemblies plus the whole .NET runtime)
+  via WiX 5's <Files Include="glob"> directory harvesting. Hand-listing
+  every runtime DLL individually, the way the net472-era file did, is not
+  practical at this file count.
+
+  PublishOutput\ is produced by (self contained flag set to true):
+    dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -r win-x64 -o PublishOutput
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
@@ -30,12 +40,15 @@
 
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
-    <!-- Icon for Add/Remove Programs -->
+    <!-- Icon for Add/Remove Programs. Sourced directly from Properties\, same as
+         the net472-era file: never copied into build/publish output either
+         before or after the migration (ApplicationIcon embeds it into the exe
+         resource directly; this is a separate loose-file reference). -->
     <Icon Id="JimmyIcon" SourceFile="..\WSJTX_Controller\Properties\netfol.ico" />
     <Property Id="ARPPRODUCTICON" Value="JimmyIcon" />
     <Property Id="ARPCONTACT" Value="KB0UZT" />
 
-    <!-- Standard dialog set: Welcome → InstallDir (Browse) → VerifyReady → Progress → Finish -->
+    <!-- Standard dialog set: Welcome -> InstallDir (Browse) -> VerifyReady -> Progress -> Finish -->
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <!-- Custom UI fragment that adds ShortcutsDlg and overrides the dialog chain -->
     <UIRef Id="JimmyUI" />
@@ -45,29 +58,13 @@
     <Property Id="DESKTOP_SHORTCUT" Value="1" Secure="yes" />
     <Property Id="STARTMENU_SHORTCUT" Value="1" Secure="yes" />
 
-    <!-- .NET Framework 4.7.2 check. 461808 is Microsoft's documented minimum
-         Release registry value for 4.7.2 (see learn.microsoft.com "How to:
-         Determine which .NET Framework versions are installed"). WiX v4's
-         RegistrySearch only supports Type="raw" (string); there is no
-         integer type, so the numeric comparison is forced in the Launch
-         Condition itself via the "#" prefix (standard Windows Installer
-         condition syntax for treating a property's string value as a
-         number). Without the "#" and a real threshold, a plain existence/
-         truthy check would also pass for any older 4.x Full install (4.0
-         through 4.6.2), which does not actually satisfy this requirement. -->
-    <Property Id="NETFX472RELEASE">
-      <RegistrySearch Id="NetFx472Search"
-        Root="HKLM"
-        Key="SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full"
-        Name="Release"
-        Type="raw" />
-    </Property>
-    <Launch Condition="NETFX472RELEASE &gt;=#461808" Message="Jimmy requires .NET Framework 4.7.2 or later.&#xA;&#xA;Download it from: https://dotnet.microsoft.com/en-us/download/dotnet-framework/net472&#xA;&#xA;Install it, then run this installer again." />
+    <!-- No .NET Framework launch-condition check (net472-era NETFX472RELEASE
+         RegistrySearch/Launch Condition removed here, per Stage B7 scope):
+         the self-contained win-x64 publish carries its own .NET 10 runtime,
+         so there is no longer a prerequisite to verify before installing. -->
 
     <Feature Id="DefaultFeature" Title="Jimmy" Level="1">
-      <ComponentGroupRef Id="MainComponents" />
-      <ComponentGroupRef Id="ResourceComponents" />
-      <ComponentGroupRef Id="SQLiteInteropComponents" />
+      <ComponentGroupRef Id="PublishComponents" />
       <ComponentGroupRef Id="RuleDefinitionsComponents" />
       <ComponentGroupRef Id="RuleDefinitionsListsComponents" />
       <ComponentRef Id="DesktopShortcutComp" />
@@ -81,9 +78,14 @@
     <StandardDirectory Id="ProgramFilesFolder">
       <Directory Id="ManufacturerDir" Name="KB0UZT">
         <Directory Id="INSTALLFOLDER" Name="Jimmy">
-          <Directory Id="ResourcesDir" Name="Resources" />
-          <Directory Id="X86Dir" Name="x86" />
-          <Directory Id="X64Dir" Name="x64" />
+          <!-- Declared explicitly (not left to harvesting) only for
+               RuleDefinitions\, because it mixes direct files (*.ini) with a
+               subdirectory (Lists\); this is exactly the known WiX 5
+               harvesting bug the roadmap flagged (wixtoolset/issues#8608):
+               a folder that has both won't get harvested as one Directory
+               row, it gets two duplicate rows with the same name. Every
+               other folder here (Resources\, each locale subfolder) is
+               leaf-only, so plain recursive harvesting is safe for them. -->
           <Directory Id="RuleDefinitionsDir" Name="RuleDefinitions">
             <Directory Id="RuleDefinitionsListsDir" Name="Lists" />
           </Directory>
@@ -95,224 +97,29 @@
     <StandardDirectory Id="ProgramMenuFolder" />
   </Fragment>
 
-  <!-- ── Main install folder ───────────────────────────────────────────── -->
+  <!-- ── Harvested publish output ───────────────────────────────────────────
+       Recursively harvests every file under PublishOutput\ (the self-contained
+       win-x64 publish: Jimmy.exe/.dll, the .NET 10 runtime, SQLite.Interop.dll,
+       MQTTnet*.dll, clublog_key.txt, Resources\*.wav, and the satellite-resource
+       culture subfolders), preserving directory structure under INSTALLFOLDER
+       automatically. RuleDefinitions\ is excluded here and harvested separately
+       below (see the Directory declaration above for why). Replaces the
+       net472-era file's ~15 hand-maintained ComponentGroups; hand-listing 300+
+       files individually is not practical at this scale, which is exactly the
+       WiX 5 harvesting capability the roadmap called for. ────────────────── -->
   <Fragment>
-    <ComponentGroup Id="MainComponents" Directory="INSTALLFOLDER">
-
-      <Component Id="JimmyExe">
-        <File Id="JimmyExeFile"
-              Source="..\WSJTX_Controller\bin\Release\Jimmy.exe"
-              KeyPath="yes" />
-      </Component>
-
-      <Component Id="JimmyConfig">
-        <File Id="JimmyConfigFile"
-              Source="..\WSJTX_Controller\bin\Release\Jimmy.exe.config" />
-      </Component>
-
-      <!-- Jimmy's Club Log application key; see Jimmy.csproj's EmbedClubLogKey
-           target (writes this file during Release build) and ClubLogAppKey.cs
-           (reads it at runtime). Not a user credential; always present (possibly
-           empty) so this component never fails to build. -->
-      <Component Id="ClubLogKey">
-        <File Id="ClubLogKeyFile"
-              Source="..\WSJTX_Controller\bin\Release\clublog_key.txt" />
-      </Component>
-
-      <Component Id="AppIcon">
-        <File Id="AppIconFile"
-              Source="..\WSJTX_Controller\Properties\netfol.ico" />
-      </Component>
-
-      <Component Id="SQLiteDll">
-        <File Id="SQLiteDllFile"
-              Source="..\WSJTX_Controller\bin\Release\System.Data.SQLite.dll"
-              KeyPath="yes" />
-      </Component>
-
-      <!-- DX Spot Watch (PSKReporter MQTT feed) dependencies, added 2026-07-07.
-           MSBuild copies these to bin\Release\ via the project's Reference
-           HintPaths; the MSI's file list is manually maintained (no wildcard
-           harvesting in this WiX version), so they must be listed explicitly
-           here too or a fresh install would be missing them and Jimmy.exe
-           would fail to start (DxSpotWatcher is constructed unconditionally
-           in Form_Load). -->
-      <Component Id="MQTTnetDll">
-        <File Id="MQTTnetDllFile"
-              Source="..\WSJTX_Controller\bin\Release\MQTTnet.dll"
-              KeyPath="yes" />
-      </Component>
-
-      <Component Id="MQTTnetManagedClientDll">
-        <File Id="MQTTnetManagedClientDllFile"
-              Source="..\WSJTX_Controller\bin\Release\MQTTnet.Extensions.ManagedClient.dll"
-              KeyPath="yes" />
-      </Component>
-
+    <ComponentGroup Id="PublishComponents" Directory="INSTALLFOLDER">
+      <Files Include="PublishOutput\**">
+        <Exclude Files="PublishOutput\RuleDefinitions\**" />
+      </Files>
     </ComponentGroup>
-  </Fragment>
 
-  <!-- ── SQLite native interop DLLs (per-architecture) ─────────────────── -->
-  <Fragment>
-    <ComponentGroup Id="SQLiteInteropComponents">
-
-      <Component Id="SQLiteInteropX86" Directory="X86Dir">
-        <File Id="SQLiteInteropX86File"
-              Source="..\WSJTX_Controller\bin\Release\x86\SQLite.Interop.dll"
-              KeyPath="yes" />
-      </Component>
-
-      <Component Id="SQLiteInteropX64" Directory="X64Dir">
-        <File Id="SQLiteInteropX64File"
-              Source="..\WSJTX_Controller\bin\Release\x64\SQLite.Interop.dll"
-              KeyPath="yes" />
-      </Component>
-
-    </ComponentGroup>
-  </Fragment>
-
-  <!-- ── Rule Definitions starter library (Awards engine) ──────────────────
-       Seeded by RuleLoader into %LocalAppData%\Jimmy\Data\RuleDefinitions on
-       first run. The installed WiX 4.0.6 core schema has no wildcard file
-       harvesting (Files Include="glob" is WiX v5+), so each award/list
-       file is listed individually; add a new Component/File pair here
-       whenever a file is added under RuleDefinitions\. ────────────────────── -->
-  <Fragment>
     <ComponentGroup Id="RuleDefinitionsComponents" Directory="RuleDefinitionsDir">
-
-      <Component Id="RuleDef_CQ_DX_Award">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\CQ_DX_Award.ini" />
-      </Component>
-      <Component Id="RuleDef_Colonies13">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\Colonies13.ini" />
-      </Component>
-      <Component Id="RuleDef_Colonies13Bonus">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\Colonies13Bonus.ini" />
-      </Component>
-      <Component Id="RuleDef_DXCC">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\DXCC.ini" />
-      </Component>
-      <Component Id="RuleDef_IOTA_100Islands">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\IOTA_100Islands.ini" />
-      </Component>
-      <Component Id="RuleDef_QRZ_DXWorld">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\QRZ_DXWorld.ini" />
-      </Component>
-      <Component Id="RuleDef_QRZ_GridSquared">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\QRZ_GridSquared.ini" />
-      </Component>
-      <Component Id="RuleDef_QRZ_USCounties">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\QRZ_USCounties.ini" />
-      </Component>
-      <Component Id="RuleDef_QRZ_US_Award">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\QRZ_US_Award.ini" />
-      </Component>
-      <Component Id="RuleDef_QRZ_WorldContinents">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\QRZ_WorldContinents.ini" />
-      </Component>
-      <Component Id="RuleDef_RAC_Canadaward">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\RAC_Canadaward.ini" />
-      </Component>
-      <Component Id="RuleDef_RAC_WANA">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\RAC_WANA.ini" />
-      </Component>
-      <Component Id="RuleDef_Route66OTA">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\Route66OTA.ini" />
-      </Component>
-      <Component Id="RuleDef_WAC">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAC.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_6M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_6M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_10M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_10M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_12M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_12M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_15M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_15M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_17M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_17M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_20M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_20M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_40M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_40M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_80M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_80M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAS_160M">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAS_160M.ini" />
-      </Component>
-      <Component Id="RuleDef_WAZ">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WAZ.ini" />
-      </Component>
-      <Component Id="RuleDef_WPX">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WPX.ini" />
-      </Component>
-      <Component Id="RuleDef_WWFF_Hunter">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\WWFF_Hunter.ini" />
-      </Component>
-
+      <Files Include="PublishOutput\RuleDefinitions\*" />
     </ComponentGroup>
-  </Fragment>
 
-  <Fragment>
     <ComponentGroup Id="RuleDefinitionsListsComponents" Directory="RuleDefinitionsListsDir">
-
-      <Component Id="RuleDefList_Colonies13Roster">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\Lists\colonies13_roster.txt" />
-      </Component>
-      <Component Id="RuleDefList_Colonies13BonusRoster">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\Lists\colonies13_bonus_roster.txt" />
-      </Component>
-      <Component Id="RuleDefList_Route66Roster">
-        <File Source="..\WSJTX_Controller\bin\Release\RuleDefinitions\Lists\route66_roster.txt" />
-      </Component>
-
-    </ComponentGroup>
-  </Fragment>
-
-  <!-- ── Resources subfolder (WAV files) ───────────────────────────────── -->
-  <Fragment>
-    <ComponentGroup Id="ResourceComponents" Directory="ResourcesDir">
-
-      <Component Id="BeepBeepWav">
-        <File Source="..\WSJTX_Controller\Resources\BeepBeep.wav" />
-      </Component>
-
-      <Component Id="BlipWav">
-        <File Source="..\WSJTX_Controller\Resources\Blip.wav" />
-      </Component>
-
-      <Component Id="ChimeWav">
-        <File Source="..\WSJTX_Controller\Resources\Chime.wav" />
-      </Component>
-
-      <Component Id="DingDingWav">
-        <File Source="..\WSJTX_Controller\Resources\DingDing.wav" />
-      </Component>
-
-      <Component Id="DiveWav">
-        <File Source="..\WSJTX_Controller\Resources\Dive.wav" />
-      </Component>
-
-      <Component Id="EchoWav">
-        <File Source="..\WSJTX_Controller\Resources\Echo.wav" />
-      </Component>
-
-      <Component Id="TrumpetWav">
-        <File Source="..\WSJTX_Controller\Resources\Trumpet.wav" />
-      </Component>
-
+      <Files Include="PublishOutput\RuleDefinitions\Lists\*" />
     </ComponentGroup>
   </Fragment>
 
@@ -358,32 +165,32 @@
 
   <!-- ── UI customizations ─────────────────────────────────────────────── -->
   <!--
-    WiX 4 merges multiple <UI> fragments into one MSI UI section.
+    WiX 5 merges multiple <UI> fragments into one MSI UI section.
     This fragment adds ShortcutsDlg into the dialog chain after InstallDirDlg.
 
     Fresh-install flow:
-      WelcomeDlg → InstallDirDlg (Browse) → ShortcutsDlg (checkboxes) → VerifyReadyDlg (Install) → ExitDlg (Finish)
+      WelcomeDlg -> InstallDirDlg (Browse) -> ShortcutsDlg (checkboxes) -> VerifyReadyDlg (Install) -> ExitDlg (Finish)
 
     Override strategy:
-      - Order=5 on InstallDirDlg Next fires after the built-in Order=4 (→VerifyReadyDlg),
+      - Order=5 on InstallDirDlg Next fires after the built-in Order=4 (->VerifyReadyDlg),
         using the same validity condition so invalid paths still block progression.
-      - Order=2 on VerifyReadyDlg Back fires after the built-in Order=1 (→InstallDirDlg),
+      - Order=2 on VerifyReadyDlg Back fires after the built-in Order=1 (->InstallDirDlg),
         redirecting back to ShortcutsDlg instead.
   -->
   <Fragment>
     <UI Id="JimmyUI">
-      <!-- Skip LicenseAgreementDlg: WelcomeDlg Next → InstallDirDlg (Order=5 overrides built-in Order=1→LicenseAgreementDlg) -->
+      <!-- Skip LicenseAgreementDlg: WelcomeDlg Next -> InstallDirDlg (Order=5 overrides built-in Order=1->LicenseAgreementDlg) -->
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="5"
                Condition="NOT Installed" />
 
       <!-- Fix InstallDirDlg Back to return to WelcomeDlg (not LicenseAgreementDlg) -->
       <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="5" />
 
-      <!-- Route: InstallDirDlg Next → ShortcutsDlg -->
+      <!-- Route: InstallDirDlg Next -> ShortcutsDlg -->
       <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Order="5"
                Condition='WIXUI_DONTVALIDATEPATH OR Installed OR PATCH OR WIXUI_INSTALLDIR_VALID = "1"' />
 
-      <!-- Route: VerifyReadyDlg Back → ShortcutsDlg (fresh install only) -->
+      <!-- Route: VerifyReadyDlg Back -> ShortcutsDlg (fresh install only) -->
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="2"
                Condition="NOT Installed AND NOT PATCH" />
 
