@@ -933,7 +933,6 @@ namespace WSJTX_Controller
                     if (commConfirmed && supportedModes.Contains(mode) && specOp == 0 && opMode == OpModes.IDLE)
                     {
                         EnableMonitoring();              //must do only after DisableTx and HaltTx
-                        //if (debug) EnableDebugLog();
 
                         opMode = OpModes.START;
                         DebugOutput($"{Time()} opMode:{opMode}");
@@ -1463,19 +1462,6 @@ namespace WSJTX_Controller
             udpClient2.Send(ba, ba.Length);
             DebugOutput($"{Time()} >>>>>Sent 'Start upload to LOTW' cmd:16{nl}{emsg}");
         }
-
-        private void EnableDebugLog()
-        {
-            if (!debug) return;
-
-            emsg.NewTxMsgIdx = 5;
-            emsg.GenMsg = $"";         //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Enable Debug' cmd:5{nl}{emsg}");
-        }
-
 
         private void HeartbeatNotRecd(object sender, EventArgs e)
         {
