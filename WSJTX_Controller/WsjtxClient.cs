@@ -35,11 +35,19 @@ namespace WSJTX_Controller
         public IJimmyQueueView QueueView;
         public IJimmyLogView LogView;
         public bool altListPaused = false;
-        public UdpClient udpClient;
-        public int port;
-        public IPAddress ipAddress;
-        public bool multicast;
-        public bool overrideUdpDetect;
+
+        // Stage A3 (migration roadmap): socket state now owned by WsjtxProtocolAdapter
+        // (Protocol/WsjtxProtocolAdapter.cs). These stay as delegating properties, not
+        // fields, with their original names/visibility, so every existing call site
+        // across WsjtxClient's other partial-class files and external classes
+        // (Controller/OptionsDlg/SetupDlg read these; only WsjtxClient itself ever
+        // assigns them) keeps working completely unchanged.
+        private readonly WsjtxProtocolAdapter _protocolAdapter = new WsjtxProtocolAdapter();
+        public UdpClient udpClient { get => _protocolAdapter.ReceiveSocket; set => _protocolAdapter.ReceiveSocket = value; }
+        public int port { get => _protocolAdapter.Port; set => _protocolAdapter.Port = value; }
+        public IPAddress ipAddress { get => _protocolAdapter.IpAddress; set => _protocolAdapter.IpAddress = value; }
+        public bool multicast { get => _protocolAdapter.Multicast; set => _protocolAdapter.Multicast = value; }
+        public bool overrideUdpDetect { get => _protocolAdapter.OverrideUdpDetect; set => _protocolAdapter.OverrideUdpDetect = value; }
         public bool debug;
         public string pgmName;
         public string pgmVer;
@@ -129,8 +137,8 @@ namespace WSJTX_Controller
         private bool restartQueue = false;
 
         private WsjtxMessage.QsoStates lastQsoState = WsjtxMessage.QsoStates.INVALID;
-        private UdpClient udpClient2;
-        private IPEndPoint endPoint;
+        private UdpClient udpClient2 { get => _protocolAdapter.SendSocket; set => _protocolAdapter.SendSocket = value; }
+        private IPEndPoint endPoint { get => _protocolAdapter.EndPoint; set => _protocolAdapter.EndPoint = value; }
         private bool? lastXmitting = null;
         private bool? lastTxWatchdog = null;
         private string dxCall = null;
@@ -173,12 +181,16 @@ namespace WSJTX_Controller
         private bool ClaimLiveLoggedQso(string dedupKey) =>
             string.IsNullOrEmpty(dedupKey) || _liveLoggedQsoKeys.Add(dedupKey);
 
-        private AsyncCallback asyncCallback;
-        private UdpState udpSt;
-        private static bool messageRecd;
-        private static byte[] datagram;
-        private static IPEndPoint fromEp = new IPEndPoint(IPAddress.Any, 0);
-        private static bool recvStarted;
+        private AsyncCallback asyncCallback { get => _protocolAdapter.AsyncCallback; set => _protocolAdapter.AsyncCallback = value; }
+        private UdpState udpSt { get => _protocolAdapter.UdpSt; set => _protocolAdapter.UdpSt = value; }
+        // messageRecd/datagram/fromEp/recvStarted were "private static" here -- a
+        // historical artifact with no observable effect in this single-instance app
+        // (only one WsjtxClient, hence only one WsjtxProtocolAdapter, is ever
+        // constructed). Now plain instance state on the adapter, behavior-identical.
+        private bool messageRecd { get => _protocolAdapter.MessageRecd; set => _protocolAdapter.MessageRecd = value; }
+        private byte[] datagram { get => _protocolAdapter.Datagram; set => _protocolAdapter.Datagram = value; }
+        private IPEndPoint fromEp { get => _protocolAdapter.FromEp; set => _protocolAdapter.FromEp = value; }
+        private bool recvStarted { get => _protocolAdapter.RecvStarted; set => _protocolAdapter.RecvStarted = value; }
         private static uint defaultAudioOffset = 1500;
         private string failReason = "Failure reason: Unknown";
         public static int wsjtxRevision;
@@ -312,12 +324,6 @@ namespace WSJTX_Controller
         public static bool IsWsjtx270Rc()
         {
             return WSJTX_Controller.WsjtxClient.wsjtxRevision == WSJTX_Controller.WsjtxClient.lastWsjtx270RcRevision;
-        }
-
-        private struct UdpState
-        {
-            public UdpClient u;
-            public IPEndPoint e;
         }
 
         public enum TxModes
