@@ -43,6 +43,12 @@ namespace WSJTX_Controller
         // (Controller/OptionsDlg/SetupDlg read these; only WsjtxClient itself ever
         // assigns them) keeps working completely unchanged.
         private readonly WsjtxProtocolAdapter _protocolAdapter = new WsjtxProtocolAdapter();
+        // Stage A4 (migration roadmap): isolates every non-standard NewTxMsgIdx
+        // sub-command behind WsjtxCompatibilityExtension (Compatibility/
+        // WsjtxCompatibilityExtension.cs). Field initializers run in declaration
+        // order, so _protocolAdapter (declared just above) is already constructed
+        // by the time this one runs.
+        private readonly WsjtxCompatibilityExtension _compatExtension;
         public UdpClient udpClient { get => _protocolAdapter.ReceiveSocket; set => _protocolAdapter.ReceiveSocket = value; }
         public int port { get => _protocolAdapter.Port; set => _protocolAdapter.Port = value; }
         public IPAddress ipAddress { get => _protocolAdapter.IpAddress; set => _protocolAdapter.IpAddress = value; }
@@ -604,6 +610,7 @@ namespace WSJTX_Controller
 
             emsg = new EnableTxMessage();
             emsg.Id = WsjtxMessage.UniqueId;
+            _compatExtension = new WsjtxCompatibilityExtension(_protocolAdapter);
 
             firstDecodeTime = DateTime.MinValue;
 
@@ -2734,13 +2741,8 @@ namespace WSJTX_Controller
                 }
 
                 DebugOutput($"{Time()} EnableTx, txEnabled:{txEnabled} processDecodeTimer.Enabled:{processDecodeTimer.Enabled}");
-                emsg.NewTxMsgIdx = 9;
-                emsg.Param0 = true;       //WSJT-X Enable Tx button state 
-                emsg.GenMsg = $"";         //ignored
-                emsg.CmdCheck = "";         //ignored
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Enable Tx' cmd:9{nl}{emsg}");
+                // Stage A4: build+send moved to WsjtxCompatibilityExtension.EnableTx.
+                _compatExtension.EnableTx(msg => DebugOutput($"{Time()} {msg}"));
                 txEnabled = true;
                 wsjtxTxEnableButton = true;
                 UpdateDblClkTip();
@@ -2767,13 +2769,8 @@ namespace WSJTX_Controller
                     return;
                 }
 
-                emsg.NewTxMsgIdx = 8;
-                emsg.Param0 = buttonState;    //set WSJT-X Enable Tx button state
-                emsg.GenMsg = $"";         //ignored
-                emsg.CmdCheck = "";         //ignored
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Disable Tx' cmd:8{nl}{emsg}");
+                // Stage A4: build+send moved to WsjtxCompatibilityExtension.DisableTx.
+                _compatExtension.DisableTx(buttonState, msg => DebugOutput($"{Time()} {msg}"));
                 txEnabled = false;
                 wsjtxTxEnableButton = buttonState;
                 UpdateDblClkTip();
@@ -2787,16 +2784,13 @@ namespace WSJTX_Controller
             UpdateDebug();
         }
 
+        // Stage A4: build+send moved to WsjtxCompatibilityExtension.EnableMonitoring.
         private void EnableMonitoring()
         {
-            emsg.NewTxMsgIdx = 11;
-            emsg.GenMsg = $"";         //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Enable Monitoring' cmd:11{nl}{emsg}");
+            _compatExtension.EnableMonitoring(msg => DebugOutput($"{Time()} {msg}"));
         }
 
+        // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetListenMode.
         private void SetListenMode()
         {
             if (udpClient2 == null)
@@ -2805,13 +2799,7 @@ namespace WSJTX_Controller
                 return;
             }
 
-            emsg.NewTxMsgIdx = 14;
-            emsg.Param0 = (txMode == TxModes.LISTEN);
-            emsg.GenMsg = $"";          //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Set listen mode' cmd:14{nl}{emsg}");
+            _compatExtension.SetListenMode(txMode == TxModes.LISTEN, msg => DebugOutput($"{Time()} {msg}"));
         }
 
         public void HaltTuning()
@@ -2825,12 +2813,8 @@ namespace WSJTX_Controller
             tuning = false;
             if (udpClient2 != null)
             {
-                emsg.NewTxMsgIdx = 12;
-                emsg.GenMsg = $"";         //ignored
-                emsg.CmdCheck = "";         //ignored
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'HaltTx' cmd:12{nl}{emsg}");
+                // Stage A4: build+send moved to WsjtxCompatibilityExtension.HaltTx.
+                _compatExtension.HaltTx(msg => DebugOutput($"{Time()} {msg}"));
                 txEnabled = false;
                 wsjtxTxEnableButton = false;
                 UpdateDblClkTip();
