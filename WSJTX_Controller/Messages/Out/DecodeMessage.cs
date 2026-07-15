@@ -351,6 +351,14 @@ namespace WsjtxUdpLib.Messages.Out
         // set by DeriveCategory/CheckAwardAlert, read back for display (CategoryTag/raw
         // decode tags) and for smart sound file lookup. Null when no award matched.
         public string MatchedAwardRuleId { get; set; }
+        // Stage A6 (migration roadmap): the ClassifiedCall computed by ClassificationEngine
+        // for this decode, attached once by ProcessDecodeMsg before any classification-
+        // derived field below is read. The wire-supplied fields above (IsDx/IsNewCallOnBand/
+        // etc.) are left completely untouched alongside this -- deliberately, so the two can
+        // always be diffed directly for parity diagnosis. Null until ProcessDecodeMsg runs
+        // (e.g. messages that never reach it). Use EnqueueDecodeMessage.EffectiveClassification()
+        // (Classification/ClassificationCutover.cs) rather than reading this directly.
+        public WSJTX_Controller.ClassifiedCall Classified { get; set; }
 
         public static string WsjtxCountry(string country)
         {

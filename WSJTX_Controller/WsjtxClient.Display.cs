@@ -216,8 +216,12 @@ namespace WSJTX_Controller
 
         private string BuildCallWaitingRow(string call, EnqueueDecodeMessage d)
         {
+            // Stage A6: classification-derived fields below all read from
+            // EffectiveClassification() instead of directly off the wire.
+            ClassifiedCall classification = d.EffectiveClassification();
+
             string snr = $", {d.Snr.ToString("+#;-#;0")}";
-            string countryName = d.Country;
+            string countryName = classification.Country;
             if (countryName.Length == 0 && lookupManager != null && lookupManager.Enabled)
             {
                 var rec = lookupManager.Build(call);
@@ -229,7 +233,7 @@ namespace WSJTX_Controller
             string grid = g == null ? "" : $", {SpacifyPayload(g)}";
 
             if (ctrl.showUsStateCheckBox.Checked &&
-                d.Country == "USA" &&
+                classification.Country == "USA" &&
                 d.Priority != (int)CallPriority.NEW_COUNTRY_ON_BAND &&
                 d.Priority != (int)CallPriority.NEW_COUNTRY)
             {
@@ -243,9 +247,9 @@ namespace WSJTX_Controller
                 if (state != null) country = $", {state}";
             }
 
-            int dist = metricUnits || d.Distance < 0 ? d.Distance : (int)((0.6213 * d.Distance) + 0.5);
+            int dist = metricUnits || classification.Distance < 0 ? classification.Distance : (int)((0.6213 * classification.Distance) + 0.5);
             string unitsStr = metricUnits ? "km" : "mi";
-            string distAz = (d.Distance >= 0 && d.Azimuth >= 0) ? $", {dist}{unitsStr}, {d.Azimuth}°" : "";
+            string distAz = (classification.Distance >= 0 && classification.Azimuth >= 0) ? $", {dist}{unitsStr}, {classification.Azimuth}°" : "";
 
             string oe = debug ? $", {d.SinceMidnight.Minutes.ToString().PadLeft(2, '0')}:{d.SinceMidnight.Seconds.ToString().PadLeft(2, '0')}" : "";
 
@@ -318,6 +322,10 @@ namespace WSJTX_Controller
             {
                 if (!PassesRawDecodeFilter(d)) continue;
 
+                // Stage A6: classification-derived fields below all read from
+                // EffectiveClassification() instead of directly off the wire.
+                ClassifiedCall classification = d.EffectiveClassification();
+
                 string side = IsEvenCall(d) ? "TX1" : "TX2";
 
                 string tag = "";
@@ -346,8 +354,8 @@ namespace WSJTX_Controller
                 string g = WsjtxMessage.Grid(d.Message);
                 string grid = ctrl.rawShowGrid && g != null ? $", {g}" : "";
 
-                string country = ctrl.rawShowCountry && d.Country.Length > 0 ? $", {d.Country}" : "";
-                if (ctrl.showUsStateCheckBox.Checked && d.Country == "USA" && g != null)
+                string country = ctrl.rawShowCountry && classification.Country.Length > 0 ? $", {classification.Country}" : "";
+                if (ctrl.showUsStateCheckBox.Checked && classification.Country == "USA" && g != null)
                 {
                     string qrzState = null;
                     if (lookupManager != null && lookupManager.Enabled)
@@ -360,11 +368,11 @@ namespace WSJTX_Controller
                 }
 
                 string distAz = "";
-                if (ctrl.rawShowDistAz && d.Distance >= 0 && d.Azimuth >= 0)
+                if (ctrl.rawShowDistAz && classification.Distance >= 0 && classification.Azimuth >= 0)
                 {
-                    int dist = metricUnits || d.Distance < 0 ? d.Distance : (int)((0.6213 * d.Distance) + 0.5);
+                    int dist = metricUnits || classification.Distance < 0 ? classification.Distance : (int)((0.6213 * classification.Distance) + 0.5);
                     string unitsStr = metricUnits ? "km" : "mi";
-                    distAz = $", {dist}{unitsStr} {d.Azimuth}°";
+                    distAz = $", {dist}{unitsStr} {classification.Azimuth}°";
                 }
 
                 // Fallback (only reached if rawDecodeRowOrderFields is somehow null) matches
@@ -389,6 +397,10 @@ namespace WSJTX_Controller
 
         private bool PassesRawDecodeFilter(EnqueueDecodeMessage d)
         {
+            // Stage A6: classification-derived fields below all read from
+            // EffectiveClassification() instead of directly off the wire.
+            ClassifiedCall classification = d.EffectiveClassification();
+
             // Advanced filter: only decodes with a callsign
             if (ctrl.rawOnlyCallsigns && string.IsNullOrEmpty(d.DeCall())) return false;
 
@@ -396,7 +408,7 @@ namespace WSJTX_Controller
             if (ctrl.rawOnlyUnworked)
             {
                 if (string.IsNullOrEmpty(d.DeCall())) return false;
-                if (!d.IsNewCallOnBand) return false;
+                if (!classification.IsNewCallOnBand) return false;
             }
 
             // rawOnlyRanked: station must pass Tilly's basic call-wanted criteria,
@@ -406,22 +418,22 @@ namespace WSJTX_Controller
             {
                 if (string.IsNullOrEmpty(d.DeCall())) return false;
 
-                bool isNewCtyOnBand    = d.IsNewCountryOnBand;
-                bool isDirAlert        = d.IsCQ() && IsDirectedAlert(WsjtxMessage.DirectedTo(d.Message), d.IsDx);
+                bool isNewCtyOnBand    = classification.IsNewCountryOnBand;
+                bool isDirAlert        = d.IsCQ() && IsDirectedAlert(WsjtxMessage.DirectedTo(d.Message), classification.IsDx);
                 bool isWantedDirected  = ctrl.replyDirCqCheckBox.Checked && isDirAlert;
 
                 if (!isNewCtyOnBand && !isWantedDirected)
                 {
                     // Primary gate: must be new on current band
-                    if (!d.IsNewCallOnBand) return false;
+                    if (!classification.IsNewCallOnBand) return false;
 
                     // Origin filter: DX and/or local
-                    bool wantedOrigin = (ctrl.replyDxCheckBox.Checked && d.IsDx)
-                                     || (ctrl.replyLocalCheckBox.Checked && !d.IsDx);
+                    bool wantedOrigin = (ctrl.replyDxCheckBox.Checked && classification.IsDx)
+                                     || (ctrl.replyLocalCheckBox.Checked && !classification.IsDx);
                     if (!wantedOrigin) return false;
 
                     // Band scope: when set to "Any band", station must also be new on any band
-                    if (ctrl.bandComboBox.SelectedIndex == (int)NewCallBands.ANY && !d.IsNewCallAnyBand)
+                    if (ctrl.bandComboBox.SelectedIndex == (int)NewCallBands.ANY && !classification.IsNewCallAnyBand)
                         return false;
                 }
             }

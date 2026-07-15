@@ -40,6 +40,19 @@ namespace WSJTX_Controller
             if (provider != null) _providers.Add(provider);
         }
 
+        // Stage A6 test infrastructure: inserts at the FRONT of the provider chain, so
+        // its fields win over every other provider's -- including any real local cache
+        // a provider might coincidentally already have on a given machine (e.g. Club
+        // Log's downloaded country-prefix table, which resolves purely from the
+        // callsign prefix and needs no per-call caching). Used only to register
+        // TestFixtureLookupProvider, so replay-test parity is fully deterministic and
+        // never depends on what happens to already be cached on whichever machine is
+        // running the tests.
+        public void RegisterProviderFirst(ILookupProvider provider)
+        {
+            if (provider != null) _providers.Insert(0, provider);
+        }
+
         public bool             Enabled => _useLookupData &&
                                           (Qrz.IsEnabled || LoTW.IsEnabled || ClubLog.IsEnabled);
         public QrzLookupPolicy  Policy  => _policy;
