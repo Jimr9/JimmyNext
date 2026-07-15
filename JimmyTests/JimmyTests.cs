@@ -143,6 +143,7 @@ static class JimmyTests
         ClassificationEngineTests();
         GeoMathTests();
         CapabilityNegotiatorTests();
+        A6ClassificationParityTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -732,6 +733,171 @@ static class JimmyTests
               degraded.State == WsjtxCapabilityState.Disconnected, true);
         full.Reset();
         Check("Reset from ConnectedFull -> Disconnected too", full.State == WsjtxCapabilityState.Disconnected, true);
+    }
+
+    // ── A6 Classification Parity (deterministic fixtures) ───────────────────────
+    // Proves ClassificationEngine's computed output matches hand-derived ground
+    // truth (LogbookDb worked-before state + TestFixtureLookupProvider's
+    // deterministic Country/Continent/Dxcc/Grid data -- zero network/disk I/O
+    // beyond the throwaway LogbookDb, TestModeGuard's protections untouched), and
+    // that CallQueueRanker/AwardMatcher produce identical output whether reading
+    // via the wire-style path (ClassificationCutover.UseClassificationEngine=false)
+    // or the computed path (=true) for the same underlying decode. Calls/Country/
+    // Continent values are chosen to match JimmyReplay.py's own *_CALL fixtures --
+    // see TestFixtureLookupProvider.cs for the per-call cross-reference.
+    static void CheckFieldParity(ClassificationEngine engine, string label, string message, string band,
+        string myGrid, string myContinent,
+        bool expectNewOnBand, bool expectNewAnyBand, bool expectNewCountry, bool expectNewCountryOnBand,
+        string expectCountry, string expectContinent, bool expectIsDx, string expectGridForAzDist)
+    {
+        string call = WsjtxMessage.DeCall(message);
+        var c = engine.Classify(call, band, message, myGrid, myContinent);
+
+        Check($"{label}: IsNewCallOnBand", c.IsNewCallOnBand == expectNewOnBand, true);
+        Check($"{label}: IsNewCallAnyBand", c.IsNewCallAnyBand == expectNewAnyBand, true);
+        Check($"{label}: IsNewCountry", c.IsNewCountry == expectNewCountry, true);
+        Check($"{label}: IsNewCountryOnBand", c.IsNewCountryOnBand == expectNewCountryOnBand, true);
+        CheckStr($"{label}: Country", c.Country, expectCountry);
+        CheckStr($"{label}: Continent", c.Continent, expectContinent);
+        Check($"{label}: IsDx", c.IsDx == expectIsDx, true);
+
+        if (expectGridForAzDist == null)
+        {
+            Check($"{label}: Azimuth -1 (unresolvable)", c.Azimuth == -1, true);
+            Check($"{label}: Distance -1 (unresolvable)", c.Distance == -1, true);
+        }
+        else
+        {
+            var expectedDa = GeoMath.DistanceAndAzimuth(myGrid, expectGridForAzDist);
+            int expectedDist = (int)Math.Round(expectedDa.Value.distanceKm);
+            int expectedAz = (int)Math.Round(expectedDa.Value.azimuthDeg) % 360;
+            if (expectedAz < 0) expectedAz += 360;
+            Check($"{label}: Distance matches GeoMath oracle for {expectGridForAzDist}", c.Distance == expectedDist, true);
+            Check($"{label}: Azimuth matches GeoMath oracle for {expectGridForAzDist}", c.Azimuth == expectedAz, true);
+        }
+    }
+
+    static void A6ClassificationParityTests()
+    {
+        Console.WriteLine("\n── A6 Classification Parity (deterministic fixtures, Stage A6) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_A6Parity_" + Guid.NewGuid().ToString("N") + ".db");
+        bool originalFlag = ClassificationCutover.UseClassificationEngine;
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                // TestModeGuard.IsTestMode is unaffected by any of this -- LookupManager's
+                // real providers (Qrz/ClubLog/LoTW/FccUls) stay fully registered and are
+                // still exercised by Build(), they just contribute nothing for these
+                // fictional test calls (no real cached data). TestFixtureLookupProvider is
+                // the only source that resolves them, inserted first so it always wins.
+                var lookupManager = new LookupManager();
+                lookupManager.RegisterProviderFirst(new TestFixtureLookupProvider());
+                lookupManager.Initialize(
+                    useLookupData: true,
+                    qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                    lotwEnabled: true, lotwDays: 1,
+                    clubLogAppKey: null, clubLogDays: 1,
+                    fccUlsEnabled: false);
+
+                var engine = new ClassificationEngine(db, lookupManager);
+                const string myGrid = "FN42";
+                const string myContinent = "NA";
+                const string band = "20m";
+
+                // Case A: K4YT, never worked, message carries its own grid.
+                CheckFieldParity(engine, "K4YT (never worked, msg carries grid)", "CQ K4YT EM63", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: true, expectNewCountryOnBand: true,
+                    expectCountry: "USA", expectContinent: "NA", expectIsDx: false, expectGridForAzDist: "EM63");
+
+                // Case B: K4YT worked on 20m -- this message has no grid, must fall back to
+                // the fixture's grid (matching K4YT's own CQ grid, so Azimuth/Distance stay
+                // consistent across a station's grid-carrying and grid-less messages).
+                InsertQso(db, "K4YT", "TN", dxcc: 291, zone: 4, band: "20m");
+                CheckFieldParity(engine, "K4YT (worked on 20m, report msg has no grid)", "KB0UZT K4YT -05", band, myGrid, myContinent,
+                    expectNewOnBand: false, expectNewAnyBand: false, expectNewCountry: false, expectNewCountryOnBand: false,
+                    expectCountry: "USA", expectContinent: "NA", expectIsDx: false, expectGridForAzDist: "EM63");
+
+                // Case C: same call, worked on 20m, asked about 40m -- new on this band,
+                // country/DXCC already worked (any-band).
+                CheckFieldParity(engine, "K4YT (worked on 20m, asked about 40m)", "KB0UZT K4YT RRR", "40m", myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: false, expectNewCountry: false, expectNewCountryOnBand: true,
+                    expectCountry: "USA", expectContinent: "NA", expectIsDx: false, expectGridForAzDist: "EM63");
+
+                // Case D: G3HRC -- DX (different continent than myContinent=NA), never
+                // worked, DXCC never worked.
+                CheckFieldParity(engine, "G3HRC (DX, never worked)", "CQ G3HRC IO91", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: true, expectNewCountryOnBand: true,
+                    expectCountry: "England", expectContinent: "EU", expectIsDx: true, expectGridForAzDist: "IO91");
+
+                // Case E: PY5SNL -- DX, DXCC (Brazil) already worked via a *different*
+                // callsign on this band -- IsNewCountry/IsNewCountryOnBand must reflect the
+                // DXCC entity, not the specific call, while IsNewCallOnBand/AnyBand stay true
+                // for PY5SNL itself.
+                InsertQso(db, "PT9ZZ", "SA", dxcc: 108, zone: 11, band: "20m");
+                CheckFieldParity(engine, "PY5SNL (Brazil, DXCC already worked via another call)", "CQ PY5SNL GG66", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
+                    expectCountry: "Brazil", expectContinent: "SA", expectIsDx: true, expectGridForAzDist: "GG66");
+
+                // Case F: W5C/H -- deliberately absent from the fixture table (matches
+                // JimmyReplay.py's own country=None/continent=None test case) -- must not
+                // crash, everything stays at conservative defaults.
+                CheckFieldParity(engine, "W5C/H (unresolvable, no fixture data)", "CQ W5C/H", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
+                    expectCountry: "", expectContinent: "", expectIsDx: false, expectGridForAzDist: null);
+
+                // ── Consumer-level parity: same underlying values, both cutover-flag
+                //    states, identical output. ──
+                var ranker = new CallQueueRanker();
+                ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.DIST_DECR }, null);
+
+                var computed = engine.Classify("G3HRC", band, "CQ G3HRC IO91", myGrid, myContinent);
+                var da = GeoMath.DistanceAndAzimuth(myGrid, "IO91");
+                int expDist = (int)Math.Round(da.Value.distanceKm);
+                int expAz = (int)Math.Round(da.Value.azimuthDeg) % 360;
+                if (expAz < 0) expAz += 360;
+
+                var wireStyle = new EnqueueDecodeMessage
+                {
+                    Message = "CQ G3HRC IO91",
+                    Category = WsjtxClient.CallCategory.DEFAULT,
+                    IsDx = true, IsNewCallOnBand = true, IsNewCallAnyBand = true,
+                    IsNewCountry = true, IsNewCountryOnBand = true,
+                    Country = "England", Continent = "EU",
+                    Distance = expDist, Azimuth = expAz,
+                    Classified = computed,
+                };
+
+                ClassificationCutover.UseClassificationEngine = false;
+                ranker.SetRank(wireStyle);
+                int rankWireStyle = wireStyle.Rank;
+
+                ClassificationCutover.UseClassificationEngine = true;
+                ranker.SetRank(wireStyle);
+                int rankComputedStyle = wireStyle.Rank;
+
+                Check("SetRank: identical Rank regardless of cutover flag (same underlying grid/values)",
+                      rankWireStyle == rankComputedStyle, true);
+
+                bool rejectWire = AwardMatcher.ShouldRejectAlreadyWorked(
+                    wireStyle.IsNewCallOnBand, isPota: false, isNewDxccCategory: false, isStillNeededByActiveAward: false);
+                bool rejectComputed = AwardMatcher.ShouldRejectAlreadyWorked(
+                    computed.IsNewCallOnBand, isPota: false, isNewDxccCategory: false, isStillNeededByActiveAward: false);
+                Check("ShouldRejectAlreadyWorked: identical outcome, wire-derived vs computed IsNewCallOnBand",
+                      rejectWire == rejectComputed, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  A6ClassificationParityTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            ClassificationCutover.UseClassificationEngine = originalFlag;
+            try { File.Delete(tmpDb); } catch { }
+        }
     }
 
     // ── QrzLogbookClient.IsDuplicateReason ──────────────────────────────────────
