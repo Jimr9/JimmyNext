@@ -561,6 +561,39 @@ static class JimmyTests
                 Check("HasWorkedDxcc: entity 291 NOT worked on 40m", db.HasWorkedDxcc(291, "40m"), false);
                 Check("HasWorkedDxcc: different entity NOT worked", db.HasWorkedDxcc(999, null), false);
                 Check("HasWorkedDxcc: dxcc <= 0 always false", db.HasWorkedDxcc(0, null), false);
+
+                // -- IsDx/Azimuth/Distance (Stage A6 addition) --
+                // No LookupManager here (same constraint as the Country/Continent checks
+                // above), so Continent is always unresolved -- IsDx must stay conservatively
+                // false regardless of myContinent, exactly like IsNewCountry's "can't
+                // classify, don't guess" behavior. The true/DX branch is exercised at the
+                // consumer/replay level, where LookupManager has real provider data.
+                var noGridOrMsg = engine.Classify("W1AW", "20m", myGrid: "FN42", myContinent: "NA");
+                Check("IsDx false when Continent unresolved (no LookupManager)", noGridOrMsg.IsDx, false);
+                Check("Azimuth -1 (unknown) when no grid available at all", noGridOrMsg.Azimuth == -1, true);
+                Check("Distance -1 (unknown) when no grid available at all", noGridOrMsg.Distance == -1, true);
+
+                // Message-embedded grid does NOT require LookupManager -- WsjtxMessage.Grid()
+                // is pure string parsing. Cross-checked against GeoMath directly (oracle-style,
+                // same approach as GeoMathTests below) rather than a hardcoded expected number.
+                var expected = GeoMath.DistanceAndAzimuth("FN42", "EM63");
+                var withMsgGrid = engine.Classify("K4YT", "20m", decodedMessage: "CQ K4YT EM63", myGrid: "FN42");
+                Check("message-grid path: Distance matches GeoMath oracle",
+                      expected.HasValue && withMsgGrid.Distance == (int)Math.Round(expected.Value.distanceKm), true);
+                Check("message-grid path: Azimuth matches GeoMath oracle",
+                      expected.HasValue && withMsgGrid.Azimuth == (int)Math.Round(expected.Value.azimuthDeg) % 360, true);
+
+                // A report/73 message never carries a grid, and there's no LookupManager
+                // fallback here -- must stay -1, not silently reuse a stale/wrong grid.
+                var reportMsg = engine.Classify("K4YT", "20m", decodedMessage: "KB0UZT K4YT -05", myGrid: "FN42");
+                Check("no grid in report-type message: Distance stays -1", reportMsg.Distance == -1, true);
+                Check("no grid in report-type message: Azimuth stays -1", reportMsg.Azimuth == -1, true);
+
+                // myGrid missing (unknown local grid): must not crash, stays -1 even though
+                // the message itself has a grid.
+                var noMyGrid = engine.Classify("K4YT", "20m", decodedMessage: "CQ K4YT EM63", myGrid: null);
+                Check("no myGrid: Distance stays -1 (no crash)", noMyGrid.Distance == -1, true);
+                Check("no myGrid: Azimuth stays -1 (no crash)", noMyGrid.Azimuth == -1, true);
             }
         }
         catch (Exception ex)
