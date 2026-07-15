@@ -23,6 +23,22 @@
     <PackageReference Include="MQTTnet.Extensions.ManagedClient" Version="4.3.7.1207" />
   </ItemGroup>
 
+  <!-- Stage B5 accessibility finding (2026-07-15): a live JAWS test on the net10.0-windows
+       build found arrow-key caret navigation broken inside statusText (the one read-only
+       status TextBox), even though statusText.ReadOnly=true is set identically to production
+       and nothing in Controller.cs/Controller.Designer.cs changed for the migration. Production
+       targets .NET Framework 4.7.2, which defaults to WinForms' legacy (MSAA/native-Edit-control)
+       accessibility behavior unless an app opts into the newer UIA Text Pattern behavior; net10.0
+       has no such legacy default available and very likely always runs the newer UIA stack, which
+       is a documented, different code path for exactly this (arrow-key text review in a read-only
+       edit control). Opting back into the legacy behavior here to match production's default and
+       see whether it resolves the regression; not yet confirmed fixed by a live JAWS retest. -->
+  <ItemGroup>
+    <RuntimeHostConfigurationOption Include="Switch.UseLegacyAccessibilityFeatures" Value="true" />
+    <RuntimeHostConfigurationOption Include="Switch.UseLegacyAccessibilityFeatures.2" Value="true" />
+    <RuntimeHostConfigurationOption Include="Switch.UseLegacyAccessibilityFeatures.3" Value="true" />
+  </ItemGroup>
+
   <ItemGroup>
     <None Include="App.config" />
   </ItemGroup>
