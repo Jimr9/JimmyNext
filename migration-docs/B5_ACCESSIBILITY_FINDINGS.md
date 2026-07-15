@@ -62,7 +62,30 @@ gate and refuses 3.1. Correct, expected, matches the roadmap.
   Finding 1's fix; deferred pending a fuller test pass (see checklist below)
   so we're not spending a retest cycle on it before knowing what else needs
   fixing first.
-- **Open question for you**: does normal Tab-into-the-list-then-arrow-up/down
-  (not JAWS-cursor mode) correctly announce each entry? That's the primary
-  way the app is actually used day to day -- if that works, this finding is
-  lower priority than if it doesn't.
+- **Answered, 2026-07-15**: normal Tab-into-the-list-then-arrow-up/down reads
+  every entry fine. Severity downgraded -- the primary real-world interaction
+  path is unaffected; only JAWS-cursor screen-review mode is broken.
+
+## Finding 3 — stray control announced across a TabControl page boundary — OPEN, low severity
+
+- Symptom: tabbing into Options' "Logbook Sync" tab, JAWS reads
+  `udpPortStdLabel` ("(Standard: 2237)") -- a `Label` that belongs to the UDP
+  port field on the separate "UDP / Connection" tab -- immediately before
+  correctly landing on the Logbook Sync tab's own first control (the
+  `serviceList` ListBox, `AccessibleName = "Logbook service list"`).
+  Reproduced twice in the same session (pasted JAWS speech buffer,
+  2026-07-15).
+- Confirmed adjacency: `udpTabPage` is `tabControl1` page index 9,
+  `logbookSyncTabPage` is index 10 -- immediately next to each other
+  (`OptionsDlg.Designer.cs`). Strongly suggests JAWS's tree-walk is briefly
+  touching the *previous* tab page's trailing control right as focus lands
+  on the next page, i.e. the UI Automation tree isn't correctly scoping
+  itself to only the active TabPage's children. Not investigated further
+  yet (not attempted: any fix).
+- Severity: low/cosmetic -- one extra spoken phrase, not a functional
+  blocker, doesn't affect any control's own correctness once reached.
+- Not yet known: whether this happens at other tab-page boundaries in
+  Options (there are 13+ tabs) or is specific to this pair; whether it
+  happens in both Tab and Shift+Tab directions. Not blocking further
+  testing -- logged for later, revisit if it turns out to be widespread
+  rather than a one-off.
