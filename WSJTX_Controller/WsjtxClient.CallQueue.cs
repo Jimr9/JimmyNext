@@ -31,23 +31,26 @@ namespace WSJTX_Controller
         public void AddSelectedCall(EnqueueDecodeMessage emsg)
         {
             string msg = emsg.Message;
+            // Stage A6: classification-derived fields below all read from
+            // EffectiveClassification() instead of directly off the wire.
+            ClassifiedCall classification = emsg.EffectiveClassification();
 
             string deCall = WsjtxMessage.DeCall(msg);       //known to not be null
             string toCall = WsjtxMessage.ToCall(msg);       //known to not be null
             string directedTo = WsjtxMessage.DirectedTo(msg);
             bool isCq = emsg.IsCQ();                //CQ format check
             bool isPota = emsg.IsPota();
-            bool isDirectedAlert = isCq && IsDirectedAlert(directedTo, emsg.IsDx);
+            bool isDirectedAlert = isCq && IsDirectedAlert(directedTo, classification.IsDx);
             bool isGridReply = WsjtxMessage.IsReply(emsg.Message);
-            bool isAcceptableCq = isCq && (directedTo == null /*|| directedTo == "QRP"*/ || (directedTo == "DX" && emsg.IsDx) || directedTo == myContinent);
-            bool isWantedNewCallOnBand = ctrl.bandComboBox.SelectedIndex == (int)WsjtxClient.NewCallBands.CURRENT && emsg.IsNewCallOnBand;
+            bool isAcceptableCq = isCq && (directedTo == null /*|| directedTo == "QRP"*/ || (directedTo == "DX" && classification.IsDx) || directedTo == myContinent);
+            bool isWantedNewCallOnBand = ctrl.bandComboBox.SelectedIndex == (int)WsjtxClient.NewCallBands.CURRENT && classification.IsNewCallOnBand;
             bool isWantedAzimuth = Ranker.rankMethod < RankMethods.AZ_NQUAD || Ranker.rankMethod > RankMethods.AZ_NWQUAD || emsg.Rank != CallQueueRanker.OffBeamRank;         //within desired azimuth
             bool isWantedMsgType =
                 (ctrl.cqOnlyRadioButton.Checked && (isAcceptableCq || WsjtxMessage.Is73orRR73(emsg.Message)))               //CQ, with or without grid info, or (RR)73
                 || (ctrl.cqGridRadioButton.Checked && ((isAcceptableCq && WsjtxMessage.Grid(emsg.Message) != null) || isGridReply))             //CQ or reply, with grid info
                 || ctrl.anyMsgRadioButton.Checked;                                                 //don't care about grid info
-            bool isWantedOrigin = ((ctrl.replyDxCheckBox.Checked && emsg.IsDx) || (ctrl.replyLocalCheckBox.Checked && !emsg.IsDx)) && (!isCq || isAcceptableCq);
-            bool isWantedCall = isWantedMsgType && isWantedOrigin && isWantedAzimuth && (emsg.IsNewCallAnyBand || isWantedNewCallOnBand);
+            bool isWantedOrigin = ((ctrl.replyDxCheckBox.Checked && classification.IsDx) || (ctrl.replyLocalCheckBox.Checked && !classification.IsDx)) && (!isCq || isAcceptableCq);
+            bool isWantedCall = isWantedMsgType && isWantedOrigin && isWantedAzimuth && (classification.IsNewCallAnyBand || isWantedNewCallOnBand);
             // isWantedDirected: pure classification — whether this decode IS a directed CQ that
             // matches the alert list.  Admission is gated by IsCallingEnabled(WANTED_CQ) in the
             // category switch below; the replyDirCqCheckBox no longer controls admission.
@@ -60,7 +63,7 @@ namespace WSJTX_Controller
             emsg.Category = _awardTagger.DeriveCategory(emsg);   //after Priority set; before SetRank
             SetRank(emsg);           //only after set priority, need this before _callQueueStore.AddCall()
 
-            if (emsg.Country == "")
+            if (classification.Country == "")
             {
                 DebugOutput($"{spacer}Country unknown for '{deCall}', queuing without country");
             }
@@ -174,7 +177,7 @@ namespace WSJTX_Controller
                                         || emsg.Category == CallCategory.NEW_COUNTRY_ON_BAND;
                 bool isStillNeededByActiveAward = _awardTagger.MatchedAwardRuleId(emsg) != null;
                 if (AwardMatcher.ShouldRejectAlreadyWorked(
-                        emsg.IsNewCallOnBand, isPota, isNewDxccCategory, isStillNeededByActiveAward))
+                        classification.IsNewCallOnBand, isPota, isNewDxccCategory, isStillNeededByActiveAward))
                 {
                     DebugOutput($"{spacer}AddSelectedCall: already worked '{deCall}'");
                     return;
@@ -232,10 +235,10 @@ namespace WSJTX_Controller
                 {
                     if (!debugDetail) DebugOutput($"{Time()}");
                     if (!debugDetail) DebugOutput($"{emsg}{nl}{spacer}msg:'{emsg.Message}' decodeCycle:{CurrentDecodeCycleString()} decodesProcessed:{decodesProcessed} cqPaused:{cqPaused}");
-                    DebugOutput($"{spacer}AddSelectedCall, isCq:{isCq} deCall:'{deCall}' Priority:{emsg.Priority} Category:{emsg.Category} Rank:{emsg.Rank} IsDx:{emsg.IsDx} isWantedCall:{isWantedCall} isWantedDir:{isWantedDirected}");
+                    DebugOutput($"{spacer}AddSelectedCall, isCq:{isCq} deCall:'{deCall}' Priority:{emsg.Priority} Category:{emsg.Category} Rank:{emsg.Rank} IsDx:{classification.IsDx} isWantedCall:{isWantedCall} isWantedDir:{isWantedDirected}");
                     DebugOutput($"{spacer}filterAdmit:{IsCallingEnabled(emsg.Category)} isWantedOrigin:{isWantedOrigin} isWantedMsgType:{isWantedMsgType} isWantedAz:{isWantedAzimuth}");
-                    DebugOutput($"{spacer}maxAutoGenEnqueue:{maxAutoGenEnqueue} maxPrevTo:{maxPrevTo} isNewCallAnyBand:{emsg.IsNewCallAnyBand} isNewCallOnBand:{emsg.IsNewCallOnBand} isWantedNewCallOnBand:{isWantedNewCallOnBand}");
-                    DebugOutput($"{spacer}isNewCountry:{emsg.IsNewCountry} isNewCountryOnBand:{emsg.IsNewCountryOnBand} isPota:{isPota} directedTo:'{directedTo}'");
+                    DebugOutput($"{spacer}maxAutoGenEnqueue:{maxAutoGenEnqueue} maxPrevTo:{maxPrevTo} isNewCallAnyBand:{classification.IsNewCallAnyBand} isNewCallOnBand:{classification.IsNewCallOnBand} isWantedNewCallOnBand:{isWantedNewCallOnBand}");
+                    DebugOutput($"{spacer}isNewCountry:{classification.IsNewCountry} isNewCountryOnBand:{classification.IsNewCountryOnBand} isPota:{isPota} directedTo:'{directedTo}'");
                     DebugOutput($"{spacer}opMode:{opMode} toCall: '{toCall}' callInProg:'{CallPriorityString(callInProg)}' callQueue.Count:{callQueue.Count} callQueue.Contains:{callQueue.Contains(deCall)} logList.Contains:{logList.Contains(deCall)}");
 
                     if (!IsCorrectTimePeriodForMode(emsg))
@@ -315,7 +318,7 @@ namespace WSJTX_Controller
                         notWantedReason = $"filter:{emsg.Category}";
                     else
                         notWantedReason = !isWantedMsgType ? "msgType" : !isWantedOrigin ? "origin" : !isWantedAzimuth ? "azimuth" : "newBand";
-                    DebugOutput($"{spacer}AddSelectedCall: not wanted '{deCall}' cat:{emsg.Category} reason:{notWantedReason} msgType:{isWantedMsgType} origin:{isWantedOrigin} az:{isWantedAzimuth} newBand:{emsg.IsNewCallAnyBand || isWantedNewCallOnBand}");
+                    DebugOutput($"{spacer}AddSelectedCall: not wanted '{deCall}' cat:{emsg.Category} reason:{notWantedReason} msgType:{isWantedMsgType} origin:{isWantedOrigin} az:{isWantedAzimuth} newBand:{classification.IsNewCallAnyBand || isWantedNewCallOnBand}");
                 }
                 return;
             }
@@ -483,7 +486,9 @@ namespace WSJTX_Controller
         private bool CanAddWantedCall(string call, EnqueueDecodeMessage decode, bool isWantedCall, bool isEvenPeriod)
         {
             int periodCount = _callQueueStore.PeriodCallCount(isEvenPeriod);
-            if (periodCount < maxAutoGenEnqueue || decode.IsNewCallOnBand || decode.IsNewCallAnyBand || IsPrimarySort(RankMethods.MOST_RECENT)) return true;
+            // Stage A6: IsNewCallOnBand/IsNewCallAnyBand now read via EffectiveClassification().
+            ClassifiedCall decodeClassification = decode.EffectiveClassification();
+            if (periodCount < maxAutoGenEnqueue || decodeClassification.IsNewCallOnBand || decodeClassification.IsNewCallAnyBand || IsPrimarySort(RankMethods.MOST_RECENT)) return true;
             if (IsPrimarySort(RankMethods.CALL_ORDER) || !isWantedCall) return false;
 
             var callArray = callQueue.ToArray();
