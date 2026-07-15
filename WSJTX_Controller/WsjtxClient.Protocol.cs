@@ -343,47 +343,41 @@ namespace WSJTX_Controller
 
                 curVerBld = $"{imsg.Version}/{rev}";
 
-                if (!acceptableWsjtxVersions.Contains(curVerBld))
+                // Stage A5: the hard acceptableWsjtxVersions allowlist + blocking dialog
+                // is gone (Blueprint §18). Any build that speaks the standard Heartbeat
+                // protocol is accepted here; whether the non-standard Compatibility Layer
+                // is also present gets probed separately via the existing cmd:7 exchange
+                // (see CapabilityNegotiator, and the SENT->RECD transition below) rather
+                // than refusing to connect up front.
+                _capabilityNegotiator.BeginNegotiating();
+
+                if (udpClient2 != null)
                 {
-                    heartbeatRecdTimer.Stop();
-                    suspendComm = true;
-                    ctrl.BringToFront();
-                    MessageBox.Show($"WSJT-X v{imsg.Version}/{imsg.Revision} is not supported.{nl}{nl}Supported WSJT-X version(s):{nl}{AcceptableVersionsString()}{nl}{nl}You can check the WSJT-X version/build by selecting 'Help | About' in WSJT-X.{nl}{nl}{pgmName} will try again when you close this dialog.", pgmName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    ResetOpMode();
-                    ShowStatus();
-                    suspendComm = false;
-                    UpdateDebug();
-                    return;
+                    udpClient2.Close();
+                    udpClient2 = null;
+                    DebugOutput($"{spacer}closed udpClient2:{udpClient2}");
                 }
-                else
-                {
-                    if (udpClient2 != null)
-                    {
-                        udpClient2.Close();
-                        udpClient2 = null;
-                        DebugOutput($"{spacer}closed udpClient2:{udpClient2}");
-                    }
 
-                    var tmsg = new HeartbeatMessage();
-                    tmsg.SchemaVersion = WsjtxMessage.PgmSchemaVersion;
-                    tmsg.MaxSchemaNumber = (uint)WsjtxMessage.PgmSchemaVersion;
-                    tmsg.Id = WsjtxMessage.UniqueId;
-                    tmsg.Version = WsjtxMessage.PgmVersion;
-                    tmsg.Revision = WsjtxMessage.PgmRevision;
+                var tmsg = new HeartbeatMessage();
+                tmsg.SchemaVersion = WsjtxMessage.PgmSchemaVersion;
+                tmsg.MaxSchemaNumber = (uint)WsjtxMessage.PgmSchemaVersion;
+                tmsg.Id = WsjtxMessage.UniqueId;
+                tmsg.Version = WsjtxMessage.PgmVersion;
+                tmsg.Revision = WsjtxMessage.PgmRevision;
 
-                    ba = tmsg.GetBytes();
-                    udpClient2 = new UdpClient();
-                    udpClient2.Connect(fromEp);
-                    udpClient2.Send(ba, ba.Length);
-                    WsjtxMessage.NegoState = WsjtxMessage.NegoStates.SENT;
-                    UpdateDebug();
-                    DebugOutput($"{spacer}NegoState:{WsjtxMessage.NegoState}");
-                    DebugOutput($"{Time()} >>>>>Sent'Heartbeat' msg:{nl}{tmsg}");
-                    ShowStatus();
-                    StatusView.ShowMessage("WSJT-X responding", false);
+                ba = tmsg.GetBytes();
+                udpClient2 = new UdpClient();
+                udpClient2.Connect(fromEp);
+                udpClient2.Send(ba, ba.Length);
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.SENT;
+                UpdateDebug();
+                DebugOutput($"{spacer}NegoState:{WsjtxMessage.NegoState}");
+                DebugOutput($"{Time()} >>>>>Sent'Heartbeat' msg:{nl}{tmsg}");
+                ShowStatus();
+                StatusView.ShowMessage("WSJT-X responding", false);
 
-                    if (wsjtxRevision == 102 && wsjtxTestVer < 72) DeleteLotwCsv();        //fixed, reason for WSJT-X crashing at startup because of NVDA determined
-                }
+                if (wsjtxRevision == 102 && wsjtxTestVer < 72) DeleteLotwCsv();        //fixed, reason for WSJT-X crashing at startup because of NVDA determined
+
                 UpdateDebug();
                 return;
             }
@@ -413,6 +407,9 @@ namespace WSJTX_Controller
                 ba = emsg.GetBytes();
                 udpClient2.Send(ba, ba.Length);
                 DebugOutput($"{Time()} >>>>>Sent 'Ack Req' cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
+                // Stage A5: cmd:7 doubles as the CapabilityNegotiator's probe for the
+                // Compatibility Layer -- tracking only, the send itself is unchanged.
+                _capabilityNegotiator.BeginCapabilityProbe();
 
                 // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetPskReporterEnable.
                 _compatExtension.SetPskReporterEnable(usePskReporter,
@@ -728,6 +725,7 @@ namespace WSJTX_Controller
                     {
                         cmdCheckTimer.Stop();
                         commConfirmed = true;
+                        _capabilityNegotiator.ConfirmCompatibilityLayer();     //Stage A5
                         DebugOutput($"{nl}{Time()} WSJT-X event, Check cmd rec'd, match");
                     }
 
@@ -1223,6 +1221,7 @@ namespace WSJTX_Controller
             DebugOutput($"{Time()} Waiting for WSJT-X to run...");
             cmdCheck = RandomCheckString();
             commConfirmed = false;
+            _capabilityNegotiator.Reset();     //Stage A5: never cached across a connection boundary
             UpdateRR73();
             ShowStatus();
             UpdateDebug();
@@ -1276,21 +1275,6 @@ namespace WSJTX_Controller
             }
 
             suspendComm = false;
-        }
-
-        private string AcceptableVersionsString()
-        {
-            string delim = "";
-            StringBuilder sb = new StringBuilder();
-
-            foreach (string s in acceptableWsjtxVersions)
-            {
-                sb.Append(delim);
-                sb.Append(s);
-                delim = $"{nl}";
-            }
-
-            return sb.ToString();
         }
 
         private string RandomCheckString()

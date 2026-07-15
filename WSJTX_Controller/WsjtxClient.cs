@@ -49,6 +49,11 @@ namespace WSJTX_Controller
         // order, so _protocolAdapter (declared just above) is already constructed
         // by the time this one runs.
         private readonly WsjtxCompatibilityExtension _compatExtension;
+        // Stage A5 (migration roadmap / Architecture Blueprint §19): replaces
+        // acceptableWsjtxVersions' hard version-string gate with a runtime capability
+        // probe. See Protocol/CapabilityNegotiator.cs.
+        private readonly CapabilityNegotiator _capabilityNegotiator = new CapabilityNegotiator();
+        public WsjtxCapabilityState CapabilityState => _capabilityNegotiator.State;
         public UdpClient udpClient { get => _protocolAdapter.ReceiveSocket; set => _protocolAdapter.ReceiveSocket = value; }
         public int port { get => _protocolAdapter.Port; set => _protocolAdapter.Port = value; }
         public IPAddress ipAddress { get => _protocolAdapter.IpAddress; set => _protocolAdapter.IpAddress = value; }
@@ -65,7 +70,6 @@ namespace WSJTX_Controller
 
         internal string nl = Environment.NewLine;
 
-        private List<string> acceptableWsjtxVersions = new List<string> { "2.7.0/204", "3.0.0-rc1/102", "3.0.0-rc1/103" };
         private List<string> supportedModes = new List<string>() { "FT8", "FT4" };
 
         public int maxPrevTo = 2;
