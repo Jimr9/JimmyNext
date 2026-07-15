@@ -62,7 +62,7 @@ namespace WSJTX_Controller
             }
             else
             {
-                bool notRunning = !IsWsjtxRunning();
+                bool notRunning = !WsjtxProtocolAdapter.IsWsjtxRunning();
                 if (notRunning || wsjtxClosing)
                 {
                     DebugOutput($"{nl}{Time()} WSJT-X notRunning:{notRunning} wsjtxClosing:{wsjtxClosing}");
@@ -91,7 +91,7 @@ namespace WSJTX_Controller
 
         private void CheckWsjtxRunning()
         {
-            if (IsWsjtxRunning())
+            if (WsjtxProtocolAdapter.IsWsjtxRunning())
             {
                 DebugOutput($"{nl}{Time()} WSJT-X running");
                 StatusView.ShowMessage("WSJT-X detected", false);
@@ -102,7 +102,7 @@ namespace WSJTX_Controller
                 {
                     if (!overrideUdpDetect)
                     {
-                        if (!DetectUdpSettings(out ipAddress, out port, out multicast))
+                        if (!WsjtxProtocolAdapter.DetectUdpSettings(out ipAddress, out port, out multicast))
                         {
                             DebugOutput($"{spacer}using default IP address from WSJT-X");
                             heartbeatRecdTimer.Stop();
@@ -1516,59 +1516,6 @@ namespace WSJTX_Controller
             CmdCheckDialog();
         }
 
-
-        //return success or failure
-        private bool DetectUdpSettings(out IPAddress ipa, out int prt, out bool mul)
-        {
-            //use WSJT-X.ini file for settings
-            string pgmNameWsjtx = "WSJT-X";
-            string pathWsjtx = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{pgmNameWsjtx}";
-            string pathFileNameExtWsjtx = pathWsjtx + "\\" + pgmNameWsjtx + ".ini";
-
-            //set defaults
-            ipa = IPAddress.Parse("127.0.0.1");
-            prt = 2237;
-            mul = false;
-
-            //temp
-            IPAddress ipaAddr;
-            int prtInt;
-            string ipaString;
-
-            if (!Directory.Exists(pathWsjtx)) return false;
-
-            try
-            {
-                IniFile iniFile = new IniFile(pathFileNameExtWsjtx);
-                ipaString = iniFile.Read("UDPServer", "Configuration");
-                ipaAddr = IPAddress.Parse(ipaString);
-                prtInt = Convert.ToInt32(iniFile.Read("UDPServerPort", "Configuration"));
-            }
-            catch
-            {
-                //ctrl.BringToFront();
-                //MessageBox.Show($"Unable to open settings file: " + pathFileNameExt + "{nl}{nl}Continuing with default settings...", pgmName, MessageBoxButtons.OK);
-                return false;
-            }
-
-            if (ipaString == "" || prtInt == 0)
-            {
-                return false;
-            }
-
-            prt = prtInt;
-            ipa = ipaAddr;
-            mul = ipaString.Substring(0, 4) != "127.";
-            return true;
-        }
-
-        private bool IsWsjtxRunning()
-        {
-            string file = "WSJT-X.lock";
-            string pathFileNameExt = $"{Path.GetTempPath()}{file}";
-            //string linuxPathFileNameExt = "Z:\\tmp\\WSJT-X.lock";     //wine/linux testing
-            return File.Exists(pathFileNameExt) /*|| File.Exists(linuxPathFileNameExt)*/;     //wine/linux testing
-        }
 
         //must call only when in WAIT state
         //to avoid async cakkback using disposed udpClient
