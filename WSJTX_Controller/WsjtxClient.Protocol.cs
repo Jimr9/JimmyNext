@@ -317,15 +317,14 @@ namespace WSJTX_Controller
         {
             if (suspendComm) return;
 
-            try
-            {
-                msg = WsjtxMessage.Parse(datagram);
-                //DebugOutput($"{Time()} msg:{msg} datagram[{datagram.Length}]:{nl}{DatagramString(datagram)}");
-            }
-            catch (ParseFailureException ex)
+            // Stage A3: the parse call itself moved to WsjtxProtocolAdapter.TryParse --
+            // this is now just the error-reporting/logging around it (Time()/
+            // DatagramString() are WsjtxClient-instance methods, so that part stays).
+            msg = _protocolAdapter.TryParse(datagram, out ParseFailureException parseEx);
+            if (parseEx != null)
             {
                 //File.WriteAllBytes($"{ex.MessageType}.couldnotparse.bin", ex.Datagram);
-                DebugOutput($"{Time()} ERROR: Parse failure {ex.InnerException.Message}");
+                DebugOutput($"{Time()} ERROR: Parse failure {parseEx.InnerException.Message}");
                 DebugOutput($"datagram[{datagram.Length}]: {DatagramString(datagram)}");
                 return;
             }

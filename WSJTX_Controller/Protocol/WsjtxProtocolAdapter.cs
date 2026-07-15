@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using WsjtxUdpLib.Messages;
 using WsjtxUdpLib.Messages.Out;
 
 namespace WSJTX_Controller
@@ -56,6 +57,27 @@ namespace WSJTX_Controller
         public byte[] Datagram { get; set; }
         public IPEndPoint FromEp { get; set; } = new IPEndPoint(IPAddress.Any, 0);
         public bool RecvStarted { get; set; }
+
+        // Stage A3 slice 3: the one genuinely-separable piece of Update()'s message
+        // dispatch -- the literal WsjtxMessage.Parse(datagram) call, with zero business
+        // logic attached. Everything downstream of a successful parse (per-message-type
+        // reactions, negotiation-state transitions, call-queue/award/logbook side
+        // effects) stays in WsjtxClient.Update(), correctly outside the Protocol
+        // Adapter's boundary per the Architecture Blueprint ("Never: touches ranking,
+        // awards, logbook, or any Jimmy business logic").
+        public WsjtxMessage TryParse(byte[] datagram, out ParseFailureException parseError)
+        {
+            parseError = null;
+            try
+            {
+                return WsjtxMessage.Parse(datagram);
+            }
+            catch (ParseFailureException ex)
+            {
+                parseError = ex;
+                return null;
+            }
+        }
 
         // Completes an in-flight BeginReceive. Moved verbatim from WsjtxClient.Protocol.cs
         // -- every touch here was already one of this class's own properties (via
