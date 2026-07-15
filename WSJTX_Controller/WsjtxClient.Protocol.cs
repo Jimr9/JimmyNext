@@ -153,15 +153,9 @@ namespace WSJTX_Controller
         {
             usePskReporter = !usePskReporter;
 
-            emsg.NewTxMsgIdx = 17;
-            emsg.Param0 = usePskReporter;
-            emsg.Param1 = false;        //ignored
-            emsg.Offset = 0;            //ignored
-            emsg.GenMsg = $"(mod by KB0UZT, w/{pgmName} v{pgmVer} [FT8 for blind hams], qrz.com/db/KB0UZT)";
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Set PSKReporter' cmd:17{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetPskReporterEnable.
+            string genMsg = $"(mod by KB0UZT, w/{pgmName} v{pgmVer} [FT8 for blind hams], qrz.com/db/KB0UZT)";
+            _compatExtension.SetPskReporterEnable(usePskReporter, genMsg, msg => DebugOutput($"{Time()} {msg}"));
 
             newPskReporter = true;
             ShowStatus();
@@ -173,14 +167,8 @@ namespace WSJTX_Controller
             if (transmitting || txEnabled) HaltTx();
             if (transmitting) Thread.Sleep(250);        //radio must return to original rx freq first
 
-            emsg.NewTxMsgIdx = 21;
-            emsg.GenMsg = newMode;
-            emsg.Param0 = false;
-            emsg.Param1 = false;
-            emsg.Param2 = 0;         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Operating Mode' cmd:21{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetOperatingMode.
+            _compatExtension.SetOperatingMode(newMode, msg => DebugOutput($"{Time()} {msg}"));
 
             return true;
         }
@@ -1378,14 +1366,8 @@ namespace WSJTX_Controller
             string bandLabel = freq > 0 ? (FreqToBandStr(freq / 1000.0 / 1e6) ?? $"{freq / 1000}kHz") : "none";
             DebugOutput($"{Time()} [BAND-AUDIT] SetBandTxFirst: caller:{caller} freq:{freq} band:{bandLabel} txFirst:{state} bandIdx:{bandIdx}");
 
-            emsg.NewTxMsgIdx = 15;
-            emsg.Param0 = state;
-            emsg.Offset = freq;
-            emsg.GenMsg = $"";          //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Set band / Tx first' cmd:15{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetBandTxFirst.
+            _compatExtension.SetBandTxFirst(freq, state, msg => DebugOutput($"{Time()} {msg}"));
         }
 
         private void GetPowerSwr()       //requires bestWsjtxVersions
@@ -1396,14 +1378,8 @@ namespace WSJTX_Controller
                 return;
             }
 
-            emsg.NewTxMsgIdx = 18;
-            emsg.Param0 = false;        //ignored
-            emsg.Offset = 0;            //ignored
-            emsg.GenMsg = $"";          //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Get Power/SWR' cmd:18{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.GetPowerSwr.
+            _compatExtension.GetPowerSwr(msg => DebugOutput($"{Time()} {msg}"));
         }
 
         private void AdjAudioLevel(bool up)       //requires bestWsjtxVersions
@@ -1414,14 +1390,8 @@ namespace WSJTX_Controller
                 return;
             }
 
-            emsg.NewTxMsgIdx = 20;
-            emsg.Param0 = up;
-            emsg.Offset = 0;            //ignored
-            emsg.GenMsg = $"";          //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Set Audio Level' cmd:20{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.AdjAudioLevel.
+            _compatExtension.AdjAudioLevel(up, msg => DebugOutput($"{Time()} {msg}"));
         }
 
         private void ToggleTuning()       //requires bestWsjtxVersions
@@ -1434,14 +1404,8 @@ namespace WSJTX_Controller
 
             if (txEnabled) HaltTx();
 
-            emsg.NewTxMsgIdx = 19;
-            emsg.Param0 = cmdPrompts;  //detail level
-            emsg.Offset = 0;            //ignored
-            emsg.GenMsg = $"";          //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'ToggleTuning' cmd:19{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.ToggleTuning.
+            _compatExtension.ToggleTuning(cmdPrompts, msg => DebugOutput($"{Time()} {msg}"));
         }
 
         private void StartUploadLotw()       //requires bestWsjtxVersions
@@ -1452,15 +1416,8 @@ namespace WSJTX_Controller
                 return;
             }
 
-            emsg.NewTxMsgIdx = 16;
-            emsg.Param0 = false;         //ignored
-            emsg.Param1 = false;        //ignored
-            emsg.Offset = 0;            //ignored
-            emsg.GenMsg = $"";          //ignored
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Start upload to LOTW' cmd:16{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.StartUploadLotw.
+            _compatExtension.StartUploadLotw(msg => DebugOutput($"{Time()} {msg}"));
         }
 
         private void HeartbeatNotRecd(object sender, EventArgs e)

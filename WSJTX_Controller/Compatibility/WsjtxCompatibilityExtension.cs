@@ -108,5 +108,89 @@ namespace WSJTX_Controller
             _emsg.CmdCheck = "";
             Send("HaltTx", 12, debugOutput);
         }
+
+        // -- sub-command 17: Set PSKReporter enable (WsjtxClient.TogglePskReporter) --
+        // genMsg carries a literal identification string
+        // ("(mod by KB0UZT, w/{pgmName} v{pgmVer} [FT8 for blind hams], qrz.com/db/KB0UZT)"),
+        // built by the caller (WsjtxClient knows pgmName/pgmVer, this class shouldn't).
+        public void SetPskReporterEnable(bool enable, string genMsg, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 17;
+            _emsg.Param0 = enable;
+            _emsg.Param1 = false;        //ignored
+            _emsg.Offset = 0;            //ignored
+            _emsg.GenMsg = genMsg;
+            _emsg.CmdCheck = "";         //ignored
+            Send("Set PSKReporter", 17, debugOutput);
+        }
+
+        // -- sub-command 21: Set Operating Mode FT8/FT4 (WsjtxClient.SetOperatingMode) --
+        public void SetOperatingMode(string newMode, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 21;
+            _emsg.GenMsg = newMode;
+            _emsg.Param0 = false;
+            _emsg.Param1 = false;
+            _emsg.Param2 = 0;         //ignored
+            Send("Operating Mode", 21, debugOutput);
+        }
+
+        // -- sub-command 15: Set Band / Tx First (WsjtxClient.SetBandTxFirst) --
+        public void SetBandTxFirst(uint freq, bool state, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 15;
+            _emsg.Param0 = state;
+            _emsg.Offset = freq;
+            _emsg.GenMsg = "";          //ignored
+            _emsg.CmdCheck = "";         //ignored
+            Send("Set band / Tx first", 15, debugOutput);
+        }
+
+        // -- sub-command 18: Get Power/SWR (WsjtxClient.GetPowerSwr) --
+        public void GetPowerSwr(Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 18;
+            _emsg.Param0 = false;        //ignored
+            _emsg.Offset = 0;            //ignored
+            _emsg.GenMsg = "";          //ignored
+            _emsg.CmdCheck = "";         //ignored
+            Send("Get Power/SWR", 18, debugOutput);
+        }
+
+        // -- sub-command 20: Set Audio Level up/down (WsjtxClient.AdjAudioLevel) --
+        public void AdjAudioLevel(bool up, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 20;
+            _emsg.Param0 = up;
+            _emsg.Offset = 0;            //ignored
+            _emsg.GenMsg = "";          //ignored
+            _emsg.CmdCheck = "";         //ignored
+            Send("Set Audio Level", 20, debugOutput);
+        }
+
+        // -- sub-command 19: Toggle Tuning (WsjtxClient.ToggleTuning) --
+        public void ToggleTuning(bool cmdPrompts, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 19;
+            _emsg.Param0 = cmdPrompts;  //detail level
+            _emsg.Offset = 0;            //ignored
+            _emsg.GenMsg = "";          //ignored
+            _emsg.CmdCheck = "";         //ignored
+            Send("ToggleTuning", 19, debugOutput);
+        }
+
+        // -- sub-command 16: Start LoTW upload (WsjtxClient.StartUploadLotw) --
+        // Kept (not removed) -- see this class's header comment for why the Phase 4
+        // audit's "Tier 1, disappears entirely" classification for this one is wrong.
+        public void StartUploadLotw(Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 16;
+            _emsg.Param0 = false;         //ignored
+            _emsg.Param1 = false;        //ignored
+            _emsg.Offset = 0;            //ignored
+            _emsg.GenMsg = "";          //ignored
+            _emsg.CmdCheck = "";         //ignored
+            Send("Start upload to LOTW", 16, debugOutput);
+        }
     }
 }
