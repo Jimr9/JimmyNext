@@ -1249,32 +1249,19 @@ namespace WSJTX_Controller
             cmdCheckTimer.Stop();
             if (commConfirmed) return;
 
-            heartbeatRecdTimer.Stop();
-            suspendComm = true;
-            ctrl.BringToFront();
-            MessageBox.Show($"Unable to make a two-way connection with WSJT-X.{nl}{nl}{pgmName} will try again when you close this dialog.", pgmName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            ResetOpMode();
-            ShowStatus();
-
-            if (udpClient2 != null)
-            {
-                emsg.NewTxMsgIdx = 7;
-                //emsg.SchemaVersion = (uint)WsjtxMessage.NegotiatedSchemaVersion;
-                emsg.GenMsg = $"";          //no effect
-                emsg.ReplyReqd = true;
-                emsg.EnableTimeout = !debug;
-                cmdCheck = RandomCheckString();
-                emsg.CmdCheck = cmdCheck;
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Ack Req' cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
-
-                cmdCheckTimer.Interval = 10000;           //set up cmd check timeout
-                cmdCheckTimer.Start();
-                DebugOutput($"{Time()} Check cmd timer restarted");
-            }
-
-            suspendComm = false;
+            // Stage A5: graceful degradation (Blueprint §19) replaces the old blocking
+            // "Unable to make a two-way connection with WSJT-X" MessageBox plus its
+            // resend-cmd:7-and-retry-forever loop. A build that hasn't echoed cmd:7's
+            // CmdCheck back within the bounded timeout isn't going to answer
+            // differently on a retry, so this now fires once per connection instead of
+            // repeatedly -- standard-protocol operation continues uninterrupted (no
+            // suspendComm, no modal dialog, no stolen focus); only Compatibility-
+            // Layer-dependent features are unavailable. The sub-command 7
+            // acknowledgment mechanics stay exactly as they are elsewhere -- this
+            // method no longer resends cmd:7 at all.
+            _capabilityNegotiator.TimeoutToDegraded();
+            DebugOutput($"{Time()} CapabilityState -> {_capabilityNegotiator.State} (no cmd:7 echo within timeout)");
+            StatusView.ShowMessage("Connected to WSJT-X, limited mode: some features unavailable", true);
         }
 
         private string RandomCheckString()
