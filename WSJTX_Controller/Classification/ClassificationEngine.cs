@@ -65,7 +65,16 @@ namespace WSJTX_Controller
             LookupRecord rec = (_lookupManager != null && _lookupManager.Enabled)
                 ? _lookupManager.Build(call)
                 : null;
-            result.Country = rec?.Country ?? "";
+            // Found via live A6 field testing 2026-07-16: lookup providers return their
+            // own raw country strings (QRZ: "United States", Club Log: "UNITED STATES OF
+            // AMERICA"), not WSJT-X's normalized set -- the wire-supplied Country setter
+            // always ran incoming values through this exact normalization
+            // (EnqueueDecodeMessage.WsjtxCountry), so several consumers compare against
+            // the normalized "USA" literal (US-state display substitution in
+            // WsjtxClient.Display.cs, the auto-lookup trigger in CallQueueStore.cs).
+            // Applying the same normalization here keeps those comparisons working
+            // regardless of which provider's raw string resolved the country.
+            result.Country = EnqueueDecodeMessage.WsjtxCountry(rec?.Country);
             result.Continent = rec?.Continent ?? "";
 
             bool workedAnyBand = _logbookDb != null && _logbookDb.HasWorkedBefore(call, null);

@@ -847,6 +847,19 @@ static class JimmyTests
                     expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
                     expectCountry: "", expectContinent: "", expectIsDx: false, expectGridForAzDist: null);
 
+                // Case G: K3ZK -- regression test for a real bug found via live A6 field
+                // testing 2026-07-16 (user-reported: US-state display substitution silently
+                // stopped firing). The fixture's raw Country is "United States" (mirroring
+                // QRZ's actual raw output), but Classify() must normalize it to "USA" --
+                // several consumers (US-state display substitution, CallQueueStore's
+                // auto-lookup trigger) compare Country against the literal "USA".
+                // DXCC 291 (USA) was already marked worked on 20m by Case B's K4YT insert
+                // above (same db, whole method) -- so IsNewCountry/IsNewCountryOnBand are
+                // correctly false here too, same as K4YT's own Case B/C expectations.
+                CheckFieldParity(engine, "K3ZK (raw QRZ-style country string must normalize to USA)", "CQ K3ZK FN21", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
+                    expectCountry: "USA", expectContinent: "NA", expectIsDx: false, expectGridForAzDist: "FN21");
+
                 // ── Consumer-level parity: same underlying values, both cutover-flag
                 //    states, identical output. ──
                 var ranker = new CallQueueRanker();

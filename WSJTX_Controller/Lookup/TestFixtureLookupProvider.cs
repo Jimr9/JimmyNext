@@ -65,6 +65,13 @@ namespace WSJTX_Controller
             ["W9NEED"]  = new Fixture { Country = "USA",    Continent = "NA", Dxcc = 291, Grid = "EM63" },
             // WEAK_CALL -- group 18 (T40-T41)
             ["W5WEAK"]  = new Fixture { Country = "USA",    Continent = "NA", Dxcc = 291, Grid = "EM63" },
+            // Not a JimmyReplay.py fixture -- added to catch the exact bug class found via
+            // live A6 field testing 2026-07-16: real lookup providers return their own raw
+            // country strings, not WSJT-X's normalized set. "United States" mirrors QRZ's
+            // actual raw output (Club Log returns "UNITED STATES OF AMERICA"); Classify()
+            // must normalize this to "USA" via EnqueueDecodeMessage.WsjtxCountry(), same as
+            // the wire-supplied Country setter always did.
+            ["K3ZK"]    = new Fixture { Country = "United States", Continent = "NA", Dxcc = 291, Grid = "FN21" },
         };
 
         public void Contribute(LookupRecord record, string call)
