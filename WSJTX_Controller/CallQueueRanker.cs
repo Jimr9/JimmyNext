@@ -144,8 +144,10 @@ namespace WSJTX_Controller
             {
                 case WsjtxClient.RankMethods.CALL_ORDER:  return -1 * d.SequenceNumber;
                 case WsjtxClient.RankMethods.MOST_RECENT: return d.SequenceNumber;
-                case WsjtxClient.RankMethods.DIST_DECR:   return d.Distance;
-                case WsjtxClient.RankMethods.DIST_INCR:   return (d.Distance < 0 ? d.Distance : EarthDiameter - d.Distance);
+                // Stage A6: Distance now comes from d.EffectiveClassification() (GeoMath,
+                // via ClassificationEngine) instead of directly off the wire.
+                case WsjtxClient.RankMethods.DIST_DECR:   return d.EffectiveClassification().Distance;
+                case WsjtxClient.RankMethods.DIST_INCR:   { int dist = d.EffectiveClassification().Distance; return dist < 0 ? dist : EarthDiameter - dist; }
                 case WsjtxClient.RankMethods.SNR_DECR:    return d.Snr;
                 case WsjtxClient.RankMethods.SNR_INCR:    return d.Snr * -1;
                 default:                                  return 0;
@@ -183,7 +185,8 @@ namespace WSJTX_Controller
             if (rankBeamMethod.HasValue)
             {
                 // CalcAzRank uses rankMethod field for heading; rankMethod is kept in sync with rankBeamMethod
-                d.Rank = CalcAzRank(d.Azimuth);
+                // Stage A6: Azimuth now comes from d.EffectiveClassification() instead of directly off the wire.
+                d.Rank = CalcAzRank(d.EffectiveClassification().Azimuth);
                 debugLog?.Invoke($"SetRank: '{d.DeCall()}' cat:DEFAULT beam rank:{d.Rank}");
                 return;
             }

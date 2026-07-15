@@ -165,11 +165,11 @@ namespace WSJTX_Controller
             string grid = WsjtxMessage.Grid(d.Message);
             string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
 
-            // d.Continent comes straight from WSJT-X's own decode message -- always available,
-            // no Club Log dependency (unlike CqZone/Dxcc, WSJT-X doesn't supply those as decode
-            // fields, only country/continent).
+            // Stage A6: Continent now comes from d.EffectiveClassification() (Jimmy's own
+            // ClassificationEngine, resolved via LookupManager -- same source CqZone/Dxcc
+            // below already use) instead of directly off the wire.
             return AwardMatcher.Match(
-                _wc.activeAwardTags, call, state, d.Continent,
+                _wc.activeAwardTags, call, state, d.EffectiveClassification().Continent,
                 cqZoneLookup: () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.CqZone ?? 0; },
                 dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; });
         }
