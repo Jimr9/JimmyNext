@@ -144,7 +144,16 @@
             // 
             this.statusText.AccessibleDescription = "";
             this.statusText.AccessibleName = "Status:";
-            this.statusText.AccessibleRole = System.Windows.Forms.AccessibleRole.None;
+            // Stage B5 finding (2026-07-15): AccessibleRole.None here (present since this
+            // control was first added, no explanatory history) is harmless under net472's
+            // older MSAA accessibility bridge, which appears to defer to the native Edit
+            // control's own role regardless of this property. net10.0-windows's newer
+            // UIA-native accessibility provider likely honors it literally instead, exposing
+            // no recognized control type -- breaking JAWS arrow-key caret/text-review
+            // navigation for exactly this control (confirmed: every other TextBox in the app,
+            // none of which override AccessibleRole, still arrow-navigates fine on net10.0).
+            // AccessibleRole.Text matches the role a plain unmodified TextBox already reports.
+            this.statusText.AccessibleRole = System.Windows.Forms.AccessibleRole.Text;
             this.statusText.BackColor = System.Drawing.Color.DarkRed;
             this.statusText.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
             this.statusText.BorderStyle = System.Windows.Forms.BorderStyle.FixedSingle;
