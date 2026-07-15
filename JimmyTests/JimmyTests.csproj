@@ -1,42 +1,46 @@
-<?xml version="1.0" encoding="utf-8"?>
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Stage B2 (migration roadmap): SDK-style + PackageReference conversion,
+    proven here first on the smaller/lower-stakes project. TargetFramework
+    stays net472 for now, NOT net10.0-windows, because a CoreCLR (.NET 10)
+    process cannot load a .NET Framework 4.7.2 assembly at runtime
+    (System.BadImageFormatException), even though it compiles fine against
+    Jimmy.exe's metadata. This project's TFM moves to net10.0-windows in
+    lockstep with Stage B3, once Jimmy.exe itself is a net10.0-windows build.
+  -->
   <PropertyGroup>
-    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
-    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <OutputType>Exe</OutputType>
+    <TargetFramework>net472</TargetFramework>
     <AssemblyName>JimmyTests</AssemblyName>
-    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
     <RootNamespace>JimmyTests</RootNamespace>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
-    <OutputPath>bin\Debug\</OutputPath>
-    <DefineConstants>DEBUG;TRACE</DefineConstants>
-    <Optimize>false</Optimize>
-  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="JimmyTests.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Drawing" />
     <!-- Needed to resolve Controller (derives from Form) for FindPreservedSelectionIndex tests. -->
     <Reference Include="System.Windows.Forms" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Reference Jimmy.exe as a library to test its parser types directly. -->
     <!-- Build Jimmy first (run build.bat or test.bat). -->
     <Reference Include="Jimmy">
       <HintPath>..\WSJTX_Controller\bin\Debug\Jimmy.exe</HintPath>
       <Private>true</Private>
     </Reference>
-    <!-- SQLite managed DLL — needed for LogbookDb tests.
-         The targets import below handles native SQLite.Interop.dll copy. -->
-    <Reference Include="System.Data.SQLite">
-      <HintPath>..\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.118.0\lib\net46\System.Data.SQLite.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
+    <!-- SQLite managed DLL, needed for LogbookDb tests. -->
+    <PackageReference Include="System.Data.SQLite.Core" Version="1.0.118" />
   </ItemGroup>
-  <ItemGroup>
-    <Compile Include="JimmyTests.cs" />
-  </ItemGroup>
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
-  <!-- Copy native SQLite.Interop.dll (x86/x64) to the test output directory. -->
-  <Import Project="..\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.118.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets"
-          Condition="Exists('..\packages\Stub.System.Data.SQLite.Core.NetFramework.1.0.118.0\build\net46\Stub.System.Data.SQLite.Core.NetFramework.targets')" />
+
 </Project>
