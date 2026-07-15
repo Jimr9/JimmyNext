@@ -129,39 +129,40 @@ of the "remaining checklist" items above -- only Sounds tab (partially
 covered), and Awards/Still Need/Lookup/Edit Log/Sync tabs in the Logbook
 window (separate from Options) remain untested.
 
-## Finding 4 — CheckBox toggle announcement drops the label every 3rd time — OPEN
+## Finding 4 — CheckBox announces the full label one extra time, on the first toggle only — OPEN, low severity, confirmed
 
-- Symptom (JAWS speech buffer, 2026-07-15): toggling the same checkbox
-  repeatedly with Space, the first two toggles announce the full
-  AccessibleName + new state, the third toggle announces only the bare
-  state word with no label. Reproduced identically on four separate
-  checkboxes in the same session:
-  - "Alert when wanted call is heard anywhere": full+checked, full+not
-    checked, bare "checked"
-  - "Show Spot Watch list in main window": full+checked, full+not checked,
-    bare "checked"
-  - "All Jimmy sounds enabled": full+checked, full+not checked, bare
-    "checked"
-  - "Call added sound enabled": full+not checked, full+checked, bare "not
-    checked"
+- Direct apples-to-apples comparison, same checkbox ("Always on top",
+  General tab), same steps (tab onto it, press Space 6 times), both
+  captured as JAWS speech buffers 2026-07-15:
+  - **Production**: arrival = full label + state ("not checked"). All 6
+    subsequent Space toggles = bare state word only ("checked", "not
+    checked", ...), no repeats of the full label, ever.
+  - **Migration (net10.0-windows)**: arrival = full label + state ("not
+    checked"). **Toggle 1** = full label + state again ("checked") --
+    the one extra announcement. Toggles 2-6 = bare state word only,
+    identical to production from that point on.
+- So the earlier "every 3rd time" read (from the first big Options pass,
+  four different checkboxes) was consistent with this same root cause, just
+  described imprecisely from noisier data. The actual shape is: one extra
+  full-label announcement on the first state change after focus arrives,
+  never again after that.
 - Confirmed NOT a Jimmy-code-level issue: zero `CheckBox` controls anywhere
   in the app have any `AccessibleRole` (or other accessibility property)
-  override -- these are all plain, unmodified WinForms `CheckBox` instances
-  using pure default accessibility behavior. Unlike Finding 1, there's no
-  specific property Jimmy sets that could be changed to fix this.
-- Working theory, unconfirmed: an inconsistent accessibility change-
-  notification on alternating `CheckedChanged` events in .NET 10's WinForms
-  CheckBox implementation -- i.e. a raw runtime behavior, not anything in
-  Jimmy's code. Needs confirming with you: does the pattern hold as
-  "toggle 1 = full, toggle 2 = full, toggle 3 = bare, toggle 4 = ?" (would
-  clarify whether it's a strict every-3rd-time pattern or something else,
-  e.g. alternating odd/even), and does it reset if you tab away and back?
-- Not yet attempted: any fix. Given there's no Jimmy-side property to
-  correct, a fix here would likely mean explicitly firing an accessibility
-  notification (e.g. on every `CheckedChanged` handler) to force a
-  consistent full re-announcement every time -- a broader change touching
-  many checkboxes, not a one-line property fix like Finding 1. Worth
-  confirming the exact pattern first before attempting that.
+  override -- plain, unmodified WinForms `CheckBox` instances. No specific
+  Jimmy-set property to change, unlike Finding 1.
+- Working theory, unconfirmed: some .NET 10 WinForms `CheckBox`/
+  `AccessibleObject` internal detail fires an extra accessibility
+  change-notification specifically on the first `CheckedChanged` after the
+  control's accessible object is realized (e.g. lazy-initialization on
+  first real access), but not on subsequent toggles. Speculative -- not
+  verified against WinForms source.
+- Severity assessment: low. One extra spoken phrase, occurs once per
+  checkbox per dialog-open (not persistently annoying), and arguably
+  harmless since it repeats context rather than omitting it. No known
+  Jimmy-side fix available (no property to correct). Recommend logging as
+  a known minor cosmetic difference rather than pursuing a WinForms-
+  internals-level fix with uncertain success -- open to reconsidering if
+  you feel it's worth chasing further.
 
 ## Other observation (not yet a confirmed finding)
 
