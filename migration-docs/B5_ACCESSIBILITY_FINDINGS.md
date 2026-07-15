@@ -120,3 +120,56 @@ list, not assumption -- update this if the UI has moved on again)
   Log Early, Exclude filter, Include filter, Ignore non-DX, RR73 reply,
   Transmit period, Transmit limit, Except callsigns, Auto frequency).
 - Remaining Options tabs beyond Logbook Sync (there are 13+ tab pages).
+
+## Update 2026-07-15: full pass through Options (Basic, General, Receive/Auto
+Reply, Transmit, Hotkeys, Advanced UI, Wanted Calls, Spot Watch, Sounds)
+
+Everything reads correctly except one new finding below. This retires most
+of the "remaining checklist" items above -- only Sounds tab (partially
+covered), and Awards/Still Need/Lookup/Edit Log/Sync tabs in the Logbook
+window (separate from Options) remain untested.
+
+## Finding 4 — CheckBox toggle announcement drops the label every 3rd time — OPEN
+
+- Symptom (JAWS speech buffer, 2026-07-15): toggling the same checkbox
+  repeatedly with Space, the first two toggles announce the full
+  AccessibleName + new state, the third toggle announces only the bare
+  state word with no label. Reproduced identically on four separate
+  checkboxes in the same session:
+  - "Alert when wanted call is heard anywhere": full+checked, full+not
+    checked, bare "checked"
+  - "Show Spot Watch list in main window": full+checked, full+not checked,
+    bare "checked"
+  - "All Jimmy sounds enabled": full+checked, full+not checked, bare
+    "checked"
+  - "Call added sound enabled": full+not checked, full+checked, bare "not
+    checked"
+- Confirmed NOT a Jimmy-code-level issue: zero `CheckBox` controls anywhere
+  in the app have any `AccessibleRole` (or other accessibility property)
+  override -- these are all plain, unmodified WinForms `CheckBox` instances
+  using pure default accessibility behavior. Unlike Finding 1, there's no
+  specific property Jimmy sets that could be changed to fix this.
+- Working theory, unconfirmed: an inconsistent accessibility change-
+  notification on alternating `CheckedChanged` events in .NET 10's WinForms
+  CheckBox implementation -- i.e. a raw runtime behavior, not anything in
+  Jimmy's code. Needs confirming with you: does the pattern hold as
+  "toggle 1 = full, toggle 2 = full, toggle 3 = bare, toggle 4 = ?" (would
+  clarify whether it's a strict every-3rd-time pattern or something else,
+  e.g. alternating odd/even), and does it reset if you tab away and back?
+- Not yet attempted: any fix. Given there's no Jimmy-side property to
+  correct, a fix here would likely mean explicitly firing an accessibility
+  notification (e.g. on every `CheckedChanged` handler) to force a
+  consistent full re-announcement every time -- a broader change touching
+  many checkboxes, not a one-line property fix like Finding 1. Worth
+  confirming the exact pattern first before attempting that.
+
+## Other observation (not yet a confirmed finding)
+
+"Jimmy Options" (the dialog title) is announced very frequently throughout
+tab/section navigation -- flagged by you as "the extra Jimmy Options."
+Likely JAWS re-establishing context on its own heuristics as focus moves
+between TabPages/groups, not something Jimmy's code explicitly triggers
+(no repeated `this.Text = "Jimmy Options"` or similar in the dialog code).
+Unclear whether this is fixable from Jimmy's side at all, or whether it
+differs from production. Needs clarification: does production announce the
+dialog title this often too, or is this also new on net10.0-windows?
