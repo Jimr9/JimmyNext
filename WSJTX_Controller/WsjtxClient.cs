@@ -1039,6 +1039,10 @@ namespace WSJTX_Controller
             // instead (Classification/ClassificationCutover.cs), which returns this
             // computed value or falls back to the wire fields per the rollback flag.
             dmsg.Classified = Classifier.Classify(deCall, CurrentBandStr, dmsg.Message, myGrid, myContinent);
+            // TEMPORARY developer diagnostic (Stage A6 field verification) -- see
+            // Classification/ClassificationParityLogger.cs. No-ops unless explicitly
+            // enabled via an undocumented .ini key.
+            ClassificationParityLogger.CheckAndLog(dmsg, deCall, CurrentBandStr, myGrid, myContinent, lookupManager);
             ClassifiedCall classification = dmsg.EffectiveClassification();
 
             //do some processing not directly related to replying immediately
@@ -2130,6 +2134,8 @@ namespace WSJTX_Controller
 
             // Stage A6: close the persistent classification LogbookDb connection.
             _logbookDb?.Dispose();
+            // TEMPORARY developer diagnostic -- see Classification/ClassificationParityLogger.cs.
+            ClassificationParityLogger.Close();
 
             SetLogFileState(false);         //close log file
         }

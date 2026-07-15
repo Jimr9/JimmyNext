@@ -503,6 +503,11 @@ namespace WSJTX_Controller
                 // ClassificationEngine-computed path). Set useClassificationEngine=False by
                 // hand-editing the .ini file only if a real-world edge case surfaces.
                 if (iniFile.KeyExists("useClassificationEngine")) ClassificationCutover.UseClassificationEngine = iniFile.Read("useClassificationEngine") != "False";
+                // TEMPORARY developer diagnostic (Classification/ClassificationParityLogger.cs) --
+                // intentionally undocumented/not exposed in OptionsDlg; default false (disabled).
+                // Set logClassificationParityMismatches=True by hand-editing the .ini file only
+                // to collect field-verification evidence for Stage A6; remove once confirmed.
+                if (iniFile.KeyExists("logClassificationParityMismatches")) ClassificationParityLogger.Enabled = iniFile.Read("logClassificationParityMismatches") == "True";
                 if (iniFile.KeyExists("rankMethod")) int.TryParse(iniFile.Read("rankMethod"), out rankMethodIdx);
                 if (iniFile.KeyExists("rankOrder")) rankOrderStr = iniFile.Read("rankOrder");
                 if (iniFile.KeyExists("rankBeam")) rankBeamStr = iniFile.Read("rankBeam");
