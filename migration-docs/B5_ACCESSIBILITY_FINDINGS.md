@@ -164,13 +164,35 @@ window (separate from Options) remain untested.
   internals-level fix with uncertain success -- open to reconsidering if
   you feel it's worth chasing further.
 
-## Other observation (not yet a confirmed finding)
+## Finding 5 — "Jimmy Options" dialog title re-announced mid-navigation — OPEN, low severity, confirmed, root cause unconfirmed
 
-"Jimmy Options" (the dialog title) is announced very frequently throughout
-tab/section navigation -- flagged by you as "the extra Jimmy Options."
-Likely JAWS re-establishing context on its own heuristics as focus moves
-between TabPages/groups, not something Jimmy's code explicitly triggers
-(no repeated `this.Text = "Jimmy Options"` or similar in the dialog code).
-Unclear whether this is fixable from Jimmy's side at all, or whether it
-differs from production. Needs clarification: does production announce the
-dialog title this often too, or is this also new on net10.0-windows?
+- Confirmed real 2026-07-15: production does not repeat the dialog title
+  during tab/section navigation; migration does.
+- Pattern from the original Options speech buffer: on the Basic tab, "Jimmy
+  Options" appears only at dialog-open and once more right before the
+  OK/Cancel buttons at the tab's end -- not between each of the tab's
+  "question" sections (those are read-only TextBoxes -- modeLabel, label12,
+  label2, label4, label5 -- each already has an explicit `AccessibleName`
+  and `AccessibleRole.StaticText`, ruled out as the source). On the General
+  tab, it appears twice more, and both times correlate with crossing into a
+  different logical grouping of controls (checkboxes -> spin box -> a lone
+  trailing checkbox before OK/Cancel) rather than every single control
+  transition.
+- General tab has no GroupBox structure (`generalPanel` is flat, controls
+  added directly, confirmed via `OptionsDlg.Designer.cs`), so this isn't
+  the same "GroupBox missing AccessibleName" shape it might first look like
+  -- ruled out as the specific mechanism here, at least for this tab.
+  Logbook Sync tab's GroupBoxes (built via the shared `MakeGroupBox` helper)
+  DO get an implicit accessible name from their own `Text` already; not
+  re-investigated in depth for other tabs given the pattern doesn't
+  obviously reduce to "GroupBox lacks a name."
+- Possible shared root cause with Finding 3: both are cases of a UI
+  Automation container-boundary crossing (TabControl page boundary for
+  Finding 3, some other logical grouping boundary here) apparently causing
+  a spurious re-announcement of an ancestor's name/title. Worth keeping in
+  mind if either gets properly root-caused later -- may turn out to be one
+  underlying WinForms Core UIA-tree issue manifesting in two places, not
+  two unrelated bugs.
+- Severity: low/cosmetic, same reasoning as Finding 4 -- extra spoken
+  context, not confusing or blocking. No confirmed code-level cause or fix
+  yet.
