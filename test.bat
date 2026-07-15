@@ -1,18 +1,10 @@
 @echo off
 setlocal
 
-set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
-if not exist "%VSWHERE%" (
-    echo ERROR: vswhere.exe not found.
-    exit /b 1
-)
-
-for /f "usebackq tokens=*" %%i in (
-    `"%VSWHERE%" -latest -products * -find MSBuild\**\Bin\MSBuild.exe`
-) do set "MSBUILD=%%i"
-
-if not defined MSBUILD (
-    echo ERROR: MSBuild not found.
+where dotnet >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: dotnet SDK not found in PATH.
+    echo Install the .NET 10 SDK and re-run.
     exit /b 1
 )
 
@@ -25,7 +17,7 @@ if errorlevel 1 (
 
 echo.
 echo Building JimmyTests...
-"%MSBUILD%" "%~dp0JimmyTests\JimmyTests.csproj" /p:Configuration=Debug /t:Build /v:minimal
+dotnet build "%~dp0JimmyTests\JimmyTests.csproj" -c Debug -v:minimal
 if errorlevel 1 (
     echo JimmyTests build FAILED.
     exit /b 1
@@ -34,4 +26,4 @@ if errorlevel 1 (
 echo.
 echo Running parser unit tests...
 echo.
-"%~dp0JimmyTests\bin\Debug\JimmyTests.exe"
+"%~dp0JimmyTests\bin\Debug\net10.0-windows\JimmyTests.exe"

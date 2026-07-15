@@ -1,6 +1,14 @@
 ﻿using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+
+// net10.0-windows SDK-style projects normally get this attribute auto-generated
+// (tied to GenerateAssemblyInfo, which is off here to avoid clashing with the
+// attributes below). Without it, the CA1416 platform-compatibility analyzer treats
+// every WinForms call site as "reachable on all platforms" instead of recognizing
+// this as a Windows-only build.
+[assembly: SupportedOSPlatform("windows")]
 
 // General Information about an assembly is controlled through the following
 // set of attributes. Change these attribute values to modify the information

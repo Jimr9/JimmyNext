@@ -468,15 +468,15 @@ namespace WsjtxUdpLib.Messages.Out
         public EnqueueDecodeMessage DeepCopy()
         {
             var enqueueDecodeMessage = new EnqueueDecodeMessage();
-            enqueueDecodeMessage.Id = String.Copy(Id);
+            enqueueDecodeMessage.Id = CopyString(Id);
             enqueueDecodeMessage.AutoGen = AutoGen;
             enqueueDecodeMessage.SinceMidnight = new TimeSpan(SinceMidnight.Ticks);
             enqueueDecodeMessage.RxDate = new DateTime(RxDate.Ticks);
             enqueueDecodeMessage.Snr = Snr;
             enqueueDecodeMessage.DeltaTime = DeltaTime;
             enqueueDecodeMessage.DeltaFrequency = DeltaFrequency;
-            enqueueDecodeMessage.Mode = String.Copy(Mode);
-            enqueueDecodeMessage.Message = String.Copy(Message);
+            enqueueDecodeMessage.Mode = CopyString(Mode);
+            enqueueDecodeMessage.Message = CopyString(Message);
             enqueueDecodeMessage.UseStdReply = UseStdReply;
             enqueueDecodeMessage.IsDx = IsDx;
             enqueueDecodeMessage.Modifier = Modifier;
@@ -487,8 +487,8 @@ namespace WsjtxUdpLib.Messages.Out
             enqueueDecodeMessage.Priority = Priority;
             enqueueDecodeMessage.Category = Category;
             enqueueDecodeMessage.MatchedAwardRuleId = MatchedAwardRuleId;
-            enqueueDecodeMessage.Country = String.Copy(Country);
-            enqueueDecodeMessage.Continent = String.Copy(Continent);
+            enqueueDecodeMessage.Country = CopyString(Country);
+            enqueueDecodeMessage.Continent = CopyString(Continent);
             enqueueDecodeMessage.Azimuth = Azimuth;
             enqueueDecodeMessage.Distance = Distance;
             enqueueDecodeMessage.SequenceNumber = SequenceNumber;
@@ -497,6 +497,11 @@ namespace WsjtxUdpLib.Messages.Out
 
             return enqueueDecodeMessage;
         }
+
+        // String.Copy(string) is obsolete on modern .NET. Strings are immutable, so a
+        // distinct copy is never observable; only String.Copy's null-check behavior
+        // (ArgumentNullException on a null field) needs preserving here.
+        private static string CopyString(string str) => str ?? throw new ArgumentNullException(nameof(str));
 
         //quality is how likely a station is to answer while in the current stage of a QSO
         private void SetMsgQuality()

@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
-using System.Web.Script.Serialization;
 using MQTTnet;
 using MQTTnet.Client;
 using MQTTnet.Extensions.ManagedClient;
@@ -51,7 +51,6 @@ namespace WSJTX_Controller
         private readonly Dictionary<string, SpotInfo> _lastSpots = new Dictionary<string, SpotInfo>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _subscribedCalls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object _lock = new object();
-        private readonly JavaScriptSerializer _json = new JavaScriptSerializer();
 
         // Raised whenever any watched call's last-seen data changes, or the watch list itself
         // changes. Fires on a background thread -- see class remarks above.
@@ -130,43 +129,33 @@ namespace WSJTX_Controller
             try
             {
                 string json = arg.ApplicationMessage.ConvertPayloadToString();
-                if (!(_json.DeserializeObject(json) is Dictionary<string, object> dict)) return Task.CompletedTask;
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.ValueKind != JsonValueKind.Object) return Task.CompletedTask;
+                JsonElement root = doc.RootElement;
 
-                string sender = dict.TryGetValue("sc", out var scObj) ? scObj as string : null;
+                string sender = GetStringOrNull(root, "sc");
                 if (string.IsNullOrEmpty(sender)) return Task.CompletedTask;
 
                 int? snr = null;
-                if (dict.TryGetValue("rp", out var rpObj))
-                {
-                    int rpVal;
-                    if (int.TryParse(Convert.ToString(rpObj), out rpVal)) snr = rpVal;
-                }
+                if (TryGetNumericText(root, "rp", out var rpText) && int.TryParse(rpText, out var rpVal)) snr = rpVal;
 
                 long? freq = null;
-                if (dict.TryGetValue("f", out var fObj))
-                {
-                    long fVal;
-                    if (long.TryParse(Convert.ToString(fObj), out fVal)) freq = fVal;
-                }
+                if (TryGetNumericText(root, "f", out var fText) && long.TryParse(fText, out var fVal)) freq = fVal;
 
                 int? spotterEntity = null;
-                if (dict.TryGetValue("ra", out var raObj))
-                {
-                    int raVal;
-                    if (int.TryParse(Convert.ToString(raObj), out raVal) && raVal > 0) spotterEntity = raVal;
-                }
+                if (TryGetNumericText(root, "ra", out var raText) && int.TryParse(raText, out var raVal) && raVal > 0) spotterEntity = raVal;
 
                 var spot = new SpotInfo
                 {
-                    Band              = dict.TryGetValue("b",  out var bObj)  ? bObj  as string : null,
-                    Mode              = dict.TryGetValue("md", out var mdObj) ? mdObj as string : null,
-                    SpotterCall       = dict.TryGetValue("rc", out var rcObj) ? rcObj as string : null,
-                    SpotterGrid       = dict.TryGetValue("rl", out var rlObj) ? rlObj as string : null,
-                    SenderGrid        = dict.TryGetValue("sl", out var slObj) ? slObj as string : null,
+                    Band              = GetStringOrNull(root, "b"),
+                    Mode              = GetStringOrNull(root, "md"),
+                    SpotterCall       = GetStringOrNull(root, "rc"),
+                    SpotterGrid       = GetStringOrNull(root, "rl"),
+                    SenderGrid        = GetStringOrNull(root, "sl"),
                     Snr               = snr,
                     Frequency         = freq,
                     SpotterDxccEntity = spotterEntity,
-                    UtcTime           = dict.TryGetValue("t",  out var tObj)  ? UnixToUtc(Convert.ToInt64(tObj)) : DateTime.UtcNow,
+                    UtcTime           = root.TryGetProperty("t", out var tEl) ? UnixToUtc(tEl.GetInt64()) : DateTime.UtcNow,
                 };
 
                 bool changed;
@@ -189,6 +178,23 @@ namespace WSJTX_Controller
 
         private static DateTime UnixToUtc(long unixSeconds) =>
             new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddSeconds(unixSeconds);
+
+        // JavaScriptSerializer replacement helpers (System.Text.Json, net10.0-windows port).
+        // Behavior-equivalent to the old Dictionary<string, object> lookups: a missing key or a
+        // key whose JSON value isn't a string yields null, same as the old `x as string` casts.
+        private static string GetStringOrNull(JsonElement root, string prop) =>
+            root.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+        // Tolerates the field arriving as either a JSON number or a JSON string, same as the old
+        // Convert.ToString(object) + int/long.TryParse combination did for boxed values.
+        private static bool TryGetNumericText(JsonElement root, string prop, out string text)
+        {
+            text = null;
+            if (!root.TryGetProperty(prop, out var v)) return false;
+            if (v.ValueKind == JsonValueKind.Number) { text = v.GetRawText(); return true; }
+            if (v.ValueKind == JsonValueKind.String) { text = v.GetString(); return true; }
+            return false;
+        }
 
         // Even/Odd transmit-period parity for a spot, derived the same way Jimmy
         // already computes it for its own live decodes (WsjtxClient.IsEvenPeriod) --

@@ -1,22 +1,20 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    Stage B2 (migration roadmap): SDK-style + PackageReference conversion,
-    proven here first on the smaller/lower-stakes project. TargetFramework
-    stays net472 for now, NOT net10.0-windows, because a CoreCLR (.NET 10)
-    process cannot load a .NET Framework 4.7.2 assembly at runtime
-    (System.BadImageFormatException), even though it compiles fine against
-    Jimmy.exe's metadata. This project's TFM moves to net10.0-windows in
-    lockstep with Stage B3, once Jimmy.exe itself is a net10.0-windows build.
+    Stage B2/B3 (migration roadmap): SDK-style + PackageReference conversion.
+    TargetFramework now matches Jimmy.exe itself (net10.0-windows) now that
+    Stage B3 has converted it, because a CoreCLR process cannot load a .NET
+    Framework 4.7.2 assembly at runtime (System.BadImageFormatException),
+    so this had to wait until Jimmy.exe's own TFM changed too.
   -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net472</TargetFramework>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>JimmyTests</AssemblyName>
     <RootNamespace>JimmyTests</RootNamespace>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
-    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
 
@@ -25,18 +23,12 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Reference Include="System" />
-    <Reference Include="System.Core" />
-    <Reference Include="System.Drawing" />
-    <!-- Needed to resolve Controller (derives from Form) for FindPreservedSelectionIndex tests. -->
-    <Reference Include="System.Windows.Forms" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <!-- Reference Jimmy.exe as a library to test its parser types directly. -->
+    <!-- Reference Jimmy's managed assembly to test its parser types directly.
+         On net10.0-windows, Jimmy.exe is a native apphost launcher stub (no CLR
+         metadata); the actual managed assembly is Jimmy.dll alongside it. -->
     <!-- Build Jimmy first (run build.bat or test.bat). -->
     <Reference Include="Jimmy">
-      <HintPath>..\WSJTX_Controller\bin\Debug\Jimmy.exe</HintPath>
+      <HintPath>..\WSJTX_Controller\bin\Debug\net10.0-windows\Jimmy.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <!-- SQLite managed DLL, needed for LogbookDb tests. -->

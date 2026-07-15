@@ -26,7 +26,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "JIMMY_EXE=%~dp0WSJTX_Controller\bin\Debug\Jimmy.exe"
+set "JIMMY_EXE=%~dp0WSJTX_Controller\bin\Debug\net10.0-windows\Jimmy.exe"
 set "STARTED_BY_SCRIPT="
 set "JIMMY_PID="
 
@@ -37,7 +37,7 @@ if not %ERRORLEVEL%==0 (
         exit /b 1
     )
     echo Starting Jimmy.exe in test mode...
-    for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command "(Start-Process -FilePath '%JIMMY_EXE%' -WorkingDirectory '%~dp0WSJTX_Controller\bin\Debug' -PassThru).Id"`) do set "JIMMY_PID=%%p"
+    for /f "usebackq delims=" %%p in (`powershell -NoProfile -Command "(Start-Process -FilePath '%JIMMY_EXE%' -WorkingDirectory '%~dp0WSJTX_Controller\bin\Debug\net10.0-windows' -PassThru).Id"`) do set "JIMMY_PID=%%p"
     set "STARTED_BY_SCRIPT=1"
     rem Launching via PowerShell (needed to capture the PID for cleanup below) adds a
     rem little startup latency versus the old plain "start" -- give the window extra
