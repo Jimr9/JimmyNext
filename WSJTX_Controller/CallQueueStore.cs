@@ -152,10 +152,12 @@ namespace WSJTX_Controller
 
                 _wc.ShowQueue();
                 if (_wc.ctrl.advancedCallLayout) _wc.ShowAdvancedQueue(_wc.IsEvenCall(msg));
-                if (_wc.lookupManager != null && msg.Country.Length == 0 && _wc.lookupManager.CanAutoQueue(call))
+                // Stage A6: Country now comes from EffectiveClassification() instead of directly off the wire.
+                string msgCountry = msg.EffectiveClassification().Country;
+                if (_wc.lookupManager != null && msgCountry.Length == 0 && _wc.lookupManager.CanAutoQueue(call))
                     _wc.lookupManager.QueueAutoLookup(call);
                 else if (_wc.ctrl.showUsStateCheckBox.Checked &&
-                         msg.Country == "USA" &&
+                         msgCountry == "USA" &&
                          _wc.lookupManager != null &&
                          _wc.lookupManager.CanAutoQueue(call) &&
                          WsjtxClient.GridToUsState(WsjtxMessage.Grid(msg.Message)) == null)

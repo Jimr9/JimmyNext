@@ -112,18 +112,21 @@ namespace WSJTX_Controller
                     pos++;
                     if (callDict.TryGetValue(callsign, out var dm))
                     {
+                        // Stage A6: classification-derived fields below all read from
+                        // EffectiveClassification() instead of directly off the wire.
+                        ClassifiedCall dmClassification = dm.EffectiveClassification();
                         queueEntries.Add(new CallQueueDiagEntry
                         {
                             Callsign            = callsign,
                             QueuePosition       = pos,
-                            Country             = dm.Country ?? "",
+                            Country             = dmClassification.Country ?? "",
                             Message             = dm.Message ?? "",
                             Snr                 = dm.Snr,
                             Category            = dm.Category.ToString(),
-                            IsNewCountry        = dm.IsNewCountry,
-                            IsNewCountryOnBand  = dm.IsNewCountryOnBand,
-                            Distance            = dm.Distance,
-                            Azimuth             = dm.Azimuth,
+                            IsNewCountry        = dmClassification.IsNewCountry,
+                            IsNewCountryOnBand  = dmClassification.IsNewCountryOnBand,
+                            Distance            = dmClassification.Distance,
+                            Azimuth             = dmClassification.Azimuth,
                         });
                     }
                 }
@@ -133,6 +136,9 @@ namespace WSJTX_Controller
                 {
                     try
                     {
+                        // Stage A6: classification-derived fields below all read from
+                        // EffectiveClassification() instead of directly off the wire.
+                        ClassifiedCall dmClassification = dm.EffectiveClassification();
                         decodeHistory.Add(new DecodeHistoryDiagEntry
                         {
                             TimeUtc            = (dm.RxDate + dm.SinceMidnight).ToString("HH:mm:ss"),
@@ -141,11 +147,11 @@ namespace WSJTX_Controller
                             Snr                = dm.Snr,
                             DeltaTime          = dm.DeltaTime,
                             DeltaFrequency     = dm.DeltaFrequency,
-                            Country            = dm.Country ?? "",
+                            Country            = dmClassification.Country ?? "",
                             Category           = dm.Category.ToString(),
-                            IsNewCountry       = dm.IsNewCountry,
-                            IsNewCountryOnBand = dm.IsNewCountryOnBand,
-                            IsDx               = dm.IsDx,
+                            IsNewCountry       = dmClassification.IsNewCountry,
+                            IsNewCountryOnBand = dmClassification.IsNewCountryOnBand,
+                            IsDx               = dmClassification.IsDx,
                         });
                     }
                     catch { /* skip individual entry on error */ }
