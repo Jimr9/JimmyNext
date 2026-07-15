@@ -1249,19 +1249,42 @@ namespace WSJTX_Controller
             cmdCheckTimer.Stop();
             if (commConfirmed) return;
 
-            // Stage A5: graceful degradation (Blueprint §19) replaces the old blocking
-            // "Unable to make a two-way connection with WSJT-X" MessageBox plus its
-            // resend-cmd:7-and-retry-forever loop. A build that hasn't echoed cmd:7's
-            // CmdCheck back within the bounded timeout isn't going to answer
-            // differently on a retry, so this now fires once per connection instead of
-            // repeatedly -- standard-protocol operation continues uninterrupted (no
-            // suspendComm, no modal dialog, no stolen focus); only Compatibility-
-            // Layer-dependent features are unavailable. The sub-command 7
-            // acknowledgment mechanics stay exactly as they are elsewhere -- this
-            // method no longer resends cmd:7 at all.
+            // Stage A5: graceful degradation (Blueprint §19) replaces only the old
+            // blocking "Unable to make a two-way connection with WSJT-X" MessageBox
+            // (plus the suspendComm/BringToFront around it) -- standard-protocol
+            // operation now continues uninterrupted instead of being blocked behind a
+            // modal dialog. The sub-command 7 acknowledgment mechanics themselves are
+            // untouched: this still resends cmd:7 with a fresh CmdCheck and restarts
+            // cmdCheckTimer below, exactly as before.
+            bool wasAlreadyDegraded = _capabilityNegotiator.State == WsjtxCapabilityState.Connected;
             _capabilityNegotiator.TimeoutToDegraded();
-            DebugOutput($"{Time()} CapabilityState -> {_capabilityNegotiator.State} (no cmd:7 echo within timeout)");
-            StatusView.ShowMessage("Connected to WSJT-X, limited mode: some features unavailable", true);
+            if (!wasAlreadyDegraded)
+            {
+                // Announce once, on the first timeout only -- a repeated announcement
+                // every 10s while the retry above keeps quietly trying in the
+                // background would be exactly the "verbose/redundant" speech the
+                // accessibility rules rule out.
+                DebugOutput($"{Time()} CapabilityState -> {_capabilityNegotiator.State} (no cmd:7 echo within timeout)");
+                StatusView.ShowMessage("Connected to WSJT-X, limited mode: some features unavailable", true);
+            }
+
+            if (udpClient2 != null)
+            {
+                emsg.NewTxMsgIdx = 7;
+                //emsg.SchemaVersion = (uint)WsjtxMessage.NegotiatedSchemaVersion;
+                emsg.GenMsg = $"";          //no effect
+                emsg.ReplyReqd = true;
+                emsg.EnableTimeout = !debug;
+                cmdCheck = RandomCheckString();
+                emsg.CmdCheck = cmdCheck;
+                ba = emsg.GetBytes();
+                udpClient2.Send(ba, ba.Length);
+                DebugOutput($"{Time()} >>>>>Sent 'Ack Req' cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
+
+                cmdCheckTimer.Interval = 10000;           //set up cmd check timeout
+                cmdCheckTimer.Start();
+                DebugOutput($"{Time()} Check cmd timer restarted");
+            }
         }
 
         private string RandomCheckString()
