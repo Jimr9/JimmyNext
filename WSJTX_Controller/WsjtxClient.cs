@@ -54,6 +54,25 @@ namespace WSJTX_Controller
         // probe. See Protocol/CapabilityNegotiator.cs.
         private readonly CapabilityNegotiator _capabilityNegotiator = new CapabilityNegotiator();
         public WsjtxCapabilityState CapabilityState => _capabilityNegotiator.State;
+        // Stage A6 (migration roadmap): cuts the queue/ranking/display/award consumers
+        // over to ClassificationEngine's computed output. LogbookDb() (parameterless)
+        // already respects JIMMY_TEST_DB_PATH (see LogbookDb.cs), so this is safe under
+        // the replay test harness without any special-casing here. Held open for
+        // WsjtxClient's whole lifetime -- disposed in Dispose() -- rather than opened
+        // per-decode, since decodes can arrive many-at-once per FT8/FT4 cycle and
+        // per-decode connection open/close would be wasteful; LogbookDb runs WAL mode
+        // (LogbookDb.cs's InitSchema), which is safe for a persistent reader alongside
+        // the app's existing short-lived writer connections elsewhere.
+        //
+        // _classificationEngine is constructed lazily (on first decode, not in this
+        // constructor) because it needs `lookupManager`, which Controller doesn't
+        // assign onto this instance until after WsjtxClient's own constructor returns
+        // (Controller.cs, right after `new WsjtxClient(...)`) -- capturing it here
+        // would freeze in a still-null reference. By the time any decode actually
+        // arrives, Controller's startup sequence has long since finished.
+        private readonly LogbookDb _logbookDb = new LogbookDb();
+        private ClassificationEngine _classificationEngine;
+        private ClassificationEngine Classifier => _classificationEngine ?? (_classificationEngine = new ClassificationEngine(_logbookDb, lookupManager));
         public UdpClient udpClient { get => _protocolAdapter.ReceiveSocket; set => _protocolAdapter.ReceiveSocket = value; }
         public int port { get => _protocolAdapter.Port; set => _protocolAdapter.Port = value; }
         public IPAddress ipAddress { get => _protocolAdapter.IpAddress; set => _protocolAdapter.IpAddress = value; }
@@ -1013,13 +1032,22 @@ namespace WSJTX_Controller
             bool toMyCall = dmsg.IsCallTo(myCall);
             dmsg.OffAir = true;     //default: play sound
 
+            // Stage A6 (migration roadmap): compute Jimmy's own classification for this
+            // decode once, here, before anything below reads a classification-derived
+            // field. dmsg's own wire-supplied fields (IsDx/IsNewCallOnBand/etc.) are left
+            // untouched -- every consumer downstream reads dmsg.EffectiveClassification()
+            // instead (Classification/ClassificationCutover.cs), which returns this
+            // computed value or falls back to the wire fields per the rollback flag.
+            dmsg.Classified = Classifier.Classify(deCall, CurrentBandStr, dmsg.Message, myGrid, myContinent);
+            ClassifiedCall classification = dmsg.EffectiveClassification();
+
             //do some processing not directly related to replying immediately
             //set initial priority
             dmsg.SequenceNumber = NextMsgSeqNum();
             dmsg.Priority = (int)CallPriority.DEFAULT;
             if (toMyCall) dmsg.Priority = (int)CallPriority.TO_MYCALL;       //as opposed to a decode from anyone else
-            if (dmsg.IsNewCountryOnBand) dmsg.Priority = (int)CallPriority.NEW_COUNTRY_ON_BAND;
-            if (dmsg.IsNewCountry) dmsg.Priority = (int)CallPriority.NEW_COUNTRY;
+            if (classification.IsNewCountryOnBand) dmsg.Priority = (int)CallPriority.NEW_COUNTRY_ON_BAND;
+            if (classification.IsNewCountry) dmsg.Priority = (int)CallPriority.NEW_COUNTRY;
 
             // Upgrade directed-alert CQ calls to WANTED_CQ unconditionally — whether a CQ is
             // directed (e.g. CQ POTA) is a property of the message, not of the operator's filter
@@ -1028,7 +1056,7 @@ namespace WSJTX_Controller
             if (dmsg.Priority == (int)CallPriority.DEFAULT && dmsg.IsCQ())
             {
                 string directedTo = WsjtxMessage.DirectedTo(dmsg.Message);
-                if (IsDirectedAlert(directedTo, dmsg.IsDx))
+                if (IsDirectedAlert(directedTo, classification.IsDx))
                     dmsg.Priority = (int)CallPriority.WANTED_CQ;
             }
 
@@ -1131,7 +1159,7 @@ namespace WSJTX_Controller
 
                 DebugOutput($"{spacer}deCall:{deCall} dmsg.Priority:{dmsg.Priority} callQueue.Contains:{callQueue.Contains(deCall)} SentAnyMsg:{SentAnyMsg(deCall)}");
                 //if calling CQ DX and ignore non-DX replies
-                if (!dmsg.IsDx
+                if (!classification.IsDx
                     && dmsg.Priority > (int)CallPriority.NEW_COUNTRY_ON_BAND
                     && txMode == TxModes.CALL_CQ
                     && ctrl.callCqDxCheckBox.Checked
@@ -2099,6 +2127,9 @@ namespace WSJTX_Controller
             CloseAllUdp();
 
             _potaLog.Close();
+
+            // Stage A6: close the persistent classification LogbookDb connection.
+            _logbookDb?.Dispose();
 
             SetLogFileState(false);         //close log file
         }
@@ -3113,7 +3144,7 @@ namespace WSJTX_Controller
                 if (msgList.Count > 0)
                 {
                     msg = msgList.Last();       //list is in chronological order, latest at end
-                    country = msg.Country;
+                    country = msg.EffectiveClassification().Country;
                 }
             }
             else
@@ -3121,7 +3152,7 @@ namespace WSJTX_Controller
                 if (replyDecode != null && callInProg != null && replyDecode.DeCall() == call)
                 {
                     msg = replyDecode;
-                    country = replyDecode.Country;
+                    country = replyDecode.EffectiveClassification().Country;
                 }
             }
 

@@ -498,6 +498,11 @@ namespace WSJTX_Controller
                 newOnBand = iniFile.Read("newOnBand") != "False";      //default: true
                 bandComboBox.SelectedIndex = newOnBand ? 1 : 0;
                 if (iniFile.KeyExists("myContinent")) myContinent = iniFile.Read("myContinent");    //required to be null if not set
+                // Stage A6 emergency rollback valve (Classification/ClassificationCutover.cs) --
+                // intentionally undocumented/not exposed in OptionsDlg; default true (new
+                // ClassificationEngine-computed path). Set useClassificationEngine=False by
+                // hand-editing the .ini file only if a real-world edge case surfaces.
+                if (iniFile.KeyExists("useClassificationEngine")) ClassificationCutover.UseClassificationEngine = iniFile.Read("useClassificationEngine") != "False";
                 if (iniFile.KeyExists("rankMethod")) int.TryParse(iniFile.Read("rankMethod"), out rankMethodIdx);
                 if (iniFile.KeyExists("rankOrder")) rankOrderStr = iniFile.Read("rankOrder");
                 if (iniFile.KeyExists("rankBeam")) rankBeamStr = iniFile.Read("rankBeam");
