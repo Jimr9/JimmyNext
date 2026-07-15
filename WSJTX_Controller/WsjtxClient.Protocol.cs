@@ -28,30 +28,12 @@ namespace WSJTX_Controller
             CloseAllUdp();
         }
 
-        public void ReceiveCallback(IAsyncResult ar)
-        {
-            datagram = null;
-            messageRecd = true;
-
-            try
-            {
-                if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT) return;
-                UdpClient u = ((UdpState)(ar.AsyncState)).u;
-                if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT) return;
-                fromEp = ((UdpState)(ar.AsyncState)).e;
-                if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT) return;
-                datagram = u.EndReceive(ar, ref fromEp);
-            }
-            catch (Exception err)
-            {
-#if DEBUG
-                Console.WriteLine($"Exception: ReceiveCallback() {err}");
-#endif
-                return;
-            }
-
-            //DebugOutput($"Received: {receiveString}");
-        }
+        // Stage A3: body moved to WsjtxProtocolAdapter.ReceiveCallback (Protocol/
+        // WsjtxProtocolAdapter.cs) -- it had zero true WsjtxClient-instance dependency
+        // beyond the socket-receive state that now lives there. Kept here as a thin
+        // wrapper since asyncCallback = new AsyncCallback(ReceiveCallback) (below, in
+        // CheckWsjtxRunning) needs a method matching AsyncCallback's signature.
+        public void ReceiveCallback(IAsyncResult ar) => _protocolAdapter.ReceiveCallback(ar);
 
         public void UdpLoop()
         {
@@ -62,7 +44,7 @@ namespace WSJTX_Controller
             }
             else
             {
-                bool notRunning = !IsWsjtxRunning();
+                bool notRunning = !WsjtxProtocolAdapter.IsWsjtxRunning();
                 if (notRunning || wsjtxClosing)
                 {
                     DebugOutput($"{nl}{Time()} WSJT-X notRunning:{notRunning} wsjtxClosing:{wsjtxClosing}");
@@ -91,7 +73,7 @@ namespace WSJTX_Controller
 
         private void CheckWsjtxRunning()
         {
-            if (IsWsjtxRunning())
+            if (WsjtxProtocolAdapter.IsWsjtxRunning())
             {
                 DebugOutput($"{nl}{Time()} WSJT-X running");
                 StatusView.ShowMessage("WSJT-X detected", false);
@@ -102,7 +84,17 @@ namespace WSJTX_Controller
                 {
                     if (!overrideUdpDetect)
                     {
-                        if (!DetectUdpSettings(out ipAddress, out port, out multicast))
+                        // Stage A3: ipAddress/port/multicast are now delegating properties
+                        // (WsjtxProtocolAdapter-backed), so they can't be passed as out
+                        // params directly -- DetectUdpSettings always sets its out params
+                        // (detected values on success, IPv4 loopback/2237/unicast defaults
+                        // on failure), so this still assigns all three unconditionally,
+                        // matching the original behavior exactly.
+                        bool detected = WsjtxProtocolAdapter.DetectUdpSettings(out IPAddress detectedIp, out int detectedPort, out bool detectedMulticast);
+                        ipAddress = detectedIp;
+                        port = detectedPort;
+                        multicast = detectedMulticast;
+                        if (!detected)
                         {
                             DebugOutput($"{spacer}using default IP address from WSJT-X");
                             heartbeatRecdTimer.Stop();
@@ -116,26 +108,18 @@ namespace WSJTX_Controller
 
                     DebugOutput($"{spacer}ipAddress:{ipAddress} port:{port} multicast:{multicast}");
                     string modeStr = multicast ? "multicast" : "unicast";
-                    try
+                    // Stage A3: socket-construction mechanics moved to
+                    // WsjtxProtocolAdapter.TryOpenReceiveSocket -- this retry loop, the
+                    // debug logging, and the error-dialog handling stay here (Controller/
+                    // UI-level orchestration decisions, not socket mechanics).
+                    if (_protocolAdapter.TryOpenReceiveSocket(out Exception openErr))
                     {
-                        if (multicast)
-                        {
-                            udpClient = new UdpClient();
-                            udpClient.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-                            udpClient.Client.Bind(endPoint = new IPEndPoint(IPAddress.Any, port));
-                            udpClient.JoinMulticastGroup(ipAddress);
-                        }
-                        else
-                        {
-                            udpClient = new UdpClient(endPoint = new IPEndPoint(ipAddress, port));
-                        }
                         DebugOutput($"{spacer}opened udpClient:{udpClient}");
                         retry = false;
                     }
-                    catch (Exception e)
+                    else
                     {
-                        e.ToString();
-                        DebugOutput($"{spacer}unable to open udpClient:{udpClient}{nl}{e}");
+                        DebugOutput($"{spacer}unable to open udpClient:{udpClient}{nl}{openErr}");
                         heartbeatRecdTimer.Stop();
                         suspendComm = true;
                         ctrl.BringToFront();
@@ -148,9 +132,10 @@ namespace WSJTX_Controller
                 }
                 suspendComm = false;
 
-                udpSt = new UdpState();
-                udpSt.e = endPoint;
-                udpSt.u = udpClient;
+                // Stage A3: udpSt is now a struct-returning delegating property, so its
+                // fields can't be mutated in place (the getter returns a copy) -- build
+                // the whole value and assign it in one step instead, same end state.
+                udpSt = new UdpState { e = endPoint, u = udpClient };
                 asyncCallback = new AsyncCallback(ReceiveCallback);
 
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.INITIAL;
@@ -332,15 +317,14 @@ namespace WSJTX_Controller
         {
             if (suspendComm) return;
 
-            try
-            {
-                msg = WsjtxMessage.Parse(datagram);
-                //DebugOutput($"{Time()} msg:{msg} datagram[{datagram.Length}]:{nl}{DatagramString(datagram)}");
-            }
-            catch (ParseFailureException ex)
+            // Stage A3: the parse call itself moved to WsjtxProtocolAdapter.TryParse --
+            // this is now just the error-reporting/logging around it (Time()/
+            // DatagramString() are WsjtxClient-instance methods, so that part stays).
+            msg = _protocolAdapter.TryParse(datagram, out ParseFailureException parseEx);
+            if (parseEx != null)
             {
                 //File.WriteAllBytes($"{ex.MessageType}.couldnotparse.bin", ex.Datagram);
-                DebugOutput($"{Time()} ERROR: Parse failure {ex.InnerException.Message}");
+                DebugOutput($"{Time()} ERROR: Parse failure {parseEx.InnerException.Message}");
                 DebugOutput($"datagram[{datagram.Length}]: {DatagramString(datagram)}");
                 return;
             }
@@ -1517,84 +1501,15 @@ namespace WSJTX_Controller
         }
 
 
-        //return success or failure
-        private bool DetectUdpSettings(out IPAddress ipa, out int prt, out bool mul)
-        {
-            //use WSJT-X.ini file for settings
-            string pgmNameWsjtx = "WSJT-X";
-            string pathWsjtx = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{pgmNameWsjtx}";
-            string pathFileNameExtWsjtx = pathWsjtx + "\\" + pgmNameWsjtx + ".ini";
-
-            //set defaults
-            ipa = IPAddress.Parse("127.0.0.1");
-            prt = 2237;
-            mul = false;
-
-            //temp
-            IPAddress ipaAddr;
-            int prtInt;
-            string ipaString;
-
-            if (!Directory.Exists(pathWsjtx)) return false;
-
-            try
-            {
-                IniFile iniFile = new IniFile(pathFileNameExtWsjtx);
-                ipaString = iniFile.Read("UDPServer", "Configuration");
-                ipaAddr = IPAddress.Parse(ipaString);
-                prtInt = Convert.ToInt32(iniFile.Read("UDPServerPort", "Configuration"));
-            }
-            catch
-            {
-                //ctrl.BringToFront();
-                //MessageBox.Show($"Unable to open settings file: " + pathFileNameExt + "{nl}{nl}Continuing with default settings...", pgmName, MessageBoxButtons.OK);
-                return false;
-            }
-
-            if (ipaString == "" || prtInt == 0)
-            {
-                return false;
-            }
-
-            prt = prtInt;
-            ipa = ipaAddr;
-            mul = ipaString.Substring(0, 4) != "127.";
-            return true;
-        }
-
-        private bool IsWsjtxRunning()
-        {
-            string file = "WSJT-X.lock";
-            string pathFileNameExt = $"{Path.GetTempPath()}{file}";
-            //string linuxPathFileNameExt = "Z:\\tmp\\WSJT-X.lock";     //wine/linux testing
-            return File.Exists(pathFileNameExt) /*|| File.Exists(linuxPathFileNameExt)*/;     //wine/linux testing
-        }
-
         //must call only when in WAIT state
         //to avoid async cakkback using disposed udpClient
         private void CloseAllUdp()
         {
             DebugOutput($"{Time()} CloseAllUdp");
-
-            try
-            {
-                if (udpClient != null)
-                {
-                    udpClient.Close();
-                    udpClient = null;
-                    DebugOutput($"{spacer}closed udpClient");
-                }
-                if (udpClient2 != null)
-                {
-                    udpClient2.Close();
-                    udpClient2 = null;
-                    DebugOutput($"{spacer}closed udpClient2");
-                }
-            }
-            catch (Exception e)         //udpClient might be disposed already
-            {
-                DebugOutput($"{spacer}error:{e.ToString()}");
-            }
+            // Stage A3: socket-closing mechanics moved to WsjtxProtocolAdapter.Close --
+            // same null-check/Close()/set-null/exception-handling shape as before, exact
+            // same log line text via this delegate.
+            _protocolAdapter.Close(msg => DebugOutput($"{spacer}{msg}"));
         }
 
     }
