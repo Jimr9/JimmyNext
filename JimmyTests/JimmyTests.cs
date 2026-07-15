@@ -141,6 +141,7 @@ static class JimmyTests
         FccUlsProviderParseLineTests();
         FccUlsProviderLooksIncompleteTests();
         ClassificationEngineTests();
+        GeoMathTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -569,6 +570,89 @@ static class JimmyTests
         finally
         {
             try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── GeoMath (migration Stage A2) ────────────────────────────────────────────
+    // Maidenhead grid -> lat/lon -> great-circle bearing/distance -- the one piece
+    // of EnqueueDecodeMessage's wire-supplied fields (Azimuth, Distance) that is
+    // genuinely new code for Jimmy (no prior great-circle math existed). Parallel-
+    // validation only -- CallQueueRanker.cs does not read GeoMath yet.
+    //
+    // Distance/azimuth values below are checked against independently derivable
+    // geometry (1 degree of latitude is ~111.2 km; a quarter of Earth's
+    // circumference along the equator is R*(pi/2)), not against the module's own
+    // arithmetic, so these are real oracle checks, not tautologies.
+    static void GeoMathTests()
+    {
+        Console.WriteLine("\n── GeoMath ──");
+
+        // Grid parsing: JJ00 sits at the intersection of the equator and prime
+        // meridian by Maidenhead convention -- center of that 2x1 degree square.
+        var jj00 = GeoMath.GridToLatLon("JJ00");
+        Check("JJ00 parses (non-null)", jj00.HasValue, true);
+        if (jj00.HasValue)
+        {
+            Check("JJ00 lat within 0.6 of equator", Math.Abs(jj00.Value.lat - 0.5) < 0.001, true);
+            Check("JJ00 lon within 0.6 of prime meridian", Math.Abs(jj00.Value.lon - 1.0) < 0.001, true);
+        }
+
+        Check("malformed grid (1 char) returns null", GeoMath.GridToLatLon("A").HasValue, false);
+        Check("malformed grid (3 chars) returns null", GeoMath.GridToLatLon("JJ0").HasValue, false);
+        Check("null grid returns null", GeoMath.GridToLatLon(null).HasValue, false);
+        Check("empty grid returns null", GeoMath.GridToLatLon("").HasValue, false);
+        Check("out-of-range field letter returns null", GeoMath.GridToLatLon("ZZ00").HasValue, false);
+
+        // Lowercase input must parse the same as uppercase (grids are case-insensitive
+        // in practice -- WSJT-X and most logging tools accept either).
+        var lower = GeoMath.GridToLatLon("jj00");
+        Check("lowercase grid parses same as uppercase",
+              lower.HasValue && jj00.HasValue &&
+              Math.Abs(lower.Value.lat - jj00.Value.lat) < 0.0001 &&
+              Math.Abs(lower.Value.lon - jj00.Value.lon) < 0.0001, true);
+
+        // Pure formula checks (direct lat/lon, independent of grid parsing):
+        // one degree of latitude north, same longitude -- due north, ~111.2 km.
+        double distNorth = GeoMath.DistanceKm(0.5, 1.0, 1.5, 1.0);
+        Check("1 degree latitude ~= 111.2 km", Math.Abs(distNorth - 111.19) < 0.5, true);
+        double azNorth = GeoMath.AzimuthDegrees(0.5, 1.0, 1.5, 1.0);
+        Check("due north bearing == 0 degrees", Math.Abs(azNorth - 0.0) < 0.01, true);
+
+        // Quarter of Earth's circumference along the equator (independently
+        // derivable: R * (pi/2)), due east.
+        double distQuarter = GeoMath.DistanceKm(0, 0, 0, 90);
+        Check("quarter circumference along equator ~= R*(pi/2)",
+              Math.Abs(distQuarter - (6371.0 * Math.PI / 2)) < 0.5, true);
+        double azEast = GeoMath.AzimuthDegrees(0, 0, 0, 90);
+        Check("due east bearing == 90 degrees", Math.Abs(azEast - 90.0) < 0.01, true);
+
+        // Same point: zero distance.
+        Check("same point: distance == 0", Math.Abs(GeoMath.DistanceKm(10, 20, 10, 20)) < 0.0001, true);
+
+        // End-to-end grid-pair convenience overload composes the same way.
+        var pair = GeoMath.DistanceAndAzimuth("JJ00", "JJ01");
+        Check("DistanceAndAzimuth(JJ00, JJ01): non-null", pair.HasValue, true);
+        if (pair.HasValue)
+        {
+            Check("DistanceAndAzimuth(JJ00, JJ01): ~111.2 km", Math.Abs(pair.Value.distanceKm - 111.19) < 0.5, true);
+            Check("DistanceAndAzimuth(JJ00, JJ01): due north", Math.Abs(pair.Value.azimuthDeg - 0.0) < 0.01, true);
+        }
+
+        Check("DistanceAndAzimuth: bad 'from' grid returns null",
+              GeoMath.DistanceAndAzimuth("bad", "JJ00").HasValue, false);
+        Check("DistanceAndAzimuth: bad 'to' grid returns null",
+              GeoMath.DistanceAndAzimuth("JJ00", "bad").HasValue, false);
+
+        // 6-character (subsquare) locators parse to a finer-resolution center point
+        // still inside the parent 4-character square.
+        var sixChar = GeoMath.GridToLatLon("JJ00aa");
+        Check("6-char locator parses (non-null)", sixChar.HasValue, true);
+        if (sixChar.HasValue && jj00.HasValue)
+        {
+            Check("6-char locator stays within the parent 4-char square (lat)",
+                  Math.Abs(sixChar.Value.lat - jj00.Value.lat) < 0.5, true);
+            Check("6-char locator stays within the parent 4-char square (lon)",
+                  Math.Abs(sixChar.Value.lon - jj00.Value.lon) < 1.0, true);
         }
     }
 
