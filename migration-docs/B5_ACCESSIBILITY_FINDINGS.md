@@ -89,3 +89,34 @@ gate and refuses 3.1. Correct, expected, matches the roadmap.
   happens in both Tab and Shift+Tab directions. Not blocking further
   testing -- logged for later, revisit if it turns out to be widespread
   rather than a one-off.
+
+## Confirmed working (no issues found)
+
+- Startup focus / `ForceForeground` interaction: close Jimmy fully, relaunch
+  fresh -- focus lands and announces correctly without needing to click or
+  Alt-Tab first. This was the specific thing the roadmap asked to re-verify
+  on the new runtime (previously-fixed `AllocConsole` foreground-stealing
+  bug, per project history) -- confirmed still fixed on net10.0-windows.
+  2026-07-15.
+- Main-screen "CQ intent" mode buttons (`modeGroupBox`: Listen / CQ only /
+  CQ DX only / CQ and CQ DX) -- tabbed through and read correctly. Not
+  actually invoked (Alt+C starts a real CQ transmission -- correctly left
+  untested per the no-transmit-testing rule).
+- Options dialog: Logbook Sync tab (QRZ/LoTW/Club Log sub-panels, all
+  fields/checkboxes/spin-boxes) fully tabbed through, reads correctly aside
+  from Finding 3 above.
+
+## Remaining checklist (from Controller.Designer.cs's actual AccessibleName
+list, not assumption -- update this if the UI has moved on again)
+
+- `callListBox` ("stations calling:") / `logListBox` ("auto-logged calls:")
+  -- simple-mode lists, if not already covered by the "control 1 2 3 4"
+  pass from earlier in testing.
+- `advTx1ListBox`/`advTx2ListBox`/`advRawListBox`/`spotWatchListBox` --
+  only visible with Advanced Call Layout enabled.
+- `timeoutNumUpDown` ("Repeat limit"), `showUsStateCheckBox` ("Show U.S.
+  state instead of USA").
+- The scattered "Help for X setting" labels (Directed CQ, Alert callsign,
+  Log Early, Exclude filter, Include filter, Ignore non-DX, RR73 reply,
+  Transmit period, Transmit limit, Except callsigns, Auto frequency).
+- Remaining Options tabs beyond Logbook Sync (there are 13+ tab pages).
