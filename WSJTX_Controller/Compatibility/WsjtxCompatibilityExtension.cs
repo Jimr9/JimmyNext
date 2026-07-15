@@ -192,5 +192,74 @@ namespace WSJTX_Controller
             _emsg.CmdCheck = "";         //ignored
             Send("Start upload to LOTW", 16, debugOutput);
         }
+
+        // -- sub-command 13: Reset Tx watchdog timer (embedded in the HeartbeatMessage
+        // handler in WsjtxClient.Protocol.cs, immediately after the handshake's cmd:7
+        // Ack Req -- distinct sub-command, not part of the cmd:7 handshake logic itself).
+        // Does not use the shared Send() helper's emsg dump -- matching the original,
+        // only a plain confirmation is logged for this one. --
+        public void ResetTxWatchdog(Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 13;      //important! reset watchdog timer
+            _emsg.GenMsg = "";          //no effect
+            _emsg.ReplyReqd = false;     //no effect
+            _emsg.EnableTimeout = true;  //no effect
+            _emsg.CmdCheck = "";         //no effect
+            byte[] ba = _emsg.GetBytes();
+            SendSocket.Send(ba, ba.Length);
+            debugOutput?.Invoke(">>>>>Sent 'Reset Tx watchdog' cmd:13");
+        }
+
+        // -- sub-command 10: Opt Req -- sets SkipGrid/UseRR73/frequency offset.
+        // 6 call sites in WsjtxClient.cs/WsjtxClient.Protocol.cs, all identical shape. --
+        public void OptReq(bool skipGrid, bool useRR73, uint offset, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 10;
+            _emsg.GenMsg = "";          //no effect
+            _emsg.SkipGrid = skipGrid;
+            _emsg.UseRR73 = useRR73;
+            _emsg.CmdCheck = "";         //ignored
+            _emsg.Offset = offset;
+            Send("Opt Req", 10, debugOutput);
+        }
+
+        // -- sub-command 6: Setup CQ (WsjtxClient.SetupCq) -- 2 call sites, identical shape. --
+        public void SetupCq(string cqMsg, bool skipGrid, bool useRR73, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 6;
+            _emsg.GenMsg = cqMsg;
+            _emsg.SkipGrid = skipGrid;
+            _emsg.UseRR73 = useRR73;
+            _emsg.CmdCheck = "";         //ignored
+            Send("Setup CQ", 6, debugOutput);
+        }
+
+        // -- sub-command 0: De-init WSJT-X (WsjtxClient.Closing) --
+        public void DeInit(bool skipGrid, bool useRR73, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 0;           //de-init WSJT-X
+            _emsg.GenMsg = "";         //ignored
+            _emsg.SkipGrid = skipGrid;
+            _emsg.UseRR73 = useRR73;
+            _emsg.CmdCheck = "";         //ignored
+            Send("De-init Req", 0, debugOutput);
+        }
+
+        // -- sub-command 255: Broadcast a Jimmy-initiated logged QSO for re-broadcast to
+        // logging programs (WsjtxClient's RequestLog-style self-log path). Does not use
+        // the shared Send() helper's emsg dump -- adifRecord travels in CmdCheck and can
+        // be large, so (matching the original) only a plain confirmation is logged. --
+        public void BroadcastLoggedQso(string call, string grid, string band, string mode, string adifRecord, Action<string> debugOutput)
+        {
+            _emsg.NewTxMsgIdx = 255;     //function code
+            _emsg.GenMsg = $"{call}${grid}${band}${mode}";
+            _emsg.Param0 = false;      //no effect
+            _emsg.Param1 = false;      //no effect
+            _emsg.CmdCheck = adifRecord;
+            byte[] ba = _emsg.GetBytes();
+            SendSocket.Send(ba, ba.Length);
+            debugOutput?.Invoke(">>>>>Sent 'Broadcast' cmd:255");
+            _emsg.CmdCheck = "";
+        }
     }
 }

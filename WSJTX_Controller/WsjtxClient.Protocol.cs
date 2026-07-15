@@ -414,15 +414,10 @@ namespace WSJTX_Controller
                 udpClient2.Send(ba, ba.Length);
                 DebugOutput($"{Time()} >>>>>Sent 'Ack Req' cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
 
-                emsg.NewTxMsgIdx = 17;
-                emsg.Param0 = usePskReporter;
-                emsg.Param1 = false;        //ignored
-                emsg.Offset = 0;            //ignored
-                emsg.GenMsg = $"(mod by KB0UZT, w/{pgmName} v{pgmVer} [FT8 for blind hams], qrz.com/db/KB0UZT)";
-                emsg.CmdCheck = "";         //ignored
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Set PSKReporter' cmd:17{nl}{emsg}");
+                // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetPskReporterEnable.
+                _compatExtension.SetPskReporterEnable(usePskReporter,
+                    $"(mod by KB0UZT, w/{pgmName} v{pgmVer} [FT8 for blind hams], qrz.com/db/KB0UZT)",
+                    msg => DebugOutput($"{Time()} {msg}"));
 
                 HaltTx();       //sync up WSJT-X button state
 
@@ -611,14 +606,11 @@ namespace WSJTX_Controller
                     if (opMode != OpModes.ACTIVE) DebugOutput($"{spacer}heartbeatRecdTimer restarted");
                 }
 
-                emsg.NewTxMsgIdx = 13;      //important! reset watchdog timer
-                emsg.GenMsg = $"";          //no effect
-                emsg.ReplyReqd = false;     //no effect
-                emsg.EnableTimeout = true;  //no effect
-                emsg.CmdCheck = "";         //no effect
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                if (opMode != OpModes.ACTIVE) DebugOutput($"{Time()} >>>>>Sent 'Reset Tx watchdog' cmd:13");
+                // Stage A4: build+send moved to WsjtxCompatibilityExtension.ResetTxWatchdog.
+                _compatExtension.ResetTxWatchdog(msg =>
+                {
+                    if (opMode != OpModes.ACTIVE) DebugOutput($"{Time()} {msg}");
+                });
 
             }
 
@@ -1156,16 +1148,10 @@ namespace WSJTX_Controller
                         //send cmd:10 when offset is known, or when freqCheckBox is off (offset=0 is safe in that case)
                         if (activeOffset > 0 || !ctrl.freqCheckBox.Checked)
                         {
-                        emsg.NewTxMsgIdx = 10;
-                        emsg.GenMsg = $"";          //no effect
-                        emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-                        emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-                        emsg.CmdCheck = "";         //ignored
-                        emsg.Offset = activeOffset;
-                        ba = emsg.GetBytes();
-                        udpClient2.Send(ba, ba.Length);
                         DebugOutput($"{Time()} [BAND-AUDIT] CheckActive→cmd:10 sent: bandIdx:{bandIdx} offset:{activeOffset}");
-                        DebugOutput($"{Time()} >>>>>Sent 'Opt Req' cmd:10{nl}{emsg}");
+                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
+                        _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, activeOffset,
+                            msg => DebugOutput($"{Time()} {msg}"));
                         }
                         if (settingChanged)
                         {
@@ -1218,15 +1204,9 @@ namespace WSJTX_Controller
         {
             if (settingChanged)
             {
-                emsg.NewTxMsgIdx = 10;
-                emsg.GenMsg = $"";          //no effect
-                emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-                emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-                emsg.CmdCheck = "";         //ignored
-                emsg.Offset = 0;            //ignored
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Opt Req' cmd:10{nl}{emsg}");
+                // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
+                _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, 0,
+                    msg => DebugOutput($"{Time()} {msg}"));
 
                 ctrl.WsjtxSettingConfirmed();
                 settingChanged = false;

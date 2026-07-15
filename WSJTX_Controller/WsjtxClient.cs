@@ -1452,15 +1452,9 @@ namespace WSJTX_Controller
                     if (ctrl.freqCheckBox.Checked && oddOffset > 0 && evenOffset > 0)
                     {
                         //set/show frequency offset for period after decodes started
-                        emsg.NewTxMsgIdx = 10;
-                        emsg.GenMsg = $"";          //no effect
-                        emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-                        emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-                        emsg.CmdCheck = "";         //ignored
-                        emsg.Offset = AudioOffsetFromTxPeriod();
-                        ba = emsg.GetBytes();
-                        udpClient2.Send(ba, ba.Length);
-                        DebugOutput($"{Time()} >>>>>Sent 'Opt Req' cmd:10{nl}{emsg}");
+                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
+                        _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, AudioOffsetFromTxPeriod(),
+                            msg => DebugOutput($"{Time()} {msg}"));
                         if (settingChanged)
                         {
                             ctrl.WsjtxSettingConfirmed();
@@ -1470,18 +1464,14 @@ namespace WSJTX_Controller
 
                     if (newDirCq)
                     {
-                        emsg.NewTxMsgIdx = 6;
-                        emsg.GenMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
-                        emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-                        emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-                        emsg.CmdCheck = "";         //ignored
-                        ba = emsg.GetBytes();           //set up for CQ, auto, call 1st
-                        udpClient2.Send(ba, ba.Length);
-                        DebugOutput($"{Time()} >>>>>Sent 'Setup CQ' cmd:6{nl}{emsg}");
+                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetupCq.
+                        string cqMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
+                        _compatExtension.SetupCq(cqMsg, ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked,
+                            msg => DebugOutput($"{Time()} {msg}"));
                         qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
                         replyCmd = null;        //invalidate last reply cmd since not replying
                         replyDecode = null;
-                        curCmd = emsg.GenMsg;
+                        curCmd = cqMsg;
                         newDirCq = false;
                         DebugOutput($"{spacer}newDirCq:{newDirCq}");
                         if (settingChanged)
@@ -2088,14 +2078,9 @@ namespace WSJTX_Controller
                 if (emsg != null && udpClient2 != null)
                 {
                     //notify WSJT-X
-                    emsg.NewTxMsgIdx = 0;           //de-init WSJT-X
-                    emsg.GenMsg = $"";         //ignored
-                    emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-                    emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-                    emsg.CmdCheck = "";         //ignored
-                    ba = emsg.GetBytes();
-                    udpClient2.Send(ba, ba.Length);
-                    DebugOutput($"{Time()} >>>>>Sent 'De-init Req' cmd:0{nl}{emsg}");
+                    // Stage A4: build+send moved to WsjtxCompatibilityExtension.DeInit.
+                    _compatExtension.DeInit(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked,
+                        msg => DebugOutput($"{Time()} {msg}"));
                     Thread.Sleep(500);
                     udpClient2.Close();
                     udpClient2 = null;
@@ -2249,15 +2234,9 @@ namespace WSJTX_Controller
 
             //request add record to log / worked before (using explicit parameters, unlike typical WSJT-X logging)
             //send ADIF record to WSJT-X for re-broadcast to logging pgms
-            emsg.NewTxMsgIdx = 255;     //function code
-            emsg.GenMsg = $"{call}${grid}${band}${mode}";
-            emsg.Param0 = false;      //no effect
-            emsg.Param1 = false;      //no effect
-            emsg.CmdCheck = adifRecord;
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Broadcast' cmd:255");
-            emsg.CmdCheck = "";
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.BroadcastLoggedQso.
+            _compatExtension.BroadcastLoggedQso(call, grid, band, mode, adifRecord,
+                msg => DebugOutput($"{Time()} {msg}"));
 
             // Root-cause fix: the cmd:255 broadcast above asks WSJT-X to log the QSO, but
             // WSJT-X's own confirmation (QsoLoggedMessage/LoggedAdifMessage) -- the only
@@ -2958,16 +2937,11 @@ namespace WSJTX_Controller
                     if (!CheckActive())
                     {
                         //set/show frequency offset for Tx period
-                        emsg.NewTxMsgIdx = 10;
-                        emsg.GenMsg = $"";          //no effect
-                        emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-                        emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-                        emsg.CmdCheck = "";         //ignored
-                        emsg.Offset = AudioOffsetFromTxPeriod();
-                        ba = emsg.GetBytes();
-                        udpClient2.Send(ba, ba.Length);
-                        DebugOutput($"{Time()} [BAND-AUDIT] DecodesCompleted→cmd:10 sent: bandIdx:{bandIdx} offset:{emsg.Offset}");
-                        DebugOutput($"{Time()} >>>>>Sent 'Opt Req' cmd:10{nl}{emsg}");
+                        uint decodesCompletedOffset = AudioOffsetFromTxPeriod();
+                        DebugOutput($"{Time()} [BAND-AUDIT] DecodesCompleted→cmd:10 sent: bandIdx:{bandIdx} offset:{decodesCompletedOffset}");
+                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
+                        _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, decodesCompletedOffset,
+                            msg => DebugOutput($"{Time()} {msg}"));
                         if (settingChanged)
                         {
                             ctrl.WsjtxSettingConfirmed();
@@ -3226,33 +3200,23 @@ namespace WSJTX_Controller
         private void SetupCq(bool enableTx)
         {
             //set/show frequency offset for period after decodes started
-            emsg.NewTxMsgIdx = 10;
-            emsg.GenMsg = $"";          //no effect
-            emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-            emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-            emsg.CmdCheck = "";         //ignored
-            emsg.Offset = AudioOffsetFromTxPeriod();
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Opt Req' cmd:10{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
+            _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, AudioOffsetFromTxPeriod(),
+                msg => DebugOutput($"{Time()} {msg}"));
             if (settingChanged)
             {
                 ctrl.WsjtxSettingConfirmed();
                 settingChanged = false;
             }
 
-            emsg.NewTxMsgIdx = 6;
-            emsg.GenMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
-            emsg.SkipGrid = ctrl.skipGridCheckBox.Checked;
-            emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-            emsg.CmdCheck = "";         //ignored
-            ba = emsg.GetBytes();           //set up for CQ, auto, call 1st
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Setup CQ' cmd:6{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetupCq.
+            string cqMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
+            _compatExtension.SetupCq(cqMsg, ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked,
+                msg => DebugOutput($"{Time()} {msg}"));
             qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
             replyCmd = null;        //invalidate last reply cmd since not replying
             replyDecode = null;
-            curCmd = emsg.GenMsg;
+            curCmd = cqMsg;
             newDirCq = false;           //if set, was processed here
             DebugOutput($"{spacer}qsoState:{qsoState} (was {lastQsoState} replyCmd:'{replyCmd}') newDirCq:{newDirCq}");
 
@@ -3328,15 +3292,9 @@ namespace WSJTX_Controller
             }
 
             //set call options
-            emsg.NewTxMsgIdx = 10;
-            emsg.GenMsg = $"";          //no effect
-            emsg.SkipGrid = (dmsg.UseStdReply ? false : ctrl.skipGridCheckBox.Checked);
-            emsg.UseRR73 = ctrl.useRR73CheckBox.Checked;
-            emsg.CmdCheck = "";         //ignored
-            emsg.Offset = AudioOffsetFromMsg(dmsg);
-            ba = emsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
-            DebugOutput($"{Time()} >>>>>Sent 'Opt Req' cmd:10{nl}{emsg}");
+            // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
+            _compatExtension.OptReq(dmsg.UseStdReply ? false : ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, AudioOffsetFromMsg(dmsg),
+                msg => DebugOutput($"{Time()} {msg}"));
             if (settingChanged)
             {
                 ctrl.WsjtxSettingConfirmed();
