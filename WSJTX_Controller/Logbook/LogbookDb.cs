@@ -861,6 +861,53 @@ ON CONFLICT(dedup_key) DO UPDATE SET
             }
         }
 
+        // Read-only "worked before" check, added for the Classification Engine (migration
+        // Stage A1 -- independently deriving what EnqueueDecodeMessage's wire-supplied
+        // IsNewCallOnBand/IsNewCallAnyBand fields currently give Jimmy). band == null
+        // checks "any band"; a non-null band restricts to that exact band. Does not
+        // mutate any state.
+        public bool HasWorkedBefore(string callsign, string band = null)
+        {
+            if (string.IsNullOrEmpty(callsign)) return false;
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = band == null
+                        ? "SELECT COUNT(*) FROM qso WHERE callsign = @callsign COLLATE NOCASE;"
+                        : "SELECT COUNT(*) FROM qso WHERE callsign = @callsign COLLATE NOCASE AND band = @band COLLATE NOCASE;";
+                    cmd.Parameters.AddWithValue("@callsign", callsign);
+                    if (band != null) cmd.Parameters.AddWithValue("@band", band);
+                    long count = (long)cmd.ExecuteScalar();
+                    return count > 0;
+                }
+            }
+        }
+
+        // Read-only "worked this DXCC entity before" check, added alongside
+        // HasWorkedBefore for the Classification Engine (migration Stage A1) --
+        // independently deriving what EnqueueDecodeMessage's wire-supplied
+        // IsNewCountry/IsNewCountryOnBand fields currently give Jimmy. dxcc <= 0
+        // (unknown entity) always returns false, matching "not classifiable as new/not
+        // new" rather than a false "new country". Does not mutate any state.
+        public bool HasWorkedDxcc(int dxcc, string band = null)
+        {
+            if (dxcc <= 0) return false;
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = band == null
+                        ? "SELECT COUNT(*) FROM qso WHERE dxcc = @dxcc;"
+                        : "SELECT COUNT(*) FROM qso WHERE dxcc = @dxcc AND band = @band COLLATE NOCASE;";
+                    cmd.Parameters.AddWithValue("@dxcc", dxcc);
+                    if (band != null) cmd.Parameters.AddWithValue("@band", band);
+                    long count = (long)cmd.ExecuteScalar();
+                    return count > 0;
+                }
+            }
+        }
+
         public Dictionary<string, int> GetSourceCounts()
         {
             var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);

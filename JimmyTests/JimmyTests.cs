@@ -140,6 +140,7 @@ static class JimmyTests
         DxSpotWatcherIsEvenPeriodTests();
         FccUlsProviderParseLineTests();
         FccUlsProviderLooksIncompleteTests();
+        ClassificationEngineTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -487,6 +488,82 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  LogbookDbUploadSyncStatusTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── ClassificationEngine (migration Stage A1) ───────────────────────────────
+    // Independently-derived counterpart to EnqueueDecodeMessage's wire-supplied
+    // IsNewCallOnBand/IsNewCallAnyBand fields, from Jimmy's own LogbookDb --
+    // parallel-validation only, nothing downstream reads ClassificationEngine yet.
+    //
+    // Country/Continent/IsNewCountry/IsNewCountryOnBand need a live-enabled
+    // LookupManager (real QRZ/Club Log provider data) to resolve a DXCC entity
+    // for the DE station; a fresh LookupManager defaults to disabled (no network
+    // calls made), so those fields aren't exercised here -- covered separately by
+    // replay-capture comparisons and the existing --verify-clublog tooling. The
+    // LogbookDb.HasWorkedDxcc query itself (the part ClassificationEngine would
+    // call once a DXCC number is available) is still exercised directly below.
+    static void ClassificationEngineTests()
+    {
+        Console.WriteLine("\n── ClassificationEngine (Stage A1) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_Classification_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                var engine = new ClassificationEngine(db, lookupManager: null);
+
+                // Nobody worked yet: everything is "new".
+                var neverWorked = engine.Classify("W1AW", "20m");
+                Check("never-worked call: IsNewCallOnBand", neverWorked.IsNewCallOnBand, true);
+                Check("never-worked call: IsNewCallAnyBand", neverWorked.IsNewCallAnyBand, true);
+                CheckStr("never-worked call: Country empty (no LookupManager)", neverWorked.Country, "");
+                Check("never-worked call: IsNewCountry false (no DXCC resolvable)", neverWorked.IsNewCountry, false);
+
+                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, band: "20m");
+
+                var sameBand = engine.Classify("W1AW", "20m");
+                Check("worked on 20m, asked about 20m: IsNewCallOnBand false", sameBand.IsNewCallOnBand, false);
+                Check("worked on 20m, asked about 20m: IsNewCallAnyBand false", sameBand.IsNewCallAnyBand, false);
+
+                var otherBand = engine.Classify("W1AW", "40m");
+                Check("worked on 20m, asked about 40m: IsNewCallOnBand true", otherBand.IsNewCallOnBand, true);
+                Check("worked on 20m, asked about 40m: IsNewCallAnyBand still false", otherBand.IsNewCallAnyBand, false);
+
+                var differentCall = engine.Classify("W2XYZ", "20m");
+                Check("different, never-worked call still new", differentCall.IsNewCallOnBand, true);
+
+                var caseInsensitive = engine.Classify("w1aw", "20m");
+                Check("call lookup is case-insensitive", caseInsensitive.IsNewCallOnBand, false);
+
+                var unknownBand = engine.Classify("W1AW", null);
+                Check("null current band: IsNewCallOnBand defaults true (conservative)", unknownBand.IsNewCallOnBand, true);
+                Check("null current band: IsNewCallAnyBand unaffected", unknownBand.IsNewCallAnyBand, false);
+
+                Check("empty call: no crash, defaults all false/empty",
+                      engine.Classify("", "20m").IsNewCallOnBand, false);
+                Check("null call: no crash, defaults all false/empty",
+                      engine.Classify(null, "20m").IsNewCallOnBand, false);
+
+                // Underlying DXCC worked-before query (what Classify() would call once a
+                // DXCC entity is resolved) -- exercised directly since LookupManager can't
+                // be driven deterministically offline.
+                Check("HasWorkedDxcc: entity 291 worked (any band)", db.HasWorkedDxcc(291, null), true);
+                Check("HasWorkedDxcc: entity 291 worked on 20m", db.HasWorkedDxcc(291, "20m"), true);
+                Check("HasWorkedDxcc: entity 291 NOT worked on 40m", db.HasWorkedDxcc(291, "40m"), false);
+                Check("HasWorkedDxcc: different entity NOT worked", db.HasWorkedDxcc(999, null), false);
+                Check("HasWorkedDxcc: dxcc <= 0 always false", db.HasWorkedDxcc(0, null), false);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  ClassificationEngineTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
         finally
