@@ -26,8 +26,9 @@ namespace WSJTX_Controller
         public FccUlsProvider  FccUls  { get; }
 
         // Every ILookupProvider that can contribute to a Build(call), in
-        // priority order (earlier providers' fields win -- matches the
-        // precedence GetInfoForDialog has always used: QRZ > Club Log > LoTW).
+        // priority order (earlier providers' fields win -- also the precedence
+        // GetInfoForDialog uses, since it's a thin wrapper around Build()):
+        // FCC ULS > Club Log > QRZ > LoTW. See the constructor below for why.
         // Providers not owned by LookupManager itself (e.g. Controller's
         // DxSpotWatcher) are added via RegisterProvider once constructed.
         private readonly List<ILookupProvider> _providers = new List<ILookupProvider>();
@@ -85,9 +86,21 @@ namespace WSJTX_Controller
             // FCC-registered value and should win over QRZ's, per the same
             // QRZ-vs-grid.dat priority reasoning already applied elsewhere -- QRZ's
             // own US records ultimately derive from this same FCC data anyway.
+            //
+            // ClubLog goes ahead of Qrz for the same reason, found via live A6 field
+            // testing 2026-07-16: Club Log's Country/Continent/Dxcc/CqZone/Prefix come
+            // from its own cty.php feed -- the same canonical CTY prefix database most
+            // ham radio software (very likely including WSJT-X itself) is built on --
+            // while QRZ's Country field is just whatever free-text an operator typed
+            // into their own profile, which is inconsistently formatted and not
+            // authoritative. Putting the canonical, WSJT-X-equivalent source first
+            // means Jimmy's classification matches what any other CTY-based program
+            // (including WSJT-X) would show for the same callsign. ClubLogProvider
+            // never populates Grid/Name/Email/QslManager/State, so this reorder has
+            // zero effect on those fields -- Qrz remains the only source for them.
             _providers.Add(FccUls);
-            _providers.Add(Qrz);
             _providers.Add(ClubLog);
+            _providers.Add(Qrz);
             _providers.Add(LoTW);
         }
 
