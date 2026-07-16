@@ -842,10 +842,23 @@ static class JimmyTests
 
                 // Case F: W5C/H -- deliberately absent from the fixture table (matches
                 // JimmyReplay.py's own country=None/continent=None test case) -- must not
-                // crash, everything stays at conservative defaults.
-                CheckFieldParity(engine, "W5C/H (unresolvable, no fixture data)", "CQ W5C/H", band, myGrid, myContinent,
+                // crash, everything stays at conservative defaults. IsDx=true here (not
+                // the general unresolved-continent default of false) because W5C/H itself
+                // ends in /H -- confirmed against real wire behavior via live A6 field
+                // testing 2026-07-16 (wire IsDx=true for this exact call).
+                CheckFieldParity(engine, "W5C/H (unresolvable, no fixture data, /H suffix)", "CQ W5C/H", band, myGrid, myContinent,
                     expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
-                    expectCountry: "", expectContinent: "", expectIsDx: false, expectGridForAzDist: null);
+                    expectCountry: "", expectContinent: "", expectIsDx: true, expectGridForAzDist: null);
+
+                // Case F2: K1ABC/H -- regression test for the /H-suffix fix itself. This
+                // fixture entry DOES have real data (Country/Continent/Dxcc/Grid, see
+                // TestFixtureLookupProvider), proving the fix actively SKIPS using it
+                // (rather than the fixture simply having no entry, like Case F above) --
+                // mirrors real QRZ/Club Log data confidently resolving a /H station's base
+                // callsign to its home location, which Classify() must not trust.
+                CheckFieldParity(engine, "K1ABC/H (/H suffix must skip real fixture data)", "CQ K1ABC/H", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
+                    expectCountry: "", expectContinent: "", expectIsDx: true, expectGridForAzDist: null);
 
                 // Case G: K3ZK -- regression test for a real bug found via live A6 field
                 // testing 2026-07-16 (user-reported: US-state display substitution silently
