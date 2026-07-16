@@ -26,8 +26,9 @@ namespace WSJTX_Controller
         public FccUlsProvider  FccUls  { get; }
 
         // Every ILookupProvider that can contribute to a Build(call), in
-        // priority order (earlier providers' fields win -- matches the
-        // precedence GetInfoForDialog has always used: QRZ > Club Log > LoTW).
+        // priority order (earlier providers' fields win -- also the precedence
+        // GetInfoForDialog uses, since it's a thin wrapper around Build()):
+        // FCC ULS > Club Log > QRZ > LoTW. See the constructor below for why.
         // Providers not owned by LookupManager itself (e.g. Controller's
         // DxSpotWatcher) are added via RegisterProvider once constructed.
         private readonly List<ILookupProvider> _providers = new List<ILookupProvider>();
