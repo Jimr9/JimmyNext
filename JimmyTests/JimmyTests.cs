@@ -144,6 +144,7 @@ static class JimmyTests
         GeoMathTests();
         CapabilityNegotiatorTests();
         A6ClassificationParityTests();
+        ClubLogPrefixTableTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -923,6 +924,174 @@ static class JimmyTests
         {
             ClassificationCutover.UseClassificationEngine = originalFlag;
             try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── ClubLogProvider: prefixes/exceptions tables ─────────────────────────────
+    // Found via live A6 field testing 2026-07-16: <entities><entity><prefix> is only
+    // ONE default prefix per entity (confirmed against a real cached Club Log
+    // download: UNITED STATES OF AMERICA's own entity record lists just "K"), so a
+    // real callsign like "NP4TX" (Puerto Rico, prefix "NP4") never matched anything
+    // via the old entities-only FindByCallsign. Club Log's actual schema also
+    // publishes <prefixes> (the comprehensive prefix-to-entity table -- confirmed
+    // "NP4" -> PUERTO RICO in the real data) and <exceptions> (exact full-callsign
+    // overrides), neither previously parsed at all. This fixture is a small,
+    // hand-built XML sample matching the real confirmed schema exactly (same tag
+    // names/structure/casing), not the full multi-hundred-KB real file.
+    const string ClubLogTestXml = @"<?xml version='1.0'?>
+<clublog date='2026-07-12T20:30:07+00:00'>
+<entities>
+	<entity>
+		<adif>291</adif>
+		<name>UNITED STATES OF AMERICA</name>
+		<prefix>K</prefix>
+		<deleted>false</deleted>
+		<cqz>5</cqz>
+		<cont>NA</cont>
+	</entity>
+	<entity>
+		<adif>202</adif>
+		<name>PUERTO RICO</name>
+		<prefix>KP4</prefix>
+		<deleted>false</deleted>
+		<cqz>8</cqz>
+		<cont>NA</cont>
+	</entity>
+	<entity>
+		<adif>230</adif>
+		<name>FEDERAL REPUBLIC OF GERMANY</name>
+		<prefix>DL</prefix>
+		<deleted>false</deleted>
+		<cqz>14</cqz>
+		<cont>EU</cont>
+	</entity>
+	<entity>
+		<adif>81</adif>
+		<name>GERMANY</name>
+		<prefix>Y2</prefix>
+		<deleted>true</deleted>
+		<cqz>14</cqz>
+		<cont>EU</cont>
+	</entity>
+</entities>
+<exceptions>
+	<exception record='1'>
+		<call>W1AW/KP4</call>
+		<entity>PUERTO RICO</entity>
+		<adif>202</adif>
+		<cqz>8</cqz>
+		<cont>NA</cont>
+	</exception>
+</exceptions>
+<prefixes>
+	<prefix record='1'>
+		<call>K</call>
+		<entity>UNITED STATES OF AMERICA</entity>
+		<adif>291</adif>
+		<cqz>5</cqz>
+		<cont>NA</cont>
+	</prefix>
+	<prefix record='2'>
+		<call>N</call>
+		<entity>UNITED STATES OF AMERICA</entity>
+		<adif>291</adif>
+		<cqz>5</cqz>
+		<cont>NA</cont>
+	</prefix>
+	<prefix record='3'>
+		<call>KP4</call>
+		<entity>PUERTO RICO</entity>
+		<adif>202</adif>
+		<cqz>8</cqz>
+		<cont>NA</cont>
+	</prefix>
+	<prefix record='4'>
+		<call>NP4</call>
+		<entity>PUERTO RICO</entity>
+		<adif>202</adif>
+		<cqz>8</cqz>
+		<cont>NA</cont>
+		<start>1978-03-24T00:00:00+00:00</start>
+	</prefix>
+	<prefix record='5'>
+		<call>DL</call>
+		<entity>GERMANY</entity>
+		<adif>81</adif>
+		<cqz>14</cqz>
+		<cont>EU</cont>
+		<end>1973-09-16T23:59:59+00:00</end>
+	</prefix>
+	<prefix record='6'>
+		<call>DL</call>
+		<entity>FEDERAL REPUBLIC OF GERMANY</entity>
+		<adif>230</adif>
+		<cqz>14</cqz>
+		<cont>EU</cont>
+	</prefix>
+</prefixes>
+</clublog>";
+
+    static void ClubLogPrefixTableTests()
+    {
+        Console.WriteLine("\n── ClubLogProvider: prefixes/exceptions tables ──");
+        string tmpRoot = Path.Combine(Path.GetTempPath(), "JimmyTest_ClubLog_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tmpRoot, "ClubLog"));
+            File.WriteAllText(Path.Combine(tmpRoot, "ClubLog", "clublog_cty.xml"), ClubLogTestXml);
+
+            var provider = new ClubLogProvider(tmpRoot);
+            provider.Configure(true, "");
+            provider.Load();
+
+            Check("Entity list still loads (RuleUniverse's AllEntities/EntityCount unaffected)",
+                  provider.EntityCount == 4, true);
+
+            // Case 1: NP4TX -- the actual real-world call that failed before this fix.
+            // Its prefix "NP4" only exists in <prefixes>, never in PUERTO RICO's own
+            // <entities><entity><prefix> ("KP4").
+            var np4tx = provider.FindByCallsign("NP4TX");
+            Check("NP4TX resolves via <prefixes> table (was previously unresolvable)", np4tx != null, true);
+            if (np4tx != null)
+                CheckStr("NP4TX -> PUERTO RICO", np4tx.Name, "PUERTO RICO");
+
+            // Case 2: KP4TX -- same entity, via its <entities> default prefix (already
+            // worked before this fix) -- must still work identically.
+            var kp4tx = provider.FindByCallsign("KP4TX");
+            Check("KP4TX still resolves (entity's own default prefix, pre-existing path)", kp4tx != null, true);
+            if (kp4tx != null)
+                CheckStr("KP4TX -> PUERTO RICO", kp4tx.Name, "PUERTO RICO");
+
+            // Case 3: plain "K" call -- USA, via <prefixes>.
+            var kCall = provider.FindByCallsign("K1ABC");
+            Check("K1ABC -> USA via <prefixes>", kCall != null && kCall.Name == "UNITED STATES OF AMERICA", true);
+
+            // Case 4: exact <exceptions> override wins even though its own prefix ("W")
+            // would otherwise resolve to USA.
+            var exception = provider.FindByCallsign("W1AW/KP4");
+            Check("W1AW/KP4 exception override -> PUERTO RICO (not USA, despite W prefix)",
+                  exception != null && exception.Name == "PUERTO RICO", true);
+
+            // Case 5: "DL" has two <prefixes> records -- one expired in 1973 (GERMANY,
+            // deleted entity), one with no <end> (FEDERAL REPUBLIC OF GERMANY, current)
+            // -- must resolve to the currently-valid one, not whichever parsed last.
+            var dl = provider.FindByCallsign("DL1ABC");
+            Check("DL1ABC resolves to the currently-valid entity, not the expired 1973 one",
+                  dl != null && dl.Name == "FEDERAL REPUBLIC OF GERMANY", true);
+
+            // Case 6: unresolvable call (no matching prefix at any length) -- must not
+            // crash, just return null.
+            Check("Completely unrelated call returns null, no crash",
+                  provider.FindByCallsign("1A1A") == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  ClubLogPrefixTableTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { Directory.Delete(tmpRoot, recursive: true); } catch { }
         }
     }
 
