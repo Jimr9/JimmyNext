@@ -1088,6 +1088,14 @@ static class JimmyTests
 		<cqz>14</cqz>
 		<cont>EU</cont>
 	</prefix>
+	<prefix record='7'>
+		<call>K4</call>
+		<entity>PUERTO RICO</entity>
+		<adif>202</adif>
+		<cqz>8</cqz>
+		<cont>NA</cont>
+		<end>1946-12-31T23:59:59+00:00</end>
+	</prefix>
 </prefixes>
 </clublog>";
 
@@ -1143,6 +1151,16 @@ static class JimmyTests
             // crash, just return null.
             Check("Completely unrelated call returns null, no crash",
                   provider.FindByCallsign("1A1A") == null, true);
+
+            // Case 7: real-world bug found via live A6 field testing 2026-07-16 --
+            // "K4" has only ONE <prefixes> record, PUERTO RICO, expired 1946 (a
+            // pre-war assignment long superseded by the modern US call-area system,
+            // with no separate current-day "K4" record to prefer over it). A real
+            // K4-prefixed US station like K4YT must still resolve to USA via the
+            // shorter, current "K" match -- not the longer but expired "K4" one.
+            var k4call = provider.FindByCallsign("K4YT");
+            Check("K4YT -> USA, not the expired 1946 K4/Puerto Rico record",
+                  k4call != null && k4call.Name == "UNITED STATES OF AMERICA", true);
         }
         catch (Exception ex)
         {
