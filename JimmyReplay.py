@@ -201,7 +201,18 @@ class JimmyVerifier:
         self._loglist  = None
         self.passed    = 0
         self.failed    = 0
-        self._find()
+        # run_replay_tests.bat gives the freshly-launched Jimmy.exe a fixed 5s
+        # head start before this script runs -- observed to be a tight/losing race
+        # on a loaded or just-rebuilt machine (first launch after a build is
+        # slower to reach a responsive main window). Retry for up to 10s instead
+        # of a single one-shot attempt so a slow-but-fine startup doesn't get
+        # misreported as "controls not located".
+        deadline = time.time() + 10.0
+        while True:
+            self._find()
+            if self.available or time.time() >= deadline:
+                break
+            time.sleep(0.5)
 
     def _find(self):
         # Title-prefix match alone is ambiguous -- e.g. a VS Code window titled
