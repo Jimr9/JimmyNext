@@ -842,10 +842,36 @@ static class JimmyTests
 
                 // Case F: W5C/H -- deliberately absent from the fixture table (matches
                 // JimmyReplay.py's own country=None/continent=None test case) -- must not
-                // crash, everything stays at conservative defaults.
-                CheckFieldParity(engine, "W5C/H (unresolvable, no fixture data)", "CQ W5C/H", band, myGrid, myContinent,
+                // crash, everything stays at conservative defaults. IsDx=true here (not
+                // the general unresolved-continent default of false) because W5C/H itself
+                // ends in /H -- confirmed against real wire behavior via live A6 field
+                // testing 2026-07-16 (wire IsDx=true for this exact call).
+                CheckFieldParity(engine, "W5C/H (unresolvable, no fixture data, /H suffix)", "CQ W5C/H", band, myGrid, myContinent,
                     expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
-                    expectCountry: "", expectContinent: "", expectIsDx: false, expectGridForAzDist: null);
+                    expectCountry: "", expectContinent: "", expectIsDx: true, expectGridForAzDist: null);
+
+                // Case F2: K1ABC/H -- regression test for the /H-suffix fix itself. This
+                // fixture entry DOES have real data (Country/Continent/Dxcc/Grid, see
+                // TestFixtureLookupProvider), proving the fix actively SKIPS using it
+                // (rather than the fixture simply having no entry, like Case F above) --
+                // mirrors real QRZ/Club Log data confidently resolving a /H station's base
+                // callsign to its home location, which Classify() must not trust.
+                CheckFieldParity(engine, "K1ABC/H (/H suffix must skip real fixture data)", "CQ K1ABC/H", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
+                    expectCountry: "", expectContinent: "", expectIsDx: true, expectGridForAzDist: null);
+
+                // Case G: K3ZK -- regression test for a real bug found via live A6 field
+                // testing 2026-07-16 (user-reported: US-state display substitution silently
+                // stopped firing). The fixture's raw Country is "United States" (mirroring
+                // QRZ's actual raw output), but Classify() must normalize it to "USA" --
+                // several consumers (US-state display substitution, CallQueueStore's
+                // auto-lookup trigger) compare Country against the literal "USA".
+                // DXCC 291 (USA) was already marked worked on 20m by Case B's K4YT insert
+                // above (same db, whole method) -- so IsNewCountry/IsNewCountryOnBand are
+                // correctly false here too, same as K4YT's own Case B/C expectations.
+                CheckFieldParity(engine, "K3ZK (raw QRZ-style country string must normalize to USA)", "CQ K3ZK FN21", band, myGrid, myContinent,
+                    expectNewOnBand: true, expectNewAnyBand: true, expectNewCountry: false, expectNewCountryOnBand: false,
+                    expectCountry: "USA", expectContinent: "NA", expectIsDx: false, expectGridForAzDist: "FN21");
 
                 // ── Consumer-level parity: same underlying values, both cutover-flag
                 //    states, identical output. ──

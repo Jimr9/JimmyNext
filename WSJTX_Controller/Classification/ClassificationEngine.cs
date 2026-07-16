@@ -62,10 +62,33 @@ namespace WSJTX_Controller
             var result = new ClassifiedCall();
             if (string.IsNullOrEmpty(call)) return result;
 
-            LookupRecord rec = (_lookupManager != null && _lookupManager.Enabled)
+            // /H-suffixed calls (Fox/Hound "Hound" designation -- WsjtxMessage.IsFoxHound,
+            // the same heuristic Jimmy's own "Possible F/H" tagging already uses) have an
+            // unreliable true operating location, so the wire-supplied classification
+            // deliberately never resolves one for them (Continent/Country come back
+            // empty, Azimuth/Distance stay unresolved, IsDx defaults true -- "might be
+            // DX, don't filter it out"). Found via live A6 field testing 2026-07-16:
+            // LookupManager.Build(call) doesn't share that caution -- QRZ/Club Log match
+            // on the base callsign, ignoring the /H suffix, and confidently (but
+            // possibly wrongly) resolve the base call's home location. Skipping the
+            // lookup entirely for these calls mirrors the wire's own conservative
+            // behavior instead of trusting a location that may not reflect where the
+            // station is actually operating from.
+            bool isPossibleFoxHound = !string.IsNullOrEmpty(decodedMessage) && WsjtxMessage.IsFoxHound(decodedMessage);
+
+            LookupRecord rec = (!isPossibleFoxHound && _lookupManager != null && _lookupManager.Enabled)
                 ? _lookupManager.Build(call)
                 : null;
-            result.Country = rec?.Country ?? "";
+            // Found via live A6 field testing 2026-07-16: lookup providers return their
+            // own raw country strings (QRZ: "United States", Club Log: "UNITED STATES OF
+            // AMERICA"), not WSJT-X's normalized set -- the wire-supplied Country setter
+            // always ran incoming values through this exact normalization
+            // (EnqueueDecodeMessage.WsjtxCountry), so several consumers compare against
+            // the normalized "USA" literal (US-state display substitution in
+            // WsjtxClient.Display.cs, the auto-lookup trigger in CallQueueStore.cs).
+            // Applying the same normalization here keeps those comparisons working
+            // regardless of which provider's raw string resolved the country.
+            result.Country = EnqueueDecodeMessage.WsjtxCountry(rec?.Country);
             result.Continent = rec?.Continent ?? "";
 
             bool workedAnyBand = _logbookDb != null && _logbookDb.HasWorkedBefore(call, null);
@@ -93,13 +116,17 @@ namespace WSJTX_Controller
             }
 
             // IsDx: "true = different continent from this QTH" (EnqueueDecodeMessage.
-            // IsDx's own doc comment). Conservative default (false) when either
-            // continent is unresolved, matching IsNewCountry's "cannot classify,
-            // don't guess" convention above -- not computed anywhere else in Jimmy
-            // before this (confirmed: no prior MyContinent-vs-Continent comparison
-            // existed in the codebase).
-            result.IsDx = !string.IsNullOrEmpty(myContinent) && !string.IsNullOrEmpty(result.Continent)
-                && !string.Equals(myContinent, result.Continent, StringComparison.OrdinalIgnoreCase);
+            // IsDx's own doc comment). Possible-F/H calls get the wire's own convention
+            // (true -- "might be DX, don't filter it out") rather than the general
+            // conservative-false default below, matching real wire behavior confirmed
+            // via live A6 field testing 2026-07-16 (W5C/H: wire IsDx=true). Otherwise,
+            // conservative default (false) when either continent is unresolved, matching
+            // IsNewCountry's "cannot classify, don't guess" convention above -- not
+            // computed anywhere else in Jimmy before this (confirmed: no prior
+            // MyContinent-vs-Continent comparison existed in the codebase).
+            result.IsDx = isPossibleFoxHound
+                || (!string.IsNullOrEmpty(myContinent) && !string.IsNullOrEmpty(result.Continent)
+                    && !string.Equals(myContinent, result.Continent, StringComparison.OrdinalIgnoreCase));
 
             // Azimuth/Distance: the decoded message's own grid (freshest, e.g. a CQ's
             // trailing grid) is tried first, falling back to LookupManager's cached
