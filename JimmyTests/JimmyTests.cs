@@ -142,6 +142,7 @@ static class JimmyTests
         FccUlsProviderLooksIncompleteTests();
         ClassificationEngineTests();
         GeoMathTests();
+        GeoMathEllipsoidCrossValidationTests();
         CapabilityNegotiatorTests();
         A6ClassificationParityTests();
         ClubLogPrefixTableTests();
@@ -624,13 +625,17 @@ static class JimmyTests
         Console.WriteLine("\n── GeoMath ──");
 
         // Grid parsing: JJ00 sits at the intersection of the equator and prime
-        // meridian by Maidenhead convention -- center of that 2x1 degree square.
+        // meridian by Maidenhead convention. A bare 4-character grid has no
+        // sub-square letters, and WSJT-X's own grid2deg.f90 defaults the missing
+        // pair to "mm" rather than resolving to the true geometric center of the
+        // 2x1 degree square -- GridToLatLon replicates that exactly (Stage-A6-
+        // geodesic-match, 2026-07-16), landing ~1.25'/2.5' off the box center.
         var jj00 = GeoMath.GridToLatLon("JJ00");
         Check("JJ00 parses (non-null)", jj00.HasValue, true);
         if (jj00.HasValue)
         {
-            Check("JJ00 lat within 0.6 of equator", Math.Abs(jj00.Value.lat - 0.5) < 0.001, true);
-            Check("JJ00 lon within 0.6 of prime meridian", Math.Abs(jj00.Value.lon - 1.0) < 0.001, true);
+            Check("JJ00 lat within 0.6 of equator", Math.Abs(jj00.Value.lat - 0.520833) < 0.001, true);
+            Check("JJ00 lon within 0.6 of prime meridian", Math.Abs(jj00.Value.lon - 1.041667) < 0.001, true);
         }
 
         Check("malformed grid (1 char) returns null", GeoMath.GridToLatLon("A").HasValue, false);
@@ -647,18 +652,27 @@ static class JimmyTests
               Math.Abs(lower.Value.lat - jj00.Value.lat) < 0.0001 &&
               Math.Abs(lower.Value.lon - jj00.Value.lon) < 0.0001, true);
 
-        // Pure formula checks (direct lat/lon, independent of grid parsing):
-        // one degree of latitude north, same longitude -- due north, ~111.2 km.
+        // Pure formula checks (direct lat/lon, independent of grid parsing). These
+        // target the Clarke 1866 ellipsoid WSJT-X itself uses (Thomas 1970 geodesic,
+        // Stage-A6-geodesic-match, 2026-07-16), not a spherical approximation -- a
+        // degree of meridional latitude is ~110.57 km near the equator (vs ~111.69 km
+        // near the poles) on this ellipsoid, not a constant ~111.2 km as a sphere of
+        // mean radius 6371 km would give. Expected values cross-validated against an
+        // independent Python port of WSJT-X's own geodist.f90.
+        //
+        // one degree of latitude north, same longitude -- due north, ~110.57 km at
+        // the equator.
         double distNorth = GeoMath.DistanceKm(0.5, 1.0, 1.5, 1.0);
-        Check("1 degree latitude ~= 111.2 km", Math.Abs(distNorth - 111.19) < 0.5, true);
+        Check("1 degree latitude ~= 110.57 km at the equator", Math.Abs(distNorth - 110.5676) < 0.01, true);
         double azNorth = GeoMath.AzimuthDegrees(0.5, 1.0, 1.5, 1.0);
         Check("due north bearing == 0 degrees", Math.Abs(azNorth - 0.0) < 0.01, true);
 
-        // Quarter of Earth's circumference along the equator (independently
-        // derivable: R * (pi/2)), due east.
+        // Quarter of the equator's circumference (independently derivable:
+        // equatorialRadiusKm * (pi/2), Clarke 1866 equatorial radius 6378.2064 km),
+        // due east.
         double distQuarter = GeoMath.DistanceKm(0, 0, 0, 90);
-        Check("quarter circumference along equator ~= R*(pi/2)",
-              Math.Abs(distQuarter - (6371.0 * Math.PI / 2)) < 0.5, true);
+        Check("quarter circumference along equator ~= equatorialR*(pi/2)",
+              Math.Abs(distQuarter - (6378.2064 * Math.PI / 2)) < 0.5, true);
         double azEast = GeoMath.AzimuthDegrees(0, 0, 0, 90);
         Check("due east bearing == 90 degrees", Math.Abs(azEast - 90.0) < 0.01, true);
 
@@ -670,7 +684,9 @@ static class JimmyTests
         Check("DistanceAndAzimuth(JJ00, JJ01): non-null", pair.HasValue, true);
         if (pair.HasValue)
         {
-            Check("DistanceAndAzimuth(JJ00, JJ01): ~111.2 km", Math.Abs(pair.Value.distanceKm - 111.19) < 0.5, true);
+            // JJ00/JJ01 resolve to their "mm" sub-square centers (see the GridToLatLon
+            // comment above), ~1 degree of latitude apart at the equator: ~110.57 km.
+            Check("DistanceAndAzimuth(JJ00, JJ01): ~110.57 km", Math.Abs(pair.Value.distanceKm - 110.5676) < 0.01, true);
             Check("DistanceAndAzimuth(JJ00, JJ01): due north", Math.Abs(pair.Value.azimuthDeg - 0.0) < 0.01, true);
         }
 
@@ -689,6 +705,50 @@ static class JimmyTests
                   Math.Abs(sixChar.Value.lat - jj00.Value.lat) < 0.5, true);
             Check("6-char locator stays within the parent 4-char square (lon)",
                   Math.Abs(sixChar.Value.lon - jj00.Value.lon) < 1.0, true);
+        }
+    }
+
+    // ── GeoMath ellipsoidal cross-validation (Stage A6 geodesic-match, 2026-07-16) ──
+    // Expected values below were produced by an independent Python transcription of
+    // WSJT-X's own lib/geodist.f90/grid2deg.f90 (Thomas 1970 spheroidal geodesic,
+    // Clarke 1866 ellipsoid), run against real grid squares -- NOT re-derived from
+    // Jimmy's own C# port. This is the permanent record of the cross-validation used
+    // to confirm the C# port is a faithful, bug-free transcription (the temporary
+    // "XVAL" console printout used to find/fix the GridToLatLon "mm" sub-square
+    // default bug during development has been removed; this replaces it).
+    static void GeoMathEllipsoidCrossValidationTests()
+    {
+        Console.WriteLine("\n── GeoMath ellipsoidal cross-validation (vs independent Python port of WSJT-X) ──");
+
+        var expectedLatLon = new (string grid, double lat, double lon)[]
+        {
+            ("EN34", 44.520833, -92.958333),
+            ("FN31", 41.520833, -72.958333),
+            ("EM63", 33.520833, -86.958333),
+            ("EN70", 40.520833, -84.958333),
+            ("FN42", 42.520833, -70.958333),
+            ("JJ00", 0.520833, 1.041667),
+            ("JJ01", 1.520833, 1.041667),
+        };
+        foreach (var (grid, lat, lon) in expectedLatLon)
+        {
+            var ll = GeoMath.GridToLatLon(grid);
+            Check($"{grid}: lat matches Python oracle", ll.HasValue && Math.Abs(ll.Value.lat - lat) < 0.0001, true);
+            Check($"{grid}: lon matches Python oracle", ll.HasValue && Math.Abs(ll.Value.lon - lon) < 0.0001, true);
+        }
+
+        var expectedPairs = new (string from, string to, double az, double distKm)[]
+        {
+            ("EN34", "FN31", 94.58, 1659.57),
+            ("EM63", "EN70", 12.31, 796.89),
+            ("FN42", "EM63", 239.75, 1719.13),
+            ("JJ00", "JJ01", 0.00, 110.57),
+        };
+        foreach (var (from, to, az, distKm) in expectedPairs)
+        {
+            var r = GeoMath.DistanceAndAzimuth(from, to);
+            Check($"{from} -> {to}: azimuth matches Python oracle", r.HasValue && Math.Abs(r.Value.azimuthDeg - az) < 0.01, true);
+            Check($"{from} -> {to}: distance matches Python oracle", r.HasValue && Math.Abs(r.Value.distanceKm - distKm) < 0.01, true);
         }
     }
 
