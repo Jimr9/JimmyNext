@@ -40,8 +40,21 @@ namespace WSJTX_Controller
         // _entitiesByAdif so Deleted/Name/Continent/CqZone still come from the
         // canonical entity record.
         private Dictionary<int, ClubLogEntity> _entitiesByAdif = new Dictionary<int, ClubLogEntity>();
-        private Dictionary<string, int> _prefixToAdif = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        private Dictionary<string, int> _exceptionToAdif = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // isCurrent alongside each Adif: some <call> values have only ONE historical
+        // <prefixes>/<exceptions> record, already expired, with no separate current-
+        // day record at all (e.g. "K4" -> PUERTO RICO, <end>1946-12-31 -- a pre-war
+        // assignment, long superseded by the modern US call-area system, with no
+        // newer "K4" record to prefer it over). Found via live A6 field testing
+        // 2026-07-16: K4YT and other real K4-prefixed US stations were being
+        // misclassified as Puerto Rico because FindByCallsign's longest-prefix search
+        // matched this expired record and returned immediately, never falling
+        // through to the correct shorter/current "K" -> USA match. isCurrent lets
+        // FindByCallsign skip an expired record and keep searching shorter prefixes,
+        // rather than only comparing currency among same-key duplicates as before.
+        private Dictionary<string, (int Adif, bool IsCurrent)> _prefixToAdif =
+            new Dictionary<string, (int, bool)>(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, (int Adif, bool IsCurrent)> _exceptionToAdif =
+            new Dictionary<string, (int, bool)>(StringComparer.OrdinalIgnoreCase);
         private static readonly HttpClient _http =
             new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
 
@@ -156,40 +169,44 @@ namespace WSJTX_Controller
 
         // 1) Exact full-callsign override (Club Log's <exceptions> table -- e.g. a
         //    special-event or portable operation whose true DXCC entity doesn't match
-        //    what its prefix would normally imply).
-        // 2) Longest-prefix match against Club Log's full <prefixes> table (tries the
-        //    full callsign, then progressively shorter prefixes, e.g.
-        //    "NP4TX" -> "NP4T" -> "NP4" -> "NP" -> "N", until a match is found) --
-        //    comprehensive: every valid prefix for every entity, not just each
-        //    entity's single <entities><entity><prefix> default.
-        // 3) Last-resort fallback: the original entities-only longest-prefix match,
-        //    kept in case some entity genuinely isn't represented in <prefixes> for
-        //    some reason (also the only path available for the legacy plain-text CTY
-        //    format, which ParseCtyText doesn't populate _prefixToAdif/_exceptionToAdif
-        //    for).
+        //    what its prefix would normally imply). Only a CURRENT exception counts
+        //    here -- an expired one falls through to prefix matching like any other
+        //    stale record (see the isCurrent comment on _prefixToAdif above).
+        // 2) A single combined longest-to-shortest pass over both Club Log's full
+        //    <prefixes> table (comprehensive: every valid prefix for every entity,
+        //    not just each entity's single <entities><entity><prefix> default) and
+        //    the entities-only default-prefix list, at each length -- so a CURRENT
+        //    match at a shorter length (e.g. "K" -> USA) is found and returned before
+        //    an EXPIRED match at a longer length (e.g. "K4" -> PUERTO RICO, expired
+        //    1946) ever gets a chance to win by virtue of being checked first.
+        // 3) Only if no current match was found at any length: fall back to the
+        //    longest expired <prefixes> match, then the exact expired <exceptions>
+        //    match -- a stale historical guess is still better than no classification
+        //    at all when nothing current applies.
         public ClubLogEntity FindByCallsign(string call)
         {
             if (!IsEnabled || string.IsNullOrEmpty(call)) return null;
             call = call.ToUpperInvariant();
 
-            if (_exceptionToAdif.TryGetValue(call, out int exceptionAdif) &&
-                _entitiesByAdif.TryGetValue(exceptionAdif, out ClubLogEntity exceptionEntity) &&
+            if (_exceptionToAdif.TryGetValue(call, out var exceptionEntry) &&
+                exceptionEntry.IsCurrent &&
+                _entitiesByAdif.TryGetValue(exceptionEntry.Adif, out ClubLogEntity exceptionEntity) &&
                 !exceptionEntity.Deleted)
                 return exceptionEntity;
 
+            ClubLogEntity expiredPrefixFallback = null;
             for (int len = call.Length; len >= 1; len--)
             {
                 string candidate = call.Substring(0, len);
-                if (_prefixToAdif.TryGetValue(candidate, out int prefixAdif) &&
-                    _entitiesByAdif.TryGetValue(prefixAdif, out ClubLogEntity prefixEntity) &&
-                    !prefixEntity.Deleted)
-                    return prefixEntity;
-            }
 
-            if (_entities.Count == 0) return null;
-            for (int len = call.Length; len >= 1; len--)
-            {
-                string candidate = call.Substring(0, len);
+                if (_prefixToAdif.TryGetValue(candidate, out var prefixEntry) &&
+                    _entitiesByAdif.TryGetValue(prefixEntry.Adif, out ClubLogEntity prefixEntity) &&
+                    !prefixEntity.Deleted)
+                {
+                    if (prefixEntry.IsCurrent) return prefixEntity;
+                    if (expiredPrefixFallback == null) expiredPrefixFallback = prefixEntity;
+                }
+
                 foreach (var e in _entities)
                 {
                     if (!e.Deleted &&
@@ -197,6 +214,14 @@ namespace WSJTX_Controller
                         return e;
                 }
             }
+
+            if (expiredPrefixFallback != null) return expiredPrefixFallback;
+
+            if (_exceptionToAdif.TryGetValue(call, out var expiredException) &&
+                _entitiesByAdif.TryGetValue(expiredException.Adif, out ClubLogEntity expiredExceptionEntity) &&
+                !expiredExceptionEntity.Deleted)
+                return expiredExceptionEntity;
+
             return null;
         }
 
@@ -286,17 +311,18 @@ namespace WSJTX_Controller
                 LastError = "Club Log XML parsed but no entities found; format may have changed.";
         }
 
-        // Parses Club Log's <prefixes>/<exceptions> tables into a call/prefix -> Adif
-        // lookup. Both sections can carry more than one historical record for the same
-        // <call> (e.g. "DL" belonged to a pre-1973 "GERMANY" entity before today's
-        // "FEDERAL REPUBLIC OF GERMANY" assignment) -- a record with no <end> date, or
-        // an <end> date that hasn't passed yet, is preferred over one that's expired,
-        // so classification reflects the currently-valid assignment rather than
-        // whichever happened to parse last.
-        private static Dictionary<string, int> ParseCallToAdifTable(XmlDocument doc, string containerTag, string recordTag)
+        // Parses Club Log's <prefixes>/<exceptions> tables into a call/prefix -> (Adif,
+        // IsCurrent) lookup. Both sections can carry more than one historical record
+        // for the same <call> (e.g. "DL" belonged to a pre-1973 "GERMANY" entity
+        // before today's "FEDERAL REPUBLIC OF GERMANY" assignment) -- among duplicates,
+        // a record with no <end> date, or an <end> date that hasn't passed yet, is
+        // preferred. IsCurrent is also returned for the winning record (even when
+        // there's only a single, expired record for a <call>, e.g. "K4" -> PUERTO
+        // RICO, expired 1946) so FindByCallsign can tell a genuinely-current match
+        // apart from a stale one that only wins by default -- see its own comment.
+        private static Dictionary<string, (int Adif, bool IsCurrent)> ParseCallToAdifTable(XmlDocument doc, string containerTag, string recordTag)
         {
-            var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            var resultIsCurrent = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            var result = new Dictionary<string, (int Adif, bool IsCurrent)>(StringComparer.OrdinalIgnoreCase);
 
             var container = doc.SelectSingleNode($"//*[local-name()='{containerTag}']");
             var records = container?.SelectNodes($"*[local-name()='{recordTag}']");
@@ -314,11 +340,8 @@ namespace WSJTX_Controller
                     || !DateTime.TryParse(endText, out DateTime end)
                     || end >= now;
 
-                if (!result.ContainsKey(call) || (isCurrent && !resultIsCurrent[call]))
-                {
-                    result[call] = adif;
-                    resultIsCurrent[call] = isCurrent;
-                }
+                if (!result.TryGetValue(call, out var existing) || (isCurrent && !existing.IsCurrent))
+                    result[call] = (adif, isCurrent);
             }
             return result;
         }
