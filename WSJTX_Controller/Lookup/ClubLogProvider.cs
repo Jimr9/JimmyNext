@@ -23,7 +23,25 @@ namespace WSJTX_Controller
         private readonly string _dir;
         private readonly string _dataFile;
         private readonly string _metaFile;
+        // AllEntities/EntityCount (RuleUniverse.cs's award-rule DXCC universe lists,
+        // Controller.cs's own entity enumeration) stay backed by this flat list --
+        // one row per entity, each carrying only its single default prefix. This is
+        // NOT sufficient for per-callsign classification (see _prefixToAdif below).
         private List<ClubLogEntity> _entities = new List<ClubLogEntity>();
+        // Found via live A6 field testing 2026-07-16: <entities><entity><prefix> is
+        // only ONE default prefix per entity -- e.g. UNITED STATES OF AMERICA's own
+        // entity record lists just "K", missing N/W/AA-AL and every US territory's
+        // own prefixes (Puerto Rico's NP4/KP4, etc.), so real callsigns like "NP4TX"
+        // never matched anything via the old entities-only FindByCallsign. Club Log's
+        // actual published cty.xml also has <prefixes> (the comprehensive prefix-to-
+        // entity table, confirmed via a real cached download: 4122+ records, e.g.
+        // NP4 -> PUERTO RICO) and <exceptions> (exact full-callsign overrides) --
+        // FindByCallsign now consults these first, keyed by Adif into
+        // _entitiesByAdif so Deleted/Name/Continent/CqZone still come from the
+        // canonical entity record.
+        private Dictionary<int, ClubLogEntity> _entitiesByAdif = new Dictionary<int, ClubLogEntity>();
+        private Dictionary<string, int> _prefixToAdif = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, int> _exceptionToAdif = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private static readonly HttpClient _http =
             new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
 
@@ -136,12 +154,39 @@ namespace WSJTX_Controller
             return null;
         }
 
-        // Longest-prefix match: tries the full callsign, then progressively shorter
-        // prefixes (e.g. "W1AW" → "W1A" → "W1" → "W") until a match is found.
+        // 1) Exact full-callsign override (Club Log's <exceptions> table -- e.g. a
+        //    special-event or portable operation whose true DXCC entity doesn't match
+        //    what its prefix would normally imply).
+        // 2) Longest-prefix match against Club Log's full <prefixes> table (tries the
+        //    full callsign, then progressively shorter prefixes, e.g.
+        //    "NP4TX" -> "NP4T" -> "NP4" -> "NP" -> "N", until a match is found) --
+        //    comprehensive: every valid prefix for every entity, not just each
+        //    entity's single <entities><entity><prefix> default.
+        // 3) Last-resort fallback: the original entities-only longest-prefix match,
+        //    kept in case some entity genuinely isn't represented in <prefixes> for
+        //    some reason (also the only path available for the legacy plain-text CTY
+        //    format, which ParseCtyText doesn't populate _prefixToAdif/_exceptionToAdif
+        //    for).
         public ClubLogEntity FindByCallsign(string call)
         {
-            if (!IsEnabled || _entities.Count == 0 || string.IsNullOrEmpty(call)) return null;
+            if (!IsEnabled || string.IsNullOrEmpty(call)) return null;
             call = call.ToUpperInvariant();
+
+            if (_exceptionToAdif.TryGetValue(call, out int exceptionAdif) &&
+                _entitiesByAdif.TryGetValue(exceptionAdif, out ClubLogEntity exceptionEntity) &&
+                !exceptionEntity.Deleted)
+                return exceptionEntity;
+
+            for (int len = call.Length; len >= 1; len--)
+            {
+                string candidate = call.Substring(0, len);
+                if (_prefixToAdif.TryGetValue(candidate, out int prefixAdif) &&
+                    _entitiesByAdif.TryGetValue(prefixAdif, out ClubLogEntity prefixEntity) &&
+                    !prefixEntity.Deleted)
+                    return prefixEntity;
+            }
+
+            if (_entities.Count == 0) return null;
             for (int len = call.Length; len >= 1; len--)
             {
                 string candidate = call.Substring(0, len);
@@ -225,9 +270,57 @@ namespace WSJTX_Controller
             }
 
             if (result.Count > 0)
+            {
                 _entities = result;
+
+                var byAdif = new Dictionary<int, ClubLogEntity>();
+                foreach (var e in result)
+                    if (e.Adif > 0 && !byAdif.ContainsKey(e.Adif))
+                        byAdif[e.Adif] = e;
+                _entitiesByAdif = byAdif;
+
+                _prefixToAdif = ParseCallToAdifTable(doc, "prefixes", "prefix");
+                _exceptionToAdif = ParseCallToAdifTable(doc, "exceptions", "exception");
+            }
             else
                 LastError = "Club Log XML parsed but no entities found; format may have changed.";
+        }
+
+        // Parses Club Log's <prefixes>/<exceptions> tables into a call/prefix -> Adif
+        // lookup. Both sections can carry more than one historical record for the same
+        // <call> (e.g. "DL" belonged to a pre-1973 "GERMANY" entity before today's
+        // "FEDERAL REPUBLIC OF GERMANY" assignment) -- a record with no <end> date, or
+        // an <end> date that hasn't passed yet, is preferred over one that's expired,
+        // so classification reflects the currently-valid assignment rather than
+        // whichever happened to parse last.
+        private static Dictionary<string, int> ParseCallToAdifTable(XmlDocument doc, string containerTag, string recordTag)
+        {
+            var result = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var resultIsCurrent = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+            var container = doc.SelectSingleNode($"//*[local-name()='{containerTag}']");
+            var records = container?.SelectNodes($"*[local-name()='{recordTag}']");
+            if (records == null) return result;
+
+            DateTime now = DateTime.UtcNow;
+            foreach (XmlNode rec in records)
+            {
+                string call = Child(rec, "call");
+                if (string.IsNullOrEmpty(call)) continue;
+                if (!int.TryParse(Child(rec, "adif"), out int adif) || adif <= 0) continue;
+
+                string endText = Child(rec, "end");
+                bool isCurrent = string.IsNullOrEmpty(endText)
+                    || !DateTime.TryParse(endText, out DateTime end)
+                    || end >= now;
+
+                if (!result.ContainsKey(call) || (isCurrent && !resultIsCurrent[call]))
+                {
+                    result[call] = adif;
+                    resultIsCurrent[call] = isCurrent;
+                }
+            }
+            return result;
         }
 
         private void ParseCtyText(string text)
