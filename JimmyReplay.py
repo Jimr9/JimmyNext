@@ -511,13 +511,16 @@ def build_heartbeat():
             _qstr(WSJT_ID) + _u32(3) + _qstr(WSJT_VERSION) + _qstr(WSJT_REVISION))
 
 
-def build_status(check="", tx_halt_clk=False, tx_enable_button=False, tx_enable_clk=False):
+def build_status(check="", tx_halt_clk=False, tx_enable_button=False, tx_enable_clk=False, tx_enabled=False):
     # TxFirst=False → Jimmy transmits in odd periods, receives in even.
     # SinceMidnight=0ms in decode messages (even period) matches this.
     #
     # tx_halt_clk/tx_enable_button/tx_enable_clk let a test simulate WSJT-X
     # changing its own Enable Tx button state independently of Jimmy (e.g. the
     # Wait and Reply feature auto-resuming a stalled QSO) -- see group15 below.
+    # tx_enabled is the *standard* field (defaults False, matching every existing
+    # test's behavior before this parameter existed) -- see group20 below, added
+    # to prove Jimmy's standard-protocol-only fallback for the same scenario.
     return (
         MAGIC + _u32(2) + _u32(MSG_STATUS) +
         _qstr(WSJT_ID) +
@@ -526,7 +529,7 @@ def build_status(check="", tx_halt_clk=False, tx_enable_button=False, tx_enable_
         _qstr("") +              # DX call
         _qstr("-05") +           # Report
         _qstr("FT8") +           # Tx mode
-        _flag(False) +           # Tx enabled
+        _flag(tx_enabled) +      # Tx enabled
         _flag(False) +           # Transmitting
         _flag(False) +           # Decoding
         _u32(1500) +             # Rx DF
@@ -1573,6 +1576,67 @@ def group19_standard_decode_message(sock, v):
          ) if v.available else None)
 
 
+def group20_wait_and_reply_standard_protocol(sock, v):
+    """T44-T45: same Wait-and-Reply cooperation as Group 15, but using ONLY the
+    standard TxEnabled field -- never TxHaltClk/TxEnableClk (Andy WM8Q's
+    fork-specific extensions, confirmed via WSJT-X's own real source: their
+    trace-log line literally carries only his own initials/dates) -- proving
+    Jimmy's standard-protocol-only fallback (WsjtxClient.Protocol.cs's "Tx
+    enable change confirmed" block) works correctly on its own, for any WSJT-X
+    build. Added after live A8 field testing 2026-07-17.
+
+    Confirmed via WSJT-X's own mainwindow.cpp: the standard TxEnabled field is
+    populated from the exact same internal state a direct operator click AND
+    Wait-and-Reply's own timeout both update (same code path, auto_tx_mode ->
+    on_autoButton_clicked -> process_autoButton), with a fresh Status broadcast
+    sent unconditionally on every change -- documented standard-protocol
+    behavior ("'Enable Tx' button status changes" is one of NetworkMessage.hpp's
+    own listed broadcast triggers), not something only Andy's fork does.
+
+    Same environment dependency as Group 15's T33: HandleUnsolicitedTxResume()
+    requires Jimmy to be genuinely cycling in CQ mode with an active
+    callInProg -- WARNs (not FAILs) otherwise, same as T33 (see that group's
+    own docstring for how to set that up manually).
+    """
+    print("  ─ Group 20: Wait and Reply cooperation, standard protocol only ─")
+
+    STD_WAIT_CALL = "W7STD"
+
+    send(sock,
+         f"Grid reply: KB0UZT {STD_WAIT_CALL} EM63",
+         f"{STD_WAIT_CALL} queued with 'to you' tag, expected to become the active call",
+         build_enqueue(f"{MY_CALL} {STD_WAIT_CALL} EM63"),
+         verify_fn=lambda: (
+             v.check_queue_contains(STD_WAIT_CALL,
+                 f"T44: {STD_WAIT_CALL} in callQueue, ready to become active"),
+         ) if v.available else None)
+
+    send(sock,
+         f"Signal report: KB0UZT {STD_WAIT_CALL} -05",
+         "Keeps the exchange going so Jimmy starts actively replying",
+         build_enqueue(f"{MY_CALL} {STD_WAIT_CALL} -05"),
+         delay=3.0)
+
+    send(sock,
+         "WSJT-X externally halts Tx (standard TxEnabled=False only, no TxHaltClk)",
+         "Simulates a standard-only build halting Tx -- Jimmy must detect this from "
+         "the standard field alone",
+         build_status(tx_enabled=False),
+         delay=1.0)
+
+    send(sock,
+         "WSJT-X externally re-enables Tx (standard TxEnabled=True only, no TxEnableClk)",
+         "Simulates Wait and Reply auto-resuming on a standard-only build -- Jimmy "
+         "did not call EnableTx() itself, and no non-standard flags are involved",
+         build_status(tx_enabled=True),
+         delay=1.0,
+         verify_fn=lambda: (
+             v.check_status_contains_warn("resumed",
+                 f"T45: status announces WSJT-X resumed calling {STD_WAIT_CALL} automatically (standard protocol)",
+                 "Jimmy actually cycling in CQ mode with an active callInProg (see group docstring)"),
+         ) if v.available else None)
+
+
 def run_tests(sock, v):
     print("──── Test Decode Messages ────")
     print(f"  Format: [DESTINATION] [SOURCE] [payload]")
@@ -1598,6 +1662,7 @@ def run_tests(sock, v):
     group17_still_needed_tag_clears_on_log(sock, v)
     group18_weak_snr_removal(sock, v)
     group19_standard_decode_message(sock, v)
+    group20_wait_and_reply_standard_protocol(sock, v)
 
     # ── To add a new replay test group ──────────────────────────────────────
     # 1. Define a new function, e.g.:

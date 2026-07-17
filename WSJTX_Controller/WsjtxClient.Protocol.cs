@@ -1008,6 +1008,10 @@ namespace WSJTX_Controller
                             DebugOutput($"{nl}{Time()} WSJT-X event, TxHaltClk, cqPaused:{cqPaused} txMode:{txMode} processDecodeTimer.Enabled:{processDecodeTimer.Enabled}");
                             txEnabled = false;        //sync belief -- WSJT-X halted Tx on its own, not via Jimmy's own EnableTx()/DisableTx()
                             Pause(false, true);       //WSJT-X already halted Tx
+                            // Stage A8: mark this transition as already handled so the
+                            // standard-protocol fallback below doesn't also fire for it --
+                            // see that block's own comment.
+                            lastTxEnabled = txEnabledConf;
                         }
                     }
                     //***********************************************
@@ -1030,15 +1034,61 @@ namespace WSJTX_Controller
                                     Console.Beep();
                                 }
                             }
+                            // Stage A8: same reasoning as the TxHaltClk block above.
+                            lastTxEnabled = txEnabledConf;
                         }
                     }
 
                     //***********************************
                     //check for changed WSJT-X Tx enabled
                     //***********************************
+                    // Stage A8: standard-protocol-only substitute for the non-standard
+                    // TxHaltClk/TxEnableClk detection above -- Wait-and-Reply cooperation
+                    // ("tell the blind operator their radio started/stopped transmitting
+                    // on its own"), previously only available against Andy WM8Q's fork.
+                    // Confirmed via reading WSJT-X's own real source (mainwindow.cpp,
+                    // github.com/avantol/WSJT-X_3.0.0 -- an unmodified copy of stock
+                    // WSJT-X's own code in this area, confirmed by MessageClient.cpp's
+                    // trace log literally carrying Andy's own initials/dates only on the
+                    // genuinely-added fields): the standard "Tx Enabled" field
+                    // (statusUpdate()'s tx_enabled parameter) is populated from the exact
+                    // same m_auto variable that both a direct operator click in WSJT-X's
+                    // own GUI AND Wait-and-Reply's own timeout (auto_tx_mode ->
+                    // on_autoButton_clicked -> process_autoButton, the identical code path
+                    // for both) update -- and process_autoButton sends a fresh Status
+                    // broadcast unconditionally on every change, regardless of source or
+                    // build. This is documented standard-protocol behavior
+                    // ("'Enable Tx' button status changes" is one of NetworkMessage.hpp's
+                    // own listed Status-broadcast triggers), not an Andy-fork-specific
+                    // behavior -- so Jimmy can infer "WSJT-X changed this on its own"
+                    // purely by comparing the standard field against its own
+                    // last-commanded belief (txEnabled), exactly as the non-standard path
+                    // above already does with wsjtxTxEnableButton/txEnabled, without
+                    // needing WSJT-X to explicitly flag the event at all.
+                    //
+                    // Only ever fires for a transition the blocks above did NOT already
+                    // handle: each syncs lastTxEnabled itself when it fires, so on an
+                    // Andy-fork connection (where both mechanisms observe the same
+                    // change) this never double-triggers. On a standard-only connection
+                    // (TxHaltClk/TxEnableClk always false -- those fields don't exist on
+                    // that build's wire), this is the only path that ever runs.
                     if (txEnabledConf != lastTxEnabled)
                     {
                         DebugOutput($"{nl}{Time()} WSJT-X event, Tx enable change confirmed, txEnabled:{txEnabled} (was {lastTxEnabled}) cqPaused:{cqPaused} txMode:{txMode}");
+                        if (opMode >= OpModes.START && !txEnabled)   //Jimmy didn't ask for this -- WSJT-X changed Tx enable state on its own
+                        {
+                            if (txEnabledConf)    //became enabled on WSJT-X's own initiative (e.g. Wait and Reply auto-resume, or a direct operator click in WSJT-X's own GUI)
+                            {
+                                DebugOutput($"{nl}{Time()} WSJT-X event, Tx enable became enabled unsolicited (standard-protocol path)");
+                                HandleUnsolicitedTxResume();
+                            }
+                            else                    //became disabled on WSJT-X's own initiative
+                            {
+                                DebugOutput($"{nl}{Time()} WSJT-X event, Tx enable became disabled unsolicited (standard-protocol path)");
+                                txEnabled = false;       //sync belief -- WSJT-X halted Tx on its own
+                                Pause(false, true);      //WSJT-X already halted Tx
+                            }
+                        }
                         lastTxEnabled = txEnabledConf;
                     }
 
