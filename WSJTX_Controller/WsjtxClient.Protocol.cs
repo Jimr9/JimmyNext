@@ -1075,14 +1075,14 @@ namespace WSJTX_Controller
                     if (txEnabledConf != lastTxEnabled)
                     {
                         DebugOutput($"{nl}{Time()} WSJT-X event, Tx enable change confirmed, txEnabled:{txEnabled} (was {lastTxEnabled}) cqPaused:{cqPaused} txMode:{txMode}");
-                        if (opMode >= OpModes.START && !txEnabled)   //Jimmy didn't ask for this -- WSJT-X changed Tx enable state on its own
+                        if (opMode >= OpModes.START)
                         {
-                            if (txEnabledConf)    //became enabled on WSJT-X's own initiative (e.g. Wait and Reply auto-resume, or a direct operator click in WSJT-X's own GUI)
+                            if (txEnabledConf && !txEnabled)    //became enabled, and Jimmy didn't ask for this -- WSJT-X's own initiative (e.g. Wait and Reply auto-resume, or a direct operator click in WSJT-X's own GUI)
                             {
                                 DebugOutput($"{nl}{Time()} WSJT-X event, Tx enable became enabled unsolicited (standard-protocol path)");
                                 HandleUnsolicitedTxResume();
                             }
-                            else                    //became disabled on WSJT-X's own initiative
+                            else if (!txEnabledConf && txEnabled)    //became disabled, and Jimmy still believes it's enabled -- WSJT-X's own initiative, not Jimmy's own HaltTx()
                             {
                                 DebugOutput($"{nl}{Time()} WSJT-X event, Tx enable became disabled unsolicited (standard-protocol path)");
                                 txEnabled = false;       //sync belief -- WSJT-X halted Tx on its own
