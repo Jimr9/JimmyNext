@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Text;
 
 namespace WsjtxUdpLib.Messages.Out
@@ -360,17 +361,65 @@ namespace WsjtxUdpLib.Messages.Out
         // (Classification/ClassificationCutover.cs) rather than reading this directly.
         public WSJTX_Controller.ClassifiedCall Classified { get; set; }
 
+        // Minor words a title-caser should leave lowercase (mid-string) rather than
+        // capitalizing every word blindly -- e.g. "Isle of Man", not "Isle Of Man".
+        private static readonly HashSet<string> CountryMinorWords =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "of", "the", "and" };
+
         public static string WsjtxCountry(string country)
         {
             //match usage in WSJT-X
-            if (country == null) return "";
-            if (country == "United States") return "USA";      
-            if (country  == "Fed. Rep. of Germany") return "Germany";
-            if (country == "European Russia") return "EU Russia";
-            if (country == "Asiatic Russia") return "AS Russia";
-            if (country == "European Turkey") return "EU Turkey";
-            if (country == "Asiatic Turkey") return "AS Turkey";
-            return country;
+            if (string.IsNullOrEmpty(country)) return "";
+
+            // Specific short names/abbreviations WSJT-X displays that aren't just a
+            // title-cased version of the source data's own name (e.g. "USA" not
+            // "United States Of America") -- checked case-insensitively so this
+            // matches regardless of which upstream convention produced the string:
+            // Club Log's ALL-CAPS canonical <name> (the primary source since Stage
+            // A6 field testing 2026-07-15/16), a QRZ-style mixed-case value ("United
+            // States"), or an already-normalized value (test fixtures, a value that
+            // already passed through here once). Found via live A6 field testing
+            // 2026-07-16/17: the original checks here only ever matched a QRZ-style
+            // string Club Log's data never produces, so every country fell through
+            // unnormalized once Club Log became the primary Country source.
+            switch (country.ToUpperInvariant())
+            {
+                case "USA":
+                case "UNITED STATES":
+                case "UNITED STATES OF AMERICA":
+                    return "USA";
+                case "GERMANY":
+                case "FED. REP. OF GERMANY":
+                case "FEDERAL REPUBLIC OF GERMANY":
+                    return "Germany";
+                case "EU RUSSIA":
+                case "EUROPEAN RUSSIA":
+                    return "EU Russia";
+                case "AS RUSSIA":
+                case "ASIATIC RUSSIA":
+                    return "AS Russia";
+                case "EU TURKEY":
+                case "EUROPEAN TURKEY":
+                    return "EU Turkey";
+                case "AS TURKEY":
+                case "ASIATIC TURKEY":
+                    return "AS Turkey";
+            }
+
+            // General case: Club Log's <name> is ALL CAPS ("ISLE OF MAN", "CZECH
+            // REPUBLIC"); WSJT-X displays ordinary title case ("Isle of Man", "Czech
+            // Republic"). Lowercase first, then capitalize each word's first letter --
+            // .NET's own ToTitleCase deliberately leaves already-all-uppercase words
+            // unchanged (treating them as acronyms), which would be a no-op on this
+            // input, so that's not used here.
+            var words = country.ToLowerInvariant().Split(' ');
+            for (int i = 0; i < words.Length; i++)
+            {
+                if (words[i].Length == 0) continue;
+                if (i > 0 && CountryMinorWords.Contains(words[i])) continue;
+                words[i] = char.ToUpperInvariant(words[i][0]) + words[i].Substring(1);
+            }
+            return string.Join(" ", words);
         }
 
         public override string ToString()

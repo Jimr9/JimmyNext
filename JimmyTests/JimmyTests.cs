@@ -325,6 +325,39 @@ static class JimmyTests
         // WsjtxCountry must return "" for null or empty — never throw
         CheckStr("WsjtxCountry: null → empty",   EnqueueDecodeMessage.WsjtxCountry(null), "");
         CheckStr("WsjtxCountry: empty → empty",  EnqueueDecodeMessage.WsjtxCountry(""), "");
+
+        // Real cases pulled directly from a live A6 parity-diagnostic session
+        // 2026-07-16/17: Club Log's own <name> is ALL CAPS, and now that Club Log is
+        // the primary Country source (Stage A6 field testing), that's what actually
+        // reaches WsjtxCountry -- must normalize to WSJT-X's own display convention
+        // instead of passing the ALL-CAPS string through unchanged.
+        CheckStr("WsjtxCountry: USA abbreviation",
+            EnqueueDecodeMessage.WsjtxCountry("UNITED STATES OF AMERICA"), "USA");
+        CheckStr("WsjtxCountry: Germany short name",
+            EnqueueDecodeMessage.WsjtxCountry("FEDERAL REPUBLIC OF GERMANY"), "Germany");
+        CheckStr("WsjtxCountry: European Russia abbreviation",
+            EnqueueDecodeMessage.WsjtxCountry("EUROPEAN RUSSIA"), "EU Russia");
+        CheckStr("WsjtxCountry: Asiatic Turkey abbreviation",
+            EnqueueDecodeMessage.WsjtxCountry("ASIATIC TURKEY"), "AS Turkey");
+        // General title-case fallback for everything without a specific override --
+        // including the "of"/"the"/"and" minor-word cases that a naive per-word
+        // capitalize-everything approach would get wrong.
+        CheckStr("WsjtxCountry: simple one-word name",
+            EnqueueDecodeMessage.WsjtxCountry("BELGIUM"), "Belgium");
+        CheckStr("WsjtxCountry: minor word 'of' stays lowercase",
+            EnqueueDecodeMessage.WsjtxCountry("ISLE OF MAN"), "Isle of Man");
+        CheckStr("WsjtxCountry: two-word name, no minor words",
+            EnqueueDecodeMessage.WsjtxCountry("CZECH REPUBLIC"), "Czech Republic");
+        CheckStr("WsjtxCountry: minor word 'of' not at start stays lowercase",
+            EnqueueDecodeMessage.WsjtxCountry("DOMINICAN REPUBLIC"), "Dominican Republic");
+        // Distinct, real (non-deleted) Club Log entities like ALASKA/GUANTANAMO BAY
+        // must NOT be special-cased away into USA here -- WsjtxCountry only
+        // reformats casing/abbreviations, it must never change WHICH entity a name
+        // refers to (that's ClassificationEngine/ClubLogProvider's job).
+        CheckStr("WsjtxCountry: distinct entity name preserved, only case changes",
+            EnqueueDecodeMessage.WsjtxCountry("ALASKA"), "Alaska");
+        CheckStr("WsjtxCountry: distinct entity name preserved, only case changes (2)",
+            EnqueueDecodeMessage.WsjtxCountry("GUANTANAMO BAY"), "Guantanamo Bay");
     }
 
     // IsFoxHound() is a suffix heuristic only — /H may be a Hound callsign OR a
