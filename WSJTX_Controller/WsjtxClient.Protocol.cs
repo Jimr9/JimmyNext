@@ -556,7 +556,22 @@ namespace WSJTX_Controller
                         {
                             SetOperatingMode("FT8");            //after halt
                             Thread.Sleep(250);
-                            mode = "FT8";
+                            // Stage A7 field-testing fix, 2026-07-17: this block used to
+                            // live in a scope with no local "mode" variable, so "mode =
+                            // ..." unambiguously meant the class field. Moved here, it's
+                            // nested inside the StatusMessage handler's own
+                            // "string mode = smsg.Mode;" local, which shadows the field --
+                            // an unqualified "mode = "FT8"" silently updated only the
+                            // local, leaving the class field at its previous value
+                            // (empty string on a fresh connect). bandToFreq() then failed
+                            // its own freqsDict.Keys.Contains(mode) check against that
+                            // stale field value and returned null, and the unchecked
+                            // (uint) cast on the caller's side threw
+                            // InvalidOperationException ("Nullable object must have a
+                            // value") -- crashed on every first-connect handshake, not
+                            // just against WSJT-X Improved 3.1. this.mode makes the
+                            // target explicit regardless of the local shadow.
+                            this.mode = "FT8";
                             bandIdx = FreqToBandIdx(dialFrequency / 1e6);       //can be null if unknown
                             if (bandIdx == null) bandIdx = 5;
                             SetBandTxFirst((uint)(bandToFreq(bandIdx) * 1000), txFirst, "InitialConnect");
