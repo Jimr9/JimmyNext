@@ -148,6 +148,7 @@ static class JimmyTests
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
+        DefaultTrPeriodMsTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -1355,6 +1356,28 @@ static class JimmyTests
             Check("Full: TxFirst reads through", fullParsed.TxFirst, true);
             CheckStr("Full: MyContinent reads through", fullParsed.MyContinent, "NA");
         }
+    }
+
+    // ── WsjtxClient.DefaultTrPeriodMs ───────────────────────────────────────────
+    // Found via live field testing 2026-07-17: WSJT-X Improved 3.1's StatusMessage
+    // never reports a real TRPeriod at all -- confirmed directly via a real session's
+    // debug log (every single StatusMessage from this build carried the N/A
+    // sentinel). Without a fallback, Jimmy's trPeriod field stayed permanently null
+    // for the whole connection, which silently broke the even/odd period-parity math
+    // raw-decode TX1/TX2 display depends on (IsEvenPeriod's final comparison
+    // collapses to "null == 0" under C#'s lifted nullable-comparison semantics, which
+    // is always false) -- decodes only ever displayed in TX2, never TX1, regardless
+    // of real signal on both. FT8/FT4's T/R periods are fixed protocol constants;
+    // this pure function is the core of the fix (WsjtxClient.Protocol.cs's
+    // UpdateTrPeriod calls it, but that method needs a live StatusMessage/WsjtxClient
+    // instance to exercise, so it's tested here in isolation instead).
+    static void DefaultTrPeriodMsTests()
+    {
+        Console.WriteLine("\n── WsjtxClient.DefaultTrPeriodMs ──");
+        Check("FT8 defaults to 15000ms", WsjtxClient.DefaultTrPeriodMs("FT8") == 15000, true);
+        Check("FT4 defaults to 7500ms", WsjtxClient.DefaultTrPeriodMs("FT4") == 7500, true);
+        Check("Unknown/null mode falls back to the FT8 default (most common case)",
+              WsjtxClient.DefaultTrPeriodMs(null) == 15000, true);
     }
 
     // Hand-built full-featured StatusMessage (every field including the Andy-fork-

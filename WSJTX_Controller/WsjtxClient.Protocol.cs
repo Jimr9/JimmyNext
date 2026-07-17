@@ -424,18 +424,7 @@ namespace WSJTX_Controller
                     txFirst = smsg.TxFirst;
                     UpdateCallListAccessibleName();     // update RX1/TX1 labels as soon as txFirst is known
 
-                    //if seconds units, need msec
-                    if (smsg.TRPeriod != null)
-                    {
-                        if ((int)smsg.TRPeriod < 1000)
-                        {
-                            trPeriod = 1000 * (int)smsg.TRPeriod;
-                        }
-                        else
-                        {
-                            trPeriod = (int)smsg.TRPeriod;
-                        }
-                    }
+                    UpdateTrPeriod(smsg);
 
                     if (trPeriod != null)
                     {
@@ -742,18 +731,7 @@ namespace WSJTX_Controller
                     }
 
 
-                    //need msec unit
-                    if (smsg.TRPeriod != null)
-                    {
-                        if ((int)smsg.TRPeriod < 1000)
-                        {
-                            trPeriod = 1000 * (int)smsg.TRPeriod;
-                        }
-                        else
-                        {
-                            trPeriod = (int)smsg.TRPeriod;
-                        }
-                    }
+                    UpdateTrPeriod(smsg);
 
                     if (cmdCheckTimer.Enabled && smsg.Check == cmdCheck)             //found the random cmd check string, cmd receive ack'd
                     {
@@ -1247,6 +1225,44 @@ namespace WSJTX_Controller
                 settingChanged = false;
             }
         }
+
+        // Found via live field testing 2026-07-17: WSJT-X Improved 3.1's StatusMessage
+        // never reports a real TRPeriod at all (confirmed: every single StatusMessage
+        // from this build carried the N/A sentinel for the entire session). Without a
+        // fallback, trPeriod (nullable) stayed permanently null for the whole
+        // connection -- which silently breaks IsEvenPeriod's even/odd period-parity
+        // math (WsjtxClient.cs:1976-1985): with trPeriod null, its final comparison
+        // collapses to "null == 0" under C#'s lifted nullable-comparison semantics,
+        // which is always false, so IsEvenCall() always returned false too. Observed
+        // symptom: raw decodes only ever displayed in TX2, never TX1, no matter how
+        // much real signal was present on both. FT8's and FT4's T/R periods are fixed
+        // protocol constants, not something that varies station to station -- safe to
+        // assume from mode alone the one time WSJT-X itself never tells us, without
+        // overwriting a previously-learned real value (WSJT-X's own doc comment says
+        // it only sends TRPeriod "when the T/R period is changed" -- omitting it on
+        // later messages is expected, not itself a sign anything is wrong).
+        private void UpdateTrPeriod(StatusMessage smsg)
+        {
+            if (smsg.TRPeriod != null)
+            {
+                //if seconds units, need msec
+                trPeriod = (int)smsg.TRPeriod < 1000 ? 1000 * (int)smsg.TRPeriod : (int)smsg.TRPeriod;
+            }
+            else if (trPeriod == null)
+            {
+                trPeriod = DefaultTrPeriodMs(smsg.Mode);
+                DebugOutput($"{Time()} [PERIOD-FALLBACK] WSJT-X never reported TRPeriod; defaulting trPeriod:{trPeriod} from mode:'{smsg.Mode}'");
+            }
+        }
+
+        // FT8's and FT4's T/R periods are fixed protocol constants, not something
+        // that varies station to station -- pulled out as its own pure function so
+        // it's directly unit-testable (UpdateTrPeriod itself needs a live
+        // StatusMessage/WsjtxClient instance state to exercise). Public: JimmyTests
+        // references Jimmy.exe as a compiled binary with no InternalsVisibleTo, so
+        // only public members are reachable from there (see CallQueueRanker.cs's/
+        // RowFormatter.cs's own comments on this same constraint).
+        public static int DefaultTrPeriodMs(string mode) => mode == "FT4" ? 7500 : 15000;
 
         private void ResetNego()
         {
