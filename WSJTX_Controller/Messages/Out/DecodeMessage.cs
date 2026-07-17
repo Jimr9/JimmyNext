@@ -522,6 +522,64 @@ namespace WsjtxUdpLib.Messages.Out
             return enqueueDecodeMessage;
         }
 
+        // Found via live A7 field testing 2026-07-17: Jimmy's decode-processing code
+        // (WsjtxClient.Protocol.cs's Update()) only ever reacted to this class's own
+        // Parse() above -- the non-standard, Andy-fork-specific EnqueueDecodeMessage
+        // (msg type 18). Stock WSJT-X and WSJT-X Improved never send that message type
+        // at all; they send the plain, standard base-class Decode message (msg type 2,
+        // DecodeMessage.Parse() above) instead. Stage A6 already made every downstream
+        // consumer (ProcessDecodeMsg, CallQueueRanker, AwardTagger, etc.) read computed
+        // classification via EffectiveClassification() rather than this class's own
+        // wire-supplied fields -- so the fix here is narrow: adapt a standard
+        // DecodeMessage into an EnqueueDecodeMessage shell so it can flow through that
+        // exact same pipeline unchanged, rather than needing a second, parallel
+        // processing path.
+        //
+        // Every field below is either (a) copied straight from the base DecodeMessage
+        // fields a standard Decode broadcast genuinely carries, (b) safe to leave at
+        // its default because ProcessDecodeMsg/downstream code always overwrites it
+        // before any read (Rank/SequenceNumber/Category/MatchedAwardRuleId, and the
+        // raw wire-supplied IsDx/IsNewCallOnBand/Country/Continent/Azimuth/Distance
+        // fields, none of which any consumer reads directly -- only
+        // EffectiveClassification(), which uses the freshly Classifier.Classify()-
+        // computed value regardless of source), or (c) AutoGen/Quality, which need a
+        // real value because a standard Decode broadcast has no wire-supplied
+        // equivalent to copy:
+        //   - AutoGen=true: a standard Decode broadcast is *always* an automatic
+        //     decode -- there's no "manually enqueued in WSJT-X's own UI" concept in
+        //     the standard protocol (that's what Andy's fork's AutoGen=false case
+        //     represents). ProcessDecodeMsg's "toMyCall && AutoGen" branch is the
+        //     entire path that handles a station actively replying to me; AutoGen=false
+        //     here would silently route every reply through the generic
+        //     AddSelectedCall path instead, losing that handling.
+        //   - Quality: computed the same way Parse()/SetMsgQuality() always compute
+        //     it for a real EnqueueDecodeMessage too -- purely from Message content,
+        //     never wire-supplied even in the non-standard case -- so it's replicated
+        //     here rather than left at the Qualities.NONE default UpdateCallQueue
+        //     would otherwise misread as a low-quality decode worth evicting.
+        public static EnqueueDecodeMessage FromStandardDecode(DecodeMessage src)
+        {
+            var enqueueDecodeMessage = new EnqueueDecodeMessage
+            {
+                SchemaVersion = src.SchemaVersion,
+                Id = src.Id,
+                New = src.New,
+                SinceMidnight = src.SinceMidnight,
+                RxDate = src.RxDate,
+                Snr = src.Snr,
+                DeltaTime = src.DeltaTime,
+                DeltaFrequency = src.DeltaFrequency,
+                Mode = src.Mode,
+                Message = src.Message,
+                Priority = src.Priority,
+                UseStdReply = src.UseStdReply,
+                OffAir = src.OffAir,
+                AutoGen = true,
+            };
+            enqueueDecodeMessage.SetMsgQuality();
+            return enqueueDecodeMessage;
+        }
+
         public EnqueueDecodeMessage DeepCopy()
         {
             var enqueueDecodeMessage = new EnqueueDecodeMessage();

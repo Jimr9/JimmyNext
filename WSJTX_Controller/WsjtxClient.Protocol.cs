@@ -639,12 +639,23 @@ namespace WSJTX_Controller
                 if (modeSupported)
                 {
                     //********************
-                    //EnqueueDecodeMessage
+                    //EnqueueDecodeMessage / standard DecodeMessage
                     //********************
                     //only resulting action is to add call to callQueue, optionally restart queue
-                    if (msg.GetType().Name == "EnqueueDecodeMessage" && myCall != null)
+                    //
+                    // Found via live A7 field testing 2026-07-17: stock WSJT-X and WSJT-X
+                    // Improved send the standard "DecodeMessage" (msg type 2), never the
+                    // non-standard "EnqueueDecodeMessage" (msg type 18, Andy WM8Q's fork
+                    // only) this branch used to require exclusively -- meaning Jimmy never
+                    // processed a single decode from any non-Andy-fork build. Adapting a
+                    // standard DecodeMessage into an EnqueueDecodeMessage shell (via
+                    // FromStandardDecode) lets it flow through the exact same pipeline below
+                    // unchanged -- see that method's own comment for the field-by-field
+                    // justification of why this is safe.
+                    if ((msg.GetType().Name == "EnqueueDecodeMessage" || msg.GetType().Name == "DecodeMessage") && myCall != null)
                     {
-                        EnqueueDecodeMessage dmsg = (EnqueueDecodeMessage)msg;
+                        EnqueueDecodeMessage dmsg = msg as EnqueueDecodeMessage
+                            ?? EnqueueDecodeMessage.FromStandardDecode((DecodeMessage)msg);
                         if (dmsg.AutoGen && ctrl.advancedCallLayout)
                         {
                             while (_rawDecodeHistory.Count >= ctrl.rawMaxRows)

@@ -147,6 +147,7 @@ static class JimmyTests
         A6ClassificationParityTests();
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
+        EnqueueDecodeMessageFromStandardDecodeTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -1205,6 +1206,87 @@ static class JimmyTests
         {
             try { Directory.Delete(tmpRoot, recursive: true); } catch { }
         }
+    }
+
+    // ── EnqueueDecodeMessage.FromStandardDecode ─────────────────────────────────
+    // Found via live A7 field testing 2026-07-17: Jimmy's decode-processing code only
+    // ever reacted to the non-standard EnqueueDecodeMessage (Andy WM8Q's fork only) --
+    // stock WSJT-X and WSJT-X Improved send the standard base-class DecodeMessage
+    // instead, which was never wired to anything. FromStandardDecode adapts one into
+    // the other so it can flow through the exact same ProcessDecodeMsg/
+    // ClassificationEngine pipeline. These tests cover the adapter itself; end-to-end
+    // queue admission (including the AutoGen="replying to me" path) is covered by
+    // JimmyReplay.py's group19_standard_decode_message instead, since ProcessDecodeMsg
+    // needs a live socket-driven WsjtxClient.
+    static void EnqueueDecodeMessageFromStandardDecodeTests()
+    {
+        Console.WriteLine("\n── EnqueueDecodeMessage.FromStandardDecode ──");
+
+        var now = DateTime.UtcNow.Date;
+        var since = TimeSpan.FromMinutes(5);
+        var src = new DecodeMessage
+        {
+            SchemaVersion = 3,
+            Id = "WSJT-X",
+            New = true,
+            SinceMidnight = since,
+            RxDate = now,
+            Snr = -12,
+            DeltaTime = 0.3,
+            DeltaFrequency = 1500,
+            Mode = "FT8",
+            Message = "CQ W6NEW EM63",
+            Priority = 0,
+            UseStdReply = false,
+            OffAir = false,
+        };
+
+        var result = EnqueueDecodeMessage.FromStandardDecode(src);
+
+        Check("SchemaVersion copied", result.SchemaVersion == 3, true);
+        CheckStr("Id copied", result.Id, "WSJT-X");
+        Check("New copied", result.New, true);
+        Check("SinceMidnight copied", result.SinceMidnight == since, true);
+        Check("RxDate copied", result.RxDate == now, true);
+        Check("Snr copied", result.Snr == -12, true);
+        Check("DeltaTime copied", Math.Abs(result.DeltaTime - 0.3) < 0.0001, true);
+        Check("DeltaFrequency copied", result.DeltaFrequency == 1500, true);
+        CheckStr("Mode copied", result.Mode, "FT8");
+        CheckStr("Message copied", result.Message, "CQ W6NEW EM63");
+        Check("UseStdReply copied", result.UseStdReply, false);
+        Check("OffAir copied", result.OffAir, false);
+
+        // The critical semantic mapping: a standard Decode broadcast is always
+        // automatic -- there's no "manually enqueued" concept in the standard
+        // protocol. AutoGen=false here would silently break the "someone is
+        // replying to me" handling in ProcessDecodeMsg.
+        Check("AutoGen is always true (standard Decode has no manual-enqueue concept)",
+              result.AutoGen, true);
+
+        // Quality must be computed from Message content (never wire-supplied, even
+        // for a real EnqueueDecodeMessage) -- matching SetMsgQuality()'s own logic
+        // exactly, not left at the Qualities.NONE default.
+        Check("Quality: CQ message -> HIGH",
+              EnqueueDecodeMessage.FromStandardDecode(new DecodeMessage { Message = "CQ W6NEW EM63" }).Quality
+                  == (int)EnqueueDecodeMessage.Qualities.HIGH, true);
+        Check("Quality: 73 message -> MEDIUM",
+              EnqueueDecodeMessage.FromStandardDecode(new DecodeMessage { Message = "W6NEW KB0UZT 73" }).Quality
+                  == (int)EnqueueDecodeMessage.Qualities.MEDIUM, true);
+        Check("Quality: RRR message -> MARGINAL",
+              EnqueueDecodeMessage.FromStandardDecode(new DecodeMessage { Message = "W6NEW KB0UZT RRR" }).Quality
+                  == (int)EnqueueDecodeMessage.Qualities.MARGINAL, true);
+        Check("Quality: plain report message -> LOW",
+              EnqueueDecodeMessage.FromStandardDecode(new DecodeMessage { Message = "W6NEW KB0UZT -05" }).Quality
+                  == (int)EnqueueDecodeMessage.Qualities.LOW, true);
+
+        // Fields ProcessDecodeMsg/downstream always overwrite before any read must be
+        // safe at their plain default -- not asserting specific values, just that
+        // constructing the adapter doesn't throw and leaves them at sane defaults.
+        Check("Rank defaults to 0 (always overwritten by SetRank before read)", result.Rank == 0, true);
+        Check("Category defaults (always overwritten by DeriveCategory before read)",
+              result.Category == default, true);
+        CheckStr("MatchedAwardRuleId defaults to null (always overwritten before read)",
+              result.MatchedAwardRuleId, null);
     }
 
     // ── StatusMessage.Parse ─────────────────────────────────────────────────────

@@ -62,6 +62,7 @@ FT8_ODD_CALL  = "W9ODD"   # FT8 opposite (odd) period
 MAGIC            = bytes([0xAD, 0xBC, 0xCB, 0xDA])
 MSG_HEARTBEAT    = 0
 MSG_STATUS       = 1
+MSG_DECODE       = 2
 MSG_QSO_LOGGED   = 5
 MSG_ENQUEUE_V3   = 18
 MSG_ENABLE_TX    = 17
@@ -425,6 +426,15 @@ class JimmyVerifier:
         ok  = (row is None) or (tag_fragment.lower() not in row.lower())
         self._report(ok, label, f"row={row!r}")
 
+    def check_queue_row_contains(self, call_fragment, tag_fragment, label):
+        """The queue row for call_fragment MUST contain tag_fragment (e.g. the
+        'replying' priority tag) -- a hard FAIL if the row is missing entirely or
+        present without the tag."""
+        self.wait_for_queue(call_fragment, timeout=3.0)
+        row = self.find_queue_row(call_fragment)
+        ok  = (row is not None) and (tag_fragment.lower() in row.lower())
+        self._report(ok, label, f"row={row!r}")
+
     def check_status_contains_warn(self, fragment, label, config_note):
         """Soft status check: PASS if found; WARNING (not FAIL) if not.
 
@@ -571,6 +581,28 @@ def build_enqueue(message_text, snr=-10, is_new_call=True, country="USA", contin
         _qstr(continent) +
         _i32(0) +                # Azimuth
         _i32(1000)               # Distance
+    )
+
+
+def build_decode(message_text, snr=-10, since_midnight_ms=0, mode="FT8", off_air=False):
+    """Standard WSJT-X Decode broadcast (msg type 2) -- what stock WSJT-X and
+    WSJT-X Improved actually send for every decode. Andy WM8Q's fork's own
+    EnqueueDecodeMessage (msg type 18, build_enqueue above) is a non-standard
+    *replacement* for this, not an addition to it -- a build without the
+    Compatibility Layer never sends msg type 18 at all. Added after live A7 field
+    testing 2026-07-17 found Jimmy never processed a single decode from such a
+    build; see EnqueueDecodeMessage.FromStandardDecode (DecodeMessage.cs)."""
+    return (
+        MAGIC + _u32(2) + _u32(MSG_DECODE) +
+        _qstr(WSJT_ID) +
+        _flag(True) +             # New
+        _u32(since_midnight_ms) + # SinceMidnight in ms
+        _i32(snr) +               # SNR
+        _f64(0.1) +               # Delta time
+        _u32(1500) +              # Delta frequency
+        _qstr(mode) +
+        _qstr(message_text) +
+        _flag(off_air)            # Off air
     )
 
 
@@ -1504,6 +1536,43 @@ def group18_weak_snr_removal(sock, v):
          verify_fn=check_removed_or_warn if v.available else None)
 
 
+def group19_standard_decode_message(sock, v):
+    """T42-T43: standard WSJT-X Decode broadcast (msg type 2) -- what stock WSJT-X
+    and WSJT-X Improved actually send -- must flow through the exact same
+    admission/priority pipeline as Andy's fork's own non-standard
+    EnqueueDecodeMessage (msg type 18, build_enqueue, used by every other group in
+    this suite). Added after live A7 field testing 2026-07-17 found Jimmy never
+    processed a single decode from a standard-only WSJT-X build: it only ever
+    reacted to msg type 18, which such a build never sends at all. See
+    EnqueueDecodeMessage.FromStandardDecode (DecodeMessage.cs) and its call site in
+    WsjtxClient.Protocol.cs's Update().
+    """
+    print("  ─ Group 19: standard Decode message (msg type 2, no Compatibility Layer) ─")
+
+    NEW_CQ_CALL   = "W6NEW"
+    REPLY_CALL    = "K2STD"
+
+    send(sock,
+         f"Standard Decode: CQ {NEW_CQ_CALL} EM63",
+         "Must be admitted to the call queue exactly like an EnqueueDecodeMessage CQ",
+         build_decode(f"CQ {NEW_CQ_CALL} EM63"),
+         verify_fn=lambda: (
+             v.check_queue_contains(NEW_CQ_CALL,
+                 f"T42: {NEW_CQ_CALL} (standard Decode CQ) queued"),
+         ) if v.available else None)
+
+    send(sock,
+         f"Standard Decode, directed to me: {MY_CALL} {REPLY_CALL} EM63",
+         "Proves the AutoGen=true mapping: must get the same 'replying' priority "
+         "tag a directed EnqueueDecodeMessage reply gets (see Group 1, T01) -- not "
+         "fall through to the generic CQ-admission path",
+         build_decode(f"{MY_CALL} {REPLY_CALL} EM63"),
+         verify_fn=lambda: (
+             v.check_queue_row_contains(REPLY_CALL, "replying",
+                 f"T43: {REPLY_CALL} (standard Decode, directed to me) tagged 'replying'"),
+         ) if v.available else None)
+
+
 def run_tests(sock, v):
     print("──── Test Decode Messages ────")
     print(f"  Format: [DESTINATION] [SOURCE] [payload]")
@@ -1528,6 +1597,7 @@ def run_tests(sock, v):
     group16_rrr_after_logged_no_requeue(sock, v)
     group17_still_needed_tag_clears_on_log(sock, v)
     group18_weak_snr_removal(sock, v)
+    group19_standard_decode_message(sock, v)
 
     # ── To add a new replay test group ──────────────────────────────────────
     # 1. Define a new function, e.g.:
