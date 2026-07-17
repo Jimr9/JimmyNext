@@ -331,7 +331,7 @@ namespace WSJTX_Controller
             {
                 ctrl.initialConnFaultTimer.Stop();             //stop connection fault dialog
                 HeartbeatMessage imsg = (HeartbeatMessage)msg;
-                DebugOutput($"{Time()}{nl}{imsg}");
+                DebugOutput($"{Time()} Heartbeat received{nl}{imsg}");
 
                 string[] sa = imsg.Revision.Split(' '); //may contain other info, including URL
 
@@ -342,6 +342,10 @@ namespace WSJTX_Controller
                 int.TryParse(testVer, out wsjtxTestVer);
 
                 curVerBld = $"{imsg.Version}/{rev}";
+                // Stage A7: previously only captured on a 2nd incoming Heartbeat (that
+                // wait-for-a-2nd-Heartbeat step is now removed -- see the SENT->RECD
+                // comment below); captured here instead so it's never silently skipped.
+                WsjtxMessage.NegotiatedSchemaVersion = imsg.SchemaVersion;
 
                 // Stage A5: the hard acceptableWsjtxVersions allowlist + blocking dialog
                 // is gone (Blueprint §18). Any build that speaks the standard Heartbeat
@@ -372,33 +376,20 @@ namespace WSJTX_Controller
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.SENT;
                 UpdateDebug();
                 DebugOutput($"{spacer}NegoState:{WsjtxMessage.NegoState}");
-                DebugOutput($"{Time()} >>>>>Sent'Heartbeat' msg:{nl}{tmsg}");
+                DebugOutput($"{Time()} Heartbeat reply sent{nl}{tmsg}");
                 ShowStatus();
                 StatusView.ShowMessage("WSJT-X responding", false);
 
                 if (wsjtxRevision == 102 && wsjtxTestVer < 72) DeleteLotwCsv();        //fixed, reason for WSJT-X crashing at startup because of NVDA determined
 
-                UpdateDebug();
-                return;
-            }
-
-            //rec'd negotiation HeartbeatMessage
-            //send another request for a StatusMessage
-            //go from SENT to RECD state
-            if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.SENT && msg.GetType().Name == "HeartbeatMessage")
-            {
-                HeartbeatMessage hmsg = (HeartbeatMessage)msg;
-                DebugOutput($"{Time()}{nl}{hmsg}");
-                WsjtxMessage.NegotiatedSchemaVersion = hmsg.SchemaVersion;
-                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
-                UpdateDebug();
-                DebugOutput($"{spacer}NegoState:{WsjtxMessage.NegoState}");
-                DebugOutput($"{spacer}negotiated schema version:{WsjtxMessage.NegotiatedSchemaVersion}");
-                UpdateDebug();
-
-                //send ACK request to WSJT-X, to get 
-                //a StatusMessage reply to start normal operation
-                Thread.Sleep(250);
+                // Stage A7: cmd:7 now fires right here, once, instead of waiting for a
+                // 2nd incoming Heartbeat (that wait -- and the RECD transition that used
+                // to ride along with it -- is removed; see the new StatusMessage-driven
+                // SENT->RECD trigger below). cmd:7 is now purely CapabilityNegotiator's
+                // own probe for the non-standard Compatibility Layer: its success/failure
+                // only affects ConnectedFull-vs-Connected reporting, never normal
+                // operation, which now depends only on the first standard StatusMessage
+                // broadcast.
                 emsg.NewTxMsgIdx = 7;
                 emsg.GenMsg = $"";          //no effect
                 emsg.ReplyReqd = true;
@@ -406,32 +397,14 @@ namespace WSJTX_Controller
                 emsg.CmdCheck = cmdCheck;
                 ba = emsg.GetBytes();
                 udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Ack Req' cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
-                // Stage A5: cmd:7 doubles as the CapabilityNegotiator's probe for the
-                // Compatibility Layer -- tracking only, the send itself is unchanged.
+                DebugOutput($"{Time()} Capability probe started, cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
                 _capabilityNegotiator.BeginCapabilityProbe();
-
-                // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetPskReporterEnable.
-                _compatExtension.SetPskReporterEnable(usePskReporter,
-                    $"(mod by KB0UZT, w/{pgmName} v{pgmVer} [FT8 for blind hams], qrz.com/db/KB0UZT)",
-                    msg => DebugOutput($"{Time()} {msg}"));
-
-                HaltTx();       //sync up WSJT-X button state
-
-                if (bandIdx == null)
-                {
-                    SetOperatingMode("FT8");            //after halt
-                    Thread.Sleep(250);
-                    mode = "FT8";
-                    bandIdx = FreqToBandIdx(dialFrequency / 1e6);       //can be null if unknown
-                    if (bandIdx == null) bandIdx = 5;
-                    SetBandTxFirst((uint)(bandToFreq(bandIdx) * 1000), txFirst, "InitialConnect");
-                    Thread.Sleep(250);
-                }
 
                 cmdCheckTimer.Interval = 10000;           //set up cmd check timeout
                 cmdCheckTimer.Start();
                 DebugOutput($"{spacer}check cmd timer started");
+
+                UpdateDebug();
                 return;
             }
 
@@ -555,6 +528,56 @@ namespace WSJTX_Controller
                     if (!CheckMyCall(smsg)) return;
                     DebugOutput($"{spacer}myCall:'{myCall}' myGrid:'{myGrid}' mode:'{mode}' specOp:'{specOp}' configuration:{configuration} check:{smsg.Check}");
                     UpdateDebug();
+
+                    // Stage A7: normal operation now depends only on receiving the first
+                    // standard StatusMessage broadcast while SENT, never on any
+                    // non-standard acknowledgment (Blueprint §6/§19 -- replaces the old
+                    // "wait for a 2nd Heartbeat, then send cmd:7 and go straight to RECD"
+                    // sequence). CheckMyCall's return above already guards this to the
+                    // first *valid* StatusMessage (real callsign/grid configured in
+                    // WSJT-X), not literally the first one of any kind.
+                    if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.SENT)
+                    {
+                        DebugOutput($"{Time()} First valid Status received");
+                        WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                        DebugOutput($"{spacer}NegoState SENT -> RECD");
+
+                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetPskReporterEnable.
+                        // Moved here from the old 2nd-Heartbeat handler (Stage A7) --
+                        // still a best-effort, non-load-bearing convenience sent
+                        // unconditionally, same as before.
+                        _compatExtension.SetPskReporterEnable(usePskReporter,
+                            $"(mod by KB0UZT, w/{pgmName} v{pgmVer} [FT8 for blind hams], qrz.com/db/KB0UZT)",
+                            m => DebugOutput($"{Time()} {m}"));
+
+                        HaltTx();       //sync up WSJT-X button state
+
+                        if (bandIdx == null)
+                        {
+                            SetOperatingMode("FT8");            //after halt
+                            Thread.Sleep(250);
+                            // Stage A7 field-testing fix, 2026-07-17: this block used to
+                            // live in a scope with no local "mode" variable, so "mode =
+                            // ..." unambiguously meant the class field. Moved here, it's
+                            // nested inside the StatusMessage handler's own
+                            // "string mode = smsg.Mode;" local, which shadows the field --
+                            // an unqualified "mode = "FT8"" silently updated only the
+                            // local, leaving the class field at its previous value
+                            // (empty string on a fresh connect). bandToFreq() then failed
+                            // its own freqsDict.Keys.Contains(mode) check against that
+                            // stale field value and returned null, and the unchecked
+                            // (uint) cast on the caller's side threw
+                            // InvalidOperationException ("Nullable object must have a
+                            // value") -- crashed on every first-connect handshake, not
+                            // just against WSJT-X Improved 3.1. this.mode makes the
+                            // target explicit regardless of the local shadow.
+                            this.mode = "FT8";
+                            bandIdx = FreqToBandIdx(dialFrequency / 1e6);       //can be null if unknown
+                            if (bandIdx == null) bandIdx = 5;
+                            SetBandTxFirst((uint)(bandToFreq(bandIdx) * 1000), txFirst, "InitialConnect");
+                            Thread.Sleep(250);
+                        }
+                    }
                 }
 
                 if (msg.GetType().Name == "EnqueueDecodeMessage")
@@ -724,9 +747,8 @@ namespace WSJTX_Controller
                     if (cmdCheckTimer.Enabled && smsg.Check == cmdCheck)             //found the random cmd check string, cmd receive ack'd
                     {
                         cmdCheckTimer.Stop();
-                        commConfirmed = true;
                         _capabilityNegotiator.ConfirmCompatibilityLayer();     //Stage A5
-                        DebugOutput($"{nl}{Time()} WSJT-X event, Check cmd rec'd, match");
+                        DebugOutput($"{nl}{Time()} CapabilityNegotiator ConnectedFull");
                     }
 
                     //*********************************
@@ -908,12 +930,16 @@ namespace WSJTX_Controller
                     //***************************************
                     //check for transition from IDLE to START
                     //***************************************
-                    if (commConfirmed && supportedModes.Contains(mode) && specOp == 0 && opMode == OpModes.IDLE)
+                    // Stage A7: commConfirmed (the non-standard cmd:7 echo) is no longer
+                    // required here -- NegoState==RECD (reaching this whole block at all)
+                    // is by itself now standard-protocol-only proof Jimmy is talking to a
+                    // real WSJT-X.
+                    if (supportedModes.Contains(mode) && specOp == 0 && opMode == OpModes.IDLE)
                     {
                         EnableMonitoring();              //must do only after DisableTx and HaltTx
 
                         opMode = OpModes.START;
-                        DebugOutput($"{Time()} opMode:{opMode}");
+                        DebugOutput($"{Time()} opMode IDLE -> START");
                         if (ctrl.freqCheckBox.Checked) ShowStatus();
                         UpdateModeVisible();
                     }
@@ -1220,7 +1246,6 @@ namespace WSJTX_Controller
             ResetOpMode();
             DebugOutput($"{Time()} Waiting for WSJT-X to run...");
             cmdCheck = RandomCheckString();
-            commConfirmed = false;
             _capabilityNegotiator.Reset();     //Stage A5: never cached across a connection boundary
             UpdateRR73();
             ShowStatus();
@@ -1244,10 +1269,18 @@ namespace WSJTX_Controller
             }
         }
 
-        public void CmdCheckDialog()
+        // Stage A7: renamed from CmdCheckDialog -- no dialog has existed here since
+        // Stage A5, and since this stage, cmd:7's success/failure only affects
+        // CapabilityNegotiator's ConnectedFull-vs-Connected reporting, never normal
+        // operation (which now depends only on NegoState==RECD, reached via the first
+        // standard StatusMessage -- see the SENT->RECD trigger in Update()).
+        public void CapabilityProbeTimeout()
         {
             cmdCheckTimer.Stop();
-            if (commConfirmed) return;
+            // Stage A7: commConfirmed replaced with CapabilityNegotiator's own state --
+            // same purpose (skip redundant timeout handling once the Compatibility
+            // Layer already confirmed via a matching echo).
+            if (_capabilityNegotiator.State == WsjtxCapabilityState.ConnectedFull) return;
 
             // Stage A5: graceful degradation (Blueprint §19) replaces only the old
             // blocking "Unable to make a two-way connection with WSJT-X" MessageBox
@@ -1264,7 +1297,7 @@ namespace WSJTX_Controller
                 // every 10s while the retry above keeps quietly trying in the
                 // background would be exactly the "verbose/redundant" speech the
                 // accessibility rules rule out.
-                DebugOutput($"{Time()} CapabilityState -> {_capabilityNegotiator.State} (no cmd:7 echo within timeout)");
+                DebugOutput($"{Time()} CapabilityNegotiator Connected (degraded, no cmd:7 echo within timeout)");
                 StatusView.ShowMessage("Connected to WSJT-X, limited mode: some features unavailable", true);
             }
 
@@ -1412,9 +1445,9 @@ namespace WSJTX_Controller
             CloseAllUdp();          //usually not needed
         }
 
-        private void cmdCheckTimer_Tick(object sender, EventArgs e)
+        private void capabilityProbeTimer_Tick(object sender, EventArgs e)
         {
-            CmdCheckDialog();
+            CapabilityProbeTimeout();
         }
 
 

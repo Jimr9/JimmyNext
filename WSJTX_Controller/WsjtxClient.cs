@@ -110,7 +110,6 @@ namespace WSJTX_Controller
         private StreamWriter logSw = null;
         private bool settingChanged = false;
         private string cmdCheck = "";
-        private bool commConfirmed = false;
         internal Dictionary<string, EnqueueDecodeMessage> callDict = new Dictionary<string, EnqueueDecodeMessage>();
         internal Queue<string> callQueue = new Queue<string>();
         internal List<string> sentReportList = new List<string>();
@@ -649,7 +648,7 @@ namespace WSJTX_Controller
             statusTimer2.Tick += new System.EventHandler(StatusTimer2Tick);       //restore previous status
             statusTimer2.Interval = 5000;
 
-            cmdCheckTimer.Tick += new System.EventHandler(cmdCheckTimer_Tick);
+            cmdCheckTimer.Tick += new System.EventHandler(capabilityProbeTimer_Tick);
 
             dialogTimer2.Tick += new System.EventHandler(dialogTimer2_Tick);
             dialogTimer2.Interval = 20;
@@ -839,7 +838,6 @@ namespace WSJTX_Controller
             DisableAutoFreqPause();
             if (autoFreqEnabled)
             {
-                //if (commConfirmed) EnableMonitoring();       may crash WSJT-X
                 if (opMode != OpModes.ACTIVE)
                 {
                     ctrl.freqCheckBox.Text = "Use best freq (pending)";
@@ -1357,7 +1355,10 @@ namespace WSJTX_Controller
             //*****************************************
             //check for transition from START to ACTIVE
             //****************************************
-            if (commConfirmed && myCall != null && supportedModes.Contains(mode) && specOp == 0 && opMode == OpModes.START && (!ctrl.freqCheckBox.Checked || !_requireOffsetForActive || (oddOffset > 0 || evenOffset > 0)))
+            // Stage A7: commConfirmed (the non-standard cmd:7 echo) is no longer
+            // required here -- see the same note on the IDLE->START gate in
+            // WsjtxClient.Protocol.cs.
+            if (myCall != null && supportedModes.Contains(mode) && specOp == 0 && opMode == OpModes.START && (!ctrl.freqCheckBox.Checked || !_requireOffsetForActive || (oddOffset > 0 || evenOffset > 0)))
             {
                 opMode = OpModes.ACTIVE;
                 if (txMode == TxModes.LISTEN)
@@ -1371,7 +1372,7 @@ namespace WSJTX_Controller
                 ctrl.LoadHrcCache();    //refresh HRC sets (band-independent; harmless to re-run here)
                 ctrl.RefreshStillNeedCache();    //reload Still Need live-tag cache now that the current band is known
                 ctrl.OnJimmyReachedActive();    //kicks off automatic logbook sync, once per session, after a short delay
-                DebugOutput($"{spacer}CheckActive, opMode:{opMode}");
+                DebugOutput($"{Time()} opMode START -> ACTIVE");
                 UpdateDebug();
                 return true;
             }

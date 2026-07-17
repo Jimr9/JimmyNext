@@ -707,57 +707,68 @@ def _parse_enable_tx(data):
     return cmd_idx, cmd_check
 
 
-def handshake(sock, v):
+def handshake(sock, v, send_check_echo=True):
     """
-    Complete the 3-step WSJT-X negotiation:
-      1. Send HeartbeatMessage → Jimmy replies + sets NegoState=SENT
-      2. Send HeartbeatMessage again → Jimmy goes SENT→RECD, sends cmd:7 (CmdCheck)
-      3. Send StatusMessage with Check=CmdCheck → Jimmy sets commConfirmed=True → ACTIVE
+    Stage A7 handshake (WsjtxClient.Protocol.cs): normal operation now depends only
+    on standard protocol traffic, never on the non-standard cmd:7 echo.
+      1. Send HeartbeatMessage → Jimmy replies with its own Heartbeat AND sends
+         cmd:7 (CmdCheck), both from the same first-Heartbeat handler now (no
+         longer waits for a 2nd incoming Heartbeat to do either).
+      2. Send a normal StatusMessage (Check="") → triggers NegoState SENT→RECD
+         on its own → opMode progresses toward ACTIVE, with no echo required.
+      3. If send_check_echo (default True): separately send a second
+         StatusMessage with Check=<the captured CmdCheck> → exercises
+         CapabilityNegotiator's ConnectedFull path. Not required for ACTIVE
+         anymore -- set send_check_echo=False to prove that directly (see
+         group0_no_compat_layer below).
     """
     print("\n──── Handshake ────")
     hb = build_heartbeat()
 
     sock.sendto(hb, (JIMMY_HOST, JIMMY_PORT))
     print(f"  → HeartbeatMessage  ({WSJT_VERSION}/{WSJT_REVISION})")
-    sock.settimeout(RECV_TIMEOUT)
-    try:
-        data, _ = sock.recvfrom(4096)
-        print(f"  ← Response: {len(data)} bytes")
-    except (socket.timeout, ConnectionResetError):
-        print("  ✗ No response. Is Jimmy running on port 2237?")
-        return False
 
-    time.sleep(0.3)
-    sock.sendto(hb, (JIMMY_HOST, JIMMY_PORT))
-    print("  → HeartbeatMessage again  (triggers SENT→RECD)")
-
-    cmd_check = None
-    deadline  = time.time() + RECV_TIMEOUT
-    while time.time() < deadline:
+    # Jimmy now sends its Heartbeat reply and cmd:7 back-to-back from the same
+    # handler -- read up to two datagrams, classifying each; don't fail if cmd:7
+    # specifically doesn't show up (it's no longer required for ACTIVE).
+    cmd_check   = None
+    got_reply   = False
+    deadline    = time.time() + RECV_TIMEOUT
+    while time.time() < deadline and not (got_reply and cmd_check):
         sock.settimeout(max(0.1, deadline - time.time()))
         try:
             data, _ = sock.recvfrom(4096)
-            ci, cc  = _parse_enable_tx(data)
-            if ci == 7 and cc is not None:
-                cmd_check = cc
-                print(f"  ← cmd:7  CmdCheck='{cmd_check}'")
         except (socket.timeout, ConnectionResetError):
             break
+        ci, cc = _parse_enable_tx(data)
+        if ci == 7 and cc is not None:
+            cmd_check = cc
+            print(f"  ← cmd:7 (capability probe)  CmdCheck='{cmd_check}'")
+        else:
+            got_reply = True
+            print(f"  ← Heartbeat reply: {len(data)} bytes")
 
-    if not cmd_check:
-        print("  ✗ Did not receive CmdCheck. Is Jimmy already connected to WSJT-X?")
-        print("    Close WSJT-X and restart Jimmy, then try again.")
+    if not got_reply:
+        print("  ✗ No Heartbeat reply. Is Jimmy running on port 2237?")
         return False
+    if not cmd_check:
+        print("  (No cmd:7 echo captured within timeout -- fine, no longer required for ACTIVE)")
 
     time.sleep(0.3)
-    sock.sendto(build_status(check=cmd_check), (JIMMY_HOST, JIMMY_PORT))
-    print(f"  → StatusMessage  (myCall={MY_CALL}, Check='{cmd_check}')")
+    sock.sendto(build_status(check=""), (JIMMY_HOST, JIMMY_PORT))
+    print(f"  → StatusMessage  (myCall={MY_CALL}, no Check -- triggers SENT→RECD on its own)")
     time.sleep(1.5)
 
     if v.available:
-        v.check_active("Jimmy reached ACTIVE state")
+        v.check_active("Jimmy reached ACTIVE state (no cmd:7 echo required)")
     else:
         print("  (Verifier not available — skipping auto-check)")
+
+    if send_check_echo and cmd_check:
+        time.sleep(0.3)
+        sock.sendto(build_status(check=cmd_check), (JIMMY_HOST, JIMMY_PORT))
+        print(f"  → StatusMessage  (Check='{cmd_check}' -- exercises ConnectedFull)")
+        time.sleep(0.3)
 
     print()
     return True
