@@ -424,18 +424,7 @@ namespace WSJTX_Controller
                     txFirst = smsg.TxFirst;
                     UpdateCallListAccessibleName();     // update RX1/TX1 labels as soon as txFirst is known
 
-                    //if seconds units, need msec
-                    if (smsg.TRPeriod != null)
-                    {
-                        if ((int)smsg.TRPeriod < 1000)
-                        {
-                            trPeriod = 1000 * (int)smsg.TRPeriod;
-                        }
-                        else
-                        {
-                            trPeriod = (int)smsg.TRPeriod;
-                        }
-                    }
+                    UpdateTrPeriod(smsg);
 
                     if (trPeriod != null)
                     {
@@ -639,12 +628,23 @@ namespace WSJTX_Controller
                 if (modeSupported)
                 {
                     //********************
-                    //EnqueueDecodeMessage
+                    //EnqueueDecodeMessage / standard DecodeMessage
                     //********************
                     //only resulting action is to add call to callQueue, optionally restart queue
-                    if (msg.GetType().Name == "EnqueueDecodeMessage" && myCall != null)
+                    //
+                    // Found via live A7 field testing 2026-07-17: stock WSJT-X and WSJT-X
+                    // Improved send the standard "DecodeMessage" (msg type 2), never the
+                    // non-standard "EnqueueDecodeMessage" (msg type 18, Andy WM8Q's fork
+                    // only) this branch used to require exclusively -- meaning Jimmy never
+                    // processed a single decode from any non-Andy-fork build. Adapting a
+                    // standard DecodeMessage into an EnqueueDecodeMessage shell (via
+                    // FromStandardDecode) lets it flow through the exact same pipeline below
+                    // unchanged -- see that method's own comment for the field-by-field
+                    // justification of why this is safe.
+                    if ((msg.GetType().Name == "EnqueueDecodeMessage" || msg.GetType().Name == "DecodeMessage") && myCall != null)
                     {
-                        EnqueueDecodeMessage dmsg = (EnqueueDecodeMessage)msg;
+                        EnqueueDecodeMessage dmsg = msg as EnqueueDecodeMessage
+                            ?? EnqueueDecodeMessage.FromStandardDecode((DecodeMessage)msg);
                         if (dmsg.AutoGen && ctrl.advancedCallLayout)
                         {
                             while (_rawDecodeHistory.Count >= ctrl.rawMaxRows)
@@ -731,18 +731,7 @@ namespace WSJTX_Controller
                     }
 
 
-                    //need msec unit
-                    if (smsg.TRPeriod != null)
-                    {
-                        if ((int)smsg.TRPeriod < 1000)
-                        {
-                            trPeriod = 1000 * (int)smsg.TRPeriod;
-                        }
-                        else
-                        {
-                            trPeriod = (int)smsg.TRPeriod;
-                        }
-                    }
+                    UpdateTrPeriod(smsg);
 
                     if (cmdCheckTimer.Enabled && smsg.Check == cmdCheck)             //found the random cmd check string, cmd receive ack'd
                     {
@@ -1236,6 +1225,44 @@ namespace WSJTX_Controller
                 settingChanged = false;
             }
         }
+
+        // Found via live field testing 2026-07-17: WSJT-X Improved 3.1's StatusMessage
+        // never reports a real TRPeriod at all (confirmed: every single StatusMessage
+        // from this build carried the N/A sentinel for the entire session). Without a
+        // fallback, trPeriod (nullable) stayed permanently null for the whole
+        // connection -- which silently breaks IsEvenPeriod's even/odd period-parity
+        // math (WsjtxClient.cs:1976-1985): with trPeriod null, its final comparison
+        // collapses to "null == 0" under C#'s lifted nullable-comparison semantics,
+        // which is always false, so IsEvenCall() always returned false too. Observed
+        // symptom: raw decodes only ever displayed in TX2, never TX1, no matter how
+        // much real signal was present on both. FT8's and FT4's T/R periods are fixed
+        // protocol constants, not something that varies station to station -- safe to
+        // assume from mode alone the one time WSJT-X itself never tells us, without
+        // overwriting a previously-learned real value (WSJT-X's own doc comment says
+        // it only sends TRPeriod "when the T/R period is changed" -- omitting it on
+        // later messages is expected, not itself a sign anything is wrong).
+        private void UpdateTrPeriod(StatusMessage smsg)
+        {
+            if (smsg.TRPeriod != null)
+            {
+                //if seconds units, need msec
+                trPeriod = (int)smsg.TRPeriod < 1000 ? 1000 * (int)smsg.TRPeriod : (int)smsg.TRPeriod;
+            }
+            else if (trPeriod == null)
+            {
+                trPeriod = DefaultTrPeriodMs(smsg.Mode);
+                DebugOutput($"{Time()} [PERIOD-FALLBACK] WSJT-X never reported TRPeriod; defaulting trPeriod:{trPeriod} from mode:'{smsg.Mode}'");
+            }
+        }
+
+        // FT8's and FT4's T/R periods are fixed protocol constants, not something
+        // that varies station to station -- pulled out as its own pure function so
+        // it's directly unit-testable (UpdateTrPeriod itself needs a live
+        // StatusMessage/WsjtxClient instance state to exercise). Public: JimmyTests
+        // references Jimmy.exe as a compiled binary with no InternalsVisibleTo, so
+        // only public members are reachable from there (see CallQueueRanker.cs's/
+        // RowFormatter.cs's own comments on this same constraint).
+        public static int DefaultTrPeriodMs(string mode) => mode == "FT4" ? 7500 : 15000;
 
         private void ResetNego()
         {
