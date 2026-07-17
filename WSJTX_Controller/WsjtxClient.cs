@@ -2834,6 +2834,30 @@ namespace WSJTX_Controller
             tuning = false;
             if (udpClient2 != null)
             {
+                // Stage A8: also send the standard HaltTx message (msg type 8), not just
+                // the non-standard sub-command 12 below -- confirmed via code reading
+                // that the standard HaltTxMessage class existed but was never actually
+                // instantiated/sent anywhere. A stock/Improved build (no Compatibility
+                // Layer) silently ignores sub-command 12 entirely, so HaltTx() -- also
+                // Jimmy's Escape-key emergency-stop path (HaltAndDisableTx, "TX halts
+                // regardless of which mode Jimmy is in") -- previously had NO effect at
+                // all against such a build. Sent unconditionally alongside the existing
+                // sub-command 12 (kept as-is, zero behavior change for a Compatibility-
+                // Layer build): pure addition, not a replacement, so nothing regresses if
+                // a real-world edge case in the standard path ever surfaces. AutoOnly is
+                // explicitly false -- an emergency stop must halt regardless of whether
+                // the pending Tx was auto-generated or not, matching the sub-command 12
+                // path's own unconditional behavior.
+                var hmsg = new HaltTxMessage
+                {
+                    SchemaVersion = (uint)WsjtxMessage.NegotiatedSchemaVersion,
+                    Id = WsjtxMessage.UniqueId,
+                    AutoOnly = false,
+                };
+                ba = hmsg.GetBytes();
+                udpClient2.Send(ba, ba.Length);
+                DebugOutput($"{Time()} >>>>>Sent standard HaltTx (msg type 8)");
+
                 // Stage A4: build+send moved to WsjtxCompatibilityExtension.HaltTx.
                 _compatExtension.HaltTx(msg => DebugOutput($"{Time()} {msg}"));
                 txEnabled = false;
