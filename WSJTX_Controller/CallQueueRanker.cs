@@ -44,6 +44,7 @@ namespace WSJTX_Controller
             { WsjtxClient.CallCategory.SOTA,                0 },
             { WsjtxClient.CallCategory.ALWAYS_WANTED,       1 },
             { WsjtxClient.CallCategory.WAS_NEEDED,          0 },
+            { WsjtxClient.CallCategory.WAS_UNCONFIRMED,     0 },
             { WsjtxClient.CallCategory.DXCC_UNCONFIRMED,    0 },
             { WsjtxClient.CallCategory.ZONE_NEEDED,         0 },
             { WsjtxClient.CallCategory.STILL_NEEDED,        0 },

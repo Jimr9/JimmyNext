@@ -137,6 +137,7 @@ namespace WSJTX_Controller
         // General tab
         private System.Windows.Forms.CheckBox pskReporterCheckBox;
         private System.Windows.Forms.CheckBox moveFocusToStatusCheckBox;
+        private System.Windows.Forms.CheckBox checkForUpdatesCheckBox;
 
         // Appearance tab
         private System.Windows.Forms.ComboBox appearanceThemeCombo;
@@ -290,6 +291,19 @@ namespace WSJTX_Controller
                 Font                  = font,
             };
             generalPanel.Controls.Add(_maxCallQueueAgeNumeric);
+
+            checkForUpdatesCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text                  = "Check for updates on startup",
+                AccessibleName        = "Check for updates on startup",
+                AccessibleDescription = "On startup, check GitHub for a newer Jimmy release. If one is found, ask whether to download and install it. Off by default.",
+                AutoSize              = true,
+                Location              = new System.Drawing.Point(10, 115),
+                TabIndex              = 4,
+                Checked               = ctrl.checkForUpdatesOnStartup,
+                Font                  = font,
+            };
+            generalPanel.Controls.Add(checkForUpdatesCheckBox);
         }
 
         private void ApplyGeneralSettings()
@@ -301,6 +315,7 @@ namespace WSJTX_Controller
             }
 
             ctrl.moveFocusToStatusOnCallSelect = moveFocusToStatusCheckBox?.Checked ?? false;
+            ctrl.checkForUpdatesOnStartup = checkForUpdatesCheckBox?.Checked ?? false;
 
             int maxAge = (int)(_maxCallQueueAgeNumeric?.Value ?? 16);
             ctrl.maxCallQueueAgePeriods = Math.Max(4, Math.Min(200, maxAge));

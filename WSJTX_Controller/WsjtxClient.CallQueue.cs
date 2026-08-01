@@ -126,6 +126,26 @@ namespace WSJTX_Controller
                     DebugOutput($"{spacer}WantedAnywhere alert: '{deCall}'");
                 }
 
+                // Weak-signal floor: this is the path ordinary CQ traffic takes (as opposed to
+                // ProcessDecodeMsg's TO_MYCALL branch, which has its own identical check and never
+                // reaches this method) -- without it here, the floor only ever protected direct
+                // replies to the operator, not the general calling queue it's mainly meant to filter.
+                // Manual selections (e.g. clicking a Raw decode) are a deliberate operator choice
+                // and already bypass every other automatic filter below (see isAdmitted override),
+                // so this bypasses the same way. Never suppress the station we're actively working --
+                // SNR can dip on a final RR73/73 and we must not drop a QSO in progress.
+                if (emsg.AutoGen && ctrl.ignoreWeakSnrCheckBox.Checked
+                    && emsg.Snr <= (int)ctrl.minSnrNumUpDown.Value && deCall != callInProg)
+                {
+                    if (debugDetail) DebugOutput($"{spacer}AddSelectedCall rejected, weak signal snr:{emsg.Snr} floor:{(int)ctrl.minSnrNumUpDown.Value}");
+                    // Default: just stop refreshing this station's queue entry (same "lingers with
+                    // last good SNR until the queue-age timeout prunes it" behavior as
+                    // ProcessDecodeMsg's identical check). Opt-in: pull it immediately instead.
+                    if (ctrl.removeOnWeakSnrCheckBox.Checked && callQueue.Contains(deCall))
+                        _callQueueStore.RemoveCall(deCall);
+                    return;
+                }
+
                 if (isCq)    //check for unwanted directed CQ
                 {
                     if (isDirectedAlert || isAcceptableCq)      //acceptable CQ
@@ -216,6 +236,7 @@ namespace WSJTX_Controller
                         isAdmitted = IsCallingEnabled(CallCategory.WANTED_CQ) && isWantedDirected;
                         break;
                     case CallCategory.WAS_NEEDED:
+                    case CallCategory.WAS_UNCONFIRMED:
                     case CallCategory.DXCC_UNCONFIRMED:
                     case CallCategory.ZONE_NEEDED:
                     case CallCategory.STILL_NEEDED:
@@ -271,6 +292,7 @@ namespace WSJTX_Controller
                         emsg.Category == CallCategory.NEW_COUNTRY ||
                         emsg.Category == CallCategory.NEW_COUNTRY_ON_BAND ||
                         emsg.Category == CallCategory.WAS_NEEDED ||
+                        emsg.Category == CallCategory.WAS_UNCONFIRMED ||
                         emsg.Category == CallCategory.DXCC_UNCONFIRMED ||
                         emsg.Category == CallCategory.ZONE_NEEDED ||
                         emsg.Category == CallCategory.STILL_NEEDED ||
@@ -428,6 +450,10 @@ namespace WSJTX_Controller
 
             // Set active-call state so status shows the target callsign, matching normal queue-reply behavior
             SetCallInProg(callsign);
+            // Mirrors the queue-reply path (NextCall) -- keeps callInProg alive through a
+            // Listen-mode timeout so Alt+E (EnableMode) can resume this same manual call
+            // after it hits the retry limit, instead of callInProg being nulled immediately.
+            StartDiscardCall(callsign);
             _manualCallInProg = true;
             cqPaused = false;
             restartQueue = false;

@@ -14,10 +14,11 @@ namespace WSJTX_Controller
     // exist.
     public class LookupRecord
     {
-        public string Callsign   { get; set; }
-        public string Name       { get; set; }
-        public string QslManager { get; set; }
-        public string Email      { get; set; }
+        public string Callsign     { get; set; }
+        public string Name         { get; set; }
+        public string LicenseClass { get; set; }
+        public string QslManager   { get; set; }
+        public string Email        { get; set; }
 
         public string Country    { get; set; }
         public int    Dxcc       { get; set; }

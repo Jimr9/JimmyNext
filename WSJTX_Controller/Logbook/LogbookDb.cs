@@ -1266,17 +1266,21 @@ WHERE id=@id;";
             "WI","WV","WY"
         };
 
-        // Computes the three HRC filter sets used by Jimmy's decode processor.
+        // Computes the four HRC filter sets used by Jimmy's decode processor.
+        // neededStates = never worked; unconfirmedStates = worked but not confirmed
+        // (mirrors unconfirmedDxcc's worked-minus-confirmed split for WAS/DXCC parity).
         // All computation is local — no network access.
         // band: ADIF-style string (e.g. "20m"); null means all-band.
         public void LoadHrcCache(
             out HashSet<string> neededStates,
+            out HashSet<string> unconfirmedStates,
             out HashSet<int>    unconfirmedDxcc,
             out HashSet<int>    neededZones,
             string band = null)
         {
             string bf = BandFilter(band);
             var confirmedSt = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var workedSt    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var workedDx    = new HashSet<int>();
             var confirmedDx = new HashSet<int>();
             var confirmedZn = new HashSet<int>();
@@ -1291,6 +1295,14 @@ WHERE id=@id;";
                         $"AND (lotw_qsl_rcvd='Y' OR qrz_qsl_rcvd='Y'){bf};";
                     using (var r = cmd.ExecuteReader())
                         while (r.Read()) if (!r.IsDBNull(0)) confirmedSt.Add(r.GetString(0));
+                }
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText =
+                        $"SELECT DISTINCT UPPER(TRIM(state)) FROM qso " +
+                        $"WHERE UPPER(TRIM(state)) IN ({WasInList}){bf};";
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read()) if (!r.IsDBNull(0)) workedSt.Add(r.GetString(0));
                 }
                 using (var cmd = _conn.CreateCommand())
                 {
@@ -1318,7 +1330,10 @@ WHERE id=@id;";
 
             neededStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var st in UsStates50)
-                if (!confirmedSt.Contains(st)) neededStates.Add(st);
+                if (!workedSt.Contains(st)) neededStates.Add(st);
+
+            unconfirmedStates = new HashSet<string>(workedSt, StringComparer.OrdinalIgnoreCase);
+            unconfirmedStates.ExceptWith(confirmedSt);
 
             unconfirmedDxcc = new HashSet<int>(workedDx);
             unconfirmedDxcc.ExceptWith(confirmedDx);

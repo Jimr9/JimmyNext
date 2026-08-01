@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace WSJTX_Controller
@@ -10,17 +12,17 @@ namespace WSJTX_Controller
     {
         private readonly TextBox _statusValue;
         private readonly Button  _closeButton;
-        private readonly Button  _qrzButton;
 
         // Rows: (label, read-only value textbox — must be focusable so JAWS/NVDA
         // users can reach each field with Tab; a plain Label can never take focus).
-        private readonly TextBox _callValue, _nameValue, _gridValue, _stateValue,
+        private readonly TextBox _callValue, _nameValue, _licClassValue, _gridValue, _stateValue,
                                  _countryValue, _continentValue, _countyValue, _cqzoneValue,
                                  _ituzoneValue, _adifValue, _qslManagerValue, _emailValue,
                                  _lotwValue, _activityValue, _sourcesValue;
 
         private readonly LookupManager _manager;
         private readonly string        _call;
+        private bool _canQrz;
 
         public bool QrzLookupOccurred { get; private set; }
 
@@ -35,7 +37,7 @@ namespace WSJTX_Controller
             MinimizeBox     = false;
             ShowInTaskbar   = false;
             StartPosition   = FormStartPosition.CenterParent;
-            Size            = new Size(480, 486);
+            Size            = new Size(480, 510);
             Font            = new Font("Microsoft Sans Serif", 9F);
             KeyPreview      = true;
             KeyDown        += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
@@ -44,6 +46,7 @@ namespace WSJTX_Controller
 
             _callValue      = AddRow("Callsign:",        ref y, lx, vx, fw, rh, ref tabIndex);
             _nameValue      = AddRow("Name:",            ref y, lx, vx, fw, rh, ref tabIndex);
+            _licClassValue  = AddRow("License Class:",   ref y, lx, vx, fw, rh, ref tabIndex);
             _gridValue      = AddRow("Grid:",            ref y, lx, vx, fw, rh, ref tabIndex);
             _stateValue     = AddRow("State/Province:",  ref y, lx, vx, fw, rh, ref tabIndex);
             _countryValue   = AddRow("Country:",         ref y, lx, vx, fw, rh, ref tabIndex);
@@ -79,17 +82,6 @@ namespace WSJTX_Controller
 
             y += 32;
 
-            _qrzButton = new Button
-            {
-                Text           = "Lookup Online (QRZ)",
-                Location       = new Point(lx, y),
-                Size           = new Size(160, 26),
-                TabIndex       = tabIndex++,
-                AccessibleName = "Look up this callsign online via QRZ",
-            };
-            _qrzButton.Click += QrzButton_Click;
-            Controls.Add(_qrzButton);
-
             _closeButton = new Button
             {
                 Text           = "Close",
@@ -97,12 +89,35 @@ namespace WSJTX_Controller
                 Size           = new Size(70, 26),
                 TabIndex       = tabIndex++,
                 DialogResult   = DialogResult.OK,
-                AccessibleName = "Close lookup dialog",
+                AccessibleName = "Close",
             };
             Controls.Add(_closeButton);
             AcceptButton = _closeButton;
 
             PopulateFromCache();
+
+            // Opening this dialog (via the lookup hotkey) is itself the explicit,
+            // user-initiated request that FocusedOnly/UnidentifiedQueue policies are
+            // gated on -- so a needed QRZ lookup fires automatically; there's no
+            // separate button for it any more.
+            Load += async (s, e) =>
+            {
+                if (!_canQrz)
+                {
+                    _statusValue.Text = "QRZ lookup disabled.";
+                }
+                else if (_manager.QrzNeedsLookup(_call))
+                {
+                    await DoQrzLookupAsync();
+                }
+                else
+                {
+                    var cachedAt = _manager.QrzCachedAt(_call);
+                    _statusValue.Text = cachedAt.HasValue
+                        ? $"QRZ data from {FormatAge(cachedAt.Value)}."
+                        : "Using cached data.";
+                }
+            };
         }
 
         private TextBox AddRow(string labelText, ref int y, int lx, int vx, int fw, int rh, ref int tabIndex)
@@ -139,6 +154,7 @@ namespace WSJTX_Controller
 
             _callValue.Text      = info.Callsign  ?? _call;
             _nameValue.Text      = info.Name       ?? "—";
+            _licClassValue.Text  = FormatLicenseClass(info.LicenseClass);
             _gridValue.Text      = info.Grid       ?? "—";
             _stateValue.Text     = info.State      ?? "—";
             _countryValue.Text   = info.Country    ?? "—";
@@ -155,29 +171,25 @@ namespace WSJTX_Controller
                                    : "—";
             _sourcesValue.Text   = info.SourcesText;
 
-            bool canQrz = _manager.Qrz.IsEnabled &&
-                          (_manager.Policy == QrzLookupPolicy.FocusedOnly ||
-                           _manager.Policy == QrzLookupPolicy.UnidentifiedQueue);
-            _qrzButton.Enabled = canQrz;
-            if (!canQrz) _qrzButton.Text = "QRZ lookup disabled";
+            _canQrz = _manager.Qrz.IsEnabled &&
+                      (_manager.Policy == QrzLookupPolicy.FocusedOnly ||
+                       _manager.Policy == QrzLookupPolicy.UnidentifiedQueue);
         }
 
         private void ShowNoData()
         {
             _callValue.Text    = _call;
-            foreach (var lbl in new[] { _nameValue, _gridValue, _stateValue, _countryValue,
+            foreach (var lbl in new[] { _nameValue, _licClassValue, _gridValue, _stateValue, _countryValue,
                                         _continentValue, _countyValue, _cqzoneValue, _ituzoneValue,
                                         _adifValue, _qslManagerValue, _emailValue,
                                         _lotwValue, _activityValue, _sourcesValue })
                 lbl.Text = "—";
-            _qrzButton.Enabled = false;
         }
 
-        private async void QrzButton_Click(object sender, EventArgs e)
+        private async Task DoQrzLookupAsync()
         {
             if (_manager == null) return;
-            _qrzButton.Enabled  = false;
-            _statusValue.Text   = "Looking up via QRZ…";
+            _statusValue.Text = "Looking up via QRZ…";
             var result = await _manager.LookupQrzAsync(_call);
             if (IsDisposed) return;
             if (result != null)
@@ -189,13 +201,45 @@ namespace WSJTX_Controller
             else
             {
                 _statusValue.Text = $"QRZ: {_manager.Qrz.LastError ?? "No data returned."}";
-                _qrzButton.Enabled = true;
             }
 
             // Move focus to the status field so JAWS/NVDA announce the async result —
             // the label never regains focus on its own, so silently updating .Text
             // would otherwise go unnoticed by screen-reader users.
             _statusValue.Focus();
+        }
+
+        // Concise, screen-reader-friendly age phrase (cachedAtUtc is always UTC --
+        // see QrzCacheEntry.CachedAtDt) so the status line says something a user can
+        // actually judge trust from, instead of a content-free "cached" phrase.
+        private static string FormatAge(DateTime cachedAtUtc)
+        {
+            var age = DateTime.UtcNow - cachedAtUtc;
+            if (age.TotalMinutes < 1)  return "moments ago";
+            if (age.TotalHours < 1)    return $"{(int)age.TotalMinutes} min ago";
+            if (age.TotalHours < 24)   return $"{(int)age.TotalHours}h ago";
+            if (age.TotalDays < 2)     return "yesterday";
+            return $"{(int)age.TotalDays} days ago";
+        }
+
+        // QRZ returns the bare US operator-class letter (N/T/G/A/E) -- spell it out for
+        // JAWS/NVDA users rather than making them parse a single letter. Anything else
+        // (a foreign license class string, or a code not in this set) is shown as-is.
+        private static readonly Dictionary<string, string> UsLicenseClassNames =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "N", "Novice" },
+            { "T", "Technician" },
+            { "G", "General" },
+            { "A", "Advanced" },
+            { "E", "Extra" },
+        };
+
+        private static string FormatLicenseClass(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "—";
+            string name;
+            return UsLicenseClassNames.TryGetValue(raw, out name) ? name : raw;
         }
     }
 }

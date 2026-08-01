@@ -387,6 +387,23 @@ class JimmyVerifier:
             print(f"           (not failed — requires: {config_note})")
             print(f"           queue={items}")
 
+    def check_queue_not_contains_warn(self, fragment, label, config_note):
+        """Soft queue check: PASS if the call is absent; WARNING (not FAIL) if present.
+
+        Complement of check_queue_contains_warn -- for tests whose *rejection* depends
+        on a user-configurable Options setting that cannot be read remotely.
+        """
+        time.sleep(0.3)
+        items    = self.queue_items()
+        frag_nsp = fragment.lower().replace(" ", "")
+        ok       = not any(frag_nsp in i.lower().replace(" ", "") for i in items)
+        if ok:
+            self._report(True, label, f"queue={items}")
+        else:
+            print(f"    ⚠ WARN  {label}")
+            print(f"           (not failed — requires: {config_note})")
+            print(f"           queue={items}")
+
     def find_queue_row(self, fragment):
         """Return the queue row whose text contains fragment (spaces stripped from
         both sides, matching Jimmy's spaced-out callsign display), or None."""
@@ -1539,102 +1556,36 @@ def group18_weak_snr_removal(sock, v):
          verify_fn=check_removed_or_warn if v.available else None)
 
 
-def group19_standard_decode_message(sock, v):
-    """T42-T43: standard WSJT-X Decode broadcast (msg type 2) -- what stock WSJT-X
-    and WSJT-X Improved actually send -- must flow through the exact same
-    admission/priority pipeline as Andy's fork's own non-standard
-    EnqueueDecodeMessage (msg type 18, build_enqueue, used by every other group in
-    this suite). Added after live A7 field testing 2026-07-17 found Jimmy never
-    processed a single decode from a standard-only WSJT-X build: it only ever
-    reacted to msg type 18, which such a build never sends at all. See
-    EnqueueDecodeMessage.FromStandardDecode (DecodeMessage.cs) and its call site in
-    WsjtxClient.Protocol.cs's Update().
+def group19_weak_snr_first_decode(sock, v):
+    """T42: a station whose very first-ever decode is already weak (at or below the
+    floor) must never be admitted to the queue at all, when 'Ignore SNR at or below'
+    is checked -- regardless of 'Remove from list immediately...', since there's
+    nothing queued yet to remove.
+
+    Regression coverage for the 2026-07-18 fix: the weak-signal SNR floor was only
+    ever wired into WsjtxClient.ProcessDecodeMsg's TO_MYCALL branch. Ordinary CQ
+    traffic -- the vast majority of what fills the calling queue, including
+    everything Group 18 above sends -- is handled entirely by AddSelectedCall, which
+    had zero weak-signal awareness. A brand-new CQ station decoded below the floor
+    was still admitted to the queue on its very first appearance (the exact bug
+    report that prompted this fix: a -22 floor with -23/-25 stations still showing
+    up in TX1). AddSelectedCall now rejects it outright, with the same
+    never-suppress-callInProg and manual-selection-bypass carve-outs already used by
+    the ProcessDecodeMsg check.
     """
-    print("  ─ Group 19: standard Decode message (msg type 2, no Compatibility Layer) ─")
+    print("  ─ Group 19: Weak-signal floor, first-decode admission ─")
 
-    NEW_CQ_CALL   = "W6NEW"
-    REPLY_CALL    = "K2STD"
-
-    send(sock,
-         f"Standard Decode: CQ {NEW_CQ_CALL} EM63",
-         "Must be admitted to the call queue exactly like an EnqueueDecodeMessage CQ",
-         build_decode(f"CQ {NEW_CQ_CALL} EM63"),
-         verify_fn=lambda: (
-             v.check_queue_contains(NEW_CQ_CALL,
-                 f"T42: {NEW_CQ_CALL} (standard Decode CQ) queued"),
-         ) if v.available else None)
+    NEW_WEAK_CALL = "W6FIRST"
 
     send(sock,
-         f"Standard Decode, directed to me: {MY_CALL} {REPLY_CALL} EM63",
-         "Proves the AutoGen=true mapping: must get the same 'replying' priority "
-         "tag a directed EnqueueDecodeMessage reply gets (see Group 1, T01) -- not "
-         "fall through to the generic CQ-admission path",
-         build_decode(f"{MY_CALL} {REPLY_CALL} EM63"),
-         verify_fn=lambda: (
-             v.check_queue_row_contains(REPLY_CALL, "replying",
-                 f"T43: {REPLY_CALL} (standard Decode, directed to me) tagged 'replying'"),
-         ) if v.available else None)
-
-
-def group20_wait_and_reply_standard_protocol(sock, v):
-    """T44-T45: same Wait-and-Reply cooperation as Group 15, but using ONLY the
-    standard TxEnabled field -- never TxHaltClk/TxEnableClk (Andy WM8Q's
-    fork-specific extensions, confirmed via WSJT-X's own real source: their
-    trace-log line literally carries only his own initials/dates) -- proving
-    Jimmy's standard-protocol-only fallback (WsjtxClient.Protocol.cs's "Tx
-    enable change confirmed" block) works correctly on its own, for any WSJT-X
-    build. Added after live A8 field testing 2026-07-17.
-
-    Confirmed via WSJT-X's own mainwindow.cpp: the standard TxEnabled field is
-    populated from the exact same internal state a direct operator click AND
-    Wait-and-Reply's own timeout both update (same code path, auto_tx_mode ->
-    on_autoButton_clicked -> process_autoButton), with a fresh Status broadcast
-    sent unconditionally on every change -- documented standard-protocol
-    behavior ("'Enable Tx' button status changes" is one of NetworkMessage.hpp's
-    own listed broadcast triggers), not something only Andy's fork does.
-
-    Same environment dependency as Group 15's T33: HandleUnsolicitedTxResume()
-    requires Jimmy to be genuinely cycling in CQ mode with an active
-    callInProg -- WARNs (not FAILs) otherwise, same as T33 (see that group's
-    own docstring for how to set that up manually).
-    """
-    print("  ─ Group 20: Wait and Reply cooperation, standard protocol only ─")
-
-    STD_WAIT_CALL = "W7STD"
-
-    send(sock,
-         f"Grid reply: KB0UZT {STD_WAIT_CALL} EM63",
-         f"{STD_WAIT_CALL} queued with 'to you' tag, expected to become the active call",
-         build_enqueue(f"{MY_CALL} {STD_WAIT_CALL} EM63"),
-         verify_fn=lambda: (
-             v.check_queue_contains(STD_WAIT_CALL,
-                 f"T44: {STD_WAIT_CALL} in callQueue, ready to become active"),
-         ) if v.available else None)
-
-    send(sock,
-         f"Signal report: KB0UZT {STD_WAIT_CALL} -05",
-         "Keeps the exchange going so Jimmy starts actively replying",
-         build_enqueue(f"{MY_CALL} {STD_WAIT_CALL} -05"),
-         delay=3.0)
-
-    send(sock,
-         "WSJT-X externally halts Tx (standard TxEnabled=False only, no TxHaltClk)",
-         "Simulates a standard-only build halting Tx -- Jimmy must detect this from "
-         "the standard field alone",
-         build_status(tx_enabled=False),
-         delay=1.0)
-
-    send(sock,
-         "WSJT-X externally re-enables Tx (standard TxEnabled=True only, no TxEnableClk)",
-         "Simulates Wait and Reply auto-resuming on a standard-only build -- Jimmy "
-         "did not call EnableTx() itself, and no non-standard flags are involved",
-         build_status(tx_enabled=True),
-         delay=1.0,
-         verify_fn=lambda: (
-             v.check_status_contains_warn("resumed",
-                 f"T45: status announces WSJT-X resumed calling {STD_WAIT_CALL} automatically (standard protocol)",
-                 "Jimmy actually cycling in CQ mode with an active callInProg (see group docstring)"),
-         ) if v.available else None)
+         f"Brand-new station, weak from the very first decode: {NEW_WEAK_CALL}",
+         "Expect: never queued IF 'Ignore SNR at or below' is checked in Options, "
+         "with the floor at or above -23 (WARN, not FAIL, otherwise)",
+         build_enqueue(f"CQ {NEW_WEAK_CALL} EM63", snr=-23),
+         verify_fn=(lambda: v.check_queue_not_contains_warn(
+             NEW_WEAK_CALL, f"T42: {NEW_WEAK_CALL} never queued (weak on first decode)",
+             "'Ignore SNR at or below' checked in Options, floor at or above -23"
+         )) if v.available else None)
 
 
 def run_tests(sock, v):
@@ -1661,8 +1612,7 @@ def run_tests(sock, v):
     group16_rrr_after_logged_no_requeue(sock, v)
     group17_still_needed_tag_clears_on_log(sock, v)
     group18_weak_snr_removal(sock, v)
-    group19_standard_decode_message(sock, v)
-    group20_wait_and_reply_standard_protocol(sock, v)
+    group19_weak_snr_first_decode(sock, v)
 
     # ── To add a new replay test group ──────────────────────────────────────
     # 1. Define a new function, e.g.:

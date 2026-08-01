@@ -44,6 +44,9 @@ For every public Jimmy release, even a small beta or installer-only fix:
 - Verify that MajorUpgrade will upgrade the previous public release.
 - Copy the fresh MSI to C:\claude\Jimmy\Jimmy.msi.
 - Verify SHA-256 before upload.
+- Zip the MSI (Jimmy.msi.zip) and upload it as an additional GitHub release asset
+  alongside the raw MSI — the update page (blindsea.com/jimmy) prefers the zip since
+  browsers/SmartScreen flag a bare .msi download more aggressively.
 
 AssemblyVersion may remain frozen unless project policy changes.
 

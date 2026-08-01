@@ -40,6 +40,7 @@ namespace WSJTX_Controller
                     else if (_wc.IsPotaCall(d)) cat = WsjtxClient.CallCategory.POTA;
                     else if (IsSotaCall(d)) cat = WsjtxClient.CallCategory.SOTA;
                     else if (IsHrcWasNeeded(d))       cat = WsjtxClient.CallCategory.WAS_NEEDED;
+                    else if (IsHrcWasUnconfirmed(d))  cat = WsjtxClient.CallCategory.WAS_UNCONFIRMED;
                     else if (IsHrcDxccUnconfirmed(d)) cat = WsjtxClient.CallCategory.DXCC_UNCONFIRMED;
                     else if (IsHrcZoneNeeded(d))      cat = WsjtxClient.CallCategory.ZONE_NEEDED;
                     else
@@ -120,6 +121,22 @@ namespace WSJTX_Controller
             return !string.IsNullOrEmpty(state) && _wc.hrcNeededStates.Contains(state);
         }
 
+        public bool IsHrcWasUnconfirmed(EnqueueDecodeMessage d)
+        {
+            if (_wc.hrcUnconfirmedStates.Count == 0 || _wc.activeAwardTags.ContainsKey("WAS")) return false;
+
+            string qrzState = null;
+            string call = d.DeCall();
+            if (!string.IsNullOrEmpty(call) && _wc.lookupManager != null && _wc.lookupManager.Enabled)
+            {
+                var rec = _wc.lookupManager.Build(call);
+                qrzState = rec.State;
+            }
+            string grid = WsjtxMessage.Grid(d.Message);
+            string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
+            return !string.IsNullOrEmpty(state) && _wc.hrcUnconfirmedStates.Contains(state);
+        }
+
         public bool IsHrcDxccUnconfirmed(EnqueueDecodeMessage d)
         {
             if (_wc.hrcUnconfirmedDxcc.Count == 0 || _wc.activeAwardTags.ContainsKey("DXCC")) return false;
@@ -187,6 +204,7 @@ namespace WSJTX_Controller
                 case WsjtxClient.CallCategory.POTA:                return "POTA";
                 case WsjtxClient.CallCategory.SOTA:                return "SOTA";
                 case WsjtxClient.CallCategory.WAS_NEEDED:          return "WAS Needed";
+                case WsjtxClient.CallCategory.WAS_UNCONFIRMED:     return "WAS Unconf";
                 case WsjtxClient.CallCategory.DXCC_UNCONFIRMED:    return "DXCC Unconf";
                 case WsjtxClient.CallCategory.ZONE_NEEDED:         return "Zone Needed";
                 case WsjtxClient.CallCategory.STILL_NEEDED:        return AwardDisplayName(d) + " Needed";

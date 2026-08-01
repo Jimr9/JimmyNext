@@ -8,11 +8,16 @@ using System.Threading.Tasks;
 
 namespace WSJTX_Controller
 {
-    // Offline US-state lookup from the FCC's own public amateur license database --
-    // the authoritative source QRZ's own US records ultimately derive from anyway.
-    // Free, no subscription/account, no per-call network cost once downloaded.
-    // Only ever contributes State: nothing else about a callsign (name, grid, QSL
-    // manager, etc.) comes from this source, unlike QRZ.
+    // Offline US-state (and fallback name) lookup from the FCC's own public amateur
+    // license database -- the authoritative source QRZ's own US records ultimately
+    // derive from anyway. Free, no subscription/account, no per-call network cost
+    // once downloaded. State is always taken from here when available (authoritative,
+    // overrides any other source). Name uses whichever contributor's name has more
+    // words: QRZ's own profile name generally wins, but QRZ's "fname" field sometimes
+    // already jams a first name + middle initial together while the separate
+    // last-name field is left blank -- in that case FCC's fuller first+MI+last record
+    // supplements it. Nothing else about a callsign (grid, QSL manager, etc.) comes
+    // from this source.
     //
     // Downloads https://data.fcc.gov/download/pub/uls/complete/l_amat.zip -- the
     // FCC's full weekly amateur-license snapshot (~170MB, regenerated every Sunday).
@@ -35,14 +40,21 @@ namespace WSJTX_Controller
     // by keeping only the row with the highest unique_system_identifier (field
     // index 1) per callsign; the FCC assigns these monotonically, so the highest
     // one for a given callsign is confirmed (spot-checked against a real duplicate,
-    // "AA0A") to be the current holder, not a stale prior one.
+    // "AA0A") to be the current holder, not a stale prior one. First name (index 8),
+    // middle initial (index 9), and last name (index 10) verified the same way
+    // against the same real "AA0A"/"W1AW" rows (see JimmyTests) -- club/club-style
+    // licenses (e.g. W1AW) leave these three fields blank, individual licenses
+    // populate them.
     public class FccUlsProvider : ILookupProvider
     {
         private const string DownloadUrl = "https://data.fcc.gov/download/pub/uls/complete/l_amat.zip";
-        private const int CallSignFieldIndex = 4;
-        private const int StateFieldIndex    = 17;
-        private const int UidFieldIndex      = 1;
-        private const int MinFieldCount      = 18;
+        private const int CallSignFieldIndex  = 4;
+        private const int FirstNameFieldIndex = 8;
+        private const int MiFieldIndex        = 9;
+        private const int LastNameFieldIndex  = 10;
+        private const int StateFieldIndex     = 17;
+        private const int UidFieldIndex       = 1;
+        private const int MinFieldCount       = 18;
 
         // Real downloaded files (2026-07-08) parsed to ~1.58 million unique
         // callsigns -- well above this floor, which only needs to catch a badly
@@ -77,6 +89,12 @@ namespace WSJTX_Controller
 
         public void Configure(bool enabled) => IsEnabled = enabled;
 
+        // Set false when an existing local fcc_uls.db predates the "name" column
+        // (built by an older Jimmy version) -- NeedsRefresh() then forces an
+        // immediate full rebuild instead of waiting out the normal refresh cadence,
+        // so upgrading users get name data without a manual cache clear.
+        private bool _schemaCurrent;
+
         public void Load()
         {
             LastUpdate = ReadMeta();
@@ -92,6 +110,7 @@ namespace WSJTX_Controller
                         cmd.CommandText = "SELECT COUNT(*) FROM fcc_amat;";
                         RecordCount = Convert.ToInt32(cmd.ExecuteScalar());
                     }
+                    _schemaCurrent = HasNameColumn();
                 }
             }
             catch (Exception ex)
@@ -100,8 +119,26 @@ namespace WSJTX_Controller
             }
         }
 
+        // PRAGMA table_info returns one row per existing column, each row's own
+        // "name" field holding that column's name -- this checks whether one of
+        // those rows describes a column literally called "name".
+        private bool HasNameColumn()
+        {
+            using (var cmd = _conn.CreateCommand())
+            {
+                cmd.CommandText = "PRAGMA table_info(fcc_amat);";
+                using (var r = cmd.ExecuteReader())
+                {
+                    while (r.Read())
+                        if (string.Equals(Convert.ToString(r["name"]), "name", StringComparison.OrdinalIgnoreCase))
+                            return true;
+                }
+            }
+            return false;
+        }
+
         public bool NeedsRefresh(int days) =>
-            !File.Exists(_dbPath) || (DateTime.UtcNow - LastUpdate).TotalDays >= days;
+            !File.Exists(_dbPath) || !_schemaCurrent || (DateTime.UtcNow - LastUpdate).TotalDays >= days;
 
         // Downloads the full weekly file, parses EN.dat directly out of the zip
         // (never extracted to disk as loose files), builds a fresh SQLite table in
@@ -133,7 +170,7 @@ namespace WSJTX_Controller
                 }
                 File.WriteAllBytes(tmpZip, bytes);
 
-                var best = new Dictionary<string, (long Uid, string State)>(StringComparer.OrdinalIgnoreCase);
+                var best = new Dictionary<string, (long Uid, string State, string Name)>(StringComparer.OrdinalIgnoreCase);
                 try
                 {
                     using (var zip = ZipFile.OpenRead(tmpZip))
@@ -187,19 +224,20 @@ namespace WSJTX_Controller
                     conn.Open();
                     using (var cmd = conn.CreateCommand())
                     {
-                        cmd.CommandText = "CREATE TABLE fcc_amat (callsign TEXT PRIMARY KEY, state TEXT);";
+                        cmd.CommandText = "CREATE TABLE fcc_amat (callsign TEXT PRIMARY KEY, state TEXT, name TEXT);";
                         cmd.ExecuteNonQuery();
                     }
                     using (var tx = conn.BeginTransaction())
                     {
                         using (var cmd = conn.CreateCommand())
                         {
-                            cmd.CommandText = "INSERT INTO fcc_amat (callsign, state) VALUES (@c, @s);";
+                            cmd.CommandText = "INSERT INTO fcc_amat (callsign, state, name) VALUES (@c, @s, @n);";
                             foreach (var kv in best)
                             {
                                 cmd.Parameters.Clear();
                                 cmd.Parameters.AddWithValue("@c", kv.Key);
                                 cmd.Parameters.AddWithValue("@s", kv.Value.State);
+                                cmd.Parameters.AddWithValue("@n", (object)kv.Value.Name ?? DBNull.Value);
                                 cmd.ExecuteNonQuery();
                             }
                         }
@@ -215,6 +253,7 @@ namespace WSJTX_Controller
                     File.Copy(tmpDb, _dbPath, overwrite: true);
                     _conn = new SQLiteConnection($"Data Source={_dbPath};");
                     _conn.Open();
+                    _schemaCurrent = true;
                 }
 
                 RecordCount = best.Count;
@@ -247,7 +286,7 @@ namespace WSJTX_Controller
         // Public (and the field-index constants above it) so this can be verified
         // directly against real sample EN.dat lines in JimmyTests, instead of only
         // trusting that it compiles.
-        public static void ParseLine(string line, Dictionary<string, (long Uid, string State)> best)
+        public static void ParseLine(string line, Dictionary<string, (long Uid, string State, string Name)> best)
         {
             if (string.IsNullOrEmpty(line) || !line.StartsWith("EN|", StringComparison.Ordinal)) return;
             var f = line.Split('|');
@@ -260,38 +299,107 @@ namespace WSJTX_Controller
             long uid;
             if (!long.TryParse(f[UidFieldIndex], out uid)) return;
 
-            (long Uid, string State) existing;
+            string name = CombineName(f[FirstNameFieldIndex].Trim(), f[MiFieldIndex].Trim(), f[LastNameFieldIndex].Trim());
+
+            (long Uid, string State, string Name) existing;
             if (!best.TryGetValue(call, out existing) || uid > existing.Uid)
-                best[call] = (uid, state);
+                best[call] = (uid, state, name);
+        }
+
+        // Club/club-style licenses (e.g. W1AW) leave first/mi/last all blank --
+        // returns null rather than an empty string so downstream "is there a name"
+        // checks (string.IsNullOrEmpty) behave the same as QRZ's CombineName.
+        private static string CombineName(string first, string mi, string last)
+        {
+            string firstPart = string.IsNullOrEmpty(mi) ? first : $"{first} {mi}";
+            if (string.IsNullOrEmpty(firstPart)) return string.IsNullOrEmpty(last) ? null : last;
+            if (string.IsNullOrEmpty(last)) return firstPart;
+            return $"{firstPart} {last}";
         }
 
         // Synchronous, offline (only reads the already-downloaded local table) --
-        // safe for the per-decode hot path.
-        public string Lookup(string call)
+        // safe for the per-decode hot path. Returns State only, for the one external
+        // caller (Controller's spot-country display) that predates Name support.
+        public string Lookup(string call) => LookupStateAndName(call).State;
+
+        private (string State, string Name) LookupStateAndName(string call)
         {
-            if (string.IsNullOrEmpty(call)) return null;
+            if (string.IsNullOrEmpty(call)) return (null, null);
             lock (_dbLock)
             {
-                if (_conn == null) return null;
-                using (var cmd = _conn.CreateCommand())
+                if (_conn == null) return (null, null);
+                try
                 {
-                    cmd.CommandText = "SELECT state FROM fcc_amat WHERE callsign = @c;";
-                    cmd.Parameters.AddWithValue("@c", call.ToUpperInvariant());
-                    return cmd.ExecuteScalar() as string;
+                    using (var cmd = _conn.CreateCommand())
+                    {
+                        // An upgrading user's on-disk fcc_uls.db may still be the old
+                        // (pre-Name) 2-column schema until the background rebuild
+                        // NeedsRefresh() triggered finishes -- querying "name" against
+                        // that table would throw on every single call. _schemaCurrent
+                        // reflects what the currently-open connection actually has.
+                        cmd.CommandText = _schemaCurrent
+                            ? "SELECT state, name FROM fcc_amat WHERE callsign = @c;"
+                            : "SELECT state FROM fcc_amat WHERE callsign = @c;";
+                        cmd.Parameters.AddWithValue("@c", call.ToUpperInvariant());
+                        using (var r = cmd.ExecuteReader())
+                        {
+                            if (!r.Read()) return (null, null);
+                            string state = r.IsDBNull(0) ? null : r.GetString(0);
+                            string name  = (_schemaCurrent && !r.IsDBNull(1)) ? r.GetString(1) : null;
+                            return (state, name);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Never let a lookup-provider hiccup crash the per-decode hot path
+                    // (WsjtxClient.Update -> AwardTagger -> Build -> Contribute).
+                    LastError = "Lookup error: " + ex.Message;
+                    return (null, null);
                 }
             }
         }
 
         public void Contribute(LookupRecord record, string call)
         {
-            if (!string.IsNullOrEmpty(record.State)) return;
-            var state = Lookup(call);
+            var (state, name) = LookupStateAndName(call);
+            bool contributed = false;
+
+            // FCC's registered state is authoritative for a US callsign -- always
+            // use it when available, regardless of what an earlier provider in the
+            // merge order already set.
             if (!string.IsNullOrEmpty(state))
             {
                 record.State = state;
-                record.Sources.Add(SourceName);
+                contributed = true;
             }
+
+            if (ShouldPreferName(name, record.Name))
+            {
+                record.Name = name;
+                contributed = true;
+            }
+
+            if (contributed) record.Sources.Add(SourceName);
         }
+
+        // Prefer whichever contributor's name has more parts to it. QRZ's own
+        // "fname" field sometimes already jams a first name + middle initial
+        // together (e.g. "RICHARD L") while its separate last-name field is left
+        // blank on many profiles -- taking QRZ's 2-word result as "already
+        // complete" would permanently hide FCC's fuller "RICHARD L DILLON" record.
+        // FCC's fields are always first+MI+last in a consistent order, so a higher
+        // word count from FCC reliably means a more complete name, not a different
+        // one. Public so this can be tested directly, same as ParseLine/LooksIncomplete.
+        public static bool ShouldPreferName(string candidateName, string existingName)
+        {
+            if (string.IsNullOrEmpty(candidateName)) return false;
+            if (string.IsNullOrEmpty(existingName)) return true;
+            return WordCount(candidateName) > WordCount(existingName);
+        }
+
+        private static int WordCount(string s) =>
+            s.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length;
 
         private DateTime ReadMeta()
         {

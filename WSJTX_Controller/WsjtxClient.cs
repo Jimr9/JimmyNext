@@ -399,9 +399,10 @@ namespace WSJTX_Controller
             SOTA,                // 7 — DEFAULT priority + IsSotaCall
             ALWAYS_WANTED,       // 8 — matches user-defined wanted callsign list
             WAS_NEEDED,          // 9 — US state needed for WAS award (HRC database)
-            DXCC_UNCONFIRMED,    // 10 — DXCC entity worked but unconfirmed (HRC database)
-            ZONE_NEEDED,         // 11 — CQ zone needed for WAZ award (HRC database)
-            STILL_NEEDED,        // 12 — matches the Rule Definition selected in the Still Need tab
+            WAS_UNCONFIRMED,     // 10 — US state worked but unconfirmed (HRC database)
+            DXCC_UNCONFIRMED,    // 11 — DXCC entity worked but unconfirmed (HRC database)
+            ZONE_NEEDED,         // 12 — CQ zone needed for WAZ award (HRC database)
+            STILL_NEEDED,        // 13 — matches the Rule Definition selected in the Still Need tab
         }
 
         public enum RankMethods
@@ -436,9 +437,10 @@ namespace WSJTX_Controller
 
         // HRC database caches — populated from the local Ham Radio Center database at startup,
         // after each import, and after each band change.  All lookups are in-memory.
-        public HashSet<string> hrcNeededStates    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        public HashSet<int>    hrcUnconfirmedDxcc = new HashSet<int>();
-        public HashSet<int>    hrcNeededZones     = new HashSet<int>();
+        public HashSet<string> hrcNeededStates      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> hrcUnconfirmedStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        public HashSet<int>    hrcUnconfirmedDxcc   = new HashSet<int>();
+        public HashSet<int>    hrcNeededZones       = new HashSet<int>();
 
         // One entry per Rule Definition currently checked for live tagging in the
         // Logbook window's Still Need tab (see Controller.RefreshStillNeedCache()).
@@ -3609,7 +3611,7 @@ namespace WSJTX_Controller
         // exact tag text since several different awards can be checked/matched at once. Feeds
         // the periodic status summary so it names which award(s) have a station waiting, not
         // just a bare count -- mirrors SnapshotPriorityCount's visible-vs-all fallback, but
-        // keys on Category + CategoryTag() instead of Priority, since these four categories
+        // keys on Category + CategoryTag() instead of Priority, since these five categories
         // are only ever assigned in DeriveCategory()'s default case (Priority itself doesn't
         // distinguish them -- see DeriveCategory()'s comment on Category being separate from
         // Priority). Reuses CategoryTag() rather than a separate naming scheme so the status
@@ -3625,7 +3627,8 @@ namespace WSJTX_Controller
                 if (StringComparer.OrdinalIgnoreCase.Equals(call, callInProg)) continue;
                 EnqueueDecodeMessage d;
                 if (!callDict.TryGetValue(call, out d)) continue;
-                if (d.Category != CallCategory.WAS_NEEDED && d.Category != CallCategory.DXCC_UNCONFIRMED &&
+                if (d.Category != CallCategory.WAS_NEEDED && d.Category != CallCategory.WAS_UNCONFIRMED &&
+                    d.Category != CallCategory.DXCC_UNCONFIRMED &&
                     d.Category != CallCategory.ZONE_NEEDED && d.Category != CallCategory.STILL_NEEDED) continue;
 
                 string tag = _awardTagger.CategoryTag(d);

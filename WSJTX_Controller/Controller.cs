@@ -61,6 +61,7 @@ namespace WSJTX_Controller
         public bool keepTransmitListDuringTx = false;
         public bool keepListPositionDuringRefresh = false;
         public bool moveFocusToStatusOnCallSelect = false;
+        public bool checkForUpdatesOnStartup = false;
 
         // Sound settings: enabled flags and file paths for each sound event
         // CallAdded/CallingMe/Logged enabled state is controlled by existing checkboxes
@@ -556,6 +557,7 @@ namespace WSJTX_Controller
                 keepTransmitListDuringTx = iniFile.Read("keepTransmitListDuringTx") == "True";
                 keepListPositionDuringRefresh = iniFile.Read("keepListPositionDuringRefresh") == "True";
                 moveFocusToStatusOnCallSelect = iniFile.Read("moveFocusToStatusOnCallSelect") == "True";
+                checkForUpdatesOnStartup = iniFile.Read("checkForUpdatesOnStartup") == "True";
 
                 // Sound settings: migrate old enabled keys for backward compat
                 // Enabled state for CallAdded/CallingMe/Logged already read above from playCallAdded/playMyCall/playLogged
@@ -881,6 +883,72 @@ namespace WSJTX_Controller
                 // same pattern used on every routine status update.
                 SendKeys.Send("{UP}");
             }));
+
+            if (checkForUpdatesOnStartup)
+            {
+                _ = CheckForUpdateOnStartupAsync();
+            }
+        }
+
+        // Fire-and-forget from Form_Load: runs entirely on a background thread until it
+        // has something to show, then hops back to the UI thread via BeginInvoke. Silent
+        // on any failure (network down, GitHub rate limit, etc.) -- see UpdateChecker.
+        private async Task CheckForUpdateOnStartupAsync()
+        {
+            string currentVersion = Assembly.GetExecutingAssembly()
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+                ?.InformationalVersion ?? string.Empty;
+
+            UpdateInfo info = await UpdateChecker.CheckForNewerVersionAsync(currentVersion).ConfigureAwait(false);
+            if (info == null) return;
+
+            BeginInvoke(new Action(() => OfferUpdate(info, currentVersion)));
+        }
+
+        private void OfferUpdate(UpdateInfo info, string currentVersion)
+        {
+            string releaseNote = info.Published.HasValue
+                ? $" (released {info.Published.Value.ToLocalTime():MMMM d, yyyy})"
+                : "";
+            var result = MessageBox.Show(this,
+                $"{friendlyName} {info.Version} is available{releaseNote}. You have {currentVersion}." +
+                $"{nl}{nl}Download and install it now? {friendlyName} will close to complete the install.",
+                "Update Available", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+
+            if (result != DialogResult.Yes) return;
+
+            _ = DownloadAndInstallUpdateAsync(info);
+        }
+
+        private async Task DownloadAndInstallUpdateAsync(UpdateInfo info)
+        {
+            string msiPath;
+            try
+            {
+                msiPath = await UpdateChecker.DownloadToTempAsync(info.MsiUrl, info.MsiName).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                BeginInvoke(new Action(() =>
+                    MessageBox.Show(this, $"Could not download the update:{nl}{ex.Message}", "Update Failed",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error)));
+                return;
+            }
+
+            BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    System.Diagnostics.Process.Start(msiPath);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"Could not launch the installer:{nl}{ex.Message}", "Update Failed",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                Application.Exit();
+            }));
         }
 
         private void Controller_FormClosing(object sender, FormClosingEventArgs e)
@@ -975,6 +1043,7 @@ namespace WSJTX_Controller
                 iniFile.Write("keepTransmitListDuringTx", keepTransmitListDuringTx.ToString());
                 iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
                 iniFile.Write("moveFocusToStatusOnCallSelect", moveFocusToStatusOnCallSelect.ToString());
+                iniFile.Write("checkForUpdatesOnStartup", checkForUpdatesOnStartup.ToString());
                 // Sound settings
                 iniFile.Write("soundFile_CallAdded",        soundFile_CallAdded   ?? "");
                 iniFile.Write("soundFile_CallingMe",        soundFile_CallingMe   ?? "");
@@ -1656,12 +1725,14 @@ namespace WSJTX_Controller
                 using (var db = new LogbookDb())
                 {
                     HashSet<string> neededStates;
+                    HashSet<string> unconfirmedStates;
                     HashSet<int>    unconfirmedDxcc;
                     HashSet<int>    neededZones;
-                    db.LoadHrcCache(out neededStates, out unconfirmedDxcc, out neededZones);
-                    wsjtxClient.hrcNeededStates    = neededStates;
-                    wsjtxClient.hrcUnconfirmedDxcc = unconfirmedDxcc;
-                    wsjtxClient.hrcNeededZones     = neededZones;
+                    db.LoadHrcCache(out neededStates, out unconfirmedStates, out unconfirmedDxcc, out neededZones);
+                    wsjtxClient.hrcNeededStates      = neededStates;
+                    wsjtxClient.hrcUnconfirmedStates = unconfirmedStates;
+                    wsjtxClient.hrcUnconfirmedDxcc   = unconfirmedDxcc;
+                    wsjtxClient.hrcNeededZones       = neededZones;
                 }
             }
             catch { }
@@ -1824,15 +1895,46 @@ namespace WSJTX_Controller
         public void LookupFocusedCall()
         {
             string call = null;
-            if (callListBox.Visible)
+
+            // Whichever list currently has keyboard focus wins, so the lookup always
+            // matches what's actually selected -- works the same in every list.
+            if (callListBox.Visible && callListBox.Focused)
             {
+                int idx = callListBox.SelectedIndex;
+                if (idx >= 0)
+                    call = wsjtxClient.GetCallAtIndex(wsjtxClient.MapNormalListIndex(idx));
+            }
+            else if (advTx1ListBox.Visible && advTx1ListBox.Focused)
+            {
+                int idx = advTx1ListBox.SelectedIndex;
+                if (idx >= 0) call = wsjtxClient.GetCallAtTx1Index(idx);
+            }
+            else if (advTx2ListBox.Visible && advTx2ListBox.Focused)
+            {
+                int idx = advTx2ListBox.SelectedIndex;
+                if (idx >= 0) call = wsjtxClient.GetCallAtTx2Index(idx);
+            }
+            else if (advRawListBox.Visible && advRawListBox.Focused)
+            {
+                int idx = advRawListBox.SelectedIndex;
+                if (idx >= 0) call = wsjtxClient.GetCallAtRawIndex(idx);
+            }
+            else if (logListBox.Visible && logListBox.Focused)
+            {
+                int idx = logListBox.SelectedIndex;
+                if (idx >= 0 && idx < _loggedKeys.Count) call = _loggedKeys[idx];
+            }
+            else if (callListBox.Visible)
+            {
+                // Nothing focused (e.g. hotkey pressed from main status) -- fall back to
+                // the normal-layout "Stations calling" selection, as before.
                 int idx = callListBox.SelectedIndex;
                 if (idx >= 0)
                     call = wsjtxClient.GetCallAtIndex(wsjtxClient.MapNormalListIndex(idx));
             }
             else
             {
-                // Advanced layout: try TX1 then TX2 selected index
+                // Advanced layout, nothing focused: try TX1 then TX2 selected index.
                 int idx = advTx1ListBox.SelectedIndex;
                 if (idx >= 0) call = wsjtxClient.GetCallAtTx1Index(idx);
                 if (call == null)
@@ -3233,6 +3335,7 @@ namespace WSJTX_Controller
             WsjtxClient.CallCategory.WANTED_CQ,
             WsjtxClient.CallCategory.ALWAYS_WANTED,
             WsjtxClient.CallCategory.WAS_NEEDED,
+            WsjtxClient.CallCategory.WAS_UNCONFIRMED,
             WsjtxClient.CallCategory.DXCC_UNCONFIRMED,
             WsjtxClient.CallCategory.ZONE_NEEDED,
             WsjtxClient.CallCategory.STILL_NEEDED,

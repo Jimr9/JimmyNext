@@ -139,6 +139,7 @@ static class JimmyTests
         AdifImporterLiveLoggedStateFallbackTests();
         DxSpotWatcherIsEvenPeriodTests();
         FccUlsProviderParseLineTests();
+        FccUlsProviderShouldPreferNameTests();
         FccUlsProviderLooksIncompleteTests();
         ClassificationEngineTests();
         GeoMathTests();
@@ -388,7 +389,7 @@ static class JimmyTests
     }
 
     // ── HRC filter enum values ────────────────────────────────────────────────
-    // Verify the three new CallCategory values have the expected integer assignments.
+    // Verify the four new CallCategory values have the expected integer assignments.
     // If any of these fail, DeriveCategory / AddSelectedCall routing is broken.
     static void HrcEnumTests()
     {
@@ -398,8 +399,9 @@ static class JimmyTests
         Check("ALWAYS_WANTED == 8",       (int)WsjtxClient.CallCategory.ALWAYS_WANTED       == 8,  true);
         // New HRC values
         Check("WAS_NEEDED == 9",          (int)WsjtxClient.CallCategory.WAS_NEEDED          == 9,  true);
-        Check("DXCC_UNCONFIRMED == 10",   (int)WsjtxClient.CallCategory.DXCC_UNCONFIRMED    == 10, true);
-        Check("ZONE_NEEDED == 11",        (int)WsjtxClient.CallCategory.ZONE_NEEDED         == 11, true);
+        Check("WAS_UNCONFIRMED == 10",    (int)WsjtxClient.CallCategory.WAS_UNCONFIRMED     == 10, true);
+        Check("DXCC_UNCONFIRMED == 11",   (int)WsjtxClient.CallCategory.DXCC_UNCONFIRMED    == 11, true);
+        Check("ZONE_NEEDED == 12",        (int)WsjtxClient.CallCategory.ZONE_NEEDED         == 12, true);
     }
 
     // ── HRC cache SQL logic ───────────────────────────────────────────────────
@@ -415,9 +417,10 @@ static class JimmyTests
         {
             using (var db = new LogbookDb(tmpDb))
             {
-                // TX confirmed via LoTW → TX must NOT be in neededStates
+                // TX confirmed via LoTW → TX must NOT be in neededStates or unconfirmedStates
                 InsertQso(db, "W5TX",   "TX", dxcc: 100, zone: 4, lotwRcvd: "Y");
-                // CA worked but unconfirmed → CA MUST be in neededStates
+                // CA worked but unconfirmed → CA MUST be in unconfirmedStates, NOT neededStates
+                // (never-worked and worked-unconfirmed are now a WAS/DXCC-parity split, not one bucket)
                 InsertQso(db, "W6CA",   "CA", dxcc: 100, zone: 3);
                 // WY: never worked at all → WY MUST be in neededStates (no QSO inserted)
 
@@ -434,19 +437,33 @@ static class JimmyTests
                 // Zone 20: never worked → zone 20 MUST be in neededZones
 
                 HashSet<string> neededStates;
+                HashSet<string> unconfirmedStates;
                 HashSet<int>    unconfirmedDxcc;
                 HashSet<int>    neededZones;
-                db.LoadHrcCache(out neededStates, out unconfirmedDxcc, out neededZones);
+                db.LoadHrcCache(out neededStates, out unconfirmedStates, out unconfirmedDxcc, out neededZones);
 
                 // ── States ──────────────────────────────────────────────────
-                Check("neededStates: TX confirmed → NOT in set",   neededStates.Contains("TX"), false);
-                Check("neededStates: CA unconfirmed → in set",     neededStates.Contains("CA"), true);
-                Check("neededStates: WY (no QSO) → in set",        neededStates.Contains("WY"), true);
-                Check("neededStates: count ≤ 50",                  neededStates.Count <= 50,    true);
-                // Only TX was confirmed, so 49 states should be needed
-                Check("neededStates: count == 49",                 neededStates.Count == 49,    true);
+                // Worked states in this fixture: TX (confirmed), CA (unconfirmed),
+                // and CO (unconfirmed, via the W0TST zone-5 QSO below) — all three
+                // move out of neededStates now that it means "never worked".
+                Check("neededStates: TX confirmed → NOT in set",     neededStates.Contains("TX"), false);
+                Check("neededStates: CA worked/unconfirmed → NOT in set (moved to unconfirmedStates)",
+                      neededStates.Contains("CA"), false);
+                Check("neededStates: CO worked/unconfirmed → NOT in set (moved to unconfirmedStates)",
+                      neededStates.Contains("CO"), false);
+                Check("neededStates: WY (no QSO) → in set",          neededStates.Contains("WY"), true);
+                Check("neededStates: count ≤ 50",                    neededStates.Count <= 50,    true);
+                // TX, CA, and CO are all no longer "never worked", so 47 states remain needed
+                Check("neededStates: count == 47",                   neededStates.Count == 47,    true);
                 // DC must never appear — it is not a state
-                Check("neededStates: DC never present",            neededStates.Contains("DC"), false);
+                Check("neededStates: DC never present",              neededStates.Contains("DC"), false);
+
+                // ── States unconfirmed ────────────────────────────────────────
+                Check("unconfirmedStates: TX confirmed → NOT in set", unconfirmedStates.Contains("TX"), false);
+                Check("unconfirmedStates: CA worked/unconfirmed → in set", unconfirmedStates.Contains("CA"), true);
+                Check("unconfirmedStates: CO worked/unconfirmed → in set", unconfirmedStates.Contains("CO"), true);
+                Check("unconfirmedStates: WY never worked → NOT in set",   unconfirmedStates.Contains("WY"), false);
+                Check("unconfirmedStates: count == 2",                     unconfirmedStates.Count == 2,     true);
 
                 // ── DXCC unconfirmed ─────────────────────────────────────────
                 // DXCC 100 has a confirmed QSO → NOT unconfirmed
@@ -1561,46 +1578,84 @@ static class JimmyTests
     // Uses REAL sample rows copied verbatim from an actual downloaded EN.dat
     // (2026-07-08), not synthetic data -- confirms the empirically-verified field
     // positions (callsign index 4, state index 17, unique_system_identifier index
-    // 1) still parse correctly, and that dedup keeps the highest-uid row per
-    // callsign (the current holder) rather than an old/reissued one.
+    // 1, first/mi/last name indices 8/9/10) still parse correctly, and that dedup
+    // keeps the highest-uid row per callsign (the current holder) rather than an
+    // old/reissued one.
     static void FccUlsProviderParseLineTests()
     {
         Console.WriteLine("\n── FccUlsProvider.ParseLine ──");
 
         // W1AW = ARRL HQ, Newington, CT -- a stable, well-known real-world answer.
+        // Club licenses leave first/mi/last name all blank -- Name must be null,
+        // not an empty string pieced together from blanks.
         const string w1aw = "EN|780866|||W1AW|L|L00306106|ARRL HQ OPERATORS CLUB||||||||225 MAIN ST|NEWINGTON|CT|06111|| David A Minster|000|0004511143|B||||||";
-        var d1 = new Dictionary<string, (long Uid, string State)>(StringComparer.OrdinalIgnoreCase);
+        var d1 = new Dictionary<string, (long Uid, string State, string Name)>(StringComparer.OrdinalIgnoreCase);
         FccUlsProvider.ParseLine(w1aw, d1);
         Check("W1AW parses to CT", d1.TryGetValue("W1AW", out var w1awEntry) && w1awEntry.State == "CT", true);
+        Check("W1AW (club license) has no personal name", w1awEntry.Name == null, true);
 
         // AA0A: two real rows for the same callsign -- an older license (McCarthy,
-        // MO, lower uid) and the current one (Rosebrook, SD, higher uid). Confirmed
-        // duplicate pair copied verbatim from a real downloaded file.
+        // MO, lower uid, with a middle initial) and the current one (Rosebrook, SD,
+        // higher uid, no middle initial). Confirmed duplicate pair copied verbatim
+        // from a real downloaded file.
         const string aa0aOld = "EN|215000|||AA0A|L|L00209566|MC CARTHY, DENNIS J|DENNIS|J|MC CARTHY|||||6438 Bishops Pl|SAINT LOUIS|MO|631093371|||000|0002274249|I||||||";
         const string aa0aNew = "EN|4280373|||AA0A|L|L02306961|Rosebrook, John|John||Rosebrook|||||3916 N. Potsdam Ave. #4555|Sioux Falls|SD|57104|||000|0028942159|I||||||";
 
+        // The old row alone (not shadowed by the higher-uid new row) exercises the
+        // middle-initial-present combining path.
+        var dOldAlone = new Dictionary<string, (long Uid, string State, string Name)>(StringComparer.OrdinalIgnoreCase);
+        FccUlsProvider.ParseLine(aa0aOld, dOldAlone);
+        Check("AA0A old row: name combines first + MI + last",
+              dOldAlone.TryGetValue("AA0A", out var aa0aOldEntry) && aa0aOldEntry.Name == "DENNIS J MC CARTHY", true);
+
         // Order 1: old row first, then new -- higher uid must win.
-        var d2 = new Dictionary<string, (long Uid, string State)>(StringComparer.OrdinalIgnoreCase);
+        var d2 = new Dictionary<string, (long Uid, string State, string Name)>(StringComparer.OrdinalIgnoreCase);
         FccUlsProvider.ParseLine(aa0aOld, d2);
         FccUlsProvider.ParseLine(aa0aNew, d2);
         Check("AA0A (old-then-new order): higher uid (SD) wins",
               d2.TryGetValue("AA0A", out var aa0aEntry1) && aa0aEntry1.State == "SD", true);
+        Check("AA0A (old-then-new order): current holder's name (no MI)",
+              aa0aEntry1.Name == "John Rosebrook", true);
 
         // Order 2: new row first, then old -- must NOT regress back to the old one.
-        var d3 = new Dictionary<string, (long Uid, string State)>(StringComparer.OrdinalIgnoreCase);
+        var d3 = new Dictionary<string, (long Uid, string State, string Name)>(StringComparer.OrdinalIgnoreCase);
         FccUlsProvider.ParseLine(aa0aNew, d3);
         FccUlsProvider.ParseLine(aa0aOld, d3);
         Check("AA0A (new-then-old order): higher uid (SD) still wins",
               d3.TryGetValue("AA0A", out var aa0aEntry2) && aa0aEntry2.State == "SD", true);
+        Check("AA0A (new-then-old order): current holder's name (no MI)",
+              aa0aEntry2.Name == "John Rosebrook", true);
 
         // Malformed/irrelevant input must be skipped, not throw or add junk.
-        var d4 = new Dictionary<string, (long Uid, string State)>(StringComparer.OrdinalIgnoreCase);
+        var d4 = new Dictionary<string, (long Uid, string State, string Name)>(StringComparer.OrdinalIgnoreCase);
         FccUlsProvider.ParseLine("HD|780866|||W1AW|A|||||", d4);
         Check("non-EN record type is skipped", d4.Count == 0, true);
         FccUlsProvider.ParseLine("EN|123|||W9ZZZ|L|", d4);
         Check("too-few-fields line is skipped", d4.Count == 0, true);
         FccUlsProvider.ParseLine("", d4);
         Check("empty line is skipped, does not throw", d4.Count == 0, true);
+    }
+
+    // ── FccUlsProvider.ShouldPreferName ──────────────────────────────────────────
+    // Real-world case that motivated this: QRZ's "fname" field sometimes already
+    // jams a first name + middle initial together ("RICHARD L") with the separate
+    // last-name field left blank, so QRZ's own combined name has only 2 words even
+    // though a full name is available -- FCC's fuller 3-word record must still win.
+    static void FccUlsProviderShouldPreferNameTests()
+    {
+        Console.WriteLine("\n── FccUlsProvider.ShouldPreferName ──");
+        Check("no existing name -> FCC's name is preferred",
+              FccUlsProvider.ShouldPreferName("John Rosebrook", null), true);
+        Check("FCC name more complete (3 words) than existing (2 words) -> preferred",
+              FccUlsProvider.ShouldPreferName("RICHARD L DILLON", "RICHARD L"), true);
+        Check("FCC name same word count as existing -> not preferred (existing kept)",
+              FccUlsProvider.ShouldPreferName("John Rosebrook", "Johnny Rosebrook"), false);
+        Check("FCC name fewer words than existing -> not preferred",
+              FccUlsProvider.ShouldPreferName("John", "John Q Rosebrook"), false);
+        Check("no FCC name -> never preferred, regardless of existing",
+              FccUlsProvider.ShouldPreferName(null, "RICHARD L"), false);
+        Check("no FCC name and no existing name -> not preferred",
+              FccUlsProvider.ShouldPreferName(null, null), false);
     }
 
     // ── FccUlsProvider.LooksIncomplete ───────────────────────────────────────────
@@ -2059,8 +2114,8 @@ static class JimmyTests
                 InsertQso(db, "W5TX", "TX", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
 
                 HashSet<string> neededNoBand, neededWithBand;
-                db.LoadHrcCache(out neededNoBand, out _, out _, band: null);
-                db.LoadHrcCache(out neededWithBand, out _, out _, band: "10m");
+                db.LoadHrcCache(out neededNoBand, out _, out _, out _, band: null);
+                db.LoadHrcCache(out neededWithBand, out _, out _, out _, band: "10m");
 
                 Check("LoadHrcCache(band:null): TX confirmed on 20m -> not needed (all-time view)",
                       !neededNoBand.Contains("TX"), true);

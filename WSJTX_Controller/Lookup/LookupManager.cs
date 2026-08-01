@@ -82,25 +82,27 @@ namespace WSJTX_Controller
             ClubLog = new ClubLogProvider(root);
             FccUls  = new FccUlsProvider(root);
 
-            // FccUls goes first: its State (when it has one) is the authoritative
-            // FCC-registered value and should win over QRZ's, per the same
-            // QRZ-vs-grid.dat priority reasoning already applied elsewhere -- QRZ's
-            // own US records ultimately derive from this same FCC data anyway.
+            // Every provider below (except FccUls's State) fills a field only when
+            // it's still empty, so list order is the priority order for shared
+            // fields. Two independent priority findings combine here:
             //
-            // ClubLog goes ahead of Qrz for the same reason, found via live A6 field
-            // testing 2026-07-16: Club Log's Country/Continent/Dxcc/CqZone/Prefix come
-            // from its own cty.php feed -- the same canonical CTY prefix database most
-            // ham radio software (very likely including WSJT-X itself) is built on --
-            // while QRZ's Country field is just whatever free-text an operator typed
-            // into their own profile, which is inconsistently formatted and not
-            // authoritative. Putting the canonical, WSJT-X-equivalent source first
-            // means Jimmy's classification matches what any other CTY-based program
-            // (including WSJT-X) would show for the same callsign. ClubLogProvider
-            // never populates Grid/Name/Email/QslManager/State, so this reorder has
-            // zero effect on those fields -- Qrz remains the only source for them.
-            _providers.Add(FccUls);
+            // ClubLog before Qrz: found via live A6 field testing 2026-07-16.
+            // Club Log's Country/Continent/Dxcc/CqZone/Prefix come from its own
+            // cty.php feed -- the same canonical CTY prefix database most ham radio
+            // software (very likely including WSJT-X itself) is built on -- while
+            // QRZ's Country field is just whatever free-text an operator typed into
+            // their own profile. ClubLogProvider never populates Grid/Name/Email/
+            // QslManager/State, so this has zero effect on those fields.
+            //
+            // Qrz before FccUls: Qrz's Name (the operator's own chosen on-air
+            // display name) gets first claim on record.Name; FccUlsProvider only
+            // overwrites it when its own record has strictly more name parts (see
+            // FccUlsProvider.ShouldPreferName). FccUls's State is unaffected by
+            // ordering -- it always overwrites State unconditionally when it has
+            // one (the authoritative FCC-registered value), regardless of position.
             _providers.Add(ClubLog);
             _providers.Add(Qrz);
+            _providers.Add(FccUls);
             _providers.Add(LoTW);
         }
 
@@ -195,6 +197,9 @@ namespace WSJTX_Controller
 
         public bool QrzNeedsLookup(string call) =>
             _useLookupData && Qrz.NeedsLookup(call);
+
+        public DateTime? QrzCachedAt(string call) =>
+            _useLookupData ? Qrz.GetCachedAt(call) : null;
 
         public Task<bool> TestQrzAsync() => Qrz.TestAsync();
 

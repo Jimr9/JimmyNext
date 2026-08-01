@@ -27,6 +27,7 @@ namespace WSJTX_Controller
         [XmlAttribute] public string Grid       { get; set; }
         [XmlAttribute] public string Continent  { get; set; }
         [XmlAttribute] public string Name       { get; set; }
+        [XmlAttribute] public string LicenseClass { get; set; }
         [XmlAttribute] public string County     { get; set; }
         [XmlAttribute] public string CqZone      { get; set; }
         [XmlAttribute] public string ItuZone     { get; set; }
@@ -93,6 +94,22 @@ namespace WSJTX_Controller
             }
         }
 
+        // When this specific call was last actually fetched from QRZ (not just
+        // displayed) -- lets a caller show how stale a cache hit is, e.g. the
+        // Lookup dialog's status line. Null if not cached (or the cache entry has
+        // aged out, same freshness rule as GetCached).
+        public DateTime? GetCachedAt(string call)
+        {
+            if (!IsEnabled || string.IsNullOrEmpty(call)) return null;
+            lock (_cacheLock)
+            {
+                QrzCacheEntry e;
+                if (!_cache.TryGetValue(call, out e)) return null;
+                if ((DateTime.UtcNow - e.CachedAtDt).TotalDays >= _cacheDays) return null;
+                return e.CachedAtDt;
+            }
+        }
+
         // The most recent CachedAt across every cached entry -- CachedAt is only
         // ever set when a fresh network fetch actually happens (ParseResponse), not
         // on a cache-hit reuse, so this reflects "last time we actually talked to
@@ -122,7 +139,8 @@ namespace WSJTX_Controller
             var cached = GetCached(call);
             if (cached == null) return;
 
-            if (string.IsNullOrEmpty(record.Name))       record.Name       = cached.Name;
+            if (string.IsNullOrEmpty(record.Name))         record.Name         = cached.Name;
+            if (string.IsNullOrEmpty(record.LicenseClass))  record.LicenseClass = cached.LicenseClass;
             if (string.IsNullOrEmpty(record.Grid))       record.Grid       = cached.Grid;
             if (string.IsNullOrEmpty(record.State))      record.State      = cached.State;
             if (string.IsNullOrEmpty(record.Country))    record.Country    = cached.Country;
@@ -273,7 +291,8 @@ namespace WSJTX_Controller
                 State      = NodeText(doc, "state"),
                 Grid       = NodeText(doc, "grid"),
                 Continent  = NodeText(doc, "cont"),
-                Name       = NodeText(doc, "fname") ?? NodeText(doc, "name"),
+                Name       = CombineName(NodeText(doc, "fname"), NodeText(doc, "name")),
+                LicenseClass = NodeText(doc, "class"),
                 County     = NodeText(doc, "county"),
                 CqZone     = NodeText(doc, "cqzone"),
                 ItuZone    = NodeText(doc, "ituzone"),
@@ -281,6 +300,18 @@ namespace WSJTX_Controller
                 Email      = NodeText(doc, "email"),
                 CachedAt   = DateTime.UtcNow.ToString("o"),
             };
+        }
+
+        // QRZ's XML API splits the operator's name into "fname" (first name,
+        // sometimes including a middle initial) and "name" (last name) --
+        // these must be joined, not treated as a fallback pair, or the last
+        // name is silently dropped whenever a first name is present (i.e.
+        // almost always).
+        private static string CombineName(string first, string last)
+        {
+            if (string.IsNullOrEmpty(first)) return last;
+            if (string.IsNullOrEmpty(last)) return first;
+            return $"{first} {last}";
         }
 
         private static string NodeText(XmlDocument doc, string tag)
@@ -298,6 +329,7 @@ namespace WSJTX_Controller
             Grid       = e.Grid,
             Continent  = e.Continent,
             Name       = e.Name,
+            LicenseClass = e.LicenseClass,
             County     = e.County,
             CqZone     = ParseZone(e.CqZone),
             ItuZone    = ParseZone(e.ItuZone),

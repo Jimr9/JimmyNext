@@ -306,6 +306,7 @@ namespace WSJTX_Controller
             { CallCategory.POTA,                "POTA" },
             { CallCategory.SOTA,                "SOTA" },
             { CallCategory.WAS_NEEDED,          "WAS Needed" },
+            { CallCategory.WAS_UNCONFIRMED,     "WAS Unconf" },
             { CallCategory.DXCC_UNCONFIRMED,    "DXCC Unconf" },
             { CallCategory.ZONE_NEEDED,         "Zone Needed" },
         };
@@ -584,6 +585,15 @@ namespace WSJTX_Controller
             // by queue filters (already logged, blocked, origin filter, wrong period,
             // etc.).  Bypassing those filters via ReplyTo would be unsafe.
             StatusView.ShowMessage($"{deCall} not in call queue", false);
+        }
+
+        // Like GetRawDecodeCallOrText, but returns null (rather than falling back to
+        // the raw message text) when the line has no discernible callsign -- callers
+        // that need an actual callsign (e.g. station lookup) should use this instead.
+        public string GetCallAtRawIndex(int listIdx)
+        {
+            var d = GetFilteredRawDecode(listIdx);
+            return d?.DeCall();
         }
 
         public string GetRawDecodeCallOrText(int listIdx)
