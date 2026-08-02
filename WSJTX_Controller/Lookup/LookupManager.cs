@@ -145,6 +145,12 @@ namespace WSJTX_Controller
         {
             if (ClubLog.NeedsRefresh(clubLogDays))
                 _ = ClubLog.RefreshAsync();
+            // Same "always on, no Use Lookup Data gate" treatment as the Club Log XML
+            // refresh just above -- this is the alias/exception data FindByCallsign
+            // needs to resolve prefixes correctly (see ClubLogProvider.cs), not a
+            // user-facing lookup feature. Reuses the same refresh cadence.
+            if (ClubLog.NeedsBigCtyRefresh(clubLogDays))
+                _ = ClubLog.RefreshBigCtyAsync();
 
             if (!_useLookupData) return;
             if (LoTW.IsEnabled && LoTW.NeedsRefresh(lotwDays))

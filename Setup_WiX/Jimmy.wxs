@@ -2,6 +2,7 @@
 <!--
   Jimmy installer - WiX 5 source (migration Stage B7)
   Product  : Jimmy (WSJT-X Controller)
+  Version  : 1.90.9
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
@@ -24,7 +25,7 @@
 
   <Package
     Name="Jimmy"
-    Version="1.90.8"
+    Version="1.90.9"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"

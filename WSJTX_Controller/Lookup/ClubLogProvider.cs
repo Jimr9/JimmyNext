@@ -71,11 +71,36 @@ namespace WSJTX_Controller
         public IReadOnlyList<ClubLogEntity> AllEntities => _entities;
         private string _apiKey = "";
 
+        // ── Big CTY alias/exception data ─────────────────────────────────────────
+        // clublog_cty.xml above stores exactly one representative prefix per DXCC
+        // entity (e.g. USA = "K"), so FindByCallsign historically could only ever
+        // match a callsign whose prefix happened to be that one chosen prefix --
+        // every other USA prefix (N, W, ...) silently resolved to nothing, and
+        // ambiguous prefixes like "KG4" (shared between Guantanamo Bay and ordinary
+        // FCC-sequential USA calls) matched the wrong entity outright. This second,
+        // independent file is AD1C's real "Big CTY" country file -- the same one
+        // WSJT-X's own User Guide directs users to for updating its bundled cty.dat
+        // -- which carries the full alias/exception list per entity. It supplies
+        // ONLY the callsign->main-prefix resolution; Name/Adif/Continent/Deleted
+        // still come from clublog_cty.xml via FindByPrefix, unchanged.
+        private readonly string _bigCtyFile;
+        private readonly string _bigCtyMetaFile;
+        private const string BigCtyUrl = "https://www.country-files.com/bigcty/cty.dat";
+        private Dictionary<string, (string MainPrefix, int? Zone)> _bigCtyPrefixes   =
+            new Dictionary<string, (string MainPrefix, int? Zone)>(StringComparer.OrdinalIgnoreCase);
+        private Dictionary<string, (string MainPrefix, int? Zone)> _bigCtyExceptions =
+            new Dictionary<string, (string MainPrefix, int? Zone)>(StringComparer.OrdinalIgnoreCase);
+
+        public DateTime BigCtyLastUpdate  { get; private set; }
+        public int      BigCtyAliasCount  => _bigCtyPrefixes.Count + _bigCtyExceptions.Count;
+
         public ClubLogProvider(string dataRoot)
         {
             _dir      = Path.Combine(dataRoot, "ClubLog");
             _dataFile = Path.Combine(_dir, "clublog_cty.xml");
             _metaFile = Path.Combine(_dir, "metadata.txt");
+            _bigCtyFile     = Path.Combine(_dir, "bigcty.dat");
+            _bigCtyMetaFile = Path.Combine(_dir, "bigcty_metadata.txt");
             Directory.CreateDirectory(_dir);
         }
 
@@ -87,12 +112,17 @@ namespace WSJTX_Controller
 
         public void Load()
         {
-            LastUpdate = ReadMeta();
+            LastUpdate = ReadMeta(_metaFile);
             if (File.Exists(_dataFile)) ParseFile(_dataFile);
+            BigCtyLastUpdate = ReadMeta(_bigCtyMetaFile);
+            if (File.Exists(_bigCtyFile)) LoadBigCty();
         }
 
         public bool NeedsRefresh(int days) =>
             !File.Exists(_dataFile) || (DateTime.UtcNow - LastUpdate).TotalDays >= days;
+
+        public bool NeedsBigCtyRefresh(int days) =>
+            !File.Exists(_bigCtyFile) || (DateTime.UtcNow - BigCtyLastUpdate).TotalDays >= days;
 
         public async Task<bool> RefreshAsync()
         {
@@ -119,7 +149,7 @@ namespace WSJTX_Controller
                 File.Copy(tmp, _dataFile, overwrite: true);
                 try { File.Delete(tmp); } catch { }
                 LastUpdate = DateTime.UtcNow;
-                WriteMeta(LastUpdate);
+                WriteMeta(_metaFile, LastUpdate);
                 ParseFile(_dataFile);
                 return _entities.Count > 0;
             }
@@ -128,6 +158,56 @@ namespace WSJTX_Controller
                 LastError = Redact(ex.Message);
                 try { File.Delete(tmp); } catch { }
                 return false;
+            }
+        }
+
+        // Downloads AD1C's real Big CTY country file (plain text, no auth, no API
+        // key/rate-limit concerns unlike Club Log's own API above) and parses it
+        // into the alias/exception dictionaries FindByCallsign uses. Independent
+        // of RefreshAsync()/clublog_cty.xml -- a failure here never touches the
+        // existing entity list, and vice versa.
+        public async Task<bool> RefreshBigCtyAsync()
+        {
+            LastError = null;
+            if (TestModeGuard.IsTestMode)
+            {
+                LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real Big CTY traffic allowed.";
+                return false;
+            }
+            var tmp = Path.Combine(_dir, "bigcty.tmp");
+            try
+            {
+                var text = await _http.GetStringAsync(BigCtyUrl).ConfigureAwait(false);
+                if (text.Length < 200)
+                {
+                    LastError = "Big CTY returned unexpected (too short) response.";
+                    return false;
+                }
+                File.WriteAllText(tmp, text, System.Text.Encoding.UTF8);
+                File.Copy(tmp, _bigCtyFile, overwrite: true);
+                try { File.Delete(tmp); } catch { }
+                BigCtyLastUpdate = DateTime.UtcNow;
+                WriteMeta(_bigCtyMetaFile, BigCtyLastUpdate);
+                LoadBigCty();
+                return BigCtyAliasCount > 0;
+            }
+            catch (Exception ex)
+            {
+                LastError = ex.Message;
+                try { File.Delete(tmp); } catch { }
+                return false;
+            }
+        }
+
+        private void LoadBigCty()
+        {
+            try
+            {
+                ParseBigCtyText(File.ReadAllText(_bigCtyFile, System.Text.Encoding.UTF8));
+            }
+            catch (Exception ex)
+            {
+                LastError = "Big CTY parse error: " + ex.Message;
             }
         }
 
@@ -167,6 +247,12 @@ namespace WSJTX_Controller
             return null;
         }
 
+        // Resolves a callsign to its entity. Preferred source is AD1C's Big CTY
+        // alias/exception data (real per-callarea prefixes + individually-catalogued
+        // exceptions, see ResolveMainPrefix); when that hasn't been downloaded yet
+        // (fresh install, still refreshing in the background) or doesn't resolve
+        // anything for this call, falls back to Club Log's own exceptions/prefixes
+        // tables:
         // 1) Exact full-callsign override (Club Log's <exceptions> table -- e.g. a
         //    special-event or portable operation whose true DXCC entity doesn't match
         //    what its prefix would normally imply). Only a CURRENT exception counts
@@ -187,6 +273,33 @@ namespace WSJTX_Controller
         {
             if (!IsEnabled || string.IsNullOrEmpty(call)) return null;
             call = call.ToUpperInvariant();
+
+            if (BigCtyAliasCount > 0)
+            {
+                var resolved = ResolveMainPrefix(call);
+                if (resolved.MainPrefix != null)
+                {
+                    var byPrefix = FindByPrefix(resolved.MainPrefix);
+                    if (byPrefix != null)
+                    {
+                        if (!resolved.Zone.HasValue || resolved.Zone.Value == byPrefix.CqZone)
+                            return byPrefix;
+
+                        // Per-callarea zone override (e.g. USA's K0-K9 call areas span
+                        // CQ zones 3/4/5) -- return a shallow copy so the shared cached
+                        // entity instance is never mutated for other callers/lookups.
+                        return new ClubLogEntity
+                        {
+                            Name      = byPrefix.Name,
+                            Prefix    = byPrefix.Prefix,
+                            Continent = byPrefix.Continent,
+                            CqZone    = resolved.Zone.Value,
+                            Adif      = byPrefix.Adif,
+                            Deleted   = byPrefix.Deleted,
+                        };
+                    }
+                }
+            }
 
             if (_exceptionToAdif.TryGetValue(call, out var exceptionEntry) &&
                 exceptionEntry.IsCurrent &&
@@ -224,6 +337,56 @@ namespace WSJTX_Controller
 
             return null;
         }
+
+        // Resolves a callsign to the "main prefix" string clublog_cty.xml's own
+        // per-entity Prefix field uses (e.g. "K" for USA, "KG4" for Guantanamo Bay),
+        // using the Big CTY alias/exception data. Order matters:
+        //   1. An exact-callsign exception always wins (real, maintained data --
+        //      e.g. a specific historic Guantanamo Bay operator's callsign).
+        //   2. The KG4 format rule (see ResolveKg4Prefix) -- only reached once step 1
+        //      has already ruled out a specific catalogued exception for this call.
+        //   3. Longest-prefix match against the general per-callarea alias table.
+        private (string MainPrefix, int? Zone) ResolveMainPrefix(string call)
+        {
+            (string MainPrefix, int? Zone) exc;
+            if (_bigCtyExceptions.TryGetValue(call, out exc)) return exc;
+
+            int slash = call.IndexOf('/');
+            string noSuffix = slash >= 0 ? call.Substring(0, slash) : call;
+            string kg4 = ResolveKg4Prefix(noSuffix);
+            if (kg4 != null) return (kg4, null);
+
+            for (int len = call.Length; len >= 1; len--)
+            {
+                (string MainPrefix, int? Zone) pfx;
+                if (_bigCtyPrefixes.TryGetValue(call.Substring(0, len), out pfx)) return pfx;
+            }
+            return (null, null);
+        }
+
+        // KG4 is the one DXCC prefix genuinely split by callsign *format* rather
+        // than by which specific calls it's been issued to: Guantanamo Bay (ADIF
+        // 105) only ever uses KG4 + exactly two letters (e.g. KG4AB); every other
+        // KG4 format (KG4W, KG4JOK, KG4ABCD, ...) is an ordinary FCC-sequential-
+        // block USA call. Real cty.dat only models this via a hand-maintained list
+        // of individual =callsign exceptions (see ResolveMainPrefix step 1), which
+        // can never be complete for a callsign not yet catalogued -- this is the
+        // real-world case that motivated this fix (KG4JOK, a live USA station, had
+        // no such exception entry yet and was misrouted to Guantanamo Bay). This is
+        // a callsign-format boundary permanently fixed by ADIF/DXCC, the same rule
+        // every mature DXCC/contest logger (N1MM, DXLab, etc.) hardcodes for this
+        // one well-known edge case -- not a special case for any specific station.
+        // callNoSuffix must already have any "/..." portable suffix stripped.
+        private static string ResolveKg4Prefix(string callNoSuffix)
+        {
+            if (!callNoSuffix.StartsWith("KG4", StringComparison.OrdinalIgnoreCase)) return null;
+            string suffix = callNoSuffix.Substring(3);
+            bool isTwoLetterSuffix = suffix.Length == 2 &&
+                                      IsAsciiLetter(suffix[0]) && IsAsciiLetter(suffix[1]);
+            return isTwoLetterSuffix ? "KG4" : "K";
+        }
+
+        private static bool IsAsciiLetter(char c) => (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
 
         // Synchronous, offline (FindByCallsign only reads already-downloaded
         // cty.xml data) -- safe for the per-decode hot path.
@@ -289,7 +452,10 @@ namespace WSJTX_Controller
                     };
                     int v;
                     int.TryParse(Child(n, "ADIF") ?? Child(n, "adif"), out v); e.Adif   = v;
-                    int.TryParse(Child(n, "CQ")   ?? Child(n, "cq"),   out v); e.CqZone = v;
+                    // Real Club Log XML uses <cqz>, not <cq> -- this previously never
+                    // matched, so CqZone silently parsed as 0 for every entity (found
+                    // while adding the Big CTY per-callarea zone-override test below).
+                    int.TryParse(Child(n, "CQZ")  ?? Child(n, "cqz"),  out v); e.CqZone = v;
                     result.Add(e);
                 }
             }
@@ -374,6 +540,100 @@ namespace WSJTX_Controller
                 LastError = "Club Log CTY text parsed but no entities found.";
         }
 
+        // Parses AD1C's real Big CTY country file (https://www.country-files.com/bigcty/cty.dat,
+        // the same file WSJT-X's own User Guide directs users to download). Real format,
+        // confirmed by direct inspection of a live download -- e.g.:
+        //   United States:            05:  08:  NA:   37.60:    91.87:     5.0:  K:
+        //       AA,AB,AC,...,K,N,W,=NH7RO/M,...,
+        //       AA0(4)[7],AB0(4)[7],...,K0(4)[7],...,=AH2BY(4)[7],...;
+        // Header line (not indented): Name, then 7 colon-delimited fields (cqz, ituz,
+        // cont, lat, long, tz, main prefix) -- only the main prefix is needed here;
+        // Adif/Continent/CqZone/Deleted still come from clublog_cty.xml via
+        // FindByPrefix(mainPrefix), so this only needs to resolve a callsign to that
+        // string. Continuation lines (indented, comma-separated, terminated by ';' on
+        // the last line of the block): each token is either a bare alias/prefix
+        // ("KG4", "AA0") or an exact-callsign exception ("=KG4NEX", "=W1AW/KG4"),
+        // optionally suffixed with "(n)" = CQ zone override and/or "[n]" = ITU zone
+        // override. No dash-range compression appears in the current file (verified),
+        // so every alias is fully enumerated -- no range-expansion logic is needed.
+        private void ParseBigCtyText(string text)
+        {
+            var prefixMap = new Dictionary<string, (string MainPrefix, int? Zone)>(StringComparer.OrdinalIgnoreCase);
+            var exceptionMap = new Dictionary<string, (string MainPrefix, int? Zone)>(StringComparer.OrdinalIgnoreCase);
+            string currentMainPrefix = null;
+
+            foreach (var raw in text.Split('\n'))
+            {
+                string line = raw.TrimEnd('\r');
+                if (string.IsNullOrWhiteSpace(line)) continue;
+
+                if (!char.IsWhiteSpace(line[0]))
+                {
+                    // Header line -- extract just the main prefix (last colon-delimited
+                    // field before the trailing colon).
+                    currentMainPrefix = null;
+                    int colon = line.IndexOf(':');
+                    if (colon < 1) continue;
+                    var headerFields = line.Substring(colon + 1).Split(':');
+                    if (headerFields.Length < 7) continue;
+                    string mainPrefix = headerFields[6].Trim().TrimStart('*');
+                    if (mainPrefix.Length > 0) currentMainPrefix = mainPrefix;
+                    continue;
+                }
+
+                if (currentMainPrefix == null) continue;  // continuation line for a header we couldn't parse
+
+                string content = line.Trim().TrimEnd(';', ',');
+                if (content.Length == 0) continue;
+
+                foreach (var rawToken in content.Split(','))
+                {
+                    string token = rawToken.Trim();
+                    if (token.Length == 0) continue;
+
+                    bool isException = token[0] == '=';
+                    if (isException) token = token.Substring(1);
+
+                    int? zone = null;
+                    int parenIdx = token.IndexOf('(');
+                    if (parenIdx >= 0)
+                    {
+                        int closeIdx = token.IndexOf(')', parenIdx);
+                        if (closeIdx > parenIdx)
+                        {
+                            int z;
+                            if (int.TryParse(token.Substring(parenIdx + 1, closeIdx - parenIdx - 1), out z))
+                                zone = z;
+                        }
+                        token = token.Substring(0, parenIdx);
+                    }
+                    else
+                    {
+                        int bracketIdx = token.IndexOf('[');
+                        if (bracketIdx >= 0) token = token.Substring(0, bracketIdx);
+                    }
+
+                    token = token.Trim();
+                    if (token.Length == 0) continue;
+
+                    if (isException)
+                        exceptionMap[token] = (currentMainPrefix, zone);
+                    else
+                        prefixMap[token] = (currentMainPrefix, zone);
+                }
+            }
+
+            if (prefixMap.Count > 0)
+            {
+                _bigCtyPrefixes = prefixMap;
+                _bigCtyExceptions = exceptionMap;
+            }
+            else
+            {
+                LastError = "Big CTY file parsed but no prefixes found; format may have changed.";
+            }
+        }
+
         private static string Child(XmlNode parent, string tag)
         {
             var n = parent.SelectSingleNode($"*[local-name()='{tag}']");
@@ -381,21 +641,21 @@ namespace WSJTX_Controller
             return string.IsNullOrEmpty(t) ? null : t;
         }
 
-        private DateTime ReadMeta()
+        private static DateTime ReadMeta(string metaFile)
         {
             try
             {
-                if (!File.Exists(_metaFile)) return DateTime.MinValue;
+                if (!File.Exists(metaFile)) return DateTime.MinValue;
                 DateTime dt;
-                return DateTime.TryParse(File.ReadAllText(_metaFile).Trim(), out dt)
+                return DateTime.TryParse(File.ReadAllText(metaFile).Trim(), out dt)
                     ? dt : DateTime.MinValue;
             }
             catch { return DateTime.MinValue; }
         }
 
-        private void WriteMeta(DateTime dt)
+        private static void WriteMeta(string metaFile, DateTime dt)
         {
-            try { File.WriteAllText(_metaFile, dt.ToString("o")); } catch { }
+            try { File.WriteAllText(metaFile, dt.ToString("o")); } catch { }
         }
     }
 }

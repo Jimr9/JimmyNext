@@ -101,6 +101,7 @@ static class JimmyTests
         HrcCacheTests();
         RuleUniverseBuiltInTests();
         RuleUniverseClubLogTests();
+        ClubLogBigCtyResolutionTests();
         RuleEngineCoreTests();
         RuleEngineDateRangeTests();
         RuleEngineBandIndependenceTests();
@@ -1812,6 +1813,48 @@ static class JimmyTests
                 ? $"  {token}: ERROR {err}"
                 : $"  {token}: {set.Count} entities");
         }
+
+        // Big CTY alias/exception data (https://www.country-files.com/bigcty/cty.dat) --
+        // sanity-check the real fix for the KG4JOK bug report against the actual current
+        // file, not just the synthetic fixture in ClubLogBigCtyResolutionTests.
+        Console.WriteLine();
+        Console.WriteLine("=== Big CTY alias/exception data (real download) ===");
+        if (provider.BigCtyAliasCount == 0)
+        {
+            Console.WriteLine("No cached Big CTY data yet -- downloading once...");
+            bool ok = provider.RefreshBigCtyAsync().GetAwaiter().GetResult();
+            Console.WriteLine($"  RefreshBigCtyAsync() returned: {ok}, AliasCount={provider.BigCtyAliasCount}, LastError={provider.LastError}");
+            if (!ok || provider.BigCtyAliasCount == 0)
+            {
+                Console.WriteLine("Could not download real Big CTY data -- KG4 resolution checks skipped.");
+                return;
+            }
+        }
+        else
+        {
+            Console.WriteLine($"Reusing cached Big CTY data: AliasCount={provider.BigCtyAliasCount}, LastUpdate={provider.BigCtyLastUpdate}");
+        }
+
+        // KG4JOK: the real callsign from the bug report -- an ordinary 3-letter-
+        // suffix USA amateur, not yet in AD1C's exception list (confirmed by direct
+        // inspection when this fix was written). Must resolve to USA (291), not
+        // Guantanamo Bay (105), via the KG4 length rule.
+        var kg4jok = provider.FindByCallsign("KG4JOK");
+        Console.WriteLine(kg4jok == null
+            ? "  KG4JOK: FAIL -- did not resolve at all"
+            : $"  KG4JOK: Adif={kg4jok.Adif} ({kg4jok.Name}) -- {(kg4jok.Adif == 291 ? "PASS" : "FAIL, expected 291 (USA)")}");
+
+        // KG44WW: a real, currently-catalogued Guantanamo Bay exception (3-letter-
+        // style suffix "4WW", so the KG4 length rule alone would get this one
+        // wrong -- must resolve via the exception, not the rule). Note: an earlier
+        // draft of this check used "KG4NEX", which real historic Club Log data
+        // marks as Guantanamo only through 1971 -- AD1C's current file has since
+        // reassigned it to USA, so it no longer exercises this path; verified by
+        // inspecting the live download directly when this was written.
+        var kg44ww = provider.FindByCallsign("KG44WW");
+        Console.WriteLine(kg44ww == null
+            ? "  KG44WW: FAIL -- did not resolve at all"
+            : $"  KG44WW: Adif={kg44ww.Adif} ({kg44ww.Name}) -- {(kg44ww.Adif == 105 ? "PASS" : "FAIL, expected 105 (Guantanamo Bay)")}");
     }
 
     static void CompareUniverses(string newToken, string oldToken, string listsFolder, ClubLogProvider clubLog)
@@ -1924,6 +1967,131 @@ static class JimmyTests
         finally
         {
             try { Directory.Delete(tmpRoot, true); } catch { }
+        }
+    }
+
+    // ── ClubLogProvider: Big CTY alias/exception resolution ─────────────────────
+    // Regression coverage for the KG4JOK bug report (Jimmy_1.90.7_support_
+    // 20260731_220224.zip): FindByCallsign historically matched only ClubLog's own
+    // clublog_cty.xml, which stores exactly one representative prefix per entity
+    // (USA = "K"), so a plain "W"/"N" call never resolved at all, and "KG4"-prefix
+    // calls always matched Guantanamo Bay (which also claims "KG4") regardless of
+    // suffix length/format. Both fixture files are written directly to disk (no
+    // network -- same mechanism as RuleUniverseClubLogTests above) so
+    // ClubLogProvider.Load() picks them up exactly like its real on-disk cache.
+    static void ClubLogBigCtyResolutionTests()
+    {
+        Console.WriteLine("\n── ClubLogProvider: Big CTY Alias/Exception Resolution ──");
+
+        string tmpRoot = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_BigCty_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tmpRoot, "ClubLog"));
+
+            string xml =
+                "<clublog><entities>" +
+                "<ENTITY><adif>291</adif><name>UNITED STATES OF AMERICA</name><prefix>K</prefix><deleted>FALSE</deleted><cqz>5</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>105</adif><name>GUANTANAMO BAY</name><prefix>KG4</prefix><deleted>FALSE</deleted><cqz>8</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>100</adif><name>ARGENTINA</name><prefix>LU</prefix><deleted>FALSE</deleted><cqz>13</cqz><cont>SA</cont></ENTITY>" +
+                "</entities></clublog>";
+            File.WriteAllText(Path.Combine(tmpRoot, "ClubLog", "clublog_cty.xml"), xml);
+
+            // Real Big CTY format (header: Name: cqz: ituz: cont: lat: long: tz: mainPrefix:).
+            // "K0(4)" gives the USA entry a per-callarea zone override to exercise the
+            // shallow-copy path; "=KG4NEX" is a 3-letter-suffix exception deliberately
+            // routed to Guantanamo Bay to prove exceptions outrank the KG4 length rule.
+            string bigCty =
+                "United States:             05:  08:  NA:   37.60:    91.87:     5.0:  K:\n" +
+                "    K,N,W,\n" +
+                "    K0(4)[7],K1(5)[8],=AH6XX(4)[7];\n" +
+                "\n" +
+                "Guantanamo Bay:            08:  11:  NA:   20.00:    75.00:     5.0:  KG4:\n" +
+                "    KG4,=KG4NEX,=KG44WW;\n" +
+                "\n" +
+                "Argentina:                 13:  14:  SA:  -34.00:    64.00:     3.0:  LU:\n" +
+                "    LU;\n";
+            File.WriteAllText(Path.Combine(tmpRoot, "ClubLog", "bigcty.dat"), bigCty);
+
+            var provider = new ClubLogProvider(tmpRoot);
+            provider.Configure(true, "");
+            provider.Load();
+            Check("Fixture: 3 entities loaded",      provider.EntityCount == 3,     true);
+            Check("Fixture: Big CTY aliases loaded", provider.BigCtyAliasCount > 0, true);
+
+            // Ordinary 3-letter-suffix KG4 call, no exception -- must resolve to USA,
+            // not Guantanamo Bay (this is the exact real-world KG4JOK bug).
+            var kg4jok = provider.FindByCallsign("KG4JOK");
+            Check("KG4JOK (3-letter suffix): resolves", kg4jok != null,        true);
+            Check("KG4JOK: resolves to USA (291)",      kg4jok?.Adif == 291,   true);
+
+            // 2-letter-suffix KG4 call, no exception -- the real Guantanamo Bay format.
+            var kg4ab = provider.FindByCallsign("KG4AB");
+            Check("KG4AB (2-letter suffix): resolves to Guantanamo Bay (105)", kg4ab?.Adif == 105, true);
+
+            // Explicit exception on a 3-letter-suffix call -- must win over the KG4
+            // length rule (real historic Guantanamo Bay operator format).
+            var kg4nex = provider.FindByCallsign("KG4NEX");
+            Check("KG4NEX (exception, 3-letter suffix): still Guantanamo Bay (105)", kg4nex?.Adif == 105, true);
+
+            // Plain "W"/"N" USA calls -- unresolvable via clublog_cty.xml alone (it
+            // only lists "K"), proving the multi-prefix-country gap is fixed too.
+            var w1aw = provider.FindByCallsign("W1AW");
+            Check("W1AW: resolves to USA (291)", w1aw?.Adif == 291, true);
+            var n5xyz = provider.FindByCallsign("N5XYZ");
+            Check("N5XYZ: resolves to USA (291)", n5xyz?.Adif == 291, true);
+
+            // Per-callarea zone override -- longest-match should prefer "K0" (zone 4)
+            // over the bare "K" alias (header default zone 5), without corrupting the
+            // shared cached USA entity's own CqZone for other lookups.
+            var k0abc = provider.FindByCallsign("K0ABC");
+            Check("K0ABC: zone override applied (4, not header default 5)", k0abc?.CqZone == 4, true);
+            Check("K0ABC: Adif still USA (291) despite zone override",      k0abc?.Adif == 291,  true);
+            var w1awAfter = provider.FindByCallsign("W1AW");
+            Check("W1AW: unaffected by K0ABC's zone override (still header default 5)",
+                  w1awAfter?.CqZone == 5, true);
+
+            // Plain single-prefix country, unaffected by the KG4/zone-override logic.
+            var lu = provider.FindByCallsign("LU1ABC");
+            Check("LU1ABC: resolves to Argentina (100)", lu?.Adif == 100, true);
+        }
+        finally
+        {
+            try { Directory.Delete(tmpRoot, true); } catch { }
+        }
+
+        // Fallback case: no bigcty.dat downloaded yet (fresh install) -- must
+        // degrade to the legacy single-prefix-per-entity behavior, not throw or
+        // resolve nothing across the board.
+        string tmpRoot2 = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_BigCty_NoFile_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tmpRoot2, "ClubLog"));
+            string xml =
+                "<clublog><entities>" +
+                "<ENTITY><adif>291</adif><name>UNITED STATES OF AMERICA</name><prefix>K</prefix><deleted>FALSE</deleted><cqz>5</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>105</adif><name>GUANTANAMO BAY</name><prefix>KG4</prefix><deleted>FALSE</deleted><cqz>8</cqz><cont>NA</cont></ENTITY>" +
+                "</entities></clublog>";
+            File.WriteAllText(Path.Combine(tmpRoot2, "ClubLog", "clublog_cty.xml"), xml);
+
+            var provider = new ClubLogProvider(tmpRoot2);
+            provider.Configure(true, "");
+            provider.Load();
+            Check("No bigcty.dat: BigCtyAliasCount == 0", provider.BigCtyAliasCount == 0, true);
+
+            // Documents the known, accepted limitation during the download gap --
+            // matches legacy single-prefix behavior exactly (still misroutes KG4 to
+            // Guantanamo, still can't resolve a plain "W" call).
+            var kg4jokLegacy = provider.FindByCallsign("KG4JOK");
+            Check("Fallback: KG4JOK matches legacy single-prefix Guantanamo entry (105)",
+                  kg4jokLegacy?.Adif == 105, true);
+            var w1awLegacy = provider.FindByCallsign("W1AW");
+            Check("Fallback: W1AW unresolved (legacy multi-prefix gap)", w1awLegacy == null, true);
+        }
+        finally
+        {
+            try { Directory.Delete(tmpRoot2, true); } catch { }
         }
     }
 

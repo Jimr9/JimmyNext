@@ -2342,16 +2342,21 @@ namespace WSJTX_Controller
             };
             lotwBox.Controls.Add(_lotwUploadEnabledCb);
 
-            // ── Club Log Country Data ────────────────────────────────────────────
+            // ── Club Log Country Data + Big CTY aliases ──────────────────────────
             // Automatic Jimmy infrastructure, not a user-facing toggle -- country
             // data downloads unconditionally using Jimmy's own application key
             // (see ClubLogAppKey.cs), so Rule Definition awards (DXCC etc.) work
-            // out of the box with no configuration.
+            // out of the box with no configuration. "Update Now" and the refresh
+            // interval below cover both files: Club Log's clublog_cty.xml (Name/
+            // Adif/Continent/Deleted per entity) and AD1C's real Big CTY cty.dat
+            // (the full per-callarea prefix/exception data Club Log's own file
+            // doesn't carry -- see ClubLogProvider.cs), which is what actually
+            // resolves a decoded callsign to the right entity.
             tabIdx = 2;
-            var clBox = MakeGroupBox("Club Log Country Data (automatic — no account needed)", 175, 58, pw, 76, font);
+            var clBox = MakeGroupBox("Country & Prefix Data (automatic — no account needed)", 175, 58, pw, 76, font);
             lookupPanel.Controls.Add(clBox);
             panels.Add(clBox);
-            serviceList.Items.Add("Club Log Country Data");
+            serviceList.Items.Add("Country & Prefix Data");
 
             clBox.Controls.Add(MakeLabel("Refresh (days):", 10, 23, font));
             _clubLogRefreshDaysNum = new System.Windows.Forms.NumericUpDown
@@ -2539,7 +2544,11 @@ namespace WSJTX_Controller
                     : "Not downloaded yet. Click Update Now.";
             }
             var age = m.ClubLog.LastUpdate == DateTime.MinValue ? "never" : m.ClubLog.LastUpdate.ToLocalTime().ToString("g");
-            return $"{m.ClubLog.EntityCount} entities, last updated {age}";
+            string bigCty = m.ClubLog.BigCtyAliasCount == 0
+                ? "Big CTY aliases not downloaded yet"
+                : $"{m.ClubLog.BigCtyAliasCount:N0} Big CTY aliases, updated " +
+                  (m.ClubLog.BigCtyLastUpdate == DateTime.MinValue ? "never" : m.ClubLog.BigCtyLastUpdate.ToLocalTime().ToString("g"));
+            return $"{m.ClubLog.EntityCount} entities, last updated {age}; {bigCty}";
         }
 
         private void SaveLookupTab()
@@ -2987,10 +2996,20 @@ namespace WSJTX_Controller
             ctrl.lookupManager.ClubLog.Configure(true, ClubLogAppKey.Resolve());
             _clubLogUpdateBtn.Enabled = false;
             _clubLogStatusLbl.Text   = "Downloading…";
-            bool ok = await ctrl.lookupManager.ClubLog.RefreshAsync();
+            // Refresh both files -- clublog_cty.xml (Name/Adif/Continent/Deleted) and
+            // the Big CTY alias/exception data (actual callsign->entity resolution).
+            // LastError is shared by both calls on the same provider instance, so
+            // capture each one immediately -- the second call's success would
+            // otherwise clear the first call's failure message before it's read.
+            bool okClubLog = await ctrl.lookupManager.ClubLog.RefreshAsync();
+            string clubLogError = ctrl.lookupManager.ClubLog.LastError;
+            bool okBigCty = await ctrl.lookupManager.ClubLog.RefreshBigCtyAsync();
+            string bigCtyError = ctrl.lookupManager.ClubLog.LastError;
             if (!IsDisposed)
             {
-                _clubLogStatusLbl.Text    = ok ? ClubLogStatusText() : $"Error: {ctrl.lookupManager.ClubLog.LastError}";
+                _clubLogStatusLbl.Text = (okClubLog && okBigCty)
+                    ? ClubLogStatusText()
+                    : $"Error: {(!okClubLog ? clubLogError : bigCtyError)}";
                 _clubLogUpdateBtn.Enabled = true;
                 _clubLogStatusLbl.Focus();
             }
