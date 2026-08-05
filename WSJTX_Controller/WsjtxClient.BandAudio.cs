@@ -124,11 +124,34 @@ namespace WSJTX_Controller
             ctrl.statusText.SelectionStart = 0;
         }
 
+        // Self-sufficiency plan, Phase 1: backend-aware. WsjtxCat keeps today's behavior
+        // unchanged (WM8Q sub-command 18, answer arrives async via wsjtxResultCode). HamlibRigctld
+        // instead does one fresh, synchronous PollOnce() -- deliberately not reusing
+        // ctrl.lastRadioStatus's background-timer value, since this is an explicit on-demand
+        // "check now" action (Alt+Q), not a passive display.
         public bool ReportPowerSwr()
         {
+            if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
+            {
+                var status = ctrl.rigctldClient.PollOnce();
+                ctrl.lastRadioStatus = status;
+                StatusView.ShowMessage(FormatRigctldPowerSwr(status), true);
+                return true;
+            }
+
             GetPowerSwr();
             StartStatusTimer2(false);
             return true;
+        }
+
+        private static string FormatRigctldPowerSwr(RadioStatus status)
+        {
+            if (!status.Ok) return $"Radio: {status.LastError ?? "no response"}";
+            var parts = new List<string>();
+            if (status.SMeterDb.HasValue) parts.Add($"S-meter {status.SMeterDb.Value} dB");
+            if (status.PowerRaw.HasValue) parts.Add($"power {status.PowerRaw.Value:0.00}");
+            if (status.Swr.HasValue) parts.Add($"SWR {status.Swr.Value:0.0}");
+            return parts.Count > 0 ? string.Join(", ", parts) : "Radio: no meter data available from rigctld.";
         }
 
         public bool ToggleTuningProcess()
@@ -147,13 +170,20 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // Self-sufficiency plan, Phase 1: the one and only F11/F12 redirect point (confirmed by
+        // direct tracing -- HotkeyConfig.cs -> Controller.ProcessCmdKey -> here -> either path
+        // below; no other code path touches F11/F12). HamlibRigctld adjusts the radio's own AF
+        // gain via rigctld; WsjtxCat keeps today's WM8Q sub-command 20 behavior unchanged.
         public bool AudioLevel(bool up)
         {
             if (!transmitting) return false;
 
             if (!tuning) StartStatusTimer2(false);
 
-            AdjAudioLevel(up);
+            if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
+                ctrl.rigctldClient.AdjustAudioLevel(up);
+            else
+                AdjAudioLevel(up);
             return true;
         }
 

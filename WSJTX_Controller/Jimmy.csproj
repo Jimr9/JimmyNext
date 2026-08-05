@@ -65,6 +65,20 @@
     </None>
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Bundled rigctld (self-sufficiency plan, Phase 1), staged here by
+         fetch-hamlib.ps1, not committed to source control (see .gitignore).
+         Whatever the fetch script stages (rigctld.exe, rigctl.exe, and Hamlib's DLLs
+         and attribution files) is picked up automatically, same "any file dropped
+         under this folder" convention as RuleDefinitions above. Absent means the
+         folder doesn't exist yet (fetch script not run); Include on a missing path
+         is a harmless no-op in MSBuild, not a build error, so Jimmy still builds
+         fine before the first fetch. -->
+    <None Include="Resources\hamlib\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
   <!-- Jimmy's Club Log application key lives in a private file outside the
        repo, never an environment variable and never source control. Only the
        path and line number are recorded here (this is a personal machine path,

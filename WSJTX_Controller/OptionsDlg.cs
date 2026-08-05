@@ -36,7 +36,8 @@ namespace WSJTX_Controller
         private const int SpotWatchTabIndex    = 7;
         private const int SoundsTabIndex       = 8;
         private const int UdpTabIndex          = 9;
-        private const int LookupTabIndex       = 10;
+        private const int RadioTabIndex        = 10;
+        private const int LookupTabIndex       = 10;   // stale/unused -- pre-existing, not from this change
 
         // Advanced UI tab — controls created dynamically in BuildAdvancedUiTab()
         private System.Windows.Forms.CheckBox advCallLayoutCheckBox;
@@ -208,6 +209,7 @@ namespace WSJTX_Controller
             BuildAdvancedUiTab();
             BuildWantedCallsTab();
             BuildSpotWatchTab();
+            BuildRadioTab();
             BuildSoundsTab();
             BuildLogbookSyncTab();
             BuildLookupDataTab();
@@ -350,6 +352,7 @@ namespace WSJTX_Controller
             SaveAdvancedUiTab();
             SaveWantedCallsTab();
             SaveSpotWatchTab();
+            SaveRadioTab();
             SaveSoundsTab();
             SaveLookupTab();
             SaveAppearanceTab();
@@ -924,6 +927,284 @@ namespace WSJTX_Controller
             int idx = _spotWatchSortCb?.SelectedIndex ?? 0;
             ctrl.spotWatchSortKey = sortKeys[idx >= 0 && idx < sortKeys.Length ? idx : 0];
             ctrl.RefreshSpotWatchDisplay();
+        }
+
+        // ===== RADIO TAB (self-sufficiency plan, Phase 1) =====
+
+        private System.Windows.Forms.RadioButton _radioWsjtxCatRb;
+        private System.Windows.Forms.RadioButton _radioHamlibRb;
+        private System.Windows.Forms.TextBox _radioRigModelTextBox;
+        private System.Windows.Forms.TextBox _radioComPortTextBox;
+        private System.Windows.Forms.CheckBox _radioUseExternalCheckBox;
+        private System.Windows.Forms.TextBox _radioHostTextBox;
+        private System.Windows.Forms.TextBox _radioPortTextBox;
+        private System.Windows.Forms.CheckBox _radioPttEnabledCheckBox;
+        private System.Windows.Forms.Button _radioTestButton;
+        private System.Windows.Forms.Label _radioTestResultLabel;
+
+        private void BuildRadioTab()
+        {
+            radioPanel.Controls.Clear();
+
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            int y = 8;
+            const int left = 8;
+            const int w = 640;
+
+            var instrBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly       = true,
+                Multiline      = true,
+                BorderStyle    = System.Windows.Forms.BorderStyle.None,
+                BackColor      = radioPanel.BackColor,
+                ForeColor      = System.Drawing.SystemColors.ControlText,
+                Location       = new System.Drawing.Point(left, y),
+                Size           = new System.Drawing.Size(w, 48),
+                Text           = "Choose where signal-meter, power, and SWR readings come from. WSJT-X CAT is today's " +
+                                 "behavior (Power/SWR available via Alt+Q if WSJT-X supports it). Hamlib rigctld adds a " +
+                                 "real S-meter and connects to the radio directly.",
+                TabStop        = false,
+                AccessibleName = "Radio tab instructions",
+                Font           = font,
+            };
+            radioPanel.Controls.Add(instrBox);
+            y += 56;
+
+            _radioWsjtxCatRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "Use WSJT-X CAT (current behavior)",
+                Checked = ctrl.Radio.Mode == RadioControlMode.WsjtxCat,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 0,
+                Font = font,
+                AccessibleName = "Use WSJT-X CAT",
+                AccessibleDescription = "Radio state (frequency, mode, transmitting) comes from WSJT-X, same as today. Power and SWR use WSJT-X's own reporting.",
+            };
+            radioPanel.Controls.Add(_radioWsjtxCatRb);
+            y += 24;
+
+            _radioHamlibRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "Use Hamlib rigctld (S-meter, power, SWR; optional PTT)",
+                Checked = ctrl.Radio.Mode == RadioControlMode.HamlibRigctld,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 1,
+                Font = font,
+                AccessibleName = "Use Hamlib rigctld",
+                AccessibleDescription = "Jimmy launches its own bundled rigctld against the rig model and COM port below, or connects to an external rigctld if configured. Frequency and mode for decoding still come from WSJT-X either way.",
+            };
+            radioPanel.Controls.Add(_radioHamlibRb);
+            y += 32;
+
+            var rigModelLabel = new System.Windows.Forms.Label
+            {
+                Text = "Rig model (Hamlib number, e.g. 2037 for Kenwood TS-590SG):",
+                AccessibleName = "Rig model label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(rigModelLabel);
+            y += 20;
+
+            _radioRigModelTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.Radio.RigModel,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(100, 21),
+                TabIndex = 2,
+                Font = font,
+                AccessibleName = "Rig model",
+                AccessibleDescription = "Hamlib rig model number. 2037 is the Kenwood TS-590SG.",
+            };
+            radioPanel.Controls.Add(_radioRigModelTextBox);
+            y += 28;
+
+            var comPortLabel = new System.Windows.Forms.Label
+            {
+                Text = "COM port (e.g. COM3):",
+                AccessibleName = "COM port label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(comPortLabel);
+            y += 20;
+
+            _radioComPortTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.Radio.ComPort,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(100, 21),
+                TabIndex = 3,
+                Font = font,
+                AccessibleName = "COM port",
+                AccessibleDescription = "Serial port the radio is connected to, e.g. COM3. Only used when launching Jimmy's own bundled rigctld.",
+            };
+            radioPanel.Controls.Add(_radioComPortTextBox);
+            y += 32;
+
+            _radioUseExternalCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Use an external rigctld instead of Jimmy's own bundled copy",
+                Checked = ctrl.Radio.UseExternalRigctld,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 4,
+                Font = font,
+                AccessibleName = "Use external rigctld",
+                AccessibleDescription = "When checked, Jimmy connects to a rigctld you are already running elsewhere, using the host and port below, instead of launching its own bundled copy.",
+            };
+            _radioUseExternalCheckBox.CheckedChanged += (s, e) => UpdateRadioHostPortEnabled();
+            radioPanel.Controls.Add(_radioUseExternalCheckBox);
+            y += 28;
+
+            var hostLabel = new System.Windows.Forms.Label
+            {
+                Text = "Host:",
+                AccessibleName = "rigctld host label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(hostLabel);
+
+            _radioHostTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.Radio.RigctldHost,
+                Location = new System.Drawing.Point(left + 45, y),
+                Size = new System.Drawing.Size(120, 21),
+                TabIndex = 5,
+                Font = font,
+                AccessibleName = "rigctld host",
+                AccessibleDescription = "Hostname or IP address of the external rigctld instance.",
+            };
+            radioPanel.Controls.Add(_radioHostTextBox);
+
+            var portLabel = new System.Windows.Forms.Label
+            {
+                Text = "Port:",
+                AccessibleName = "rigctld port label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 175, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(portLabel);
+
+            _radioPortTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.Radio.RigctldPort.ToString(),
+                Location = new System.Drawing.Point(left + 215, y),
+                Size = new System.Drawing.Size(60, 21),
+                TabIndex = 6,
+                Font = font,
+                AccessibleName = "rigctld port",
+                AccessibleDescription = "TCP port of the external rigctld instance. Hamlib's default is 4532.",
+            };
+            radioPanel.Controls.Add(_radioPortTextBox);
+            y += 32;
+
+            _radioPttEnabledCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Use rigctld for PTT (instead of WSJT-X's own CAT-driven PTT)",
+                Checked = ctrl.Radio.PttEnabled,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 7,
+                Font = font,
+                AccessibleName = "Use rigctld for PTT",
+                AccessibleDescription = "Off by default. A bigger change than read-only telemetry -- only turn this on if you want Jimmy, not WSJT-X, keying the radio.",
+            };
+            radioPanel.Controls.Add(_radioPttEnabledCheckBox);
+            y += 32;
+
+            _radioTestButton = new System.Windows.Forms.Button
+            {
+                Text = "Test connection",
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(120, 24),
+                TabIndex = 8,
+                Font = font,
+                AccessibleName = "Test radio connection",
+                AccessibleDescription = "Launches (or connects to) rigctld with the settings above and reports whether it answered.",
+            };
+            _radioTestButton.Click += RadioTestButton_Click;
+            radioPanel.Controls.Add(_radioTestButton);
+
+            _radioTestResultLabel = new System.Windows.Forms.Label
+            {
+                Text = "",
+                AccessibleName = "Radio test result",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 130, y + 4),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(_radioTestResultLabel);
+
+            UpdateRadioHostPortEnabled();
+        }
+
+        private void UpdateRadioHostPortEnabled()
+        {
+            bool external = _radioUseExternalCheckBox?.Checked ?? false;
+            if (_radioHostTextBox != null) _radioHostTextBox.Enabled = external;
+            if (_radioPortTextBox != null) _radioPortTextBox.Enabled = external;
+            if (_radioRigModelTextBox != null) _radioRigModelTextBox.Enabled = !external;
+            if (_radioComPortTextBox != null) _radioComPortTextBox.Enabled = !external;
+        }
+
+        // Applies the fields above to a throwaway RigctldClient, launching the bundled copy
+        // (or connecting to the external one) exactly as SaveRadioTab would, then polls once.
+        // Never touches ctrl.rigctldClient -- a failed test must not disturb a working session.
+        private void RadioTestButton_Click(object sender, EventArgs e)
+        {
+            _radioTestResultLabel.Text = "Testing...";
+            bool external = _radioUseExternalCheckBox.Checked;
+            string host = external ? _radioHostTextBox.Text.Trim() : "127.0.0.1";
+            int.TryParse(_radioPortTextBox.Text.Trim(), out int port);
+            if (port <= 0) port = 4532;
+
+            using (var test = new RigctldClient(host, port))
+            {
+                if (!external)
+                {
+                    if (!test.LaunchBundled(_radioRigModelTextBox.Text.Trim(), _radioComPortTextBox.Text.Trim()))
+                    {
+                        _radioTestResultLabel.Text = "FAIL: " + test.LastError;
+                        return;
+                    }
+                }
+
+                var status = test.PollOnce();
+                _radioTestResultLabel.Text = status.Ok
+                    ? "PASS -- rigctld answered."
+                    : "FAIL: " + (status.LastError ?? "no response");
+
+                if (!external) test.StopBundled();
+            }
+        }
+
+        private void SaveRadioTab()
+        {
+            if (_radioWsjtxCatRb == null) return;
+
+            ctrl.Radio.Mode = _radioHamlibRb.Checked ? RadioControlMode.HamlibRigctld : RadioControlMode.WsjtxCat;
+            ctrl.Radio.RigModel = _radioRigModelTextBox.Text.Trim();
+            ctrl.Radio.ComPort = _radioComPortTextBox.Text.Trim();
+            ctrl.Radio.UseExternalRigctld = _radioUseExternalCheckBox.Checked;
+            ctrl.Radio.RigctldHost = _radioHostTextBox.Text.Trim();
+            if (int.TryParse(_radioPortTextBox.Text.Trim(), out int port) && port > 0 && port <= 65535)
+                ctrl.Radio.RigctldPort = port;
+            ctrl.Radio.PttEnabled = _radioPttEnabledCheckBox.Checked;
+
+            ctrl.ApplyRadioSettings();
         }
 
         // ===== SOUNDS TAB =====

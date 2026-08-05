@@ -58,3 +58,8 @@ text files/
 # User-specific editor settings
 .vscode/
 publish-trial/
+
+# Bundled rigctld (self-sufficiency plan, Phase 1) -- fetched by scripts\fetch-hamlib.ps1,
+# not vendored, same reasoning as Nexus's own fetch-hamlib.sh keeping these out of source
+# control (they're an official Hamlib release download, not something Jimmy authors).
+WSJTX_Controller/Resources/hamlib/

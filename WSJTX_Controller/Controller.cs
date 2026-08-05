@@ -158,6 +158,15 @@ namespace WSJTX_Controller
         // DX Spot Watch: tracks last-seen band/time/spotter for a user-curated callsign list
         // via the PSKReporter MQTT feed. See spotWatchCalls (WsjtxClient) for the watch list.
         private DxSpotWatcher dxSpotWatcher;
+
+        // Self-sufficiency plan, Phase 1: Hamlib rigctld radio-state source. Null whenever
+        // Radio.Mode == WsjtxCat -- only instantiated/launched when the operator opts into
+        // HamlibRigctld. Public so OptionsDlg's own throwaway test client (RadioTestButton_Click)
+        // isn't the only thing that can reach it; kept but not itself made thread-safe (single
+        // owner: radioPollTimer_Tick and on-demand callers like Alt+Q, never concurrently).
+        public RigctldClient rigctldClient;
+        public System.Windows.Forms.Timer radioPollTimer;
+        public RadioStatus lastRadioStatus;
         public List<string> spotWatchRowOrderFields;
         // "callsign" (alphabetical, default), "evenodd", or "snr".
         public string spotWatchSortKey = "callsign";
@@ -244,6 +253,9 @@ namespace WSJTX_Controller
             spotWatchAgeTimer = new System.Windows.Forms.Timer();
             spotWatchAgeTimer.Interval = 60000;
             spotWatchAgeTimer.Tick += new System.EventHandler(spotWatchAgeTimer_Tick);
+            radioPollTimer = new System.Windows.Forms.Timer();
+            radioPollTimer.Interval = Math.Max(200, Radio.PollIntervalMs);
+            radioPollTimer.Tick += new System.EventHandler(radioPollTimer_Tick);
         }
 
 #if DEBUG
@@ -752,6 +764,7 @@ namespace WSJTX_Controller
             dxSpotWatcher.Updated += () => BeginInvoke(new Action(RenderSpotWatchList));
             dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls);
             spotWatchAgeTimer.Start();
+            ApplyRadioSettings();   // Phase 1: launches/connects rigctld if Radio.Mode was saved as HamlibRigctld
             wsjtxClient.rawPriorityTags = rawPriorityTags;
             wsjtxClient.cmdPrompts = cmdPrompts;
             wsjtxClient.usePskReporter = usePskReporter;
@@ -1171,6 +1184,8 @@ namespace WSJTX_Controller
             mainLoopTimer = null;
             statusMsgTimer.Stop();
             initialConnFaultTimer.Stop();
+            radioPollTimer?.Stop();
+            rigctldClient?.Dispose();   // also stops any bundled rigctld this session launched
             wsjtxClient.Closing();
         }
 
@@ -2241,6 +2256,56 @@ namespace WSJTX_Controller
         private void spotWatchAgeTimer_Tick(object sender, EventArgs e)
         {
             RenderSpotWatchList();
+        }
+
+        // Self-sufficiency plan, Phase 1: brings the live rigctldClient/radioPollTimer state
+        // into line with Radio's current settings. Called once at startup (after
+        // Radio.LoadFromIni) and again every time OptionsDlg's Radio tab is saved -- switching
+        // modes takes effect immediately, no restart needed, matching the plan's "Done when"
+        // criterion for this phase.
+        public void ApplyRadioSettings()
+        {
+            radioPollTimer.Stop();
+
+            if (Radio.Mode != RadioControlMode.HamlibRigctld)
+            {
+                rigctldClient?.Dispose();
+                rigctldClient = null;
+                lastRadioStatus = null;
+                return;
+            }
+
+            // Reconnect from scratch on every apply rather than trying to patch a live
+            // connection's host/port/launch-args in place -- Options changes to this tab are
+            // infrequent, and a clean relaunch avoids a whole class of "which half of the old
+            // settings is still live" bugs for a handful of extra milliseconds.
+            rigctldClient?.Dispose();
+            rigctldClient = new RigctldClient(
+                Radio.UseExternalRigctld ? Radio.RigctldHost : "127.0.0.1",
+                Radio.RigctldPort);
+
+            if (!Radio.UseExternalRigctld)
+            {
+                if (!rigctldClient.LaunchBundled(Radio.RigModel, Radio.ComPort))
+                {
+                    ShowMessage($"Radio: {rigctldClient.LastError}", false);
+                    return;
+                }
+            }
+
+            radioPollTimer.Interval = Math.Max(200, Radio.PollIntervalMs);
+            if (Radio.PollEnabled) radioPollTimer.Start();
+        }
+
+        // Quiet background update, same "no sound, no forced announcement" spirit as
+        // spotWatchAgeTimer_Tick above -- Alt+Q (ReportPowerSwr) always does its own fresh,
+        // synchronous PollOnce() rather than relying on this cached value, so this timer only
+        // needs to keep lastRadioStatus reasonably current for anything that wants to peek at
+        // it without forcing a round-trip.
+        private void radioPollTimer_Tick(object sender, EventArgs e)
+        {
+            if (rigctldClient == null) return;
+            lastRadioStatus = rigctldClient.PollOnce();
         }
 
         // Called (via BeginInvoke, already marshalled to the UI thread) whenever

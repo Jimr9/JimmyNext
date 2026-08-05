@@ -42,6 +42,8 @@ namespace WSJTX_Controller
             this.wantedCallsPanel = new System.Windows.Forms.Panel();
             this.spotWatchTabPage = new System.Windows.Forms.TabPage();
             this.spotWatchPanel = new System.Windows.Forms.Panel();
+            this.radioTabPage = new System.Windows.Forms.TabPage();
+            this.radioPanel = new System.Windows.Forms.Panel();
             this.soundsTabPage = new System.Windows.Forms.TabPage();
             this.soundsPanel = new System.Windows.Forms.Panel();
             this.appearanceTabPage = new System.Windows.Forms.TabPage();
@@ -96,6 +98,8 @@ namespace WSJTX_Controller
             this.wantedCallsPanel.SuspendLayout();
             this.spotWatchTabPage.SuspendLayout();
             this.spotWatchPanel.SuspendLayout();
+            this.radioTabPage.SuspendLayout();
+            this.radioPanel.SuspendLayout();
             this.soundsTabPage.SuspendLayout();
             this.soundsPanel.SuspendLayout();
             this.appearanceTabPage.SuspendLayout();
@@ -117,9 +121,10 @@ namespace WSJTX_Controller
             this.tabControl1.Controls.Add(this.spotWatchTabPage);     // index 7
             this.tabControl1.Controls.Add(this.soundsTabPage);        // index 8
             this.tabControl1.Controls.Add(this.udpTabPage);           // index 9
-            this.tabControl1.Controls.Add(this.logbookSyncTabPage);   // index 10
-            this.tabControl1.Controls.Add(this.lookupTabPage);        // index 11
-            this.tabControl1.Controls.Add(this.appearanceTabPage);    // index 12
+            this.tabControl1.Controls.Add(this.radioTabPage);         // index 10
+            this.tabControl1.Controls.Add(this.logbookSyncTabPage);   // index 11
+            this.tabControl1.Controls.Add(this.lookupTabPage);        // index 12
+            this.tabControl1.Controls.Add(this.appearanceTabPage);    // index 13
             this.tabControl1.Location = new System.Drawing.Point(0, 0);
             this.tabControl1.Multiline = true;
             this.tabControl1.Name = "tabControl1";
@@ -308,6 +313,19 @@ namespace WSJTX_Controller
             this.spotWatchPanel.AutoScroll = true;
             this.spotWatchPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.spotWatchPanel.Name = "spotWatchPanel";
+            //
+            // radioTabPage
+            //
+            this.radioTabPage.Controls.Add(this.radioPanel);
+            this.radioTabPage.Text = "Radio";
+            this.radioTabPage.Name = "radioTabPage";
+            this.radioTabPage.AccessibleName = "Radio tab";
+            //
+            // radioPanel
+            //
+            this.radioPanel.AutoScroll = true;
+            this.radioPanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.radioPanel.Name = "radioPanel";
             //
             // soundsTabPage
             //
@@ -773,6 +791,8 @@ namespace WSJTX_Controller
             this.wantedCallsPanel.ResumeLayout(false);
             this.spotWatchTabPage.ResumeLayout(false);
             this.spotWatchPanel.ResumeLayout(false);
+            this.radioTabPage.ResumeLayout(false);
+            this.radioPanel.ResumeLayout(false);
             this.soundsTabPage.ResumeLayout(false);
             this.soundsPanel.ResumeLayout(false);
             this.appearanceTabPage.ResumeLayout(false);
@@ -844,6 +864,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Panel wantedCallsPanel;
         private System.Windows.Forms.TabPage spotWatchTabPage;
         private System.Windows.Forms.Panel spotWatchPanel;
+        private System.Windows.Forms.TabPage radioTabPage;
+        private System.Windows.Forms.Panel radioPanel;
         private System.Windows.Forms.TabPage soundsTabPage;
         private System.Windows.Forms.Panel soundsPanel;
         private System.Windows.Forms.TabPage logbookSyncTabPage;
