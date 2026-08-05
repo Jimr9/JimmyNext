@@ -18,6 +18,13 @@ namespace WSJTX_Controller
         public string ClubLogUploadEmail;
         public string ClubLogUploadPassword;
         public string ClubLogUploadCallsign;
+        // HRDLog.net (self-sufficiency plan, Phase 2). Same shape as the Club Log fields above --
+        // callsign is its own configured setting, not silently derived from wsjtxClient.myCall,
+        // for consistency with how ClubLogUploadCallsign already works.
+        public bool HrdLogUploadEnabled;
+        public bool HrdLogUploadRealtime;
+        public string HrdLogUploadCode;
+        public string HrdLogUploadCallsign;
     }
 
     // Extracted from WsjtxClient.ImportLiveLoggedQso (Phase 2.6 of the modernization plan) --
@@ -94,8 +101,13 @@ namespace WSJTX_Controller
                                        !string.IsNullOrWhiteSpace(creds.ClubLogUploadPassword) &&
                                        !string.IsNullOrWhiteSpace(creds.ClubLogUploadCallsign) &&
                                        !_clubLogRealtimeBroken;
+                        // No circuit breaker, same as QRZ -- HRDLog's own API isn't documented to
+                        // require one the way Club Log's does.
+                        bool needHrdLog = creds.HrdLogUploadEnabled && creds.HrdLogUploadRealtime &&
+                                       !string.IsNullOrWhiteSpace(creds.HrdLogUploadCode) &&
+                                       !string.IsNullOrWhiteSpace(creds.HrdLogUploadCallsign);
 
-                        if (!needQrz && !needClubLog) return;
+                        if (!needQrz && !needClubLog && !needHrdLog) return;
 
                         if (needQrz)
                         {
@@ -124,6 +136,15 @@ namespace WSJTX_Controller
                                 _clubLogRealtimeBroken = true;
                                 _showStatus($"Club Log real-time upload error, automatic upload paused: {clClient.LastError}", true);
                             }
+                        }
+
+                        if (needHrdLog)
+                        {
+                            var hrdClient = new HrdLogUploadClient();
+                            bool ok = await hrdClient.InsertAsync(
+                                creds.HrdLogUploadCallsign, creds.HrdLogUploadCode, adifRecord).ConfigureAwait(false);
+                            if (ok) db.MarkUploaded(dedupKey, "HRDLOG", DateTime.UtcNow);
+                            else _debugLog($"HRDLog.net real-time upload failed for {dxCall}: {hrdClient.LastError}");
                         }
                     }
                 }

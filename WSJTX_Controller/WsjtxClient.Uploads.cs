@@ -199,6 +199,11 @@ namespace WSJTX_Controller
                             !string.IsNullOrWhiteSpace(ctrl.clubLogUploadPassword) &&
                             !string.IsNullOrWhiteSpace(ctrl.clubLogUploadCallsign))
                             await CatchUpClubLog(db).ConfigureAwait(false);
+
+                        if (ctrl.hrdLogUploadEnabled &&
+                            !string.IsNullOrWhiteSpace(ctrl.hrdLogUploadCode) &&
+                            !string.IsNullOrWhiteSpace(ctrl.hrdLogUploadCallsign))
+                            await CatchUpHrdLog(db).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
@@ -311,6 +316,58 @@ namespace WSJTX_Controller
                 // here the way real-time upload needs one.
                 ctrl.BeginInvoke(new Action(() =>
                     ctrl.ShowUploadStatus($"Club Log upload failed: {client.LastError}", true)));
+            }
+        }
+
+        // HRDLog.net's NewEntry.aspx is single-QSO-per-call like QRZ (no batch endpoint), so
+        // this follows CatchUpQrz's exact per-QSO-loop-with-delay shape, not CatchUpClubLog's
+        // single-batch shape.
+        private async Task CatchUpHrdLog(LogbookDb db)
+        {
+            var pending = db.GetPendingUploads("HRDLOG");
+            if (pending.Count == 0) return;
+            DebugOutput($"{Time()} HRDLog.net upload catch-up: {pending.Count} pending QSO(s).");
+
+            ctrl.BeginInvoke(new Action(() =>
+                ctrl.ShowUploadStatus($"HRDLog.net upload: starting, {pending.Count} pending QSO(s)...", false)));
+
+            var client = new HrdLogUploadClient();
+            int done = 0, succeeded = 0, failedCount = 0;
+            DateTime lastStatusUpdate = DateTime.UtcNow;
+            foreach (var q in pending)
+            {
+                string adifRecord = AdifRecordBuilder.Build(
+                    q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
+                    q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
+                    q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd);
+                bool ok = await client.InsertAsync(ctrl.hrdLogUploadCallsign, ctrl.hrdLogUploadCode, adifRecord).ConfigureAwait(false);
+                done++;
+                if (ok)
+                {
+                    db.MarkUploaded(q.DedupKey, "HRDLOG", DateTime.UtcNow);
+                    succeeded++;
+                }
+                else
+                {
+                    failedCount++;
+                    DebugOutput($"{Time()} HRDLog.net upload catch-up failed for {q.Callsign}: {client.LastError}");
+                }
+
+                bool isLast = done == pending.Count;
+                if (isLast || (DateTime.UtcNow - lastStatusUpdate).TotalSeconds >= 5)
+                {
+                    lastStatusUpdate = DateTime.UtcNow;
+                    int doneSnap = done, totalSnap = pending.Count, okSnap = succeeded, failSnap = failedCount;
+                    string msg = isLast
+                        ? $"HRDLog.net upload: {totalSnap} QSO(s) processed ({okSnap} uploaded, {failSnap} failed)."
+                        : $"HRDLog.net upload: {doneSnap}/{totalSnap} processed ({okSnap} uploaded, {failSnap} failed)...";
+                    if (isLast)
+                        ctrl.BeginInvoke(new Action(() => { ctrl.ShowUploadStatus(msg, false); ctrl.RefreshLogbookWindowIfOpen(); }));
+                    else
+                        ctrl.BeginInvoke(new Action(() => ctrl.ShowUploadStatus(msg, false)));
+                }
+
+                await Task.Delay(300).ConfigureAwait(false);
             }
         }
 

@@ -575,6 +575,10 @@ namespace WSJTX_Controller
                     ClubLogUploadEmail = ctrl.clubLogUploadEmail,
                     ClubLogUploadPassword = ctrl.clubLogUploadPassword,
                     ClubLogUploadCallsign = ctrl.clubLogUploadCallsign,
+                    HrdLogUploadEnabled = ctrl.hrdLogUploadEnabled,
+                    HrdLogUploadRealtime = ctrl.hrdLogUploadRealtime,
+                    HrdLogUploadCode = ctrl.hrdLogUploadCode,
+                    HrdLogUploadCallsign = ctrl.hrdLogUploadCallsign,
                 },
                 notifyImported: () => ctrl.BeginInvoke(new Action(() =>
                 {

@@ -132,6 +132,13 @@ namespace WSJTX_Controller
         public string clubLogUploadEmail     = "";
         public string clubLogUploadPassword  = "";
         public string clubLogUploadCallsign  = "";
+        // HRDLog.net (self-sufficiency plan, Phase 2) -- same shape as the Club Log fields
+        // above. hrdLogUploadCode is the account's HRDLog upload code (a secret, DPAPI-protected
+        // like clubLogUploadPassword), not the account login password.
+        public bool   hrdLogUploadEnabled    = false;
+        public bool   hrdLogUploadRealtime   = false;
+        public string hrdLogUploadCode       = "";
+        public string hrdLogUploadCallsign   = "";
 
         // Automatic logbook download/sync (opt-in, default off so existing users aren't
         // suddenly downloading full logbooks on their next update without asking). Runs
@@ -635,6 +642,10 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("clubLogUploadEmail"))    clubLogUploadEmail    = iniFile.Read("clubLogUploadEmail")    ?? "";
                 if (iniFile.KeyExists("clubLogUploadPassword")) clubLogUploadPassword = CredentialProtector.Unprotect(iniFile.Read("clubLogUploadPassword"));
                 if (iniFile.KeyExists("clubLogUploadCallsign")) clubLogUploadCallsign = iniFile.Read("clubLogUploadCallsign") ?? "";
+                if (iniFile.KeyExists("hrdLogUploadEnabled"))    hrdLogUploadEnabled   = iniFile.Read("hrdLogUploadEnabled")    == "True";
+                if (iniFile.KeyExists("hrdLogUploadRealtime"))   hrdLogUploadRealtime  = iniFile.Read("hrdLogUploadRealtime")   == "True";
+                if (iniFile.KeyExists("hrdLogUploadCode"))       hrdLogUploadCode      = CredentialProtector.Unprotect(iniFile.Read("hrdLogUploadCode"));
+                if (iniFile.KeyExists("hrdLogUploadCallsign"))   hrdLogUploadCallsign  = iniFile.Read("hrdLogUploadCallsign")   ?? "";
                 if (iniFile.KeyExists("qrzLogbookAutoSyncEnabled"))     qrzLogbookAutoSyncEnabled     = iniFile.Read("qrzLogbookAutoSyncEnabled")     == "True";
                 int qrzld; if (iniFile.KeyExists("qrzLogbookRefreshDays") && int.TryParse(iniFile.Read("qrzLogbookRefreshDays"), out qrzld) && qrzld >= 1) qrzLogbookRefreshDays = qrzld;
                 if (iniFile.KeyExists("lotwLogbookAutoSyncEnabled"))    lotwLogbookAutoSyncEnabled    = iniFile.Read("lotwLogbookAutoSyncEnabled")    == "True";
@@ -1122,6 +1133,10 @@ namespace WSJTX_Controller
                 iniFile.Write("clubLogUploadEmail",      clubLogUploadEmail       ?? "");
                 iniFile.Write("clubLogUploadPassword",   CredentialProtector.Protect(clubLogUploadPassword));
                 iniFile.Write("clubLogUploadCallsign",   clubLogUploadCallsign    ?? "");
+                iniFile.Write("hrdLogUploadEnabled",     hrdLogUploadEnabled.ToString());
+                iniFile.Write("hrdLogUploadRealtime",    hrdLogUploadRealtime.ToString());
+                iniFile.Write("hrdLogUploadCode",        CredentialProtector.Protect(hrdLogUploadCode));
+                iniFile.Write("hrdLogUploadCallsign",    hrdLogUploadCallsign     ?? "");
                 iniFile.Write("qrzLogbookAutoSyncEnabled",     qrzLogbookAutoSyncEnabled.ToString());
                 iniFile.Write("qrzLogbookRefreshDays",         qrzLogbookRefreshDays.ToString());
                 iniFile.Write("lotwLogbookAutoSyncEnabled",    lotwLogbookAutoSyncEnabled.ToString());

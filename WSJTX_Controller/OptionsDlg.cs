@@ -111,6 +111,10 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox         _clubLogUploadCallsignTb;
         private System.Windows.Forms.CheckBox        _clubLogLogbookAutoSyncCb;
         private System.Windows.Forms.NumericUpDown   _clubLogLogbookRefreshDaysNum;
+        private System.Windows.Forms.CheckBox        _hrdLogUploadEnabledCb;
+        private System.Windows.Forms.CheckBox        _hrdLogUploadRealtimeCb;
+        private System.Windows.Forms.TextBox         _hrdLogUploadCallsignTb;
+        private System.Windows.Forms.TextBox         _hrdLogUploadCodeTb;
 
         private sealed class SoundRow
         {
@@ -2362,6 +2366,76 @@ namespace WSJTX_Controller
                 "Passwords) -- NOT your normal Club Log website login. Separate from the country-data key (Lookup Data tab).",
                 10, 200, font));
 
+            // ── HRDLog.net Upload (self-sufficiency plan, Phase 2) ───────────────
+            // HRDLog.net is the online logging/awards site at hrdlog.net -- NOT the Ham Radio
+            // Deluxe *Logbook* desktop app, and NOT an ARRL confirmation source (an upload here
+            // never earns DXCC/WAS credit, unlike LoTW). No auto-download here: HRDLog exposes
+            // no bulk-fetch API, unlike QRZ/LoTW/Club Log above.
+            tabIdx = 1;
+            var hrdLogBox = MakeGroupBox("HRDLog.net Upload", 175, 5, pw, 160, font);
+            logbookSyncPanel.Controls.Add(hrdLogBox);
+            panels.Add(hrdLogBox);
+            serviceList.Items.Add("HRDLog");
+
+            _hrdLogUploadEnabledCb = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Enable HRDLog.net upload",
+                Checked        = ctrl.hrdLogUploadEnabled,
+                Location       = new System.Drawing.Point(10, 20),
+                AutoSize       = true,
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Enable HRDLog.net upload",
+            };
+            hrdLogBox.Controls.Add(_hrdLogUploadEnabledCb);
+
+            _hrdLogUploadRealtimeCb = new System.Windows.Forms.CheckBox
+            {
+                Text           = $"Upload automatically as each QSO completes (otherwise, use {uploadLotwKeyText})",
+                Checked        = ctrl.hrdLogUploadRealtime,
+                Location       = new System.Drawing.Point(28, 42),
+                AutoSize       = true,
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Upload to HRDLog.net automatically in real time",
+            };
+            hrdLogBox.Controls.Add(_hrdLogUploadRealtimeCb);
+
+            hrdLogBox.Controls.Add(MakeLabel("Callsign:", 10, 68, font));
+            _hrdLogUploadCallsignTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ctrl.hrdLogUploadCallsign ?? "",
+                Location       = new System.Drawing.Point(90, 65),
+                Size           = new System.Drawing.Size(120, 20),
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Callsign for HRDLog.net upload",
+            };
+            hrdLogBox.Controls.Add(_hrdLogUploadCallsignTb);
+
+            hrdLogBox.Controls.Add(MakeLabel("Upload code:", 10, 92, font));
+            _hrdLogUploadCodeTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ctrl.hrdLogUploadCode ?? "",
+                Location       = new System.Drawing.Point(90, 89),
+                Size           = new System.Drawing.Size(220, 20),
+                PasswordChar   = '●',
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "HRDLog.net upload code",
+            };
+            hrdLogBox.Controls.Add(_hrdLogUploadCodeTb);
+
+            hrdLogBox.Controls.Add(MakeLabel(
+                "Uploads QSOs to your HRDLog.net account (Options -> your account -> Upload Code). This is",
+                10, 116, font));
+            hrdLogBox.Controls.Add(MakeLabel(
+                "the online HRDLog.net live-logging/awards site, not Ham Radio Deluxe software, and does",
+                10, 132, font));
+            hrdLogBox.Controls.Add(MakeLabel(
+                "not earn ARRL award credit -- LoTW above still handles DXCC/WAS confirmation.",
+                10, 148, font));
+
             WireServiceList(serviceList, panels);
         }
 
@@ -2863,6 +2937,10 @@ namespace WSJTX_Controller
             ctrl.clubLogUploadCallsign   = _clubLogUploadCallsignTb?.Text.Trim().ToUpperInvariant() ?? "";
             ctrl.clubLogLogbookAutoSyncEnabled = _clubLogLogbookAutoSyncCb?.Checked ?? false;
             ctrl.clubLogLogbookRefreshDays = (int)(_clubLogLogbookRefreshDaysNum?.Value ?? 7);
+            ctrl.hrdLogUploadEnabled     = _hrdLogUploadEnabledCb?.Checked          ?? false;
+            ctrl.hrdLogUploadRealtime    = _hrdLogUploadRealtimeCb?.Checked         ?? false;
+            ctrl.hrdLogUploadCallsign    = _hrdLogUploadCallsignTb?.Text.Trim().ToUpperInvariant() ?? "";
+            ctrl.hrdLogUploadCode        = _hrdLogUploadCodeTb?.Text              ?? "";
             ctrl.fccUlsEnabled           = _fccUlsEnabledCb?.Checked           ?? false;
             ctrl.fccUlsRefreshDays       = (int)(_fccUlsRefreshDaysNum?.Value   ?? 7);
         }

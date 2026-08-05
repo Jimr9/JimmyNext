@@ -136,6 +136,7 @@ static class JimmyTests
         ParseRowOrderTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
+        HrdLogClassifyResponseTests();
         ResolveUsStateTests();
         AdifImporterLiveLoggedStateFallbackTests();
         DxSpotWatcherIsEvenPeriodTests();
@@ -1458,6 +1459,42 @@ static class JimmyTests
         Check("null reason is not a duplicate", QrzLogbookClient.IsDuplicateReason(null), false);
         Check("empty reason is not a duplicate", QrzLogbookClient.IsDuplicateReason(""), false);
         Check("whitespace-only reason is not a duplicate", QrzLogbookClient.IsDuplicateReason("   "), false);
+    }
+
+    // ── HrdLogUploadClient.ClassifyResponse ──────────────────────────────────────
+    // HRDLog.net's NewEntry.aspx reply format and these exact fixture bodies are ported
+    // directly from the open-source Nexus project's crates/tempo-core/src/hrdlog.rs unit
+    // tests, since Jimmy's own codebase has no other documentation of HRDLog's real XML shape.
+    static void HrdLogClassifyResponseTests()
+    {
+        Console.WriteLine("\n── HrdLogUploadClient.ClassifyResponse ──");
+
+        string ok = "<?xml version=\"1.0\" ?><HrdLog xmlns=\"http://xml.hrdlog.com\">" +
+                    "<NewEntry><insert>1</insert></NewEntry></HrdLog>";
+        Check("insert=1 is Ok", HrdLogUploadClient.ClassifyResponse(ok).Result == HrdLogUploadClient.HrdLogResult.Ok, true);
+
+        string dup = "<HrdLog><NewEntry><insert>0</insert></NewEntry></HrdLog>";
+        Check("insert=0 is Duplicate", HrdLogUploadClient.ClassifyResponse(dup).Result == HrdLogUploadClient.HrdLogResult.Duplicate, true);
+
+        string unknownUser = "<HrdLog><NewEntry><error>Unknown user</error></NewEntry></HrdLog>";
+        var unknownUserResult = HrdLogUploadClient.ClassifyResponse(unknownUser);
+        Check("'Unknown user' error is AuthFail", unknownUserResult.Result == HrdLogUploadClient.HrdLogResult.AuthFail, true);
+        Check("'Unknown user' error message preserved", unknownUserResult.Message == "Unknown user", true);
+
+        string invalidToken = "<HrdLog><NewEntry><error>Invalid token</error></NewEntry></HrdLog>";
+        Check("'Invalid token' error is AuthFail",
+              HrdLogUploadClient.ClassifyResponse(invalidToken).Result == HrdLogUploadClient.HrdLogResult.AuthFail, true);
+
+        string badAdif = "<HrdLog><NewEntry><error>A key should contain at least: Call, QSO_Date, " +
+                          "Time_On</error></NewEntry></HrdLog>";
+        var badAdifResult = HrdLogUploadClient.ClassifyResponse(badAdif);
+        Check("other error text is Rejected, not AuthFail", badAdifResult.Result == HrdLogUploadClient.HrdLogResult.Rejected, true);
+        Check("Rejected keeps the error message",
+              badAdifResult.Message != null && badAdifResult.Message.Contains("Call, QSO_Date"), true);
+
+        Check("unrecognized HTML body is Unknown (transient, not a bounce)",
+              HrdLogUploadClient.ClassifyResponse("<html>500 Internal Server Error</html>").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
+        Check("empty body is Unknown", HrdLogUploadClient.ClassifyResponse("").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
     }
 
     // ── WsjtxClient.ResolveUsState ───────────────────────────────────────────────
