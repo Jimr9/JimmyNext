@@ -33,6 +33,9 @@ namespace WSJTX_Controller
         // properties, kept under the original field names so the ~65 existing call
         // sites across Controller/WsjtxClient/OptionsDlg/SupportReportBuilder are unaffected.
         public JimmySettings Settings = new JimmySettings();
+        // Self-sufficiency plan, Phase 0: radio-backend settings (Hamlib/rigctld). Mode defaults
+        // to WsjtxCat, so nothing reads/uses this yet -- Phase 1 wires a RigctldClient to it.
+        public RadioSettings Radio = new RadioSettings();
         public bool advancedCallLayout { get => Settings.AdvancedCallLayout; set => Settings.AdvancedCallLayout = value; }
         public bool advShowTx1 { get => Settings.AdvShowTx1; set => Settings.AdvShowTx1 = value; }
         public bool advShowTx2 { get => Settings.AdvShowTx2; set => Settings.AdvShowTx2 = value; }
@@ -509,6 +512,13 @@ namespace WSJTX_Controller
                 // Set logClassificationParityMismatches=True by hand-editing the .ini file only
                 // to collect field-verification evidence for Stage A6; remove once confirmed.
                 if (iniFile.KeyExists("logClassificationParityMismatches")) ClassificationParityLogger.Enabled = iniFile.Read("logClassificationParityMismatches") == "True";
+                // Self-sufficiency plan (Protocol/BackendMode.cs) -- same emergency-rollback-valve
+                // shape as useClassificationEngine above: INI-only, undocumented, default unchanged
+                // (WsjtxExternal/SeparateProcess) until Phase 4 has field validation to justify a
+                // real Options control.
+                if (iniFile.KeyExists("decodeEngineMode") && System.Enum.TryParse(iniFile.Read("decodeEngineMode"), out DecodeEngineMode dem)) EngineModeCutover.Mode = dem;
+                if (iniFile.KeyExists("engineProcessModel") && System.Enum.TryParse(iniFile.Read("engineProcessModel"), out EngineProcessModel epm)) EngineModeCutover.ProcessModel = epm;
+                Radio.LoadFromIni(iniFile);
                 if (iniFile.KeyExists("rankMethod")) int.TryParse(iniFile.Read("rankMethod"), out rankMethodIdx);
                 if (iniFile.KeyExists("rankOrder")) rankOrderStr = iniFile.Read("rankOrder");
                 if (iniFile.KeyExists("rankBeam")) rankBeamStr = iniFile.Read("rankBeam");
@@ -1020,6 +1030,7 @@ namespace WSJTX_Controller
                 iniFile.Write("usePskReporter", wsjtxClient.usePskReporter.ToString());
                 iniFile.Write("showUsState", showUsStateCheckBox.Checked.ToString());
                 Settings.SaveToIni(iniFile);
+                Radio.SaveToIni(iniFile);
                 iniFile.Write("rawShowCq", rawShowCq.ToString());
                 iniFile.Write("rawShowDirected", rawShowDirected.ToString());
                 iniFile.Write("rawShowReports", rawShowReports.ToString());

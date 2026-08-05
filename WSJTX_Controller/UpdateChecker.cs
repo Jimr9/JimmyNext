@@ -1,10 +1,8 @@
 using System;
-using System.Collections;
-using System.Collections.Generic;
 using System.IO;
 using System.Net.Http;
+using System.Text.Json;
 using System.Threading.Tasks;
-using System.Web.Script.Serialization;
 
 namespace WSJTX_Controller
 {
@@ -40,23 +38,23 @@ namespace WSJTX_Controller
             try
             {
                 string json = await _http.GetStringAsync(ReleasesApiUrl).ConfigureAwait(false);
-                if (!(new JavaScriptSerializer().DeserializeObject(json) is Dictionary<string, object> dict))
-                    return null;
+                using var doc = JsonDocument.Parse(json);
+                JsonElement root = doc.RootElement;
 
-                string tag = dict.TryGetValue("tag_name", out var t) ? t as string : null;
+                string tag = root.TryGetProperty("tag_name", out var tagEl) && tagEl.ValueKind == JsonValueKind.String
+                    ? tagEl.GetString() : null;
                 int[] latest = ParseVersion(tag);
                 int[] current = ParseVersion(currentVersion);
                 if (latest == null || current == null) return null;
                 if (CompareVersions(current, latest) >= 0) return null;
 
-                Dictionary<string, object> msiAsset = null;
-                if (dict.TryGetValue("assets", out var assetsObj) && assetsObj is IEnumerable assets)
+                JsonElement? msiAsset = null;
+                if (root.TryGetProperty("assets", out var assetsEl) && assetsEl.ValueKind == JsonValueKind.Array)
                 {
-                    foreach (var item in assets)
+                    foreach (var asset in assetsEl.EnumerateArray())
                     {
-                        if (item is Dictionary<string, object> asset &&
-                            (asset.TryGetValue("name", out var nameObj) ? nameObj as string : null)
-                                ?.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) == true)
+                        if (asset.TryGetProperty("name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String &&
+                            nameEl.GetString()?.EndsWith(".msi", StringComparison.OrdinalIgnoreCase) == true)
                         {
                             msiAsset = asset;
                             break;
@@ -64,10 +62,11 @@ namespace WSJTX_Controller
                     }
                 }
                 if (msiAsset == null) return null;
+                JsonElement msi = msiAsset.Value;
 
                 DateTime? published = null;
-                if (dict.TryGetValue("published_at", out var pubRaw) &&
-                    DateTime.TryParse(pubRaw as string, out var pub))
+                if (root.TryGetProperty("published_at", out var pubEl) && pubEl.ValueKind == JsonValueKind.String &&
+                    DateTime.TryParse(pubEl.GetString(), out var pub))
                 {
                     published = pub;
                 }
@@ -76,8 +75,8 @@ namespace WSJTX_Controller
                 {
                     Version   = tag.TrimStart('v', 'V'),
                     Published = published,
-                    MsiName   = msiAsset.TryGetValue("name", out var n) ? n as string : "JimmyUpdate.msi",
-                    MsiUrl    = msiAsset.TryGetValue("browser_download_url", out var u) ? u as string : null,
+                    MsiName   = msi.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : "JimmyUpdate.msi",
+                    MsiUrl    = msi.TryGetProperty("browser_download_url", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() : null,
                 };
             }
             catch
