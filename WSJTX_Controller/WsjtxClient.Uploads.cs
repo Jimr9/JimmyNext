@@ -170,11 +170,50 @@ namespace WSJTX_Controller
             HaltTuning();
             if (ctrl.lotwUploadEnabled)
             {
-                StartUploadLotw();
+                if (ctrl.lotwUploadPath == LotwUploadPath.JimmyTqsl)
+                    RunTqslUpload();
+                else
+                    StartUploadLotw();
                 lastLotwUploadTrigger = DateTime.Now;
             }
             RunUploadCatchUp();
             return true;
+        }
+
+        // Self-sufficiency plan, Phase 3: Jimmy's own TQSL invocation, an alternative to
+        // StartUploadLotw's WM8Q sub-command 16 path. Runs in the background like
+        // RunUploadCatchUp -- TQSL itself can take several seconds to sign and upload.
+        private void RunTqslUpload()
+        {
+            Task.Run(async () =>
+            {
+                try
+                {
+                    using (var db = new LogbookDb())
+                    {
+                        var client = new TqslUploadClient();
+                        bool ok = await client.UploadPendingAsync(ctrl.tqslStationLocation, db).ConfigureAwait(false);
+                        if (!ok)
+                        {
+                            DebugOutput($"{Time()} TQSL upload failed: {client.LastError}");
+                            ctrl.BeginInvoke(new Action(() =>
+                                ctrl.ShowUploadStatus($"LoTW (TQSL) upload failed: {client.LastError}", true)));
+                        }
+                        else
+                        {
+                            ctrl.BeginInvoke(new Action(() =>
+                            {
+                                ctrl.ShowUploadStatus("LoTW (TQSL) upload complete.", false);
+                                ctrl.RefreshLogbookWindowIfOpen();
+                            }));
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugOutput($"{Time()} RunTqslUpload error: {ex.Message}");
+                }
+            });
         }
 
         // Sends every QSO not yet uploaded to QRZ/Club Log. This is the batch

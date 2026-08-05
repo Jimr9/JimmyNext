@@ -115,6 +115,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox        _hrdLogUploadRealtimeCb;
         private System.Windows.Forms.TextBox         _hrdLogUploadCallsignTb;
         private System.Windows.Forms.TextBox         _hrdLogUploadCodeTb;
+        private System.Windows.Forms.CheckBox        _lotwUseTqslCb;
+        private System.Windows.Forms.TextBox         _tqslStationLocationTb;
 
         private sealed class SoundRow
         {
@@ -2190,7 +2192,7 @@ namespace WSJTX_Controller
 
             // ── LoTW Logbook Download ────────────────────────────────────────────
             tabIdx = 1;
-            var lotwLogbookBox = MakeGroupBox("LoTW Logbook Download", 175, 5, pw, 142, font);
+            var lotwLogbookBox = MakeGroupBox("LoTW Logbook Download", 175, 5, pw, 210, font);
             logbookSyncPanel.Controls.Add(lotwLogbookBox);
             panels.Add(lotwLogbookBox);
             serviceList.Items.Add("LoTW");
@@ -2254,6 +2256,47 @@ namespace WSJTX_Controller
             };
             lotwLogbookBox.Controls.Add(_lotwLogbookRefreshDaysNum);
             lotwLogbookBox.Controls.Add(MakeLabel("days", 270, 111, font));
+
+            // ── LoTW upload path (self-sufficiency plan, Phase 3) ────────────────
+            // Independent of the download settings above -- this only affects what Alt+U's
+            // LoTW leg does. Unchecked (default) keeps today's behavior: WSJT-X invokes its
+            // own TQSL integration (sub-command 16). Checked: Jimmy invokes TQSL itself
+            // (TqslUploadClient), needing only the Station Location name below -- TQSL's own
+            // certificate/passphrase setup stays exactly as configured inside TQSL.
+            lotwLogbookBox.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――",
+                Location = new System.Drawing.Point(10, 137), AutoSize = true, Font = font, TabStop = false,
+            });
+
+            _lotwUseTqslCb = new System.Windows.Forms.CheckBox
+            {
+                Text           = $"Sign and upload via Jimmy's own TQSL when pressing {uploadLotwKeyText} (instead of WSJT-X)",
+                Checked        = ctrl.lotwUploadPath == LotwUploadPath.JimmyTqsl,
+                Location       = new System.Drawing.Point(10, 148),
+                AutoSize       = true,
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Use Jimmy's own TQSL for LoTW upload instead of WSJT-X",
+                AccessibleDescription = "Requires TQSL to be installed, with a Station Location already configured inside TQSL itself.",
+            };
+            lotwLogbookBox.Controls.Add(_lotwUseTqslCb);
+
+            lotwLogbookBox.Controls.Add(MakeLabel("TQSL Station Location:", 10, 174, font));
+            _tqslStationLocationTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ctrl.tqslStationLocation ?? "",
+                Location       = new System.Drawing.Point(160, 171),
+                Size           = new System.Drawing.Size(150, 20),
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "TQSL Station Location name",
+                AccessibleDescription = "The Station Location name as configured inside TQSL -- not a Jimmy credential. Required only if Jimmy's own TQSL upload is enabled above.",
+            };
+            lotwLogbookBox.Controls.Add(_tqslStationLocationTb);
+            lotwLogbookBox.Controls.Add(MakeLabel(
+                "A passphrase-protected certificate isn't supported here -- use a certificate TQSL doesn't need to unlock.",
+                10, 194, font));
 
             // ── Club Log Logbook Upload ──────────────────────────────────────────
             // A per-user credential (Application Password), entirely separate from
@@ -2941,6 +2984,8 @@ namespace WSJTX_Controller
             ctrl.hrdLogUploadRealtime    = _hrdLogUploadRealtimeCb?.Checked         ?? false;
             ctrl.hrdLogUploadCallsign    = _hrdLogUploadCallsignTb?.Text.Trim().ToUpperInvariant() ?? "";
             ctrl.hrdLogUploadCode        = _hrdLogUploadCodeTb?.Text              ?? "";
+            ctrl.lotwUploadPath          = (_lotwUseTqslCb?.Checked ?? false) ? LotwUploadPath.JimmyTqsl : LotwUploadPath.WsjtxDelegated;
+            ctrl.tqslStationLocation     = _tqslStationLocationTb?.Text.Trim()    ?? "";
             ctrl.fccUlsEnabled           = _fccUlsEnabledCb?.Checked           ?? false;
             ctrl.fccUlsRefreshDays       = (int)(_fccUlsRefreshDaysNum?.Value   ?? 7);
         }

@@ -122,6 +122,12 @@ namespace WSJTX_Controller
         // that existing behavior for everyone; only someone who doesn't use LoTW needs to
         // uncheck it (Options > Lookup) to stop WSJT-X reporting an error on that keypress.
         public bool   lotwUploadEnabled      = true;
+        // Self-sufficiency plan, Phase 3: independent of DecodeEngineMode entirely -- an
+        // operator can use Jimmy's own TQSL invocation for LoTW while still using WM8Q/WSJT-X
+        // for decode, since WM8Q sub-command 16 has no coupling to decode/encode at all.
+        // WsjtxDelegated (default) is unchanged existing behavior (Alt+U -> sub-command 16).
+        public LotwUploadPath lotwUploadPath = LotwUploadPath.WsjtxDelegated;
+        public string tqslStationLocation    = "";
         // Which entry in directedTextBox's space-separated list (e.g. "POTA SOTA") the Call
         // CQ dialog should use every time, instead of Jimmy's default random rotation. Empty
         // means "Random" -- NextDirCq() falls back to rotating through all entries whenever
@@ -646,6 +652,8 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("hrdLogUploadRealtime"))   hrdLogUploadRealtime  = iniFile.Read("hrdLogUploadRealtime")   == "True";
                 if (iniFile.KeyExists("hrdLogUploadCode"))       hrdLogUploadCode      = CredentialProtector.Unprotect(iniFile.Read("hrdLogUploadCode"));
                 if (iniFile.KeyExists("hrdLogUploadCallsign"))   hrdLogUploadCallsign  = iniFile.Read("hrdLogUploadCallsign")   ?? "";
+                if (iniFile.KeyExists("lotwUploadPath") && System.Enum.TryParse(iniFile.Read("lotwUploadPath"), out LotwUploadPath lup)) lotwUploadPath = lup;
+                if (iniFile.KeyExists("tqslStationLocation"))    tqslStationLocation   = iniFile.Read("tqslStationLocation")    ?? "";
                 if (iniFile.KeyExists("qrzLogbookAutoSyncEnabled"))     qrzLogbookAutoSyncEnabled     = iniFile.Read("qrzLogbookAutoSyncEnabled")     == "True";
                 int qrzld; if (iniFile.KeyExists("qrzLogbookRefreshDays") && int.TryParse(iniFile.Read("qrzLogbookRefreshDays"), out qrzld) && qrzld >= 1) qrzLogbookRefreshDays = qrzld;
                 if (iniFile.KeyExists("lotwLogbookAutoSyncEnabled"))    lotwLogbookAutoSyncEnabled    = iniFile.Read("lotwLogbookAutoSyncEnabled")    == "True";
@@ -1137,6 +1145,8 @@ namespace WSJTX_Controller
                 iniFile.Write("hrdLogUploadRealtime",    hrdLogUploadRealtime.ToString());
                 iniFile.Write("hrdLogUploadCode",        CredentialProtector.Protect(hrdLogUploadCode));
                 iniFile.Write("hrdLogUploadCallsign",    hrdLogUploadCallsign     ?? "");
+                iniFile.Write("lotwUploadPath",          lotwUploadPath.ToString());
+                iniFile.Write("tqslStationLocation",     tqslStationLocation      ?? "");
                 iniFile.Write("qrzLogbookAutoSyncEnabled",     qrzLogbookAutoSyncEnabled.ToString());
                 iniFile.Write("qrzLogbookRefreshDays",         qrzLogbookRefreshDays.ToString());
                 iniFile.Write("lotwLogbookAutoSyncEnabled",    lotwLogbookAutoSyncEnabled.ToString());

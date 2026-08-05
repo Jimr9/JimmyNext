@@ -137,6 +137,7 @@ static class JimmyTests
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
+        TqslParseFinalStatusTests();
         ResolveUsStateTests();
         AdifImporterLiveLoggedStateFallbackTests();
         DxSpotWatcherIsEvenPeriodTests();
@@ -1495,6 +1496,48 @@ static class JimmyTests
         Check("unrecognized HTML body is Unknown (transient, not a bounce)",
               HrdLogUploadClient.ClassifyResponse("<html>500 Internal Server Error</html>").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
         Check("empty body is Unknown", HrdLogUploadClient.ClassifyResponse("").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
+    }
+
+    // ── TqslUploadClient.ParseFinalStatus ────────────────────────────────────────
+    // These three stderr examples are copied verbatim from TQSL 2.8's own installed
+    // documentation (TrustedQSL\help\tqslapp\cmdline.htm's "Status Examples" section), not
+    // fabricated -- confirms the "Final Status: Description (Code)" parser matches TQSL's
+    // real batch-mode (-x) output shape, including the cancelled/partial/success cases.
+    static void TqslParseFinalStatusTests()
+    {
+        Console.WriteLine("\n── TqslUploadClient.ParseFinalStatus ──");
+
+        string cancelled =
+            "05:57:39 PM: Warning: Signing cancelled\n" +
+            "05:57:39 PM: No records output\n" +
+            "05:57:39 PM: Final Status: cancelled by user (1)\n";
+        var c = TqslUploadClient.ParseFinalStatus(cancelled);
+        Check("cancelled-by-user code parsed", c.Code == 1, true);
+        Check("cancelled-by-user description parsed", c.Description == "cancelled by user", true);
+
+        string partial =
+            "06:05:56 PM: /home/rmurphy/k1mu.adi: 414 QSO records were already uploaded\n" +
+            "06:05:56 PM: /home/rmurphy/k1mu.adi: wrote 1 records to /home/rmurphy/k1mu.tq8\n" +
+            "06:05:56 PM: /home/rmurphy/k1mu.tq8 is ready to be emailed or uploaded.\n" +
+            "Note: TQSL assumes that this file will be uploaded to LoTW.\n" +
+            "Resubmitting these QSOs will cause them to be reported as already uploaded.\n" +
+            "06:05:56 PM: Final Status: Some QSOs were already uploaded or out of date range (9)\n";
+        var p = TqslUploadClient.ParseFinalStatus(partial);
+        Check("partial-upload code parsed (treated as success, not a failure)", p.Code == 9, true);
+        Check("partial-upload description parsed", p.Description == "Some QSOs were already uploaded or out of date range", true);
+
+        string success =
+            "17:21:32 PM: /Signing using Callsign W4TV, DXCC Entity UNITED STATES OF AMERICA\n" +
+            "17:21:32 PM: /Attempting to upload 2 QSOs\n" +
+            "17:21:33 PM: /Log uploaded successfully with result \"File queued for processing\"!\n" +
+            "17:21:33 PM: /Final Status: Success (0)\n";
+        var s = TqslUploadClient.ParseFinalStatus(success);
+        Check("success code parsed", s.Code == 0, true);
+        Check("success description parsed", s.Description == "Success", true);
+
+        var none = TqslUploadClient.ParseFinalStatus("no status line here at all");
+        Check("missing status line yields null code (must be treated as failure, not assumed success)", none.Code == null, true);
+        Check("empty stderr yields null code", TqslUploadClient.ParseFinalStatus("").Code == null, true);
     }
 
     // ── WsjtxClient.ResolveUsState ───────────────────────────────────────────────
