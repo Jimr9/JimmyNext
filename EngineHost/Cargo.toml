@@ -29,6 +29,10 @@ ft8 = { path = "C:/claude/nexus/crates/ft8" }
 # feature split for). CpalBackend (device.rs) is the actual real-audio-capture reuse target --
 # see EngineHost/src/audio.rs.
 tempo-audio = { path = "C:/claude/nexus/crates/tempo-audio", features = ["device"] }
+# `live` feature: read-only POTA/SOTA spot fetch (crate::live::pota) reused for Phase 4f.
+# Independent of tempo-fast-sys (pure network/parsing code, no native modem link) -- confirmed
+# by its own Cargo.toml before adding it here.
+propagation = { path = "C:/claude/nexus/crates/propagation", features = ["live"] }
 
 # tempo-core/tempo-audio/ft8 -> tempo-fast-sys, whose OWN build.rs hits a \\?\-long-path interop
 # bug between cmake/ninja/gfortran in this environment (a Rust canonicalize() quirk) -- not a bug
