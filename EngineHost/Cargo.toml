@@ -25,6 +25,11 @@ path = "src/main.rs"
 [dependencies]
 tempo-net = { path = "C:/claude/nexus/crates/tempo-net" }
 tempo-core = { path = "C:/claude/nexus/crates/tempo-core" }
+# `device` feature pulls in cpal (real sound-card I/O) + tempo-sstv (an SSTV-feature
+# transitive dep of tempo-audio's `device` feature, unused here but not worth a Nexus-side
+# feature split for). CpalBackend (device.rs) is the actual real-audio-capture reuse target --
+# see EngineHost/src/audio.rs.
+tempo-audio = { path = "C:/claude/nexus/crates/tempo-audio", features = ["device"] }
 
 # tempo-core -> tempo-fast -> tempo-fast-sys, whose OWN build.rs hits the same \\?\-long-path
 # interop bug documented above (a Rust canonicalize() quirk this environment's gfortran/ninja
