@@ -76,11 +76,18 @@ fn main() {
         }
     };
 
+    let no_halt = std::env::args().any(|a| a == "--no-halt");
+
     let sock = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral UDP socket");
 
     let reply = build_reply("send_reply_bench", -12, 0.2, 1500, "FT8", "CQ K1ABC FN20");
     sock.send_to(&reply, &engine_addr).expect("send Reply");
     println!("Sent synthetic Reply (CQ K1ABC FN20) to {engine_addr} -- watch the engine's own console.");
+
+    if no_halt {
+        println!("--no-halt set: skipping HaltTx (for tests that need to watch a TX_SCHEDULE tick).");
+        return;
+    }
 
     std::thread::sleep(Duration::from_secs(3));
 

@@ -21,6 +21,7 @@
 
 mod audio;
 mod tx_control;
+mod tx_schedule;
 
 use std::io::Write;
 use std::net::UdpSocket;
@@ -112,7 +113,11 @@ fn main() {
     let (tx_cmd_tx, tx_cmd_rx) = mpsc::channel::<tx_control::Command>();
     tx_control::spawn_receiver(&sock, tx_cmd_tx)
         .expect("spawn transmit-control receive thread (cloning the UDP socket)");
-    let mut current_qso: Option<Station> = None;
+    let mut current_qso: Option<tx_schedule::ActiveQso> = None;
+    // (message text, period decoded in) for recently-sent Decodes -- lets a later Reply look up
+    // which period the replied-to signal was actually heard in, which TX parity is computed
+    // from (see tx_schedule.rs). Pruned to a handful of periods' worth.
+    let mut recent_decodes: Vec<(String, u64)> = Vec::new();
 
     let mut cap = match &args.device {
         Some(name) => audio::FrameCapture::open_named(name),
@@ -134,7 +139,7 @@ fn main() {
         // WOULD happen -- see tx_control.rs's own header comment for the staged build-out.
         while let Ok(cmd) = tx_cmd_rx.try_recv() {
             match cmd {
-                tx_control::Command::Reply { dxcall, msg, snr } => {
+                tx_control::Command::Reply { dxcall, msg, snr, raw_text } => {
                     let station = Station::start(
                         &args.mycall,
                         &args.mygrid,
@@ -143,12 +148,34 @@ fn main() {
                         false,
                         false,
                     );
+                    // Which period was the replied-to signal actually decoded in? Needed for TX
+                    // parity (tx_schedule::tx_parity_for_decoded_period). Matched by exact
+                    // message text against recently-sent Decodes; a Reply to something decoded
+                    // before this process started (or long enough ago to be pruned) has no
+                    // match -- fall back to the opposite of the CURRENT period rather than
+                    // guessing wrong silently.
+                    let (current_period, _) = audio::period_position();
+                    let decoded_period = recent_decodes
+                        .iter()
+                        .rev()
+                        .find(|(text, _)| text == &raw_text)
+                        .map(|(_, p)| *p)
+                        .unwrap_or_else(|| {
+                            log!(
+                                "[TX_CONTROL] Reply message not found in recent-decode history \
+                                 -- falling back to current period for parity"
+                            );
+                            current_period
+                        });
+                    let qso = tx_schedule::ActiveQso::new(station, decoded_period);
                     log!(
-                        "[TX_CONTROL] Reply -> working {dxcall}: state={:?} pending='{}' (Stage 1: NOT actually transmitted)",
-                        station.state,
-                        station.pending_text().unwrap_or_default()
+                        "[TX_CONTROL] Reply -> working {dxcall}: state={:?} pending='{}' tx_parity={} \
+                         (decoded in period {decoded_period}) (Stage 2: NOT actually transmitted)",
+                        qso.station.state,
+                        qso.station.pending_text().unwrap_or_default(),
+                        qso.tx_parity
                     );
-                    current_qso = Some(station);
+                    current_qso = Some(qso);
                 }
                 tx_control::Command::HaltTx { auto_only } => {
                     log!("[TX_CONTROL] HaltTx (auto_only={auto_only}) -- clearing current QSO");
@@ -196,6 +223,7 @@ fn main() {
                     };
                     let bytes = encode_decode(ENGINE_ID, &wire);
                     let _ = sock.send_to(&bytes, &args.jimmy_addr);
+                    recent_decodes.push((d.message.clone(), next_decode_period));
                 }
                 if !decodes.is_empty() {
                     log!(
@@ -203,7 +231,34 @@ fn main() {
                         decodes.len()
                     );
                 }
+                // Prune decode history older than a handful of periods -- a Reply arrives
+                // within seconds of the operator seeing the decode, never minutes later.
+                recent_decodes.retain(|(_, p)| next_decode_period.saturating_sub(*p) <= 4);
                 next_decode_period += 1;
+            }
+        }
+
+        // Stage 2 dry run: if the active QSO owes a transmission for the CURRENT period, report
+        // exactly what would be sent and when -- generates the real audio via the real native
+        // encoder (proving the content is valid) but never plays it to a device or asserts PTT.
+        if let Some(qso) = &mut current_qso {
+            let (current_period, pos_in_period) = audio::period_position();
+            if qso.owes_tx_for(current_period) {
+                if let Some(text) = qso.station.pending_text() {
+                    let tones = ft8::encode(&text);
+                    let target_start = audio::period_boundary_time(current_period);
+                    log!(
+                        "[TX_SCHEDULE] period {current_period} (parity {}): WOULD transmit '{text}' \
+                         ({} tones, {:.2}s duration) starting at period boundary {target_start:?} \
+                         -- {:.2}s into this period right now -- NOT actually played, no PTT asserted",
+                        qso.tx_parity,
+                        tones.len(),
+                        tones.len() as f64 * (ft8::NZ as f64 / ft8::NN as f64) / ft8::SAMPLE_RATE as f64,
+                        pos_in_period
+                    );
+                    qso.last_tx_period = Some(current_period);
+                    qso.station.after_tx();
+                }
             }
         }
 

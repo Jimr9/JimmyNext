@@ -25,8 +25,10 @@ use tempo_net::wsjtx::{parse_inbound, Inbound};
 pub enum Command {
     /// The operator (via Jimmy's queue) wants to work this station -- WSJT-X's own "double-click
     /// a decode" semantics, which `tempo_core::qso::Station::start` already implements exactly
-    /// (see qso.rs's own doc comment on that function).
-    Reply { dxcall: String, msg: Msg, snr: i32 },
+    /// (see qso.rs's own doc comment on that function). `raw_text` is the original decoded text
+    /// verbatim, for matching against recent-decode history (TX parity lookup); `msg`/`snr` are
+    /// the same message already parsed for `Station::start`'s `context` argument.
+    Reply { dxcall: String, msg: Msg, snr: i32, raw_text: String },
     /// Stop transmitting. `auto_only`: true = only turn off auto-TX, finish the current
     /// transmission; false = stop now. Both must be reacted to immediately once real transmit
     /// exists -- this is the single most safety-critical message this process receives.
@@ -69,7 +71,12 @@ fn handle_datagram(bytes: &[u8], tx: &Sender<Command>) {
             let msg = Msg::parse(&message);
             match msg_sender(&msg) {
                 Some(dxcall) => {
-                    let _ = tx.send(Command::Reply { dxcall: dxcall.to_string(), msg, snr });
+                    let _ = tx.send(Command::Reply {
+                        dxcall: dxcall.to_string(),
+                        msg,
+                        snr,
+                        raw_text: message,
+                    });
                 }
                 None => {
                     eprintln!(
