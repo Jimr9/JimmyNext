@@ -6,12 +6,13 @@
 //! CapabilityNegotiator/WsjtxProtocolAdapter code already speaks, proven correct against a real
 //! radio in Phase 4c/4d/4e (see those commits and examples/live_decode.rs, examples/qso_bench.rs).
 //!
-//! RECEIVE ONLY, deliberately: this process never asserts PTT and never transmits. It does not
-//! yet listen for or act on Jimmy's outbound Reply/HaltTx/EnableTx messages -- an operator using
-//! JimmyNative today gets real native decodes of off-air traffic into Jimmy's own accessible
-//! queue/classification UI, but "Reply" doesn't yet do anything, because there is no live
-//! transmit backend wired to respond to it. Wiring transmit is a separate, safety-reviewed step
-//! (see the self-sufficiency plan's Phase 4 notes on why PTT/TX wiring is deferred).
+//! Transmit-control wiring is being built in verifiable stages (each bench-tested before the
+//! next lands), per an explicit, deliberate safety review with the operator -- this process
+//! still does not assert PTT or play TX audio as of the current stage (Stage 1: receive Jimmy's
+//! outbound Reply/HaltTx, run the real QSO sequencer, report what WOULD be sent -- see
+//! tx_control.rs). No stage before the last plays real audio to an output device or asserts
+//! PTT, and the final step -- an actual over-the-air test -- only happens with the operator
+//! physically present and watching, at reduced power into a dummy load first.
 //!
 //! Launched by Jimmy's Controller.cs (same lifecycle pattern as Phase 1's
 //! RigctldClient.LaunchBundled/StopBundled: spawned on demand, killed on Jimmy shutdown) when
@@ -19,11 +20,28 @@
 //! (e.g. `cargo run --release -- --mycall KB0UZT --mygrid FN42`) for bench testing.
 
 mod audio;
+mod tx_control;
 
+use std::io::Write;
 use std::net::UdpSocket;
+use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
+use tempo_core::qso::Station;
 use tempo_net::wsjtx::{encode_decode, encode_heartbeat, encode_status, Decode, Status};
+
+/// `println!`, but flushed immediately. Rust's stdout is only line-buffered when attached to a
+/// real terminal; redirected to a file or pipe (a launched-as-child-process Jimmy, or any test
+/// harness capturing output) it's fully block-buffered by default, so a caller polling the log
+/// for a specific line can wait arbitrarily long for it to actually appear. Every status line
+/// this process prints matters for exactly that kind of polling (bench tests, Jimmy watching for
+/// trouble), so this is used everywhere instead of a bare `println!`.
+macro_rules! log {
+    ($($arg:tt)*) => {{
+        println!($($arg)*);
+        let _ = std::io::stdout().flush();
+    }};
+}
 
 const ENGINE_ID: &str = "JimmyEngine";
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
@@ -75,7 +93,7 @@ fn main() {
     }
 
     let args = parse_args();
-    println!(
+    log!(
         "jimmy-engine-host starting: mycall={} mygrid={} device={} -> {} (RECEIVE ONLY -- no PTT, no transmit)",
         args.mycall,
         args.mygrid,
@@ -84,6 +102,17 @@ fn main() {
     );
 
     let sock = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral UDP socket");
+    log!(
+        "jimmy-engine-host listening on {} (this is where Jimmy's own Reply/HaltTx datagrams \
+         land -- Jimmy replies to whatever address a Heartbeat arrived from, so this ephemeral \
+         port IS the engine's control address; a bench tool targets it directly)",
+        sock.local_addr().expect("local_addr of a just-bound socket")
+    );
+
+    let (tx_cmd_tx, tx_cmd_rx) = mpsc::channel::<tx_control::Command>();
+    tx_control::spawn_receiver(&sock, tx_cmd_tx)
+        .expect("spawn transmit-control receive thread (cloning the UDP socket)");
+    let mut current_qso: Option<Station> = None;
 
     let mut cap = match &args.device {
         Some(name) => audio::FrameCapture::open_named(name),
@@ -99,6 +128,35 @@ fn main() {
     let mut next_decode_period = current_period + 1;
 
     loop {
+        // Drain every pending transmit-control command before anything else this tick --
+        // HaltTx in particular must never wait behind audio-capture work. Stage 1: no real
+        // transmit yet, so "acting on" a command means updating current_qso and reporting what
+        // WOULD happen -- see tx_control.rs's own header comment for the staged build-out.
+        while let Ok(cmd) = tx_cmd_rx.try_recv() {
+            match cmd {
+                tx_control::Command::Reply { dxcall, msg, snr } => {
+                    let station = Station::start(
+                        &args.mycall,
+                        &args.mygrid,
+                        &dxcall,
+                        Some((&msg, snr)),
+                        false,
+                        false,
+                    );
+                    log!(
+                        "[TX_CONTROL] Reply -> working {dxcall}: state={:?} pending='{}' (Stage 1: NOT actually transmitted)",
+                        station.state,
+                        station.pending_text().unwrap_or_default()
+                    );
+                    current_qso = Some(station);
+                }
+                tx_control::Command::HaltTx { auto_only } => {
+                    log!("[TX_CONTROL] HaltTx (auto_only={auto_only}) -- clearing current QSO");
+                    current_qso = None;
+                }
+            }
+        }
+
         cap.poll();
 
         let now = SystemTime::now();
@@ -140,7 +198,7 @@ fn main() {
                     let _ = sock.send_to(&bytes, &args.jimmy_addr);
                 }
                 if !decodes.is_empty() {
-                    println!(
+                    log!(
                         "period {next_decode_period}: {} real decode(s) sent to Jimmy",
                         decodes.len()
                     );
