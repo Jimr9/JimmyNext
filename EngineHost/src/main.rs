@@ -63,6 +63,17 @@ fn parse_args() -> Args {
 }
 
 fn main() {
+    // Not part of the continuous-service contract -- a quick, side-effect-free query mode so
+    // Jimmy's Options dialog can populate an audio-device picker (NativeEngineClient.cs) without
+    // needing its own cpal/WASAPI bindings. Prints one device name per line and exits.
+    if std::env::args().any(|a| a == "--list-devices") {
+        let (inputs, _outputs) = tempo_audio::device::available_devices();
+        for name in inputs {
+            println!("{name}");
+        }
+        return;
+    }
+
     let args = parse_args();
     println!(
         "jimmy-engine-host starting: mycall={} mygrid={} device={} -> {} (RECEIVE ONLY -- no PTT, no transmit)",

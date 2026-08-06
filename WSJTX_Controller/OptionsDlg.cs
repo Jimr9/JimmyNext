@@ -948,6 +948,15 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Button _radioTestButton;
         private System.Windows.Forms.Label _radioTestResultLabel;
 
+        // Self-sufficiency plan, Phase 4g/4i: decode engine source, same tab as radio-state
+        // source above (both answer "where does DSP/radio work come from"). RECEIVE ONLY --
+        // see NativeEngineClient's own header comment; no PTT/transmit control lives here.
+        private System.Windows.Forms.RadioButton _engineWsjtxExternalRb;
+        private System.Windows.Forms.RadioButton _engineJimmyNativeRb;
+        private System.Windows.Forms.TextBox _engineMyCallTextBox;
+        private System.Windows.Forms.TextBox _engineMyGridTextBox;
+        private System.Windows.Forms.ComboBox _engineAudioDeviceCombo;
+
         private void BuildRadioTab()
         {
             radioPanel.Controls.Clear();
@@ -1153,8 +1162,154 @@ namespace WSJTX_Controller
                 TabStop = false,
             };
             radioPanel.Controls.Add(_radioTestResultLabel);
+            y += 40;
+
+            var engineDivider = new System.Windows.Forms.Label
+            {
+                Text = "Decode Engine",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y),
+                Font = new System.Drawing.Font(font, System.Drawing.FontStyle.Bold),
+                TabStop = false,
+                AccessibleName = "Decode Engine section",
+            };
+            radioPanel.Controls.Add(engineDivider);
+            y += 22;
+
+            var engineInstrBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true,
+                Multiline = true,
+                BorderStyle = System.Windows.Forms.BorderStyle.None,
+                BackColor = radioPanel.BackColor,
+                ForeColor = System.Drawing.SystemColors.ControlText,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(w, 48),
+                Text = "Choose where FT8 decoding comes from. WSJT-X External is today's behavior -- Jimmy needs " +
+                       "a separate WSJT-X-family program running. Jimmy Native decodes audio itself; no other " +
+                       "program is needed, but it is receive-only for now -- Reply does not yet transmit.",
+                TabStop = false,
+                AccessibleName = "Decode Engine instructions",
+                Font = font,
+            };
+            radioPanel.Controls.Add(engineInstrBox);
+            y += 52;
+
+            _engineWsjtxExternalRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "WSJT-X External (current behavior)",
+                Checked = EngineModeCutover.Mode == DecodeEngineMode.WsjtxExternal,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 9,
+                Font = font,
+                AccessibleName = "Use WSJT-X External",
+                AccessibleDescription = "Jimmy connects to a separate WSJT-X-family program for decoding, same as today.",
+            };
+            _engineWsjtxExternalRb.CheckedChanged += (s, e) => UpdateEngineControlsEnabled();
+            radioPanel.Controls.Add(_engineWsjtxExternalRb);
+            y += 24;
+
+            _engineJimmyNativeRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "Jimmy Native (Jimmy decodes audio itself -- receive only)",
+                Checked = EngineModeCutover.Mode == DecodeEngineMode.JimmyNative,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 10,
+                Font = font,
+                AccessibleName = "Use Jimmy Native",
+                AccessibleDescription = "Jimmy launches its own bundled native FT8 decoder -- no separate WSJT-X-family program needed. Receive only: replying does not yet transmit.",
+            };
+            _engineJimmyNativeRb.CheckedChanged += (s, e) => UpdateEngineControlsEnabled();
+            radioPanel.Controls.Add(_engineJimmyNativeRb);
+            y += 32;
+
+            var myCallLabel = new System.Windows.Forms.Label
+            {
+                Text = "My Call:",
+                AccessibleName = "My Call label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(myCallLabel);
+
+            _engineMyCallTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.NativeEngine.MyCall,
+                Location = new System.Drawing.Point(left + 65, y),
+                Size = new System.Drawing.Size(100, 21),
+                TabIndex = 11,
+                Font = font,
+                AccessibleName = "My Call",
+                AccessibleDescription = "Your callsign. Required for Jimmy Native -- the engine needs it before it can report its own status.",
+            };
+            radioPanel.Controls.Add(_engineMyCallTextBox);
+
+            var myGridLabel = new System.Windows.Forms.Label
+            {
+                Text = "My Grid:",
+                AccessibleName = "My Grid label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 180, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(myGridLabel);
+
+            _engineMyGridTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.NativeEngine.MyGrid,
+                Location = new System.Drawing.Point(left + 245, y),
+                Size = new System.Drawing.Size(80, 21),
+                TabIndex = 12,
+                Font = font,
+                AccessibleName = "My Grid",
+                AccessibleDescription = "Your Maidenhead grid square. Required for Jimmy Native.",
+            };
+            radioPanel.Controls.Add(_engineMyGridTextBox);
+            y += 32;
+
+            var audioDeviceLabel = new System.Windows.Forms.Label
+            {
+                Text = "Audio input device:",
+                AccessibleName = "Audio input device label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(audioDeviceLabel);
+            y += 20;
+
+            _engineAudioDeviceCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDown,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(320, 21),
+                TabIndex = 13,
+                Font = font,
+                AccessibleName = "Audio input device",
+                AccessibleDescription = "Sound card input Jimmy Native captures from. Leave blank for the system default. Populated from the real devices this computer sees.",
+            };
+            _engineAudioDeviceCombo.Items.Add("");   // blank = system default
+            foreach (var dev in NativeEngineClient.ListAudioDevices())
+                _engineAudioDeviceCombo.Items.Add(dev);
+            _engineAudioDeviceCombo.Text = ctrl.NativeEngine.AudioInputDevice;
+            radioPanel.Controls.Add(_engineAudioDeviceCombo);
 
             UpdateRadioHostPortEnabled();
+            UpdateEngineControlsEnabled();
+        }
+
+        private void UpdateEngineControlsEnabled()
+        {
+            bool native = _engineJimmyNativeRb?.Checked ?? false;
+            if (_engineMyCallTextBox != null) _engineMyCallTextBox.Enabled = native;
+            if (_engineMyGridTextBox != null) _engineMyGridTextBox.Enabled = native;
+            if (_engineAudioDeviceCombo != null) _engineAudioDeviceCombo.Enabled = native;
         }
 
         private void UpdateRadioHostPortEnabled()
@@ -1211,6 +1366,15 @@ namespace WSJTX_Controller
             ctrl.Radio.PttEnabled = _radioPttEnabledCheckBox.Checked;
 
             ctrl.ApplyRadioSettings();
+
+            if (_engineWsjtxExternalRb != null)
+            {
+                EngineModeCutover.Mode = _engineJimmyNativeRb.Checked ? DecodeEngineMode.JimmyNative : DecodeEngineMode.WsjtxExternal;
+                ctrl.NativeEngine.MyCall = _engineMyCallTextBox.Text.Trim();
+                ctrl.NativeEngine.MyGrid = _engineMyGridTextBox.Text.Trim();
+                ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
+                ctrl.ApplyEngineMode();
+            }
         }
 
         // ===== SOUNDS TAB =====

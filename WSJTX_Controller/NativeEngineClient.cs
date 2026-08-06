@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
@@ -100,6 +101,43 @@ namespace WSJTX_Controller
                 LastError = $"Failed to launch jimmy-engine-host: {ex.Message}";
                 return false;
             }
+        }
+
+        // Enumerates real audio input device names via `jimmy-engine-host.exe --list-devices`
+        // (tempo_audio::device::available_devices(), the same cpal enumeration Launch's --device
+        // argument expects verbatim) for Options > Radio's device picker. Returns an empty list,
+        // never throws, if the exe is missing or enumeration fails -- the picker degrades to "type
+        // a device name" rather than blocking the whole tab from opening.
+        public static List<string> ListAudioDevices()
+        {
+            var result = new List<string>();
+            string exePath = LocateExe();
+            if (exePath == null) return result;
+
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = exePath,
+                    Arguments = "--list-devices",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(5000);
+                    foreach (var line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                        result.Add(line);
+                }
+            }
+            catch
+            {
+                // Best-effort only -- empty list on any failure.
+            }
+            return result;
         }
 
         // Terminates the engine host process this client started. Never touches any other

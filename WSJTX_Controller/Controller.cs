@@ -2345,11 +2345,11 @@ namespace WSJTX_Controller
             if (Radio.PollEnabled) radioPollTimer.Start();
         }
 
-        // Self-sufficiency plan, Phase 4g: brings the live nativeEngineClient state into line
+        // Self-sufficiency plan, Phase 4g/4i: brings the live nativeEngineClient state into line
         // with EngineModeCutover.Mode (an INI-only, undocumented flag -- see BackendMode.cs).
-        // Called once at startup (after EngineModeCutover/NativeEngine are loaded from the
-        // .ini). Unlike ApplyRadioSettings, there is no Options UI path that re-calls this yet
-        // (the cutover flag is hand-edit-only), so this only ever runs once per session for now.
+        // Called once at startup (after EngineModeCutover/NativeEngine are loaded from the .ini)
+        // and again whenever OptionsDlg's Radio tab is saved -- switching modes takes effect
+        // immediately, no restart needed, matching ApplyRadioSettings' own "Done when" shape.
         //
         // Jimmy's own UdpLoop/CheckWsjtxRunning (WsjtxClient.Protocol.cs) only opens Jimmy's UDP
         // socket after detecting %TEMP%\WSJT-X.lock -- a file a real external WSJT-X-family
@@ -2364,6 +2364,16 @@ namespace WSJTX_Controller
             {
                 nativeEngineClient?.Dispose();
                 nativeEngineClient = null;
+                // Switching away from JimmyNative (e.g. via Options) must also drop the lock
+                // file this session created for it -- otherwise Jimmy's UdpLoop still believes
+                // "WSJT-X running" with no process left to actually feed it UDP, a silently
+                // stuck-connected state until Jimmy is restarted or a real WSJT-X happens to run.
+                if (_nativeEngineOwnsLockFile)
+                {
+                    try { System.IO.File.Delete(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "WSJT-X.lock")); }
+                    catch { /* best-effort cleanup */ }
+                    _nativeEngineOwnsLockFile = false;
+                }
                 return;
             }
 
