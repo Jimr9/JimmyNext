@@ -1,0 +1,26 @@
+[package]
+name = "jimmy-engine-host"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+# Proof-of-concept for the self-sufficiency plan's Phase 4: an engine host that reuses the
+# open-source Nexus project's own native FT8 decoder (libtempo, vendored WSJT-X-derived
+# Fortran/C/C++) rather than reimplementing FT8/FT4 DSP from scratch, plus its tempo-net crate
+# for the stock WSJT-X UDP protocol Jimmy already speaks. Links directly against a locally-built
+# libtempo.a (see build.rs) instead of depending on Nexus's own tempo-fast-sys crate, whose
+# build.rs hits a \\?\-long-path interop bug between cmake/ninja/gfortran in this environment --
+# not a bug in the FT8 code itself, and not something to fix by editing Nexus's own source.
+# Nexus's crates are GPL-3.0; this crate inherits that for the same reason Nexus's own NOTICE
+# documents (linking GPLv3-derived modem code). Path dependency on tempo-net (pure Rust, no
+# native build) points at the local Nexus clone -- a development-time convenience for this proof
+# of concept; shipping this for real needs a proper vendoring strategy, a separate decision from
+# proving the architecture works.
+license = "GPL-3.0-only"
+
+[[bin]]
+name = "jimmy-engine-host"
+path = "src/main.rs"
+
+[dependencies]
+tempo-net = { path = "C:/claude/nexus/crates/tempo-net" }
