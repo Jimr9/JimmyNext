@@ -1,104 +1,143 @@
-//! Proof-of-concept engine host for Jimmy's self-sufficiency plan, Phase 4.
+//! jimmy-engine-host: a continuous, RECEIVE-ONLY native FT8 engine for Jimmy's
+//! DecodeEngineMode.JimmyNative. Captures real audio (tempo_audio::device::CpalBackend),
+//! decodes each FT8 period through the real native decoder (the `ft8` crate, wrapping
+//! libtempo), and reports every decode to Jimmy over the stock WSJT-X UDP protocol
+//! (tempo_net::wsjtx) -- the exact protocol Jimmy's EXISTING, UNMODIFIED
+//! CapabilityNegotiator/WsjtxProtocolAdapter code already speaks, proven correct against a real
+//! radio in Phase 4c/4d/4e (see those commits and examples/live_decode.rs, examples/qso_bench.rs).
 //!
-//! Proves the single riskiest architectural bet in the plan: that a Rust-built native FT8
-//! engine, reusing the open-source Nexus project's own libtempo native decoder (via its real
-//! `ft8` crate -- originally worked around via a local ft8_ffi.rs port when tempo-fast-sys's
-//! build.rs was still broken in this environment; that's fixed now, see
-//! vendor/tempo-fast-sys-patched/, so this uses the real crate directly) and tempo-net crate,
-//! can emit real WSJT-X UDP protocol datagrams that Jimmy's EXISTING, UNMODIFIED
-//! protocol-handling code correctly receives and displays -- with zero Jimmy-side changes needed
-//! for this half of the architecture. Synthesizes a test FT8 signal, decodes it back through the
-//! real native decoder (not a canned string), and sends the recovered decode to Jimmy exactly
-//! the way a real WSJT-X-family process would.
+//! RECEIVE ONLY, deliberately: this process never asserts PTT and never transmits. It does not
+//! yet listen for or act on Jimmy's outbound Reply/HaltTx/EnableTx messages -- an operator using
+//! JimmyNative today gets real native decodes of off-air traffic into Jimmy's own accessible
+//! queue/classification UI, but "Reply" doesn't yet do anything, because there is no live
+//! transmit backend wired to respond to it. Wiring transmit is a separate, safety-reviewed step
+//! (see the self-sufficiency plan's Phase 4 notes on why PTT/TX wiring is deferred).
 //!
-//! Real audio capture (src/audio.rs, tempo-audio) and QSO sequencing (tempo-core's Station,
-//! examples/qso_bench.rs) are proven separately, live -- see those files' own header comments.
+//! Launched by Jimmy's Controller.cs (same lifecycle pattern as Phase 1's
+//! RigctldClient.LaunchBundled/StopBundled: spawned on demand, killed on Jimmy shutdown) when
+//! EngineModeCutover.Mode == DecodeEngineMode.JimmyNative. Runs standalone/by hand otherwise
+//! (e.g. `cargo run --release -- --mycall KB0UZT --mygrid FN42`) for bench testing.
+
+mod audio;
 
 use std::net::UdpSocket;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
+
 use tempo_net::wsjtx::{encode_decode, encode_heartbeat, encode_status, Decode, Status};
 
-const JIMMY_ADDR: &str = "127.0.0.1:2237";
 const ENGINE_ID: &str = "JimmyEngine";
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+const POLL_INTERVAL: Duration = Duration::from_millis(150);
 
-fn main() {
-    let sock = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral UDP socket");
-    sock.set_read_timeout(Some(Duration::from_millis(100))).ok();
+struct Args {
+    mycall: String,
+    mygrid: String,
+    device: Option<String>,
+    jimmy_addr: String,
+    dial_freq: u64,
+}
 
-    println!("jimmy-engine-host proof of concept -- sending to {JIMMY_ADDR} as '{ENGINE_ID}'");
+fn parse_args() -> Args {
+    let mut mycall = "NOCALL".to_string();
+    let mut mygrid = "AA00".to_string();
+    let mut device = None;
+    let mut jimmy_addr = "127.0.0.1:2237".to_string();
+    let mut dial_freq: u64 = 14_074_000;
 
-    // 1. Heartbeat -- lets Jimmy's CapabilityNegotiator begin negotiating.
-    let hb = encode_heartbeat(ENGINE_ID, 3, "0.1.0", "poc");
-    sock.send_to(&hb, JIMMY_ADDR).expect("send heartbeat");
-    println!("sent Heartbeat");
-
-    // 2. Status -- de_call/de_grid populate Jimmy's myCall/myGrid (WsjtxClient.cs:1358-1361),
-    // reaching ACTIVE state the same way the replay-test harness's first StatusMessage does.
-    let status = Status {
-        dial_freq: 14_074_000,
-        mode: "FT8",
-        tr_period: 15,
-        decoding: true,
-        de_call: "KB0UZT",
-        de_grid: "FN42",
-        ..Default::default()
-    };
-    let st = encode_status(ENGINE_ID, &status);
-    sock.send_to(&st, JIMMY_ADDR).expect("send status");
-    println!("sent Status (myCall=KB0UZT myGrid=FN42, 20m FT8)");
-
-    std::thread::sleep(Duration::from_millis(500));
-
-    // 3. Synthesize a real FT8 signal from a fake test station -- same pattern as ft8's own
-    // encode/decode roundtrip unit test, not a canned string. This proves the actual native
-    // decode path (encode -> waveform -> place in a 15s frame -> decode_frame) end to end.
-    // K1ABC fits FT8's standard compact callsign packing (letter/digit prefix, digit, up to
-    // 3-letter suffix); W1TEST doesn't (4-letter suffix), which is why an earlier run of this
-    // exact test correctly decoded down to 'CQ W1TEST' but silently dropped the grid -- that's
-    // FT8's real non-standard-callsign message type (no grid slot), not a decode failure.
-    let msg = "CQ K1ABC FN20";
-    let f0 = 1500.0_f32;
-    let tones = ft8::encode(msg);
-    assert_eq!(tones.len(), ft8::NN, "FT8 must encode to 79 tones");
-    let wave = ft8::gen_wave(&tones, ft8::SAMPLE_RATE, f0);
-
-    let mut iwave = vec![0i16; ft8::NMAX];
-    let noff = 6_000usize; // 0.5s FT8 TX start, matching WSJT-X's own convention
-    for (i, &s) in wave.iter().enumerate() {
-        if noff + i < iwave.len() {
-            iwave[noff + i] = (s * 1000.0).clamp(-32768.0, 32767.0) as i16;
+    let mut it = std::env::args().skip(1);
+    while let Some(flag) = it.next() {
+        match flag.as_str() {
+            "--mycall" => mycall = it.next().unwrap_or(mycall),
+            "--mygrid" => mygrid = it.next().unwrap_or(mygrid),
+            "--device" => device = it.next(),
+            "--jimmy-addr" => jimmy_addr = it.next().unwrap_or(jimmy_addr),
+            "--dial-freq" => {
+                if let Some(v) = it.next() {
+                    dial_freq = v.parse().unwrap_or(dial_freq);
+                }
+            }
+            other => eprintln!("jimmy-engine-host: ignoring unrecognized argument '{other}'"),
         }
     }
+    Args { mycall, mygrid, device, jimmy_addr, dial_freq }
+}
 
-    println!("synthesized '{msg}' at {f0} Hz, decoding through the real native decoder...");
-    let decodes = ft8::decode_frame(&iwave, 200, 2900, 3, "", "", 0, 0, true, false);
-    println!("ft8::decode_frame returned {} decode(s)", decodes.len());
+fn main() {
+    let args = parse_args();
+    println!(
+        "jimmy-engine-host starting: mycall={} mygrid={} device={} -> {} (RECEIVE ONLY -- no PTT, no transmit)",
+        args.mycall,
+        args.mygrid,
+        args.device.as_deref().unwrap_or("<system default>"),
+        args.jimmy_addr
+    );
 
-    for d in &decodes {
-        println!(
-            "  decode: snr={} freq={:.0}Hz dt={:.2}s msg='{}'",
-            d.snr, d.freq, d.dt, d.message
-        );
-        let wire = Decode {
-            new: true,
-            time_ms: 0,
-            snr: d.snr,
-            delta_time: d.dt as f64,
-            delta_freq: d.freq as u32,
-            mode: "~",
-            message: &d.message,
-            low_confidence: d.qual < 0.5,
-            off_air: false,
-        };
-        let bytes = encode_decode(ENGINE_ID, &wire);
-        sock.send_to(&bytes, JIMMY_ADDR).expect("send decode");
-        println!("  -> sent Decode datagram to Jimmy ({} bytes)", bytes.len());
+    let sock = UdpSocket::bind("127.0.0.1:0").expect("bind ephemeral UDP socket");
+
+    let mut cap = match &args.device {
+        Some(name) => audio::FrameCapture::open_named(name),
+        None => audio::FrameCapture::open_default(),
     }
-
-    if decodes.iter().any(|d| d.message == msg) {
-        println!("\nRESULT: PASS -- native decoder recovered '{msg}' and it was sent to Jimmy.");
-    } else {
-        println!("\nRESULT: FAIL -- native decoder did not recover the synthesized message.");
+    .unwrap_or_else(|e| {
+        eprintln!("FATAL: could not open audio input device: {e}");
         std::process::exit(1);
+    });
+
+    let mut last_heartbeat = SystemTime::UNIX_EPOCH;
+    let (current_period, _) = audio::period_position();
+    let mut next_decode_period = current_period + 1;
+
+    loop {
+        cap.poll();
+
+        let now = SystemTime::now();
+        if now.duration_since(last_heartbeat).unwrap_or(Duration::MAX) >= HEARTBEAT_INTERVAL {
+            let hb = encode_heartbeat(ENGINE_ID, 3, env!("CARGO_PKG_VERSION"), "jimmy-native");
+            let _ = sock.send_to(&hb, &args.jimmy_addr);
+
+            let status = Status {
+                dial_freq: args.dial_freq,
+                mode: "FT8",
+                tr_period: 15,
+                decoding: true,
+                de_call: &args.mycall,
+                de_grid: &args.mygrid,
+                ..Default::default()
+            };
+            let st = encode_status(ENGINE_ID, &status);
+            let _ = sock.send_to(&st, &args.jimmy_addr);
+            last_heartbeat = now;
+        }
+
+        let boundary = audio::period_boundary_time(next_decode_period);
+        if boundary <= now {
+            if let Some(frame) = cap.frame_for_period(boundary) {
+                let decodes = ft8::decode_frame(&frame, 200, 2900, 3, &args.mycall, "", 0, 0, true, false);
+                for d in &decodes {
+                    let wire = Decode {
+                        new: true,
+                        time_ms: 0,
+                        snr: d.snr,
+                        delta_time: d.dt as f64,
+                        delta_freq: d.freq as u32,
+                        mode: "~",
+                        message: &d.message,
+                        low_confidence: d.qual < 0.5,
+                        off_air: false,
+                    };
+                    let bytes = encode_decode(ENGINE_ID, &wire);
+                    let _ = sock.send_to(&bytes, &args.jimmy_addr);
+                }
+                if !decodes.is_empty() {
+                    println!(
+                        "period {next_decode_period}: {} real decode(s) sent to Jimmy",
+                        decodes.len()
+                    );
+                }
+                next_decode_period += 1;
+            }
+        }
+
+        std::thread::sleep(POLL_INTERVAL);
     }
 }

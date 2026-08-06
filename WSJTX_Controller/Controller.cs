@@ -180,6 +180,18 @@ namespace WSJTX_Controller
         public RigctldClient rigctldClient;
         public System.Windows.Forms.Timer radioPollTimer;
         public RadioStatus lastRadioStatus;
+
+        // Self-sufficiency plan, Phase 4g: Jimmy's own native FT8 engine host. Null whenever
+        // EngineModeCutover.Mode == WsjtxExternal (today's default) -- only launched when that
+        // INI-only cutover flag is set to JimmyNative. See NativeEngineClient's own header
+        // comment: RECEIVE ONLY, no PTT/transmit wiring yet.
+        public NativeEngineClient nativeEngineClient;
+        public NativeEngineSettings NativeEngine = new NativeEngineSettings();
+        // True only if THIS session created %TEMP%\WSJT-X.lock to make Jimmy's existing
+        // UdpLoop/CheckWsjtxRunning open its UDP socket for the native engine (which, unlike a
+        // real external WSJT-X-family process, doesn't create that file itself). Never deletes
+        // a lock file it didn't create -- a real external WSJT-X could legitimately own it.
+        private bool _nativeEngineOwnsLockFile;
         public List<string> spotWatchRowOrderFields;
         // "callsign" (alphabetical, default), "evenodd", or "snr".
         public string spotWatchSortKey = "callsign";
@@ -543,6 +555,7 @@ namespace WSJTX_Controller
                 // real Options control.
                 if (iniFile.KeyExists("decodeEngineMode") && System.Enum.TryParse(iniFile.Read("decodeEngineMode"), out DecodeEngineMode dem)) EngineModeCutover.Mode = dem;
                 if (iniFile.KeyExists("engineProcessModel") && System.Enum.TryParse(iniFile.Read("engineProcessModel"), out EngineProcessModel epm)) EngineModeCutover.ProcessModel = epm;
+                NativeEngine.LoadFromIni(iniFile);
                 Radio.LoadFromIni(iniFile);
                 if (iniFile.KeyExists("rankMethod")) int.TryParse(iniFile.Read("rankMethod"), out rankMethodIdx);
                 if (iniFile.KeyExists("rankOrder")) rankOrderStr = iniFile.Read("rankOrder");
@@ -784,6 +797,7 @@ namespace WSJTX_Controller
             dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls);
             spotWatchAgeTimer.Start();
             ApplyRadioSettings();   // Phase 1: launches/connects rigctld if Radio.Mode was saved as HamlibRigctld
+            ApplyEngineMode();      // Phase 4g: launches the native engine host if EngineModeCutover.Mode is JimmyNative
             wsjtxClient.rawPriorityTags = rawPriorityTags;
             wsjtxClient.cmdPrompts = cmdPrompts;
             wsjtxClient.usePskReporter = usePskReporter;
@@ -1063,6 +1077,7 @@ namespace WSJTX_Controller
                 iniFile.Write("showUsState", showUsStateCheckBox.Checked.ToString());
                 Settings.SaveToIni(iniFile);
                 Radio.SaveToIni(iniFile);
+                NativeEngine.SaveToIni(iniFile);
                 iniFile.Write("rawShowCq", rawShowCq.ToString());
                 iniFile.Write("rawShowDirected", rawShowDirected.ToString());
                 iniFile.Write("rawShowReports", rawShowReports.ToString());
@@ -1211,6 +1226,14 @@ namespace WSJTX_Controller
             initialConnFaultTimer.Stop();
             radioPollTimer?.Stop();
             rigctldClient?.Dispose();   // also stops any bundled rigctld this session launched
+            nativeEngineClient?.Dispose();   // also stops the native engine host this session launched
+            nativeEngineClient = null;
+            if (_nativeEngineOwnsLockFile)
+            {
+                try { System.IO.File.Delete(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "WSJT-X.lock")); }
+                catch { /* best-effort cleanup */ }
+                _nativeEngineOwnsLockFile = false;
+            }
             wsjtxClient.Closing();
         }
 
@@ -2320,6 +2343,52 @@ namespace WSJTX_Controller
 
             radioPollTimer.Interval = Math.Max(200, Radio.PollIntervalMs);
             if (Radio.PollEnabled) radioPollTimer.Start();
+        }
+
+        // Self-sufficiency plan, Phase 4g: brings the live nativeEngineClient state into line
+        // with EngineModeCutover.Mode (an INI-only, undocumented flag -- see BackendMode.cs).
+        // Called once at startup (after EngineModeCutover/NativeEngine are loaded from the
+        // .ini). Unlike ApplyRadioSettings, there is no Options UI path that re-calls this yet
+        // (the cutover flag is hand-edit-only), so this only ever runs once per session for now.
+        //
+        // Jimmy's own UdpLoop/CheckWsjtxRunning (WsjtxClient.Protocol.cs) only opens Jimmy's UDP
+        // socket after detecting %TEMP%\WSJT-X.lock -- a file a real external WSJT-X-family
+        // process creates on its own startup. The native engine host is that process now, but it
+        // doesn't know about (or create) that file, so this method creates it, exactly the way
+        // the replay-test harness's own ensure_jimmy_udp_ready() does for the same reason. Only
+        // ever deleted again if THIS session created it (_nativeEngineOwnsLockFile) -- never a
+        // lock file a real external WSJT-X might legitimately own.
+        public void ApplyEngineMode()
+        {
+            if (EngineModeCutover.Mode != DecodeEngineMode.JimmyNative)
+            {
+                nativeEngineClient?.Dispose();
+                nativeEngineClient = null;
+                return;
+            }
+
+            string lockPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "WSJT-X.lock");
+            if (!System.IO.File.Exists(lockPath))
+            {
+                try
+                {
+                    System.IO.File.Create(lockPath).Dispose();
+                    _nativeEngineOwnsLockFile = true;
+                }
+                catch (Exception ex)
+                {
+                    ShowMessage($"Native engine: couldn't create {lockPath}: {ex.Message}", false);
+                    return;
+                }
+            }
+
+            nativeEngineClient?.Dispose();
+            nativeEngineClient = new NativeEngineClient();
+            int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
+            if (!nativeEngineClient.Launch(NativeEngine.MyCall, NativeEngine.MyGrid, NativeEngine.AudioInputDevice, jimmyPort))
+            {
+                ShowMessage($"Native engine: {nativeEngineClient.LastError}", false);
+            }
         }
 
         // Quiet background update, same "no sound, no forced announcement" spirit as
