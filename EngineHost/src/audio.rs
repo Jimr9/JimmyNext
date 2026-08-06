@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tempo_audio::backend::AudioBackend;
 use tempo_audio::device::CpalBackend;
 
-use crate::ft8_ffi::FT8_NMAX;
+use ft8::NMAX as FT8_NMAX;
 
 pub const FT8_PERIOD_SECS: u64 = 15;
 const SAMPLE_RATE: f64 = 12_000.0;

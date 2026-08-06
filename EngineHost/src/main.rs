@@ -1,19 +1,18 @@
 //! Proof-of-concept engine host for Jimmy's self-sufficiency plan, Phase 4.
 //!
 //! Proves the single riskiest architectural bet in the plan: that a Rust-built native FT8
-//! engine, reusing the open-source Nexus project's own libtempo native decoder (via this crate's
-//! own ft8_ffi bindings -- see ft8_ffi.rs for why this doesn't depend on Nexus's tempo-fast-sys
-//! crate directly) and tempo-net crate, can emit real WSJT-X UDP protocol datagrams that Jimmy's
-//! EXISTING, UNMODIFIED protocol-handling code correctly receives and displays -- with zero
-//! Jimmy-side changes needed for this half of the architecture. Synthesizes a test FT8 signal,
-//! decodes it back through the real native decoder (not a canned string), and sends the
-//! recovered decode to Jimmy exactly the way a real WSJT-X-family process would.
+//! engine, reusing the open-source Nexus project's own libtempo native decoder (via its real
+//! `ft8` crate -- originally worked around via a local ft8_ffi.rs port when tempo-fast-sys's
+//! build.rs was still broken in this environment; that's fixed now, see
+//! vendor/tempo-fast-sys-patched/, so this uses the real crate directly) and tempo-net crate,
+//! can emit real WSJT-X UDP protocol datagrams that Jimmy's EXISTING, UNMODIFIED
+//! protocol-handling code correctly receives and displays -- with zero Jimmy-side changes needed
+//! for this half of the architecture. Synthesizes a test FT8 signal, decodes it back through the
+//! real native decoder (not a canned string), and sends the recovered decode to Jimmy exactly
+//! the way a real WSJT-X-family process would.
 //!
-//! This is a proof of concept, not the final engine host: it doesn't yet own real audio capture
-//! (tempo-audio), the QSO sequencing state machine (tempo-core), or PSK Reporter/POTA/SOTA
-//! (propagation) -- those come next, once this foundational piece is confirmed working.
-
-mod ft8_ffi;
+//! Real audio capture (src/audio.rs, tempo-audio) and QSO sequencing (tempo-core's Station,
+//! examples/qso_bench.rs) are proven separately, live -- see those files' own header comments.
 
 use std::net::UdpSocket;
 use std::time::Duration;
@@ -59,11 +58,11 @@ fn main() {
     // FT8's real non-standard-callsign message type (no grid slot), not a decode failure.
     let msg = "CQ K1ABC FN20";
     let f0 = 1500.0_f32;
-    let tones = ft8_ffi::encode(msg);
-    assert_eq!(tones.len(), ft8_ffi::FT8_NN, "FT8 must encode to 79 tones");
-    let wave = ft8_ffi::gen_wave(&tones, ft8_ffi::SAMPLE_RATE, f0);
+    let tones = ft8::encode(msg);
+    assert_eq!(tones.len(), ft8::NN, "FT8 must encode to 79 tones");
+    let wave = ft8::gen_wave(&tones, ft8::SAMPLE_RATE, f0);
 
-    let mut iwave = vec![0i16; ft8_ffi::FT8_NMAX];
+    let mut iwave = vec![0i16; ft8::NMAX];
     let noff = 6_000usize; // 0.5s FT8 TX start, matching WSJT-X's own convention
     for (i, &s) in wave.iter().enumerate() {
         if noff + i < iwave.len() {
@@ -72,8 +71,8 @@ fn main() {
     }
 
     println!("synthesized '{msg}' at {f0} Hz, decoding through the real native decoder...");
-    let decodes = ft8_ffi::decode_frame(&iwave, 200, 2900, 3, "", "", 0, 0, true, false);
-    println!("ft8_ffi::decode_frame returned {} decode(s)", decodes.len());
+    let decodes = ft8::decode_frame(&iwave, 200, 2900, 3, "", "", 0, 0, true, false);
+    println!("ft8::decode_frame returned {} decode(s)", decodes.len());
 
     for d in &decodes {
         println!(

@@ -2,20 +2,17 @@
 name = "jimmy-engine-host"
 version = "0.1.0"
 edition = "2021"
-build = "build.rs"
 
-# Proof-of-concept for the self-sufficiency plan's Phase 4: an engine host that reuses the
-# open-source Nexus project's own native FT8 decoder (libtempo, vendored WSJT-X-derived
-# Fortran/C/C++) rather than reimplementing FT8/FT4 DSP from scratch, plus its tempo-net crate
-# for the stock WSJT-X UDP protocol Jimmy already speaks. Links directly against a locally-built
-# libtempo.a (see build.rs) instead of depending on Nexus's own tempo-fast-sys crate, whose
-# build.rs hits a \\?\-long-path interop bug between cmake/ninja/gfortran in this environment --
-# not a bug in the FT8 code itself, and not something to fix by editing Nexus's own source.
-# Nexus's crates are GPL-3.0; this crate inherits that for the same reason Nexus's own NOTICE
-# documents (linking GPLv3-derived modem code). Path dependency on tempo-net (pure Rust, no
-# native build) points at the local Nexus clone -- a development-time convenience for this proof
-# of concept; shipping this for real needs a proper vendoring strategy, a separate decision from
-# proving the architecture works.
+# Self-sufficiency plan Phase 4: an engine host that reuses the open-source Nexus project's own
+# native FT8 decoder (libtempo, vendored WSJT-X-derived Fortran/C/C++), QSO sequencer, and real
+# audio capture -- rather than reimplementing any of it -- plus its tempo-net crate for the
+# stock WSJT-X UDP protocol Jimmy already speaks. All native linking is handled by
+# tempo-fast-sys's own build.rs (redirected to a locally-patched copy -- see the [patch] section
+# below and vendor/tempo-fast-sys-patched/build.rs's header comment for why). Nexus's crates are
+# GPL-3.0; this crate inherits that for the same reason Nexus's own NOTICE documents (linking
+# GPLv3-derived modem code). Path dependencies point at the local Nexus clone -- a
+# development-time convenience for this proof of concept; shipping this for real needs a proper
+# vendoring strategy, a separate decision from proving the architecture works.
 license = "GPL-3.0-only"
 
 [[bin]]
@@ -25,19 +22,20 @@ path = "src/main.rs"
 [dependencies]
 tempo-net = { path = "C:/claude/nexus/crates/tempo-net" }
 tempo-core = { path = "C:/claude/nexus/crates/tempo-core" }
+modes = { path = "C:/claude/nexus/crates/modes" }
+ft8 = { path = "C:/claude/nexus/crates/ft8" }
 # `device` feature pulls in cpal (real sound-card I/O) + tempo-sstv (an SSTV-feature
 # transitive dep of tempo-audio's `device` feature, unused here but not worth a Nexus-side
 # feature split for). CpalBackend (device.rs) is the actual real-audio-capture reuse target --
 # see EngineHost/src/audio.rs.
 tempo-audio = { path = "C:/claude/nexus/crates/tempo-audio", features = ["device"] }
 
-# tempo-core -> tempo-fast -> tempo-fast-sys, whose OWN build.rs hits the same \\?\-long-path
-# interop bug documented above (a Rust canonicalize() quirk this environment's gfortran/ninja
-# mishandles) -- but this time it can't just be routed around, since real tempo-core/tempo-audio
-# logic is what Phase 4d+ actually needs, not just the raw decoder. Redirects every transitive
-# use of tempo-fast-sys to ../vendor/tempo-fast-sys-patched -- a local copy of Nexus's own crate
-# with ONLY the canonicalize()/\\?\ handling changed (see that copy's build.rs header comment);
-# it still builds the real, unmodified Nexus libtempo/ source tree in place. Nexus's own checkout
-# at C:/claude/nexus is not modified by this.
+# tempo-core/tempo-audio/ft8 -> tempo-fast-sys, whose OWN build.rs hits a \\?\-long-path interop
+# bug between cmake/ninja/gfortran in this environment (a Rust canonicalize() quirk) -- not a bug
+# in the FT8/modem code itself, and not something to fix by editing Nexus's own source. Redirects
+# every transitive use of tempo-fast-sys to ../vendor/tempo-fast-sys-patched -- a local copy of
+# Nexus's own crate with ONLY the canonicalize()/\\?\ handling changed (see that copy's build.rs
+# header comment); it still builds the real, unmodified Nexus libtempo/ source tree in place.
+# Nexus's own checkout at C:/claude/nexus is not modified by this.
 [patch."file:///C:/claude/nexus/crates/tempo-fast-sys"]
 tempo-fast-sys = { path = "../vendor/tempo-fast-sys-patched" }

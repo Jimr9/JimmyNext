@@ -8,8 +8,6 @@
 
 #[path = "../src/audio.rs"]
 mod audio;
-#[path = "../src/ft8_ffi.rs"]
-mod ft8_ffi;
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -75,7 +73,7 @@ fn main() {
                     "  [{:>3}s] period {next_decode_period}: decoding captured audio... ",
                     start.elapsed().as_secs()
                 );
-                let decodes = ft8_ffi::decode_frame(&frame, 200, 2900, 3, "", "", 0, 0, true, false);
+                let decodes = ft8::decode_frame(&frame, 200, 2900, 3, "", "", 0, 0, true, false);
                 if decodes.is_empty() {
                     println!("no decodes");
                 } else {
