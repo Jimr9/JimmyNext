@@ -24,3 +24,15 @@ path = "src/main.rs"
 
 [dependencies]
 tempo-net = { path = "C:/claude/nexus/crates/tempo-net" }
+tempo-core = { path = "C:/claude/nexus/crates/tempo-core" }
+
+# tempo-core -> tempo-fast -> tempo-fast-sys, whose OWN build.rs hits the same \\?\-long-path
+# interop bug documented above (a Rust canonicalize() quirk this environment's gfortran/ninja
+# mishandles) -- but this time it can't just be routed around, since real tempo-core/tempo-audio
+# logic is what Phase 4d+ actually needs, not just the raw decoder. Redirects every transitive
+# use of tempo-fast-sys to ../vendor/tempo-fast-sys-patched -- a local copy of Nexus's own crate
+# with ONLY the canonicalize()/\\?\ handling changed (see that copy's build.rs header comment);
+# it still builds the real, unmodified Nexus libtempo/ source tree in place. Nexus's own checkout
+# at C:/claude/nexus is not modified by this.
+[patch."file:///C:/claude/nexus/crates/tempo-fast-sys"]
+tempo-fast-sys = { path = "../vendor/tempo-fast-sys-patched" }

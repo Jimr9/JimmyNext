@@ -3,10 +3,51 @@
 version = 4
 
 [[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "cfg-if"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "fst4"
+version = "0.1.0"
+dependencies = [
+ "tempo-fast-sys",
+]
+
+[[package]]
+name = "ft4"
+version = "0.1.0"
+dependencies = [
+ "tempo-fast-sys",
+]
+
+[[package]]
+name = "ft8"
+version = "0.1.0"
+dependencies = [
+ "tempo-fast-sys",
+]
+
+[[package]]
 name = "jimmy-engine-host"
 version = "0.1.0"
 dependencies = [
+ "tempo-core",
  "tempo-net",
+]
+
+[[package]]
+name = "jt65"
+version = "0.1.0"
+dependencies = [
+ "tempo-fast-sys",
 ]
 
 [[package]]
@@ -14,6 +55,64 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "microfft"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2b6673eb0cc536241d6734c2ca45abfdbf90e9e7791c66a36a7ba3c315b76cf"
+dependencies = [
+ "cfg-if",
+ "num-complex",
+ "static_assertions",
+]
+
+[[package]]
+name = "modes"
+version = "0.1.0"
+dependencies = [
+ "fst4",
+ "ft4",
+ "ft8",
+ "jt65",
+ "msk144",
+ "q65",
+ "tempo-fast",
+ "tempo-net",
+ "wspr",
+]
+
+[[package]]
+name = "msk144"
+version = "0.1.0"
+dependencies = [
+ "tempo-fast-sys",
+]
+
+[[package]]
+name = "num-complex"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "num-traits"
+version = "0.2.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
+name = "q65"
+version = "0.1.0"
+dependencies = [
+ "tempo-fast-sys",
+]
 
 [[package]]
 name = "socket2"
@@ -24,6 +123,33 @@ dependencies = [
  "libc",
  "windows-sys",
 ]
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "tempo-core"
+version = "0.2.0"
+dependencies = [
+ "microfft",
+ "modes",
+ "tempo-fast",
+ "wspr",
+]
+
+[[package]]
+name = "tempo-fast"
+version = "0.2.0"
+dependencies = [
+ "tempo-fast-sys",
+]
+
+[[package]]
+name = "tempo-fast-sys"
+version = "0.2.0"
 
 [[package]]
 name = "tempo-net"
@@ -45,4 +171,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link",
+]
+
+[[package]]
+name = "wspr"
+version = "0.1.0"
+dependencies = [
+ "tempo-fast-sys",
 ]
