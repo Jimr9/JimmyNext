@@ -59,8 +59,12 @@ namespace WSJTX_Controller
         public bool BandUp()
         {
             if (!freqsDict.Keys.Contains(mode)) return false;
-            if (bandIdx == null || (int)bandIdx >= freqsDict[mode].Count - 1) return false;
-            int targetIdx = (int)bandIdx + 1;
+            // Prefer the last REQUESTED band over the last CONFIRMED one, so repeated presses
+            // before a real CAT round-trip lands keep advancing instead of re-requesting the
+            // same band each time -- see _pendingBandIdx's own comment.
+            int? effectiveIdx = _pendingBandIdx ?? bandIdx;
+            if (effectiveIdx == null || (int)effectiveIdx >= freqsDict[mode].Count - 1) return false;
+            int targetIdx = (int)effectiveIdx + 1;
             if (bandToFreq(targetIdx) == null) return false;
 
             ClearAudioOffsets();
@@ -72,8 +76,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            DebugOutput($"{Time()} [BAND-AUDIT] BandUp: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{(uint)(bandToFreq(targetIdx) * 1000)} txFirst:{txFirst}");
-            SetBandTxFirst((uint)(bandToFreq(targetIdx) * 1000), txFirst, "BandUp");
+            RetuneBand(targetIdx, "BandUp");
             ShowBandChangePending(targetIdx);
             return true;
         }
@@ -81,8 +84,9 @@ namespace WSJTX_Controller
         public bool BandDown()
         {
             if (!freqsDict.Keys.Contains(mode)) return false;
-            if (bandIdx == null || (int)bandIdx <= 0) return false;
-            int targetIdx = (int)bandIdx - 1;
+            int? effectiveIdx = _pendingBandIdx ?? bandIdx;
+            if (effectiveIdx == null || (int)effectiveIdx <= 0) return false;
+            int targetIdx = (int)effectiveIdx - 1;
             if (bandToFreq(targetIdx) == null) return false;
 
             ClearAudioOffsets();
@@ -91,8 +95,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            DebugOutput($"{Time()} [BAND-AUDIT] BandDown: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{(uint)(bandToFreq(targetIdx) * 1000)} txFirst:{txFirst}");
-            SetBandTxFirst((uint)(bandToFreq(targetIdx) * 1000), txFirst, "BandDown");
+            RetuneBand(targetIdx, "BandDown");
             ShowBandChangePending(targetIdx);
             return true;
         }
@@ -110,10 +113,29 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            DebugOutput($"{Time()} [BAND-AUDIT] SelectBand: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{(uint)(bandToFreq(targetIdx) * 1000)} txFirst:{txFirst}");
-            SetBandTxFirst((uint)(bandToFreq(targetIdx) * 1000), txFirst, "SelectBand");
+            RetuneBand(targetIdx, "SelectBand");
             ShowBandChangePending(targetIdx);
             return true;
+        }
+
+        // Self-sufficiency plan, Phase 5: JimmyNative has no external WSJT-X process to receive
+        // SetBandTxFirst's own WM8Q-only sub-command 15 -- run_radio's standard WSJT-X UDP
+        // server does not implement that private extension, so under JimmyNative band changes
+        // silently did nothing (found live, 2026-08-06: "alt page up and down does not change
+        // bands"). HamlibRigctld radio mode means Jimmy already owns a live rigctld connection
+        // either way (same guard ReportPowerSwr uses above), so retune directly over that
+        // instead -- the engine's own poll loop picks up the new dial on its next tick (see
+        // RigctldClient.SetFrequency's own comment) exactly like a knob-QSY would. WsjtxCat
+        // radio mode is unchanged: that path still needs the external WSJT-X to move its own CAT.
+        private void RetuneBand(int targetIdx, string caller)
+        {
+            _pendingBandIdx = targetIdx;
+            uint freqHz = (uint)(bandToFreq(targetIdx) * 1000);
+            DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst}");
+            if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
+                ctrl.rigctldClient.SetFrequency(freqHz);
+            else
+                SetBandTxFirst(freqHz, txFirst, caller);
         }
 
         private void ShowBandChangePending(int targetIdx)
@@ -181,7 +203,12 @@ namespace WSJTX_Controller
             if (!tuning) StartStatusTimer2(false);
 
             if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
-                ctrl.rigctldClient.AdjustAudioLevel(up);
+            {
+                if (ctrl.rigctldClient.AdjustAudioLevel(up, out double newLevel))
+                    StatusView.ShowMessage($"Audio level {newLevel * 100:0}%", true);
+                else
+                    StatusView.ShowMessage($"Audio level: {ctrl.rigctldClient.LastError}", true);
+            }
             else
                 AdjAudioLevel(up);
             return true;

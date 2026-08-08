@@ -18,15 +18,23 @@ namespace WSJTX_Controller
 
         // Empty = system default input device (cpal's own default-device pick). Matches the
         // device-name strings tempo_audio::device::available_devices() returns (see
-        // EngineHost/examples/list_devices.rs) -- Options > Radio's audio-device picker (not
-        // yet built) will source its choices from the same enumeration.
+        // EngineHost/examples/list_devices.rs) -- Options > Radio's audio-device picker
+        // sources its choices from the same enumeration.
         public string AudioInputDevice { get; set; } = "";
+
+        // Phase 4 TX Stage 4: where TX audio actually plays. Empty = system default output --
+        // before this field existed, TX audio ALWAYS went to the system default regardless of
+        // what (if anything) the operator expected, since there was nowhere to configure it.
+        // Matters because the radio's own audio interface is very often NOT the Windows default
+        // output device.
+        public string AudioOutputDevice { get; set; } = "";
 
         public void LoadFromIni(IniFile ini)
         {
             if (ini.KeyExists("nativeEngineMyCall")) MyCall = ini.Read("nativeEngineMyCall");
             if (ini.KeyExists("nativeEngineMyGrid")) MyGrid = ini.Read("nativeEngineMyGrid");
             if (ini.KeyExists("nativeEngineAudioDevice")) AudioInputDevice = ini.Read("nativeEngineAudioDevice");
+            if (ini.KeyExists("nativeEngineAudioOutputDevice")) AudioOutputDevice = ini.Read("nativeEngineAudioOutputDevice");
         }
 
         public void SaveToIni(IniFile ini)
@@ -34,6 +42,7 @@ namespace WSJTX_Controller
             ini.Write("nativeEngineMyCall", MyCall);
             ini.Write("nativeEngineMyGrid", MyGrid);
             ini.Write("nativeEngineAudioDevice", AudioInputDevice);
+            ini.Write("nativeEngineAudioOutputDevice", AudioOutputDevice);
         }
     }
 }

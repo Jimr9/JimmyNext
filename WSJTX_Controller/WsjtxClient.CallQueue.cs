@@ -111,7 +111,15 @@ namespace WSJTX_Controller
                         callInProgLastActivity = $"working {toCall}";
                     }
 
-                    DebugOutput($"{spacer}AddSelectedCall toCallStatus:{toCallStatus} activity:{callInProgLastActivity}");
+                    // Diagnostic (2026-08-07 QSO-not-logging investigation): this early-return
+                    // path only ever updates the lightweight status hint above -- it never
+                    // reaches AddAllCallDict (WsjtxClient.cs's ProcessDecodeMsg does that,
+                    // earlier in the SAME call, before AddSelectedCall runs). Logging the raw
+                    // message + its timestamp here, next to the msg SinceMidnight, is so a live
+                    // test can show definitively whether this is firing for a genuine fresh
+                    // decode from the QSO partner or for stale/replayed decode data -- the
+                    // existing log alone couldn't distinguish the two.
+                    DebugOutput($"{spacer}AddSelectedCall toCallStatus:{toCallStatus} activity:{callInProgLastActivity} msg:'{msg}' msgTime:{emsg.SinceMidnight} autoGen:{emsg.AutoGen}");
                     return;
                 }
 
@@ -310,6 +318,19 @@ namespace WSJTX_Controller
                             }
 
                             DebugOutput($"{spacer}addedCall:{addedCall} decodesProcessed:{decodesProcessed}");
+                            // Self-sufficiency plan: the status line's steady-state refresh normally
+                            // rides DecodesCompleted()/postDecodeTimer, itself triggered by WSJT-X's
+                            // own Status "decoding" field flipping true->false at the end of each
+                            // cycle. Nexus's engine reports "decoding" as a near-static receiving
+                            // indicator instead of that per-cycle pulse (confirmed live, 2026-08-06/07:
+                            // zero decoding:false transitions across a 20+ minute session), so that
+                            // path never fires under Jimmy Native -- the status line froze at whatever
+                            // it last showed (band change, or "no available stations") while the call
+                            // queue itself kept growing correctly underneath it. A newly admitted call
+                            // is exactly the kind of change the status line exists to reflect, so
+                            // refresh it here too -- StartStatusTimer() is a 250ms debounce (Stop then
+                            // Start), so a burst of admissions still collapses to one refresh.
+                            if (addedCall) StartStatusTimer();
                             if (addedCall && decodesProcessed && !cqPaused)
                             {
                                 DebugOutput($"{spacer}late decode(4), restartQueue:{restartQueue}");

@@ -30,9 +30,12 @@ namespace WSJTX_Controller
         private static readonly object _lock = new object();
         private static StreamWriter _writer;
 
+        // Derived from the running assembly's own name (not a literal "Jimmy") so a
+        // differently-named build (e.g. a side-by-side "Jimmy Test" release) writes to its
+        // own data folder, consistent with LookupManager.DataRoot.
         private static string LogPath =>
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Jimmy", "ClassificationParityMismatches.log");
+                System.Reflection.Assembly.GetExecutingAssembly().GetName().Name, "ClassificationParityMismatches.log");
 
         public static void CheckAndLog(EnqueueDecodeMessage dmsg, string call, string band,
             string myGrid, string myContinent, LookupManager lookupManager)

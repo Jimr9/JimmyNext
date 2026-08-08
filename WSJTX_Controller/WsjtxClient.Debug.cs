@@ -81,7 +81,14 @@ namespace WSJTX_Controller
                     }
                     catch (Exception err)
                     {
-                        err.ToString();
+                        // Previously discarded (err.ToString() computed, never used) -- the log
+                        // checkbox reflects the saved setting, not whether the file actually
+                        // opened, so a failure here was completely invisible: checkbox checked,
+                        // log file silently never created, no error anywhere. Confirmed live,
+                        // 2026-08-08, as the likely explanation for a tester's "log is blank"
+                        // report despite logging being on by default.
+                        Notify.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Debug log",
+                            $"couldn't open {path}: {err.Message}"));
                         logSw = null;
                         return false;       //log file state = closed
                     }

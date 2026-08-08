@@ -81,6 +81,18 @@ namespace WSJTX_Controller
             if (!_wc.IsAlertCooledDown(_wc._awardAlertTimes, call, WsjtxClient.AwardAlertCooldownSecs)) return;
             _wc._awardAlertTimes[call] = DateTime.UtcNow;
             _wc.Sounds.PlaySoundEvent(_wc.ctrl.soundEnabled_AwardNeeded, _wc.ctrl.soundFile_AwardNeeded, call, matchedRuleId);
+
+            // Wave 2 of the notification architecture (WSJTX_Controller/Notify/). Deliberately
+            // independent of the 30s sound cooldown right above (WsjtxClient.
+            // AwardAlertCooldownSecs/_awardAlertTimes) -- NotificationDefaults gives
+            // AwardsNeeded its own, separately-configurable RepeatSeconds/ThrottleMilliseconds,
+            // so the beep and the spoken summary can be tuned independently. AwardCount is
+            // always 1 today: MatchedAwardRuleId returns a single rule ID, first-match-wins --
+            // this payload shape supports a future multi-match AwardTagger without changing
+            // the notification code, but nothing here produces more than one yet.
+            var awards = new[] { matchedRuleId };
+            string awardSummary = NotificationTemplateEngine.Pluralize(1, "award needed");
+            _wc.Notify.Publish(new AwardsNeededEvent(call, 1, awards, awardSummary));
         }
 
         // Returns true if dmsg is associated with a "CQ SOTA" transmission.

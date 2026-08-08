@@ -137,6 +137,8 @@ static class JimmyTests
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
+        RigctldClientListRigModelsTests();
+        OptionsDlgExtractRigModelIdTests();
         TqslParseFinalStatusTests();
         ResolveUsStateTests();
         AdifImporterLiveLoggedStateFallbackTests();
@@ -152,7 +154,13 @@ static class JimmyTests
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
+        DecodeMessageIsCallToTests();
         DefaultTrPeriodMsTests();
+        NotificationTemplateEngineTests();
+        NotificationSettingsDefaultsTests();
+        NotificationSettingsRoundTripTests();
+        NotificationDedupThrottleTests();
+        NotificationCenterPublishTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -544,6 +552,39 @@ static class JimmyTests
                 Check("QRZ mark does not affect Club Log uploaded count", clubLogAfter.UploadedCount == 0, true);
                 Check("QRZ mark does not affect Club Log last upload time",
                       clubLogAfter.LastUploadUtc.HasValue, false);
+
+                // LOTW and HRDLOG: regression coverage for the 2026-08-07 fix -- both
+                // GetPendingUploads("LOTW")/("HRDLOG") and MarkUploaded(..., "LOTW"/"HRDLOG", ...)
+                // used to throw ArgumentException (UploadColumn had no case for either), silently
+                // caught by every real caller (TqslUploadClient, LiveQsoUploadOrchestrator,
+                // WsjtxClient.Uploads.cs's CatchUpHrdLog) -- so neither service's upload ever
+                // actually got recorded locally, even when the real upload itself succeeded.
+                var lotwBefore = db.GetUploadSyncStatus("LOTW");
+                Check("before any upload: LOTW pending count == 2", lotwBefore.PendingCount == 2, true);
+                var hrdLogBefore = db.GetUploadSyncStatus("HRDLOG");
+                Check("before any upload: HRDLOG pending count == 2", hrdLogBefore.PendingCount == 2, true);
+
+                db.MarkUploaded(keyW1AW, "LOTW", when);
+                var lotwAfter = db.GetUploadSyncStatus("LOTW");
+                Check("after marking W1AW uploaded: LOTW pending count == 1", lotwAfter.PendingCount == 1, true);
+                Check("after marking W1AW uploaded: LOTW uploaded count == 1", lotwAfter.UploadedCount == 1, true);
+
+                // LOTW mark must not affect HRDLOG, or either of QRZ/Club Log from above.
+                Check("LOTW mark does not affect HRDLOG pending count",
+                      db.GetUploadSyncStatus("HRDLOG").PendingCount == 2, true);
+                Check("LOTW mark does not affect QRZ pending count",
+                      db.GetUploadSyncStatus("QRZ").PendingCount == 1, true);
+                Check("LOTW mark does not affect Club Log pending count",
+                      db.GetUploadSyncStatus("CLUBLOG").PendingCount == 2, true);
+
+                db.MarkUploaded(keyW1AW, "HRDLOG", when);
+                var hrdLogAfter = db.GetUploadSyncStatus("HRDLOG");
+                Check("after marking W1AW uploaded: HRDLOG pending count == 1", hrdLogAfter.PendingCount == 1, true);
+                Check("after marking W1AW uploaded: HRDLOG uploaded count == 1", hrdLogAfter.UploadedCount == 1, true);
+
+                var lotwPending = db.GetPendingUploads("LOTW");
+                Check("LOTW GetPendingUploads returns the one still-pending QSO", lotwPending.Count == 1, true);
+                CheckStr("LOTW GetPendingUploads pending QSO is W2AW", lotwPending[0].Callsign, "W2AW");
             }
         }
         catch (Exception ex)
@@ -1310,6 +1351,34 @@ static class JimmyTests
               result.MatchedAwardRuleId, null);
     }
 
+    // ── DecodeMessage.IsCallTo ───────────────────────────────────────────────────
+    // Direct unit coverage for the 2026-08-07 fix: IsCallTo used a case-sensitive ==
+    // comparison (myCall == ToCall(Message)). Under Jimmy Native, myCall keeps
+    // whatever case the operator actually typed in Options (lower case is a normal,
+    // expected thing to type); wire text is always upper case. The case-sensitive
+    // compare then never matched, so every reply from every QSO partner was silently
+    // classified as "not directed at me" -- see DecodeMessage.cs's own comment on the
+    // fix for the full incident. This is a live-protocol-free, single-process check
+    // of the fixed comparison itself; JimmyReplay.py's end-to-end groups exercise the
+    // surrounding queue/logging behavior for a matched-case myCall (Group 1) without
+    // needing a mid-session myCall change, which a real operator would never do
+    // without reconnecting anyway.
+    static void DecodeMessageIsCallToTests()
+    {
+        Console.WriteLine("\n── DecodeMessage.IsCallTo ──");
+
+        Check("Lower-case myCall matches upper-case wire text",
+              new DecodeMessage { Message = "KB0UZT K4YT EM63" }.IsCallTo("kb0uzt"), true);
+        Check("Mixed-case myCall matches upper-case wire text",
+              new DecodeMessage { Message = "KB0UZT K4YT EM63" }.IsCallTo("Kb0Uzt"), true);
+        Check("Upper-case myCall matches upper-case wire text (unchanged baseline)",
+              new DecodeMessage { Message = "KB0UZT K4YT EM63" }.IsCallTo("KB0UZT"), true);
+        Check("Different callsign does not match regardless of case",
+              new DecodeMessage { Message = "KB0UZT K4YT EM63" }.IsCallTo("w6new"), false);
+        Check("Null myCall never matches (no throw)",
+              new DecodeMessage { Message = "KB0UZT K4YT EM63" }.IsCallTo(null), false);
+    }
+
     // ── StatusMessage.Parse ─────────────────────────────────────────────────────
     // Found via live A7 field testing 2026-07-17: a real WSJT-X Improved 3.1
     // StatusMessage datagram, captured verbatim during a failed live handshake test,
@@ -1496,6 +1565,70 @@ static class JimmyTests
         Check("unrecognized HTML body is Unknown (transient, not a bounce)",
               HrdLogUploadClient.ClassifyResponse("<html>500 Internal Server Error</html>").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
         Check("empty body is Unknown", HrdLogUploadClient.ClassifyResponse("").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
+    }
+
+    // ── RigctldClient.ListRigModels ──────────────────────────────────────────────
+    // Runs the actual bundled rigctl.exe --list and parses its fixed-column output --
+    // regression coverage for the 2026-08-07 rig-model dropdown: a whitespace split would
+    // break on multi-word manufacturer names ("N2ADR James Ahlstrom", "Vertex Standard"),
+    // which is exactly why this parses fixed columns instead. Skips (warns) rather than
+    // fails if the bundled exe isn't present next to JimmyTests.exe -- it ships next to
+    // Jimmy.exe, not this test binary.
+    static void RigctldClientListRigModelsTests()
+    {
+        Console.WriteLine("\n── RigctldClient.ListRigModels ──");
+
+        var models = RigctldClient.ListRigModels();
+        if (models.Count == 0)
+        {
+            Console.WriteLine("  WARN  ListRigModels returned 0 entries -- rigctl.exe not found next to JimmyTests.exe (expected; it ships next to Jimmy.exe). Skipping.");
+            return;
+        }
+
+        Check("returns a large real list (Hamlib supports hundreds of rigs)", models.Count > 100, true);
+
+        var kenwood590sg = models.Find(m => m.Id == 2037);
+        Check("Kenwood TS-590SG (id 2037) is present", kenwood590sg != null, true);
+        if (kenwood590sg != null)
+        {
+            CheckStr("id 2037 manufacturer is Kenwood", kenwood590sg.Mfg, "Kenwood");
+            CheckStr("id 2037 model is TS-590SG", kenwood590sg.Model, "TS-590SG");
+            CheckStr("Display combines mfg/model/id", kenwood590sg.Display, "Kenwood TS-590SG (2037)");
+        }
+
+        // The multi-word-manufacturer edge case that motivated fixed-column parsing over a
+        // whitespace split -- id 10 is Hamlib's own "N2ADR James Ahlstrom" / Quisk entry.
+        var quisk = models.Find(m => m.Id == 10);
+        Check("multi-word manufacturer (id 10, Quisk) is present", quisk != null, true);
+        if (quisk != null)
+        {
+            CheckStr("multi-word manufacturer parsed whole, not split", quisk.Mfg, "N2ADR James Ahlstrom");
+            CheckStr("model column unaffected by the long manufacturer name", quisk.Model, "Quisk");
+        }
+
+        Check("no duplicate IDs in the parsed list",
+              models.Count == new System.Collections.Generic.HashSet<int>(models.ConvertAll(m => m.Id)).Count, true);
+    }
+
+    // ── OptionsDlg.ExtractRigModelId ─────────────────────────────────────────────
+    static void OptionsDlgExtractRigModelIdTests()
+    {
+        Console.WriteLine("\n── OptionsDlg.ExtractRigModelId ──");
+
+        CheckStr("extracts id from a normal catalog entry",
+              OptionsDlg.ExtractRigModelId("Kenwood TS-590SG (2037)"), "2037");
+        CheckStr("extracts id from a multi-word manufacturer entry",
+              OptionsDlg.ExtractRigModelId("Vertex Standard VX-1700 (1033)"), "1033");
+        CheckStr("extracts the raw value from the unlisted-fallback entry",
+              OptionsDlg.ExtractRigModelId("(currently configured: 9999)"), "9999");
+        CheckStr("a bare number (old-style stored value) passes through unchanged",
+              OptionsDlg.ExtractRigModelId("2037"), "2037");
+        CheckStr("unrecognized text passes through unchanged rather than disappearing",
+              OptionsDlg.ExtractRigModelId("garbage"), "garbage");
+        CheckStr("null passes through as null (no throw)",
+              OptionsDlg.ExtractRigModelId(null), null);
+        CheckStr("empty string passes through as empty",
+              OptionsDlg.ExtractRigModelId(""), "");
     }
 
     // ── TqslUploadClient.ParseFinalStatus ────────────────────────────────────────
@@ -3198,6 +3331,221 @@ static class JimmyTests
         {
             try { File.Delete(tmpIni); } catch { }
         }
+    }
+
+    // ── Notification architecture (WSJTX_Controller/Notify/) ──────────────────────────
+
+    static void NotificationTemplateEngineTests()
+    {
+        Console.WriteLine("\n── NotificationTemplateEngine: Format/Pluralize ──");
+
+        CheckStr("Format: simple substitution",
+            NotificationTemplateEngine.Format("Working {Callsign}",
+                new Dictionary<string, string> { ["Callsign"] = "K4YT" }),
+            "Working K4YT");
+
+        CheckStr("Format: multiple tokens",
+            NotificationTemplateEngine.Format("{Callsign}, {AwardSummary}",
+                new Dictionary<string, string> { ["Callsign"] = "K4YT", ["AwardSummary"] = "1 award needed" }),
+            "K4YT, 1 award needed");
+
+        CheckStr("Format: unknown token left verbatim, never throws",
+            NotificationTemplateEngine.Format("Hi {Nope}", new Dictionary<string, string>()),
+            "Hi {Nope}");
+
+        CheckStr("Format: null template -> empty string",
+            NotificationTemplateEngine.Format(null, null), "");
+
+        CheckStr("Format: empty template -> empty string",
+            NotificationTemplateEngine.Format("", new Dictionary<string, string>()), "");
+
+        CheckStr("Format: null tokens dictionary with a token present -> left verbatim, never throws",
+            NotificationTemplateEngine.Format("Hi {Callsign}", null), "Hi {Callsign}");
+
+        CheckStr("Format: unmatched opening brace treated as literal text",
+            NotificationTemplateEngine.Format("Hi {Callsign",
+                new Dictionary<string, string> { ["Callsign"] = "K4YT" }),
+            "Hi {Callsign");
+
+        CheckStr("Format: no tokens in template at all",
+            NotificationTemplateEngine.Format("WSJT-X closed", new Dictionary<string, string>()),
+            "WSJT-X closed");
+
+        CheckStr("Pluralize: singular", NotificationTemplateEngine.Pluralize(1, "award needed"), "1 award needed");
+        CheckStr("Pluralize: default plural adds 's'", NotificationTemplateEngine.Pluralize(2, "award needed"), "2 award neededs");
+        CheckStr("Pluralize: explicit plural form", NotificationTemplateEngine.Pluralize(2, "award needed", "awards needed"), "2 awards needed");
+        CheckStr("Pluralize: zero uses plural form", NotificationTemplateEngine.Pluralize(0, "award needed", "awards needed"), "0 awards needed");
+    }
+
+    static void NotificationSettingsDefaultsTests()
+    {
+        Console.WriteLine("\n── NotificationSettings: Missing/invalid-key Defaults ──");
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_NotifyDefaults_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // Fresh/never-written INI file -- every key read returns "".
+            var ini = new IniFile(tmpIni);
+            var settings = new NotificationSettings();
+            settings.LoadFromIni(ini);
+
+            var codeDefault = NotificationDefaults.Policies[NotificationEventType.QsoCompleted];
+            var loaded = settings.Policies[NotificationEventType.QsoCompleted];
+            Check("Missing keys -> Enabled matches code default", loaded.Enabled, codeDefault.Enabled);
+            Check("Missing keys -> Priority matches code default", loaded.Priority == codeDefault.Priority, true);
+            Check("Missing keys -> RepeatSeconds matches code default", loaded.RepeatSeconds == codeDefault.RepeatSeconds, true);
+            CheckStr("Missing keys -> Template matches code default", loaded.Template, codeDefault.Template);
+
+            // Every enum member must have a code default -- a new type added later with no
+            // NotificationDefaults entry would silently vanish from Policies on load, which
+            // would be a real bug, not a "new type, no override yet" situation.
+            bool allTypesPresent = true;
+            foreach (NotificationEventType type in Enum.GetValues(typeof(NotificationEventType)))
+                if (!settings.Policies.ContainsKey(type)) allTypesPresent = false;
+            Check("Every NotificationEventType has a policy after load", allTypesPresent, true);
+
+            // Invalid values must fall back to the code default, never throw.
+            ini.Write("notifyRepeatSeconds_QsoCompleted", "not-a-number");
+            ini.Write("notifyPriority_ErrorWarning", "Bogus");
+            ini.Write("notifyThrottleMs_AwardsNeeded", "-5");
+            var settings2 = new NotificationSettings();
+            settings2.LoadFromIni(ini);
+            Check("Invalid int value falls back to code default",
+                settings2.Policies[NotificationEventType.QsoCompleted].RepeatSeconds
+                    == NotificationDefaults.Policies[NotificationEventType.QsoCompleted].RepeatSeconds, true);
+            Check("Invalid enum value falls back to code default",
+                settings2.Policies[NotificationEventType.ErrorWarning].Priority == NotificationDefaults.Policies[NotificationEventType.ErrorWarning].Priority, true);
+            Check("Negative throttle value falls back to code default",
+                settings2.Policies[NotificationEventType.AwardsNeeded].ThrottleMilliseconds
+                    == NotificationDefaults.Policies[NotificationEventType.AwardsNeeded].ThrottleMilliseconds, true);
+        }
+        finally
+        {
+            try { File.Delete(tmpIni); } catch { }
+        }
+    }
+
+    static void NotificationSettingsRoundTripTests()
+    {
+        Console.WriteLine("\n── NotificationSettings: Load/Save Round-trip + valid overrides ──");
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_NotifyRoundTrip_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            var ini = new IniFile(tmpIni);
+            var saved = new NotificationSettings();
+            saved.Policies[NotificationEventType.QsoStarted].Enabled = false;
+            saved.Policies[NotificationEventType.QsoStarted].Priority = NotificationPriority.Important;
+            saved.Policies[NotificationEventType.QsoStarted].RepeatSeconds = 42;
+            saved.Policies[NotificationEventType.QsoStarted].ThrottleMilliseconds = 1500;
+            saved.Policies[NotificationEventType.QsoStarted].Template = "On {Callsign}";
+            saved.SaveToIni(ini);
+
+            var loaded = new NotificationSettings();
+            loaded.LoadFromIni(ini);
+            var p = loaded.Policies[NotificationEventType.QsoStarted];
+            Check("Round-trip: Enabled", p.Enabled, false);
+            Check("Round-trip: Priority", p.Priority == NotificationPriority.Important, true);
+            Check("Round-trip: RepeatSeconds", p.RepeatSeconds == 42, true);
+            Check("Round-trip: ThrottleMilliseconds", p.ThrottleMilliseconds == 1500, true);
+            CheckStr("Round-trip: Template override honored", p.Template, "On {Callsign}");
+
+            // A type not explicitly touched must still round-trip its own (code-default) values,
+            // proving SaveToIni writes every type, not just ones the caller modified.
+            var untouched = loaded.Policies[NotificationEventType.ConnectionClosed];
+            var untouchedDefault = NotificationDefaults.Policies[NotificationEventType.ConnectionClosed];
+            CheckStr("Untouched type's template still round-trips", untouched.Template, untouchedDefault.Template);
+        }
+        finally
+        {
+            try { File.Delete(tmpIni); } catch { }
+        }
+    }
+
+    static void NotificationDedupThrottleTests()
+    {
+        Console.WriteLine("\n── NotificationDedupThrottle: dedup + throttle ──");
+
+        var repeatPolicy = new NotificationPolicy { RepeatSeconds = 30, ThrottleMilliseconds = 0 };
+        var d = new NotificationDedupThrottle();
+        Check("First fire for a fresh identity is allowed",
+            d.ShouldAnnounce(NotificationEventType.QsoStarted, "K4YT", repeatPolicy), true);
+        d.RecordFired(NotificationEventType.QsoStarted, "K4YT");
+        Check("Immediate repeat for the same identity is suppressed",
+            d.ShouldAnnounce(NotificationEventType.QsoStarted, "K4YT", repeatPolicy), false);
+        Check("A different identity is not suppressed by another identity's cooldown",
+            d.ShouldAnnounce(NotificationEventType.QsoStarted, "W1AW", repeatPolicy), true);
+        Check("A different event type for the same identity is not suppressed",
+            d.ShouldAnnounce(NotificationEventType.QsoCompleted, "K4YT", repeatPolicy), true);
+
+        var throttlePolicy = new NotificationPolicy { RepeatSeconds = 0, ThrottleMilliseconds = 60000 };
+        var t = new NotificationDedupThrottle();
+        Check("First fire under a throttle policy is allowed",
+            t.ShouldAnnounce(NotificationEventType.AwardsNeeded, "K4YT", throttlePolicy), true);
+        t.RecordFired(NotificationEventType.AwardsNeeded, "K4YT");
+        Check("A DIFFERENT identity is still throttled by the same event type's global spacing",
+            t.ShouldAnnounce(NotificationEventType.AwardsNeeded, "W1AW", throttlePolicy), false);
+
+        var noLimitsPolicy = new NotificationPolicy { RepeatSeconds = 0, ThrottleMilliseconds = 0 };
+        var n = new NotificationDedupThrottle();
+        n.RecordFired(NotificationEventType.QsoStarted, "K4YT");
+        Check("RepeatSeconds=0 and ThrottleMilliseconds=0 means never suppressed",
+            n.ShouldAnnounce(NotificationEventType.QsoStarted, "K4YT", noLimitsPolicy), true);
+    }
+
+    // Test-only INotificationDelivery: records what would have been announced instead of
+    // touching any real UI, so NotificationCenter.Publish's policy/dedup/format/deliver
+    // pipeline can be exercised end-to-end without a running Jimmy window.
+    private class FakeNotificationDelivery : INotificationDelivery
+    {
+        public string LastText;
+        public bool? LastImportant;
+        public int AnnounceCount;
+
+        public void Announce(string text, bool important)
+        {
+            LastText = text;
+            LastImportant = important;
+            AnnounceCount++;
+        }
+    }
+
+    static void NotificationCenterPublishTests()
+    {
+        Console.WriteLine("\n── NotificationCenter: Publish end-to-end ──");
+
+        var settings = new NotificationSettings();
+        var delivery = new FakeNotificationDelivery();
+        var center = new NotificationCenter(settings, delivery);
+
+        center.Publish(new QsoCompletedEvent("K4YT", "20m", "FT8"));
+        CheckStr("QsoCompleted uses its default template", delivery.LastText, "Logged QSO with K4YT");
+        Check("QsoCompleted default priority is Normal (no beep)", delivery.LastImportant == false, true);
+
+        settings.Policies[NotificationEventType.QsoStarted].Enabled = false;
+        int before = delivery.AnnounceCount;
+        center.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));
+        Check("Disabled event type never reaches delivery", delivery.AnnounceCount == before, true);
+
+        // ErrorSeverity.Error forces the beep regardless of the configured policy Priority
+        // (default Normal) -- see NotificationCenter.Publish's own comment; this is what lets
+        // both existing migrated error call sites (one historically sound:false at
+        // Warning-equivalent severity, one sound:true) share one policy.
+        center.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Radio", "CAT link lost"));
+        Check("ErrorSeverity.Error always sets Important, regardless of policy default", delivery.LastImportant == true, true);
+
+        center.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "launch failed"));
+        Check("ErrorSeverity.Warning respects the policy's configured Priority (default Normal)", delivery.LastImportant == false, true);
+
+        // Dedup: QsoStarted defaults to RepeatSeconds=5 (see NotificationDefaults.cs), so an
+        // immediate re-publish for the same callsign must not reach delivery a second time.
+        settings.Policies[NotificationEventType.QsoStarted].Enabled = true;
+        center.Publish(new QsoStartedEvent("W1AW", "20m", "FT8"));
+        int afterFirst = delivery.AnnounceCount;
+        center.Publish(new QsoStartedEvent("W1AW", "20m", "FT8"));
+        Check("Immediate repeat of the same QsoStarted identity is suppressed by default RepeatSeconds",
+            delivery.AnnounceCount == afterFirst, true);
+
+        center.Publish(null);
+        Check("Publish(null) is a safe no-op", delivery.AnnounceCount == afterFirst, true);
     }
 
     // ── Controller.FindPreservedSelectionIndex: list-selection identity tracking ──

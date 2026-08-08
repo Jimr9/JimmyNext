@@ -141,7 +141,20 @@ namespace WsjtxUdpLib.Messages.Out
 
         public bool IsCallTo(string myCall)
         {
-            return myCall != null && myCall == WsjtxMessage.ToCall(Message);
+            // Callsigns are case-insensitive (there's no such thing as a case-sensitive
+            // callsign) -- a plain == here always failed to match whenever myCall's stored
+            // case differed from the decoded message's (always uppercase on the wire).
+            // Confirmed live, 2026-08-07: under Jimmy Native, myCall keeps whatever case the
+            // operator typed in Options (e.g. "kb0uzt"), so every single incoming reply was
+            // silently misclassified as NOT directed at us -- it fell through to the
+            // AddSelectedCall "not toMyCall" branch, which never reaches AddAllCallDict, so
+            // NOTHING the QSO partner sent ever got recorded for logging, even though the
+            // native engine's own auto-sequencer used it correctly to drive the exchange.
+            // External WSJT-X masked this for years: WSJT-X always echoes its OWN callsign
+            // back in its Status messages as uppercase regardless of how it was typed, so
+            // myCall ended up uppercase there by coincidence, matching the wire text.
+            return myCall != null
+                && myCall.Equals(WsjtxMessage.ToCall(Message), StringComparison.OrdinalIgnoreCase);
         }
 
         public bool Is73()

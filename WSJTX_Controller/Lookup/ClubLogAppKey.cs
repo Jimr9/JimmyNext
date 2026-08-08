@@ -53,9 +53,12 @@ namespace WSJTX_Controller
                 if (File.Exists(shipped))
                     return File.ReadAllText(shipped).Trim();
 
+                // Derived from the running assembly's own name (not a literal "Jimmy") so a
+                // differently-named build (e.g. a side-by-side "Jimmy Test" release) looks in
+                // its own data folder, consistent with LookupManager.DataRoot.
                 string fallback = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "Jimmy", FallbackFileName);
+                    System.Reflection.Assembly.GetExecutingAssembly().GetName().Name, FallbackFileName);
                 if (File.Exists(fallback))
                     return File.ReadAllText(fallback).Trim();
 

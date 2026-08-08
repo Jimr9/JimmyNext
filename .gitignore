@@ -25,9 +25,16 @@ Setup1/build_log*.txt
 Setup_WiX/.wix/
 Setup_WiX/Release/
 Setup_WiX/PublishOutput/
+Setup_WiX/PublishOutputTest/
 *.wixpdb
 debug/
 installer_build.log
+# wix extension add's local extension cache (repo-root .wix/, distinct from Setup_WiX/.wix/
+# above) -- tool cache, not source.
+/.wix/
+
+# Claude Code's own local session/worktree metadata -- tool-local state, not project source.
+/.claude/
 
 # Visual Studio upgrade logs
 UpgradeLog*.htm

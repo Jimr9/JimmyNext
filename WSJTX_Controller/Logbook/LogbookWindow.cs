@@ -27,8 +27,6 @@ namespace WSJTX_Controller
         private readonly Action   _onImportComplete;
         private readonly HashSet<string> _activeAwardRuleIds;
         private readonly Action<string, bool> _onActiveAwardRuleIdsChanged;
-        private readonly Func<DateTime?> _lastLotwUploadTrigger;
-        private readonly Func<string> _uploadLotwHotkeyText;
         // Offline-only callsign->US-state lookup, used when an imported ADIF record's own
         // STATE field is blank (see AdifImporter.Normalize). Never a live network query.
         private readonly Func<string, string> _resolveUsState;
@@ -75,6 +73,7 @@ namespace WSJTX_Controller
         private TextBox  _statUploadQrzTb;
         private TextBox  _statUploadClubLogTb;
         private TextBox  _statUploadLotwTb;
+        private TextBox  _statUploadHrdLogTb;
         private ListView _dashRecentLv;
 
         // ── Awards controls ───────────────────────────────────────────────────────
@@ -155,8 +154,6 @@ namespace WSJTX_Controller
             Action onImportComplete = null,
             HashSet<string> initialActiveAwardRuleIds = null,
             Action<string, bool> onActiveAwardRuleIdsChanged = null,
-            Func<DateTime?> lastLotwUploadTrigger = null,
-            Func<string> uploadLotwHotkeyText = null,
             Func<string, string> resolveUsState = null,
             Func<bool> isWsjtxConnected = null,
             Func<string> currentBand = null,
@@ -174,8 +171,6 @@ namespace WSJTX_Controller
             _onImportComplete = onImportComplete;
             _activeAwardRuleIds = initialActiveAwardRuleIds ?? new HashSet<string>();
             _onActiveAwardRuleIdsChanged = onActiveAwardRuleIdsChanged;
-            _lastLotwUploadTrigger = lastLotwUploadTrigger ?? (() => (DateTime?)null);
-            _uploadLotwHotkeyText  = uploadLotwHotkeyText  ?? (() => "Alt+U");
             _resolveUsState        = resolveUsState        ?? (call => null);
             _isWsjtxConnected      = isWsjtxConnected      ?? (() => false);
             _currentBand           = currentBand           ?? (() => null);
@@ -313,6 +308,7 @@ namespace WSJTX_Controller
             AddStatField(_myLogPanel, "QRZ",      font, ref y, out _statUploadQrzTb,      "QRZ upload status");
             AddStatField(_myLogPanel, "Club Log", font, ref y, out _statUploadClubLogTb,  "Club Log upload status");
             AddStatField(_myLogPanel, "LoTW",     font, ref y, out _statUploadLotwTb,     "LoTW upload status");
+            AddStatField(_myLogPanel, "HRDLog.net", font, ref y, out _statUploadHrdLogTb, "HRDLog.net upload status");
             y += 8;
 
             var recentLbl = new Label
@@ -1241,11 +1237,8 @@ namespace WSJTX_Controller
 
                 _statUploadQrzTb.Text     = FormatUploadStatus(_db.GetUploadSyncStatus("QRZ"));
                 _statUploadClubLogTb.Text = FormatUploadStatus(_db.GetUploadSyncStatus("CLUBLOG"));
-                var lastLotw = _lastLotwUploadTrigger();
-                string lotwKey = _uploadLotwHotkeyText();
-                _statUploadLotwTb.Text = lastLotw.HasValue
-                    ? $"Last {lotwKey} upload: {lastLotw.Value:g}  ({lotwConf.ToString("N0")} confirmed)"
-                    : $"Not yet triggered this session ({lotwKey} uploads via WSJT-X)  ({lotwConf.ToString("N0")} confirmed)";
+                _statUploadLotwTb.Text    = FormatUploadStatus(_db.GetUploadSyncStatus("LOTW"));
+                _statUploadHrdLogTb.Text  = FormatUploadStatus(_db.GetUploadSyncStatus("HRDLOG"));
 
                 var recent = _db.GetRecentQsos(10);
                 _dashRecentLv.Items.Clear();

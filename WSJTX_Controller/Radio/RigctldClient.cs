@@ -67,10 +67,78 @@ namespace WSJTX_Controller
             return File.Exists(path) ? path : null;
         }
 
+        // One row of the bundled rigctl.exe's own --list output -- the live-supported rig
+        // catalog for whichever Hamlib version Jimmy actually ships, not a separately
+        // maintained/hardcoded list that could silently drift out of sync with it.
+        public class RigModelInfo
+        {
+            public int Id;
+            public string Mfg;
+            public string Model;
+            public string Display => $"{Mfg} {Model} ({Id})";
+        }
+
+        // Runs the bundled rigctl.exe --list once and parses its fixed-column table (verified
+        // directly against a real run: " Rig #  Mfg                    Model  ..." with Rig#
+        // in columns 1-8, Mfg in 9-31, Model in 32-55 -- some manufacturer names contain spaces
+        // themselves, e.g. "N2ADR James Ahlstrom" and "Vertex Standard", so this cannot be a
+        // plain whitespace split). Returns an empty list (never throws, never null) if the
+        // bundled exe is missing or the process fails for any reason -- callers must degrade to
+        // "type the number directly" rather than crash Options.
+        public static System.Collections.Generic.List<RigModelInfo> ListRigModels()
+        {
+            var result = new System.Collections.Generic.List<RigModelInfo>();
+            try
+            {
+                string dir = Path.GetDirectoryName(LocateBundledExe() ?? "");
+                if (string.IsNullOrEmpty(dir)) return result;
+                string rigctlPath = Path.Combine(dir, "rigctl.exe");
+                if (!File.Exists(rigctlPath)) return result;
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = rigctlPath,
+                    Arguments = "--list",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                };
+                using (var proc = Process.Start(psi))
+                {
+                    string stdout = proc.StandardOutput.ReadToEnd();
+                    proc.WaitForExit(10_000);
+
+                    foreach (string rawLine in stdout.Split('\n'))
+                    {
+                        string line = rawLine.TrimEnd('\r');
+                        if (line.Length < 32) continue;
+                        string idStr = line.Substring(0, 8).Trim();
+                        if (!int.TryParse(idStr, out int id)) continue;   // skips the header row too
+                        string mfg = line.Substring(8, 23).Trim();
+                        string model = line.Substring(31, Math.Min(24, line.Length - 31)).Trim();
+                        if (mfg.Length == 0 && model.Length == 0) continue;
+                        result.Add(new RigModelInfo { Id = id, Mfg = mfg, Model = model });
+                    }
+                }
+            }
+            catch
+            {
+                // Degrade to an empty list -- Options falls back to free-text entry.
+            }
+            return result;
+        }
+
         // Launches Jimmy's own bundled rigctld against the configured rig model/COM port,
         // listening on this client's configured port. Returns false (LastError set) rather
         // than throwing if the bundled copy is missing or the rig model isn't configured.
-        public bool LaunchBundled(string rigModel, string comPort)
+        // `baudRate`: rigctld's own -s/--serial-speed -- empty means let Hamlib use its built-in
+        // default for `rigModel`. A mismatch against the rig's own CAT baud rate menu setting is
+        // a silent, total CAT communication failure with no error anywhere -- this parameter
+        // exists because that gap was live-diagnosed 2026-08-06 (PTT never engaged against a
+        // real Kenwood TS-590SG; rigctld itself came up and answered fine on its own TCP port,
+        // but every actual CAT command to the radio failed).
+        public bool LaunchBundled(string rigModel, string comPort, string baudRate = null)
         {
             LastError = null;
             try
@@ -89,6 +157,7 @@ namespace WSJTX_Controller
 
                 var args = $"-m {rigModel}";
                 if (!string.IsNullOrWhiteSpace(comPort)) args += $" -r {comPort}";
+                if (!string.IsNullOrWhiteSpace(baudRate)) args += $" -s {baudRate}";
                 args += $" -t {_port}";
 
                 _bundledProcess = new Process
@@ -104,11 +173,37 @@ namespace WSJTX_Controller
                     }
                 };
                 _bundledProcess.Start();
+                // Drain both pipes asynchronously -- an un-drained pipe fills and blocks
+                // rigctld's own output eventually, same class of bug fixed in
+                // NativeEngineClient.Launch (see that method's own comment for the full
+                // explanation). No debugOutput sink wired up here (yet) -- draining alone is
+                // what prevents the hang; nobody needs to read rigctld's own console chatter today.
+                _bundledProcess.OutputDataReceived += (s, e) => { };
+                _bundledProcess.ErrorDataReceived += (s, e) => { };
+                _bundledProcess.BeginOutputReadLine();
+                _bundledProcess.BeginErrorReadLine();
 
                 // Fixed short wait for rigctld to bind its listening socket before the first
                 // connect attempt, rather than a retry loop -- matches the app's existing
                 // "give the window extra time to come up" style (run_replay_tests.bat).
                 Thread.Sleep(500);
+
+                // Check the process actually survived the bind attempt -- rigctld exits
+                // immediately (with a clear stderr message, already drained above) if the
+                // requested port is already taken, e.g. by the native engine host's OWN rigctld
+                // on the same configured port. Returning true unconditionally here used to hide
+                // exactly that failure: EnsureConnected() would then either fail to connect at
+                // all or, worse, connect to whatever else happened to already own the port,
+                // neither of which is what the operator asked this call to do.
+                if (_bundledProcess.HasExited)
+                {
+                    LastError = $"rigctld exited immediately after launch (exit code {_bundledProcess.ExitCode}) " +
+                                 $"-- port {_port} is likely already in use by another rigctld (e.g. the native " +
+                                 "engine's own, if Decode Engine is set to Jimmy Native).";
+                    _bundledProcess.Dispose();
+                    _bundledProcess = null;
+                    return false;
+                }
                 return true;
             }
             catch (Exception ex)
@@ -140,13 +235,34 @@ namespace WSJTX_Controller
             }
         }
 
+        // Bounds EVERY blocking network call this class makes (connect, and -- via
+        // TcpClient.ReceiveTimeout/SendTimeout below -- every synchronous stream read/write
+        // SendCommand does too). Before this existed, NOTHING in this class had a timeout
+        // anywhere: TcpClient.Connect() and StreamReader.ReadLine() can both block
+        // indefinitely, and every caller (RadioTestButton_Click, radioPollTimer_Tick) runs
+        // synchronously on the UI thread -- an unresponsive/conflicted rigctld (e.g. two
+        // instances contending for the same port, confirmed live 2026-08-06: the native
+        // engine's own rigctld and the Options > Radio "Test connection" button's separate
+        // throwaway rigctld both trying to bind the same configured port) froze the ENTIRE
+        // application, with no way to recover except Windows force-closing it.
+        private const int NetworkTimeoutMs = 3000;
+
         private bool EnsureConnected()
         {
             if (IsConnected) return true;
             try
             {
                 _tcp = new TcpClient();
-                _tcp.Connect(_host, _port);
+                var connectTask = _tcp.ConnectAsync(_host, _port);
+                if (!connectTask.Wait(NetworkTimeoutMs))
+                {
+                    LastError = $"Timed out connecting to rigctld at {_host}:{_port} after {NetworkTimeoutMs}ms " +
+                                 "-- is another rigctld already bound to that port?";
+                    Close();
+                    return false;
+                }
+                _tcp.ReceiveTimeout = NetworkTimeoutMs;
+                _tcp.SendTimeout = NetworkTimeoutMs;
                 _stream = _tcp.GetStream();
                 _reader = new StreamReader(_stream, Encoding.ASCII);
                 _writer = new StreamWriter(_stream, Encoding.ASCII) { AutoFlush = true, NewLine = "\n" };
@@ -247,14 +363,80 @@ namespace WSJTX_Controller
             return !LooksLikeError(reply);
         }
 
+        // Self-sufficiency plan Phase 5: Band Up/Down retuning under JimmyNative +
+        // HamlibRigctld. rigctld is a multi-client daemon, so this rides the SAME connection
+        // (and, when JimmyNative, the SAME physical rigctld the native engine host itself
+        // launched) used for S-meter/SWR/power polling above -- no separate protocol needed.
+        // The engine's own Engine::observe_rig_freq reconciles an externally-changed frequency
+        // on its own next poll tick, so commanding it here does not desync the engine's belief
+        // about the dial.
+        public bool SetFrequency(ulong hz)
+        {
+            string reply = SendCommand($"F {hz}");
+            return !LooksLikeError(reply);
+        }
+
+        // Matches WSJT-X's own Radio tab "Split Operation: Rig" choice -- enables/disables the
+        // radio's own hardware split (TX on VFO B, RX on VFO A) via Hamlib's set_split_vfo.
+        // "None" (the default) calls this with enabled=false, which is a harmless no-op on a
+        // rig that was never in split. Requested by the operator, 2026-08-07, for parity with
+        // WSJT-X's Radio tab -- WSJT-X's third choice, "Fake It" (software-emulated split with
+        // no true rig split at all), has no equivalent here; see RadioSettings.SplitMode's own
+        // comment for why.
+        public bool SetSplit(bool enabled)
+        {
+            string reply = SendCommand(enabled ? "S 1 VFOB" : "S 0 VFOA");
+            return !LooksLikeError(reply);
+        }
+
+        // get_mode ("m") replies on two lines (mode, then passband) -- same shape PollOnce
+        // already reads; duplicated here (not shared) because PollOnce populates a whole
+        // RadioStatus and this needs just the two raw values for the connect-kick below.
+        public bool GetMode(out string mode, out int passband)
+        {
+            mode = null;
+            passband = 0;
+            if (!EnsureConnected()) return false;
+            try
+            {
+                _writer.WriteLine("m");
+                string modeReply = _reader.ReadLine();
+                string passbandReply = _reader.ReadLine();
+                if (LooksLikeError(modeReply)) return false;
+                mode = modeReply.Trim();
+                int.TryParse(passbandReply?.Trim(), out passband);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                LastError = $"rigctld command 'm' failed: {ex.Message}";
+                Close();
+                return false;
+            }
+        }
+
+        // set_mode ("M <mode> <passband>"). Nexus's own retune loop only re-sends a mode
+        // command when its OWN belief of the current mode differs from the target -- if that
+        // belief was ever seeded as "already correct" (e.g. from a stale prior session) without
+        // a real CAT command reaching the physical radio, the rig can be stuck on whatever mode
+        // it was last ACTUALLY in, forever, while every read-back keeps agreeing with the belief
+        // instead of hardware truth. Used by the connect-kick to force a genuine mode round-trip
+        // the same way SetFrequency's own nudge does for frequency.
+        public bool SetMode(string mode, int passband)
+        {
+            string reply = SendCommand($"M {mode} {passband}");
+            return !LooksLikeError(reply);
+        }
+
         // Hamlib analogue of WSJT-X's software RX-gain slider that F11/F12 drives in WsjtxCat
         // mode: adjusts the radio's own AF (audio) gain level up/down by a fixed step. Different
         // mechanism (hardware AF gain via CAT vs. a software multiplier applied before decode)
         // but the same practical effect on received audio level.
         private const double AudioStep = 0.05;
 
-        public bool AdjustAudioLevel(bool up)
+        public bool AdjustAudioLevel(bool up, out double newLevel)
         {
+            newLevel = 0.0;
             string reply = SendCommand("l AF");
             if (LooksLikeError(reply) ||
                 !double.TryParse(reply.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double current))
@@ -264,7 +446,9 @@ namespace WSJTX_Controller
             }
             double next = Math.Max(0.0, Math.Min(1.0, current + (up ? AudioStep : -AudioStep)));
             string setReply = SendCommand("L AF " + next.ToString(CultureInfo.InvariantCulture));
-            return !LooksLikeError(setReply);
+            if (LooksLikeError(setReply)) return false;
+            newLevel = next;
+            return true;
         }
 
         public void Close()

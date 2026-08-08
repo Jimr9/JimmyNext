@@ -610,6 +610,14 @@ namespace WSJTX_Controller
             string status = "";
             Color foreColor = Color.Black;
             Color backColor = Color.Yellow;     //caution
+            // True only when this call is a purely routine "available stations" summary
+            // with nothing else worth saying right now -- set below, at the top of the
+            // ACTIVE case, from the SAME one-off flags that case's own reset block clears
+            // at the end (finalSignoffCall, uploadResult, newBand, etc.), read here before
+            // any of them are touched. Defaults false (don't defer) for every other opMode
+            // and for the special-case branches within ACTIVE (tuning, replyFromInProg,
+            // etc.) -- only the plain, nothing-special case is ever eligible to wait.
+            bool deferEligible = false;
 
             string k = cmdPrompts ? $", use Alt, K, for command key list" : "";
 
@@ -671,6 +679,29 @@ namespace WSJTX_Controller
                             backColor = Color.Orange;
                             return;
                         case (int)OpModes.ACTIVE:
+                            // Must be read here, before any of these get consumed/reset (see
+                            // the reset block near the end of this case) -- true only when
+                            // NOTHING special is being reported this round, i.e. this really
+                            // would just be the routine "N available stations" summary, safe
+                            // to batch with the rest of the period. A one-off event (a final
+                            // 73, a band/mode change, an upload result, etc.) always announces
+                            // immediately regardless of decode-batch timing.
+                            //
+                            // Deliberately NOT excluding cqPaused here (first attempt did, and
+                            // it was wrong): confirmed live, 2026-08-07, cqPaused reads True
+                            // continuously through ordinary Listen-mode monitoring -- it's a
+                            // persistent mode flag, not a one-off event -- so excluding it
+                            // silently disabled deferral for exactly the scenario this whole
+                            // fix is for. The cqPaused branch below still only ever assembles
+                            // the same callsWaiting-driven routine text (or tuneResult, or
+                            // whatever finalSignoffCall/uploadResult/etc. already prepended to
+                            // curTxMode) -- those genuinely special cases are already covered
+                            // by the other checks here independent of cqPaused.
+                            deferEligible = finalSignoffCall == null && uploadResult == null && !deletedAllCalls
+                                && !newBand && !newMode && !newPskReporter && !newTxFirst && !promptsChanged
+                                && tuneResult == null && !replyFromInProg && !tuning
+                                && consecNoDecodes < maxNoDecodes && Math.Abs(timeOffset) <= maxTimeOffset
+                                && autoFreqPauseMode == autoFreqPauseModes.DISABLED;
                             int qcw = callQueue.Count;
                             if ((cqPaused && txMode == TxModes.CALL_CQ) || (!transmitting && txMode == TxModes.LISTEN && qcw > 0)) modePrompt = true;
                             DateTime dt = DateTime.Now.ToUniversalTime();
@@ -693,19 +724,62 @@ namespace WSJTX_Controller
                             string tmStr = mode == "FT8" ? "" : $", {mode}";
                             string desc = $", {tMode} mode{tmStr}";
 
+                            // TX1/RX1/RX2/TX2 naming matches ShowAdvancedQueue's own list headers:
+                            // whichever slot is Jimmy's own Tx turn is the "TX" side, the other is
+                            // the "RX" side (txFirst decides which is which).
+                            string tx1Prefix = txFirst ? "TX1" : "RX1";
+                            string tx2Prefix = txFirst ? "RX2" : "TX2";
+                            int tx1Count = ctrl.advShowTx1 ? _tx1SnapshotRows.Count : 0;
+                            int tx2Count = ctrl.advShowTx2 ? _tx2SnapshotRows.Count : 0;
+                            // currentSideIsTx1: is the period that just completed the even one
+                            // (tx1's bucket -- see IsEvenCall)? Deliberately NOT based on
+                            // `transmitting`: in Listen mode transmitting is false for the entire
+                            // session unless the operator actually keys a QSO, which pinned this to
+                            // one slot forever and silently hid the other slot's count (confirmed
+                            // live, 2026-08-07 -- only ever heard RX1, never TX2, despite TX2's list
+                            // genuinely growing the whole time).
+                            //
+                            // Prefer lastDecodeEvenPeriod (the actual decode's own SinceMidnight)
+                            // over the current wall clock -- confirmed live, 2026-08-07: a decode
+                            // for the period that just ended can be processed a moment after the
+                            // next period's clock window has already begun (WSJT-X's own
+                            // decode-compute latency), and re-deriving parity from "now" at that
+                            // point mislabels it as the new period's data before that period has
+                            // decoded anything, producing an announcement that reads as happening
+                            // partway into the next period. Only fall back to the clock before the
+                            // first decode of the session has arrived at all.
+                            bool currentSideIsTx1 = lastDecodeEvenPeriod ?? IsEvenPeriod((int)sinceMidnight.TotalSeconds);
+
                             int displayedCount = ctrl.advancedCallLayout
-                                ? (ctrl.advShowTx1 ? _tx1SnapshotRows.Count : 0)
-                                  + (ctrl.advShowTx2 ? _tx2SnapshotRows.Count : 0)
+                                ? (currentSideIsTx1 ? tx1Count : tx2Count)
                                 : (callInProg != null && callQueue.Contains(callInProg) ? qcw - 1 : qcw);
                             string callsStr = displayedCount == 1 ? "available station" : "available stations";
-                            string count = displayedCount == 0 ? "no" : $"{displayedCount}";
+                            string count;
+                            if (ctrl.advancedCallLayout)
+                            {
+                                // Naming BOTH slots' counts on the same line used to read as "it's
+                                // adding them together" (fixed 2026-08-07 by adding the TX1/TX2
+                                // breakdown below) -- but confirmed live, 2026-08-07, that even the
+                                // breakdown still reads as hearing rx and tx info glued together on
+                                // one line, since it always spoke both labels regardless of which one
+                                // was actually current. Now only the slot matching what Jimmy is
+                                // doing right now is spoken; the DXCC/wanted/award counts just below
+                                // (via visibleCalls) are scoped to the same slot, so nothing from the
+                                // other direction rides along on this announcement either.
+                                count = currentSideIsTx1 ? $"{tx1Prefix} {displayedCount}" : $"{tx2Prefix} {displayedCount}";
+                            }
+                            else
+                            {
+                                count = displayedCount == 0 ? "no" : $"{displayedCount}";
+                            }
 
                             HashSet<string> visibleCalls = null;
                             if (ctrl.advancedCallLayout)
                             {
                                 visibleCalls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                                if (ctrl.advShowTx1) foreach (var vc in _tx1SnapshotCalls) visibleCalls.Add(vc);
-                                if (ctrl.advShowTx2) foreach (var vc in _tx2SnapshotCalls) visibleCalls.Add(vc);
+                                var sideCalls = currentSideIsTx1 ? _tx1SnapshotCalls : _tx2SnapshotCalls;
+                                bool sideEnabled = currentSideIsTx1 ? ctrl.advShowTx1 : ctrl.advShowTx2;
+                                if (sideEnabled) foreach (var vc in sideCalls) visibleCalls.Add(vc);
                             }
 
                             int n = SnapshotPriorityCount(CallPriority.TO_MYCALL, visibleCalls);
@@ -723,7 +797,14 @@ namespace WSJTX_Controller
                             string needed = string.Concat(SnapshotNeededAwardCounts(visibleCalls)
                                 .Select(kv => $", {kv.Value} {kv.Key}"));
 
-                            string callsWaiting = (!transmitting || qsoState == WsjtxMessage.QsoStates.CALLING)
+                            // Once actively engaged with a specific station (callInProg set), the
+                            // operator wants to hear the call status and RX activity, not the
+                            // band-wide "N available stations, TX1/RX2 counts" summary -- that's
+                            // useful while choosing who to call, not mid-exchange. Confirmed live,
+                            // 2026-08-07: hearing queue/DXCC/wanted counts glued onto the same
+                            // sentence as "receiving/transmitting to <call>" reads as noise once a
+                            // specific QSO attempt is underway.
+                            string callsWaiting = (!transmitting || qsoState == WsjtxMessage.QsoStates.CALLING) && callInProg == null
                                 ? $", {count} {callsStr}{pri}{cty}{want}{needed}"
                                 : "";
                             string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? $", Alt E to enable transmit" : (!transmitting && qcw > 0 ? $", Control W for list or Alt N for next" : "")) : "";
@@ -766,10 +847,14 @@ namespace WSJTX_Controller
                                 curTxMode = $"Deleted all waiting calls, " + curTxMode;
                             }
 
-                            if (loggedCall != null)
-                            {
-                                curTxMode = $"{Spacify(loggedCall)} logged, " + curTxMode;
-                            }
+                            // "{call} logged" used to be woven into this sentence here too --
+                            // removed 2026-08-07: RequestLog's own Notify.Publish(QsoCompletedEvent)
+                            // (WSJTX_Controller/Notify/) already announces this on its own the
+                            // moment it happens, and having both meant the second one could cut
+                            // the first off mid-utterance (confirmed live). loggedCall itself is
+                            // untouched -- it still gates the "first"/"no need to say it twice"
+                            // logic just below and gets cleared at the bottom of this method
+                            // exactly as before; only the redundant announcement text is gone.
 
                             if (finalSignoffCall != null)
                             {
@@ -952,7 +1037,44 @@ namespace WSJTX_Controller
             {
                 string bandMode = (bandIdx != null && !string.IsNullOrEmpty(mode))
                     ? $"{bands[(int)bandIdx]}m {mode}" : "Status:";
-                StatusView.RenderStatus(bandMode, status, foreColor, backColor);
+
+                // Batch the "N available stations" announcement instead of speaking it on
+                // every individual decode -- confirmed live, 2026-08-07: a couple of fast/
+                // early decodes for a brand-new period could otherwise trigger a premature,
+                // partial-count announcement (e.g. "3 available stations") seconds before
+                // that period's real, full decode batch (e.g. 19) had actually arrived.
+                //
+                // Two earlier attempts both leaned on WSJT-X's own "decode pass ended"
+                // signals (postDecodeTimer.Enabled, then decodesProcessed) and both failed
+                // live for the same underlying reason: this real WSJT-X build reports
+                // Decoding:True once at startup and never flips back to False again, so
+                // neither of those ever fires a second time. ScheduleStatusAnnounce()
+                // (WsjtxClient.cs) instead computes the next period boundary purely from
+                // trPeriod and the wall clock -- nothing WSJT-X reports about its own decode
+                // state can make this go stale. Only defer while no call is in progress -- an
+                // active exchange's real-time info must never be delayed. deferEligible (set
+                // at the top of the ACTIVE case) additionally requires that nothing one-off is
+                // being reported this round -- a final 73, a band change, an upload result,
+                // etc. must never wait on the decode batch just because callInProg happens to
+                // be null when they occur.
+                if (callInProg == null && deferEligible && trPeriod != null)
+                {
+                    _pendingStatusHeading = bandMode;
+                    _pendingStatusText = status;
+                    _pendingStatusForeColor = foreColor;
+                    _pendingStatusBackColor = backColor;
+                    ScheduleStatusAnnounce();
+                }
+                else
+                {
+                    // A fresher, immediate render always wins over a still-pending batched
+                    // one -- e.g. callInProg just became non-null (operator engaged a call)
+                    // after an earlier deferred summary was queued; that stale summary must
+                    // never overwrite this newer, more relevant text a moment later.
+                    statusAnnounceTimer.Stop();
+                    _pendingStatusText = null;
+                    StatusView.RenderStatus(bandMode, status, foreColor, backColor);
+                }
             }
         }
 

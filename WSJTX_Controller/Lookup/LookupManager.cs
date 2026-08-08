@@ -2,6 +2,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -58,10 +59,14 @@ namespace WSJTX_Controller
                                           (Qrz.IsEnabled || LoTW.IsEnabled || ClubLog.IsEnabled);
         public QrzLookupPolicy  Policy  => _policy;
 
+        // Derived from the running assembly's own name (not a literal "Jimmy") so a
+        // differently-named build (e.g. a side-by-side "Jimmy Test" release) gets its own
+        // isolated data folder automatically, rather than sharing the production install's
+        // logbook database -- this is the root LogbookDb.cs's own DbPath builds from.
         public static string DataRoot =>
             Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "Jimmy", "Data");
+                Assembly.GetExecutingAssembly().GetName().Name, "Data");
 
         // Callback invoked on background thread when an auto-lookup completes.
         // WsjtxClient should BeginInvoke to marshal back to the UI thread.

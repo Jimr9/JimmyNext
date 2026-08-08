@@ -216,6 +216,7 @@ namespace WSJTX_Controller
             BuildWantedCallsTab();
             BuildSpotWatchTab();
             BuildRadioTab();
+            BuildDecodeEngineTab();
             BuildSoundsTab();
             BuildLogbookSyncTab();
             BuildLookupDataTab();
@@ -939,14 +940,16 @@ namespace WSJTX_Controller
 
         private System.Windows.Forms.RadioButton _radioWsjtxCatRb;
         private System.Windows.Forms.RadioButton _radioHamlibRb;
-        private System.Windows.Forms.TextBox _radioRigModelTextBox;
-        private System.Windows.Forms.TextBox _radioComPortTextBox;
+        private System.Windows.Forms.ComboBox _radioRigModelCombo;
+        private System.Windows.Forms.ComboBox _radioComPortTextBox;
+        private System.Windows.Forms.ComboBox _radioBaudRateTextBox;
+        private System.Windows.Forms.ComboBox _radioPttMethodCombo;
         private System.Windows.Forms.CheckBox _radioUseExternalCheckBox;
         private System.Windows.Forms.TextBox _radioHostTextBox;
         private System.Windows.Forms.TextBox _radioPortTextBox;
         private System.Windows.Forms.CheckBox _radioPttEnabledCheckBox;
         private System.Windows.Forms.Button _radioTestButton;
-        private System.Windows.Forms.Label _radioTestResultLabel;
+        private AnnouncingLabel _radioTestResultLabel;
 
         // Self-sufficiency plan, Phase 4g/4i: decode engine source, same tab as radio-state
         // source above (both answer "where does DSP/radio work come from"). RECEIVE ONLY --
@@ -956,6 +959,13 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox _engineMyCallTextBox;
         private System.Windows.Forms.TextBox _engineMyGridTextBox;
         private System.Windows.Forms.ComboBox _engineAudioDeviceCombo;
+        private System.Windows.Forms.ComboBox _engineAudioOutputDeviceCombo;
+        private System.Windows.Forms.CheckBox _radioDataModesPlainSsbCheckBox;
+        private System.Windows.Forms.CheckBox _radioSplitCheckBox;
+        private System.Windows.Forms.NumericUpDown _radioPollIntervalUpDown;
+        private System.Windows.Forms.CheckBox _radioReadDisplayPwrSwrCheckBox;
+        private System.Windows.Forms.CheckBox _radioHaltTxOnHighSwrCheckBox;
+        private System.Windows.Forms.NumericUpDown _radioSwrHaltThresholdUpDown;
 
         private void BuildRadioTab()
         {
@@ -1008,14 +1018,16 @@ namespace WSJTX_Controller
                 TabIndex = 1,
                 Font = font,
                 AccessibleName = "Use Hamlib rigctld",
-                AccessibleDescription = "Jimmy launches its own bundled rigctld against the rig model and COM port below, or connects to an external rigctld if configured. Frequency and mode for decoding still come from WSJT-X either way.",
+                AccessibleDescription = EngineModeCutover.Mode == DecodeEngineMode.JimmyNative
+                    ? "Jimmy Native launches its own bundled rigctld against the rig model and COM port below (or connects to an external rigctld if configured) and drives CAT/PTT directly -- no WSJT-X-family process is used for this at all."
+                    : "Jimmy launches its own bundled rigctld against the rig model and COM port below, or connects to an external rigctld if configured. Frequency and mode for decoding still come from WSJT-X either way.",
             };
             radioPanel.Controls.Add(_radioHamlibRb);
             y += 32;
 
             var rigModelLabel = new System.Windows.Forms.Label
             {
-                Text = "Rig model (Hamlib number, e.g. 2037 for Kenwood TS-590SG):",
+                Text = "Rig model:",
                 AccessibleName = "Rig model label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
@@ -1025,22 +1037,57 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(rigModelLabel);
             y += 20;
 
-            _radioRigModelTextBox = new System.Windows.Forms.TextBox
+            _radioRigModelCombo = new System.Windows.Forms.ComboBox
             {
-                Text = ctrl.Radio.RigModel,
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
                 Location = new System.Drawing.Point(left, y),
-                Size = new System.Drawing.Size(100, 21),
+                Size = new System.Drawing.Size(320, 21),
                 TabIndex = 2,
                 Font = font,
                 AccessibleName = "Rig model",
-                AccessibleDescription = "Hamlib rig model number. 2037 is the Kenwood TS-590SG.",
+                AccessibleDescription = "The radio model Jimmy's bundled rigctld talks to. Type the first letters of a manufacturer or model to jump to it, e.g. \"Kenwood\".",
             };
-            radioPanel.Controls.Add(_radioRigModelTextBox);
+            // Live list from the bundled rigctl.exe itself (Resources\hamlib\rigctl.exe --list)
+            // -- always matches whichever Hamlib version actually ships with Jimmy, never a
+            // separately maintained list that could drift out of sync with it. Sorted by
+            // manufacturer then model so typing the first few letters of either jumps close to
+            // the right entry (a plain DropDownList's own built-in incremental-search behavior).
+            var rigModels = RigctldClient.ListRigModels();
+            rigModels.Sort((a, b) =>
+            {
+                int c = string.Compare(a.Mfg, b.Mfg, StringComparison.OrdinalIgnoreCase);
+                return c != 0 ? c : string.Compare(a.Model, b.Model, StringComparison.OrdinalIgnoreCase);
+            });
+            bool foundCurrent = false;
+            foreach (var m in rigModels)
+            {
+                _radioRigModelCombo.Items.Add(m.Display);
+                if (m.Id.ToString() == (ctrl.Radio.RigModel ?? "").Trim()) foundCurrent = true;
+            }
+            // Never lose an already-configured value just because this Hamlib build's --list
+            // didn't include it (or --list itself failed to run) -- keep it selectable and
+            // selected rather than silently switching the operator to a different rig.
+            string curRigModel = (ctrl.Radio.RigModel ?? "").Trim();
+            if (!foundCurrent && curRigModel.Length > 0)
+                _radioRigModelCombo.Items.Insert(0, $"(currently configured: {curRigModel})");
+            if (curRigModel.Length > 0)
+            {
+                foreach (var item in _radioRigModelCombo.Items)
+                {
+                    string s = (string)item;
+                    if (s.Contains($"({curRigModel})") || s == $"(currently configured: {curRigModel})")
+                    {
+                        _radioRigModelCombo.SelectedItem = s;
+                        break;
+                    }
+                }
+            }
+            radioPanel.Controls.Add(_radioRigModelCombo);
             y += 28;
 
             var comPortLabel = new System.Windows.Forms.Label
             {
-                Text = "COM port (e.g. COM3):",
+                Text = "COM port:",
                 AccessibleName = "COM port label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
@@ -1050,17 +1097,81 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(comPortLabel);
             y += 20;
 
-            _radioComPortTextBox = new System.Windows.Forms.TextBox
+            // DropDownList (a closed list, not free-text DropDown) -- reported live, 2026-08-06,
+            // as the more reliable style with JAWS; it also makes the "typed 4 instead of COM4"
+            // class of mistake structurally impossible (rigctld launched with -r 4 -- not a real
+            // Windows device path -- silently could never talk to the radio, and every symptom
+            // that followed, from a hung Test-connection to a stalled S-meter poll, traced back
+            // to that one bad string). Real detected ports come from
+            // System.IO.Ports.SerialPort.GetPortNames(); the currently-saved value is always
+            // included even if not currently detected (radio powered off/unplugged at the
+            // moment Options happens to be open must never silently hide or lose the setting).
+            _radioComPortTextBox = new System.Windows.Forms.ComboBox
             {
-                Text = ctrl.Radio.ComPort,
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(100, 21),
                 TabIndex = 3,
                 Font = font,
                 AccessibleName = "COM port",
-                AccessibleDescription = "Serial port the radio is connected to, e.g. COM3. Only used when launching Jimmy's own bundled rigctld.",
+                AccessibleDescription = "Serial port the radio is connected to. Only used when launching Jimmy's own bundled rigctld. Lists ports currently detected on this PC.",
             };
+            _radioComPortTextBox.Items.Add("");   // blank = not configured
+            var detectedPorts = new System.Collections.Generic.List<string>(System.IO.Ports.SerialPort.GetPortNames());
+            detectedPorts.Sort((a, b) =>
+            {
+                int an, bn;
+                bool aNum = int.TryParse(new string(System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Where(a, char.IsDigit))), out an);
+                bool bNum = int.TryParse(new string(System.Linq.Enumerable.ToArray(System.Linq.Enumerable.Where(b, char.IsDigit))), out bn);
+                return aNum && bNum ? an.CompareTo(bn) : string.CompareOrdinal(a, b);
+            });
+            foreach (var p in detectedPorts)
+                _radioComPortTextBox.Items.Add(p);
+            // Add the saved value verbatim (no suffix/decoration -- DropDownList's .Text IS the
+            // selected item's exact text, so decorating it here would corrupt the actual saved
+            // setting) if it's not already in the detected list, so a radio that's simply
+            // powered off/unplugged right now never silently loses its configured port.
+            if (!string.IsNullOrWhiteSpace(ctrl.Radio.ComPort) && !detectedPorts.Contains(ctrl.Radio.ComPort))
+                _radioComPortTextBox.Items.Add(ctrl.Radio.ComPort);
+            _radioComPortTextBox.Text = ctrl.Radio.ComPort;
             radioPanel.Controls.Add(_radioComPortTextBox);
+            y += 32;
+
+            var baudRateLabel = new System.Windows.Forms.Label
+            {
+                Text = "Baud rate (blank = Hamlib's default for this rig):",
+                AccessibleName = "Baud rate label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(baudRateLabel);
+            y += 20;
+
+            // DropDownList (closed list), not free-text DropDown -- reported live, 2026-08-06, as
+            // the more reliable style with JAWS. If the saved rate isn't one of the standard
+            // ones it's still added to the list below (so an unusual real value is never
+            // silently discarded), just not typeable ad hoc anymore.
+            _radioBaudRateTextBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(100, 21),
+                TabIndex = 4,
+                Font = font,
+                AccessibleName = "Baud rate",
+                AccessibleDescription = "Serial baud rate for CAT control -- must match the rig's own CAT baud rate menu setting, or rigctld cannot talk to it at all. Leave blank to use Hamlib's built-in default for this rig model.",
+            };
+            // Standard RS-232 rates, same set real WSJT-X's own Radio tab offers.
+            _radioBaudRateTextBox.Items.Add("");   // blank = Hamlib's own default
+            var standardBauds = new[] { "1200", "4800", "9600", "19200", "38400", "57600", "115200" };
+            foreach (var rate in standardBauds)
+                _radioBaudRateTextBox.Items.Add(rate);
+            if (!string.IsNullOrWhiteSpace(ctrl.Radio.BaudRate) && System.Array.IndexOf(standardBauds, ctrl.Radio.BaudRate) < 0)
+                _radioBaudRateTextBox.Items.Add(ctrl.Radio.BaudRate);
+            _radioBaudRateTextBox.Text = ctrl.Radio.BaudRate;
+            radioPanel.Controls.Add(_radioBaudRateTextBox);
             y += 32;
 
             _radioUseExternalCheckBox = new System.Windows.Forms.CheckBox
@@ -1069,7 +1180,7 @@ namespace WSJTX_Controller
                 Checked = ctrl.Radio.UseExternalRigctld,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
-                TabIndex = 4,
+                TabIndex = 5,
                 Font = font,
                 AccessibleName = "Use external rigctld",
                 AccessibleDescription = "When checked, Jimmy connects to a rigctld you are already running elsewhere, using the host and port below, instead of launching its own bundled copy.",
@@ -1094,7 +1205,7 @@ namespace WSJTX_Controller
                 Text = ctrl.Radio.RigctldHost,
                 Location = new System.Drawing.Point(left + 45, y),
                 Size = new System.Drawing.Size(120, 21),
-                TabIndex = 5,
+                TabIndex = 6,
                 Font = font,
                 AccessibleName = "rigctld host",
                 AccessibleDescription = "Hostname or IP address of the external rigctld instance.",
@@ -1117,7 +1228,7 @@ namespace WSJTX_Controller
                 Text = ctrl.Radio.RigctldPort.ToString(),
                 Location = new System.Drawing.Point(left + 215, y),
                 Size = new System.Drawing.Size(60, 21),
-                TabIndex = 6,
+                TabIndex = 7,
                 Font = font,
                 AccessibleName = "rigctld port",
                 AccessibleDescription = "TCP port of the external rigctld instance. Hamlib's default is 4532.",
@@ -1131,12 +1242,156 @@ namespace WSJTX_Controller
                 Checked = ctrl.Radio.PttEnabled,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
-                TabIndex = 7,
+                TabIndex = 8,
                 Font = font,
                 AccessibleName = "Use rigctld for PTT",
                 AccessibleDescription = "Off by default. A bigger change than read-only telemetry -- only turn this on if you want Jimmy, not WSJT-X, keying the radio.",
             };
             radioPanel.Controls.Add(_radioPttEnabledCheckBox);
+
+            // Placed on the SAME row as the checkbox above (not a new row) -- the Radio tab
+            // already hit a real Tab-unreachable overflow bug once today from adding rows one at
+            // a time without re-checking the total against the tab's visible height; the fix
+            // that time was splitting Decode Engine into its own tab, which isn't warranted for
+            // one more field here, so this stays deliberately width-wise instead of tall-wise.
+            var pttMethodLabel = new System.Windows.Forms.Label
+            {
+                Text = "PTT method:",
+                AccessibleName = "PTT method label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 400, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(pttMethodLabel);
+
+            _radioPttMethodCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left + 480, y),
+                Size = new System.Drawing.Size(110, 21),
+                TabIndex = 9,
+                Font = font,
+                AccessibleName = "PTT method",
+                AccessibleDescription = "How PTT is actually keyed once 'Use rigctld for PTT' above is checked: Cat (rigctld's own CAT command -- the common case), Vox (the radio keys itself off transmit audio -- Jimmy sends no PTT command at all), Serial RTS or Serial DTR (a serial control line on the same port as CAT). Ignored, forced to Vox, when 'Use rigctld for PTT' is unchecked.",
+            };
+            foreach (PttMethod m in Enum.GetValues(typeof(PttMethod)))
+                _radioPttMethodCombo.Items.Add(m.ToString());
+            _radioPttMethodCombo.SelectedItem = ctrl.Radio.PttMethod.ToString();
+            radioPanel.Controls.Add(_radioPttMethodCombo);
+            y += 32;
+
+            // Same row/placement family as real WSJT-X's own Radio tab, which puts its "Mode:
+            // None/USB/Data-Pkt" choice right above "Test CAT" -- confirmed live, 2026-08-07, via
+            // the operator's own JAWS navigation transcript of WSJT-X 3.0.0 rc1 mod's Radio tab.
+            // Originally placed on Jimmy's Decode Engine tab instead (next to the audio device
+            // pickers), which the operator flagged as the wrong location: WSJT-X keeps rig-mode
+            // choices with its other CAT/PTT controls, not with audio device selection, and
+            // Jimmy should match that grouping for anyone already familiar with WSJT-X's layout.
+            // Only two of WSJT-X's three choices are real here (see DataModesPlainSsb's own
+            // comment for why "None" isn't available without forking Nexus's own engine code).
+            _radioDataModesPlainSsbCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Use plain USB instead of Data/Pkt mode for FT8/FT4",
+                Checked = ctrl.Radio.DataModesPlainSsb,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 10,
+                Font = font,
+                AccessibleName = "Use plain USB instead of Data mode",
+                AccessibleDescription = "Off by default (recommended for most rigs, including a normal rear-panel USB or ACC digital audio interface). Matches WSJT-X's own Radio tab 'Mode' choice: Data/Pkt (default here, off) vs USB (checked). Only try this if Data/Pkt mode isn't actually routing transmit audio to the radio correctly on your setup.",
+            };
+            radioPanel.Controls.Add(_radioDataModesPlainSsbCheckBox);
+            y += 32;
+
+            // Rig Data section, packed two-controls-per-row like PTT Method above it -- same
+            // "don't grow the tab tall enough to go Tab-unreachable" discipline. Matches WSJT-X's
+            // own Radio tab "Rig Data" grouping (Split Operation, Poll Interval, Read/display
+            // PWR+SWR, Halt Tx on high SWR) per the operator's own request and JAWS navigation
+            // transcript of WSJT-X 3.0.0 rc1 mod, 2026-08-07 -- kept on THIS tab rather than a
+            // separate one because the operator explicitly said WSJT-X has it all on one Radio
+            // tab and Jimmy should match that.
+            _radioSplitCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Use rig split (TX on VFO B)",
+                Checked = ctrl.Radio.SplitMode == RadioSplitMode.Rig,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 11,
+                Font = font,
+                AccessibleName = "Use rig split",
+                AccessibleDescription = "Off by default. Matches WSJT-X's own Radio tab 'Split Operation' choice: None (default here, off) vs Rig (checked) -- true hardware split via CAT, RX on VFO A, TX on VFO B. WSJT-X's third choice, 'Fake It' (software-emulated split, no true rig split), has no equivalent here. Rarely needed for FT8/FT4, which conventionally run simplex.",
+            };
+            radioPanel.Controls.Add(_radioSplitCheckBox);
+
+            var pollIntervalLabel = new System.Windows.Forms.Label
+            {
+                Text = "Poll interval (s):",
+                AccessibleName = "Poll interval label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 290, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(pollIntervalLabel);
+
+            _radioPollIntervalUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 1,
+                Maximum = 30,
+                Value = Math.Max(1, Math.Min(30, ctrl.Radio.PollIntervalMs / 1000)),
+                Location = new System.Drawing.Point(left + 410, y),
+                Size = new System.Drawing.Size(55, 21),
+                TabIndex = 12,
+                Font = font,
+                AccessibleName = "Poll interval seconds",
+                AccessibleDescription = "How often Jimmy polls the radio for S-meter/power/SWR, in seconds, while 'Read and display PWR and SWR' below is checked.",
+            };
+            radioPanel.Controls.Add(_radioPollIntervalUpDown);
+            y += 32;
+
+            _radioReadDisplayPwrSwrCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Read and display PWR and SWR",
+                Checked = ctrl.Radio.ReadDisplayPwrSwr,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 13,
+                Font = font,
+                AccessibleName = "Read and display PWR and SWR",
+                AccessibleDescription = "Off by default. Turns on the periodic S-meter/power/SWR poll (Poll interval above) that Alt+Q's on-demand check also uses. Must be checked for 'Halt Tx when SWR' below to have anything to check.",
+            };
+            _radioReadDisplayPwrSwrCheckBox.CheckedChanged += (s, e) => UpdateSwrHaltEnabled();
+            radioPanel.Controls.Add(_radioReadDisplayPwrSwrCheckBox);
+
+            _radioHaltTxOnHighSwrCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Halt Tx when SWR >",
+                Checked = ctrl.Radio.HaltTxOnHighSwr,
+                Location = new System.Drawing.Point(left + 290, y),
+                AutoSize = true,
+                TabIndex = 14,
+                Font = font,
+                AccessibleName = "Halt Tx when SWR exceeds threshold",
+                AccessibleDescription = "Off by default. Matches WSJT-X's own Radio tab safety feature: automatically halts transmission if a poll (see 'Read and display PWR and SWR' above, which this requires) reports SWR above the threshold to the right.",
+            };
+            radioPanel.Controls.Add(_radioHaltTxOnHighSwrCheckBox);
+
+            _radioSwrHaltThresholdUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 1.0m,
+                Maximum = 10.0m,
+                DecimalPlaces = 1,
+                Increment = 0.1m,
+                Value = (decimal)Math.Max(1.0, Math.Min(10.0, ctrl.Radio.SwrHaltThreshold)),
+                Location = new System.Drawing.Point(left + 470, y),
+                Size = new System.Drawing.Size(55, 21),
+                TabIndex = 15,
+                Font = font,
+                AccessibleName = "SWR halt threshold",
+                AccessibleDescription = "SWR value above which Tx is automatically halted, when 'Halt Tx when SWR' to the left is checked. WSJT-X's own default is 2.5.",
+            };
+            radioPanel.Controls.Add(_radioSwrHaltThresholdUpDown);
             y += 32;
 
             _radioTestButton = new System.Windows.Forms.Button
@@ -1144,7 +1399,7 @@ namespace WSJTX_Controller
                 Text = "Test connection",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(120, 24),
-                TabIndex = 8,
+                TabIndex = 16,
                 Font = font,
                 AccessibleName = "Test radio connection",
                 AccessibleDescription = "Launches (or connects to) rigctld with the settings above and reports whether it answered.",
@@ -1152,7 +1407,7 @@ namespace WSJTX_Controller
             _radioTestButton.Click += RadioTestButton_Click;
             radioPanel.Controls.Add(_radioTestButton);
 
-            _radioTestResultLabel = new System.Windows.Forms.Label
+            _radioTestResultLabel = new AnnouncingLabel
             {
                 Text = "",
                 AccessibleName = "Radio test result",
@@ -1164,36 +1419,51 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioTestResultLabel);
             y += 40;
 
-            var engineDivider = new System.Windows.Forms.Label
-            {
-                Text = "Decode Engine",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left, y),
-                Font = new System.Drawing.Font(font, System.Drawing.FontStyle.Bold),
-                TabStop = false,
-                AccessibleName = "Decode Engine section",
-            };
-            radioPanel.Controls.Add(engineDivider);
-            y += 22;
+            UpdateRadioHostPortEnabled();
+            UpdateSwrHaltEnabled();
+        }
+
+        private void UpdateSwrHaltEnabled()
+        {
+            bool pollOn = _radioReadDisplayPwrSwrCheckBox?.Checked ?? false;
+            if (_radioHaltTxOnHighSwrCheckBox != null) _radioHaltTxOnHighSwrCheckBox.Enabled = pollOn;
+            if (_radioSwrHaltThresholdUpDown != null) _radioSwrHaltThresholdUpDown.Enabled = pollOn;
+        }
+
+        // Split out from BuildRadioTab: this section had grown tall enough to render below the
+        // Radio tab's visible area, and AutoScroll being set on that panel did not make it
+        // reachable by Tab with a real screen reader -- confirmed live with JAWS/NVDA,
+        // 2026-08-06 (tabbing from "Test radio connection" went straight to OK/Cancel, skipping
+        // this whole section entirely). Its own tab has plenty of room and needs no scrolling.
+        private void BuildDecodeEngineTab()
+        {
+            decodeEnginePanel.Controls.Clear();
+
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            int y = 8;
+            const int left = 8;
+            const int w = 640;
 
             var engineInstrBox = new System.Windows.Forms.TextBox
             {
                 ReadOnly = true,
                 Multiline = true,
                 BorderStyle = System.Windows.Forms.BorderStyle.None,
-                BackColor = radioPanel.BackColor,
+                BackColor = decodeEnginePanel.BackColor,
                 ForeColor = System.Drawing.SystemColors.ControlText,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(w, 48),
                 Text = "Choose where FT8 decoding comes from. WSJT-X External is today's behavior -- Jimmy needs " +
                        "a separate WSJT-X-family program running. Jimmy Native decodes audio itself; no other " +
-                       "program is needed, but it is receive-only for now -- Reply does not yet transmit.",
+                       "program is needed. Replying WILL transmit for real -- with real PTT and real audio -- " +
+                       "if Radio Mode (Radio tab) is set to Hamlib rigctld with PTT enabled; otherwise it " +
+                       "stays receive-only with nowhere to key PTT.",
                 TabStop = false,
                 AccessibleName = "Decode Engine instructions",
                 Font = font,
             };
-            radioPanel.Controls.Add(engineInstrBox);
-            y += 52;
+            decodeEnginePanel.Controls.Add(engineInstrBox);
+            y += 56;
 
             _engineWsjtxExternalRb = new System.Windows.Forms.RadioButton
             {
@@ -1201,28 +1471,28 @@ namespace WSJTX_Controller
                 Checked = EngineModeCutover.Mode == DecodeEngineMode.WsjtxExternal,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
-                TabIndex = 9,
+                TabIndex = 0,
                 Font = font,
                 AccessibleName = "Use WSJT-X External",
                 AccessibleDescription = "Jimmy connects to a separate WSJT-X-family program for decoding, same as today.",
             };
             _engineWsjtxExternalRb.CheckedChanged += (s, e) => UpdateEngineControlsEnabled();
-            radioPanel.Controls.Add(_engineWsjtxExternalRb);
+            decodeEnginePanel.Controls.Add(_engineWsjtxExternalRb);
             y += 24;
 
             _engineJimmyNativeRb = new System.Windows.Forms.RadioButton
             {
-                Text = "Jimmy Native (Jimmy decodes audio itself -- receive only)",
+                Text = "Jimmy Native (Jimmy decodes audio itself -- can transmit for real if PTT is configured)",
                 Checked = EngineModeCutover.Mode == DecodeEngineMode.JimmyNative,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
-                TabIndex = 10,
+                TabIndex = 1,
                 Font = font,
                 AccessibleName = "Use Jimmy Native",
-                AccessibleDescription = "Jimmy launches its own bundled native FT8 decoder -- no separate WSJT-X-family program needed. Receive only: replying does not yet transmit.",
+                AccessibleDescription = "Jimmy launches its own bundled native FT8 decoder -- no separate WSJT-X-family program needed. Replying transmits for real, with real PTT and real audio, when Radio Mode is Hamlib rigctld with PTT enabled; otherwise stays receive-only.",
             };
             _engineJimmyNativeRb.CheckedChanged += (s, e) => UpdateEngineControlsEnabled();
-            radioPanel.Controls.Add(_engineJimmyNativeRb);
+            decodeEnginePanel.Controls.Add(_engineJimmyNativeRb);
             y += 32;
 
             var myCallLabel = new System.Windows.Forms.Label
@@ -1234,19 +1504,19 @@ namespace WSJTX_Controller
                 Font = font,
                 TabStop = false,
             };
-            radioPanel.Controls.Add(myCallLabel);
+            decodeEnginePanel.Controls.Add(myCallLabel);
 
             _engineMyCallTextBox = new System.Windows.Forms.TextBox
             {
                 Text = ctrl.NativeEngine.MyCall,
                 Location = new System.Drawing.Point(left + 65, y),
                 Size = new System.Drawing.Size(100, 21),
-                TabIndex = 11,
+                TabIndex = 2,
                 Font = font,
                 AccessibleName = "My Call",
                 AccessibleDescription = "Your callsign. Required for Jimmy Native -- the engine needs it before it can report its own status.",
             };
-            radioPanel.Controls.Add(_engineMyCallTextBox);
+            decodeEnginePanel.Controls.Add(_engineMyCallTextBox);
 
             var myGridLabel = new System.Windows.Forms.Label
             {
@@ -1257,19 +1527,19 @@ namespace WSJTX_Controller
                 Font = font,
                 TabStop = false,
             };
-            radioPanel.Controls.Add(myGridLabel);
+            decodeEnginePanel.Controls.Add(myGridLabel);
 
             _engineMyGridTextBox = new System.Windows.Forms.TextBox
             {
                 Text = ctrl.NativeEngine.MyGrid,
                 Location = new System.Drawing.Point(left + 245, y),
                 Size = new System.Drawing.Size(80, 21),
-                TabIndex = 12,
+                TabIndex = 3,
                 Font = font,
                 AccessibleName = "My Grid",
                 AccessibleDescription = "Your Maidenhead grid square. Required for Jimmy Native.",
             };
-            radioPanel.Controls.Add(_engineMyGridTextBox);
+            decodeEnginePanel.Controls.Add(_engineMyGridTextBox);
             y += 32;
 
             var audioDeviceLabel = new System.Windows.Forms.Label
@@ -1281,7 +1551,7 @@ namespace WSJTX_Controller
                 Font = font,
                 TabStop = false,
             };
-            radioPanel.Controls.Add(audioDeviceLabel);
+            decodeEnginePanel.Controls.Add(audioDeviceLabel);
             y += 20;
 
             _engineAudioDeviceCombo = new System.Windows.Forms.ComboBox
@@ -1289,7 +1559,7 @@ namespace WSJTX_Controller
                 DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDown,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(320, 21),
-                TabIndex = 13,
+                TabIndex = 4,
                 Font = font,
                 AccessibleName = "Audio input device",
                 AccessibleDescription = "Sound card input Jimmy Native captures from. Leave blank for the system default. Populated from the real devices this computer sees.",
@@ -1298,9 +1568,37 @@ namespace WSJTX_Controller
             foreach (var dev in NativeEngineClient.ListAudioDevices())
                 _engineAudioDeviceCombo.Items.Add(dev);
             _engineAudioDeviceCombo.Text = ctrl.NativeEngine.AudioInputDevice;
-            radioPanel.Controls.Add(_engineAudioDeviceCombo);
+            decodeEnginePanel.Controls.Add(_engineAudioDeviceCombo);
+            y += 32;
 
-            UpdateRadioHostPortEnabled();
+            var audioOutputDeviceLabel = new System.Windows.Forms.Label
+            {
+                Text = "Audio output device (TX):",
+                AccessibleName = "Audio output device label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            decodeEnginePanel.Controls.Add(audioOutputDeviceLabel);
+            y += 20;
+
+            _engineAudioOutputDeviceCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDown,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(320, 21),
+                TabIndex = 5,
+                Font = font,
+                AccessibleName = "Audio output device",
+                AccessibleDescription = "Sound card output Jimmy Native transmits to -- normally the radio's own audio interface, NOT your PC speakers. Leave blank for the system default. Populated from the real devices this computer sees.",
+            };
+            _engineAudioOutputDeviceCombo.Items.Add("");   // blank = system default
+            foreach (var dev in NativeEngineClient.ListOutputAudioDevices())
+                _engineAudioOutputDeviceCombo.Items.Add(dev);
+            _engineAudioOutputDeviceCombo.Text = ctrl.NativeEngine.AudioOutputDevice;
+            decodeEnginePanel.Controls.Add(_engineAudioOutputDeviceCombo);
+
             UpdateEngineControlsEnabled();
         }
 
@@ -1310,6 +1608,8 @@ namespace WSJTX_Controller
             if (_engineMyCallTextBox != null) _engineMyCallTextBox.Enabled = native;
             if (_engineMyGridTextBox != null) _engineMyGridTextBox.Enabled = native;
             if (_engineAudioDeviceCombo != null) _engineAudioDeviceCombo.Enabled = native;
+            if (_engineAudioOutputDeviceCombo != null) _engineAudioOutputDeviceCombo.Enabled = native;
+            if (_radioDataModesPlainSsbCheckBox != null) _radioDataModesPlainSsbCheckBox.Enabled = native;
         }
 
         private void UpdateRadioHostPortEnabled()
@@ -1317,64 +1617,194 @@ namespace WSJTX_Controller
             bool external = _radioUseExternalCheckBox?.Checked ?? false;
             if (_radioHostTextBox != null) _radioHostTextBox.Enabled = external;
             if (_radioPortTextBox != null) _radioPortTextBox.Enabled = external;
-            if (_radioRigModelTextBox != null) _radioRigModelTextBox.Enabled = !external;
+            if (_radioRigModelCombo != null) _radioRigModelCombo.Enabled = !external;
             if (_radioComPortTextBox != null) _radioComPortTextBox.Enabled = !external;
+            if (_radioBaudRateTextBox != null) _radioBaudRateTextBox.Enabled = !external;
         }
 
         // Applies the fields above to a throwaway RigctldClient, launching the bundled copy
         // (or connecting to the external one) exactly as SaveRadioTab would, then polls once.
         // Never touches ctrl.rigctldClient -- a failed test must not disturb a working session.
+        // Sets the test-result label's text AND fires the MSAA NameChanged notification --
+        // JAWS/NVDA do not announce a plain Label.Text change on an unfocused control, so
+        // without this the result was only ever visible to sighted users (confirmed live,
+        // 2026-08-06: "when i do the test radio button nothing happens either"). Does NOT move
+        // focus -- this is the correct, non-focus-stealing way to announce a status change in
+        // response to the user's own just-taken action.
+        private void SetRadioTestResult(string text)
+        {
+            _radioTestResultLabel.Text = text;
+            _radioTestResultLabel.AnnounceTextChanged();
+        }
+
+        // AccessibilityNotifyClients is `protected` on Control -- a plain Label can't be told to
+        // fire it from outside its own class, hence this thin subclass exposing it publicly. See
+        // SetRadioTestResult's own comment for why this exists at all.
+        private class AnnouncingLabel : System.Windows.Forms.Label
+        {
+            public void AnnounceTextChanged() =>
+                AccessibilityNotifyClients(System.Windows.Forms.AccessibleEvents.NameChange, -1);
+        }
+
+        // A label change alone was reported live, 2026-08-06, as unreliable ("got nothing back")
+        // -- AccessibilityNotifyClients announces out of context if the operator has already
+        // tabbed elsewhere, and is silent if they haven't yet interacted with the label at all.
+        // A modal MessageBox always steals focus and is always announced by JAWS/NVDA, so it is
+        // the result path that cannot be missed; the label is kept too for sighted users glancing
+        // at the dialog.
         private void RadioTestButton_Click(object sender, EventArgs e)
         {
-            _radioTestResultLabel.Text = "Testing...";
+            SetRadioTestResult("Testing...");
             bool external = _radioUseExternalCheckBox.Checked;
             string host = external ? _radioHostTextBox.Text.Trim() : "127.0.0.1";
             int.TryParse(_radioPortTextBox.Text.Trim(), out int port);
             if (port <= 0) port = 4532;
 
+            string resultText;
+            bool ok;
             using (var test = new RigctldClient(host, port))
             {
                 if (!external)
                 {
-                    if (!test.LaunchBundled(_radioRigModelTextBox.Text.Trim(), _radioComPortTextBox.Text.Trim()))
+                    if (!test.LaunchBundled(ExtractRigModelId(_radioRigModelCombo.Text.Trim()), _radioComPortTextBox.Text.Trim(), _radioBaudRateTextBox.Text.Trim()))
                     {
-                        _radioTestResultLabel.Text = "FAIL: " + test.LastError;
+                        resultText = "FAIL: " + test.LastError;
+                        ok = false;
+                        SetRadioTestResult(resultText);
+                        System.Windows.Forms.MessageBox.Show(this, resultText, "Radio Test Result",
+                            System.Windows.Forms.MessageBoxButtons.OK, System.Windows.Forms.MessageBoxIcon.Error);
                         return;
                     }
                 }
 
                 var status = test.PollOnce();
-                _radioTestResultLabel.Text = status.Ok
+                ok = status.Ok;
+                resultText = status.Ok
                     ? "PASS -- rigctld answered."
                     : "FAIL: " + (status.LastError ?? "no response");
+                SetRadioTestResult(resultText);
 
                 if (!external) test.StopBundled();
             }
+
+            System.Windows.Forms.MessageBox.Show(this, resultText, "Radio Test Result",
+                System.Windows.Forms.MessageBoxButtons.OK,
+                ok ? System.Windows.Forms.MessageBoxIcon.Information : System.Windows.Forms.MessageBoxIcon.Error);
         }
 
         private void SaveRadioTab()
         {
             if (_radioWsjtxCatRb == null) return;
 
+            // Snapshot everything ApplyEngineMode()/ApplyRadioSettings() actually care about,
+            // from BEFORE this save's writes below -- confirmed live, 2026-08-07: both used to
+            // run unconditionally on every single Options save, restarting the live native
+            // engine (and its rigctld connection) even when the operator only touched an
+            // unrelated tab (e.g. Logbook Sync). That restart does not durably preserve the
+            // radio's actual current frequency, so it retuned the operator's real radio away
+            // from what it was actually on (40m -> 20m), with no radio-related change intended
+            // at all. Now: only restart/reconnect when something that actually feeds into
+            // either call changed.
+            var wasMode = EngineModeCutover.Mode;
+            string wasMyCall = ctrl.NativeEngine.MyCall;
+            string wasMyGrid = ctrl.NativeEngine.MyGrid;
+            string wasAudioIn = ctrl.NativeEngine.AudioInputDevice;
+            string wasAudioOut = ctrl.NativeEngine.AudioOutputDevice;
+            var r = ctrl.Radio;
+            var wasRadioMode = r.Mode;
+            string wasRigModel = r.RigModel;
+            string wasComPort = r.ComPort;
+            string wasBaudRate = r.BaudRate;
+            bool wasUseExternal = r.UseExternalRigctld;
+            string wasHost = r.RigctldHost;
+            int wasPort = r.RigctldPort;
+            bool wasPttEnabled = r.PttEnabled;
+            PttMethod wasPttMethod = r.PttMethod;
+            bool wasDataModesPlainSsb = r.DataModesPlainSsb;
+            RadioSplitMode wasSplitMode = r.SplitMode;
+            int wasPollIntervalMs = r.PollIntervalMs;
+            bool wasReadDisplayPwrSwr = r.ReadDisplayPwrSwr;
+            bool wasHaltTxOnHighSwr = r.HaltTxOnHighSwr;
+            double wasSwrHaltThreshold = r.SwrHaltThreshold;
+
             ctrl.Radio.Mode = _radioHamlibRb.Checked ? RadioControlMode.HamlibRigctld : RadioControlMode.WsjtxCat;
-            ctrl.Radio.RigModel = _radioRigModelTextBox.Text.Trim();
+            ctrl.Radio.RigModel = ExtractRigModelId(_radioRigModelCombo.Text.Trim());
             ctrl.Radio.ComPort = _radioComPortTextBox.Text.Trim();
+            ctrl.Radio.BaudRate = _radioBaudRateTextBox.Text.Trim();
             ctrl.Radio.UseExternalRigctld = _radioUseExternalCheckBox.Checked;
             ctrl.Radio.RigctldHost = _radioHostTextBox.Text.Trim();
             if (int.TryParse(_radioPortTextBox.Text.Trim(), out int port) && port > 0 && port <= 65535)
                 ctrl.Radio.RigctldPort = port;
             ctrl.Radio.PttEnabled = _radioPttEnabledCheckBox.Checked;
+            ctrl.Radio.PttMethod = _radioPttMethodCombo != null && Enum.TryParse(_radioPttMethodCombo.SelectedItem as string, out PttMethod pttMethod)
+                ? pttMethod : ctrl.Radio.PttMethod;
+            if (_radioDataModesPlainSsbCheckBox != null) ctrl.Radio.DataModesPlainSsb = _radioDataModesPlainSsbCheckBox.Checked;
+            if (_radioSplitCheckBox != null)
+                ctrl.Radio.SplitMode = _radioSplitCheckBox.Checked ? RadioSplitMode.Rig : RadioSplitMode.None;
+            if (_radioPollIntervalUpDown != null) ctrl.Radio.PollIntervalMs = (int)_radioPollIntervalUpDown.Value * 1000;
+            if (_radioReadDisplayPwrSwrCheckBox != null)
+            {
+                ctrl.Radio.ReadDisplayPwrSwr = _radioReadDisplayPwrSwrCheckBox.Checked;
+                ctrl.Radio.PollEnabled = _radioReadDisplayPwrSwrCheckBox.Checked;
+            }
+            if (_radioHaltTxOnHighSwrCheckBox != null) ctrl.Radio.HaltTxOnHighSwr = _radioHaltTxOnHighSwrCheckBox.Checked;
+            if (_radioSwrHaltThresholdUpDown != null) ctrl.Radio.SwrHaltThreshold = (double)_radioSwrHaltThresholdUpDown.Value;
 
-            ctrl.ApplyRadioSettings();
-
+            // EngineModeCutover.Mode must be set BEFORE ApplyRadioSettings() runs, not after:
+            // under JimmyNative + HamlibRigctld, ApplyRadioSettings() must NOT launch its own
+            // bundled rigctld (the native engine host launches its own) -- it needs the FINAL,
+            // just-saved mode to make that call correctly, not whatever was in effect when the
+            // dialog opened. Getting this order wrong caused two competing rigctld launches on
+            // the same port when switching TO JimmyNative and changing Radio settings in the
+            // same Save -- confirmed live during the Phase 5 rewrite, 2026-08-06.
             if (_engineWsjtxExternalRb != null)
             {
                 EngineModeCutover.Mode = _engineJimmyNativeRb.Checked ? DecodeEngineMode.JimmyNative : DecodeEngineMode.WsjtxExternal;
-                ctrl.NativeEngine.MyCall = _engineMyCallTextBox.Text.Trim();
-                ctrl.NativeEngine.MyGrid = _engineMyGridTextBox.Text.Trim();
+                // Same safety guard as Controller.cs's own startup load -- this is a SECOND,
+                // independent place Mode gets set, so it needs its own copy of the check, not a
+                // one-time fix at startup. A replay-test operator opening Options mid-session
+                // (JimmyReplay.py's own setup instructions say to do exactly this, to enable
+                // Advanced Call Layout) must never be able to re-arm JimmyNative here, even by
+                // clicking OK with the Native radio button checked from a prior real session.
+                if (TestModeGuard.IsTestMode) EngineModeCutover.Mode = DecodeEngineMode.WsjtxExternal;
+                // Normalize case on entry: this call/grid flows straight into
+                // jimmy-engine-host's --mycall (see DecodeMessage.IsCallTo's own comment on
+                // the 2026-08-07 case-sensitivity bug that came from an operator-typed lower-
+                // case callsign never matching upper-case decoded wire text). Fixing the
+                // comparison to be case-insensitive is the real fix; normalizing here too is
+                // defense in depth, and makes the field actually look right either way.
+                ctrl.NativeEngine.MyCall = _engineMyCallTextBox.Text.Trim().ToUpperInvariant();
+                ctrl.NativeEngine.MyGrid = FormatGridSquare(_engineMyGridTextBox.Text.Trim());
                 ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
-                ctrl.ApplyEngineMode();
+                ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
             }
+
+            // Only run either call if something it actually depends on changed -- see this
+            // method's own opening comment. radioSettingsChanged also covers ApplyEngineMode(),
+            // not just ApplyRadioSettings(): Launch() bakes the whole Radio settings object into
+            // the engine host's own CLI args, so a Radio-only change while staying in JimmyNative
+            // still needs a restart to take effect.
+            bool modeChanged = wasMode != EngineModeCutover.Mode;
+            bool engineIdentityChanged =
+                wasMyCall != ctrl.NativeEngine.MyCall || wasMyGrid != ctrl.NativeEngine.MyGrid ||
+                wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice;
+            bool radioSettingsChanged =
+                wasRadioMode != r.Mode || wasRigModel != r.RigModel || wasComPort != r.ComPort ||
+                wasBaudRate != r.BaudRate || wasUseExternal != r.UseExternalRigctld || wasHost != r.RigctldHost ||
+                wasPort != r.RigctldPort || wasPttEnabled != r.PttEnabled || wasPttMethod != r.PttMethod ||
+                wasDataModesPlainSsb != r.DataModesPlainSsb || wasSplitMode != r.SplitMode ||
+                wasPollIntervalMs != r.PollIntervalMs || wasReadDisplayPwrSwr != r.ReadDisplayPwrSwr ||
+                wasHaltTxOnHighSwr != r.HaltTxOnHighSwr || wasSwrHaltThreshold != r.SwrHaltThreshold;
+
+            // ApplyEngineMode() first (when applicable): under JimmyNative + HamlibRigctld it
+            // launches the engine host, which owns and spawns the real rigctld; ApplyRadioSettings()
+            // then only ever CONNECTS to that rigctld in this combination, never launches its own,
+            // so running it after gives the real rigctld a head start instead of racing its first
+            // poll tick against a daemon that doesn't exist yet (found live, 2026-08-06/07).
+            if (_engineWsjtxExternalRb != null && (modeChanged || engineIdentityChanged || radioSettingsChanged))
+                ctrl.ApplyEngineMode();
+            if (modeChanged || radioSettingsChanged)
+                ctrl.ApplyRadioSettings();
         }
 
         // ===== SOUNDS TAB =====
@@ -3477,6 +3907,55 @@ namespace WSJTX_Controller
         {
             if (!c.HasValue) return "default";
             return c.Value.IsKnownColor ? c.Value.Name : $"RGB {c.Value.R}, {c.Value.G}, {c.Value.B}";
+        }
+
+        // Standard Maidenhead locator casing: field (first 2 chars) uppercase letters,
+        // square (next 2) digits, subsquare (last 2, if present) lowercase letters -- so a
+        // grid typed in any case (or all upper/lower) displays and stores in the
+        // conventional form, matching what real over-the-air FT8 grid exchanges expect.
+        // Malformed input (wrong length/non-alpha where a letter belongs) is returned
+        // unchanged, uppercased only -- not this dialog's job to validate grid syntax.
+        private static string FormatGridSquare(string grid)
+        {
+            if (string.IsNullOrEmpty(grid)) return grid;
+            if (grid.Length != 4 && grid.Length != 6) return grid.ToUpperInvariant();
+
+            char[] c = grid.ToCharArray();
+            for (int i = 0; i < 2; i++)
+            {
+                if (!char.IsLetter(c[i])) return grid.ToUpperInvariant();
+                c[i] = char.ToUpperInvariant(c[i]);
+            }
+            for (int i = 2; i < 4; i++)
+            {
+                if (!char.IsDigit(c[i])) return grid.ToUpperInvariant();
+            }
+            if (grid.Length == 6)
+            {
+                for (int i = 4; i < 6; i++)
+                {
+                    if (!char.IsLetter(c[i])) return grid.ToUpperInvariant();
+                    c[i] = char.ToLowerInvariant(c[i]);
+                }
+            }
+            return new string(c);
+        }
+
+        // Turns the rig model combo's selected display text ("Kenwood TS-590SG (2037)", or the
+        // "(currently configured: X)" fallback for an unlisted value) back into the raw Hamlib
+        // model number ctrl.Radio.RigModel/LaunchBundled expect. Falls back to the text itself
+        // for anything that doesn't match either pattern, so nothing ever silently disappears --
+        // matches the plain-TextBox behavior this replaced.
+        // Public (not private) for the same reason HrdLogUploadClient.ClassifyResponse is
+        // public: JimmyTests has no InternalsVisibleTo, so only public static members are
+        // reachable from tests.
+        public static string ExtractRigModelId(string display)
+        {
+            if (string.IsNullOrEmpty(display)) return display;
+            var m = System.Text.RegularExpressions.Regex.Match(display, @"\((\d+)\)\s*$");
+            if (m.Success) return m.Groups[1].Value;
+            m = System.Text.RegularExpressions.Regex.Match(display, @"^\(currently configured:\s*(.+)\)$");
+            return m.Success ? m.Groups[1].Value : display;
         }
 
         private void SaveAppearanceTab()

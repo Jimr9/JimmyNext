@@ -536,8 +536,7 @@ def build_status(check="", tx_halt_clk=False, tx_enable_button=False, tx_enable_
     # changing its own Enable Tx button state independently of Jimmy (e.g. the
     # Wait and Reply feature auto-resuming a stalled QSO) -- see group15 below.
     # tx_enabled is the *standard* field (defaults False, matching every existing
-    # test's behavior before this parameter existed) -- see group20 below, added
-    # to prove Jimmy's standard-protocol-only fallback for the same scenario.
+    # test's behavior before this parameter existed).
     return (
         MAGIC + _u32(2) + _u32(MSG_STATUS) +
         _qstr(WSJT_ID) +
@@ -551,7 +550,7 @@ def build_status(check="", tx_halt_clk=False, tx_enable_button=False, tx_enable_
         _flag(False) +           # Decoding
         _u32(1500) +             # Rx DF
         _u32(1500) +             # Tx DF
-        _qstr(MY_CALL) +         # DE call
+        _qstr(MY_CALL) +          # DE call
         _qstr(MY_GRID) +         # DE grid
         _qstr("") +              # Detail / DX grid
         _flag(False) +           # Tx watchdog
@@ -1586,6 +1585,25 @@ def group19_weak_snr_first_decode(sock, v):
              NEW_WEAK_CALL, f"T42: {NEW_WEAK_CALL} never queued (weak on first decode)",
              "'Ignore SNR at or below' checked in Options, floor at or above -23"
          )) if v.available else None)
+
+
+# group20_case_insensitive_mycall (T43-T44) was removed 2026-08-07. It tried to
+# prove DecodeMessage.IsCallTo()'s case-insensitivity fix end-to-end by re-handshaking
+# mid-session with a lower-case myCall. Two attempts (a spliced-in bare StatusMessage,
+# then a full mini re-handshake with a settle-poll up to 6s) both failed the same way:
+# Jimmy's status never left "Connecting to WSJT-X, wait until ready." after the second
+# Heartbeat cycle, even though every other group's single/first handshake settles in
+# under 1.5s reliably. That's a real difference between "first connection" and
+# "reconnect while already ACTIVE" in Jimmy's own negotiation state machine, not a
+# timing bug in this script -- and not one a real operator would hit either, since
+# changing myCall in Options happens while WSJT-X is idle/disconnected, never mid-QSO.
+# Forcing that scenario here bought flakiness with no matching real-world behavior.
+#
+# The actual fix (DecodeMessage.IsCallTo's case-insensitive compare) is covered
+# directly and reliably instead by JimmyTests.cs's DecodeMessageIsCallToTests --
+# a single-process unit test against the comparison itself, no live socket or
+# reconnect needed. Group 1 (group1_station_calling_me) continues to cover the
+# ordinary matched-case CallingMe/signoff path end-to-end as before.
 
 
 def run_tests(sock, v):

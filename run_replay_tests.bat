@@ -18,6 +18,10 @@ if %ERRORLEVEL%==0 (
 set "JIMMY_TEST_DB_PATH=%TEMP%\JimmyReplayTest_logbook.db"
 echo Test mode: JIMMY_TEST_DB_PATH=%JIMMY_TEST_DB_PATH%
 echo   (real logbook untouched; all real QRZ/Club Log/LoTW/FCC ULS network calls blocked)
+echo   (JimmyNative also force-disabled for this session -- see Controller.cs's own
+echo    TestModeGuard.IsTestMode check -- so a test run can never spawn the real engine
+echo    host or touch the real radio, even if decodeEngineMode=JimmyNative in the real
+echo    .ini; nothing here needs manual editing/restoring of the .ini anymore)
 
 where python >nul 2>&1
 if errorlevel 1 (

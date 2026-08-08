@@ -51,7 +51,10 @@ namespace WSJTX_Controller
                     ResetNego();
                     CloseAllUdp();
                     wsjtxClosing = false;
-                    StatusView.ShowMessage("WSJT-X closed", true);
+                    // Wave 1 of the notification architecture (WSJTX_Controller/Notify/):
+                    // default template "WSJT-X closed", Important priority -- byte-identical
+                    // to the direct ShowMessage call this replaces.
+                    Notify.Publish(new ConnectionClosedEvent());
                 }
             }
 
@@ -147,6 +150,51 @@ namespace WSJTX_Controller
                     ctrl.initialConnFaultTimer.Start();
                 }
             }
+        }
+
+        // Jimmy Native's own connection path -- deliberately bypasses CheckWsjtxRunning()
+        // entirely rather than reusing it. That method exists to detect and reconnect to a
+        // SEPARATE, already-running real WSJT-X.exe: it reads WSJT-X's own ini file for its
+        // configured UDP server address (irrelevant here, and can be flat wrong -- e.g.
+        // multicast -- if a real WSJT-X install coexists on the same PC), unconditionally
+        // blocks the UI thread for a flat Thread.Sleep(3000), and on failure pops a modal
+        // MessageBox.Show with WSJT-X-specific instructions that make no sense in Native
+        // mode. Confirmed live, 2026-08-07/08: this whole path -- not anything in
+        // NativeEngineClient.Launch itself -- was the actual cause of Jimmy's window going
+        // fully unresponsive (busy cursor, no keyboard/mouse response) the instant Native
+        // mode was enabled, since ApplyEngineMode() creates the same WSJT-X.lock file
+        // CheckWsjtxRunning() uses as its "a WSJT-X is running" signal, guaranteeing this
+        // path fires via mainLoopTimer's very next tick. Native mode already knows its own
+        // UDP endpoint exactly -- NativeEngineClient.Launch was told to send to
+        // 127.0.0.1:<jimmyPort> via --jimmy-addr -- so there is nothing to detect: just open
+        // that exact socket directly and move straight to normal heartbeat negotiation.
+        public void ConnectNativeEngine(IPAddress addr, int nativeEnginePort)
+        {
+            ResetNego();
+            CloseAllUdp();
+            ipAddress = addr;
+            port = nativeEnginePort;
+            multicast = false;
+            overrideUdpDetect = true;
+
+            if (!_protocolAdapter.TryOpenReceiveSocket(out Exception openErr))
+            {
+                DebugOutput($"{spacer}unable to open native engine udpClient:{openErr}");
+                Notify.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine",
+                    $"couldn't open the UDP listener on {addr}:{nativeEnginePort}: {openErr.Message}"));
+                return;         //stays in NegoState.WAIT; no retry loop, no modal -- next
+                                 //Options save (or app restart) tries again from a clean state
+            }
+
+            DebugOutput($"{spacer}opened udpClient:{udpClient} (native engine, {addr}:{nativeEnginePort})");
+            udpSt = new UdpState { e = endPoint, u = udpClient };
+            asyncCallback = new AsyncCallback(ReceiveCallback);
+            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.INITIAL;
+            DebugOutput($"{spacer}NegoState:{WsjtxMessage.NegoState}");
+
+            suspendComm = false;
+            ctrl.initialConnFaultTimer.Interval = 3 * heartbeatInterval * 1000;
+            ctrl.initialConnFaultTimer.Start();
         }
 
         public bool TogglePskReporter()
@@ -390,6 +438,28 @@ namespace WSJTX_Controller
                 // only affects ConnectedFull-vs-Connected reporting, never normal
                 // operation, which now depends only on the first standard StatusMessage
                 // broadcast.
+                //
+                // Unlike the sub-commands WsjtxCompatibilityExtension gates (see its own
+                // header comment), cmd:7 is sent as a REAL, standard EnableTxMessage --
+                // not a value packed inside an Andy-fork-only sub-command byte that Nexus's
+                // dispatch silently ignores. Confirmed live, 2026-08-08 (tester log
+                // log_8-7-2026.txt): jimmy-engine-host.exe reliably exited within ~1 second
+                // of receiving this exact probe (NewTxMsgIdx=7, ReplyReqd=true, an empty
+                // GenMsg, and a random CmdCheck -- not a shape any genuine transmit-enable
+                // request would ever have), in both logged sessions, right at the first
+                // retry from CapabilityProbeTimeout below. Jimmy Native already knows its
+                // own engine's capabilities exactly (it launched the process itself), so
+                // there is nothing to probe -- skip the send and go straight to
+                // ConnectedFull, the same way WsjtxCompatibilityExtension skips its own
+                // Andy-fork-only sends under Native mode.
+                if (EngineModeCutover.Mode == DecodeEngineMode.JimmyNative)
+                {
+                    DebugOutput($"{Time()} [COMPAT-SKIP] cmd:7 capability probe not sent -- would crash jimmy-engine-host.exe (not Andy-fork-aware); Native mode assumes ConnectedFull");
+                    _capabilityNegotiator.ConfirmCompatibilityLayer();
+                    UpdateDebug();
+                    return;
+                }
+
                 emsg.NewTxMsgIdx = 7;
                 emsg.GenMsg = $"";          //no effect
                 emsg.ReplyReqd = true;
@@ -525,11 +595,47 @@ namespace WSJTX_Controller
                     // sequence). CheckMyCall's return above already guards this to the
                     // first *valid* StatusMessage (real callsign/grid configured in
                     // WSJT-X), not literally the first one of any kind.
-                    if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.SENT)
+                    if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.SENT ||
+                        WsjtxMessage.NegoState == WsjtxMessage.NegoStates.INITIAL)
                     {
-                        DebugOutput($"{Time()} First valid Status received");
+                        // Self-sufficiency plan Phase 5: the native engine host (Nexus's
+                        // run_radio) sends its opening Heartbeat exactly ONCE, at startup --
+                        // unlike real WSJT-X, it never repeats it (tempo-audio/src/service.rs's
+                        // own comment: "the opening Heartbeat... harmless if unheard", written
+                        // for passive loggers like GridTracker that don't need a strict
+                        // handshake, not for a stateful negotiation like this one). If the
+                        // engine's real CAT/rig-open sequence takes long enough that Jimmy's own
+                        // UDP socket isn't listening yet when that one-shot Heartbeat goes out,
+                        // it is gone forever and the Heartbeat-triggered INITIAL->SENT transition
+                        // above never fires -- confirmed live, 2026-08-06/07: Jimmy stuck at
+                        // "WSJT-X detected" indefinitely while real Status messages kept arriving
+                        // normally every ~15s the whole time (a real TS-590SG's CAT-open over a
+                        // real serial port is far slower than the dummy-rig bench tests this was
+                        // validated against). A valid Status message proves a live,
+                        // WSJT-X-protocol-speaking peer just as well as a Heartbeat would, so
+                        // promote straight to RECD from INITIAL too -- but first do the setup
+                        // steps the (skipped) Heartbeat branch above would have done: open
+                        // udpClient2 (every outbound Reply/HaltTx/SetBandTxFirst/etc. send is a
+                        // silent no-op without it -- see SetBandTxFirst's own udpClient2==null
+                        // guard) and stop the connection-fault dialog's timer so it doesn't still
+                        // pop up "No response from WSJT-X" after we just connected via Status.
+                        if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.INITIAL)
+                        {
+                            ctrl.initialConnFaultTimer.Stop();
+                            if (udpClient2 == null)
+                            {
+                                udpClient2 = new UdpClient();
+                                udpClient2.Connect(fromEp);
+                            }
+                            WsjtxMessage.NegotiatedSchemaVersion = smsg.SchemaVersion;
+                            DebugOutput($"{Time()} First valid Status received while still INITIAL (no Heartbeat seen) -- promoting straight to RECD");
+                        }
+                        else
+                        {
+                            DebugOutput($"{Time()} First valid Status received");
+                        }
                         WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
-                        DebugOutput($"{spacer}NegoState SENT -> RECD");
+                        DebugOutput($"{spacer}NegoState -> RECD");
 
                         // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetPskReporterEnable.
                         // Moved here from the old 2nd-Heartbeat handler (Stage A7) --
@@ -598,15 +704,32 @@ namespace WSJTX_Controller
             if (msg.GetType().Name == "HeartbeatMessage")
             {
                 if (opMode != OpModes.ACTIVE) DebugOutput($"{nl}{Time()} WSJT-X event, heartbeat rec'd:{nl}{msg}");
-                emsg.NewTxMsgIdx = 7;
-                emsg.GenMsg = $"";          //no effect
-                emsg.ReplyReqd = (opMode != OpModes.ACTIVE);
-                emsg.EnableTimeout = !debug;
-                if (emsg.ReplyReqd) cmdCheck = RandomCheckString();
-                emsg.CmdCheck = cmdCheck;
-                ba = emsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                if (opMode != OpModes.ACTIVE) DebugOutput($"{Time()} >>>>>Sent 'Ack Req' cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
+                // Confirmed live, 2026-08-08 (tester log log_8-7-2026.txt): this fires on
+                // EVERY heartbeat the peer sends, not just the first -- the earlier fix at
+                // the initial cmd:7 probe (top of this method, NegoState==WAIT branch) only
+                // covers connection startup. Nexus's real run_radio sends its own periodic
+                // Heartbeat roughly every 15-20s same as real WSJT-X, and this site replied
+                // to that SECOND heartbeat with the same crash-inducing EnableTx-shaped
+                // probe every time -- explaining why the engine reliably died ~19-21s after
+                // connecting in all three logged sessions, regardless of radio config, audio
+                // device, or queue content. Same skip as the earlier site: Native mode has
+                // nothing to probe.
+                if (EngineModeCutover.Mode == DecodeEngineMode.JimmyNative)
+                {
+                    DebugOutput($"{Time()} [COMPAT-SKIP] cmd:7 'Ack Req' not sent on heartbeat -- would crash jimmy-engine-host.exe; Native mode assumes ConnectedFull");
+                }
+                else
+                {
+                    emsg.NewTxMsgIdx = 7;
+                    emsg.GenMsg = $"";          //no effect
+                    emsg.ReplyReqd = (opMode != OpModes.ACTIVE);
+                    emsg.EnableTimeout = !debug;
+                    if (emsg.ReplyReqd) cmdCheck = RandomCheckString();
+                    emsg.CmdCheck = cmdCheck;
+                    ba = emsg.GetBytes();
+                    udpClient2.Send(ba, ba.Length);
+                    if (opMode != OpModes.ACTIVE) DebugOutput($"{Time()} >>>>>Sent 'Ack Req' cmd:7 cmdCheck:{cmdCheck}{nl}{emsg}");
+                }
 
                 heartbeatRecdTimer.Stop();
                 if (!debug)
@@ -705,6 +828,7 @@ namespace WSJTX_Controller
                     int? prevBandIdx = bandIdx;
                     dialFrequency = smsg.DialFrequency;
                     bandIdx = FreqToBandIdx(dialFrequency / 1e6);       //can be null if unknown
+                    _pendingBandIdx = null;       // real confirmation arrived -- drop any optimistic guess
                     txOffset = smsg.TxDF;
                     wsjtxTxEnableButton = smsg.TxEnableButton;
                     UpdateDblClkTip();
@@ -887,7 +1011,12 @@ namespace WSJTX_Controller
                             //if transmitting, let tx end trigger show status
                             if (!transmitting) ShowStatus();
 
-                            if (!modeChanged) StatusView.ShowMessage("Band changed", false);
+                            // Say the actual band, not just "Band changed" -- confirmed live,
+                            // 2026-08-07: cycling Band Up/Down quickly (each retune racing the
+                            // previous one's confirmation) produces several of these in a row, and
+                            // a bare "Band changed" gives no way to tell which retune you landed
+                            // on without separately checking the mode/band edit box.
+                            if (!modeChanged) StatusView.ShowMessage($"Band changed to {FreqToBandStr(dialFrequency / 1e6)}", false);
                             DebugOutput($"{spacer}cleared queued calls:DialFrequency, txTimeout:{txTimeout} callInProg:'{CallPriorityString(callInProg)}'");
                         }
                     }
@@ -1375,7 +1504,12 @@ namespace WSJTX_Controller
                 // background would be exactly the "verbose/redundant" speech the
                 // accessibility rules rule out.
                 DebugOutput($"{Time()} CapabilityNegotiator Connected (degraded, no cmd:7 echo within timeout)");
-                StatusView.ShowMessage("Connected to WSJT-X, limited mode: some features unavailable", true);
+                // Wave 1 of the notification architecture (WSJTX_Controller/Notify/): default
+                // template matches this exact wording, Important priority -- byte-identical to
+                // the direct ShowMessage call this replaces. wasAlreadyDegraded above still
+                // gates this to fire once, same as before; NotificationDedupThrottle is a
+                // redundant backstop alongside it for this first pass, not a replacement.
+                Notify.Publish(new ConnectionDegradedEvent());
             }
 
             if (udpClient2 != null)
@@ -1511,7 +1645,11 @@ namespace WSJTX_Controller
             DebugOutput($"{Time()} heartbeatRecdTimer timed out");
             if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.RECD)
             {
-                StatusView.ShowMessage("WSJT-X disconnected", false);
+                // Wave 1 of the notification architecture (WSJTX_Controller/Notify/): default
+                // template "WSJT-X disconnected", Normal priority -- byte-identical to the
+                // direct ShowMessage call this replaces. The sound cue below stays untouched
+                // and independent, exactly as before.
+                Notify.Publish(new ConnectionLostEvent());
                 Sounds.PlaySoundEvent(ctrl.soundEnabled_Disconnected, ctrl.soundFile_Disconnected);
             }
             else

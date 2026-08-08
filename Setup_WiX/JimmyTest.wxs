@@ -1,0 +1,327 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Jimmy Test installer - WiX 5 source, mirrors Jimmy.wxs exactly except for the
+  identity/isolation changes needed to install SIDE BY SIDE with a production
+  Jimmy install on the same machine, rather than upgrading/replacing it:
+    - Different Package Name ("Jimmy Test") and INSTALLFOLDER ("Jimmy Test").
+    - A FRESH UpgradeCode (never reuse production's {D5415907-...}); reusing
+      it would make this a major upgrade of production instead of a separate,
+      coexisting product.
+    - Different shortcut names and HKCU registry key path (Software\KB0UZT\
+      "Jimmy Test" instead of "Jimmy"), so the two installs' shortcuts/registry
+      state never collide.
+    - Target exe is "Jimmy Test.exe" (AssemblyName overridden at publish time),
+      which also makes Jimmy's OWN runtime data folder isolate automatically
+      (%LocalAppData%\Jimmy Test\ instead of %LocalAppData%\Jimmy\; see
+      LookupManager.DataRoot and Controller.cs's pgmName, both derived from the
+      running assembly's own name), so this test build never reads or writes
+      the production install's real settings/logbook database.
+
+  Product  : Jimmy Test (WSJT-X Controller, test/beta build)
+  Version  : 2.0.0
+  Mfr      : KB0UZT
+  Install  : C:\Program Files\KB0UZT\Jimmy Test\
+  Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
+
+  PublishOutputTest\ is produced by (self-contained, distinct AssemblyName):
+    dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Test" -p:SelfContained=true -r win-x64 -o PublishOutputTest
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
+     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
+
+  <Package
+    Name="Jimmy Test"
+    Version="2.0.0"
+    Manufacturer="KB0UZT"
+    Language="1033"
+    Codepage="1252"
+    UpgradeCode="{BFC5D246-0851-4DB3-B351-EDFD8BDFEA2B}"
+    InstallerVersion="500"
+    Compressed="yes">
+
+    <SummaryInformation Description="Jimmy Test (WSJT-X Controller) Installer" />
+
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+      Schedule="afterInstallInitialize" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+
+    <!-- Icon for Add/Remove Programs. Sourced directly from Properties\, same as
+         Jimmy.wxs: never copied into build/publish output either before or after
+         the migration (ApplicationIcon embeds it into the exe resource directly;
+         this is a separate loose-file reference). -->
+    <Icon Id="JimmyTestIcon" SourceFile="..\WSJTX_Controller\Properties\netfol.ico" />
+    <Property Id="ARPPRODUCTICON" Value="JimmyTestIcon" />
+    <Property Id="ARPCONTACT" Value="KB0UZT" />
+
+    <!-- Standard dialog set: Welcome -> InstallDir (Browse) -> VerifyReady -> Progress -> Finish -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <!-- Custom UI fragment that adds ShortcutsDlg and overrides the dialog chain -->
+    <UIRef Id="JimmyTestUI" />
+
+    <!-- Shortcut options: 1 = create (checked), empty = skip (unchecked).
+         Both default checked. Secure passes them from UI to elevated execute sequence. -->
+    <Property Id="DESKTOP_SHORTCUT" Value="1" Secure="yes" />
+    <Property Id="STARTMENU_SHORTCUT" Value="1" Secure="yes" />
+
+    <!-- No .NET Framework launch-condition check: the self-contained win-x64
+         publish carries its own .NET 10 runtime, so there is no prerequisite to
+         verify before installing. -->
+
+    <Feature Id="DefaultFeature" Title="Jimmy Test" Level="1">
+      <ComponentGroupRef Id="PublishComponents" />
+      <ComponentGroupRef Id="RuleDefinitionsComponents" />
+      <ComponentGroupRef Id="RuleDefinitionsListsComponents" />
+      <ComponentRef Id="DesktopShortcutComp" />
+      <ComponentRef Id="StartMenuShortcutComp" />
+      <ComponentRef Id="RigctldFirewallComp" />
+      <ComponentRef Id="EngineHostFirewallComp" />
+    </Feature>
+
+    <!-- Pre-warm Windows Defender's scan of jimmy-engine-host.exe during install, not the
+         operator's first use of Native mode. Confirmed live, 2026-08-07: a real tester's
+         machine froze solid (no keyboard, no mouse, "busy" cursor) the first time Jimmy
+         launched this exe, because Process.Start() sits directly on Jimmy's UI thread with
+         nothing async about it; Defender's real-time scan of a brand-new, unsigned
+         executable it has never seen before can take real time, and that whole wait landed
+         on the UI thread. Confirmed the connection live too: disabling real-time protection
+         made the freeze go away. Running the exe once, harmlessly, right here during
+         installation (where a brief pause is normal and expected, and nothing is on Jimmy's
+         own UI thread) means Defender has already scanned and cached its verdict on this
+         exact file by the time the operator ever touches Native mode; the same
+         Process.Start() call should then return immediately. The list-devices flag used
+         below is the same one NativeEngineClient.ListAudioDevices() already uses at
+         Options-dialog-open time (WSJTX_Controller\NativeEngineClient.cs), a real,
+         already-proven-safe, side-effect-free enumeration, not a throwaway/invalid
+         invocation. Return="ignore": this must never fail the install itself (a slow/failed
+         scan here is just a missed optimization, not a real problem), deliberately
+         best-effort, matching the "never a build/install error, only ever a harmless no-op"
+         convention used elsewhere in this codebase (see Jimmy.csproj's own comments on the
+         hamlib/EngineHost Include items). Execute="deferred" plus Impersonate="no": runs
+         elevated (as the MSI already does), after the real files are on disk, not still
+         inside a pending install transaction. -->
+    <CustomAction Id="PreWarmEngineHostScan"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]Resources\EngineHost\jimmy-engine-host.exe&quot; --list-devices"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <Custom Action="PreWarmEngineHostScan" After="InstallFiles" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+
+  </Package>
+
+  <!-- ── Directory structure ────────────────────────────────────────────── -->
+  <Fragment>
+    <StandardDirectory Id="ProgramFilesFolder">
+      <Directory Id="ManufacturerDir" Name="KB0UZT">
+        <Directory Id="INSTALLFOLDER" Name="Jimmy Test">
+          <!-- Declared explicitly (not left to harvesting) only for
+               RuleDefinitions\, because it mixes direct files (*.ini) with a
+               subdirectory (Lists\); this is exactly the known WiX 5
+               harvesting bug the roadmap flagged (wixtoolset/issues#8608):
+               a folder that has both won't get harvested as one Directory
+               row, it gets two duplicate rows with the same name. Every
+               other folder here (Resources\, each locale subfolder) is
+               leaf-only, so plain recursive harvesting is safe for them. -->
+          <Directory Id="RuleDefinitionsDir" Name="RuleDefinitions">
+            <Directory Id="RuleDefinitionsListsDir" Name="Lists" />
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder" />
+    <StandardDirectory Id="ProgramMenuFolder" />
+  </Fragment>
+
+  <!-- ── Harvested publish output ───────────────────────────────────────────
+       Recursively harvests every file under PublishOutputTest\ (the self-
+       contained win-x64 publish: "Jimmy Test.exe"/.dll, the .NET 10 runtime,
+       SQLite.Interop.dll, MQTTnet*.dll, clublog_key.txt, Resources\*.wav, and
+       the satellite-resource culture subfolders), preserving directory
+       structure under INSTALLFOLDER automatically. RuleDefinitions\ is
+       excluded here and harvested separately below (see the Directory
+       declaration above for why). ────────────────────────────────────── -->
+  <Fragment>
+    <ComponentGroup Id="PublishComponents" Directory="INSTALLFOLDER">
+      <Files Include="PublishOutputTest\**">
+        <Exclude Files="PublishOutputTest\RuleDefinitions\**" />
+      </Files>
+    </ComponentGroup>
+
+    <ComponentGroup Id="RuleDefinitionsComponents" Directory="RuleDefinitionsDir">
+      <Files Include="PublishOutputTest\RuleDefinitions\*" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="RuleDefinitionsListsComponents" Directory="RuleDefinitionsListsDir">
+      <Files Include="PublishOutputTest\RuleDefinitions\Lists\*" />
+    </ComponentGroup>
+  </Fragment>
+
+  <!-- ── Shortcuts ──────────────────────────────────────────────────────── -->
+  <Fragment>
+
+    <!-- Desktop shortcut: only installed when checkbox is checked.
+         Component Condition is evaluated at InstallValidate; empty property = absent. -->
+    <Component Id="DesktopShortcutComp" Directory="DesktopFolder" Condition="DESKTOP_SHORTCUT">
+      <Shortcut Id="DesktopSC"
+                Name="Jimmy Test"
+                Description="WSJT-X Controller (test/beta build)"
+                Target="[INSTALLFOLDER]Jimmy Test.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="JimmyTestIcon"
+                IconIndex="0" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\KB0UZT\Jimmy Test"
+                     Name="DesktopShortcut"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Start Menu shortcut: only installed when checkbox is checked -->
+    <Component Id="StartMenuShortcutComp" Directory="ProgramMenuFolder" Condition="STARTMENU_SHORTCUT">
+      <Shortcut Id="StartMenuSC"
+                Name="Jimmy Test"
+                Description="WSJT-X Controller (test/beta build)"
+                Target="[INSTALLFOLDER]Jimmy Test.exe"
+                WorkingDirectory="INSTALLFOLDER"
+                Icon="JimmyTestIcon"
+                IconIndex="0" />
+      <RegistryValue Root="HKCU"
+                     Key="Software\KB0UZT\Jimmy Test"
+                     Name="StartMenuShortcut"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+    </Component>
+
+  </Fragment>
+
+  <!-- ── Firewall exceptions ────────────────────────────────────────────────
+       Confirmed live, 2026-08-07: a fresh standalone install prompts Windows
+       Security's "Allow/Cancel" the first time rigctld.exe (or the Native
+       engine host, which also speaks the rigctld protocol when it owns the
+       radio directly) tries to listen for a connection, confusing for a
+       tester with no context for what's asking, and Cancel leaves radio
+       control silently non-functional. These add both programs to the
+       Windows Firewall allow-list at install time so the prompt never
+       appears at all. Scoped by Program (not a specific port): both
+       programs' listening port is user-configurable in Options, and
+       Program-based exceptions cover whatever port each one actually uses,
+       the same way manually clicking "Allow" in the security prompt would.
+       Scope="localSubnet", not "any": Jimmy's own sockets are hardcoded to
+       127.0.0.1 only (see RigctldClient.cs's own comments), so there is
+       never a legitimate reason for either program to accept a connection
+       from beyond the local machine/subnet. -->
+  <Fragment>
+    <Component Id="RigctldFirewallComp" Directory="INSTALLFOLDER">
+      <RegistryValue Root="HKCU"
+                     Key="Software\KB0UZT\Jimmy Test"
+                     Name="RigctldFirewallException"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+      <fw:FirewallException Id="RigctldFirewallException"
+                             Name="Jimmy Test - Hamlib rigctld"
+                             Program="[INSTALLFOLDER]Resources\hamlib\rigctld.exe"
+                             Scope="localSubnet" />
+    </Component>
+
+    <Component Id="EngineHostFirewallComp" Directory="INSTALLFOLDER">
+      <RegistryValue Root="HKCU"
+                     Key="Software\KB0UZT\Jimmy Test"
+                     Name="EngineHostFirewallException"
+                     Type="integer"
+                     Value="1"
+                     KeyPath="yes" />
+      <fw:FirewallException Id="EngineHostFirewallException"
+                             Name="Jimmy Test - Native engine host"
+                             Program="[INSTALLFOLDER]Resources\EngineHost\jimmy-engine-host.exe"
+                             Scope="localSubnet" />
+    </Component>
+  </Fragment>
+
+  <!-- ── UI customizations ─────────────────────────────────────────────── -->
+  <!--
+    WiX 5 merges multiple <UI> fragments into one MSI UI section.
+    This fragment adds ShortcutsDlg into the dialog chain after InstallDirDlg.
+
+    Fresh-install flow:
+      WelcomeDlg -> InstallDirDlg (Browse) -> ShortcutsDlg (checkboxes) -> VerifyReadyDlg (Install) -> ExitDlg (Finish)
+
+    Override strategy:
+      - Order=5 on InstallDirDlg Next fires after the built-in Order=4 (->VerifyReadyDlg),
+        using the same validity condition so invalid paths still block progression.
+      - Order=2 on VerifyReadyDlg Back fires after the built-in Order=1 (->InstallDirDlg),
+        redirecting back to ShortcutsDlg instead.
+  -->
+  <Fragment>
+    <UI Id="JimmyTestUI">
+      <!-- Skip LicenseAgreementDlg: WelcomeDlg Next -> InstallDirDlg (Order=5 overrides built-in Order=1->LicenseAgreementDlg) -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="5"
+               Condition="NOT Installed" />
+
+      <!-- Fix InstallDirDlg Back to return to WelcomeDlg (not LicenseAgreementDlg) -->
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="5" />
+
+      <!-- Route: InstallDirDlg Next -> ShortcutsDlg -->
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ShortcutsDlg" Order="5"
+               Condition='WIXUI_DONTVALIDATEPATH OR Installed OR PATCH OR WIXUI_INSTALLDIR_VALID = "1"' />
+
+      <!-- Route: VerifyReadyDlg Back -> ShortcutsDlg (fresh install only) -->
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="2"
+               Condition="NOT Installed AND NOT PATCH" />
+
+      <!-- ── ShortcutsDlg ──────────────────────────────────────────── -->
+      <Dialog Id="ShortcutsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+
+        <!-- Banner matching WixUI inner-dialog style -->
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+
+        <!-- Title (bold WixUI font) and subtitle -->
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes">
+          <Text Value="{\WixUI_Font_Title}Shortcuts" />
+        </Control>
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Select which shortcuts to create for [ProductName]." />
+
+        <!-- Checkbox: Desktop shortcut -->
+        <Control Id="DesktopCheckBox" Type="CheckBox" X="20" Y="90" Width="290" Height="17"
+                 Property="DESKTOP_SHORTCUT" CheckBoxValue="1"
+                 Text="&amp;Create Desktop shortcut" />
+
+        <!-- Checkbox: Start Menu shortcut -->
+        <Control Id="StartMenuCheckBox" Type="CheckBox" X="20" Y="112" Width="290" Height="17"
+                 Property="STARTMENU_SHORTCUT" CheckBoxValue="1"
+                 Text="Create &amp;Start Menu shortcut" />
+
+        <!-- Bottom separator -->
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+
+        <!-- Back: return to InstallDirDlg -->
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="&amp;Back">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+
+        <!-- Next: proceed to VerifyReadyDlg (Install button) -->
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="&amp;Next">
+          <Publish Event="NewDialog" Value="VerifyReadyDlg" />
+        </Control>
+
+        <!-- Cancel: confirm cancellation -->
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+
+      </Dialog>
+    </UI>
+  </Fragment>
+
+</Wix>

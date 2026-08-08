@@ -41,5 +41,5 @@ using System.Runtime.Versioning;
 // by using the '*' as shown below:
 // [assembly: AssemblyVersion("1.0.*")]
 [assembly: AssemblyVersion("1.0.0.0")]          //major.minor.build.private; freeze all so config re-used each new AssemblyFileVersion
-[assembly: AssemblyFileVersion("1.90.9.0")]      //major.minor.build.private; increment minor when new install pkg
-[assembly: AssemblyInformationalVersion("1.90.9")]
+[assembly: AssemblyFileVersion("2.0.0.0")]      //major.minor.build.private; increment minor when new install pkg
+[assembly: AssemblyInformationalVersion("2.0.0")]

@@ -174,7 +174,6 @@ namespace WSJTX_Controller
                     RunTqslUpload();
                 else
                     StartUploadLotw();
-                lastLotwUploadTrigger = DateTime.Now;
             }
             RunUploadCatchUp();
             return true;

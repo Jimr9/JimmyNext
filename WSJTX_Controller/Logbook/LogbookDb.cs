@@ -226,6 +226,22 @@ namespace WSJTX_Controller
 
                 SetMeta("db_version", "5");
             }
+
+            // v6: same per-QSO outbound upload tracking as v3's qrz_uploaded_at/
+            // clublog_uploaded_at, extended to LoTW (TqslUploadClient) and HRDLog.net
+            // (HrdLogUploadClient) -- both already called GetPendingUploads/MarkUploaded
+            // with "LOTW"/"HRDLOG" before this column existed, which UploadColumn()
+            // rejected with an exception every time (silently caught and logged, never
+            // surfaced) -- confirmed live, 2026-08-07: real-time HRDLog uploads could
+            // succeed on HRDLog.net's own end while Jimmy never recorded it locally, and
+            // both services' Alt+U catch-up silently did nothing.
+            if (ver < 6)
+            {
+                Exec("ALTER TABLE qso ADD COLUMN lotw_uploaded_at   TEXT DEFAULT '';");
+                Exec("ALTER TABLE qso ADD COLUMN hrdlog_uploaded_at TEXT DEFAULT '';");
+
+                SetMeta("db_version", "6");
+            }
         }
 
         // ── Meta ─────────────────────────────────────────────────────────────────
@@ -345,7 +361,8 @@ namespace WSJTX_Controller
             const string mutableCols =
                 "lotw_qsl_sent, lotw_qsl_rcvd, qrz_qsl_sent, qrz_qsl_rcvd, country, state, name, grid, " +
                 "dxcc, cq_zone, continent, itu_zone, county, iota, sig, sig_info, my_sig, my_sig_info, " +
-                "darc_dok, wpx_prefix, exchange_sent, exchange_rcvd, qrz_uploaded_at, clublog_uploaded_at";
+                "darc_dok, wpx_prefix, exchange_sent, exchange_rcvd, qrz_uploaded_at, clublog_uploaded_at, " +
+                "lotw_uploaded_at, hrdlog_uploaded_at";
 
             lock (_lock)
             {
@@ -377,7 +394,7 @@ INSERT INTO qso (
     source, source_qso_id, imported_at, dedup_key,
     continent, itu_zone, county, iota, sig, sig_info, my_sig, my_sig_info,
     darc_dok, wpx_prefix, exchange_sent, exchange_rcvd,
-    qrz_uploaded_at, clublog_uploaded_at
+    qrz_uploaded_at, clublog_uploaded_at, lotw_uploaded_at, hrdlog_uploaded_at
 ) VALUES (
     @callsign, @band, @mode, @qso_date, @time_on, @time_off, @freq_hz,
     @rst_sent, @rst_rcvd, @state, @country, @dxcc, @cq_zone, @grid,
@@ -387,7 +404,9 @@ INSERT INTO qso (
     @continent, @itu_zone, @county, @iota, @sig, @sig_info, @my_sig, @my_sig_info,
     @darc_dok, @wpx_prefix, @exchange_sent, @exchange_rcvd,
     CASE WHEN @source='QRZ'     THEN @imported_at ELSE '' END,
-    CASE WHEN @source='CLUBLOG' THEN @imported_at ELSE '' END
+    CASE WHEN @source='CLUBLOG' THEN @imported_at ELSE '' END,
+    CASE WHEN @source='LOTW'    THEN @imported_at ELSE '' END,
+    CASE WHEN @source='HRDLOG'  THEN @imported_at ELSE '' END
 )
 ON CONFLICT(dedup_key) DO UPDATE SET
     lotw_qsl_sent = CASE WHEN excluded.source='LOTW' AND excluded.lotw_qsl_sent!='' THEN excluded.lotw_qsl_sent ELSE qso.lotw_qsl_sent END,
@@ -403,6 +422,8 @@ ON CONFLICT(dedup_key) DO UPDATE SET
     -- whether QRZ/Club Log has this QSO.
     qrz_uploaded_at      = CASE WHEN qso.qrz_uploaded_at      != '' THEN qso.qrz_uploaded_at      ELSE excluded.qrz_uploaded_at      END,
     clublog_uploaded_at  = CASE WHEN qso.clublog_uploaded_at  != '' THEN qso.clublog_uploaded_at  ELSE excluded.clublog_uploaded_at  END,
+    lotw_uploaded_at     = CASE WHEN qso.lotw_uploaded_at     != '' THEN qso.lotw_uploaded_at     ELSE excluded.lotw_uploaded_at     END,
+    hrdlog_uploaded_at   = CASE WHEN qso.hrdlog_uploaded_at   != '' THEN qso.hrdlog_uploaded_at   ELSE excluded.hrdlog_uploaded_at   END,
     -- country/dxcc/continent/cq_zone are the fields Jimmy itself guesses from its own
     -- cached Club Log country data at live-logging time (EnrichWithClubLogGeoData), purely
     -- so Awards/Still-Need tracking has something to show immediately -- Jimmy is never the
@@ -593,7 +614,7 @@ ON CONFLICT(dedup_key) DO UPDATE SET
             public string ExchangeSent, ExchangeRcvd;
         }
 
-        // service is "qrz" or "clublog". Returns QSOs never yet uploaded to that
+        // service is "qrz", "clublog", "lotw", or "hrdlog" (see UploadColumn). Returns QSOs never yet uploaded to that
         // service, oldest first, so a batch upload sends them in QSO order.
         public List<PendingUploadQso> GetPendingUploads(string service, int limit = 1000)
         {
@@ -662,6 +683,8 @@ ON CONFLICT(dedup_key) DO UPDATE SET
             {
                 case "QRZ":     return "qrz_uploaded_at";
                 case "CLUBLOG": return "clublog_uploaded_at";
+                case "LOTW":    return "lotw_uploaded_at";
+                case "HRDLOG":  return "hrdlog_uploaded_at";
                 default: throw new ArgumentException("Unknown upload service: " + service);
             }
         }
@@ -673,7 +696,7 @@ ON CONFLICT(dedup_key) DO UPDATE SET
             public DateTime? LastUploadUtc;
         }
 
-        // service is "qrz" or "clublog". Cheap summary for the Sync Status
+        // service is "qrz", "clublog", "lotw", or "hrdlog" (see UploadColumn). Cheap summary for the Sync Status
         // display -- avoids pulling full QSO rows just to show a count.
         public UploadSyncStatus GetUploadSyncStatus(string service)
         {

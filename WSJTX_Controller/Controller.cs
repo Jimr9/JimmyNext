@@ -36,6 +36,10 @@ namespace WSJTX_Controller
         // Self-sufficiency plan, Phase 0: radio-backend settings (Hamlib/rigctld). Mode defaults
         // to WsjtxCat, so nothing reads/uses this yet -- Phase 1 wires a RigctldClient to it.
         public RadioSettings Radio = new RadioSettings();
+        // Notification/accessibility architecture: INI-backed per-event-type policy (enable/
+        // priority/dedup/throttle/wording). See WSJTX_Controller/Notify/ -- NotificationCenter
+        // (constructed in WsjtxClient's constructor) is the only consumer of this.
+        public NotificationSettings Notifications = new NotificationSettings();
         public bool advancedCallLayout { get => Settings.AdvancedCallLayout; set => Settings.AdvancedCallLayout = value; }
         public bool advShowTx1 { get => Settings.AdvShowTx1; set => Settings.AdvShowTx1 = value; }
         public bool advShowTx2 { get => Settings.AdvShowTx2; set => Settings.AdvShowTx2 = value; }
@@ -61,6 +65,15 @@ namespace WSJTX_Controller
         public int rawMaxRows = 100;
         public int maxQueuedCallsBase = 5;
         public int maxCallQueueAgePeriods = 16;
+        // Extra grace period (ms) ShowStatus() waits AFTER a period's decode window is
+        // confirmed done (WsjtxClient.cs's decodesProcessed, set from the real FT8/FT4
+        // period clock) before actually announcing the "N available stations" summary --
+        // gives one more moment for a last-instant straggler decode to be folded in. This
+        // is not what makes the announcement wait for the period to finish -- that part
+        // always happens and isn't optional (a mid-period partial count isn't useful to
+        // anyone); this is just a small additional buffer on top of it. 0 = no buffer,
+        // announce the moment the period is confirmed done.
+        public int statusBatchDelayMs = 500;
         public bool keepTransmitListDuringTx = false;
         public bool keepListPositionDuringRefresh = false;
         public bool moveFocusToStatusOnCallSelect = false;
@@ -183,8 +196,7 @@ namespace WSJTX_Controller
 
         // Self-sufficiency plan, Phase 4g: Jimmy's own native FT8 engine host. Null whenever
         // EngineModeCutover.Mode == WsjtxExternal (today's default) -- only launched when that
-        // INI-only cutover flag is set to JimmyNative. See NativeEngineClient's own header
-        // comment: RECEIVE ONLY, no PTT/transmit wiring yet.
+        // INI-only cutover flag is set to JimmyNative.
         public NativeEngineClient nativeEngineClient;
         public NativeEngineSettings NativeEngine = new NativeEngineSettings();
         // True only if THIS session created %TEMP%\WSJT-X.lock to make Jimmy's existing
@@ -554,9 +566,20 @@ namespace WSJTX_Controller
                 // (WsjtxExternal/SeparateProcess) until Phase 4 has field validation to justify a
                 // real Options control.
                 if (iniFile.KeyExists("decodeEngineMode") && System.Enum.TryParse(iniFile.Read("decodeEngineMode"), out DecodeEngineMode dem)) EngineModeCutover.Mode = dem;
+                // Safety, not a preference: a replay-test session (JIMMY_TEST_DB_PATH set) must
+                // NEVER activate JimmyNative, no matter what's saved in the real .ini -- that
+                // would spawn the real engine host, open the real COM port, and key the real
+                // radio while a human isn't watching it happen. Added 2026-08-07 after
+                // discovering this had to be done by hand (temporarily editing decodeEngineMode
+                // in the .ini and remembering to change it back) -- exactly the kind of step an
+                // operator or a future session can forget. In-memory only, deliberately: never
+                // written back to the .ini (see the save-side guard below), so the real saved
+                // preference is untouched and this has zero effect outside test mode.
+                if (TestModeGuard.IsTestMode) EngineModeCutover.Mode = DecodeEngineMode.WsjtxExternal;
                 if (iniFile.KeyExists("engineProcessModel") && System.Enum.TryParse(iniFile.Read("engineProcessModel"), out EngineProcessModel epm)) EngineModeCutover.ProcessModel = epm;
                 NativeEngine.LoadFromIni(iniFile);
                 Radio.LoadFromIni(iniFile);
+                Notifications.LoadFromIni(iniFile);
                 if (iniFile.KeyExists("rankMethod")) int.TryParse(iniFile.Read("rankMethod"), out rankMethodIdx);
                 if (iniFile.KeyExists("rankOrder")) rankOrderStr = iniFile.Read("rankOrder");
                 if (iniFile.KeyExists("rankBeam")) rankBeamStr = iniFile.Read("rankBeam");
@@ -602,6 +625,9 @@ namespace WSJTX_Controller
                 int maxAgePeriods;
                 if (iniFile.KeyExists("maxCallQueueAgePeriods") && int.TryParse(iniFile.Read("maxCallQueueAgePeriods"), out maxAgePeriods) && maxAgePeriods >= 4 && maxAgePeriods <= 200)
                     maxCallQueueAgePeriods = maxAgePeriods;
+                int statusBatchMs;
+                if (iniFile.KeyExists("statusBatchDelayMs") && int.TryParse(iniFile.Read("statusBatchDelayMs"), out statusBatchMs) && statusBatchMs >= 0 && statusBatchMs <= 5000)
+                    statusBatchDelayMs = statusBatchMs;
                 keepTransmitListDuringTx = iniFile.Read("keepTransmitListDuringTx") == "True";
                 keepListPositionDuringRefresh = iniFile.Read("keepListPositionDuringRefresh") == "True";
                 moveFocusToStatusOnCallSelect = iniFile.Read("moveFocusToStatusOnCallSelect") == "True";
@@ -796,8 +822,15 @@ namespace WSJTX_Controller
             dxSpotWatcher.Updated += () => BeginInvoke(new Action(RenderSpotWatchList));
             dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls);
             spotWatchAgeTimer.Start();
-            ApplyRadioSettings();   // Phase 1: launches/connects rigctld if Radio.Mode was saved as HamlibRigctld
+            // Order matters under JimmyNative + HamlibRigctld: ApplyEngineMode() launches the
+            // engine host, which owns and spawns the real rigctld; ApplyRadioSettings() (when
+            // engineOwnsRigctld) only ever CONNECTS to that rigctld, never launches its own.
+            // Running ApplyRadioSettings() first raced its first poll tick(s) against a rigctld
+            // that didn't exist yet -- harmless on its own (self-heals next tick), but confusing
+            // to diagnose alongside everything else found live, 2026-08-06/07, so fixed while in
+            // there. ApplyEngineMode() first gives the real rigctld a head start.
             ApplyEngineMode();      // Phase 4g: launches the native engine host if EngineModeCutover.Mode is JimmyNative
+            ApplyRadioSettings();   // Phase 1: launches/connects rigctld if Radio.Mode was saved as HamlibRigctld
             wsjtxClient.rawPriorityTags = rawPriorityTags;
             wsjtxClient.cmdPrompts = cmdPrompts;
             wsjtxClient.usePskReporter = usePskReporter;
@@ -1077,7 +1110,23 @@ namespace WSJTX_Controller
                 iniFile.Write("showUsState", showUsStateCheckBox.Checked.ToString());
                 Settings.SaveToIni(iniFile);
                 Radio.SaveToIni(iniFile);
+                Notifications.SaveToIni(iniFile);
                 NativeEngine.SaveToIni(iniFile);
+                // EngineModeCutover.Mode was only ever READ from the .ini (line ~555) -- never
+                // written back here, so Decode Engine always reverted to WsjtxExternal on the
+                // next launch no matter what was picked in Options (found live, 2026-08-06:
+                // "the decoder is not being saved every time i start jimmy it is on the wsjtx
+                // and not native jimmy").
+                // Never persist during a replay-test session -- EngineModeCutover.Mode was just
+                // force-overridden to WsjtxExternal above (see the load-side guard) regardless of
+                // the operator's real saved preference; writing it back here would silently
+                // replace that real preference with the test override the next time Options is
+                // saved during a test run.
+                if (!TestModeGuard.IsTestMode)
+                {
+                    iniFile.Write("decodeEngineMode", EngineModeCutover.Mode.ToString());
+                    iniFile.Write("engineProcessModel", EngineModeCutover.ProcessModel.ToString());
+                }
                 iniFile.Write("rawShowCq", rawShowCq.ToString());
                 iniFile.Write("rawShowDirected", rawShowDirected.ToString());
                 iniFile.Write("rawShowReports", rawShowReports.ToString());
@@ -1098,6 +1147,7 @@ namespace WSJTX_Controller
                 iniFile.Write("rawMaxRows", rawMaxRows.ToString());
                 iniFile.Write("maxQueuedCalls", maxQueuedCallsBase.ToString());
                 iniFile.Write("maxCallQueueAgePeriods", maxCallQueueAgePeriods.ToString());
+                iniFile.Write("statusBatchDelayMs", statusBatchDelayMs.ToString());
                 iniFile.Write("keepTransmitListDuringTx", keepTransmitListDuringTx.ToString());
                 iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
                 iniFile.Write("moveFocusToStatusOnCallSelect", moveFocusToStatusOnCallSelect.ToString());
@@ -1226,7 +1276,7 @@ namespace WSJTX_Controller
             initialConnFaultTimer.Stop();
             radioPollTimer?.Stop();
             rigctldClient?.Dispose();   // also stops any bundled rigctld this session launched
-            nativeEngineClient?.Dispose();   // also stops the native engine host this session launched
+            nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path)
             nativeEngineClient = null;
             if (_nativeEngineOwnsLockFile)
             {
@@ -1888,12 +1938,6 @@ namespace WSJTX_Controller
                         iniFile?.Write("activeAwardRuleIds", FormatActiveAwardRuleIds(activeAwardRuleIds));
                         RefreshStillNeedCache();
                     },
-                    lastLotwUploadTrigger: () => wsjtxClient?.lastLotwUploadTrigger,
-                    uploadLotwHotkeyText: () =>
-                    {
-                        string s = HotkeyConfig.FormatKeys(hotkeyConfig[HotkeyAction.UploadLotw]);
-                        return string.IsNullOrEmpty(s) ? "(unassigned hotkey)" : s;
-                    },
                     resolveUsState: call => lookupManager?.Build(call)?.State,
                     isWsjtxConnected: () => wsjtxClient != null && wsjtxClient.ConnectedToWsjtx(),
                     currentBand: () => wsjtxClient?.CurrentBandStr,
@@ -2044,7 +2088,14 @@ namespace WSJTX_Controller
             // ShowStatus() will naturally overwrite this text on the next status rebuild
             // (see ToggleTxFirst for the same accepted pattern), which is fine: by then
             // the screen reader has already started speaking this message.
-            if (statusText.Focused && Form.ActiveForm == this)
+            bool announced = statusText.Focused && Form.ActiveForm == this;
+            // [ANNOUNCE] tag: enable the UDP diag log (Options/Setup) to get a millisecond-
+            // timestamped record of every real screen-reader announcement -- added 2026-08-07
+            // to pin down live reports of announcements landing partway into the next period,
+            // which is very hard to time by ear alone. announced=False means the text was
+            // updated but JAWS/NVDA was never actually nudged (statusText wasn't focused).
+            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}] '{text}'");
+            if (announced)
                 SendKeys.Send("{UP}");
         }
 
@@ -2117,7 +2168,10 @@ namespace WSJTX_Controller
             // Guard: only send if Tilly is actually the active application.
             // SendKeys.Send uses SendInput(), which delivers to the foreground window;
             // without this guard a timer tick during focus-loss can send to Notepad.
-            if (this.statusText.Focused && Form.ActiveForm == this) SendKeys.Send("{UP}");  //triggers screen reader
+            bool announced = this.statusText.Focused && Form.ActiveForm == this;
+            // [ANNOUNCE] tag: see ShowMsg's identical logging for what this is for.
+            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}] '{statusText}'");
+            if (announced) SendKeys.Send("{UP}");  //triggers screen reader
         }
 
         public void ShowMessage(string text, bool sound) => ShowMsg(text, sound);
@@ -2315,6 +2369,23 @@ namespace WSJTX_Controller
         {
             radioPollTimer.Stop();
 
+            // Safety, not a preference: a replay-test session must never open a real serial
+            // port or talk real CAT to a real radio at all -- confirmed live, 2026-08-07, that
+            // forcing decodeEngineMode alone was NOT enough: Radio.Mode (CAT control) is a
+            // completely independent setting, this method only ever checked whether the
+            // *native engine* owned rigctld, and a real replay-test run genuinely launched
+            // Jimmy's own bundled rigctld and sent real CAT commands -- including the
+            // RIG-KICK mode-nudge sequence -- to the operator's actual TS-590SG. No real radio
+            // interaction is ever a legitimate part of replay testing, so this skips the whole
+            // method outright rather than trying to thread the needle further downstream.
+            if (TestModeGuard.IsTestMode)
+            {
+                rigctldClient?.Dispose();
+                rigctldClient = null;
+                lastRadioStatus = null;
+                return;
+            }
+
             if (Radio.Mode != RadioControlMode.HamlibRigctld)
             {
                 rigctldClient?.Dispose();
@@ -2323,26 +2394,116 @@ namespace WSJTX_Controller
                 return;
             }
 
-            // Reconnect from scratch on every apply rather than trying to patch a live
-            // connection's host/port/launch-args in place -- Options changes to this tab are
-            // infrequent, and a clean relaunch avoids a whole class of "which half of the old
-            // settings is still live" bugs for a handful of extra milliseconds.
             rigctldClient?.Dispose();
+
+            // Self-sufficiency plan Phase 5: under JimmyNative, the native engine host owns
+            // rigctld directly (it builds a real Rig from the SAME rig/COM-port/baud/PTT-method
+            // settings -- see ApplyEngineMode/NativeEngineClient.Launch) -- Jimmy's own
+            // rigctldClient here must only CONNECT (read-only S-meter/SWR/power polling, plus
+            // SetFrequency for Band Up/Down) and must NEVER launch a second, competing rigctld on
+            // the same port. rigctld is a multi-client daemon, so a plain connect-only client
+            // shares it fine. Under WsjtxExternal, unchanged: Jimmy's own bundled copy is what's
+            // actually driving CAT/PTT, so it launches as before.
+            bool engineOwnsRigctld = EngineModeCutover.Mode == DecodeEngineMode.JimmyNative;
+
             rigctldClient = new RigctldClient(
                 Radio.UseExternalRigctld ? Radio.RigctldHost : "127.0.0.1",
                 Radio.RigctldPort);
 
-            if (!Radio.UseExternalRigctld)
+            if (!Radio.UseExternalRigctld && !engineOwnsRigctld)
             {
-                if (!rigctldClient.LaunchBundled(Radio.RigModel, Radio.ComPort))
+                if (!rigctldClient.LaunchBundled(Radio.RigModel, Radio.ComPort, Radio.BaudRate))
                 {
-                    ShowMessage($"Radio: {rigctldClient.LastError}", false);
+                    // Wave 1 of the notification architecture (WSJTX_Controller/Notify/):
+                    // default template "{Source}: {Detail}", Warning severity (respects the
+                    // policy's configured Priority, default Normal) -- byte-identical to the
+                    // direct ShowMessage call this replaces (which never beeped).
+                    wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", rigctldClient.LastError));
                     return;
                 }
             }
+            ScheduleRigConnectKick(rigctldClient);
 
             radioPollTimer.Interval = Math.Max(200, Radio.PollIntervalMs);
             if (Radio.PollEnabled) radioPollTimer.Start();
+        }
+
+        // Self-sufficiency plan Phase 5: Nexus's own engine does a "read-only launch" -- it READS
+        // the rig's current frequency and adopts it as its own belief, but never WRITES it back on
+        // connect (see tempo-audio/src/service.rs's own "READ-ONLY LAUNCH" comment). Real WSJT-X
+        // apparently DOES actively SET the frequency on connect -- confirmed live, 2026-08-07, by
+        // the operator's own Kenwood TS-590SG audibly announcing the frequency under real WSJT-X (a
+        // rig feature that fires on a CAT frequency WRITE, not a read) and never announcing at all
+        // under Jimmy Native. Explicitly re-asserting the SAME frequency the rig already reports (a
+        // same-value round-trip -- this never actually retunes anything) mimics that active-SET
+        // behavior generically, for any rig, without touching Nexus's own engine code.
+        //
+        // Also sends Radio.SplitMode's own live command (rigctld's set_split_vfo) here, once per
+        // connect -- same reasoning as the frequency kick: a one-time assertion right after
+        // connect, not something that needs to ride the engine's own retune loop.
+        //
+        // One-shot System.Windows.Forms.Timer, not a background Task: RigctldClient's own class
+        // comment is explicit that it is "not thread-safe by design... not called concurrently
+        // from a background Task" -- radioPollTimer (started right after this) polls the SAME
+        // client instance, and every WinForms Timer callback runs serialized on the UI thread's
+        // message loop, so this avoids that race entirely. The delay gives the engine's own CAT
+        // probe (a documented 700ms internal sleep, plus a real serial round-trip) time to finish
+        // before this reads/writes it -- also generous enough for Jimmy's own bundled rigctld
+        // (the !engineOwnsRigctld path) even though LaunchBundled itself already blocks until the
+        // process starts, since the CAT probe inside it can still be settling.
+        private void ScheduleRigConnectKick(RigctldClient client)
+        {
+            var kickTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+            kickTimer.Tick += (s, e) =>
+            {
+                kickTimer.Stop();
+                kickTimer.Dispose();
+                if (client != rigctldClient)
+                {
+                    wsjtxClient?.DebugOutput("[RIG-KICK] skipped -- superseded by a newer ApplyRadioSettings() call");
+                    return;
+                }
+                try
+                {
+                    var status = client.PollOnce();
+                    wsjtxClient?.DebugOutput($"[RIG-KICK] poll ok:{status.Ok} freq:{status.FrequencyHz} err:'{status.LastError}'");
+                    // The frequency nudge that used to live here (set freq+1Hz, then back) was
+                    // removed 2026-08-07: confirmed live that the radio's voice announce is
+                    // actually triggered by the MODE command below, not a frequency write at
+                    // all -- the frequency nudge never did anything real, and the announce
+                    // attributed to it earlier was really the mode nudge firing right after it.
+                    bool okSplit = client.SetSplit(Radio.SplitMode == RadioSplitMode.Rig);
+                    wsjtxClient?.DebugOutput($"[RIG-KICK] split={Radio.SplitMode}: ok:{okSplit}");
+
+                    // The engine's own retune loop only re-sends set_mode when its belief differs
+                    // from the target, so if that belief was ever seeded as "already correct"
+                    // (e.g. from a stale prior session) without a real CAT command reaching the
+                    // physical radio, the rig could stay stuck on whatever mode it was actually
+                    // last in. Nudge to a mode FT8/FT4 operation would never actually want (FM)
+                    // and back to whatever's currently read, forcing two genuinely different
+                    // set_mode calls the rig can't collapse into a no-op. Confirmed live,
+                    // 2026-08-07: this genuinely reaches the radio (it's what triggers the real
+                    // voice announce, not the frequency write) -- kept for that reason, though on
+                    // its own it did NOT fix the separate mic-vs-USB-audio transmit issue, which
+                    // is a different bug still under investigation (audio playback path, not
+                    // mode-setting).
+                    if (client.GetMode(out string curMode, out int curPassband) && !string.IsNullOrWhiteSpace(curMode))
+                    {
+                        bool okModeNudge = client.SetMode("FM", 0);
+                        bool okModeRestore = client.SetMode(curMode, curPassband);
+                        wsjtxClient?.DebugOutput($"[RIG-KICK] mode nudge FM->{curMode}: nudge_ok:{okModeNudge} restore_ok:{okModeRestore}");
+                    }
+                    else
+                    {
+                        wsjtxClient?.DebugOutput("[RIG-KICK] mode nudge skipped -- could not read current mode");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    wsjtxClient?.DebugOutput($"[RIG-KICK] EXCEPTION: {ex.Message}");
+                }
+            };
+            kickTimer.Start();
         }
 
         // Self-sufficiency plan, Phase 4g/4i: brings the live nativeEngineClient state into line
@@ -2392,25 +2553,117 @@ namespace WSJTX_Controller
                 }
             }
 
+            // Self-sufficiency plan Phase 5: no control-channel listener to stand up anymore --
+            // the native engine host builds its own Rig directly (from the CLI args
+            // NativeEngineClient.Launch derives from `Radio` below) whenever Radio.Mode ==
+            // HamlibRigctld, regardless of Radio.PttEnabled (control and PTT are independent --
+            // S-meter/frequency tracking stays live even with PTT itself off; Launch forces the
+            // PTT method to Vox when PttEnabled is false, so it never attempts to key the radio
+            // in that case -- degrades to receive-only for PTT specifically, not a silent
+            // failure). Under WsjtxCat, Launch passes no rig args at all -- receive-only for
+            // radio entirely, exactly as before.
             nativeEngineClient?.Dispose();
-            nativeEngineClient = new NativeEngineClient();
+            var client = new NativeEngineClient();
+            nativeEngineClient = client;
             int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
-            if (!nativeEngineClient.Launch(NativeEngine.MyCall, NativeEngine.MyGrid, NativeEngine.AudioInputDevice, jimmyPort))
+            string myCall = NativeEngine.MyCall, myGrid = NativeEngine.MyGrid;
+            string inDevice = NativeEngine.AudioInputDevice, outDevice = NativeEngine.AudioOutputDevice;
+            RadioSettings radioSnapshot = Radio;
+            WsjtxClient wsjtx = wsjtxClient;
+
+            // Confirmed live, 2026-08-08: the real cause of Jimmy's window going fully
+            // unresponsive the instant Native mode was enabled was CheckWsjtxRunning()'s
+            // legacy "detect a separately-running real WSJT-X" dance (WsjtxClient.Protocol.cs)
+            // -- a flat 3-second Thread.Sleep on the UI thread, reading WSJT-X's own ini file
+            // for a UDP address that's irrelevant here, and a possible invisible/unfocused
+            // modal MessageBox on failure. The lock file created above guarantees that path
+            // fires on the very next mainLoopTimer tick. ConnectNativeEngine bypasses all of
+            // that: Native mode already knows its own UDP endpoint (Launch below is told to
+            // send to 127.0.0.1:jimmyPort via --jimmy-addr), so there's nothing to detect.
+            wsjtx?.ConnectNativeEngine(IPAddress.Parse("127.0.0.1"), jimmyPort);
+
+            // Launch() (specifically Process.Start()) still runs on a background thread as a
+            // second, independent defensive measure -- Process.Start() for a new, unsigned exe
+            // is well known to be able to block synchronously on real-time AV scanning or
+            // SmartScreen's Mark-of-the-Web check, separately from the UDP issue above.
+            System.Threading.Tasks.Task.Run(() =>
             {
-                ShowMessage($"Native engine: {nativeEngineClient.LastError}", false);
-            }
+                // Before onUnexpectedExit existed, a real crash of the engine host was completely
+                // silent -- Jimmy kept showing stale decode/radio state forever with no sign the
+                // process backing it was gone (found live, 2026-08-06/07, auditing everything else
+                // wrong with real-time visibility into the native engine's health). Marshal to the
+                // UI thread explicitly -- Process.Exited fires on a threadpool thread, and
+                // ShowMessage touches statusText.
+                bool ok = client.Launch(myCall, myGrid, inDevice, jimmyPort, outDevice, radioSnapshot,
+                    msg => wsjtx?.DebugOutput(msg),
+                    () => BeginInvoke(new Action(() => ShowMessage("Native engine host stopped unexpectedly -- decoding/TX are no longer running.", true))));
+                if (!ok && nativeEngineClient == client)
+                {
+                    BeginInvoke(new Action(() => ShowMessage($"Native engine: {client.LastError}", false)));
+                }
+            });
         }
+
+        // null = no poll completed yet this session; true/false = the CAT link's health as of
+        // the last poll. Used only to detect a CHANGE (see radioPollTimer_Tick) -- never read
+        // for its own sake elsewhere.
+        private bool? _lastRadioPollOk = null;
 
         // Quiet background update, same "no sound, no forced announcement" spirit as
         // spotWatchAgeTimer_Tick above -- Alt+Q (ReportPowerSwr) always does its own fresh,
         // synchronous PollOnce() rather than relying on this cached value, so this timer only
         // needs to keep lastRadioStatus reasonably current for anything that wants to peek at
         // it without forcing a round-trip.
+        //
+        // CAT health was previously invisible in real time: a failed link (bad COM port, wrong
+        // baud, rig powered off, cable unplugged, or the engine-restart race fixed elsewhere)
+        // silently degraded to receive-only-for-control with nothing telling the operator --
+        // found live, 2026-08-06/07, chasing a real TX session where mode-switching over CAT
+        // silently wasn't happening. Announce state CHANGES only (not every tick, which would
+        // be constant, unusable chatter) via the same accessible status-bar mechanism used
+        // throughout Jimmy (ShowMessage -> statusText, forced to announce when focused).
         private void radioPollTimer_Tick(object sender, EventArgs e)
         {
             if (rigctldClient == null) return;
             lastRadioStatus = rigctldClient.PollOnce();
+
+            if (_lastRadioPollOk != lastRadioStatus.Ok)
+            {
+                if (lastRadioStatus.Ok)
+                {
+                    // Only announce a RECOVERY, not the very first successful poll of a
+                    // session (that's just normal startup, not news).
+                    if (_lastRadioPollOk == false)
+                        ShowMessage("Radio CAT link OK", false);
+                }
+                else
+                {
+                    // Wave 1 of the notification architecture (WSJTX_Controller/Notify/):
+                    // ErrorSeverity.Error always beeps regardless of policy Priority --
+                    // byte-identical to the direct ShowMessage(..., true) call this replaces.
+                    wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Radio CAT link lost", lastRadioStatus.LastError ?? "no response"));
+                }
+                _lastRadioPollOk = lastRadioStatus.Ok;
+            }
+
+            // Matches WSJT-X's own Radio tab "Halt Tx when SWR > 2.5" safety feature -- requested
+            // by the operator, 2026-08-07, for parity. lastRadioStatus.Swr is null on a rig/
+            // backend that doesn't report SWR, treated as "no reading, nothing to act on".
+            // Edge-triggered (_swrOverThreshold tracks the PREVIOUS poll's state) so this fires
+            // HaltTx()/announces once per episode, not every tick while SWR stays high -- the
+            // same "state change, not constant chatter" discipline as the CAT-health announce
+            // above.
+            bool swrOver = Radio.HaltTxOnHighSwr && lastRadioStatus.Ok && lastRadioStatus.Swr.HasValue
+                           && lastRadioStatus.Swr.Value > Radio.SwrHaltThreshold;
+            if (swrOver && !_swrOverThreshold)
+            {
+                wsjtxClient?.HaltTx();
+                ShowMessage($"Tx halted: SWR {lastRadioStatus.Swr.Value:F1} exceeds threshold {Radio.SwrHaltThreshold:F1}", true);
+            }
+            _swrOverThreshold = swrOver;
         }
+
+        private bool _swrOverThreshold = false;
 
         // Called (via BeginInvoke, already marshalled to the UI thread) whenever
         // DxSpotWatcher's watch list or any watched call's last-seen data changes. One row per

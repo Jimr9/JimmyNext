@@ -1,18 +1,25 @@
 [package]
 name = "jimmy-engine-host"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
-# Self-sufficiency plan Phase 4: an engine host that reuses the open-source Nexus project's own
-# native FT8 decoder (libtempo, vendored WSJT-X-derived Fortran/C/C++), QSO sequencer, and real
-# audio capture -- rather than reimplementing any of it -- plus its tempo-net crate for the
-# stock WSJT-X UDP protocol Jimmy already speaks. All native linking is handled by
-# tempo-fast-sys's own build.rs (redirected to a locally-patched copy -- see the [patch] section
-# below and vendor/tempo-fast-sys-patched/build.rs's header comment for why). Nexus's crates are
-# GPL-3.0; this crate inherits that for the same reason Nexus's own NOTICE documents (linking
-# GPLv3-derived modem code). Path dependencies point at the local Nexus clone -- a
-# development-time convenience for this proof of concept; shipping this for real needs a proper
-# vendoring strategy, a separate decision from proving the architecture works.
+# Self-sufficiency plan Phase 5: jimmy-engine-host no longer hand-rolls its own decode/TX-
+# scheduling/PTT loop. Nexus's own production radio loop -- tempo_audio::service::run_radio,
+# driven against a real tempo_app::engine::Engine -- already does all of that, tested, in
+# Nexus's own shipped desktop app: real audio capture/playback, wall-clock-UTC-steered slot
+# timing (SlotClock, NTP-offset corrected), an async decode-worker thread, real PTT/CAT via a
+# Rig it builds internally, and -- critically -- it already speaks the full standard WSJT-X UDP
+# protocol both directions (RadioConfig.wsjtx_udp) when asked to. This crate's whole job is now
+# just: build an Engine + RadioConfig from Jimmy's CLI args and call run_radio on a thread. See
+# EngineHost/src/main.rs's own header comment for the full reasoning (this superseded an earlier,
+# hand-rolled main.rs/audio.rs/tx_control.rs/tx_schedule.rs -- see git history, "TX wiring Stage
+# 1-4" and the Phase 5 planning session -- once the operator asked whether jimmy-engine-host was
+# reusing Nexus the right way, and it turned out to be re-deriving run_radio by hand).
+#
+# Nexus's crates are GPL-3.0; this crate inherits that for the same reason Nexus's own NOTICE
+# documents (linking GPLv3-derived modem code). Path dependencies point at the local Nexus clone
+# -- a development-time convenience; shipping this for real needs a proper vendoring strategy, a
+# separate decision from proving the architecture works.
 license = "GPL-3.0-only"
 
 [[bin]]
@@ -20,26 +27,32 @@ name = "jimmy-engine-host"
 path = "src/main.rs"
 
 [dependencies]
-tempo-net = { path = "C:/claude/nexus/crates/tempo-net" }
+# Engine: the real QSO/TX/decode orchestrator (FT8/FT4/WSPR/FST4/... all live here). Nexus's own
+# desktop app drives this exact type the same way this crate now does.
+tempo-app = { path = "C:/claude/nexus/crates/tempo-app" }
+# `device`: real sound-card I/O (cpal) -- also what gates on tempo-audio's `service` module
+# (run_radio itself). `serial`: RTS/DTR PTT via the `serialport` crate -- Windows only needs
+# this for serial enumeration/control, no libudev involved (that's the Linux-only concern the
+# feature's own doc comment flags).
+tempo-audio = { path = "C:/claude/nexus/crates/tempo-audio", features = ["device", "serial"] }
 tempo-core = { path = "C:/claude/nexus/crates/tempo-core" }
-modes = { path = "C:/claude/nexus/crates/modes" }
-ft8 = { path = "C:/claude/nexus/crates/ft8" }
-# `device` feature pulls in cpal (real sound-card I/O) + tempo-sstv (an SSTV-feature
-# transitive dep of tempo-audio's `device` feature, unused here but not worth a Nexus-side
-# feature split for). CpalBackend (device.rs) is the actual real-audio-capture reuse target --
-# see EngineHost/src/audio.rs.
-tempo-audio = { path = "C:/claude/nexus/crates/tempo-audio", features = ["device"] }
-# `live` feature: read-only POTA/SOTA spot fetch (crate::live::pota) reused for Phase 4f.
-# Independent of tempo-fast-sys (pure network/parsing code, no native modem link) -- confirmed
-# by its own Cargo.toml before adding it here.
-propagation = { path = "C:/claude/nexus/crates/propagation", features = ["live"] }
 
-# tempo-core/tempo-audio/ft8 -> tempo-fast-sys, whose OWN build.rs hits a \\?\-long-path interop
-# bug between cmake/ninja/gfortran in this environment (a Rust canonicalize() quirk) -- not a bug
-# in the FT8/modem code itself, and not something to fix by editing Nexus's own source. Redirects
-# every transitive use of tempo-fast-sys to ../vendor/tempo-fast-sys-patched -- a local copy of
-# Nexus's own crate with ONLY the canonicalize()/\\?\ handling changed (see that copy's build.rs
-# header comment); it still builds the real, unmodified Nexus libtempo/ source tree in place.
-# Nexus's own checkout at C:/claude/nexus is not modified by this.
+# tempo-core/tempo-audio/tempo-app -> tempo-fast-sys, whose OWN build.rs hits a \\?\-long-path
+# interop bug between cmake/ninja/gfortran in this environment (a Rust canonicalize() quirk) --
+# not a bug in the FT8/modem code itself, and not something to fix by editing Nexus's own source.
+# Redirects every transitive use of tempo-fast-sys to ../vendor/tempo-fast-sys-patched -- a local
+# copy of Nexus's own crate with ONLY the canonicalize()/\\?\ handling changed (see that copy's
+# build.rs header comment); it still builds the real, unmodified Nexus libtempo/ source tree in
+# place. Nexus's own checkout at C:/claude/nexus is not modified by this. Kept in sync with
+# Nexus's real tempo-fast-sys FFI declarations by hand (see that file's own note from the
+# 2026-08-06 resync after a drift caused a build failure) -- there is no automated check for this
+# yet.
 [patch."file:///C:/claude/nexus/crates/tempo-fast-sys"]
 tempo-fast-sys = { path = "../vendor/tempo-fast-sys-patched" }
+
+[dev-dependencies]
+# Not needed by main.rs itself (Engine calls the native FT8 encoder/decoder internally) -- only
+# by tests/{roundtrip,qso_sequencing}.rs, which regression-test the underlying DSP/QSO-sequencer
+# primitives Engine now wraps, directly and independently of Engine itself.
+ft8 = { path = "C:/claude/nexus/crates/ft8" }
+modes = { path = "C:/claude/nexus/crates/modes" }

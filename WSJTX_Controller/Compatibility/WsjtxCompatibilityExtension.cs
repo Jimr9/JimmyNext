@@ -56,6 +56,17 @@ namespace WSJTX_Controller
 
         private void Send(string label, int cmdIdx, Action<string> debugOutput)
         {
+            if (EngineModeCutover.Mode == DecodeEngineMode.JimmyNative)
+            {
+                // Everything sent through this class is Andy WM8Q's fork-only "SetupTx RPC
+                // channel" (see the class comment) -- Jimmy's native engine (Nexus/run_radio)
+                // speaks only the standard WSJT-X UDP protocol and has no idea what these
+                // sub-commands are; they were confirmed to land in Nexus's own inbound
+                // dispatch's unmatched `_ => {}` catch-all and do nothing. Skip the send
+                // entirely rather than emit dead traffic against a real WSJT-X-protocol peer.
+                debugOutput?.Invoke($"[COMPAT-SKIP] '{label}' cmd:{cmdIdx} not sent -- Andy-fork-only, no effect on Jimmy Native engine");
+                return;
+            }
             byte[] ba = _emsg.GetBytes();
             SendSocket.Send(ba, ba.Length);
             debugOutput?.Invoke($">>>>>Sent '{label}' cmd:{cmdIdx}{Environment.NewLine}{_emsg}");
@@ -205,6 +216,11 @@ namespace WSJTX_Controller
             _emsg.ReplyReqd = false;     //no effect
             _emsg.EnableTimeout = true;  //no effect
             _emsg.CmdCheck = "";         //no effect
+            if (EngineModeCutover.Mode == DecodeEngineMode.JimmyNative)
+            {
+                debugOutput?.Invoke("[COMPAT-SKIP] 'Reset Tx watchdog' cmd:13 not sent -- Andy-fork-only, no effect on Jimmy Native engine");
+                return;
+            }
             byte[] ba = _emsg.GetBytes();
             SendSocket.Send(ba, ba.Length);
             debugOutput?.Invoke(">>>>>Sent 'Reset Tx watchdog' cmd:13");
@@ -256,6 +272,12 @@ namespace WSJTX_Controller
             _emsg.Param0 = false;      //no effect
             _emsg.Param1 = false;      //no effect
             _emsg.CmdCheck = adifRecord;
+            if (EngineModeCutover.Mode == DecodeEngineMode.JimmyNative)
+            {
+                debugOutput?.Invoke("[COMPAT-SKIP] 'Broadcast' cmd:255 not sent -- Andy-fork-only, no effect on Jimmy Native engine");
+                _emsg.CmdCheck = "";
+                return;
+            }
             byte[] ba = _emsg.GetBytes();
             SendSocket.Send(ba, ba.Length);
             debugOutput?.Invoke(">>>>>Sent 'Broadcast' cmd:255");

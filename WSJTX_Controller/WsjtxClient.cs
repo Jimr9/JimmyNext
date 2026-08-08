@@ -152,6 +152,20 @@ namespace WSJTX_Controller
         internal int? trPeriod = null;       //msec
         private ulong dialFrequency = 0;
         private int? bandIdx = null;
+
+        // Self-sufficiency plan: BandUp/BandDown are RELATIVE (current band +/- 1), unlike the
+        // Alt+1-0 direct-band hotkeys (SelectBand), which are absolute and don't care whether
+        // bandIdx is current. Under Jimmy Native + a real CAT-controlled radio, bandIdx only
+        // updates once a full round-trip confirms it (retune -> radio physically moves -> the
+        // engine's next poll cycle reads the new frequency -> next Status message -> line ~743
+        // updates bandIdx) -- typically a few seconds. Without tracking a pending target
+        // separately, a second Alt+PageUp pressed before that round-trip completes recomputes
+        // from the SAME stale bandIdx and just re-requests the same band again, which reads as
+        // "the hotkey did nothing" (confirmed live, 2026-08-07: Alt+1-0 "fire right away" while
+        // Alt+PageUp "will do nothing for a while"). Tracks the last REQUESTED index so repeated
+        // presses can keep advancing optimistically; cleared the moment a real confirmed bandIdx
+        // arrives (line ~743) so it never drifts from reality for long.
+        private int? _pendingBandIdx = null;
         private List<int> bands = new List<int>() { 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 };
         private Dictionary<string, List<int>> freqsDict = new Dictionary<string, List<int>>(){
             {"FT8", new List<int>(){ 1840, 3573, 5357, 7074, 10136, 14074, 18100, 21074, 24915, 28074, 50313 }},
@@ -235,6 +249,15 @@ namespace WSJTX_Controller
         private const int freqChangeThreshold = 200;
         private bool skipFirstDecodeSeries = true;
         private System.Windows.Forms.Timer postDecodeTimer = new System.Windows.Forms.Timer();
+        // Batches the "N available stations" announcement while decodes are still arriving
+        // for the current period -- see ShowStatus()'s own comment for why. Interval is set
+        // fresh (from ctrl.statusBatchDelayMs) each time it's (re)started, not fixed like
+        // postDecodeTimer's, since this one's delay is INI-configurable.
+        private System.Windows.Forms.Timer statusAnnounceTimer = new System.Windows.Forms.Timer();
+        private string _pendingStatusHeading = null;
+        private string _pendingStatusText = null;
+        private Color _pendingStatusForeColor;
+        private Color _pendingStatusBackColor;
         private System.Windows.Forms.Timer processDecodeTimer = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer processDecodeTimer2 = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer statusTimer = new System.Windows.Forms.Timer();
@@ -244,7 +267,16 @@ namespace WSJTX_Controller
         public System.Windows.Forms.Timer dialogTimer3 = new System.Windows.Forms.Timer();
         public System.Windows.Forms.Timer heartbeatRecdTimer = new System.Windows.Forms.Timer();
         private bool _requireOffsetForActive = false;   // true after a band change; keeps CheckActive from firing before WSJT-X settles
-        internal string path = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{Assembly.GetExecutingAssembly().GetName().Name.ToString()}";
+        // Test-mode isolation gap found live, 2026-08-07: this path backs both the plain-text
+        // diagnostic log (WsjtxClient.Debug.cs's SetLogFileState) and pota.txt (PotaLogTracker)
+        // -- neither was ever gated by TestModeGuard the way the QSO logbook DB and radio
+        // control already are, so every replay-test run with diag logging enabled wrote
+        // synthetic test traffic straight into the operator's real log_<date>.txt. Same
+        // JIMMY_TEST_DB_PATH signal TestModeGuard already reuses from LogbookDb -- one
+        // isolated folder now covers this path too.
+        internal string path = TestModeGuard.IsTestMode
+            ? $"{Path.GetTempPath()}JimmyReplayTest_AppData"
+            : $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{Assembly.GetExecutingAssembly().GetName().Name.ToString()}";
         private List<int> audioOffsets = new List<int>();
         private int oddOffset = 0;
         private int lastOddOffsetDebug = 0;
@@ -290,6 +322,13 @@ namespace WSJTX_Controller
         private uint prevOffset = defaultAudioOffset;
 
         public NotificationSounds Sounds;
+        // Notification/accessibility architecture (see WSJTX_Controller/Notify/): the ONLY
+        // entry point business logic should call is Notify.Publish(event) -- never build a
+        // sentence and call StatusView.ShowMessage directly for anything migrated onto this.
+        // Independent of and complementary to Sounds above (a WAV cue and a spoken
+        // notification for the same real-world event are two separate, separately-configured
+        // concerns, not merged).
+        public NotificationCenter Notify;
         public LiveQsoUploadOrchestrator LiveQsoUploader;
         private readonly PotaLogTracker _potaLog;
         private readonly AwardTagger _awardTagger;
@@ -328,6 +367,16 @@ namespace WSJTX_Controller
         private bool? lastCallListTxFirst = null;
         private bool newBand = false;
         private bool newMode = false;
+        // Which period (even/odd) the most recently processed decode actually belongs to,
+        // per that decode's own SinceMidnight -- not "what time is it right now". A decode
+        // for the period that just ended can genuinely get processed a moment after the
+        // next period's wall-clock window has already started (WSJT-X's own decode-compute
+        // latency), so ShowStatus() must not re-derive "which side to announce" from the
+        // current clock -- see ShowStatus()'s currentSideIsTx1 for the live-confirmed bug
+        // this caused (2026-08-07: an announcement partway into the next period, using that
+        // period's clock-parity before it had actually decoded anything). Null until the
+        // first decode of the session arrives.
+        private bool? lastDecodeEvenPeriod = null;
         private string uploadResult = null;
         private string tuneResult = null;
         private string lastStatusTxMsg = null;
@@ -564,6 +613,7 @@ namespace WSJTX_Controller
             _awardTagger = new AwardTagger(this);
             _callQueueStore = new CallQueueStore(this);
             Sounds = new NotificationSounds(() => ctrl.soundsEnabled);
+            Notify = new NotificationCenter(ctrl.Notifications, new StatusViewNotificationDelivery(StatusView));
             LiveQsoUploader = new LiveQsoUploadOrchestrator(
                 credentials: () => new LiveUploadCredentials
                 {
@@ -644,6 +694,8 @@ namespace WSJTX_Controller
 
             postDecodeTimer.Interval = 4000;
             postDecodeTimer.Tick += new System.EventHandler(ProcessPostDecodeTimerTick);
+
+            statusAnnounceTimer.Tick += new System.EventHandler(StatusAnnounceTimerTick);
 
             processDecodeTimer.Tick += new System.EventHandler(ProcessDecodeTimerTick);
 
@@ -995,6 +1047,10 @@ namespace WSJTX_Controller
 
         private void ProcessDecodeMsg(EnqueueDecodeMessage dmsg, bool isSpecOp)
         {
+            // Set unconditionally, before any early return below -- even a decode that gets
+            // rejected still tells ShowStatus() which period is actually current right now.
+            lastDecodeEvenPeriod = IsEvenCall(dmsg);
+
             if (dmsg.AutoGen && (dmsg.DeltaFrequency > offsetLoLimit && dmsg.DeltaFrequency < offsetHiLimit)) audioOffsets.Add(dmsg.DeltaFrequency);
             timeOffsets.Add(dmsg.DeltaTime);
 
@@ -1641,6 +1697,37 @@ namespace WSJTX_Controller
             UpdateDebug();
         }
 
+        // Schedules the "N available stations" summary ShowStatus() held back while this
+        // period's decode window was still open (see ShowStatus()'s own comment). Computed
+        // purely from the wall clock and trPeriod -- confirmed live, 2026-08-07, that this
+        // real WSJT-X build reports Decoding:True once at startup and never flips back to
+        // False again for the rest of the session, so decodeCycle/processDecodeTimer/
+        // decodesProcessed (the app's existing "decode pass ended" machinery) never fire a
+        // second time either -- relying on any of that left every deferred announcement
+        // stuck pending forever (confirmed: total silence after the very first one). This
+        // depends on nothing WSJT-X reports about its own decode state, only trPeriod
+        // (already known once ACTIVE) and DateTime.UtcNow, so it can't go silently stale.
+        //
+        // A no-op if a countdown to the next boundary is already running -- only the FIRST
+        // deferred call after a flush starts a fresh one; later calls in the same window
+        // just update the pending text, so the wait is anchored to the period clock and
+        // never gets pushed later by more decodes arriving.
+        private void ScheduleStatusAnnounce()
+        {
+            if (statusAnnounceTimer.Enabled) return;
+            if (trPeriod == null) return;
+            DateTime dtNow = DateTime.UtcNow;
+            int msec = (dtNow.Second * 1000) + dtNow.Millisecond;
+            int diffMsec = msec % (int)trPeriod;
+            int toBoundary = Math.Max(((int)trPeriod) - diffMsec, 1);
+            int interval = toBoundary + Math.Max(0, ctrl.statusBatchDelayMs);
+            // Sane upper bound -- purely a defensive clamp in case of an unexpected trPeriod
+            // value; the arithmetic above should never actually reach this.
+            interval = Math.Min(interval, (int)trPeriod * 2);
+            statusAnnounceTimer.Interval = interval;
+            statusAnnounceTimer.Start();
+        }
+
         //check for time to log (best done at Tx-start to avoid any logging/dequeueing timing problem if done at Tx end)
         private void ProcessTxStart()
         {
@@ -1665,6 +1752,32 @@ namespace WSJTX_Controller
             }
 
             string toCall = WsjtxMessage.ToCall(txMsg);
+
+            // Wave 2 of the notification architecture (WSJTX_Controller/Notify/): only when
+            // the message actually changed (compared against the OLD curTxMsg, before it's
+            // overwritten below) -- a retransmission of the identical message during a
+            // multi-step exchange must not re-announce. Distinct from txStr in
+            // WsjtxClient.Display.cs's ShowStatus(), which is an ongoing "currently sending
+            // X" status readout re-shown on every rebuild while transmitting, not a one-time
+            // change event -- the two are complementary, not duplicates (see the loggedCall
+            // audit, 2026-08-07).
+            if (txMsg != curTxMsg)
+            {
+                string txSummary;
+                if (WsjtxMessage.IsCQ(txMsg))
+                {
+                    txSummary = "Calling CQ";
+                }
+                else
+                {
+                    string payload = SpacifyPayload(WsjtxMessage.Payload(txMsg));
+                    txSummary = string.IsNullOrEmpty(payload)
+                        ? $"Sending to {Spacify(toCall)}"
+                        : $"Sending {payload} to {Spacify(toCall)}";
+                }
+                Notify.Publish(new TxMessageChangedEvent(toCall, txMsg, txSummary));
+            }
+
             curTxMsg = txMsg;       //the message displayed
             if (txMsg == "TUNE") tuning = true;
             lastStatusTxMsg = txMsg;     //status update for interrupted Tx not required
@@ -2038,6 +2151,8 @@ namespace WSJTX_Controller
         {
             StopDecodeTimers();
             postDecodeTimer.Stop();
+            statusAnnounceTimer.Stop();
+            _pendingStatusText = null;
             decodeCycle = 0;
             decodeCount = 0;
             consecNoDecodes = 0;
@@ -2318,7 +2433,10 @@ namespace WSJTX_Controller
             }
 
             Sounds.PlaySoundEvent(ctrl.loggedCheckBox.Checked, ctrl.soundFile_Logged);
-            StatusView.ShowMessage($"Logged QSO with {call}", false);
+            // Wave 1 of the notification architecture (WSJTX_Controller/Notify/): default
+            // template is "Logged QSO with {Callsign}" -- byte-identical to the direct
+            // ShowMessage call this replaces.
+            Notify.Publish(new QsoCompletedEvent(call, band, mode));
             if (isPota) _potaLog.Add(call, DateTime.Now, band, mode);         //local date/time
             consecCqCount = 0;
             consecTimeoutCount = 0;
@@ -2421,11 +2539,6 @@ namespace WSJTX_Controller
             return true;
         }
 
-        // Last time Alt+U told WSJT-X to upload to LoTW, for display on the Sync
-        // Status view. In-memory only (not persisted) -- LoTW upload is a manual,
-        // user-triggered action, not a background schedule, so "since I started
-        // Jimmy" is the meaningful window, not "ever."
-        public DateTime? lastLotwUploadTrigger;
 
         // Alt+N: Walk Call Filter order (outer), then rank order within each category (inner).
         // The first category in callingEnabled that has a queued call wins; within that category,
@@ -2752,6 +2865,17 @@ namespace WSJTX_Controller
 
             if (call == null) { CancelDiscardCall(); _manualCallInProg = false; }
 
+            // Wave 2 of the notification architecture (WSJTX_Controller/Notify/): only a
+            // genuine transition to a NEW target -- never re-confirming the same station
+            // (that's what the existing "Replying to X" / replyFromInProg path already
+            // covers, a different moment) and never the clear-to-null case. Compared against
+            // the OLD callInProg value, before it's overwritten below.
+            if (call != null && call != callInProg)
+            {
+                string band = FreqToBandStr(dialFrequency / 1e6) ?? "";
+                Notify.Publish(new QsoStartedEvent(call, band, mode));
+            }
+
             callInProg = call;
             UpdateDblClkTip();
             UpdateCallInProg();
@@ -2945,6 +3069,14 @@ namespace WSJTX_Controller
         private void ProcessPostDecodeTimerTick(object sender, EventArgs e)
         {
             DecodesCompleted();
+        }
+
+        private void StatusAnnounceTimerTick(object sender, EventArgs e)
+        {
+            statusAnnounceTimer.Stop();
+            if (_pendingStatusText == null) return;
+            StatusView.RenderStatus(_pendingStatusHeading, _pendingStatusText, _pendingStatusForeColor, _pendingStatusBackColor);
+            _pendingStatusText = null;
         }
 
         private void ProcessDecodeTimerTick(object sender, EventArgs e)
@@ -3712,9 +3844,13 @@ namespace WSJTX_Controller
 
         private void UpdateCallQueue(string call, EnqueueDecodeMessage dmsg)
         {
-            if (!ctrl.cqOnlyRadioButton.Checked || dmsg.ToCall() == myCall) return;
+            // Case-insensitive: see DecodeMessage.IsCallTo's own comment -- myCall keeps
+            // whatever case the operator typed, decoded wire text is always uppercase, and a
+            // plain == here always missed a genuine match under Jimmy Native, which could
+            // incorrectly remove a call actually directed at us on a low-quality decode.
+            if (!ctrl.cqOnlyRadioButton.Checked || dmsg.ToCall().Equals(myCall, StringComparison.OrdinalIgnoreCase)) return;
 
-            if (dmsg.ToCall() != myCall && dmsg.Quality < (int)EnqueueDecodeMessage.Qualities.MEDIUM)
+            if (!dmsg.ToCall().Equals(myCall, StringComparison.OrdinalIgnoreCase) && dmsg.Quality < (int)EnqueueDecodeMessage.Qualities.MEDIUM)
             {
                 _callQueueStore.RemoveCall(call);
                 if (debugDetail) DebugOutput($"{Time()} UpdateCallQueue: removed call:'{call}' msg:{dmsg.Message} quality:{dmsg.Quality}");

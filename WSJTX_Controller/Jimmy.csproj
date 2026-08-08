@@ -21,6 +21,7 @@
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.118" />
     <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
     <PackageReference Include="MQTTnet.Extensions.ManagedClient" Version="4.3.7.1207" />
+    <PackageReference Include="System.IO.Ports" Version="9.0.0" />
   </ItemGroup>
 
   <ItemGroup>
@@ -75,6 +76,33 @@
          is a harmless no-op in MSBuild, not a build error, so Jimmy still builds
          fine before the first fetch. -->
     <None Include="Resources\hamlib\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Rust Native engine host (self-sufficiency plan Phase 5); built separately via a
+         cargo release build in EngineHost\, not part of this C# project's own build, so
+         MSBuild has to be told about it explicitly (it lives outside WSJTX_Controller\,
+         unlike Resources\hamlib\ above, which is a plain recursive Include since it's
+         already nested under this project). Landed at Resources\EngineHost\ in the output;
+         that's NativeEngineClient.LocateExe()'s primary lookup path, so a genuinely
+         standalone/installed copy can find it too, not just a dev build run from inside a
+         full git checkout (LocateExe()'s OTHER fallback, walking up to a sibling
+         EngineHost\target\release\ folder, only ever resolves there; confirmed live,
+         2026-08-07, missing entirely, and silently breaking Native mode with no crash,
+         just a dead engine and a dead radio connection, on a real tester's standalone
+         install). Absent (repo cloned but the Rust side never built) is a harmless no-op in
+         MSBuild, same convention as the hamlib Include above; Jimmy still builds fine
+         without it, just can't use Native mode. -->
+    <None Include="..\EngineHost\target\release\jimmy-engine-host.exe;
+                    ..\EngineHost\target\release\libfftw3f-3.dll;
+                    ..\EngineHost\target\release\libgcc_s_seh-1.dll;
+                    ..\EngineHost\target\release\libgfortran-5.dll;
+                    ..\EngineHost\target\release\libquadmath-0.dll;
+                    ..\EngineHost\target\release\libstdc++-6.dll;
+                    ..\EngineHost\target\release\libwinpthread-1.dll">
+      <Link>Resources\EngineHost\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

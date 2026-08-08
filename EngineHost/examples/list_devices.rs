@@ -4,10 +4,10 @@ fn main() {
     let (inputs, outputs) = tempo_audio::device::available_devices();
     println!("Input devices ({}):", inputs.len());
     for d in &inputs {
-        println!("  - {d}");
+        println!("  - {} ({})", d.name, d.label);
     }
     println!("Output devices ({}):", outputs.len());
     for d in &outputs {
-        println!("  - {d}");
+        println!("  - {} ({})", d.name, d.label);
     }
 }

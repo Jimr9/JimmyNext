@@ -44,6 +44,8 @@ namespace WSJTX_Controller
             this.spotWatchPanel = new System.Windows.Forms.Panel();
             this.radioTabPage = new System.Windows.Forms.TabPage();
             this.radioPanel = new System.Windows.Forms.Panel();
+            this.decodeEngineTabPage = new System.Windows.Forms.TabPage();
+            this.decodeEnginePanel = new System.Windows.Forms.Panel();
             this.soundsTabPage = new System.Windows.Forms.TabPage();
             this.soundsPanel = new System.Windows.Forms.Panel();
             this.appearanceTabPage = new System.Windows.Forms.TabPage();
@@ -100,6 +102,8 @@ namespace WSJTX_Controller
             this.spotWatchPanel.SuspendLayout();
             this.radioTabPage.SuspendLayout();
             this.radioPanel.SuspendLayout();
+            this.decodeEngineTabPage.SuspendLayout();
+            this.decodeEnginePanel.SuspendLayout();
             this.soundsTabPage.SuspendLayout();
             this.soundsPanel.SuspendLayout();
             this.appearanceTabPage.SuspendLayout();
@@ -122,9 +126,10 @@ namespace WSJTX_Controller
             this.tabControl1.Controls.Add(this.soundsTabPage);        // index 8
             this.tabControl1.Controls.Add(this.udpTabPage);           // index 9
             this.tabControl1.Controls.Add(this.radioTabPage);         // index 10
-            this.tabControl1.Controls.Add(this.logbookSyncTabPage);   // index 11
-            this.tabControl1.Controls.Add(this.lookupTabPage);        // index 12
-            this.tabControl1.Controls.Add(this.appearanceTabPage);    // index 13
+            this.tabControl1.Controls.Add(this.decodeEngineTabPage);  // index 11
+            this.tabControl1.Controls.Add(this.logbookSyncTabPage);   // index 12
+            this.tabControl1.Controls.Add(this.lookupTabPage);        // index 13
+            this.tabControl1.Controls.Add(this.appearanceTabPage);    // index 14
             this.tabControl1.Location = new System.Drawing.Point(0, 0);
             this.tabControl1.Multiline = true;
             this.tabControl1.Name = "tabControl1";
@@ -326,6 +331,24 @@ namespace WSJTX_Controller
             this.radioPanel.AutoScroll = true;
             this.radioPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.radioPanel.Name = "radioPanel";
+            //
+            // decodeEngineTabPage
+            //
+            // Split out from radioTabPage: the Decode Engine section (Jimmy Native / My Call /
+            // My Grid / audio device pickers) had grown tall enough to render below the Radio
+            // tab's visible area -- AutoScroll being set did not make it reachable by Tab with a
+            // real screen reader (confirmed live with JAWS/NVDA, 2026-08-06), so it now gets its
+            // own tab with plenty of room instead of relying on scrolling within Radio's tab.
+            this.decodeEngineTabPage.Controls.Add(this.decodeEnginePanel);
+            this.decodeEngineTabPage.Text = "Decode Engine";
+            this.decodeEngineTabPage.Name = "decodeEngineTabPage";
+            this.decodeEngineTabPage.AccessibleName = "Decode Engine tab";
+            //
+            // decodeEnginePanel
+            //
+            this.decodeEnginePanel.AutoScroll = true;
+            this.decodeEnginePanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.decodeEnginePanel.Name = "decodeEnginePanel";
             //
             // soundsTabPage
             //
@@ -793,6 +816,8 @@ namespace WSJTX_Controller
             this.spotWatchPanel.ResumeLayout(false);
             this.radioTabPage.ResumeLayout(false);
             this.radioPanel.ResumeLayout(false);
+            this.decodeEngineTabPage.ResumeLayout(false);
+            this.decodeEnginePanel.ResumeLayout(false);
             this.soundsTabPage.ResumeLayout(false);
             this.soundsPanel.ResumeLayout(false);
             this.appearanceTabPage.ResumeLayout(false);
@@ -866,6 +891,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Panel spotWatchPanel;
         private System.Windows.Forms.TabPage radioTabPage;
         private System.Windows.Forms.Panel radioPanel;
+        private System.Windows.Forms.TabPage decodeEngineTabPage;
+        private System.Windows.Forms.Panel decodeEnginePanel;
         private System.Windows.Forms.TabPage soundsTabPage;
         private System.Windows.Forms.Panel soundsPanel;
         private System.Windows.Forms.TabPage logbookSyncTabPage;
