@@ -76,8 +76,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            RetuneBand(targetIdx, "BandUp");
-            ShowBandChangePending(targetIdx);
+            if (RetuneBand(targetIdx, "BandUp")) ShowBandChangePending(targetIdx);
             return true;
         }
 
@@ -95,8 +94,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            RetuneBand(targetIdx, "BandDown");
-            ShowBandChangePending(targetIdx);
+            if (RetuneBand(targetIdx, "BandDown")) ShowBandChangePending(targetIdx);
             return true;
         }
 
@@ -113,29 +111,29 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            RetuneBand(targetIdx, "SelectBand");
-            ShowBandChangePending(targetIdx);
+            if (RetuneBand(targetIdx, "SelectBand")) ShowBandChangePending(targetIdx);
             return true;
         }
 
-        // Self-sufficiency plan, Phase 5: JimmyNative has no external WSJT-X process to receive
-        // SetBandTxFirst's own WM8Q-only sub-command 15 -- run_radio's standard WSJT-X UDP
-        // server does not implement that private extension, so under JimmyNative band changes
-        // silently did nothing (found live, 2026-08-06: "alt page up and down does not change
-        // bands"). HamlibRigctld radio mode means Jimmy already owns a live rigctld connection
-        // either way (same guard ReportPowerSwr uses above), so retune directly over that
-        // instead -- the engine's own poll loop picks up the new dial on its next tick (see
-        // RigctldClient.SetFrequency's own comment) exactly like a knob-QSY would. WsjtxCat
-        // radio mode is unchanged: that path still needs the external WSJT-X to move its own CAT.
-        private void RetuneBand(int targetIdx, string caller)
+        // Self-sufficiency plan, Phase 5: band changes retune the radio directly over rigctld --
+        // the engine's own poll loop picks up the new dial on its next tick (see
+        // RigctldClient.SetFrequency's own comment) exactly like a knob-QSY would. Under
+        // RadioControlMode.WsjtxCat there is no separate CAT connection at all (radio state
+        // comes read-only from the engine's own StatusMessage broadcasts), so there is nothing
+        // to retune -- returns false so callers skip the "Changing to..." status announcement
+        // instead of claiming a band change that never happens.
+        private bool RetuneBand(int targetIdx, string caller)
         {
             _pendingBandIdx = targetIdx;
             uint freqHz = (uint)(bandToFreq(targetIdx) * 1000);
             DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst}");
-            if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
-                ctrl.rigctldClient.SetFrequency(freqHz);
-            else
-                SetBandTxFirst(freqHz, txFirst, caller);
+            if (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld || ctrl.rigctldClient == null)
+            {
+                StatusView.ShowMessage("Band change needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
+                return false;
+            }
+            ctrl.rigctldClient.SetFrequency(freqHz);
+            return true;
         }
 
         private void ShowBandChangePending(int targetIdx)
@@ -146,11 +144,10 @@ namespace WSJTX_Controller
             ctrl.statusText.SelectionStart = 0;
         }
 
-        // Self-sufficiency plan, Phase 1: backend-aware. WsjtxCat keeps today's behavior
-        // unchanged (WM8Q sub-command 18, answer arrives async via wsjtxResultCode). HamlibRigctld
-        // instead does one fresh, synchronous PollOnce() -- deliberately not reusing
-        // ctrl.lastRadioStatus's background-timer value, since this is an explicit on-demand
-        // "check now" action (Alt+Q), not a passive display.
+        // Self-sufficiency plan, Phase 1: one fresh, synchronous PollOnce() -- deliberately not
+        // reusing ctrl.lastRadioStatus's background-timer value, since this is an explicit
+        // on-demand "check now" action (Alt+Q), not a passive display. Needs Hamlib rigctld --
+        // under RadioControlMode.WsjtxCat there is no separate CAT connection to poll at all.
         public bool ReportPowerSwr()
         {
             if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
@@ -161,8 +158,7 @@ namespace WSJTX_Controller
                 return true;
             }
 
-            GetPowerSwr();
-            StartStatusTimer2(false);
+            StatusView.ShowMessage("Power/SWR needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
             return true;
         }
 
@@ -176,26 +172,19 @@ namespace WSJTX_Controller
             return parts.Count > 0 ? string.Join(", ", parts) : "Radio: no meter data available from rigctld.";
         }
 
+        // No native trigger exists for this yet -- jimmy-engine-host.exe has no CLI/UDP
+        // "start tuning" request of its own (tuning here otherwise only ever reflects the
+        // engine's own real txMsg=="TUNE" status reports, see ProcessTxStart/ProcessTxEnd).
         public bool ToggleTuningProcess()
         {
-            if (!tuning && transmitting)
-            {
-                HaltTx();
-                Thread.Sleep(500);
-            }
-
-            ToggleTuning();
-            tuning = !tuning;
-
-            if (!tuning) StartStatusTimer2(false);
-
+            StatusView.ShowMessage("Tune isn't available in Jimmy Native yet.", true);
             return true;
         }
 
         // Self-sufficiency plan, Phase 1: the one and only F11/F12 redirect point (confirmed by
         // direct tracing -- HotkeyConfig.cs -> Controller.ProcessCmdKey -> here -> either path
-        // below; no other code path touches F11/F12). HamlibRigctld adjusts the radio's own AF
-        // gain via rigctld; WsjtxCat keeps today's WM8Q sub-command 20 behavior unchanged.
+        // below). Needs Hamlib rigctld to adjust the radio's own AF gain -- under
+        // RadioControlMode.WsjtxCat there is no separate CAT connection to adjust at all.
         public bool AudioLevel(bool up)
         {
             if (!transmitting) return false;
@@ -210,7 +199,7 @@ namespace WSJTX_Controller
                     StatusView.ShowMessage($"Audio level: {ctrl.rigctldClient.LastError}", true);
             }
             else
-                AdjAudioLevel(up);
+                StatusView.ShowMessage("Audio level needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
             return true;
         }
 

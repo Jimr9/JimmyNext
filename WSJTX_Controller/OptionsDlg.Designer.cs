@@ -50,18 +50,6 @@ namespace WSJTX_Controller
             this.soundsPanel = new System.Windows.Forms.Panel();
             this.appearanceTabPage = new System.Windows.Forms.TabPage();
             this.appearancePanel = new System.Windows.Forms.Panel();
-            this.udpTabPage = new System.Windows.Forms.TabPage();
-            this.udpPanel = new System.Windows.Forms.Panel();
-            this.udpGroupBox = new System.Windows.Forms.GroupBox();
-            this.udpOverrideCheckBox = new System.Windows.Forms.CheckBox();
-            this.udpHelpButton = new System.Windows.Forms.Button();
-            this.udpAddrStaticLabel = new System.Windows.Forms.Label();
-            this.udpAddrTextBox = new System.Windows.Forms.TextBox();
-            this.udpAddrLabel = new System.Windows.Forms.Label();
-            this.udpPortStaticLabel = new System.Windows.Forms.Label();
-            this.udpPortTextBox = new System.Windows.Forms.TextBox();
-            this.udpPortStdLabel = new System.Windows.Forms.Label();
-            this.udpMulticastCheckBox = new System.Windows.Forms.CheckBox();
             this.udpOnTopCheckBox = new System.Windows.Forms.CheckBox();
             this.udpDiagLogCheckBox = new System.Windows.Forms.CheckBox();
             this.filterGroupBox = new System.Windows.Forms.GroupBox();
@@ -108,9 +96,6 @@ namespace WSJTX_Controller
             this.soundsPanel.SuspendLayout();
             this.appearanceTabPage.SuspendLayout();
             this.appearancePanel.SuspendLayout();
-            this.udpTabPage.SuspendLayout();
-            this.udpPanel.SuspendLayout();
-            this.udpGroupBox.SuspendLayout();
             this.SuspendLayout();
             //
             // tabControl1
@@ -124,12 +109,11 @@ namespace WSJTX_Controller
             this.tabControl1.Controls.Add(this.wantedCallsTabPage);   // index 6
             this.tabControl1.Controls.Add(this.spotWatchTabPage);     // index 7
             this.tabControl1.Controls.Add(this.soundsTabPage);        // index 8
-            this.tabControl1.Controls.Add(this.udpTabPage);           // index 9
-            this.tabControl1.Controls.Add(this.radioTabPage);         // index 10
-            this.tabControl1.Controls.Add(this.decodeEngineTabPage);  // index 11
-            this.tabControl1.Controls.Add(this.logbookSyncTabPage);   // index 12
-            this.tabControl1.Controls.Add(this.lookupTabPage);        // index 13
-            this.tabControl1.Controls.Add(this.appearanceTabPage);    // index 14
+            this.tabControl1.Controls.Add(this.radioTabPage);         // index 9
+            this.tabControl1.Controls.Add(this.decodeEngineTabPage);  // index 10
+            this.tabControl1.Controls.Add(this.logbookSyncTabPage);   // index 11
+            this.tabControl1.Controls.Add(this.lookupTabPage);        // index 12
+            this.tabControl1.Controls.Add(this.appearanceTabPage);    // index 13
             this.tabControl1.Location = new System.Drawing.Point(0, 0);
             this.tabControl1.Multiline = true;
             this.tabControl1.Name = "tabControl1";
@@ -148,6 +132,7 @@ namespace WSJTX_Controller
             // generalPanel
             //
             this.generalPanel.Controls.Add(this.udpOnTopCheckBox);
+            this.generalPanel.Controls.Add(this.udpDiagLogCheckBox);
             this.generalPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.generalPanel.Name = "generalPanel";
             //
@@ -402,118 +387,7 @@ namespace WSJTX_Controller
             this.lookupPanel.Dock       = System.Windows.Forms.DockStyle.Fill;
             this.lookupPanel.Name       = "lookupPanel";
             //
-            // udpTabPage
-            //
-            this.udpTabPage.Controls.Add(this.udpPanel);
-            this.udpTabPage.Text = "UDP / Connection";
-            this.udpTabPage.Name = "udpTabPage";
-            //
-            // udpPanel
-            //
-            this.udpPanel.Controls.Add(this.udpGroupBox);
-            this.udpPanel.Controls.Add(this.udpDiagLogCheckBox);
-            this.udpPanel.Dock = System.Windows.Forms.DockStyle.Fill;
-            this.udpPanel.Name = "udpPanel";
-            //
-            // udpGroupBox
-            //
-            this.udpGroupBox.AccessibleName = "UDP server settings group";
-            this.udpGroupBox.Controls.Add(this.udpOverrideCheckBox);
-            this.udpGroupBox.Controls.Add(this.udpHelpButton);
-            this.udpGroupBox.Controls.Add(this.udpAddrStaticLabel);
-            this.udpGroupBox.Controls.Add(this.udpAddrTextBox);
-            this.udpGroupBox.Controls.Add(this.udpAddrLabel);
-            this.udpGroupBox.Controls.Add(this.udpPortStaticLabel);
-            this.udpGroupBox.Controls.Add(this.udpPortTextBox);
-            this.udpGroupBox.Controls.Add(this.udpPortStdLabel);
-            this.udpGroupBox.Controls.Add(this.udpMulticastCheckBox);
-            this.udpGroupBox.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
-            this.udpGroupBox.Location = new System.Drawing.Point(10, 8);
-            this.udpGroupBox.Name = "udpGroupBox";
-            this.udpGroupBox.Size = new System.Drawing.Size(640, 155);
-            this.udpGroupBox.TabStop = false;
-            this.udpGroupBox.Text = "UDP server settings";
-            //
-            // udpOverrideCheckBox
-            //
-            this.udpOverrideCheckBox.AccessibleName = "Override UDP automatic detection";
-            this.udpOverrideCheckBox.AutoSize = true;
-            this.udpOverrideCheckBox.Location = new System.Drawing.Point(12, 22);
-            this.udpOverrideCheckBox.Name = "udpOverrideCheckBox";
-            this.udpOverrideCheckBox.TabIndex = 0;
-            this.udpOverrideCheckBox.Text = "Override automatic detection (not recommended!)";
-            this.udpOverrideCheckBox.UseVisualStyleBackColor = true;
-            this.udpOverrideCheckBox.CheckedChanged += new System.EventHandler(this.udpOverrideCheckBox_CheckedChanged);
-            //
-            // udpHelpButton
-            //
-            this.udpHelpButton.AccessibleName = "UDP connection help";
-            this.udpHelpButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, ((System.Drawing.FontStyle)((System.Drawing.FontStyle.Bold | System.Drawing.FontStyle.Italic))), System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.udpHelpButton.ForeColor = System.Drawing.Color.Blue;
-            this.udpHelpButton.Location = new System.Drawing.Point(294, 0);
-            this.udpHelpButton.Name = "udpHelpButton";
-            this.udpHelpButton.Size = new System.Drawing.Size(26, 22);
-            this.udpHelpButton.TabIndex = 4;
-            this.udpHelpButton.Text = "?";
-            this.udpHelpButton.UseVisualStyleBackColor = true;
-            this.udpHelpButton.Click += new System.EventHandler(this.udpHelpButton_Click);
-            //
-            // udpAddrStaticLabel
-            //
-            this.udpAddrStaticLabel.AutoSize = true;
-            this.udpAddrStaticLabel.Location = new System.Drawing.Point(28, 52);
-            this.udpAddrStaticLabel.Name = "udpAddrStaticLabel";
-            this.udpAddrStaticLabel.Text = "UDP address:";
-            //
-            // udpAddrTextBox
-            //
-            this.udpAddrTextBox.AccessibleName = "UDP address text box";
-            this.udpAddrTextBox.Location = new System.Drawing.Point(130, 49);
-            this.udpAddrTextBox.Name = "udpAddrTextBox";
-            this.udpAddrTextBox.Size = new System.Drawing.Size(120, 20);
-            this.udpAddrTextBox.TabIndex = 1;
-            //
-            // udpAddrLabel
-            //
-            this.udpAddrLabel.AutoSize = true;
-            this.udpAddrLabel.Location = new System.Drawing.Point(258, 52);
-            this.udpAddrLabel.Name = "udpAddrLabel";
-            this.udpAddrLabel.Text = "(Standard: 239.255.0.0)";
-            //
-            // udpPortStaticLabel
-            //
-            this.udpPortStaticLabel.AutoSize = true;
-            this.udpPortStaticLabel.Location = new System.Drawing.Point(28, 79);
-            this.udpPortStaticLabel.Name = "udpPortStaticLabel";
-            this.udpPortStaticLabel.Text = "UDP port:";
-            //
-            // udpPortTextBox
-            //
-            this.udpPortTextBox.AccessibleName = "UDP port text box";
-            this.udpPortTextBox.Location = new System.Drawing.Point(130, 76);
-            this.udpPortTextBox.Name = "udpPortTextBox";
-            this.udpPortTextBox.Size = new System.Drawing.Size(120, 20);
-            this.udpPortTextBox.TabIndex = 2;
-            //
-            // udpPortStdLabel
-            //
-            this.udpPortStdLabel.AutoSize = true;
-            this.udpPortStdLabel.Location = new System.Drawing.Point(258, 79);
-            this.udpPortStdLabel.Name = "udpPortStdLabel";
-            this.udpPortStdLabel.Text = "(Standard: 2237)";
-            //
-            // udpMulticastCheckBox
-            //
-            this.udpMulticastCheckBox.AccessibleName = "Multicast";
-            this.udpMulticastCheckBox.AutoSize = true;
-            this.udpMulticastCheckBox.Location = new System.Drawing.Point(28, 107);
-            this.udpMulticastCheckBox.Name = "udpMulticastCheckBox";
-            this.udpMulticastCheckBox.TabIndex = 3;
-            this.udpMulticastCheckBox.Text = "Multicast (also select an \"Outgoing interface\" in WSJT-X)";
-            this.udpMulticastCheckBox.UseVisualStyleBackColor = true;
-            this.udpMulticastCheckBox.CheckedChanged += new System.EventHandler(this.udpMulticastCheckBox_CheckedChanged);
-            //
-            // udpOnTopCheckBox  (moved to General tab / generalPanel)
+            // udpOnTopCheckBox  (General tab / generalPanel)
             //
             this.udpOnTopCheckBox.AccessibleName = "Always on top";
             this.udpOnTopCheckBox.AutoSize = true;
@@ -523,13 +397,13 @@ namespace WSJTX_Controller
             this.udpOnTopCheckBox.Text = "Always on top";
             this.udpOnTopCheckBox.UseVisualStyleBackColor = true;
             //
-            // udpDiagLogCheckBox
+            // udpDiagLogCheckBox  (General tab / generalPanel)
             //
             this.udpDiagLogCheckBox.AccessibleName = "Log diagnostic info";
             this.udpDiagLogCheckBox.AutoSize = true;
-            this.udpDiagLogCheckBox.Location = new System.Drawing.Point(10, 170);
+            this.udpDiagLogCheckBox.Location = new System.Drawing.Point(200, 15);
             this.udpDiagLogCheckBox.Name = "udpDiagLogCheckBox";
-            this.udpDiagLogCheckBox.TabIndex = 4;
+            this.udpDiagLogCheckBox.TabIndex = 1;
             this.udpDiagLogCheckBox.Text = "Log diagnostic info";
             this.udpDiagLogCheckBox.UseVisualStyleBackColor = true;
             //
@@ -822,11 +696,6 @@ namespace WSJTX_Controller
             this.soundsPanel.ResumeLayout(false);
             this.appearanceTabPage.ResumeLayout(false);
             this.appearancePanel.ResumeLayout(false);
-            this.udpTabPage.ResumeLayout(false);
-            this.udpPanel.ResumeLayout(false);
-            this.udpPanel.PerformLayout();
-            this.udpGroupBox.ResumeLayout(false);
-            this.udpGroupBox.PerformLayout();
             this.lookupTabPage.ResumeLayout(false);
             this.ResumeLayout(false);
         }
@@ -849,18 +718,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TabPage basicTabPage;
         private System.Windows.Forms.TabPage hotkeysTabPage;
         private System.Windows.Forms.Panel hotkeysPanel;
-        private System.Windows.Forms.TabPage udpTabPage;
-        private System.Windows.Forms.Panel udpPanel;
-        private System.Windows.Forms.GroupBox udpGroupBox;
-        private System.Windows.Forms.CheckBox udpOverrideCheckBox;
-        private System.Windows.Forms.Button udpHelpButton;
-        private System.Windows.Forms.Label udpAddrStaticLabel;
-        private System.Windows.Forms.TextBox udpAddrTextBox;
-        private System.Windows.Forms.Label udpAddrLabel;
-        private System.Windows.Forms.Label udpPortStaticLabel;
-        private System.Windows.Forms.TextBox udpPortTextBox;
-        private System.Windows.Forms.Label udpPortStdLabel;
-        private System.Windows.Forms.CheckBox udpMulticastCheckBox;
         private System.Windows.Forms.CheckBox udpOnTopCheckBox;
         private System.Windows.Forms.CheckBox udpDiagLogCheckBox;
         public System.Windows.Forms.GroupBox filterGroupBox;

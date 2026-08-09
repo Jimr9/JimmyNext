@@ -292,10 +292,6 @@ namespace WSJTX_Controller
             sb.AppendLine($"UDP IP address:       {diag.IpAddress?.ToString() ?? "Unknown"}");
             sb.AppendLine($"UDP port:             {diag.Port}");
             sb.AppendLine($"UDP multicast:        {diag.Multicast}");
-            sb.AppendLine($"Override UDP detect:  {Safe(() => ctrl?.wsjtxClient?.overrideUdpDetect.ToString() ?? "Unknown")}");
-            sb.AppendLine();
-            sb.AppendLine("WSJT-X.ini UDP settings (auto-detected source):");
-            sb.AppendLine(Safe(ReadWsjtxUdpSettings));
         }
 
         private static void BuildOperatingSection(StringBuilder sb, Controller ctrl, WsjtxDiagData diag)
@@ -699,27 +695,6 @@ namespace WSJTX_Controller
             }
             catch { }
             return os;
-        }
-
-        private static string ReadWsjtxUdpSettings()
-        {
-            try
-            {
-                string wsjtxIni = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "WSJT-X", "WSJT-X.ini");
-                if (!File.Exists(wsjtxIni)) return "  WSJT-X.ini not found.";
-
-                var ini = new IniFile(wsjtxIni);
-                string server = ini.Read("UDPServer",     "Configuration");
-                string port   = ini.Read("UDPServerPort", "Configuration");
-                return $"  UDPServer = {(string.IsNullOrEmpty(server) ? "(not set)" : server)}\n" +
-                       $"  UDPServerPort = {(string.IsNullOrEmpty(port) ? "(not set)" : port)}";
-            }
-            catch (Exception ex)
-            {
-                return $"  Could not read WSJT-X.ini: {ex.Message}";
-            }
         }
 
         private static string FormatTxMode(WsjtxClient.TxModes mode)

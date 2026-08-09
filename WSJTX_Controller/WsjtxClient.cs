@@ -40,20 +40,9 @@ namespace WSJTX_Controller
         // (Protocol/WsjtxProtocolAdapter.cs). These stay as delegating properties, not
         // fields, with their original names/visibility, so every existing call site
         // across WsjtxClient's other partial-class files and external classes
-        // (Controller/OptionsDlg/SetupDlg read these; only WsjtxClient itself ever
-        // assigns them) keeps working completely unchanged.
+        // (Controller/OptionsDlg read these; only WsjtxClient itself ever assigns
+        // them) keeps working completely unchanged.
         private readonly WsjtxProtocolAdapter _protocolAdapter = new WsjtxProtocolAdapter();
-        // Stage A4 (migration roadmap): isolates every non-standard NewTxMsgIdx
-        // sub-command behind WsjtxCompatibilityExtension (Compatibility/
-        // WsjtxCompatibilityExtension.cs). Field initializers run in declaration
-        // order, so _protocolAdapter (declared just above) is already constructed
-        // by the time this one runs.
-        private readonly WsjtxCompatibilityExtension _compatExtension;
-        // Stage A5 (migration roadmap / Architecture Blueprint §19): replaces
-        // acceptableWsjtxVersions' hard version-string gate with a runtime capability
-        // probe. See Protocol/CapabilityNegotiator.cs.
-        private readonly CapabilityNegotiator _capabilityNegotiator = new CapabilityNegotiator();
-        public WsjtxCapabilityState CapabilityState => _capabilityNegotiator.State;
         // Stage A6 (migration roadmap): cuts the queue/ranking/display/award consumers
         // over to ClassificationEngine's computed output. LogbookDb() (parameterless)
         // already respects JIMMY_TEST_DB_PATH (see LogbookDb.cs), so this is safe under
@@ -77,7 +66,6 @@ namespace WSJTX_Controller
         public int port { get => _protocolAdapter.Port; set => _protocolAdapter.Port = value; }
         public IPAddress ipAddress { get => _protocolAdapter.IpAddress; set => _protocolAdapter.IpAddress = value; }
         public bool multicast { get => _protocolAdapter.Multicast; set => _protocolAdapter.Multicast = value; }
-        public bool overrideUdpDetect { get => _protocolAdapter.OverrideUdpDetect; set => _protocolAdapter.OverrideUdpDetect = value; }
         public bool debug;
         public string pgmName;
         public string pgmVer;
@@ -109,7 +97,6 @@ namespace WSJTX_Controller
 
         private StreamWriter logSw = null;
         private bool settingChanged = false;
-        private string cmdCheck = "";
         internal Dictionary<string, EnqueueDecodeMessage> callDict = new Dictionary<string, EnqueueDecodeMessage>();
         internal Queue<string> callQueue = new Queue<string>();
         internal List<string> sentReportList = new List<string>();
@@ -262,7 +249,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Timer processDecodeTimer2 = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer statusTimer = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer statusTimer2 = new System.Windows.Forms.Timer();
-        public System.Windows.Forms.Timer cmdCheckTimer = new System.Windows.Forms.Timer();
         public System.Windows.Forms.Timer dialogTimer2 = new System.Windows.Forms.Timer();
         public System.Windows.Forms.Timer dialogTimer3 = new System.Windows.Forms.Timer();
         public System.Windows.Forms.Timer heartbeatRecdTimer = new System.Windows.Forms.Timer();
@@ -603,7 +589,7 @@ namespace WSJTX_Controller
             PWR_SWR_SINGLE_RPT
         }
 
-        public WsjtxClient(Controller c, IPAddress reqIpAddress, int reqPort, bool reqMulticast, bool reqOverrideUdpDetect, bool reqDebug, bool reqLog, WsjtxClient.TxModes tMode)
+        public WsjtxClient(Controller c, IPAddress reqIpAddress, int reqPort, bool reqMulticast, bool reqDebug, bool reqLog, WsjtxClient.TxModes tMode)
         {
             ctrl = c;           //used for accessing/updating UI
             StatusView = c;
@@ -641,7 +627,6 @@ namespace WSJTX_Controller
             ipAddress = reqIpAddress;
             port = reqPort;
             multicast = reqMulticast;
-            overrideUdpDetect = reqOverrideUdpDetect;
             txMode = tMode;
             //major.minor.build.private
             string allVer = FileVersionInfo.GetVersionInfo(Assembly.GetExecutingAssembly().Location).FileVersion;
@@ -688,7 +673,6 @@ namespace WSJTX_Controller
 
             emsg = new EnableTxMessage();
             emsg.Id = WsjtxMessage.UniqueId;
-            _compatExtension = new WsjtxCompatibilityExtension(_protocolAdapter);
 
             firstDecodeTime = DateTime.MinValue;
 
@@ -705,8 +689,6 @@ namespace WSJTX_Controller
 
             statusTimer2.Tick += new System.EventHandler(StatusTimer2Tick);       //restore previous status
             statusTimer2.Interval = 5000;
-
-            cmdCheckTimer.Tick += new System.EventHandler(capabilityProbeTimer_Tick);
 
             dialogTimer2.Tick += new System.EventHandler(dialogTimer2_Tick);
             dialogTimer2.Interval = 20;
@@ -1551,9 +1533,6 @@ namespace WSJTX_Controller
                     if (ctrl.freqCheckBox.Checked && oddOffset > 0 && evenOffset > 0)
                     {
                         //set/show frequency offset for period after decodes started
-                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
-                        _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, AudioOffsetFromTxPeriod(),
-                            msg => DebugOutput($"{Time()} {msg}"));
                         if (settingChanged)
                         {
                             ctrl.WsjtxSettingConfirmed();
@@ -1563,10 +1542,7 @@ namespace WSJTX_Controller
 
                     if (newDirCq)
                     {
-                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetupCq.
                         string cqMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
-                        _compatExtension.SetupCq(cqMsg, ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked,
-                            msg => DebugOutput($"{Time()} {msg}"));
                         qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
                         replyCmd = null;        //invalidate last reply cmd since not replying
                         replyDecode = null;
@@ -2228,18 +2204,12 @@ namespace WSJTX_Controller
             ResetOpMode();
             ShowStatus();
             heartbeatRecdTimer.Stop();
-            cmdCheckTimer.Stop();
             DebugOutput($"{spacer}heartbeatRecdTimer stop");
 
             try
             {
-                if (emsg != null && udpClient2 != null)
+                if (udpClient2 != null)
                 {
-                    //notify WSJT-X
-                    // Stage A4: build+send moved to WsjtxCompatibilityExtension.DeInit.
-                    _compatExtension.DeInit(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked,
-                        msg => DebugOutput($"{Time()} {msg}"));
-                    Thread.Sleep(500);
                     udpClient2.Close();
                     udpClient2 = null;
                     DebugOutput($"{spacer}closed udpClient2:{udpClient2}");
@@ -2382,34 +2352,20 @@ namespace WSJTX_Controller
             if (band == null) band = "Unknown";
 
             // Reuses the same shared builder as HandleLiveQsoLogged/HandleLiveAdifLogged (see
-            // AdifRecordBuilder.cs) instead of maintaining a separate hand-rolled field list here --
-            // this is the record actually sent to WSJT-X (cmd:255) and, via ImportLiveLoggedQso,
-            // uploaded verbatim to QRZ/Club Log in real time, so any field the shared builder
-            // supports now flows through for Jimmy-initiated logging too. name/comment/tx_pwr/
-            // operator/exchange are passed empty -- WSJT-X's own QsoLoggedMessage carries those
-            // (typed into WSJT-X's own logging dialog); Jimmy's self-initiated log here has no
-            // equivalent source for them today.
+            // AdifRecordBuilder.cs) instead of maintaining a separate hand-rolled field list here.
+            // name/comment/tx_pwr/operator/exchange are passed empty -- WSJT-X's own
+            // QsoLoggedMessage carries those (typed into WSJT-X's own logging dialog); Jimmy's
+            // self-initiated log here has no equivalent source for them today.
             string adifRecord = AdifRecordBuilder.Build(
                 call, band, (long)(dialFrequency + txOffset), mode,
                 qsoDateOn, qsoTimeOn, qsoTimeOff, rstSent, rstRecd, grid,
                 name: "", comment: "", txPwr: "", operatorCall: "",
                 stationCall: myCall, myGrid: myGrid, qsoDateOff: qsoDateOff);
 
-            //request add record to log / worked before (using explicit parameters, unlike typical WSJT-X logging)
-            //send ADIF record to WSJT-X for re-broadcast to logging pgms
-            // Stage A4: build+send moved to WsjtxCompatibilityExtension.BroadcastLoggedQso.
-            _compatExtension.BroadcastLoggedQso(call, grid, band, mode, adifRecord,
-                msg => DebugOutput($"{Time()} {msg}"));
-
-            // Root-cause fix: the cmd:255 broadcast above asks WSJT-X to log the QSO, but
-            // WSJT-X's own confirmation (QsoLoggedMessage/LoggedAdifMessage) -- the only
-            // thing that normally drives ImportLiveLoggedQso (local logbook.db, Awards/Still
-            // Need tracking, and QRZ/Club Log real-time upload) -- is not guaranteed to come
-            // back. Observed in practice: WSJT-X wrote the QSO to its own ADIF log but never
-            // sent the confirmation, so Jimmy's own database silently never learned about it.
-            // Jimmy already has every field needed to record this QSO itself, so it does so
-            // directly here instead of depending solely on that round trip. ClaimLiveLoggedQso
-            // still dedupes against WSJT-X's confirmation if it arrives afterward.
+            // Jimmy has every field needed to record this Jimmy-initiated QSO itself, so it does
+            // so directly here rather than depending on any round trip back from the engine.
+            // ClaimLiveLoggedQso still dedupes against a QsoLoggedMessage/LoggedAdifMessage
+            // confirmation if one arrives too.
             string liveDedupKey = AdifImporter.BuildDedupKey(call, band, mode, qsoDateOn, qsoTimeOn);
             if (ClaimLiveLoggedQso(liveDedupKey))
             {
@@ -2892,8 +2848,6 @@ namespace WSJTX_Controller
                 }
 
                 DebugOutput($"{Time()} EnableTx, txEnabled:{txEnabled} processDecodeTimer.Enabled:{processDecodeTimer.Enabled}");
-                // Stage A4: build+send moved to WsjtxCompatibilityExtension.EnableTx.
-                _compatExtension.EnableTx(msg => DebugOutput($"{Time()} {msg}"));
                 txEnabled = true;
                 wsjtxTxEnableButton = true;
                 UpdateDblClkTip();
@@ -2920,8 +2874,6 @@ namespace WSJTX_Controller
                     return;
                 }
 
-                // Stage A4: build+send moved to WsjtxCompatibilityExtension.DisableTx.
-                _compatExtension.DisableTx(buttonState, msg => DebugOutput($"{Time()} {msg}"));
                 txEnabled = false;
                 wsjtxTxEnableButton = buttonState;
                 UpdateDblClkTip();
@@ -2935,24 +2887,6 @@ namespace WSJTX_Controller
             UpdateDebug();
         }
 
-        // Stage A4: build+send moved to WsjtxCompatibilityExtension.EnableMonitoring.
-        private void EnableMonitoring()
-        {
-            _compatExtension.EnableMonitoring(msg => DebugOutput($"{Time()} {msg}"));
-        }
-
-        // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetListenMode.
-        private void SetListenMode()
-        {
-            if (udpClient2 == null)
-            {
-                DebugOutput($"{Time()} SetListenMode skipped, udpClient2:{udpClient2}");
-                return;
-            }
-
-            _compatExtension.SetListenMode(txMode == TxModes.LISTEN, msg => DebugOutput($"{Time()} {msg}"));
-        }
-
         public void HaltTuning()
         {
             if (tuning) HaltTx();
@@ -2964,20 +2898,10 @@ namespace WSJTX_Controller
             tuning = false;
             if (udpClient2 != null)
             {
-                // Stage A8: also send the standard HaltTx message (msg type 8), not just
-                // the non-standard sub-command 12 below -- confirmed via code reading
-                // that the standard HaltTxMessage class existed but was never actually
-                // instantiated/sent anywhere. A stock/Improved build (no Compatibility
-                // Layer) silently ignores sub-command 12 entirely, so HaltTx() -- also
-                // Jimmy's Escape-key emergency-stop path (HaltAndDisableTx, "TX halts
-                // regardless of which mode Jimmy is in") -- previously had NO effect at
-                // all against such a build. Sent unconditionally alongside the existing
-                // sub-command 12 (kept as-is, zero behavior change for a Compatibility-
-                // Layer build): pure addition, not a replacement, so nothing regresses if
-                // a real-world edge case in the standard path ever surfaces. AutoOnly is
-                // explicitly false -- an emergency stop must halt regardless of whether
-                // the pending Tx was auto-generated or not, matching the sub-command 12
-                // path's own unconditional behavior.
+                // The standard HaltTx message (msg type 8) -- also Jimmy's Escape-key
+                // emergency-stop path (HaltAndDisableTx, "TX halts regardless of which mode
+                // Jimmy is in"). AutoOnly is explicitly false -- an emergency stop must halt
+                // regardless of whether the pending Tx was auto-generated or not.
                 var hmsg = new HaltTxMessage
                 {
                     SchemaVersion = (uint)WsjtxMessage.NegotiatedSchemaVersion,
@@ -2988,8 +2912,6 @@ namespace WSJTX_Controller
                 udpClient2.Send(ba, ba.Length);
                 DebugOutput($"{Time()} >>>>>Sent standard HaltTx (msg type 8)");
 
-                // Stage A4: build+send moved to WsjtxCompatibilityExtension.HaltTx.
-                _compatExtension.HaltTx(msg => DebugOutput($"{Time()} {msg}"));
                 txEnabled = false;
                 wsjtxTxEnableButton = false;
                 UpdateDblClkTip();
@@ -3142,10 +3064,7 @@ namespace WSJTX_Controller
                     {
                         //set/show frequency offset for Tx period
                         uint decodesCompletedOffset = AudioOffsetFromTxPeriod();
-                        DebugOutput($"{Time()} [BAND-AUDIT] DecodesCompleted→cmd:10 sent: bandIdx:{bandIdx} offset:{decodesCompletedOffset}");
-                        // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
-                        _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, decodesCompletedOffset,
-                            msg => DebugOutput($"{Time()} {msg}"));
+                        DebugOutput($"{Time()} [BAND-AUDIT] DecodesCompleted offset calc: bandIdx:{bandIdx} offset:{decodesCompletedOffset}");
                         if (settingChanged)
                         {
                             ctrl.WsjtxSettingConfirmed();
@@ -3404,19 +3323,13 @@ namespace WSJTX_Controller
         private void SetupCq(bool enableTx)
         {
             //set/show frequency offset for period after decodes started
-            // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
-            _compatExtension.OptReq(ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, AudioOffsetFromTxPeriod(),
-                msg => DebugOutput($"{Time()} {msg}"));
             if (settingChanged)
             {
                 ctrl.WsjtxSettingConfirmed();
                 settingChanged = false;
             }
 
-            // Stage A4: build+send moved to WsjtxCompatibilityExtension.SetupCq.
             string cqMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
-            _compatExtension.SetupCq(cqMsg, ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked,
-                msg => DebugOutput($"{Time()} {msg}"));
             qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
             replyCmd = null;        //invalidate last reply cmd since not replying
             replyDecode = null;
@@ -3496,9 +3409,6 @@ namespace WSJTX_Controller
             }
 
             //set call options
-            // Stage A4: build+send moved to WsjtxCompatibilityExtension.OptReq.
-            _compatExtension.OptReq(dmsg.UseStdReply ? false : ctrl.skipGridCheckBox.Checked, ctrl.useRR73CheckBox.Checked, AudioOffsetFromMsg(dmsg),
-                msg => DebugOutput($"{Time()} {msg}"));
             if (settingChanged)
             {
                 ctrl.WsjtxSettingConfirmed();

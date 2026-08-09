@@ -31,8 +31,6 @@ import ctypes
 import ctypes.wintypes
 import datetime
 import os
-import tempfile
-import atexit
 
 # Ensure UTF-8 output so checkmark/cross symbols render on any Windows console
 try:
@@ -685,32 +683,14 @@ def _port_in_use(port):
 
 def ensure_jimmy_udp_ready():
     """
-    Jimmy only binds its UDP socket after detecting WSJT-X via the lock file
-    at %TEMP%\\WSJT-X.lock. If the port isn't open yet, create the lock file
-    to trigger Jimmy's startup sequence, then wait for it to bind.
-
-    The lock file is removed on exit so Jimmy cleanly detects 'WSJT-X closed'.
+    Native-only Jimmy opens its UDP listener unconditionally at startup
+    (Controller.ApplyEngineMode -> WsjtxClient.ConnectNativeEngine), no lock
+    file or external-WSJT-X detection involved anymore -- just poll for the
+    port to come up.
     """
     if _port_in_use(JIMMY_PORT):
         return True  # already open — nothing to do
 
-    lock_path = os.path.join(tempfile.gettempdir(), "WSJT-X.lock")
-    created = False
-
-    if not os.path.exists(lock_path):
-        print(f"  Jimmy UDP not yet open. Creating {lock_path} to trigger startup...")
-        try:
-            open(lock_path, "w").close()
-            created = True
-            atexit.register(lambda: os.path.exists(lock_path) and os.remove(lock_path))
-        except OSError as e:
-            print(f"  WARNING: Could not create lock file: {e}")
-            return False
-    else:
-        print(f"  WSJT-X.lock already exists at {lock_path}")
-
-    # Jimmy's mainLoopTimer fires every ~12 ms; CheckWsjtxRunning sleeps 3 s
-    # then binds UDP. Poll up to 10 seconds total to cover the 3-s sleep + margin.
     print("  Waiting for Jimmy to open UDP (up to 10 s)...", end="", flush=True)
     deadline = time.time() + 10.0
     while time.time() < deadline:
@@ -721,11 +701,6 @@ def ensure_jimmy_udp_ready():
             return True
 
     print(f"\n  WARNING: Jimmy did not open port {JIMMY_PORT} within 10 s.")
-    if created:
-        try:
-            os.remove(lock_path)
-        except OSError:
-            pass
     return False
 
 
@@ -733,45 +708,15 @@ def ensure_jimmy_udp_ready():
 # WSJT-X Handshake
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _parse_enable_tx(data):
-    """Extract (cmd_idx, cmd_check) from an EnableTxMessage."""
-    if not data.startswith(MAGIC) or len(data) < 12:
-        return None, None
-    msg_type = struct.unpack_from('>I', data, 8)[0]
-    if msg_type != MSG_ENABLE_TX:
-        return None, None
-    pos = 12
-    def rd_u32():
-        nonlocal pos
-        v = struct.unpack_from('>I', data, pos)[0]; pos += 4; return v
-    def rd_str():
-        nonlocal pos
-        n = rd_u32()
-        if n == 0xFFFFFFFF: return ""
-        s = data[pos:pos+n].decode('utf-8', errors='replace'); pos += n; return s
-    rd_str()                   # Id
-    cmd_idx = rd_u32()         # NewTxMsgIdx
-    rd_str()                   # GenMsg
-    pos += 1                   # SkipGrid
-    pos += 1                   # UseRR73
-    cmd_check = rd_str()       # CmdCheck
-    return cmd_idx, cmd_check
-
-
-def handshake(sock, v, send_check_echo=True):
+def handshake(sock, v):
     """
-    Stage A7 handshake (WsjtxClient.Protocol.cs): normal operation now depends only
-    on standard protocol traffic, never on the non-standard cmd:7 echo.
-      1. Send HeartbeatMessage → Jimmy replies with its own Heartbeat AND sends
-         cmd:7 (CmdCheck), both from the same first-Heartbeat handler now (no
-         longer waits for a 2nd incoming Heartbeat to do either).
+    Native-only: normal operation depends only on standard protocol traffic --
+    Jimmy no longer sends or expects the old non-standard cmd:7 capability probe
+    at all (removed together with the rest of the WSJT-X-external/Andy-fork
+    compatibility layer).
+      1. Send HeartbeatMessage → Jimmy replies with its own Heartbeat.
       2. Send a normal StatusMessage (Check="") → triggers NegoState SENT→RECD
-         on its own → opMode progresses toward ACTIVE, with no echo required.
-      3. If send_check_echo (default True): separately send a second
-         StatusMessage with Check=<the captured CmdCheck> → exercises
-         CapabilityNegotiator's ConnectedFull path. Not required for ACTIVE
-         anymore -- set send_check_echo=False to prove that directly (see
-         group0_no_compat_layer below).
+         on its own → opMode progresses toward ACTIVE.
     """
     print("\n──── Handshake ────")
     hb = build_heartbeat()
@@ -779,31 +724,13 @@ def handshake(sock, v, send_check_echo=True):
     sock.sendto(hb, (JIMMY_HOST, JIMMY_PORT))
     print(f"  → HeartbeatMessage  ({WSJT_VERSION}/{WSJT_REVISION})")
 
-    # Jimmy now sends its Heartbeat reply and cmd:7 back-to-back from the same
-    # handler -- read up to two datagrams, classifying each; don't fail if cmd:7
-    # specifically doesn't show up (it's no longer required for ACTIVE).
-    cmd_check   = None
-    got_reply   = False
-    deadline    = time.time() + RECV_TIMEOUT
-    while time.time() < deadline and not (got_reply and cmd_check):
-        sock.settimeout(max(0.1, deadline - time.time()))
-        try:
-            data, _ = sock.recvfrom(4096)
-        except (socket.timeout, ConnectionResetError):
-            break
-        ci, cc = _parse_enable_tx(data)
-        if ci == 7 and cc is not None:
-            cmd_check = cc
-            print(f"  ← cmd:7 (capability probe)  CmdCheck='{cmd_check}'")
-        else:
-            got_reply = True
-            print(f"  ← Heartbeat reply: {len(data)} bytes")
-
-    if not got_reply:
+    sock.settimeout(RECV_TIMEOUT)
+    try:
+        data, _ = sock.recvfrom(4096)
+        print(f"  ← Heartbeat reply: {len(data)} bytes")
+    except (socket.timeout, ConnectionResetError):
         print("  ✗ No Heartbeat reply. Is Jimmy running on port 2237?")
         return False
-    if not cmd_check:
-        print("  (No cmd:7 echo captured within timeout -- fine, no longer required for ACTIVE)")
 
     time.sleep(0.3)
     sock.sendto(build_status(check=""), (JIMMY_HOST, JIMMY_PORT))
@@ -811,15 +738,9 @@ def handshake(sock, v, send_check_echo=True):
     time.sleep(1.5)
 
     if v.available:
-        v.check_active("Jimmy reached ACTIVE state (no cmd:7 echo required)")
+        v.check_active("Jimmy reached ACTIVE state")
     else:
         print("  (Verifier not available — skipping auto-check)")
-
-    if send_check_echo and cmd_check:
-        time.sleep(0.3)
-        sock.sendto(build_status(check=cmd_check), (JIMMY_HOST, JIMMY_PORT))
-        print(f"  → StatusMessage  (Check='{cmd_check}' -- exercises ConnectedFull)")
-        time.sleep(0.3)
 
     print()
     return True

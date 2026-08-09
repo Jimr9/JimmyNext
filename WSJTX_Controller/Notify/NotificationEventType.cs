@@ -12,7 +12,6 @@ namespace WSJTX_Controller
         AwardsNeeded,
         ConnectionClosed,
         ConnectionLost,
-        ConnectionDegraded,
         ErrorWarning,
     }
 }

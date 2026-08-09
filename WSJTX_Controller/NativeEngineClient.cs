@@ -2,7 +2,10 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
+using System.Threading.Tasks;
 
 namespace WSJTX_Controller
 {
@@ -10,7 +13,7 @@ namespace WSJTX_Controller
     // long-running child process that captures real audio, decodes it through the real native
     // FT8 decoder (reusing Nexus's own libtempo/ft8/tempo-core crates rather than reimplementing
     // any of it), and reports decodes to Jimmy over the same stock WSJT-X UDP protocol Jimmy
-    // already speaks -- CapabilityNegotiator/WsjtxProtocolAdapter need no changes to receive it.
+    // already speaks -- WsjtxProtocolAdapter needs no changes to receive it.
     // Mirrors RigctldClient's bundled-process lifecycle exactly (LocateBundledExe / LaunchBundled
     // / StopBundled): only ever kills the process THIS client started, never an externally-run
     // instance.
@@ -31,12 +34,19 @@ namespace WSJTX_Controller
 
         public bool Running => _process != null && !_process.HasExited;
 
+        // Local-loopback-only port the engine host's own control server (EngineHost/src/main.rs's
+        // run_control_server) listens on for the lifetime of a session. Fixed rather than derived
+        // from jimmyPort: only one engine session ever runs at a time (Controller's own
+        // nativeEngineClient field + Stop()-before-Launch() discipline), so there's nothing to
+        // collide with, and a fixed value lets the static ListDevices() below reach it without
+        // needing the live session's own settings threaded through. Loopback-only binds don't
+        // trigger a Windows Firewall prompt.
+        private const int ControlPort = 58239;
+
         // Locates jimmy-engine-host.exe: first the bundled release location (Resources\EngineHost\,
-        // staged at release time the same way Resources\hamlib\ is by fetch-hamlib.ps1 -- no such
-        // staging step exists for the engine host yet, since DecodeEngineMode.JimmyNative is still
-        // INI-only/unreleased), then the dev-build location next to this checkout's own EngineHost/
-        // folder, so this works against a local `cargo build --release` with no packaging step
-        // while the feature is still field-testing.
+        // staged at release/publish time -- see Jimmy.csproj), then the dev-build location next
+        // to this checkout's own EngineHost\ folder, so this also works against a local
+        // `cargo build --release` with no packaging step while developing.
         public static string LocateExe()
         {
             string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
@@ -110,7 +120,7 @@ namespace WSJTX_Controller
                     return false;
                 }
 
-                var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort}";
+                var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
                 if (!string.IsNullOrWhiteSpace(audioDevice))
                     args += $" --device \"{audioDevice}\"";
                 if (!string.IsNullOrWhiteSpace(outputDevice))
@@ -156,6 +166,14 @@ namespace WSJTX_Controller
                         RedirectStandardError = true,
                     }
                 };
+                // Diagnostic-only: a real crash so far has never printed a Rust panic message
+                // to stderr before dying (confirmed live, 2026-08-08 -- debug log shows nothing
+                // between the last normal decode line and "stopped unexpectedly"), which usually
+                // means either a genuine access violation/SEH crash (no Rust panic machinery
+                // involved at all) or a panic whose message was lost in the pipe on abrupt exit.
+                // RUST_BACKTRACE doesn't fix that by itself, but costs nothing and gives a real
+                // backtrace for free the next time a panic *does* get to print.
+                _process.StartInfo.EnvironmentVariables["RUST_BACKTRACE"] = "full";
                 if (debugOutput != null)
                 {
                     _process.OutputDataReceived += (s, e) => { if (e.Data != null) debugOutput($"[NativeEngine] {e.Data}"); };
@@ -165,7 +183,17 @@ namespace WSJTX_Controller
                 if (onUnexpectedExit != null)
                 {
                     _process.EnableRaisingEvents = true;
-                    _process.Exited += (s, e) => { if (!_stopping) onUnexpectedExit(); };
+                    _process.Exited += (s, e) =>
+                    {
+                        if (_stopping) return;
+                        // Diagnostic-only: exit code narrows down "genuine crash" (Rust panic
+                        // aborts with 101; a Windows-level SEH exception like access violation
+                        // shows as a large/negative code, e.g. 0xC0000005) vs a clean early exit.
+                        int exitCode = -1;
+                        try { exitCode = _process.ExitCode; } catch { /* best-effort */ }
+                        debugOutput?.Invoke($"[NativeEngine] process exited unexpectedly, exit code: {exitCode} (0x{(uint)exitCode:X8})");
+                        onUnexpectedExit();
+                    };
                 }
                 _process.Start();
                 // Always drain both pipes asynchronously, whether or not debugOutput is given --
@@ -187,20 +215,47 @@ namespace WSJTX_Controller
             }
         }
 
-        // Enumerates real audio input device names via `jimmy-engine-host.exe --list-devices`
-        // (tempo_audio::device::available_devices(), the same cpal enumeration Launch's --device
-        // argument expects verbatim) for Options > Radio's device picker. Returns an empty list,
-        // never throws, if the exe is missing or enumeration fails -- the picker degrades to "type
-        // a device name" rather than blocking the whole tab from opening.
-        public static List<string> ListAudioDevices() => ListDevices("--list-devices");
+        // Enumerates real audio input device names for Options > Radio's device picker. Returns
+        // an empty list, never throws, if the exe is missing or enumeration fails -- the picker
+        // degrades to "type a device name" rather than blocking the whole tab from opening.
+        // `sessionActive`: pass true whenever a real engine-host session might currently be
+        // running (e.g. `ctrl.nativeEngineClient?.Running == true`) -- see ListDevices' own
+        // comment on why this must come from known state, not be guessed.
+        public static List<string> ListAudioDevices(bool sessionActive) => ListDevices("--list-devices", sessionActive);
 
-        // Stage 4: same idea, output side -- `jimmy-engine-host.exe --list-output-devices`, for
-        // Options > Radio's TX audio-device picker. Launch's own `outputDevice` argument expects
-        // one of these names verbatim (or empty = system default).
-        public static List<string> ListOutputAudioDevices() => ListDevices("--list-output-devices");
+        // Stage 4: same idea, output side, for Options > Radio's TX audio-device picker. Launch's
+        // own `outputDevice` argument expects one of these names verbatim (or empty = system
+        // default).
+        public static List<string> ListOutputAudioDevices(bool sessionActive) => ListDevices("--list-output-devices", sessionActive);
 
-        private static List<string> ListDevices(string listArg)
+        private static List<string> ListDevices(string listArg, bool sessionActive)
         {
+            string controlCommand = listArg == "--list-devices" ? "LIST_DEVICES" : "LIST_OUTPUT_DEVICES";
+
+            // A live session means a jimmy-engine-host process already has the sound card open.
+            // Spawning a SECOND one to answer a device-list query -- even as a "fallback" after a
+            // failed control-port attempt -- recreates the exact crash this control port exists to
+            // prevent (Nexus's own AUDIO_HOST_LOCK, tempo-audio/src/device.rs, only serializes
+            // concurrent cpal/WASAPI callers WITHIN one process; it has no power over two SEPARATE
+            // processes). Confirmed live, 2026-08-08: inferring "no session running" from a control-
+            // port connect timeout was wrong during a restart storm -- the control server just
+            // hadn't finished (re)starting yet, so the old code fell through to the spawn path
+            // anyway and reproduced the identical crash. `sessionActive` is real state from the
+            // caller, not a guess, so this can refuse to ever spawn instead of merely trying not
+            // to. A few short retries ride out that same "control server not up yet" window
+            // WITHOUT falling back to a second process -- worst case, the picker comes back empty
+            // for this one open of Options, which is safe.
+            if (sessionActive)
+            {
+                for (int attempt = 0; attempt < 4; attempt++)
+                {
+                    var viaControlPort = TryListDevicesViaControlPort(controlCommand);
+                    if (viaControlPort != null) return viaControlPort;
+                    System.Threading.Thread.Sleep(250);
+                }
+                return new List<string>();
+            }
+
             var result = new List<string>();
             string exePath = LocateExe();
             if (exePath == null) return result;
@@ -218,8 +273,20 @@ namespace WSJTX_Controller
                 };
                 using (var p = Process.Start(psi))
                 {
-                    string output = p.StandardOutput.ReadToEnd();
-                    p.WaitForExit(5000);
+                    // ReadToEnd() alone has no timeout -- if the engine host hangs (or a crash-
+                    // loop leaves antivirus scanning every fresh launch of it) this blocked
+                    // forever with no way out, freezing Options on the UI thread despite this
+                    // method's own doc comment promising it never blocks the tab from opening
+                    // (found live, 2026-08-08, chasing an Options freeze during a real engine
+                    // crash storm). Bound the wait and kill the process if it overruns so the
+                    // device pickers always degrade to empty instead of hanging.
+                    var outputTask = p.StandardOutput.ReadToEndAsync();
+                    if (!outputTask.Wait(5000))
+                    {
+                        try { p.Kill(); } catch { }
+                    }
+                    p.WaitForExit(1000);
+                    string output = outputTask.Status == TaskStatus.RanToCompletion ? outputTask.Result : string.Empty;
                     foreach (var line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
                         result.Add(line);
                 }
@@ -229,6 +296,48 @@ namespace WSJTX_Controller
                 // Best-effort only -- empty list on any failure.
             }
             return result;
+        }
+
+        // Connect timeout is short and deliberate: on loopback, "nothing listening" refuses the
+        // connection almost instantly, so this only ever waits meaningfully long when a session
+        // really is up and about to answer. Read timeout is generous (a fresh device enumeration
+        // can briefly queue behind whatever run_radio itself is doing with AUDIO_HOST_LOCK).
+        // Returns null (never throws, never returns empty-for-"nothing listening" -- empty is
+        // reserved for "connected and it really has no devices") so ListDevices can tell "ask the
+        // spawn-a-process fallback instead" apart from "control server answered with zero devices".
+        private static List<string> TryListDevicesViaControlPort(string controlCommand)
+        {
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    if (!connectTask.Wait(300) || !client.Connected) return null;
+
+                    using (var stream = client.GetStream())
+                    {
+                        stream.WriteTimeout = 1000;
+                        stream.ReadTimeout = 5000;
+                        byte[] cmd = System.Text.Encoding.ASCII.GetBytes(controlCommand + "\n");
+                        stream.Write(cmd, 0, cmd.Length);
+
+                        var result = new List<string>();
+                        using (var reader = new StreamReader(stream, System.Text.Encoding.ASCII))
+                        {
+                            string line;
+                            while ((line = reader.ReadLine()) != null)
+                                result.Add(line);
+                        }
+                        return result;
+                    }
+                }
+            }
+            catch
+            {
+                // Nothing listening (no session running), or it timed out/dropped mid-response --
+                // either way, fall back to the spawn-a-process path rather than failing outright.
+                return null;
+            }
         }
 
         // How long to wait for the killed process (and, via its own Job Object, its child

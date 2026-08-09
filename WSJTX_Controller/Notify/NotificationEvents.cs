@@ -143,13 +143,6 @@ namespace WSJTX_Controller
         };
     }
 
-    public sealed class ConnectionDegradedEvent : INotificationEvent
-    {
-        public NotificationEventType EventType => NotificationEventType.ConnectionDegraded;
-        public string DedupKey => null;
-        public IReadOnlyDictionary<string, string> ToTokens() => EmptyTokens.Instance;
-    }
-
     public enum ErrorSeverity
     {
         Warning,

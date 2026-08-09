@@ -168,13 +168,7 @@ namespace WSJTX_Controller
         public bool UploadLotw()
         {
             HaltTuning();
-            if (ctrl.lotwUploadEnabled)
-            {
-                if (ctrl.lotwUploadPath == LotwUploadPath.JimmyTqsl)
-                    RunTqslUpload();
-                else
-                    StartUploadLotw();
-            }
+            if (ctrl.lotwUploadEnabled) RunTqslUpload();
             RunUploadCatchUp();
             return true;
         }

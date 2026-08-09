@@ -34,12 +34,11 @@ namespace WSJTX_Controller
     public class WsjtxProtocolAdapter
     {
         // -- Socket configuration (moved from WsjtxClient's public fields; still public
-        // here since external classes like Controller/OptionsDlg/SetupDlg read the
-        // WsjtxClient-side delegating properties, never this class directly). --
+        // here since external classes like Controller/OptionsDlg read the WsjtxClient-side
+        // delegating properties, never this class directly). --
         public IPAddress IpAddress { get; set; }
         public int Port { get; set; }
         public bool Multicast { get; set; }
-        public bool OverrideUdpDetect { get; set; }
 
         // -- Socket state (moved from WsjtxClient's private fields). ReceiveSocket was
         // "udpClient" (the BeginReceive/EndReceive socket); SendSocket was "udpClient2"
@@ -164,60 +163,5 @@ namespace WSJTX_Controller
             }
         }
 
-        // Reads WSJT-X's own ini file for its configured UDP endpoint, so Jimmy can
-        // auto-detect the address/port/multicast settings instead of requiring manual
-        // configuration. Returns false (with IPv4 loopback / port 2237 / unicast
-        // defaults) if WSJT-X's settings folder or ini file isn't present or readable.
-        public static bool DetectUdpSettings(out IPAddress ipa, out int prt, out bool mul)
-        {
-            //use WSJT-X.ini file for settings
-            string pgmNameWsjtx = "WSJT-X";
-            string pathWsjtx = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{pgmNameWsjtx}";
-            string pathFileNameExtWsjtx = pathWsjtx + "\\" + pgmNameWsjtx + ".ini";
-
-            //set defaults
-            ipa = IPAddress.Parse("127.0.0.1");
-            prt = 2237;
-            mul = false;
-
-            //temp
-            IPAddress ipaAddr;
-            int prtInt;
-            string ipaString;
-
-            if (!Directory.Exists(pathWsjtx)) return false;
-
-            try
-            {
-                IniFile iniFile = new IniFile(pathFileNameExtWsjtx);
-                ipaString = iniFile.Read("UDPServer", "Configuration");
-                ipaAddr = IPAddress.Parse(ipaString);
-                prtInt = Convert.ToInt32(iniFile.Read("UDPServerPort", "Configuration"));
-            }
-            catch
-            {
-                return false;
-            }
-
-            if (ipaString == "" || prtInt == 0)
-            {
-                return false;
-            }
-
-            prt = prtInt;
-            ipa = ipaAddr;
-            mul = ipaString.Substring(0, 4) != "127.";
-            return true;
-        }
-
-        // WSJT-X creates this lock file while running (and only while running) --
-        // Jimmy's cheapest, most reliable "is WSJT-X up right now" check, requiring no
-        // socket/process-list access.
-        public static bool IsWsjtxRunning()
-        {
-            string file = "WSJT-X.lock";
-            string pathFileNameExt = $"{Path.GetTempPath()}{file}";
-            return File.Exists(pathFileNameExt);
-        }
     }
 }

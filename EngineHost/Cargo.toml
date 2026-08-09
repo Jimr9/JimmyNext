@@ -56,3 +56,12 @@ tempo-fast-sys = { path = "../vendor/tempo-fast-sys-patched" }
 # primitives Engine now wraps, directly and independently of Engine itself.
 ft8 = { path = "C:/claude/nexus/crates/ft8" }
 modes = { path = "C:/claude/nexus/crates/modes" }
+
+# This crate had no [profile.release] of its own -- silently relying on whatever the toolchain
+# does by default instead of matching Nexus's own real, shipped configuration. Nexus's own root
+# Cargo.toml and src-tauri/Cargo.toml both explicitly set exactly this (confirmed 2026-08-08,
+# tracking down a real crash that a debug-symbols build of the identical source did NOT
+# reproduce -- pointing at a build-profile mismatch, not a logic bug). Match Nexus's own
+# verified-in-production setting exactly rather than guess at which flag matters.
+[profile.release]
+strip = "debuginfo"

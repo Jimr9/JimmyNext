@@ -28,16 +28,11 @@ namespace WSJTX_Controller
         private WsjtxClient wsjtxClient;
         private Controller ctrl;
 
-        private bool startOnUdpTab;
-
         private const int HotkeysTabIndex      = 4;
         private const int AdvUiTabIndex        = 5;
         private const int WantedCallsTabIndex  = 6;
         private const int SpotWatchTabIndex    = 7;
         private const int SoundsTabIndex       = 8;
-        private const int UdpTabIndex          = 9;
-        private const int RadioTabIndex        = 10;
-        private const int LookupTabIndex       = 10;   // stale/unused -- pre-existing, not from this change
 
         // Advanced UI tab — controls created dynamically in BuildAdvancedUiTab()
         private System.Windows.Forms.CheckBox advCallLayoutCheckBox;
@@ -115,7 +110,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox        _hrdLogUploadRealtimeCb;
         private System.Windows.Forms.TextBox         _hrdLogUploadCallsignTb;
         private System.Windows.Forms.TextBox         _hrdLogUploadCodeTb;
-        private System.Windows.Forms.CheckBox        _lotwUseTqslCb;
         private System.Windows.Forms.TextBox         _tqslStationLocationTb;
 
         private sealed class SoundRow
@@ -168,13 +162,12 @@ namespace WSJTX_Controller
         private Dictionary<Control, Point> originalLocations = new Dictionary<Control, Point>();
         private List<Control> reparentedControls = new List<Control>();
 
-        public OptionsDlg(WsjtxClient wsjtxClient, Controller ctrl, bool startOnUdpTab = false)
+        public OptionsDlg(WsjtxClient wsjtxClient, Controller ctrl)
         {
             InitializeComponent();
 
             this.wsjtxClient = wsjtxClient;
             this.ctrl = ctrl;
-            this.startOnUdpTab = startOnUdpTab;
 
             normalFore = okButton.ForeColor;
             normalBack = okButton.BackColor;
@@ -197,11 +190,6 @@ namespace WSJTX_Controller
             UpdateAllButtons();
         }
 
-        public void SelectUdpTab()
-        {
-            tabControl1.SelectedIndex = UdpTabIndex;
-        }
-
         private void OptionsDlg_Load(object sender, EventArgs e)
         {
             Screen screen = Screen.FromControl(ctrl);
@@ -209,7 +197,8 @@ namespace WSJTX_Controller
                 screen.Bounds.X + (screen.Bounds.Width - Width) / 2,
                 screen.Bounds.Y + (screen.Bounds.Height - Height) / 2);
 
-            LoadUdpTab();
+            udpOnTopCheckBox.Checked = ctrl.alwaysOnTop;
+            udpDiagLogCheckBox.Checked = wsjtxClient.diagLog;
             BuildGeneralTab();
             BuildHotkeysTab();
             BuildAdvancedUiTab();
@@ -227,22 +216,7 @@ namespace WSJTX_Controller
             dxccButtonEnabled = false;  // Phase 3: New DXCC exclusive mode removed
             UpdateAllButtons();
 
-            if (startOnUdpTab)
-                tabControl1.SelectedIndex = UdpTabIndex;
-            else
-                subtitleLabel.Focus();
-        }
-
-        private void LoadUdpTab()
-        {
-            udpOverrideCheckBox.Checked = wsjtxClient.overrideUdpDetect;
-            if (wsjtxClient.ipAddress != null) udpAddrTextBox.Text = wsjtxClient.ipAddress.ToString();
-            if (wsjtxClient.port != 0) udpPortTextBox.Text = wsjtxClient.port.ToString();
-            udpMulticastCheckBox.Checked = wsjtxClient.multicast;
-            udpMulticastCheckBox_CheckedChanged(null, null);
-            udpOnTopCheckBox.Checked = ctrl.alwaysOnTop;
-            udpDiagLogCheckBox.Checked = wsjtxClient.diagLog;
-            udpOverrideCheckBox_CheckedChanged(null, null);
+            subtitleLabel.Focus();
         }
 
         // ===== GENERAL TAB =====
@@ -328,6 +302,9 @@ namespace WSJTX_Controller
 
             int maxAge = (int)(_maxCallQueueAgeNumeric?.Value ?? 16);
             ctrl.maxCallQueueAgePeriods = Math.Max(4, Math.Min(200, maxAge));
+
+            ctrl.alwaysOnTop = udpOnTopCheckBox.Checked;
+            wsjtxClient.LogModeChanged(udpDiagLogCheckBox.Checked);
         }
 
         private void OptionsDlg_FormClosing(object sender, FormClosingEventArgs e)
@@ -352,7 +329,6 @@ namespace WSJTX_Controller
 
         private void okButton_Click(object sender, EventArgs e)
         {
-            if (!ApplyUdpSettings()) return;
             if (!ValidateHotkeys()) return;
             ApplyGeneralSettings();
             SaveHotkeysTab();
@@ -375,100 +351,6 @@ namespace WSJTX_Controller
         private void cancelButton_Click(object sender, EventArgs e)
         {
             Close();
-        }
-
-        private bool ApplyUdpSettings()
-        {
-            bool multicast = udpMulticastCheckBox.Checked;
-            bool overrideUdp = udpOverrideCheckBox.Checked;
-            UInt16 port;
-            IPAddress ipAddress;
-
-            if (!UInt16.TryParse(udpPortTextBox.Text, out port))
-            {
-                MessageBox.Show("A port number must be between 0 and 65535.\n\nExample: 2237",
-                    wsjtxClient.pgmName, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                tabControl1.SelectedIndex = UdpTabIndex;
-                udpPortTextBox.Focus();
-                return false;
-            }
-
-            var a = udpAddrTextBox.Text.Split('.');
-            if (a.Length != 4)
-            {
-                string ex = multicast ? "239.255.0.0" : "127.0.0.1";
-                MessageBox.Show($"An IP address must be 4 numbers between 0 and 255, each separated by a period.\n\nExample: {ex}",
-                    wsjtxClient.pgmName, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                tabControl1.SelectedIndex = UdpTabIndex;
-                udpAddrTextBox.Focus();
-                return false;
-            }
-
-            if (overrideUdp && multicast && (a[0] != "239" || a[1] != "255"))
-            {
-                MessageBox.Show("Multicast addresses must start with '239.255'.\n\nExample: 239.255.0.0",
-                    wsjtxClient.pgmName, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                tabControl1.SelectedIndex = UdpTabIndex;
-                udpAddrTextBox.Focus();
-                return false;
-            }
-
-            try
-            {
-                ipAddress = IPAddress.Parse(udpAddrTextBox.Text);
-            }
-            catch
-            {
-                string ex = multicast ? "239.255.0.0" : "127.0.0.1";
-                MessageBox.Show($"An IP address must be 4 numbers between 0 and 255, each separated by a period.\n\nExample: {ex}",
-                    wsjtxClient.pgmName, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                tabControl1.SelectedIndex = UdpTabIndex;
-                udpAddrTextBox.Focus();
-                return false;
-            }
-
-            ctrl.alwaysOnTop = udpOnTopCheckBox.Checked;
-            wsjtxClient.LogModeChanged(udpDiagLogCheckBox.Checked);
-
-            if (wsjtxClient.ipAddress.ToString() == ipAddress.ToString() &&
-                wsjtxClient.port == port &&
-                wsjtxClient.multicast == multicast &&
-                wsjtxClient.overrideUdpDetect == overrideUdp)
-            {
-                return true;
-            }
-
-            wsjtxClient.UpdateAddrPortMulti(ipAddress, port, multicast, overrideUdp);
-            return true;
-        }
-
-        // ===== UDP TAB EVENT HANDLERS =====
-
-        private void udpMulticastCheckBox_CheckedChanged(object sender, EventArgs e)
-        {
-            udpAddrLabel.Text = udpMulticastCheckBox.Checked
-                ? "(Standard: 239.255.0.0)"
-                : "(Standard: 127.0.0.1)";
-        }
-
-        private void udpOverrideCheckBox_CheckedChanged(object sender, EventArgs e)
-        {
-            udpAddrTextBox.Enabled = udpPortTextBox.Enabled = udpMulticastCheckBox.Enabled =
-                udpOverrideCheckBox.Checked;
-        }
-
-        private void udpHelpButton_Click(object sender, EventArgs e)
-        {
-            new Thread(new ThreadStart(delegate
-            {
-                MessageBox.Show(
-                    $"This information allows communication with WSJT-X.{Environment.NewLine}{Environment.NewLine}" +
-                    $"- In the WSJT-X program, select File | Settings | Reporting.{Environment.NewLine}{Environment.NewLine}" +
-                    $"- Enter the UDP server address (xxx.xxx.xxx.xxx) and port number shown there.{Environment.NewLine}{Environment.NewLine}" +
-                    $"- Make sure 'Accept UDP requests' is enabled in WSJT-X.{Environment.NewLine}{Environment.NewLine}" +
-                    $"Note: Select 'Multicast' here (entering the standard UDP address and port number) if other WSJT-X helper programs (loggers, maps, etc.) will be used.",
-                    wsjtxClient.pgmName, MessageBoxButtons.OK, MessageBoxIcon.Information);
-            })).Start();
         }
 
         // ===== ADVANCED UI TAB =====
@@ -951,11 +833,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Button _radioTestButton;
         private AnnouncingLabel _radioTestResultLabel;
 
-        // Self-sufficiency plan, Phase 4g/4i: decode engine source, same tab as radio-state
-        // source above (both answer "where does DSP/radio work come from"). RECEIVE ONLY --
-        // see NativeEngineClient's own header comment; no PTT/transmit control lives here.
-        private System.Windows.Forms.RadioButton _engineWsjtxExternalRb;
-        private System.Windows.Forms.RadioButton _engineJimmyNativeRb;
         private System.Windows.Forms.TextBox _engineMyCallTextBox;
         private System.Windows.Forms.TextBox _engineMyGridTextBox;
         private System.Windows.Forms.ComboBox _engineAudioDeviceCombo;
@@ -985,9 +862,9 @@ namespace WSJTX_Controller
                 ForeColor      = System.Drawing.SystemColors.ControlText,
                 Location       = new System.Drawing.Point(left, y),
                 Size           = new System.Drawing.Size(w, 48),
-                Text           = "Choose where signal-meter, power, and SWR readings come from. WSJT-X CAT is today's " +
-                                 "behavior (Power/SWR available via Alt+Q if WSJT-X supports it). Hamlib rigctld adds a " +
-                                 "real S-meter and connects to the radio directly.",
+                Text           = "Choose where signal-meter, power, and SWR readings come from. Receive Only reports " +
+                                 "whatever the native engine itself broadcasts, no separate radio connection. Hamlib " +
+                                 "rigctld adds a real S-meter and connects to the radio directly.",
                 TabStop        = false,
                 AccessibleName = "Radio tab instructions",
                 Font           = font,
@@ -997,14 +874,14 @@ namespace WSJTX_Controller
 
             _radioWsjtxCatRb = new System.Windows.Forms.RadioButton
             {
-                Text = "Use WSJT-X CAT (current behavior)",
+                Text = "Receive Only (no separate CAT connection)",
                 Checked = ctrl.Radio.Mode == RadioControlMode.WsjtxCat,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
                 TabIndex = 0,
                 Font = font,
-                AccessibleName = "Use WSJT-X CAT",
-                AccessibleDescription = "Radio state (frequency, mode, transmitting) comes from WSJT-X, same as today. Power and SWR use WSJT-X's own reporting.",
+                AccessibleName = "Receive Only",
+                AccessibleDescription = "Radio state (frequency, mode, transmitting) comes read-only from the native engine's own status reports. No S-meter/power/SWR, no PTT.",
             };
             radioPanel.Controls.Add(_radioWsjtxCatRb);
             y += 24;
@@ -1018,9 +895,7 @@ namespace WSJTX_Controller
                 TabIndex = 1,
                 Font = font,
                 AccessibleName = "Use Hamlib rigctld",
-                AccessibleDescription = EngineModeCutover.Mode == DecodeEngineMode.JimmyNative
-                    ? "Jimmy Native launches its own bundled rigctld against the rig model and COM port below (or connects to an external rigctld if configured) and drives CAT/PTT directly -- no WSJT-X-family process is used for this at all."
-                    : "Jimmy launches its own bundled rigctld against the rig model and COM port below, or connects to an external rigctld if configured. Frequency and mode for decoding still come from WSJT-X either way.",
+                AccessibleDescription = "Jimmy launches its own bundled rigctld against the rig model and COM port below (or connects to an external rigctld if configured) and drives CAT/PTT directly.",
             };
             radioPanel.Controls.Add(_radioHamlibRb);
             y += 32;
@@ -1453,47 +1328,16 @@ namespace WSJTX_Controller
                 ForeColor = System.Drawing.SystemColors.ControlText,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(w, 48),
-                Text = "Choose where FT8 decoding comes from. WSJT-X External is today's behavior -- Jimmy needs " +
-                       "a separate WSJT-X-family program running. Jimmy Native decodes audio itself; no other " +
-                       "program is needed. Replying WILL transmit for real -- with real PTT and real audio -- " +
-                       "if Radio Mode (Radio tab) is set to Hamlib rigctld with PTT enabled; otherwise it " +
-                       "stays receive-only with nowhere to key PTT.",
+                Text = "Jimmy decodes FT8 audio itself -- no separate WSJT-X-family program needed. Replying " +
+                       "WILL transmit for real -- with real PTT and real audio -- if Radio Mode (Radio tab) is " +
+                       "set to Hamlib rigctld with PTT enabled; otherwise it stays receive-only with nowhere " +
+                       "to key PTT.",
                 TabStop = false,
                 AccessibleName = "Decode Engine instructions",
                 Font = font,
             };
             decodeEnginePanel.Controls.Add(engineInstrBox);
             y += 56;
-
-            _engineWsjtxExternalRb = new System.Windows.Forms.RadioButton
-            {
-                Text = "WSJT-X External (current behavior)",
-                Checked = EngineModeCutover.Mode == DecodeEngineMode.WsjtxExternal,
-                Location = new System.Drawing.Point(left, y),
-                AutoSize = true,
-                TabIndex = 0,
-                Font = font,
-                AccessibleName = "Use WSJT-X External",
-                AccessibleDescription = "Jimmy connects to a separate WSJT-X-family program for decoding, same as today.",
-            };
-            _engineWsjtxExternalRb.CheckedChanged += (s, e) => UpdateEngineControlsEnabled();
-            decodeEnginePanel.Controls.Add(_engineWsjtxExternalRb);
-            y += 24;
-
-            _engineJimmyNativeRb = new System.Windows.Forms.RadioButton
-            {
-                Text = "Jimmy Native (Jimmy decodes audio itself -- can transmit for real if PTT is configured)",
-                Checked = EngineModeCutover.Mode == DecodeEngineMode.JimmyNative,
-                Location = new System.Drawing.Point(left, y),
-                AutoSize = true,
-                TabIndex = 1,
-                Font = font,
-                AccessibleName = "Use Jimmy Native",
-                AccessibleDescription = "Jimmy launches its own bundled native FT8 decoder -- no separate WSJT-X-family program needed. Replying transmits for real, with real PTT and real audio, when Radio Mode is Hamlib rigctld with PTT enabled; otherwise stays receive-only.",
-            };
-            _engineJimmyNativeRb.CheckedChanged += (s, e) => UpdateEngineControlsEnabled();
-            decodeEnginePanel.Controls.Add(_engineJimmyNativeRb);
-            y += 32;
 
             var myCallLabel = new System.Windows.Forms.Label
             {
@@ -1565,7 +1409,8 @@ namespace WSJTX_Controller
                 AccessibleDescription = "Sound card input Jimmy Native captures from. Leave blank for the system default. Populated from the real devices this computer sees.",
             };
             _engineAudioDeviceCombo.Items.Add("");   // blank = system default
-            foreach (var dev in NativeEngineClient.ListAudioDevices())
+            bool engineSessionActive = ctrl.nativeEngineClient != null && ctrl.nativeEngineClient.Running;
+            foreach (var dev in NativeEngineClient.ListAudioDevices(engineSessionActive))
                 _engineAudioDeviceCombo.Items.Add(dev);
             _engineAudioDeviceCombo.Text = ctrl.NativeEngine.AudioInputDevice;
             decodeEnginePanel.Controls.Add(_engineAudioDeviceCombo);
@@ -1594,22 +1439,10 @@ namespace WSJTX_Controller
                 AccessibleDescription = "Sound card output Jimmy Native transmits to -- normally the radio's own audio interface, NOT your PC speakers. Leave blank for the system default. Populated from the real devices this computer sees.",
             };
             _engineAudioOutputDeviceCombo.Items.Add("");   // blank = system default
-            foreach (var dev in NativeEngineClient.ListOutputAudioDevices())
+            foreach (var dev in NativeEngineClient.ListOutputAudioDevices(engineSessionActive))
                 _engineAudioOutputDeviceCombo.Items.Add(dev);
             _engineAudioOutputDeviceCombo.Text = ctrl.NativeEngine.AudioOutputDevice;
             decodeEnginePanel.Controls.Add(_engineAudioOutputDeviceCombo);
-
-            UpdateEngineControlsEnabled();
-        }
-
-        private void UpdateEngineControlsEnabled()
-        {
-            bool native = _engineJimmyNativeRb?.Checked ?? false;
-            if (_engineMyCallTextBox != null) _engineMyCallTextBox.Enabled = native;
-            if (_engineMyGridTextBox != null) _engineMyGridTextBox.Enabled = native;
-            if (_engineAudioDeviceCombo != null) _engineAudioDeviceCombo.Enabled = native;
-            if (_engineAudioOutputDeviceCombo != null) _engineAudioOutputDeviceCombo.Enabled = native;
-            if (_radioDataModesPlainSsbCheckBox != null) _radioDataModesPlainSsbCheckBox.Enabled = native;
         }
 
         private void UpdateRadioHostPortEnabled()
@@ -1705,7 +1538,6 @@ namespace WSJTX_Controller
             // from what it was actually on (40m -> 20m), with no radio-related change intended
             // at all. Now: only restart/reconnect when something that actually feeds into
             // either call changed.
-            var wasMode = EngineModeCutover.Mode;
             string wasMyCall = ctrl.NativeEngine.MyCall;
             string wasMyGrid = ctrl.NativeEngine.MyGrid;
             string wasAudioIn = ctrl.NativeEngine.AudioInputDevice;
@@ -1750,41 +1582,22 @@ namespace WSJTX_Controller
             if (_radioHaltTxOnHighSwrCheckBox != null) ctrl.Radio.HaltTxOnHighSwr = _radioHaltTxOnHighSwrCheckBox.Checked;
             if (_radioSwrHaltThresholdUpDown != null) ctrl.Radio.SwrHaltThreshold = (double)_radioSwrHaltThresholdUpDown.Value;
 
-            // EngineModeCutover.Mode must be set BEFORE ApplyRadioSettings() runs, not after:
-            // under JimmyNative + HamlibRigctld, ApplyRadioSettings() must NOT launch its own
-            // bundled rigctld (the native engine host launches its own) -- it needs the FINAL,
-            // just-saved mode to make that call correctly, not whatever was in effect when the
-            // dialog opened. Getting this order wrong caused two competing rigctld launches on
-            // the same port when switching TO JimmyNative and changing Radio settings in the
-            // same Save -- confirmed live during the Phase 5 rewrite, 2026-08-06.
-            if (_engineWsjtxExternalRb != null)
-            {
-                EngineModeCutover.Mode = _engineJimmyNativeRb.Checked ? DecodeEngineMode.JimmyNative : DecodeEngineMode.WsjtxExternal;
-                // Same safety guard as Controller.cs's own startup load -- this is a SECOND,
-                // independent place Mode gets set, so it needs its own copy of the check, not a
-                // one-time fix at startup. A replay-test operator opening Options mid-session
-                // (JimmyReplay.py's own setup instructions say to do exactly this, to enable
-                // Advanced Call Layout) must never be able to re-arm JimmyNative here, even by
-                // clicking OK with the Native radio button checked from a prior real session.
-                if (TestModeGuard.IsTestMode) EngineModeCutover.Mode = DecodeEngineMode.WsjtxExternal;
-                // Normalize case on entry: this call/grid flows straight into
-                // jimmy-engine-host's --mycall (see DecodeMessage.IsCallTo's own comment on
-                // the 2026-08-07 case-sensitivity bug that came from an operator-typed lower-
-                // case callsign never matching upper-case decoded wire text). Fixing the
-                // comparison to be case-insensitive is the real fix; normalizing here too is
-                // defense in depth, and makes the field actually look right either way.
-                ctrl.NativeEngine.MyCall = _engineMyCallTextBox.Text.Trim().ToUpperInvariant();
-                ctrl.NativeEngine.MyGrid = FormatGridSquare(_engineMyGridTextBox.Text.Trim());
-                ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
-                ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
-            }
+            // Normalize case on entry: this call/grid flows straight into jimmy-engine-host's
+            // --mycall (see DecodeMessage.IsCallTo's own comment on the 2026-08-07
+            // case-sensitivity bug that came from an operator-typed lower-case callsign never
+            // matching upper-case decoded wire text). Fixing the comparison to be
+            // case-insensitive is the real fix; normalizing here too is defense in depth, and
+            // makes the field actually look right either way.
+            ctrl.NativeEngine.MyCall = _engineMyCallTextBox.Text.Trim().ToUpperInvariant();
+            ctrl.NativeEngine.MyGrid = FormatGridSquare(_engineMyGridTextBox.Text.Trim());
+            ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
+            ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
 
             // Only run either call if something it actually depends on changed -- see this
             // method's own opening comment. radioSettingsChanged also covers ApplyEngineMode(),
             // not just ApplyRadioSettings(): Launch() bakes the whole Radio settings object into
-            // the engine host's own CLI args, so a Radio-only change while staying in JimmyNative
-            // still needs a restart to take effect.
-            bool modeChanged = wasMode != EngineModeCutover.Mode;
+            // the engine host's own CLI args, so a Radio-only change still needs a restart to
+            // take effect.
             bool engineIdentityChanged =
                 wasMyCall != ctrl.NativeEngine.MyCall || wasMyGrid != ctrl.NativeEngine.MyGrid ||
                 wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice;
@@ -1796,14 +1609,14 @@ namespace WSJTX_Controller
                 wasPollIntervalMs != r.PollIntervalMs || wasReadDisplayPwrSwr != r.ReadDisplayPwrSwr ||
                 wasHaltTxOnHighSwr != r.HaltTxOnHighSwr || wasSwrHaltThreshold != r.SwrHaltThreshold;
 
-            // ApplyEngineMode() first (when applicable): under JimmyNative + HamlibRigctld it
-            // launches the engine host, which owns and spawns the real rigctld; ApplyRadioSettings()
-            // then only ever CONNECTS to that rigctld in this combination, never launches its own,
+            // ApplyEngineMode() first (when applicable): under HamlibRigctld it launches the
+            // engine host, which owns and spawns the real rigctld; ApplyRadioSettings() then
+            // only ever CONNECTS to that rigctld in this combination, never launches its own,
             // so running it after gives the real rigctld a head start instead of racing its first
             // poll tick against a daemon that doesn't exist yet (found live, 2026-08-06/07).
-            if (_engineWsjtxExternalRb != null && (modeChanged || engineIdentityChanged || radioSettingsChanged))
+            if (engineIdentityChanged || radioSettingsChanged)
                 ctrl.ApplyEngineMode();
-            if (modeChanged || radioSettingsChanged)
+            if (radioSettingsChanged)
                 ctrl.ApplyRadioSettings();
         }
 
@@ -2851,46 +2664,33 @@ namespace WSJTX_Controller
             lotwLogbookBox.Controls.Add(_lotwLogbookRefreshDaysNum);
             lotwLogbookBox.Controls.Add(MakeLabel("days", 270, 111, font));
 
-            // ── LoTW upload path (self-sufficiency plan, Phase 3) ────────────────
+            // ── LoTW upload (self-sufficiency plan, Phase 3) ────────────────
             // Independent of the download settings above -- this only affects what Alt+U's
-            // LoTW leg does. Unchecked (default) keeps today's behavior: WSJT-X invokes its
-            // own TQSL integration (sub-command 16). Checked: Jimmy invokes TQSL itself
-            // (TqslUploadClient), needing only the Station Location name below -- TQSL's own
-            // certificate/passphrase setup stays exactly as configured inside TQSL.
+            // LoTW leg does. Native-only: Jimmy always invokes TQSL itself (TqslUploadClient) --
+            // there is no external WSJT-X to delegate to anymore -- needing only the Station
+            // Location name below; TQSL's own certificate/passphrase setup stays exactly as
+            // configured inside TQSL.
             lotwLogbookBox.Controls.Add(new System.Windows.Forms.Label
             {
                 Text = "――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――",
                 Location = new System.Drawing.Point(10, 137), AutoSize = true, Font = font, TabStop = false,
             });
 
-            _lotwUseTqslCb = new System.Windows.Forms.CheckBox
-            {
-                Text           = $"Sign and upload via Jimmy's own TQSL when pressing {uploadLotwKeyText} (instead of WSJT-X)",
-                Checked        = ctrl.lotwUploadPath == LotwUploadPath.JimmyTqsl,
-                Location       = new System.Drawing.Point(10, 148),
-                AutoSize       = true,
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "Use Jimmy's own TQSL for LoTW upload instead of WSJT-X",
-                AccessibleDescription = "Requires TQSL to be installed, with a Station Location already configured inside TQSL itself.",
-            };
-            lotwLogbookBox.Controls.Add(_lotwUseTqslCb);
-
-            lotwLogbookBox.Controls.Add(MakeLabel("TQSL Station Location:", 10, 174, font));
+            lotwLogbookBox.Controls.Add(MakeLabel("TQSL Station Location:", 10, 148, font));
             _tqslStationLocationTb = new System.Windows.Forms.TextBox
             {
                 Text           = ctrl.tqslStationLocation ?? "",
-                Location       = new System.Drawing.Point(160, 171),
+                Location       = new System.Drawing.Point(160, 145),
                 Size           = new System.Drawing.Size(150, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "TQSL Station Location name",
-                AccessibleDescription = "The Station Location name as configured inside TQSL -- not a Jimmy credential. Required only if Jimmy's own TQSL upload is enabled above.",
+                AccessibleDescription = $"The Station Location name as configured inside TQSL -- not a Jimmy credential. Required for {uploadLotwKeyText} to sign and upload via TQSL.",
             };
             lotwLogbookBox.Controls.Add(_tqslStationLocationTb);
             lotwLogbookBox.Controls.Add(MakeLabel(
                 "A passphrase-protected certificate isn't supported here -- use a certificate TQSL doesn't need to unlock.",
-                10, 194, font));
+                10, 168, font));
 
             // ── Club Log Logbook Upload ──────────────────────────────────────────
             // A per-user credential (Application Password), entirely separate from
@@ -3578,7 +3378,6 @@ namespace WSJTX_Controller
             ctrl.hrdLogUploadRealtime    = _hrdLogUploadRealtimeCb?.Checked         ?? false;
             ctrl.hrdLogUploadCallsign    = _hrdLogUploadCallsignTb?.Text.Trim().ToUpperInvariant() ?? "";
             ctrl.hrdLogUploadCode        = _hrdLogUploadCodeTb?.Text              ?? "";
-            ctrl.lotwUploadPath          = (_lotwUseTqslCb?.Checked ?? false) ? LotwUploadPath.JimmyTqsl : LotwUploadPath.WsjtxDelegated;
             ctrl.tqslStationLocation     = _tqslStationLocationTb?.Text.Trim()    ?? "";
             ctrl.fccUlsEnabled           = _fccUlsEnabledCb?.Checked           ?? false;
             ctrl.fccUlsRefreshDays       = (int)(_fccUlsRefreshDaysNum?.Value   ?? 7);

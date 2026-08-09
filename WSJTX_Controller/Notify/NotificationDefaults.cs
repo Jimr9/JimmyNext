@@ -86,20 +86,6 @@ namespace WSJTX_Controller
                 Template = "WSJT-X disconnected",
             },
 
-            // Wave 1. Matches WsjtxClient.Protocol.cs's capability-negotiation timeout path:
-            // ShowMessage("Connected to WSJT-X, limited mode: some features unavailable", true).
-            // The existing wasAlreadyDegraded once-only guard at that call site stays in place
-            // unchanged; NotificationDedupThrottle is a redundant safety net alongside it for
-            // this first pass, not a replacement.
-            [NotificationEventType.ConnectionDegraded] = new NotificationPolicy
-            {
-                Enabled = true,
-                Priority = NotificationPriority.Important,
-                RepeatSeconds = 0,
-                ThrottleMilliseconds = 0,
-                Template = "Connected to WSJT-X, limited mode: some features unavailable",
-            },
-
             // Wave 1. Matches the shape already shared by every existing error ShowMessage call
             // site (Controller.cs: "Radio: {LastError}" sound:false, "Radio CAT link lost:
             // {LastError}" sound:true, etc.) -- kept as one type with {Source}/{Detail} tokens

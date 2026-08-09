@@ -9,14 +9,9 @@ using Microsoft.Win32;
 
 namespace WSJTX_Controller
 {
-    // Which mechanism Alt+U's LoTW leg uses. Independent of DecodeEngineMode/RadioControlMode --
-    // sub-command 16 has no coupling to decode/encode or radio control at all, so this gets its
-    // own small flag rather than being folded into either of those axes.
-    public enum LotwUploadPath { WsjtxDelegated, JimmyTqsl }
-
-    // Self-sufficiency plan, Phase 3: Jimmy's own LoTW upload path, invoking TQSL directly
-    // instead of asking WSJT-X to do it (the WM8Q sub-command 16 path, WsjtxCompatibilityExtension.
-    // StartUploadLotw -- unchanged default, this is an alternative, not a replacement of it).
+    // Self-sufficiency plan, Phase 3: Jimmy's own LoTW upload path, invoking TQSL directly --
+    // native-only, the only LoTW upload mechanism left (there is no external WSJT-X to
+    // delegate to anymore).
     //
     // Command-line syntax verified directly against the installed TQSL 2.8's own documentation
     // (TrustedQSL\help\tqslapp\cmdline.htm), not derived from memory or guesswork:
@@ -39,9 +34,8 @@ namespace WSJTX_Controller
         public string LastError { get; private set; }
 
         // Checks the standard install paths first, falling back to a registry uninstall-key
-        // lookup -- same "look for it, tolerate absence" shape as
-        // WsjtxProtocolAdapter.DetectUdpSettings. Returns null (not an exception) if TQSL isn't
-        // installed; callers must degrade to a clear status message, not a crash.
+        // lookup. Returns null (not an exception) if TQSL isn't installed; callers must degrade
+        // to a clear status message, not a crash.
         public static string LocateTqsl()
         {
             string[] standardPaths =

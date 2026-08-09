@@ -135,11 +135,6 @@ namespace WSJTX_Controller
         // that existing behavior for everyone; only someone who doesn't use LoTW needs to
         // uncheck it (Options > Lookup) to stop WSJT-X reporting an error on that keypress.
         public bool   lotwUploadEnabled      = true;
-        // Self-sufficiency plan, Phase 3: independent of DecodeEngineMode entirely -- an
-        // operator can use Jimmy's own TQSL invocation for LoTW while still using WM8Q/WSJT-X
-        // for decode, since WM8Q sub-command 16 has no coupling to decode/encode at all.
-        // WsjtxDelegated (default) is unchanged existing behavior (Alt+U -> sub-command 16).
-        public LotwUploadPath lotwUploadPath = LotwUploadPath.WsjtxDelegated;
         public string tqslStationLocation    = "";
         // Which entry in directedTextBox's space-separated list (e.g. "POTA SOTA") the Call
         // CQ dialog should use every time, instead of Jimmy's default random rotation. Empty
@@ -194,16 +189,11 @@ namespace WSJTX_Controller
         public System.Windows.Forms.Timer radioPollTimer;
         public RadioStatus lastRadioStatus;
 
-        // Self-sufficiency plan, Phase 4g: Jimmy's own native FT8 engine host. Null whenever
-        // EngineModeCutover.Mode == WsjtxExternal (today's default) -- only launched when that
-        // INI-only cutover flag is set to JimmyNative.
+        // Self-sufficiency plan, Phase 4g: Jimmy's own native FT8 engine host. Null in a
+        // replay-test session (TestModeGuard.IsTestMode) -- ApplyEngineMode() never spawns the
+        // real process there.
         public NativeEngineClient nativeEngineClient;
         public NativeEngineSettings NativeEngine = new NativeEngineSettings();
-        // True only if THIS session created %TEMP%\WSJT-X.lock to make Jimmy's existing
-        // UdpLoop/CheckWsjtxRunning open its UDP socket for the native engine (which, unlike a
-        // real external WSJT-X-family process, doesn't create that file itself). Never deletes
-        // a lock file it didn't create -- a real external WSJT-X could legitimately own it.
-        private bool _nativeEngineOwnsLockFile;
         public List<string> spotWatchRowOrderFields;
         // "callsign" (alphabetical, default), "evenodd", or "snr".
         public string spotWatchSortKey = "callsign";
@@ -232,7 +222,6 @@ namespace WSJTX_Controller
         public int              fccUlsRefreshDays       = 7;
 
         private bool formLoaded = false;
-        private bool openOptionsOnUdpTab = false;
         private HelpDlg helpDlg = null;
         private Control _helpReturnFocus = null;
         private IniFile iniFile = null;
@@ -397,7 +386,6 @@ namespace WSJTX_Controller
             IPAddress ipAddress = null;
             int port = 0;
             bool multicast = true;
-            bool overrideUdpDetect = false;
             bool debug = false;
             bool diagLog = false;
             WsjtxClient.TxModes txMode = WsjtxClient.TxModes.CALL_CQ;
@@ -545,7 +533,6 @@ namespace WSJTX_Controller
                 callCqDxCheckBox.Checked = iniFile.Read("callCqDx") == "True";
                 ignoreNonDxCheckBox.Checked = iniFile.Read("ignoreNonDx") == "True";
                 callNonDirCqCheckBox.Checked = iniFile.Read("callNonDirCq") == "True";
-                overrideUdpDetect = iniFile.Read("overrideUdpDetect") == "True";
                 skipLevelPrompt = iniFile.Read("skipLevelPrompt") == "True";
                 cqOnlyRadioButton.Checked = iniFile.Read("cqOnly") != "False";              //default: true
                 newOnBand = iniFile.Read("newOnBand") != "False";      //default: true
@@ -561,22 +548,6 @@ namespace WSJTX_Controller
                 // Set logClassificationParityMismatches=True by hand-editing the .ini file only
                 // to collect field-verification evidence for Stage A6; remove once confirmed.
                 if (iniFile.KeyExists("logClassificationParityMismatches")) ClassificationParityLogger.Enabled = iniFile.Read("logClassificationParityMismatches") == "True";
-                // Self-sufficiency plan (Protocol/BackendMode.cs) -- same emergency-rollback-valve
-                // shape as useClassificationEngine above: INI-only, undocumented, default unchanged
-                // (WsjtxExternal/SeparateProcess) until Phase 4 has field validation to justify a
-                // real Options control.
-                if (iniFile.KeyExists("decodeEngineMode") && System.Enum.TryParse(iniFile.Read("decodeEngineMode"), out DecodeEngineMode dem)) EngineModeCutover.Mode = dem;
-                // Safety, not a preference: a replay-test session (JIMMY_TEST_DB_PATH set) must
-                // NEVER activate JimmyNative, no matter what's saved in the real .ini -- that
-                // would spawn the real engine host, open the real COM port, and key the real
-                // radio while a human isn't watching it happen. Added 2026-08-07 after
-                // discovering this had to be done by hand (temporarily editing decodeEngineMode
-                // in the .ini and remembering to change it back) -- exactly the kind of step an
-                // operator or a future session can forget. In-memory only, deliberately: never
-                // written back to the .ini (see the save-side guard below), so the real saved
-                // preference is untouched and this has zero effect outside test mode.
-                if (TestModeGuard.IsTestMode) EngineModeCutover.Mode = DecodeEngineMode.WsjtxExternal;
-                if (iniFile.KeyExists("engineProcessModel") && System.Enum.TryParse(iniFile.Read("engineProcessModel"), out EngineProcessModel epm)) EngineModeCutover.ProcessModel = epm;
                 NativeEngine.LoadFromIni(iniFile);
                 Radio.LoadFromIni(iniFile);
                 Notifications.LoadFromIni(iniFile);
@@ -691,7 +662,6 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("hrdLogUploadRealtime"))   hrdLogUploadRealtime  = iniFile.Read("hrdLogUploadRealtime")   == "True";
                 if (iniFile.KeyExists("hrdLogUploadCode"))       hrdLogUploadCode      = CredentialProtector.Unprotect(iniFile.Read("hrdLogUploadCode"));
                 if (iniFile.KeyExists("hrdLogUploadCallsign"))   hrdLogUploadCallsign  = iniFile.Read("hrdLogUploadCallsign")   ?? "";
-                if (iniFile.KeyExists("lotwUploadPath") && System.Enum.TryParse(iniFile.Read("lotwUploadPath"), out LotwUploadPath lup)) lotwUploadPath = lup;
                 if (iniFile.KeyExists("tqslStationLocation"))    tqslStationLocation   = iniFile.Read("tqslStationLocation")    ?? "";
                 if (iniFile.KeyExists("qrzLogbookAutoSyncEnabled"))     qrzLogbookAutoSyncEnabled     = iniFile.Read("qrzLogbookAutoSyncEnabled")     == "True";
                 int qrzld; if (iniFile.KeyExists("qrzLogbookRefreshDays") && int.TryParse(iniFile.Read("qrzLogbookRefreshDays"), out qrzld) && qrzld >= 1) qrzLogbookRefreshDays = qrzld;
@@ -768,7 +738,7 @@ namespace WSJTX_Controller
             callCqOptionsButton.BringToFront();
 
             //start the UDP message server
-            wsjtxClient = new WsjtxClient(this, IPAddress.Parse(ipAddrStr), port, multicast, overrideUdpDetect, debug, diagLog, txMode);
+            wsjtxClient = new WsjtxClient(this, IPAddress.Parse(ipAddrStr), port, multicast, debug, diagLog, txMode);
             if (parsedCallWaitingRowOrder != null)
             {
                 wsjtxClient.callWaitingRowOrderFields = parsedCallWaitingRowOrder;
@@ -822,14 +792,14 @@ namespace WSJTX_Controller
             dxSpotWatcher.Updated += () => BeginInvoke(new Action(RenderSpotWatchList));
             dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls);
             spotWatchAgeTimer.Start();
-            // Order matters under JimmyNative + HamlibRigctld: ApplyEngineMode() launches the
-            // engine host, which owns and spawns the real rigctld; ApplyRadioSettings() (when
-            // engineOwnsRigctld) only ever CONNECTS to that rigctld, never launches its own.
-            // Running ApplyRadioSettings() first raced its first poll tick(s) against a rigctld
-            // that didn't exist yet -- harmless on its own (self-heals next tick), but confusing
-            // to diagnose alongside everything else found live, 2026-08-06/07, so fixed while in
-            // there. ApplyEngineMode() first gives the real rigctld a head start.
-            ApplyEngineMode();      // Phase 4g: launches the native engine host if EngineModeCutover.Mode is JimmyNative
+            // Order matters under HamlibRigctld: ApplyEngineMode() launches the engine host,
+            // which owns and spawns the real rigctld; ApplyRadioSettings() only ever CONNECTS
+            // to that rigctld, never launches its own. Running ApplyRadioSettings() first raced
+            // its first poll tick(s) against a rigctld that didn't exist yet -- harmless on its
+            // own (self-heals next tick), but confusing to diagnose alongside everything else
+            // found live, 2026-08-06/07, so fixed while in there. ApplyEngineMode() first gives
+            // the real rigctld a head start.
+            ApplyEngineMode();      // Phase 4g: always launches the native engine host
             ApplyRadioSettings();   // Phase 1: launches/connects rigctld if Radio.Mode was saved as HamlibRigctld
             wsjtxClient.rawPriorityTags = rawPriorityTags;
             wsjtxClient.cmdPrompts = cmdPrompts;
@@ -1088,7 +1058,6 @@ namespace WSJTX_Controller
                 iniFile.Write("callCqDx", callCqDxCheckBox.Checked.ToString());
                 iniFile.Write("ignoreNonDx", ignoreNonDxCheckBox.Checked.ToString());
                 iniFile.Write("callNonDirCq", callNonDirCqCheckBox.Checked.ToString());
-                iniFile.Write("overrideUdpDetect", wsjtxClient.overrideUdpDetect.ToString());
                 iniFile.Write("skipLevelPrompt", skipLevelPrompt.ToString());
                 iniFile.Write("cqOnly", cqOnlyRadioButton.Checked.ToString());
                 iniFile.Write("newOnBand", (bandComboBox.SelectedIndex == 1).ToString());
@@ -1112,21 +1081,6 @@ namespace WSJTX_Controller
                 Radio.SaveToIni(iniFile);
                 Notifications.SaveToIni(iniFile);
                 NativeEngine.SaveToIni(iniFile);
-                // EngineModeCutover.Mode was only ever READ from the .ini (line ~555) -- never
-                // written back here, so Decode Engine always reverted to WsjtxExternal on the
-                // next launch no matter what was picked in Options (found live, 2026-08-06:
-                // "the decoder is not being saved every time i start jimmy it is on the wsjtx
-                // and not native jimmy").
-                // Never persist during a replay-test session -- EngineModeCutover.Mode was just
-                // force-overridden to WsjtxExternal above (see the load-side guard) regardless of
-                // the operator's real saved preference; writing it back here would silently
-                // replace that real preference with the test override the next time Options is
-                // saved during a test run.
-                if (!TestModeGuard.IsTestMode)
-                {
-                    iniFile.Write("decodeEngineMode", EngineModeCutover.Mode.ToString());
-                    iniFile.Write("engineProcessModel", EngineModeCutover.ProcessModel.ToString());
-                }
                 iniFile.Write("rawShowCq", rawShowCq.ToString());
                 iniFile.Write("rawShowDirected", rawShowDirected.ToString());
                 iniFile.Write("rawShowReports", rawShowReports.ToString());
@@ -1210,7 +1164,6 @@ namespace WSJTX_Controller
                 iniFile.Write("hrdLogUploadRealtime",    hrdLogUploadRealtime.ToString());
                 iniFile.Write("hrdLogUploadCode",        CredentialProtector.Protect(hrdLogUploadCode));
                 iniFile.Write("hrdLogUploadCallsign",    hrdLogUploadCallsign     ?? "");
-                iniFile.Write("lotwUploadPath",          lotwUploadPath.ToString());
                 iniFile.Write("tqslStationLocation",     tqslStationLocation      ?? "");
                 iniFile.Write("qrzLogbookAutoSyncEnabled",     qrzLogbookAutoSyncEnabled.ToString());
                 iniFile.Write("qrzLogbookRefreshDays",         qrzLogbookRefreshDays.ToString());
@@ -1278,12 +1231,6 @@ namespace WSJTX_Controller
             rigctldClient?.Dispose();   // also stops any bundled rigctld this session launched
             nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path)
             nativeEngineClient = null;
-            if (_nativeEngineOwnsLockFile)
-            {
-                try { System.IO.File.Delete(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "WSJT-X.lock")); }
-                catch { /* best-effort cleanup */ }
-                _nativeEngineOwnsLockFile = false;
-            }
             wsjtxClient.Closing();
         }
 
@@ -1792,23 +1739,6 @@ namespace WSJTX_Controller
             useRR73CheckBox.ForeColor = Color.Black;
         }
 
-        public void SetupDlgClosed() { }
-
-        public void OpenUdpConfig()
-        {
-            initialConnFaultTimer.Stop();
-
-            if (optionsDlg != null)
-            {
-                optionsDlg.SelectUdpTab();
-                optionsDlg.BringToFront();
-                return;
-            }
-
-            openOptionsOnUdpTab = true;
-            guideTimer.Start();
-        }
-
         // Ongoing safety-net repair (see LogbookDb.BackfillMissingStates) for QSOs logged
         // with a blank state despite the callsign being derivable. Runs every startup, not
         // just once -- the underlying query is a cheap indexed lookup (ix_state) that finds
@@ -1982,12 +1912,11 @@ namespace WSJTX_Controller
         private void guideTimer_Tick(object sender, EventArgs e)
         {
             guideTimer.Stop();
-            optionsDlg = new OptionsDlg(wsjtxClient, this, openOptionsOnUdpTab);
+            optionsDlg = new OptionsDlg(wsjtxClient, this);
             // No Owner -- see the matching comment on _logbookWindow's Show() call; an owned
             // window always stays in front of its owner at the Win32 level, which breaks
             // Alt+Tab back to the main window. Controller_FormClosing already closes this
             // explicitly (optionsDlg?.Close()), so Owner isn't needed for that either.
-            openOptionsOnUdpTab = false;
             optionsDlg.Show();
         }
 
@@ -2396,32 +2325,17 @@ namespace WSJTX_Controller
 
             rigctldClient?.Dispose();
 
-            // Self-sufficiency plan Phase 5: under JimmyNative, the native engine host owns
-            // rigctld directly (it builds a real Rig from the SAME rig/COM-port/baud/PTT-method
+            // Self-sufficiency plan Phase 5: the native engine host always owns rigctld
+            // directly (it builds a real Rig from the SAME rig/COM-port/baud/PTT-method
             // settings -- see ApplyEngineMode/NativeEngineClient.Launch) -- Jimmy's own
-            // rigctldClient here must only CONNECT (read-only S-meter/SWR/power polling, plus
-            // SetFrequency for Band Up/Down) and must NEVER launch a second, competing rigctld on
-            // the same port. rigctld is a multi-client daemon, so a plain connect-only client
-            // shares it fine. Under WsjtxExternal, unchanged: Jimmy's own bundled copy is what's
-            // actually driving CAT/PTT, so it launches as before.
-            bool engineOwnsRigctld = EngineModeCutover.Mode == DecodeEngineMode.JimmyNative;
-
+            // rigctldClient here only ever CONNECTS (read-only S-meter/SWR/power polling, plus
+            // SetFrequency for Band Up/Down) and must NEVER launch a second, competing rigctld
+            // on the same port. rigctld is a multi-client daemon, so a plain connect-only
+            // client shares it fine.
             rigctldClient = new RigctldClient(
                 Radio.UseExternalRigctld ? Radio.RigctldHost : "127.0.0.1",
                 Radio.RigctldPort);
 
-            if (!Radio.UseExternalRigctld && !engineOwnsRigctld)
-            {
-                if (!rigctldClient.LaunchBundled(Radio.RigModel, Radio.ComPort, Radio.BaudRate))
-                {
-                    // Wave 1 of the notification architecture (WSJTX_Controller/Notify/):
-                    // default template "{Source}: {Detail}", Warning severity (respects the
-                    // policy's configured Priority, default Normal) -- byte-identical to the
-                    // direct ShowMessage call this replaces (which never beeped).
-                    wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", rigctldClient.LastError));
-                    return;
-                }
-            }
             ScheduleRigConnectKick(rigctldClient);
 
             radioPollTimer.Interval = Math.Max(200, Radio.PollIntervalMs);
@@ -2448,9 +2362,7 @@ namespace WSJTX_Controller
         // client instance, and every WinForms Timer callback runs serialized on the UI thread's
         // message loop, so this avoids that race entirely. The delay gives the engine's own CAT
         // probe (a documented 700ms internal sleep, plus a real serial round-trip) time to finish
-        // before this reads/writes it -- also generous enough for Jimmy's own bundled rigctld
-        // (the !engineOwnsRigctld path) even though LaunchBundled itself already blocks until the
-        // process starts, since the CAT probe inside it can still be settling.
+        // before this reads/writes it.
         private void ScheduleRigConnectKick(RigctldClient client)
         {
             var kickTimer = new System.Windows.Forms.Timer { Interval = 1500 };
@@ -2506,52 +2418,30 @@ namespace WSJTX_Controller
             kickTimer.Start();
         }
 
-        // Self-sufficiency plan, Phase 4g/4i: brings the live nativeEngineClient state into line
-        // with EngineModeCutover.Mode (an INI-only, undocumented flag -- see BackendMode.cs).
-        // Called once at startup (after EngineModeCutover/NativeEngine are loaded from the .ini)
-        // and again whenever OptionsDlg's Radio tab is saved -- switching modes takes effect
-        // immediately, no restart needed, matching ApplyRadioSettings' own "Done when" shape.
+        // Native-only: Jimmy always runs its own engine host -- called once at startup and
+        // again whenever OptionsDlg's Radio tab is saved (COM port/audio device/rig model
+        // changes take effect immediately, no restart needed, matching ApplyRadioSettings'
+        // own "Done when" shape).
         //
-        // Jimmy's own UdpLoop/CheckWsjtxRunning (WsjtxClient.Protocol.cs) only opens Jimmy's UDP
-        // socket after detecting %TEMP%\WSJT-X.lock -- a file a real external WSJT-X-family
-        // process creates on its own startup. The native engine host is that process now, but it
-        // doesn't know about (or create) that file, so this method creates it, exactly the way
-        // the replay-test harness's own ensure_jimmy_udp_ready() does for the same reason. Only
-        // ever deleted again if THIS session created it (_nativeEngineOwnsLockFile) -- never a
-        // lock file a real external WSJT-X might legitimately own.
+        // ConnectNativeEngine opens Jimmy's own UDP listener directly at a fixed, known
+        // loopback address -- no "detect a separately-running real WSJT-X" dance of any kind
+        // (that legacy path used to flat-out crash the engine host and, separately, could
+        // freeze the whole window; both confirmed live, 2026-08-07/08, and removed for good
+        // along with the rest of the WSJT-X-external/Andy-fork compatibility code).
+        //
+        // TestModeGuard.IsTestMode still opens this same real listener (so JimmyReplay.py's
+        // simulated peer -- standing in for the engine host -- connects exactly the way a
+        // real one would) but never spawns the actual jimmy-engine-host.exe process, so a
+        // replay-test session can never open a real audio device, a real COM port, or key a
+        // real radio.
         public void ApplyEngineMode()
         {
-            if (EngineModeCutover.Mode != DecodeEngineMode.JimmyNative)
-            {
-                nativeEngineClient?.Dispose();
-                nativeEngineClient = null;
-                // Switching away from JimmyNative (e.g. via Options) must also drop the lock
-                // file this session created for it -- otherwise Jimmy's UdpLoop still believes
-                // "WSJT-X running" with no process left to actually feed it UDP, a silently
-                // stuck-connected state until Jimmy is restarted or a real WSJT-X happens to run.
-                if (_nativeEngineOwnsLockFile)
-                {
-                    try { System.IO.File.Delete(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "WSJT-X.lock")); }
-                    catch { /* best-effort cleanup */ }
-                    _nativeEngineOwnsLockFile = false;
-                }
-                return;
-            }
+            int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
+            wsjtxClient?.ConnectNativeEngine(IPAddress.Parse("127.0.0.1"), jimmyPort);
 
-            string lockPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "WSJT-X.lock");
-            if (!System.IO.File.Exists(lockPath))
-            {
-                try
-                {
-                    System.IO.File.Create(lockPath).Dispose();
-                    _nativeEngineOwnsLockFile = true;
-                }
-                catch (Exception ex)
-                {
-                    ShowMessage($"Native engine: couldn't create {lockPath}: {ex.Message}", false);
-                    return;
-                }
-            }
+            nativeEngineClient?.Dispose();
+            nativeEngineClient = null;
+            if (TestModeGuard.IsTestMode) return;
 
             // Self-sufficiency plan Phase 5: no control-channel listener to stand up anymore --
             // the native engine host builds its own Rig directly (from the CLI args
@@ -2562,30 +2452,16 @@ namespace WSJTX_Controller
             // in that case -- degrades to receive-only for PTT specifically, not a silent
             // failure). Under WsjtxCat, Launch passes no rig args at all -- receive-only for
             // radio entirely, exactly as before.
-            nativeEngineClient?.Dispose();
             var client = new NativeEngineClient();
             nativeEngineClient = client;
-            int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
             string myCall = NativeEngine.MyCall, myGrid = NativeEngine.MyGrid;
             string inDevice = NativeEngine.AudioInputDevice, outDevice = NativeEngine.AudioOutputDevice;
             RadioSettings radioSnapshot = Radio;
             WsjtxClient wsjtx = wsjtxClient;
 
-            // Confirmed live, 2026-08-08: the real cause of Jimmy's window going fully
-            // unresponsive the instant Native mode was enabled was CheckWsjtxRunning()'s
-            // legacy "detect a separately-running real WSJT-X" dance (WsjtxClient.Protocol.cs)
-            // -- a flat 3-second Thread.Sleep on the UI thread, reading WSJT-X's own ini file
-            // for a UDP address that's irrelevant here, and a possible invisible/unfocused
-            // modal MessageBox on failure. The lock file created above guarantees that path
-            // fires on the very next mainLoopTimer tick. ConnectNativeEngine bypasses all of
-            // that: Native mode already knows its own UDP endpoint (Launch below is told to
-            // send to 127.0.0.1:jimmyPort via --jimmy-addr), so there's nothing to detect.
-            wsjtx?.ConnectNativeEngine(IPAddress.Parse("127.0.0.1"), jimmyPort);
-
-            // Launch() (specifically Process.Start()) still runs on a background thread as a
-            // second, independent defensive measure -- Process.Start() for a new, unsigned exe
-            // is well known to be able to block synchronously on real-time AV scanning or
-            // SmartScreen's Mark-of-the-Web check, separately from the UDP issue above.
+            // Launch() (specifically Process.Start()) runs on a background thread -- Process.Start()
+            // for a new, unsigned exe is well known to be able to block synchronously on real-time
+            // AV scanning or SmartScreen's Mark-of-the-Web check.
             System.Threading.Tasks.Task.Run(() =>
             {
                 // Before onUnexpectedExit existed, a real crash of the engine host was completely
@@ -2596,12 +2472,57 @@ namespace WSJTX_Controller
                 // ShowMessage touches statusText.
                 bool ok = client.Launch(myCall, myGrid, inDevice, jimmyPort, outDevice, radioSnapshot,
                     msg => wsjtx?.DebugOutput(msg),
-                    () => BeginInvoke(new Action(() => ShowMessage("Native engine host stopped unexpectedly -- decoding/TX are no longer running.", true))));
+                    () => BeginInvoke(new Action(() => OnNativeEngineUnexpectedExit(client))));
                 if (!ok && nativeEngineClient == client)
                 {
                     BeginInvoke(new Action(() => ShowMessage($"Native engine: {client.LastError}", false)));
                 }
             });
+        }
+
+        // Confirmed live, 2026-08-08: a real crash still happens occasionally (intermittently --
+        // reproduced once in ~24s of a session, then not again across an hour-plus of runtime in
+        // other sessions), and it's inside the native engine itself, not anything Jimmy's C# side
+        // sends it (traced with cmd:7 -- the previously-confirmed crash trigger -- fully removed
+        // from the codebase; the crash still happened). Root cause not yet found. Rather than
+        // leave the operator stuck with a dead engine (no decoding, no TX) until they notice and
+        // manually reopen Options, auto-restart once the message is shown -- "never knowingly lose
+        // a valid FT8/FT4 station or QSO opportunity" applies just as much to Jimmy's own crashes
+        // as to missed decodes. Capped and backed off so a persistently-crashing engine (a real
+        // config problem, not a transient fault) degrades to a clear "stopped trying" message
+        // instead of a tight restart loop hammering the audio device/COM port.
+        private int _nativeEngineAutoRestartCount = 0;
+        private DateTime _nativeEngineAutoRestartWindowStart = DateTime.MinValue;
+        private const int MaxNativeEngineAutoRestartsPerWindow = 5;
+        private static readonly TimeSpan NativeEngineAutoRestartWindow = TimeSpan.FromMinutes(5);
+
+        private void OnNativeEngineUnexpectedExit(NativeEngineClient exitedClient)
+        {
+            if (nativeEngineClient != exitedClient) return;    // superseded by a newer launch already
+
+            DateTime now = DateTime.UtcNow;
+            if (now - _nativeEngineAutoRestartWindowStart > NativeEngineAutoRestartWindow)
+            {
+                _nativeEngineAutoRestartWindowStart = now;
+                _nativeEngineAutoRestartCount = 0;
+            }
+            _nativeEngineAutoRestartCount++;
+
+            if (_nativeEngineAutoRestartCount > MaxNativeEngineAutoRestartsPerWindow)
+            {
+                ShowMessage("Native engine host stopped unexpectedly -- gave up auto-restarting after repeated crashes. Check Options > Decode Engine and try again.", true);
+                return;
+            }
+
+            ShowMessage($"Native engine host stopped unexpectedly -- restarting ({_nativeEngineAutoRestartCount}/{MaxNativeEngineAutoRestartsPerWindow})...", true);
+            var restartTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+            restartTimer.Tick += (s, e) =>
+            {
+                restartTimer.Stop();
+                restartTimer.Dispose();
+                if (nativeEngineClient == exitedClient) ApplyEngineMode();
+            };
+            restartTimer.Start();
         }
 
         // null = no poll completed yet this session; true/false = the CAT link's health as of
@@ -3353,12 +3274,6 @@ namespace WSJTX_Controller
             if (e.Control && e.Shift && e.KeyCode == Keys.O)
             {
                 optionsButton_Click(null, null);
-            }
-
-            if (e.Control && e.Shift && e.KeyCode == Keys.C)
-            {
-                if (wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTx();
-                OpenUdpConfig();
             }
 
             if (e.Control && e.Shift && e.KeyCode == Keys.D)

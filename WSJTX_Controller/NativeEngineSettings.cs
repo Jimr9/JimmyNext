@@ -1,16 +1,12 @@
 namespace WSJTX_Controller
 {
-    // Phase 4g of the self-sufficiency plan: settings for DecodeEngineMode.JimmyNative, modeled
-    // on RadioSettings.cs's LoadFromIni/SaveToIni pattern. Nothing reads these fields unless
-    // EngineModeCutover.Mode == JimmyNative (an INI-only, undocumented flag itself -- see
-    // BackendMode.cs), so behavior is unchanged for everyone until that's explicitly set.
+    // Phase 4g of the self-sufficiency plan: settings for Jimmy's native engine, modeled on
+    // RadioSettings.cs's LoadFromIni/SaveToIni pattern.
     //
     // MyCall/MyGrid exist here, not in JimmySettings, because they're operationally load-bearing
     // for the native engine specifically: the engine host needs them BEFORE it can send its own
-    // first Status message (unlike WsjtxExternal mode, where Controller.MyCall() reads
-    // wsjtxClient.myCall -- populated FROM an inbound Status message an external WSJT-X-family
-    // process sends; the native engine IS that process, so it needs the answer already, not a
-    // circular wait for itself to report it).
+    // first Status message -- it IS the process that reports MyCall/MyGrid, so it needs the
+    // answer already, not a circular wait for itself to report it.
     public class NativeEngineSettings
     {
         public string MyCall { get; set; } = "";

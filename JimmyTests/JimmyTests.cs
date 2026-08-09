@@ -149,7 +149,6 @@ static class JimmyTests
         ClassificationEngineTests();
         GeoMathTests();
         GeoMathEllipsoidCrossValidationTests();
-        CapabilityNegotiatorTests();
         A6ClassificationParityTests();
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
@@ -847,50 +846,6 @@ static class JimmyTests
             Check($"{from} -> {to}: azimuth matches Python oracle", r.HasValue && Math.Abs(r.Value.azimuthDeg - az) < 0.01, true);
             Check($"{from} -> {to}: distance matches Python oracle", r.HasValue && Math.Abs(r.Value.distanceKm - distKm) < 0.01, true);
         }
-    }
-
-    // ── CapabilityNegotiator (Stage A5) ─────────────────────────────────────────
-    // Pure state-transition tests for the negotiation state machine that replaces
-    // acceptableWsjtxVersions' hard version-string gate. No socket/UI involved --
-    // WsjtxClient's actual cmd:7 send/compare mechanics are exercised end-to-end by
-    // the replay suite instead (this is purely the state bookkeeping around them).
-    static void CapabilityNegotiatorTests()
-    {
-        Console.WriteLine("\n── CapabilityNegotiator (Stage A5) ──");
-
-        var n = new CapabilityNegotiator();
-        Check("starts Disconnected", n.State == WsjtxCapabilityState.Disconnected, true);
-
-        n.BeginNegotiating();
-        Check("BeginNegotiating -> Negotiating", n.State == WsjtxCapabilityState.Negotiating, true);
-
-        n.BeginCapabilityProbe();
-        Check("BeginCapabilityProbe -> CapabilityProbing", n.State == WsjtxCapabilityState.CapabilityProbing, true);
-
-        // Happy path: Compatibility Layer confirmed (currently supported Andy WM8Q build).
-        var full = new CapabilityNegotiator();
-        full.BeginNegotiating();
-        full.BeginCapabilityProbe();
-        full.ConfirmCompatibilityLayer();
-        Check("ConfirmCompatibilityLayer -> ConnectedFull", full.State == WsjtxCapabilityState.ConnectedFull, true);
-        full.TimeoutToDegraded();
-        Check("TimeoutToDegraded after ConnectedFull is a no-op (late timer fire doesn't downgrade)",
-              full.State == WsjtxCapabilityState.ConnectedFull, true);
-
-        // Degraded path: no echo within the bounded timeout (stock / WSJT-X Improved
-        // build with no Compatibility Layer) -- must NOT stay stuck refusing to run.
-        var degraded = new CapabilityNegotiator();
-        degraded.BeginNegotiating();
-        degraded.BeginCapabilityProbe();
-        degraded.TimeoutToDegraded();
-        Check("TimeoutToDegraded (no echo) -> Connected (degraded)", degraded.State == WsjtxCapabilityState.Connected, true);
-
-        // Reconnect: capability state must never be cached across a connection boundary.
-        degraded.Reset();
-        Check("Reset -> Disconnected (re-probes from scratch on reconnect)",
-              degraded.State == WsjtxCapabilityState.Disconnected, true);
-        full.Reset();
-        Check("Reset from ConnectedFull -> Disconnected too", full.State == WsjtxCapabilityState.Disconnected, true);
     }
 
     // ── A6 Classification Parity (deterministic fixtures) ───────────────────────
