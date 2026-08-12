@@ -196,3 +196,67 @@ window (separate from Options) remain untested.
 - Severity: low/cosmetic, same reasoning as Finding 4 -- extra spoken
   context, not confusing or blocking. No confirmed code-level cause or fix
   yet.
+
+## Finding 6 — CheckedListBox items announce "checked, True"/"False" (JAWS only) — OPEN, confirmed not Jimmy code
+
+- Symptom, live JAWS report 2026-08-12: items in a `CheckedListBox` (e.g.
+  Options > Notifications' two lists) are announced as "Computer clock out
+  of sync checked, True" / "QSO logged checked, False" -- the raw boolean
+  appended after the normal checked/unchecked wording. NVDA does not
+  reproduce this; reads normally.
+- Confirmed NOT a Jimmy-code issue: grepped the entire `WSJTX_Controller`
+  tree for `AccessibleObject`, `CreateAccessibilityInstance`,
+  `AccessibleValue`, `NotifyWinEvent` -- zero hits on either
+  `CheckedListBox` in the app. Both are plain, unmodified
+  `System.Windows.Forms.CheckedListBox` instances; their item text is
+  plain human-readable strings (`NotificationDefaults.DisplayNames`) with
+  no boolean anywhere near it. The "True"/"False" is coming from .NET 10
+  WinForms' own CheckedListBox UI Automation/MSAA implementation.
+- Same category as Findings 1, 2, 4, 5 -- a .NET Core WinForms port gap
+  from .NET Framework, not anything under Jimmy's control.
+  `UseLegacyAccessibilityFeatures` is confirmed inapplicable per Finding 1,
+  so not worth retrying here either.
+- No Jimmy-side fix available (no property to change, no supported
+  opt-out switch on .NET 5+). Not pursued further per project direction
+  (no custom `AccessibleObject`/AutomationPeer override -- too deep into
+  WinForms internals for uncertain payoff, matches Finding 4's own
+  recommendation).
+
+## Finding 7 — CheckedListBox Space-toggle sometimes silent, next press announces stale state (JAWS only) — OPEN, confirmed not Jimmy code
+
+- Symptom, live JAWS report 2026-08-12: pressing Space on a
+  `CheckedListBox` item sometimes changes the checked state with no
+  announcement; the next Space press announces the (by-then-previous)
+  state instead of the current one.
+- Investigated as a possible self-inflicted regression first, since
+  Options > Notifications' "template variables" CheckedListBox
+  (`_notifyVarsListBox`) rebuilds its `Items` collection (`Clear()` +
+  re-`Add()` of every entry) after every check-toggle, to keep the
+  checklist's live order in sync with the template text -- new code from
+  this same feature, not carried forward from the old build. Two rounds of
+  fixes were tried and live-retested: (1) wrapping the rebuild in
+  `BeginUpdate()`/`EndUpdate()`, (2) removing the rebuild from the
+  toggle path entirely (`NotifyVarCheckChanged` no longer touches `Items`
+  at all -- the checklist only re-sorts into template order at real
+  context-switch boundaries: selecting a different notification type,
+  Move Up/Down, or committing a hand-typed template edit). Neither changed
+  the symptom.
+- Conclusively ruled out as a Jimmy-code cause 2026-08-12: the same
+  silent/stale-catch-up behavior reproduces on `_notifyTypesListBox` (the
+  Notifications tab's *other* CheckedListBox, listing notification types
+  to enable/disable), confirmed via live JAWS retest on its "WSJT-X
+  disconnected" entry. That list's `ItemCheck` handler has never, in any
+  version, done anything but a single-line field assignment -- no `Items`
+  mutation, ever. Since the bug reproduces on a list with zero relevant
+  Jimmy code, it cannot be caused by anything in Jimmy's own event
+  handling.
+- Same category as Finding 6 -- a .NET 10 WinForms Core CheckedListBox/
+  JAWS interop gap, not fixable from Jimmy's side without a custom
+  AccessibleObject/AutomationPeer override, which is out of scope per
+  project direction (see Finding 6).
+- The two toggle-path changes made while chasing this (BeginUpdate/
+  EndUpdate batching, then removing the redundant Items rebuild) are kept
+  regardless -- they reduce unnecessary control churn on every keystroke,
+  a legitimate improvement on their own merits, verified with the full
+  JimmyTests suite (855/855 passing, no behavior change to template sync
+  or Move Up/Down). They just don't touch this specific AT-level bug.

@@ -2027,7 +2027,14 @@ namespace WSJTX_Controller
         // through first. Replaces the old fixed one-NumericUpDown-per-band-per-mode grid (22
         // always-visible fields) and the old fixed per-band hotkeys (HotkeyAction.Band160m..
         // Band6m, removed entirely -- not worth carrying forward, all defaulted to Keys.None).
-        private void BuildFrequenciesTab()
+        //
+        // internal (not private): JimmyTests calls this directly (see InternalsVisibleTo in
+        // AssemblyInfo.Testing.cs) to exercise the exact method that crashed live, 2026-08-12,
+        // without needing the rest of OptionsDlg_Load's other 15 Build*Tab() calls (several of
+        // which need their own unrelated scaffolding -- e.g. BuildHotkeysTab needs a real
+        // Controller.hotkeyConfig, BuildRadioTab touches System.IO.Ports -- not needed just to
+        // cover this bug).
+        internal void BuildFrequenciesTab()
         {
             frequenciesPanel.Controls.Clear();
 
@@ -2076,7 +2083,12 @@ namespace WSJTX_Controller
                 AccessibleName = "Frequencies",
                 AccessibleDescription = "Every band's FT8 and FT4 calling frequencies. The first entry for each mode in a band is what Band Up/Down tunes to.",
             };
-            BuildFreqList();
+            // NOT populated here: BuildFreqList() ends by calling LoadSelectedFreqEntry(),
+            // which reads _freqValueUpDown/_freqHotkeyCaptureBox/_freqClearHotkeyButton/
+            // _freqRemoveButton -- none of which exist yet at this point in construction.
+            // Root-caused live, 2026-08-12: calling it this early threw a NullReferenceException
+            // the instant Options opened (Alt+O), before any of those controls were created --
+            // moved to the end of this method, after everything it touches actually exists.
             _freqListBox.SelectedIndexChanged += (s, e) => LoadSelectedFreqEntry();
             frequenciesPanel.Controls.Add(_freqListBox);
 
@@ -2187,7 +2199,10 @@ namespace WSJTX_Controller
             };
             frequenciesPanel.Controls.Add(restoreButton);
 
-            _freqListBox.SelectedIndex = 0;
+            // Populates the list AND (via its own trailing LoadSelectedFreqEntry() call) syncs
+            // the edit fields to the initial selection -- safe here, now that every control it
+            // touches has actually been created above.
+            BuildFreqList();
         }
 
         // Every band+mode always has at least one real entry once this runs -- an operator who
@@ -2775,6 +2790,7 @@ namespace WSJTX_Controller
                 if (!_notifyVarsListEntries.Contains(v)) _notifyVarsListEntries.Add(v);
 
             _notifyUpdatingFields = true;
+            _notifyVarsListBox.BeginUpdate();
             try
             {
                 _notifyVarsListBox.Items.Clear();
@@ -2784,6 +2800,7 @@ namespace WSJTX_Controller
             }
             finally
             {
+                _notifyVarsListBox.EndUpdate();
                 _notifyUpdatingFields = false;
             }
         }
@@ -2822,15 +2839,17 @@ namespace WSJTX_Controller
             _notifyValidationLabel.Text = "";
             _notifyUpdatingFields = false;
 
-            // Defer the checklist rebuild rather than calling RefreshNotifyVarsList()
-            // synchronously here: ItemCheck fires BEFORE this CheckedListBox's own Items/
-            // checked-state collection actually updates, so clearing and re-adding Items from
-            // inside this same event would fight WinForms' own in-flight update to the box that
-            // raised it. Posting it to run right after this event finishes is the standard safe
-            // pattern for a CheckedListBox that needs to mutate its own Items from its own
-            // ItemCheck handler. (MoveNotifyVar's own resync is NOT deferred -- it's triggered
-            // by a Button click, not an in-flight ItemCheck, so there's nothing to race there.)
-            BeginInvoke(new Action(RefreshNotifyVarsList));
+            // Deliberately do NOT touch _notifyVarsListBox.Items here. WinForms itself already
+            // applies this item's own checked bit (CheckOnClick) once this handler returns --
+            // nothing left for us to do there -- and _notifyVarsListEntries' existing order is
+            // still valid since nothing's position has changed. Re-sorting the checklist into
+            // true template order (checked items first, in template order) is deferred to the
+            // next real structural change -- switching notification type, Move Up/Down, or
+            // committing a hand-typed template edit -- all of which already call
+            // RefreshNotifyVarsList() at a moment when this box isn't mid-toggle. Rebuilding
+            // Items on every single Space-press used to tear down and recreate every item's
+            // accessibility identity right as the screen reader was announcing the toggle it
+            // just fired, which is what caused the live-reported silent/stale-announce bug.
         }
 
         private void MoveNotifyVar(int direction)

@@ -152,6 +152,7 @@ static class JimmyTests
         GeoMathEllipsoidCrossValidationTests();
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
+        StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
         ClubLogPrefixTableTests();
@@ -1423,6 +1424,52 @@ static class JimmyTests
     // exactly what happened here. wsjtxClient/ctrl can both be null: InitializeComponent() runs
     // first, before either is ever touched (OptionsDlg.cs's own constructor order) -- no real
     // Controller/WsjtxClient/ini/engine needed for this specific check.
+    // ── Startup status message: version + Prompt Mode (Alt+P), no obsolete UDP wording ──
+    // Corrected 2026-08-12 (live JAWS feedback): "Waiting for WSJT-X" is startup wording from
+    // before Direct engine mode existed. This is the very first status render of EVERY
+    // session -- NegoState always starts at WAIT (ResetNego(), called unconditionally from the
+    // WsjtxClient constructor, regardless of transport) -- so it fired under Direct mode too,
+    // not just classic UDP. Fixed to reuse the EXISTING Prompt Mode setting (cmdPrompts,
+    // toggled by Alt+P via TogglePrompts()) rather than a new preference, and the existing
+    // pgmVer field (populated from the compiled assembly's own FileVersion -- see the
+    // constructor) rather than a hardcoded version.
+    static void StartupStatusMessageTests()
+    {
+        Console.WriteLine("\n── Startup status message (Prompt Mode / version, no obsolete wording) ──");
+
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+        // cmdPrompts defaults to true, so the constructor's own first render already exercises
+        // the Prompt-Mode-ON case.
+        Check("Prompt Mode defaults to on", wc.cmdPrompts, true);
+        CheckStr("Prompt Mode ON: startup text is version + the real Alt+K prompt, nothing else",
+            ctrl.statusText.Text, $"{wc.pgmName} {wc.pgmVer}, use Alt, K, for command key list.");
+        Check("Startup text never mentions the obsolete UDP-era \"Waiting for WSJT-X\" wording",
+            ctrl.statusText.Text.Contains("WSJT-X") == false, true);
+
+        // Alt+P's own real dispatch target (TogglePrompts), not a synthetic field flip -- both
+        // flips cmdPrompts and re-renders, same as a live Alt+P press (Controller.cs's
+        // ProcessCmdKey: hotkeyConfig[HotkeyAction.Prompts] -> TogglePrompts()) would.
+        wc.TogglePrompts();
+        Check("Alt+P (TogglePrompts) turns Prompt Mode off", wc.cmdPrompts, false);
+        CheckStr("Prompt Mode OFF: startup text is version identification only",
+            ctrl.statusText.Text, $"{wc.pgmName} {wc.pgmVer}.");
+
+        wc.TogglePrompts();
+        Check("Alt+P toggles Prompt Mode back on", wc.cmdPrompts, true);
+
+        // The announced shortcut must be real, not a stale reference -- HotkeyAction.Help is
+        // what Alt+K actually dispatches to (Controller.cs's ProcessCmdKey), still bound to
+        // Alt+K by default.
+        Check("The announced Alt+K shortcut is genuinely HotkeyAction.Help's current default binding",
+            HotkeyConfig.Defaults[HotkeyAction.Help] == (System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.K), true);
+    }
+
     static void OptionsDlgConstructionTests()
     {
         Console.WriteLine("\n── OptionsDlg: constructs without throwing ──");
@@ -1436,6 +1483,35 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  OptionsDlg construction threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+
+        // Root-caused live, 2026-08-12: InitializeComponent alone never reaches
+        // BuildFrequenciesTab (only OptionsDlg_Load does, which the construction-only check
+        // above never triggers), so the NullReferenceException that actually crashed Options
+        // the instant Alt+O was pressed went uncaught. Calling BuildFrequenciesTab directly --
+        // rather than the full OptionsDlg_Load, which drags in every OTHER panel's own
+        // unrelated scaffolding needs (BuildHotkeysTab needs a real Controller.hotkeyConfig,
+        // BuildRadioTab touches System.IO.Ports, etc. -- not needed to cover this specific bug)
+        // -- targets exactly the method that crashed, with no window ever appearing.
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            using (var dlg = new OptionsDlg(wc, ctrl))
+            {
+                dlg.BuildFrequenciesTab();
+                Check("BuildFrequenciesTab runs without throwing (the actual live-reported crash)", true, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  BuildFrequenciesTab threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

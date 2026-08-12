@@ -625,7 +625,15 @@ namespace WSJTX_Controller
             {
                 if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT)
                 {
-                    status = $"{pgmName} {pgmVer}. Waiting for WSJT-X{k}.";
+                    // "Waiting for WSJT-X" removed 2026-08-12: obsolete wording from before
+                    // Direct engine mode existed -- this is the very first status render of
+                    // every session (NegoState always starts at WAIT, set unconditionally in
+                    // ResetNego() at construction, regardless of transport), well before
+                    // ConnectDirectEngine's first successful poll flips it to RECD, so it fires
+                    // under Direct mode too, not just classic UDP. k already carries the exact
+                    // existing Prompt Mode (cmdPrompts, Alt+P) wording used everywhere else in
+                    // this method -- reused as-is rather than a new hardcoded string.
+                    status = $"{pgmName} {pgmVer}{k}.";
                     foreColor = Color.Black;
                     backColor = Color.Orange;
                     return;
