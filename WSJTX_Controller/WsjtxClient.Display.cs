@@ -715,6 +715,7 @@ namespace WSJTX_Controller
 
                             string prevRxStr = "";
                             string curRxStr = "";
+                            string otherStr = "";
                             string txStr = "";
                             string curTxMode = "";
                             string prevRxPayload;
@@ -749,6 +750,17 @@ namespace WSJTX_Controller
                             // partway into the next period. Only fall back to the clock before the
                             // first decode of the session has arrived at all.
                             bool currentSideIsTx1 = lastDecodeEvenPeriod ?? IsEvenPeriod((int)sinceMidnight.TotalSeconds);
+
+                            // Added 2026-08-10: the very first render right after Tx ends is
+                            // exactly when ShowAdvancedQueue's own Tx-suppression (WsjtxClient.
+                            // Display.cs: suppressTx1/suppressTx2, keyed off `transmitting`) just
+                            // lifted -- root-caused live from a real QSO where the "Receiving..."
+                            // announcement right after Tx ended said "TX2 0 available stations"
+                            // even though the overall queue genuinely had 14 calls in it at that
+                            // exact moment. Not fake data, just read at the worst possible
+                            // instant, before that side's own count has settled. See its use just
+                            // below, on the callsWaiting clause specifically.
+                            bool justStoppedTransmitting = _wasTransmittingLastShowStatus && !transmitting;
 
                             int displayedCount = ctrl.advancedCallLayout
                                 ? (currentSideIsTx1 ? tx1Count : tx2Count)
@@ -804,7 +816,13 @@ namespace WSJTX_Controller
                             // 2026-08-07: hearing queue/DXCC/wanted counts glued onto the same
                             // sentence as "receiving/transmitting to <call>" reads as noise once a
                             // specific QSO attempt is underway.
+                            // justStoppedTransmitting && displayedCount == 0: skip the count
+                            // clause entirely this one render rather than announcing a stale
+                            // "0 available stations" -- the NEXT natural status update (once the
+                            // just-unsuppressed side's list has had a moment to reflect the real
+                            // queue) will include the real count normally.
                             string callsWaiting = (!transmitting || qsoState == WsjtxMessage.QsoStates.CALLING) && callInProg == null
+                                && !(justStoppedTransmitting && displayedCount == 0)
                                 ? $", {count} {callsStr}{pri}{cty}{want}{needed}"
                                 : "";
                             string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? $", Alt E to enable transmit" : (!transmitting && qcw > 0 ? $", Control W for list or Alt N for next" : "")) : "";
@@ -847,14 +865,21 @@ namespace WSJTX_Controller
                                 curTxMode = $"Deleted all waiting calls, " + curTxMode;
                             }
 
-                            // "{call} logged" used to be woven into this sentence here too --
-                            // removed 2026-08-07: RequestLog's own Notify.Publish(QsoCompletedEvent)
-                            // (WSJTX_Controller/Notify/) already announces this on its own the
-                            // moment it happens, and having both meant the second one could cut
-                            // the first off mid-utterance (confirmed live). loggedCall itself is
-                            // untouched -- it still gates the "first"/"no need to say it twice"
-                            // logic just below and gets cleared at the bottom of this method
-                            // exactly as before; only the redundant announcement text is gone.
+                            // Restored 2026-08-10 (removed 2026-08-07, see the git history for
+                            // that removal's own reasoning): "{call} logged" woven directly into
+                            // this sentence, same prefix pattern as finalSignoffCall/uploadResult
+                            // just below/above. The 2026-08-07 removal kept RequestLog's own
+                            // separate Notify.Publish(QsoCompletedEvent) announcement instead,
+                            // reasoning the two competed and the second cut the first off --
+                            // confirmed live, 2026-08-10 (same bug class, W4MAA/K7F/WB3JSZ
+                            // sessions), that keeping the STANDALONE one was the wrong half to
+                            // keep: RequestLog no longer publishes QsoCompletedEvent (removed) --
+                            // this woven-in text is now the ONLY place "logged" gets said, so
+                            // there is nothing left for it to compete with.
+                            if (loggedCall != null)
+                            {
+                                curTxMode = $"{Spacify(loggedCall)} logged, " + curTxMode;
+                            }
 
                             if (finalSignoffCall != null)
                             {
@@ -987,6 +1012,15 @@ namespace WSJTX_Controller
 
                                 if (transmitting || (curRxPayload != null && curRxPayload != "")) desc = "";
 
+                                // See ProcessDecodeMsg's own comment (WsjtxClient.cs) for why this
+                                // exists: callInProg working someone else used to be silently
+                                // discarded before ShowStatus ever saw it. Only said while curCall
+                                // == callInProg is actually set (mid-attempt) -- once logged/reset
+                                // this clears along with everything else in SetCallInProg.
+                                otherStr = (curCall != null && otherPartyForCallInProg != null)
+                                    ? $", {Spacify(curCall)} {otherPartyStage} {Spacify(otherPartyForCallInProg)}"
+                                    : "";
+
                                 if (tuning)
                                 {
                                     status = tuneResult;
@@ -999,19 +1033,29 @@ namespace WSJTX_Controller
                                 }
                                 else if (replyFromInProg)
                                 {
-                                    status = $"Replying to {Spacify(callInProg)}.";          //must be short
+                                    // Added 2026-08-10: was "Replying to {call}." alone, with a
+                                    // separate "Working {call}" announcement (SetCallInProg's own
+                                    // Notify.Publish(QsoStartedEvent), now removed) landing ~66ms
+                                    // earlier -- root-caused live from a real QSO with W4MAA where
+                                    // both were heard back to back and read as a doubled/garbled
+                                    // announcement. Folding "Working" into this same short status
+                                    // covers the same information in one utterance instead of two;
+                                    // harmless to say again on a later reply within the same
+                                    // ongoing QSO, still short per the original comment below.
+                                    status = $"Working {Spacify(callInProg)}, replying.";    //must be short
                                 }
                                 else  //not a special case
                                 {
-                                    status = $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{txStr}{callsWaiting}{desc}{hold}{prompt}.";
+                                    status = $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{otherStr}{txStr}{callsWaiting}{desc}{hold}{prompt}.";
                                 }
                             }
                             DebugOutput($"{spacer}curCall:'{curCall}' sinceMidnight:{sinceMidnight}");
                             DebugOutput($"{spacer}curTxMode:'{curTxMode}' desc:'{desc}' inProg:'{inProg}'");
-                            DebugOutput($"{spacer}cond:'{cond}' curRxStr:'{curRxStr}' prevRxStr:'{prevRxStr}'");
+                            DebugOutput($"{spacer}cond:'{cond}' curRxStr:'{curRxStr}' prevRxStr:'{prevRxStr}' otherStr:'{otherStr}'");
                             DebugOutput($"{spacer}txStr:'{txStr}' callsWaiting:'{callsWaiting}' prompt:'{prompt}'");
                             DebugOutput($"{spacer}status:'{status}'");
 
+                            _wasTransmittingLastShowStatus = transmitting;
                             loggedCall = null;
                             finalSignoffCall = null;
                             modePrompt = false;

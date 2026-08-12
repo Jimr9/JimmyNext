@@ -251,7 +251,7 @@ namespace WSJTX_Controller
                 Dock           = DockStyle.Fill,
                 Font           = font,
                 TabIndex       = 1,
-                AccessibleName = "Logbook sections",
+                AccessibleName = "",
             };
 
             BuildMyLogPage(font, hfont);

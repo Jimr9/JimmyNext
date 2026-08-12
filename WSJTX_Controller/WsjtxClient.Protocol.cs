@@ -32,6 +32,24 @@ namespace WSJTX_Controller
 
         public void UdpLoop()
         {
+            // Structural mutual-exclusivity fix, 2026-08-10: this whole method must be a no-op
+            // whenever Direct mode (WsjtxClient.Direct.cs) is the active transport to the engine.
+            // Before this check existed, the two pipelines could both end up live at once: this
+            // method's own guard below only ever checked WsjtxMessage.NegoState, a single SHARED
+            // flag both pipelines read AND write -- Direct mode's own first successful poll sets
+            // NegoState to RECD (needed for unrelated things elsewhere that gate on it), which
+            // ALSO satisfied this method's "not still waiting" condition, letting it fall through
+            // to udpClient.BeginReceive(...) if udpClient happened to be non-null for any reason
+            // (e.g. left over from an earlier UDP-mode session before Direct was selected).
+            // Root-caused live, 2026-08-10, from a real QSO where Tx got disabled mid-contact by
+            // safety logic (WsjtxClient.cs's ProcessTxEnd/consecTxCount) that only exists in the
+            // UDP-only status-message handler below -- it could only have fired if this loop was
+            // actually receiving and processing real messages while nominally in Direct mode.
+            // _directConnected is Direct mode's own authoritative flag (unlike NegoState, never
+            // written by the UDP side), so gating on it here, first, makes the two transports
+            // structurally exclusive regardless of NegoState's shared value or udpClient's state.
+            if (_directConnected) return;
+
             if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT)
             {
                 if (_nativeEngineAddr != null && DateTime.UtcNow - _lastNativeConnectRetry >= NativeConnectRetryCooldown)
@@ -120,18 +138,52 @@ namespace WSJTX_Controller
             ctrl.initialConnFaultTimer.Start();
         }
 
+        // Root-caused live, 2026-08-11: usePskReporter never actually sent anything anywhere
+        // before this, in either transport -- it only ever flipped a local bool for the status
+        // announcement and the ini. Classic UDP mode has no outbound PSK Reporter command in
+        // WSJT-X's own protocol at all, so there's nothing to add there; direct-engine mode DOES
+        // have a real engine-side toggle (Engine::set_pskreporter, native spotting independent
+        // of WSJT-X's own), which was simply never wired to this checkbox at all until now.
         public bool TogglePskReporter()
         {
             usePskReporter = !usePskReporter;
             newPskReporter = true;
+            if (_directConnected) DirectSetPskReporter(usePskReporter);
             ShowStatus();
             return true;
         }
 
-        public bool SetOperatingMode(string newMode)
+        public bool SetOperatingMode(string newModeValue)
         {
             if (transmitting || txEnabled) HaltTx();
             if (transmitting) Thread.Sleep(250);        //radio must return to original rx freq first
+
+            // Direct-engine mode only: classic UDP/CAT mode has no outbound "change mode"
+            // command in WSJT-X's own UDP API at all -- mode has always been observed FROM
+            // WSJT-X's own self-reported Status messages (see "mode = smsg.Mode;" above), never
+            // commanded BY Jimmy. Halting Tx here has always been the entire point of this
+            // method under UDP mode: clear the way for the operator to switch modes themselves
+            // in WSJT-X's own UI, which Jimmy then picks up on the next Status message. Direct
+            // mode has no separate UI to fall back to, so it needs a real command -- root-caused
+            // live, 2026-08-09, from a report that Alt+M did nothing under direct-engine mode.
+            if (_directConnected && newModeValue != mode)
+            {
+                string tier = newModeValue == "FT4" ? "FT4" : "FT8";
+                DirectSetTier(tier);
+                mode = tier;
+                newMode = true;
+                // A tier switch changes the T/R period (FT8 15s / FT4 7.5s) -- everything queued
+                // under the old period's timing is stale, same treatment DirectApplyStatus's own
+                // band-change handling already gives a confirmed band change.
+                trPeriod = null;
+                _rawDecodeHistory.Clear();
+                if (ctrl.advShowRaw) ShowRawDecodes();
+                ClearCalls(true);
+                logList.Clear();
+                ShowLogged();
+                SetCallInProg(null);
+                ShowStatus();
+            }
             return true;
         }
 

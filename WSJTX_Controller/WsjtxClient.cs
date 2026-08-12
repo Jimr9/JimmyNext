@@ -130,6 +130,13 @@ namespace WSJTX_Controller
         private bool txEnabledConf = false;
         private bool wsjtxTxEnableButton = false;
         private bool transmitting = false;
+        // Tracks `transmitting` across ShowStatus() calls specifically (not the same as
+        // DirectApplyStatus's own local transmittingChanged, which only covers Direct mode) --
+        // lets ShowStatus() detect "this is the first render right after Tx ended" so it can
+        // avoid announcing a just-unsuppressed TX1/TX2 side's count as "0 available stations"
+        // before that side has had a chance to actually reflect the real queue. See
+        // WsjtxClient.Display.cs's ShowStatus() for the consuming logic.
+        private bool _wasTransmittingLastShowStatus = false;
         private bool decoding = false;
         private WsjtxMessage.QsoStates qsoState = WsjtxMessage.QsoStates.CALLING;
         private WsjtxMessage.QsoStates qsoStateConf = WsjtxMessage.QsoStates.CALLING;
@@ -154,15 +161,30 @@ namespace WSJTX_Controller
         // arrives (line ~743) so it never drifts from reality for long.
         private int? _pendingBandIdx = null;
         private List<int> bands = new List<int>() { 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 };
+        // Read-only view for Options > Frequencies (OptionsDlg.cs) -- index-aligned with
+        // freqsDict's own per-mode lists and FrequencySettings' override arrays.
+        internal IReadOnlyList<int> BandsMeters => bands;
         private Dictionary<string, List<int>> freqsDict = new Dictionary<string, List<int>>(){
             {"FT8", new List<int>(){ 1840, 3573, 5357, 7074, 10136, 14074, 18100, 21074, 24915, 28074, 50313 }},
             {"FT4", new List<int>(){ 1840, 3575, 5357, 7047, 10140, 14080, 18104, 21140, 24919, 28180, 50318 }}};
+        // Read-only view for Options > Frequencies -- the built-in default (pre-override) values
+        // shown when a band has no operator override, and restored by "Restore all to defaults".
+        internal IReadOnlyDictionary<string, IReadOnlyList<int>> FreqsDictDefaults =>
+            freqsDict.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<int>)kv.Value);
         private UInt32 txOffset = 0;
         private string replyCmd = null;     //no "reply to" cmd sent to WSJT-X yet, will not be a CQ
         private string curCmd = null;       //cmd last issed, can be CQ
         private EnqueueDecodeMessage replyDecode = null;
         private string configuration = null;
         public string callInProg = null;
+        // The callsign callInProg is heard actually working (a report/roger-report/73/RR73
+        // addressed to someone else), and a short verb describing that stage ("working" or
+        // "signing with") -- lets ShowStatus() mention it so the operator knows callInProg is
+        // busy with another station instead of just going quiet. Captured in ProcessDecodeMsg
+        // (before AddAllCallDict's own to-me-or-CQ-only filter would otherwise discard the
+        // decode entirely) and cleared whenever callInProg changes or replies to us again.
+        private string otherPartyForCallInProg = null;
+        private string otherPartyStage = null;
         private bool restartQueue = false;
 
         private WsjtxMessage.QsoStates lastQsoState = WsjtxMessage.QsoStates.INVALID;
@@ -1072,6 +1094,27 @@ namespace WSJTX_Controller
             }
 
             bool toMyCall = dmsg.IsCallTo(myCall);
+
+            // Root-caused live, 2026-08-11: AddAllCallDict only ever keeps a decode addressed to
+            // myCall or a CQ, so a callInProg decode heard working someone ELSE was silently
+            // discarded before ShowStatus() could ever mention it -- the operator got no
+            // indication callInProg was busy with another station, just unexplained silence.
+            // Captured here, unconditionally, before that filter ever runs. Cleared the moment
+            // callInProg replies to us again (the "someone else" info is stale at that point) or
+            // callInProg itself changes (SetCallInProg).
+            if (callInProg != null && string.Equals(deCall, callInProg, StringComparison.OrdinalIgnoreCase))
+            {
+                if (toMyCall)
+                {
+                    otherPartyForCallInProg = null;
+                }
+                else if (!dmsg.IsCQ() && toCall != null)
+                {
+                    otherPartyForCallInProg = toCall;
+                    otherPartyStage = dmsg.Is73orRR73() ? "signing with" : "working";
+                }
+            }
+
             dmsg.OffAir = true;     //default: play sound
 
             // Stage A6 (migration roadmap): compute Jimmy's own classification for this
@@ -1575,7 +1618,15 @@ namespace WSJTX_Controller
             //always called shortly before the tx period begins
             cancelledCall = null;
             UpdateMaxTxRepeat();
-            int maxDiscardCount = maxTxRepeat + 2;     //count number of rx periods since msg from discardCall last rec'd
+            // Count of consecutive rx periods since a message from discardCall was last received --
+            // deliberately NOT padded with a "+2" grace buffer (removed 2026-08-11, user request): the
+            // discard counter already resets to 0 on ANY message from that station addressed to us
+            // (see the `deCall == discardCall` reset below), whatever QSO stage we're in, so a
+            // genuinely progressing exchange never approaches this limit regardless of padding --
+            // the padding only made the configured "repeat limit" number inaccurate (a limit of 1
+            // silently meant 3 real periods of tolerated silence), not actually needed for QSO
+            // completion.
+            int maxDiscardCount = maxTxRepeat;
             DebugOutput($"{nl}{Time()} ProcessDecodes: restartQueue:{restartQueue} txTimeout:{txTimeout} txEnabled:{txEnabled}{nl}{spacer}txMode:{txMode} cqPaused:{cqPaused} txEnabled:{txEnabled}");
             DebugOutput($"{spacer}cancelledCall:{cancelledCall} autoFreqPauseMode:{autoFreqPauseMode} callInProg:'{callInProg}' discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount}");
             DebugOutput($"{spacer}maxDiscardCount:{maxDiscardCount} maxTxRepeat:{maxTxRepeat}");
@@ -1729,30 +1780,13 @@ namespace WSJTX_Controller
 
             string toCall = WsjtxMessage.ToCall(txMsg);
 
-            // Wave 2 of the notification architecture (WSJTX_Controller/Notify/): only when
-            // the message actually changed (compared against the OLD curTxMsg, before it's
-            // overwritten below) -- a retransmission of the identical message during a
-            // multi-step exchange must not re-announce. Distinct from txStr in
-            // WsjtxClient.Display.cs's ShowStatus(), which is an ongoing "currently sending
-            // X" status readout re-shown on every rebuild while transmitting, not a one-time
-            // change event -- the two are complementary, not duplicates (see the loggedCall
-            // audit, 2026-08-07).
-            if (txMsg != curTxMsg)
-            {
-                string txSummary;
-                if (WsjtxMessage.IsCQ(txMsg))
-                {
-                    txSummary = "Calling CQ";
-                }
-                else
-                {
-                    string payload = SpacifyPayload(WsjtxMessage.Payload(txMsg));
-                    txSummary = string.IsNullOrEmpty(payload)
-                        ? $"Sending to {Spacify(toCall)}"
-                        : $"Sending {payload} to {Spacify(toCall)}";
-                }
-                Notify.Publish(new TxMessageChangedEvent(toCall, txMsg, txSummary));
-            }
+            // Removed 2026-08-10: this used to also Notify.Publish(TxMessageChangedEvent(...))
+            // ("Sending X to Y") here, as a standalone announcement separate from txStr in
+            // WsjtxClient.Display.cs's ShowStatus() (the ongoing "Transmitting, ..., sending X"
+            // status readout). The two were meant to be complementary, not duplicates (see the
+            // old loggedCall audit comment, 2026-08-07) -- but confirmed live, 2026-08-10, that
+            // txStr already says everything the separate announcement did, so the second one was
+            // pure redundant competition for the screen reader's attention, not new information.
 
             curTxMsg = txMsg;       //the message displayed
             if (txMsg == "TUNE") tuning = true;
@@ -1837,8 +1871,20 @@ namespace WSJTX_Controller
             }
             else
             {
-                //check for max Tx count during Tx hold
-                if (ctrl.freqCheckBox.Checked && autoFreqPauseMode == autoFreqPauseModes.DISABLED && (ctrl.holdCheckBox.Checked || txMode == TxModes.LISTEN))
+                // Check for max Tx count during Tx hold. Deliberately gated on holdCheckBox
+                // alone now -- previously also fired for "|| txMode == TxModes.LISTEN", which
+                // meant EVERY ordinary S&P reply (not just Hold) counted toward this 12-transmit
+                // cap, since replying to any specific station always runs in Listen mode.
+                // Root-caused live, 2026-08-10: this disabled Tx entirely mid-QSO with a station
+                // that was progressing completely normally, just over more than 12 cycles -- the
+                // safety net couldn't tell "stuck, no response" apart from "a real, working
+                // exchange that's simply taking a while". Ordinary replies already have their
+                // own, separate, correctly-scoped give-up mechanism (the main window's "Limit to
+                // N repeated Tx" / holdMaxTxRepeat, maxTxRepeat/xmitCycleCount above) -- this
+                // auto-freq-pause safety net is for the Hold scenario specifically (operator has
+                // explicitly chosen to keep trying one station longer than normal), not every
+                // routine reply.
+                if (ctrl.freqCheckBox.Checked && autoFreqPauseMode == autoFreqPauseModes.DISABLED && ctrl.holdCheckBox.Checked)
                 {
                     consecTxCount++;
                     if (consecTxCount >= maxConsecTxCount)
@@ -2389,10 +2435,13 @@ namespace WSJTX_Controller
             }
 
             Sounds.PlaySoundEvent(ctrl.loggedCheckBox.Checked, ctrl.soundFile_Logged);
-            // Wave 1 of the notification architecture (WSJTX_Controller/Notify/): default
-            // template is "Logged QSO with {Callsign}" -- byte-identical to the direct
-            // ShowMessage call this replaces.
-            Notify.Publish(new QsoCompletedEvent(call, band, mode));
+            // Removed 2026-08-10: this used to also Notify.Publish(QsoCompletedEvent(...))
+            // here ("Logged QSO with {call}"), as a standalone announcement independent of
+            // ShowStatus()'s own status line. loggedCall (set just below) is read by
+            // ShowStatus() (WsjtxClient.Display.cs) to weave "{call} logged" directly into
+            // the SAME sentence as the rest of the QSO status -- confirmed live, 2026-08-10,
+            // that having both meant this standalone announcement could land on top of /cut
+            // off the status line's own real-time "received RR73" text for the same QSO.
             if (isPota) _potaLog.Add(call, DateTime.Now, band, mode);         //local date/time
             consecCqCount = 0;
             consecTimeoutCount = 0;
@@ -2821,18 +2870,9 @@ namespace WSJTX_Controller
 
             if (call == null) { CancelDiscardCall(); _manualCallInProg = false; }
 
-            // Wave 2 of the notification architecture (WSJTX_Controller/Notify/): only a
-            // genuine transition to a NEW target -- never re-confirming the same station
-            // (that's what the existing "Replying to X" / replyFromInProg path already
-            // covers, a different moment) and never the clear-to-null case. Compared against
-            // the OLD callInProg value, before it's overwritten below.
-            if (call != null && call != callInProg)
-            {
-                string band = FreqToBandStr(dialFrequency / 1e6) ?? "";
-                Notify.Publish(new QsoStartedEvent(call, band, mode));
-            }
-
             callInProg = call;
+            otherPartyForCallInProg = null;
+            otherPartyStage = null;
             UpdateDblClkTip();
             UpdateCallInProg();
         }
@@ -2896,7 +2936,19 @@ namespace WSJTX_Controller
         {
             StopDecodeTimers();
             tuning = false;
-            if (udpClient2 != null)
+            // Self-sufficiency plan Phase 6: direct mode has no udpClient2 at all (there is no
+            // heartbeat/negotiation handshake to have opened it) -- route through the control
+            // port's own HALT_TX command instead. AutoOnly is explicitly false either way: an
+            // emergency stop must halt regardless of whether the pending Tx was auto-generated.
+            if (_directConnected)
+            {
+                DirectSendHaltTx();
+                DebugOutput($"{Time()} >>>>>Sent HALT_TX (direct)");
+                txEnabled = false;
+                wsjtxTxEnableButton = false;
+                UpdateDblClkTip();
+            }
+            else if (udpClient2 != null)
             {
                 // The standard HaltTx message (msg type 8) -- also Jimmy's Escape-key
                 // emergency-stop path (HaltAndDisableTx, "TX halts regardless of which mode
@@ -3416,23 +3468,38 @@ namespace WSJTX_Controller
             }
 
             //send Reply message
-            var rmsg = new ReplyMessage();
-            rmsg.SchemaVersion = WsjtxMessage.NegotiatedSchemaVersion;
-            rmsg.Id = WsjtxMessage.UniqueId;
-            rmsg.SinceMidnight = dmsg.SinceMidnight;
-            rmsg.Snr = dmsg.Snr;
-            rmsg.DeltaTime = dmsg.DeltaTime;
-            rmsg.DeltaFrequency = dmsg.DeltaFrequency;
-            rmsg.Mode = dmsg.Mode;
-            rmsg.Message = dmsg.Message;
-            rmsg.UseStdReply = dmsg.UseStdReply;
-            ba = rmsg.GetBytes();
-            udpClient2.Send(ba, ba.Length);
+            // Self-sufficiency plan Phase 6: direct mode has no udpClient2 (no heartbeat/
+            // negotiation handshake to have opened it) -- route through the control port's own
+            // REPLY command (Engine::call_station_ctx directly) instead. replyMsg is the exact
+            // decoded text, same as the standard-protocol Message field below; call_station_ctx
+            // resolves SNR/slot context from its own decode_history by matching that text
+            // (see EngineHost/src/main.rs's ReplyArgs), so passing it through verbatim is the
+            // correct, minimal mapping rather than trying to duplicate that lookup here.
+            if (_directConnected)
+            {
+                DirectSendReply(nCall, null, dmsg.Message, dmsg.Snr, null);
+                DebugOutput($"{Time()} >>>>>Sent Reply (direct) nCall:'{nCall}' msg:'{dmsg.Message}'");
+            }
+            else
+            {
+                var rmsg = new ReplyMessage();
+                rmsg.SchemaVersion = WsjtxMessage.NegotiatedSchemaVersion;
+                rmsg.Id = WsjtxMessage.UniqueId;
+                rmsg.SinceMidnight = dmsg.SinceMidnight;
+                rmsg.Snr = dmsg.Snr;
+                rmsg.DeltaTime = dmsg.DeltaTime;
+                rmsg.DeltaFrequency = dmsg.DeltaFrequency;
+                rmsg.Mode = dmsg.Mode;
+                rmsg.Message = dmsg.Message;
+                rmsg.UseStdReply = dmsg.UseStdReply;
+                ba = rmsg.GetBytes();
+                udpClient2.Send(ba, ba.Length);
+                DebugOutput($"{Time()} >>>>>Sent 'Reply To Msg' cmd:{nl}{rmsg} lastTxMsg:'{lastTxMsg}'{nl}{spacer}replyCmd:'{replyCmd}'");
+            }
             replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress
             replyDecode = dmsg.DeepCopy();      //save the decode the reply cmd derived from
             curCmd = dmsg.Message;
             SetCallInProg(nCall);
-            DebugOutput($"{Time()} >>>>>Sent 'Reply To Msg' cmd:{nl}{rmsg} lastTxMsg:'{lastTxMsg}'{nl}{spacer}replyCmd:'{replyCmd}'");
             //toCallTxStart = null to flag intentional interruption
             if (transmitting) SetTxStartInfo(DateTime.UtcNow, null);  //because tx-start event already happened
 

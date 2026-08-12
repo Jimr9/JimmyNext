@@ -16,39 +16,29 @@ namespace WSJTX_Controller
 
         private void InitializeComponent()
         {
-            this.tabControl1 = new System.Windows.Forms.TabControl();
-            this.logbookSyncTabPage = new System.Windows.Forms.TabPage();
+            this._categoryListBox = new System.Windows.Forms.ListBox();
+            this._categoryDetailHost = new System.Windows.Forms.Panel();
             this.logbookSyncPanel   = new System.Windows.Forms.Panel();
-            this.lookupTabPage = new System.Windows.Forms.TabPage();
             this.lookupPanel   = new System.Windows.Forms.Panel();
-            this.generalTabPage = new System.Windows.Forms.TabPage();
             this.generalPanel = new System.Windows.Forms.Panel();
-            this.receiveReplyTabPage = new System.Windows.Forms.TabPage();
             this.receiveReplyPanel = new System.Windows.Forms.Panel();
             this.rcvCallingGroupBox = new System.Windows.Forms.GroupBox();
             this.rcvReplyingGroupBox = new System.Windows.Forms.GroupBox();
             this.rcvDirectedCqGroupBox = new System.Windows.Forms.GroupBox();
             this.rcvReplyBehaviorGroupBox = new System.Windows.Forms.GroupBox();
             this.rcvBlockListGroupBox = new System.Windows.Forms.GroupBox();
-            this.transmitTabPage = new System.Windows.Forms.TabPage();
             this.transmitPanel = new System.Windows.Forms.Panel();
             this.rcvTransmitGroupBox = new System.Windows.Forms.GroupBox();
-            this.basicTabPage = new System.Windows.Forms.TabPage();
-            this.hotkeysTabPage = new System.Windows.Forms.TabPage();
+            this.basicPanel = new System.Windows.Forms.Panel();
             this.hotkeysPanel = new System.Windows.Forms.Panel();
-            this.advUiTabPage = new System.Windows.Forms.TabPage();
             this.advUiPanel = new System.Windows.Forms.Panel();
-            this.wantedCallsTabPage = new System.Windows.Forms.TabPage();
             this.wantedCallsPanel = new System.Windows.Forms.Panel();
-            this.spotWatchTabPage = new System.Windows.Forms.TabPage();
             this.spotWatchPanel = new System.Windows.Forms.Panel();
-            this.radioTabPage = new System.Windows.Forms.TabPage();
             this.radioPanel = new System.Windows.Forms.Panel();
-            this.decodeEngineTabPage = new System.Windows.Forms.TabPage();
             this.decodeEnginePanel = new System.Windows.Forms.Panel();
-            this.soundsTabPage = new System.Windows.Forms.TabPage();
+            this.decodePanel = new System.Windows.Forms.Panel();
+            this.frequenciesPanel = new System.Windows.Forms.Panel();
             this.soundsPanel = new System.Windows.Forms.Panel();
-            this.appearanceTabPage = new System.Windows.Forms.TabPage();
             this.appearancePanel = new System.Windows.Forms.Panel();
             this.udpOnTopCheckBox = new System.Windows.Forms.CheckBox();
             this.udpDiagLogCheckBox = new System.Windows.Forms.CheckBox();
@@ -72,62 +62,81 @@ namespace WSJTX_Controller
             this.label9 = new System.Windows.Forms.TextBox();
             this.okButton = new System.Windows.Forms.Button();
             this.cancelButton = new System.Windows.Forms.Button();
-            this.lookupTabPage.SuspendLayout();
-            this.tabControl1.SuspendLayout();
-            this.generalTabPage.SuspendLayout();
+            this._categoryDetailHost.SuspendLayout();
             this.generalPanel.SuspendLayout();
-            this.receiveReplyTabPage.SuspendLayout();
             this.receiveReplyPanel.SuspendLayout();
-            this.transmitTabPage.SuspendLayout();
             this.transmitPanel.SuspendLayout();
-            this.basicTabPage.SuspendLayout();
-            this.hotkeysTabPage.SuspendLayout();
-            this.advUiTabPage.SuspendLayout();
+            this.basicPanel.SuspendLayout();
             this.advUiPanel.SuspendLayout();
-            this.wantedCallsTabPage.SuspendLayout();
             this.wantedCallsPanel.SuspendLayout();
-            this.spotWatchTabPage.SuspendLayout();
             this.spotWatchPanel.SuspendLayout();
-            this.radioTabPage.SuspendLayout();
             this.radioPanel.SuspendLayout();
-            this.decodeEngineTabPage.SuspendLayout();
             this.decodeEnginePanel.SuspendLayout();
-            this.soundsTabPage.SuspendLayout();
+            this.decodePanel.SuspendLayout();
+            this.frequenciesPanel.SuspendLayout();
             this.soundsPanel.SuspendLayout();
-            this.appearanceTabPage.SuspendLayout();
             this.appearancePanel.SuspendLayout();
             this.SuspendLayout();
             //
-            // tabControl1
+            // _categoryListBox
             //
-            this.tabControl1.Controls.Add(this.basicTabPage);          // index 0
-            this.tabControl1.Controls.Add(this.generalTabPage);       // index 1
-            this.tabControl1.Controls.Add(this.receiveReplyTabPage);  // index 2
-            this.tabControl1.Controls.Add(this.transmitTabPage);      // index 3
-            this.tabControl1.Controls.Add(this.hotkeysTabPage);       // index 4
-            this.tabControl1.Controls.Add(this.advUiTabPage);         // index 5
-            this.tabControl1.Controls.Add(this.wantedCallsTabPage);   // index 6
-            this.tabControl1.Controls.Add(this.spotWatchTabPage);     // index 7
-            this.tabControl1.Controls.Add(this.soundsTabPage);        // index 8
-            this.tabControl1.Controls.Add(this.radioTabPage);         // index 9
-            this.tabControl1.Controls.Add(this.decodeEngineTabPage);  // index 10
-            this.tabControl1.Controls.Add(this.logbookSyncTabPage);   // index 11
-            this.tabControl1.Controls.Add(this.lookupTabPage);        // index 12
-            this.tabControl1.Controls.Add(this.appearanceTabPage);    // index 13
-            this.tabControl1.Location = new System.Drawing.Point(0, 0);
-            this.tabControl1.Multiline = true;
-            this.tabControl1.Name = "tabControl1";
-            this.tabControl1.SelectedIndex = 0;
-            this.tabControl1.Size = new System.Drawing.Size(830, 380);
-            this.tabControl1.TabIndex = 0;
-            this.tabControl1.AccessibleName = "";
+            // Replaces tabControl1 (2026-08-10, Options accessibility reorg): the native
+            // TabControl/TabPage container re-announces itself noisily on every tab switch with
+            // a real screen reader. A ListBox driving one visible detail panel at a time is the
+            // same mechanism WireServiceList() already uses successfully inside the Logbook Sync
+            // and Lookup Data panels below (3-4 items there) -- proven with JAWS/NVDA in this
+            // app already, just scaled up to all 16 categories here. Mechanical container swap
+            // only: every category's own controls/AccessibleName/Build*Tab()/Save*Tab() are
+            // completely unchanged, only how the operator selects which one is visible changes.
+            this._categoryListBox.AccessibleName = "Options categories";
+            this._categoryListBox.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            this._categoryListBox.FormattingEnabled = true;
+            this._categoryListBox.IntegralHeight = false;
+            this._categoryListBox.Items.AddRange(new object[] {
+                "Basic",
+                "General",
+                "Receive / Auto Reply",
+                "Transmit",
+                "Hotkeys",
+                "Advanced UI",
+                "Wanted Calls",
+                "Spot Watch",
+                "Sounds",
+                "Radio",
+                "Decode Engine",
+                "Decode",
+                "Frequencies",
+                "Logbook Sync",
+                "Lookup Data",
+                "Appearance"});
+            this._categoryListBox.Location = new System.Drawing.Point(0, 0);
+            this._categoryListBox.Name = "_categoryListBox";
+            this._categoryListBox.Size = new System.Drawing.Size(190, 380);
+            this._categoryListBox.TabIndex = 0;
             //
-            // generalTabPage
+            // _categoryDetailHost
             //
-            this.generalTabPage.Controls.Add(this.generalPanel);
-            this.generalTabPage.Text = "General";
-            this.generalTabPage.Name = "generalTabPage";
-            this.generalTabPage.AccessibleName = "General tab";
+            // Each category's own real content panel (unchanged from today) is added here
+            // dynamically at runtime -- only the one matching _categoryListBox's current
+            // selection is ever actually parented here at a time (see WireCategoryList in
+            // OptionsDlg.cs). Previously all 16 panels were added here unconditionally and
+            // toggled via Visible, but live JAWS testing showed stale text from
+            // previously-selected panels bleeding into the announced content of the newly
+            // selected one -- JAWS's accessibility cache does not reliably invalidate for a
+            // hidden-but-still-parented sibling. WireCategoryList now Adds/Removes the active
+            // panel instead, matching the same fix already applied to WireServiceList.
+            // basicPanel was originally the bare basicTabPage (no separate inner panel -- its
+            // controls, including subtitleLabel, were direct TabPage children) -- converted to a
+            // plain Panel here, confirmed live that WinForms' TabPage throws ArgumentException if
+            // reparented to anything other than a real TabControl, despite technically inheriting
+            // from Panel. Order matches today's actual tab order (confirmed from the old
+            // tabControl1.Controls.Add sequence) so nothing about "what's first" changes --
+            // basicPanel stays index 0, matching subtitleLabel's unconditional .Focus() at the
+            // end of OptionsDlg_Load.
+            this._categoryDetailHost.Location = new System.Drawing.Point(196, 0);
+            this._categoryDetailHost.Name = "_categoryDetailHost";
+            this._categoryDetailHost.Size = new System.Drawing.Size(634, 380);
+            this._categoryDetailHost.TabIndex = 1;
             //
             // generalPanel
             //
@@ -135,13 +144,6 @@ namespace WSJTX_Controller
             this.generalPanel.Controls.Add(this.udpDiagLogCheckBox);
             this.generalPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.generalPanel.Name = "generalPanel";
-            //
-            // receiveReplyTabPage
-            //
-            this.receiveReplyTabPage.Controls.Add(this.receiveReplyPanel);
-            this.receiveReplyTabPage.Text = "Receive / Auto Reply";
-            this.receiveReplyTabPage.Name = "receiveReplyTabPage";
-            this.receiveReplyTabPage.AccessibleName = "Receive Auto Reply tab";
             //
             // receiveReplyPanel
             //
@@ -204,13 +206,6 @@ namespace WSJTX_Controller
             this.rcvBlockListGroupBox.TabStop = false;
             this.rcvBlockListGroupBox.Text = "Block List";
             //
-            // transmitTabPage
-            //
-            this.transmitTabPage.Controls.Add(this.transmitPanel);
-            this.transmitTabPage.Text = "Transmit";
-            this.transmitTabPage.Name = "transmitTabPage";
-            this.transmitTabPage.AccessibleName = "Transmit tab";
-            //
             // transmitPanel
             //
             this.transmitPanel.Controls.Add(this.rcvTransmitGroupBox);
@@ -227,35 +222,28 @@ namespace WSJTX_Controller
             this.rcvTransmitGroupBox.TabStop = false;
             this.rcvTransmitGroupBox.Text = "Transmit";
             //
-            // basicTabPage
+            // basicPanel
             //
-            this.basicTabPage.Controls.Add(this.subtitleLabel);
-            this.basicTabPage.Controls.Add(this.modeLabel);
-            this.basicTabPage.Controls.Add(this.callCqButton);
-            this.basicTabPage.Controls.Add(this.listenButton);
-            this.basicTabPage.Controls.Add(this.label12);
-            this.basicTabPage.Controls.Add(this.cqButton);
-            this.basicTabPage.Controls.Add(this.cqDxButton);
-            this.basicTabPage.Controls.Add(this.label2);
-            this.basicTabPage.Controls.Add(this.dxButton);
-            this.basicTabPage.Controls.Add(this.nonDxButton);
-            this.basicTabPage.Controls.Add(this.label4);
-            this.basicTabPage.Controls.Add(this.potaButton);
-            this.basicTabPage.Controls.Add(this.hunterButton);
-            this.basicTabPage.Controls.Add(this.label5);
-            this.basicTabPage.Controls.Add(this.allButton);
-            this.basicTabPage.Controls.Add(this.recentButton);
-            this.basicTabPage.Controls.Add(this.filterGroupBox);
-            this.basicTabPage.Controls.Add(this.label9);
-            this.basicTabPage.Text = "Basic";
-            this.basicTabPage.Name = "basicTabPage";
-            //
-            // hotkeysTabPage
-            //
-            this.hotkeysTabPage.Controls.Add(this.hotkeysPanel);
-            this.hotkeysTabPage.Text = "Hotkeys";
-            this.hotkeysTabPage.Name = "hotkeysTabPage";
-            this.hotkeysTabPage.AccessibleName = "Hotkeys tab";
+            this.basicPanel.Controls.Add(this.subtitleLabel);
+            this.basicPanel.Controls.Add(this.modeLabel);
+            this.basicPanel.Controls.Add(this.callCqButton);
+            this.basicPanel.Controls.Add(this.listenButton);
+            this.basicPanel.Controls.Add(this.label12);
+            this.basicPanel.Controls.Add(this.cqButton);
+            this.basicPanel.Controls.Add(this.cqDxButton);
+            this.basicPanel.Controls.Add(this.label2);
+            this.basicPanel.Controls.Add(this.dxButton);
+            this.basicPanel.Controls.Add(this.nonDxButton);
+            this.basicPanel.Controls.Add(this.label4);
+            this.basicPanel.Controls.Add(this.potaButton);
+            this.basicPanel.Controls.Add(this.hunterButton);
+            this.basicPanel.Controls.Add(this.label5);
+            this.basicPanel.Controls.Add(this.allButton);
+            this.basicPanel.Controls.Add(this.recentButton);
+            this.basicPanel.Controls.Add(this.filterGroupBox);
+            this.basicPanel.Controls.Add(this.label9);
+            this.basicPanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.basicPanel.Name = "basicPanel";
             //
             // hotkeysPanel
             //
@@ -263,27 +251,11 @@ namespace WSJTX_Controller
             this.hotkeysPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.hotkeysPanel.Name = "hotkeysPanel";
             //
-            // advancedTabPage
-            //
-            // advUiTabPage
-            //
-            this.advUiTabPage.Controls.Add(this.advUiPanel);
-            this.advUiTabPage.Text = "Advanced UI";
-            this.advUiTabPage.Name = "advUiTabPage";
-            this.advUiTabPage.AccessibleName = "Advanced UI tab";
-            //
             // advUiPanel
             //
             this.advUiPanel.AutoScroll = true;
             this.advUiPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.advUiPanel.Name = "advUiPanel";
-            //
-            // wantedCallsTabPage
-            //
-            this.wantedCallsTabPage.Controls.Add(this.wantedCallsPanel);
-            this.wantedCallsTabPage.Text = "Wanted Calls";
-            this.wantedCallsTabPage.Name = "wantedCallsTabPage";
-            this.wantedCallsTabPage.AccessibleName = "Wanted Calls tab";
             //
             // wantedCallsPanel
             //
@@ -291,56 +263,49 @@ namespace WSJTX_Controller
             this.wantedCallsPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.wantedCallsPanel.Name = "wantedCallsPanel";
             //
-            // spotWatchTabPage
-            //
-            this.spotWatchTabPage.Controls.Add(this.spotWatchPanel);
-            this.spotWatchTabPage.Text = "Spot Watch";
-            this.spotWatchTabPage.Name = "spotWatchTabPage";
-            this.spotWatchTabPage.AccessibleName = "Spot Watch tab";
-            //
             // spotWatchPanel
             //
             this.spotWatchPanel.AutoScroll = true;
             this.spotWatchPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.spotWatchPanel.Name = "spotWatchPanel";
             //
-            // radioTabPage
-            //
-            this.radioTabPage.Controls.Add(this.radioPanel);
-            this.radioTabPage.Text = "Radio";
-            this.radioTabPage.Name = "radioTabPage";
-            this.radioTabPage.AccessibleName = "Radio tab";
-            //
             // radioPanel
             //
             this.radioPanel.AutoScroll = true;
             this.radioPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.radioPanel.Name = "radioPanel";
-            //
-            // decodeEngineTabPage
-            //
-            // Split out from radioTabPage: the Decode Engine section (Jimmy Native / My Call /
+            // Split out from radioPanel: the Decode Engine section (Jimmy Native / My Call /
             // My Grid / audio device pickers) had grown tall enough to render below the Radio
-            // tab's visible area -- AutoScroll being set did not make it reachable by Tab with a
-            // real screen reader (confirmed live with JAWS/NVDA, 2026-08-06), so it now gets its
-            // own tab with plenty of room instead of relying on scrolling within Radio's tab.
-            this.decodeEngineTabPage.Controls.Add(this.decodeEnginePanel);
-            this.decodeEngineTabPage.Text = "Decode Engine";
-            this.decodeEngineTabPage.Name = "decodeEngineTabPage";
-            this.decodeEngineTabPage.AccessibleName = "Decode Engine tab";
+            // category's visible area -- AutoScroll being set did not make it reachable by Tab
+            // with a real screen reader (confirmed live with JAWS/NVDA, 2026-08-06), so it now
+            // gets its own category with plenty of room instead of relying on scrolling within
+            // Radio's own panel.
             //
             // decodeEnginePanel
             //
             this.decodeEnginePanel.AutoScroll = true;
             this.decodeEnginePanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.decodeEnginePanel.Name = "decodeEnginePanel";
+            // WSJT-X's own decode-related settings (Fast/Normal/Deep depth, F Low/F High, Enable
+            // AP, AP-CQ-only, Single decode) -- ported over in Nexus but never previously exposed
+            // to Jimmy. Deliberately its own category, separate from decodeEnginePanel above
+            // (which is about WHICH decode engine/backend runs -- native vs WSJT-X External --
+            // not WSJT-X's own decode-quality settings).
             //
-            // soundsTabPage
+            // decodePanel
             //
-            this.soundsTabPage.Controls.Add(this.soundsPanel);
-            this.soundsTabPage.Text = "Sounds";
-            this.soundsTabPage.Name = "soundsTabPage";
-            this.soundsTabPage.AccessibleName = "Sounds tab";
+            this.decodePanel.AutoScroll = true;
+            this.decodePanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.decodePanel.Name = "decodePanel";
+            // Per-band FT8/FT4 calling-frequency overrides -- WSJT-X's own Settings ▸
+            // Frequencies, applied to Jimmy's own Band Up/Down model (one canonical frequency
+            // per band, via bandToFreq() in WsjtxClient.BandAudio.cs).
+            //
+            // frequenciesPanel
+            //
+            this.frequenciesPanel.AutoScroll = true;
+            this.frequenciesPanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.frequenciesPanel.Name = "frequenciesPanel";
             //
             // soundsPanel
             //
@@ -348,38 +313,17 @@ namespace WSJTX_Controller
             this.soundsPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.soundsPanel.Name = "soundsPanel";
             //
-            // appearanceTabPage
-            //
-            this.appearanceTabPage.Controls.Add(this.appearancePanel);
-            this.appearanceTabPage.Text = "Appearance";
-            this.appearanceTabPage.Name = "appearanceTabPage";
-            this.appearanceTabPage.AccessibleName = "Appearance tab";
-            //
             // appearancePanel
             //
             this.appearancePanel.AutoScroll = true;
             this.appearancePanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.appearancePanel.Name = "appearancePanel";
             //
-            // logbookSyncTabPage
-            //
-            this.logbookSyncTabPage.Controls.Add(this.logbookSyncPanel);
-            this.logbookSyncTabPage.Text           = "Logbook Sync";
-            this.logbookSyncTabPage.Name           = "logbookSyncTabPage";
-            this.logbookSyncTabPage.AccessibleName = "Logbook Sync tab";
-            //
             // logbookSyncPanel
             //
             this.logbookSyncPanel.AutoScroll = true;
             this.logbookSyncPanel.Dock       = System.Windows.Forms.DockStyle.Fill;
             this.logbookSyncPanel.Name       = "logbookSyncPanel";
-            //
-            // lookupTabPage
-            //
-            this.lookupTabPage.Controls.Add(this.lookupPanel);
-            this.lookupTabPage.Text           = "Lookup Data";
-            this.lookupTabPage.Name           = "lookupTabPage";
-            this.lookupTabPage.AccessibleName = "Lookup Data tab";
             //
             // lookupPanel
             //
@@ -631,7 +575,7 @@ namespace WSJTX_Controller
             //
             // okButton
             //
-            this.okButton.AccessibleName = "OK, confirm changes";
+            this.okButton.AccessibleName = "OK";
             this.okButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Bold);
             this.okButton.Location = new System.Drawing.Point(618, 386);
             this.okButton.Name = "okButton";
@@ -643,7 +587,7 @@ namespace WSJTX_Controller
             //
             // cancelButton
             //
-            this.cancelButton.AccessibleName = "Cancel, discard changes";
+            this.cancelButton.AccessibleName = "Cancel";
             this.cancelButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Bold);
             this.cancelButton.Location = new System.Drawing.Point(723, 386);
             this.cancelButton.Name = "cancelButton";
@@ -658,7 +602,8 @@ namespace WSJTX_Controller
             this.AutoScaleDimensions = new System.Drawing.SizeF(6F, 13F);
             this.AutoScaleMode = System.Windows.Forms.AutoScaleMode.Font;
             this.ClientSize = new System.Drawing.Size(830, 418);
-            this.Controls.Add(this.tabControl1);
+            this.Controls.Add(this._categoryListBox);
+            this.Controls.Add(this._categoryDetailHost);
             this.Controls.Add(this.okButton);
             this.Controls.Add(this.cancelButton);
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
@@ -671,52 +616,39 @@ namespace WSJTX_Controller
             this.FormClosed += new System.Windows.Forms.FormClosedEventHandler(this.OptionsDlg_FormClosed);
             this.Load += new System.EventHandler(this.OptionsDlg_Load);
             this.KeyDown += new System.Windows.Forms.KeyEventHandler(this.OptionsDlg_KeyDown);
-            this.tabControl1.ResumeLayout(false);
-            this.generalTabPage.ResumeLayout(false);
+            this._categoryDetailHost.ResumeLayout(false);
             this.generalPanel.ResumeLayout(false);
             this.generalPanel.PerformLayout();
-            this.receiveReplyTabPage.ResumeLayout(false);
             this.receiveReplyPanel.ResumeLayout(false);
-            this.transmitTabPage.ResumeLayout(false);
             this.transmitPanel.ResumeLayout(false);
-            this.basicTabPage.ResumeLayout(false);
-            this.basicTabPage.PerformLayout();
-            this.hotkeysTabPage.ResumeLayout(false);
-            this.advUiTabPage.ResumeLayout(false);
+            this.basicPanel.ResumeLayout(false);
+            this.basicPanel.PerformLayout();
             this.advUiPanel.ResumeLayout(false);
-            this.wantedCallsTabPage.ResumeLayout(false);
             this.wantedCallsPanel.ResumeLayout(false);
-            this.spotWatchTabPage.ResumeLayout(false);
             this.spotWatchPanel.ResumeLayout(false);
-            this.radioTabPage.ResumeLayout(false);
             this.radioPanel.ResumeLayout(false);
-            this.decodeEngineTabPage.ResumeLayout(false);
             this.decodeEnginePanel.ResumeLayout(false);
-            this.soundsTabPage.ResumeLayout(false);
+            this.decodePanel.ResumeLayout(false);
+            this.frequenciesPanel.ResumeLayout(false);
             this.soundsPanel.ResumeLayout(false);
-            this.appearanceTabPage.ResumeLayout(false);
             this.appearancePanel.ResumeLayout(false);
-            this.lookupTabPage.ResumeLayout(false);
             this.ResumeLayout(false);
         }
 
         #endregion
 
-        private System.Windows.Forms.TabControl tabControl1;
-        private System.Windows.Forms.TabPage generalTabPage;
+        private System.Windows.Forms.ListBox _categoryListBox;
+        private System.Windows.Forms.Panel _categoryDetailHost;
         private System.Windows.Forms.Panel generalPanel;
-        private System.Windows.Forms.TabPage receiveReplyTabPage;
         private System.Windows.Forms.Panel receiveReplyPanel;
         public System.Windows.Forms.GroupBox rcvCallingGroupBox;
         public System.Windows.Forms.GroupBox rcvReplyingGroupBox;
         public System.Windows.Forms.GroupBox rcvDirectedCqGroupBox;
         public System.Windows.Forms.GroupBox rcvReplyBehaviorGroupBox;
         public System.Windows.Forms.GroupBox rcvBlockListGroupBox;
-        private System.Windows.Forms.TabPage transmitTabPage;
         private System.Windows.Forms.Panel transmitPanel;
         public System.Windows.Forms.GroupBox rcvTransmitGroupBox;
-        private System.Windows.Forms.TabPage basicTabPage;
-        private System.Windows.Forms.TabPage hotkeysTabPage;
+        private System.Windows.Forms.Panel basicPanel;
         private System.Windows.Forms.Panel hotkeysPanel;
         private System.Windows.Forms.CheckBox udpOnTopCheckBox;
         private System.Windows.Forms.CheckBox udpDiagLogCheckBox;
@@ -740,23 +672,16 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox label9;
         private System.Windows.Forms.Button okButton;
         private System.Windows.Forms.Button cancelButton;
-        private System.Windows.Forms.TabPage advUiTabPage;
         private System.Windows.Forms.Panel advUiPanel;
-        private System.Windows.Forms.TabPage wantedCallsTabPage;
         private System.Windows.Forms.Panel wantedCallsPanel;
-        private System.Windows.Forms.TabPage spotWatchTabPage;
         private System.Windows.Forms.Panel spotWatchPanel;
-        private System.Windows.Forms.TabPage radioTabPage;
         private System.Windows.Forms.Panel radioPanel;
-        private System.Windows.Forms.TabPage decodeEngineTabPage;
         private System.Windows.Forms.Panel decodeEnginePanel;
-        private System.Windows.Forms.TabPage soundsTabPage;
+        private System.Windows.Forms.Panel decodePanel;
+        private System.Windows.Forms.Panel frequenciesPanel;
         private System.Windows.Forms.Panel soundsPanel;
-        private System.Windows.Forms.TabPage logbookSyncTabPage;
         private System.Windows.Forms.Panel logbookSyncPanel;
-        private System.Windows.Forms.TabPage lookupTabPage;
         private System.Windows.Forms.Panel lookupPanel;
-        private System.Windows.Forms.TabPage appearanceTabPage;
         private System.Windows.Forms.Panel appearancePanel;
     }
 }

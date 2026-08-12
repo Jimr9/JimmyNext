@@ -73,11 +73,28 @@ namespace WSJTX_Controller
 
         public void ImportLiveLoggedQso(string dxCall, Dictionary<string, string> fields, string adifRecord, string dedupKey)
         {
+            // Added 2026-08-10, real incident: capture the target database path HERE, on the
+            // calling thread, synchronously -- NOT inside the background task below. LogbookDb's
+            // parameterless constructor resolves its path lazily, at the moment it actually runs
+            // (Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH") ?? the real user data
+            // path -- see LogbookDb.DbPath). Task.Run below is fire-and-forget: nothing awaits
+            // it, so it can execute an arbitrary, unbounded time after this method returns.
+            // Confirmed live: a unit test that sets JIMMY_TEST_DB_PATH, calls this method, then
+            // restores the environment variable in its own `finally` block raced this background
+            // task and lost -- four synthetic test QSOs landed in the real production logbook.db
+            // instead of the test's own throwaway database, because the task didn't actually run
+            // until AFTER the test had already restored the real path. Resolving the path here
+            // and threading it through explicitly (LogbookDb's own dbPath-argument constructor,
+            // "used by automated tests" per its existing doc comment) makes correctness
+            // independent of how long the task takes to actually start -- the path is locked in
+            // at the moment the QSO was actually logged, which is also the semantically correct
+            // behavior for production use, not just a test workaround.
+            string dbPath = LogbookDb.DbPath;
             Task.Run(async () =>
             {
                 try
                 {
-                    using (var db = new LogbookDb())
+                    using (var db = new LogbookDb(dbPath))
                     {
                         // resolveUsState is the same lookupManager-backed callback every other US
                         // state lookup in the app already uses (queue display, raw decodes row,

@@ -34,14 +34,21 @@ namespace WSJTX_Controller
 
         public bool Running => _process != null && !_process.HasExited;
 
+        // For ProcessAudioSessionVolume.cs -- finding the engine's own OS-level audio session
+        // (Options > Decode Engine tab's per-device volume controls, added 2026-08-09) needs its
+        // process ID. 0 when not running, matching Running's own null-safety.
+        public int ProcessId => Running ? _process.Id : 0;
+
         // Local-loopback-only port the engine host's own control server (EngineHost/src/main.rs's
         // run_control_server) listens on for the lifetime of a session. Fixed rather than derived
         // from jimmyPort: only one engine session ever runs at a time (Controller's own
         // nativeEngineClient field + Stop()-before-Launch() discipline), so there's nothing to
         // collide with, and a fixed value lets the static ListDevices() below reach it without
         // needing the live session's own settings threaded through. Loopback-only binds don't
-        // trigger a Windows Firewall prompt.
-        private const int ControlPort = 58239;
+        // trigger a Windows Firewall prompt. Internal (not private): WsjtxClient.Direct.cs's
+        // DirectEngineClient uses this exact same port for its SNAPSHOT/REPLY/HALT_TX/
+        // SET_TX_ENABLED commands -- one control server, one port, shared rather than duplicated.
+        internal const int ControlPort = 58239;
 
         // Locates jimmy-engine-host.exe: first the bundled release location (Resources\EngineHost\,
         // staged at release/publish time -- see Jimmy.csproj), then the dev-build location next
@@ -102,7 +109,8 @@ namespace WSJTX_Controller
         // null is fine and skips the whole EnableRaisingEvents/Exited wiring.
         public bool Launch(string mycall, string mygrid, string audioDevice, int jimmyPort,
                             string outputDevice = null, RadioSettings radio = null,
-                            Action<string> debugOutput = null, Action onUnexpectedExit = null)
+                            Action<string> debugOutput = null, Action onUnexpectedExit = null,
+                            DecodeSettings decode = null, bool pskreporter = false)
         {
             LastError = null;
             try
@@ -125,6 +133,29 @@ namespace WSJTX_Controller
                     args += $" --device \"{audioDevice}\"";
                 if (!string.IsNullOrWhiteSpace(outputDevice))
                     args += $" --output-device \"{outputDevice}\"";
+
+                // Options > Decode tab -- independent of Radio.Mode (decoding works the same
+                // whether or not CAT is configured), so this is unconditional, unlike the
+                // rig-specific block below. Only decode.DecodeDepth also has a live control-port
+                // path (SET_DECODE_DEPTH) for mid-session changes; the other four are startup-
+                // CLI-arg-only (see DecodeSettings.cs's own comment on why).
+                if (decode != null)
+                {
+                    args += $" --decode-depth {decode.DecodeDepth}";
+                    args += $" --decode-flow-hz {decode.DecodeFLowHz}";
+                    args += $" --decode-fhigh-hz {decode.DecodeFHighHz}";
+                    args += $" --ap-decode {(decode.ApDecode ? "1" : "0")}";
+                    args += $" --ap-cq-only {(decode.ApCqOnly ? "1" : "0")}";
+                    args += $" --single-decode {(decode.SingleDecode ? "1" : "0")}";
+                }
+
+                // Independent of Radio.Mode -- spotting works whether or not CAT is configured,
+                // same reasoning as the decode block above. Root-caused live, 2026-08-11: this
+                // was never wired at all before, in either transport (see TogglePskReporter's
+                // own comment, WsjtxClient.Protocol.cs) -- the engine's own native PSK Reporter
+                // spotting ran unconditionally regardless of what this checkbox said.
+                if (pskreporter) args += " --pskreporter";
+
                 if (radio != null && radio.Mode == RadioControlMode.HamlibRigctld)
                 {
                     // "network" here means "the RADIO is a network SDR" (Flex/SmartSDR via
@@ -151,7 +182,24 @@ namespace WSJTX_Controller
                     PttMethod effectiveMethod = radio.PttEnabled ? radio.PttMethod : PttMethod.Vox;
                     args += $" --ptt-method {effectiveMethod.ToCliString()}";
                     args += $" --rigctld-port {radio.RigctldPort}";
-                    if (radio.DataModesPlainSsb) args += " --plain-ssb-data-modes";
+                    if (radio.TxMode == RadioTxMode.Usb) args += " --plain-ssb-data-modes";
+                    else if (radio.TxMode == RadioTxMode.None) args += " --dont-set-mode";
+                    if (radio.PttDataSource) args += " --ptt-data-source";
+                    if (!string.IsNullOrWhiteSpace(radio.PttSerialPort))
+                        args += $" --ptt-serial-port {radio.PttSerialPort}";
+                    if (radio.SplitMode != RadioSplitMode.None)
+                        args += $" --split-mode {radio.SplitMode.ToString().ToLowerInvariant()}";
+
+                    // Startup-only power workaround (see RadioSettings.StartupPowerEnabled's own
+                    // comment for why this exists) -- clamp defensively even though OptionsDlg's
+                    // own NumericUpDown ranges should already keep these sane, since a fraction
+                    // outside 0..1 would otherwise pass straight through to the engine.
+                    if (radio.StartupPowerEnabled && radio.StartupPowerMaxWatts > 0)
+                    {
+                        double frac = Math.Max(0.0, Math.Min(1.0,
+                            (double)radio.StartupPowerWatts / radio.StartupPowerMaxWatts));
+                        args += $" --startup-power-frac {frac.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+                    }
                 }
 
                 _process = new Process
@@ -183,14 +231,26 @@ namespace WSJTX_Controller
                 if (onUnexpectedExit != null)
                 {
                     _process.EnableRaisingEvents = true;
+                    // thisProcess: captured by value at the moment THIS process was launched,
+                    // not read from the _process field inside the handler. Found live,
+                    // 2026-08-10, auditing against production: if Stop() then Launch() ever ran
+                    // back to back on this same client faster than this handler fired for the
+                    // OLD process, reading the _process FIELD inside the handler would report
+                    // the NEW process's exit code for the OLD process's exit. Checking identity
+                    // against thisProcess (on top of the existing _stopping check) also covers
+                    // the same race from the other side: a stale Exited firing after _stopping
+                    // has already been reset to false for the new launch no longer gets
+                    // misreported as an unexpected crash, since it no longer matches the
+                    // now-current _process.
+                    Process thisProcess = _process;
                     _process.Exited += (s, e) =>
                     {
-                        if (_stopping) return;
+                        if (_stopping || !ReferenceEquals(_process, thisProcess)) return;
                         // Diagnostic-only: exit code narrows down "genuine crash" (Rust panic
                         // aborts with 101; a Windows-level SEH exception like access violation
                         // shows as a large/negative code, e.g. 0xC0000005) vs a clean early exit.
                         int exitCode = -1;
-                        try { exitCode = _process.ExitCode; } catch { /* best-effort */ }
+                        try { exitCode = thisProcess.ExitCode; } catch { /* best-effort */ }
                         debugOutput?.Invoke($"[NativeEngine] process exited unexpectedly, exit code: {exitCode} (0x{(uint)exitCode:X8})");
                         onUnexpectedExit();
                     };
@@ -363,7 +423,15 @@ namespace WSJTX_Controller
                 if (_process != null && !_process.HasExited)
                 {
                     _process.Kill();
-                    _process.WaitForExit(StopWaitMs);
+                    // Found live, 2026-08-10, auditing against production: WaitForExit's own
+                    // return value (did it actually exit within StopWaitMs, or time out) was
+                    // never checked -- silently defeating this method's own documented purpose
+                    // above (waiting for the real OS-level exit so a following Launch() doesn't
+                    // race the old process for the same serial/rigctld port). If it times out,
+                    // that race is still possible and nothing would ever have known.
+                    bool exited = _process.WaitForExit(StopWaitMs);
+                    if (!exited)
+                        LastError = $"jimmy-engine-host did not exit within {StopWaitMs}ms after being killed -- a following Launch() may race it for the same serial port.";
                 }
             }
             catch

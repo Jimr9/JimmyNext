@@ -219,11 +219,15 @@ class JimmyVerifier:
         # "Jimmy", and EnumWindows returns windows in Z-order, so whichever
         # "Jimmy..."-titled window happens to be frontmost can win instead of
         # the real app. Confirm ownership by the actual process image name
-        # (Jimmy.exe) so window focus/Z-order can never pick the wrong window.
+        # (Jimmy.exe, or "Jimmy Test.exe" -- build.bat now compiles local Debug
+        # builds with AssemblyName="Jimmy Test" so they never share production's
+        # AppData identity, see build.bat's own comment) so window focus/Z-order
+        # can never pick the wrong window. startswith, not ==, so this matches
+        # either name without caring which one is actually running.
         hits = []
         @_EnumWndProc
         def cb(hwnd, _):
-            if _wnd_title(hwnd).startswith("Jimmy") and _owning_process_name(hwnd) == "jimmy":
+            if _wnd_title(hwnd).startswith("Jimmy") and _owning_process_name(hwnd).startswith("jimmy"):
                 hits.append(hwnd)
             return True
         _user32.EnumWindows(cb, 0)

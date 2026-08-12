@@ -333,6 +333,8 @@ version = "0.2.0"
 dependencies = [
  "ft8",
  "modes",
+ "serde",
+ "serde_json",
  "tempo-app",
  "tempo-audio",
  "tempo-core",

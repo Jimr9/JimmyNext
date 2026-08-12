@@ -178,11 +178,15 @@ namespace WSJTX_Controller
         // RunUploadCatchUp -- TQSL itself can take several seconds to sign and upload.
         private void RunTqslUpload()
         {
+            // See LiveQsoUploadOrchestrator.ImportLiveLoggedQso's own comment (2026-08-10) for
+            // why this is captured here, synchronously, rather than letting the background task
+            // below resolve LogbookDb.DbPath lazily whenever it happens to actually run.
+            string dbPath = LogbookDb.DbPath;
             Task.Run(async () =>
             {
                 try
                 {
-                    using (var db = new LogbookDb())
+                    using (var db = new LogbookDb(dbPath))
                     {
                         var client = new TqslUploadClient();
                         bool ok = await client.UploadPendingAsync(ctrl.tqslStationLocation, db).ConfigureAwait(false);
@@ -217,11 +221,15 @@ namespace WSJTX_Controller
         // WSJT-X performs its upload asynchronously on its own too.
         private void RunUploadCatchUp()
         {
+            // See LiveQsoUploadOrchestrator.ImportLiveLoggedQso's own comment (2026-08-10) for
+            // why this is captured here, synchronously, rather than letting the background task
+            // below resolve LogbookDb.DbPath lazily whenever it happens to actually run.
+            string dbPath = LogbookDb.DbPath;
             Task.Run(async () =>
             {
                 try
                 {
-                    using (var db = new LogbookDb())
+                    using (var db = new LogbookDb(dbPath))
                     {
                         if (ctrl.qrzUploadEnabled && !string.IsNullOrWhiteSpace(ctrl.qrzLogbookApiKey))
                             await CatchUpQrz(db).ConfigureAwait(false);

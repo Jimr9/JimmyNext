@@ -73,6 +73,7 @@ static class JimmyTests
         return msg;
     }
 
+    [STAThread]
     static void Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--verify-clublog")
@@ -150,6 +151,9 @@ static class JimmyTests
         GeoMathTests();
         GeoMathEllipsoidCrossValidationTests();
         A6ClassificationParityTests();
+        DirectModePlumbingParityTests();
+        OptionsDlgConstructionTests();
+        AudioTuningHotkeyTests();
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
@@ -1036,6 +1040,395 @@ static class JimmyTests
         {
             ClassificationCutover.UseClassificationEngine = originalFlag;
             try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Direct-mode plumbing parity (Self-sufficiency plan Phase 6 hardening) ───────────
+    // Feeds a hand-written engine-snapshot JSON (the same camelCase shape jimmy-engine-
+    // host's SNAPSHOT command actually produces) through WsjtxClient.Direct.cs's real
+    // DirectApplyStatus/DirectApplyDecodes pipeline, via the TestApplyDirectSnapshot hook,
+    // and checks the outcome the exact same way A6ClassificationParityTests above checks
+    // the UDP path. Added 2026-08-09 after finding, live, that direct mode had silently
+    // left dialFrequency and the private "mode" field at their zero/empty defaults the
+    // whole session: CurrentBandStr stayed "unknown band" forever, and Classify()'s own
+    // documented "can't tell, assume new" convention made every decode -- USA included --
+    // read as New DXCC / New DXCC on band regardless of real log history. That gap took
+    // hours of live radio observation to notice because the shared downstream pipeline
+    // (ProcessDecodeMsg, Classify, AddSelectedCall...) is correct and well-tested --
+    // only the direct-mode field-mapping feeding it was wrong. This test exists so a
+    // similar gap surfaces as a failing assertion instead.
+    //
+    // Safety: JIMMY_TEST_DB_PATH is set BEFORE constructing Controller/WsjtxClient, exactly
+    // like every other test/harness in this codebase (TestModeGuard.cs is the single
+    // source of truth) -- LogbookDb.DbPath, WsjtxClient's own "path" field, and every real
+    // QRZ/Club Log/LoTW/FCC ULS network call site all redirect/no-op automatically from
+    // that one signal. Controller is constructed but its Load event is never fired (no
+    // .Show()/Application.Run() anywhere below), so the real Jimmy.ini is never read and
+    // no engine process is ever spawned -- confirmed by reading Program.cs and Controller's
+    // constructor before writing this test. No real file writes, no real network calls,
+    // no real engine process, nothing sent to any live logging service.
+    static void DirectModePlumbingParityTests()
+    {
+        Console.WriteLine("\n── Direct-mode plumbing parity (DirectApplyStatus/DirectApplyDecodes vs UDP path) ──");
+
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_DirectParity_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller(); // never Show()/Run() -- Load event (real .ini, real engine spawn) never fires
+
+            // callCqOptionsButton is normally built by Controller's real settings-load method
+            // (the one this test deliberately never calls, to avoid touching the real
+            // Jimmy.ini) -- WsjtxClient's own constructor calls UpdateModeVisible(), which
+            // sets this button's Visible state unconditionally, so it must exist first.
+            // Built here exactly as Controller.cs itself builds it, without pulling in that
+            // whole ini-reading method.
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            // Same story -- weak-signal-floor controls (Controller.cs builds these
+            // dynamically too, reparented into Options > Receive/Auto Reply > Block List).
+            // AddSelectedCall reads ignoreWeakSnrCheckBox.Checked first and short-circuits
+            // (default false) before ever touching minSnrNumUpDown.Value, so only existing
+            // (not any particular value) matters here.
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            var lookupManager = new LookupManager();
+            lookupManager.RegisterProviderFirst(new TestFixtureLookupProvider());
+            lookupManager.Initialize(
+                useLookupData: true,
+                qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                lotwEnabled: true, lotwDays: 1,
+                clubLogAppKey: null, clubLogDays: 1,
+                fccUlsEnabled: false);
+            wc.lookupManager = lookupManager;
+
+            // Realistic baseline filter config: a freshly-constructed Controller (never
+            // loaded real Jimmy.ini) has these at their raw WinForms defaults -- all
+            // unchecked -- which would reject every call regardless of the plumbing this
+            // test targets. This is the exact live-observed config gap (2026-08-09,
+            // "loc"/"DX stations" both unchecked) that made real CQ calls stop queueing --
+            // a real bug, but a filter-configuration one, not a plumbing one, and already
+            // covered by CallQueueRanker's own tests. Set permissively here so this test
+            // isolates band/classification wiring, not filter-checkbox defaults.
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+
+            const string myCall = "KB0UZT";
+            const string myGrid = "FN42";
+
+            // ── Scenario 1: dial frequency / band tracking ──────────────────────────────
+            // 14.074 MHz is FT8's 20m calling frequency. Before the 2026-08-09 fix,
+            // CurrentBandStr stayed null (unknown band) forever in direct mode regardless
+            // of dialMhz.
+            var snap1 = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1000 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap1);
+            CheckStr("Direct mode: CurrentBandStr resolves 14.074 MHz to 20m", wc.CurrentBandStr, "20m");
+            // Added 2026-08-10, alongside the "unknown band at startup" live-testing fix:
+            // bandIdx (private, unreachable from here) is what drives this, but LastBandIdx is
+            // the observable, public side effect -- confirms DirectApplyStatus's new "persist
+            // whenever a real band is confirmed" logic actually ran, not just CurrentBandStr's
+            // own (pre-existing) FreqToBandStr text lookup above.
+            Check("Direct mode: resolving a real band persists it to Radio.LastBandIdx (20m/index 5)",
+                  ctrl.Radio.LastBandIdx == 5, true);
+
+            // ── Scenario 2: a never-worked, ordinary CQ call reaches the queue ──────────
+            // K4YT is a domestic (USA) fixture call (TestFixtureLookupProvider) -- never
+            // worked in this test's own throwaway DB, so it must be admitted.
+            var snap2 = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1001 },
+                ""recentDecodes"": [
+                    { ""from"": ""K4YT"", ""snr"": -10, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""CQ K4YT EM63"" }
+                ]
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap2);
+            Check("Direct mode: never-worked CQ call reaches the queue", wc.TestCallQueueString.Contains("K4YT"), true);
+
+            // ── Scenario 3: raw-decode-history population ───────────────────────────────
+            // Before the 2026-08-09 fix, DirectApplyDecodes never populated
+            // _rawDecodeHistory at all -- the Raw Decodes panel was silently empty in
+            // direct mode regardless of "Show raw decodes"/advancedCallLayout.
+            ctrl.advancedCallLayout = true;
+            ctrl.advShowRaw = false; // avoid touching the real UI list (ShowRawDecodes) -- only the data list matters here
+            var snap3 = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1002 },
+                ""recentDecodes"": [
+                    { ""from"": ""W9EVN"", ""snr"": -5, ""dtSec"": 0.2, ""freqHz"": 1600.0, ""message"": ""CQ W9EVN EM63"" }
+                ]
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap3);
+            Check("Direct mode: raw decode history captures the decode",
+                  wc.TestRawDecodeHistory.Any(m => m.Message != null && m.Message.Contains("W9EVN")), true);
+
+            // ── Scenario 4: already-worked station is NOT re-admitted ───────────────────
+            // Proves the classification-parity concern specifically: a station this test's
+            // own throwaway DB marks as worked on 20m must be excluded, exactly like the
+            // UDP path (see A6ClassificationParityTests' Case B/C above).
+            using (var db = new LogbookDb(tmpDb))
+            {
+                InsertQso(db, "KD4LS", "AL", dxcc: 291, zone: 4, band: "20m");
+            }
+            var snap4 = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1003 },
+                ""recentDecodes"": [
+                    { ""from"": ""KD4LS"", ""snr"": -7, ""dtSec"": 0.1, ""freqHz"": 1700.0, ""message"": ""CQ KD4LS EM74"" }
+                ]
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap4);
+            Check("Direct mode: already-worked-on-this-band station is not re-admitted",
+                  wc.TestCallQueueString.Contains("KD4LS"), false);
+
+            // ── Scenario 5: QSO completion/logging drives off the engine's own qso.txNow ────
+            // Added 2026-08-10, root-caused live from a real QSO with W1XI that never logged:
+            // curTxMsg/txMsg (feeds "sending X" status) and LogQso (73/RR73 -> ADIF log entry)
+            // were both permanently dead in Direct mode because the only code that ever set
+            // them (ProcessTxStart/ProcessTxEnd, WsjtxClient.Protocol.cs) is UDP-only.
+            // DirectApplyStatus's fix reads snap.Qso.TxNow instead -- the engine's own
+            // authoritative "what am I actually sending" (Jimmy itself never knows this in
+            // Direct mode; see DirectSendReply's own comment). Deliberately sets up callInProg/
+            // allCallDict/sentReportList directly rather than driving a full CQ-through-73
+            // decode sequence through ProcessDecodeMsg -- that admission pipeline is already
+            // covered by scenarios 2-4 above; this isolates the NEW tx_now-driven logic alone.
+            const string qsoCall = "N3XYZ";
+            wc.callInProg = qsoCall;
+            wc.allCallDict[qsoCall] = new List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = $"{myCall} {qsoCall} R-15",
+                    Snr = -15,
+                    RxDate = DateTime.UtcNow.Date,
+                    SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                },
+            };
+
+            // Step 1: Jimmy's own report to N3XYZ goes out ("N3XYZ KB0UZT -12") -- should be
+            // recognized as a report and added to sentReportList, exactly like the UDP path's
+            // own ProcessTxEnd does at the moment WSJT-X reports having sent it.
+            var snap5a = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 1004 },
+                ""recentDecodes"": [],
+                ""qso"": { ""state"": ""awaitReport"", ""txNow"": """ + qsoCall + " " + myCall + @" -12"" }
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap5a);
+            Check("Direct mode: engine's own tx_now report text is recognized and tracked",
+                  wc.sentReportList.Contains(qsoCall), true);
+            Check("Direct mode: QSO not logged yet -- only a report has gone out, not 73/RR73",
+                  wc.logList.Contains(qsoCall), false);
+
+            // Step 2: Jimmy's own 73 goes out ("N3XYZ KB0UZT 73") -- should trigger LogQso,
+            // which finds N3XYZ's own roger-report in allCallDict (set up above) and logs the
+            // QSO via the exact same RequestLog/ClaimLiveLoggedQso path the UDP path always used.
+            var snap5b = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 1005 },
+                ""recentDecodes"": [],
+                ""qso"": { ""state"": ""done"", ""txNow"": """ + qsoCall + " " + myCall + @" 73"" }
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap5b);
+            Check("Direct mode: engine's own tx_now 73 text logs the completed QSO",
+                  wc.logList.Contains(qsoCall), true);
+
+            // Regression guard, 2026-08-11: DirectApplyStatus logged the completed QSO above but
+            // never cleared callInProg afterward -- unlike the UDP path's ProcessTxEnd, which
+            // always calls SetCallInProg(null) once a 73/RR73 to callInProg goes out. Root-caused
+            // live from a real session where ShowStatus() kept re-announcing one already-logged
+            // QSO's stale "previous RR73" for 19+ minutes afterward instead of returning to
+            // normal "N available stations" status (callsWaiting is only computed when
+            // callInProg == null, WsjtxClient.Display.cs).
+            Check("Direct mode: callInProg is cleared once the final 73/RR73 has gone out",
+                  wc.callInProg == null, true);
+
+            // Step 3: a real bug found live, 2026-08-10, right after the fix above shipped --
+            // the engine's own tx_now keeps reporting the same sent-73 text for several more
+            // poll ticks (as long as the engine stays on that QSO step), not just the one tick
+            // the transmission ended on. Re-applying the SAME snapshot simulates that: without
+            // an explicit "already logged" guard, this replayed LogQso() on every 1s poll --
+            // ClaimLiveLoggedQso's dedup key stayed identical so the database only ever got one
+            // entry, but RequestLog's sound/announcement side effects are unconditional, so the
+            // operator heard three duplicate "Logged QSO with K7F" dings for one real QSO.
+            // logList.Count(x => x == qsoCall) (not Contains, which can't see duplicates) is the
+            // only way to catch a regression here.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap5b);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap5b);
+            Check("Direct mode: repeated polls with unchanged tx_now do not re-log the same QSO",
+                  wc.logList.Count(c => c == qsoCall) == 1, true);
+
+            // Step 4: real incident, 2026-08-10 -- LogQso's actual database write happens on a
+            // fire-and-forget background Task.Run (LiveQsoUploadOrchestrator.ImportLiveLoggedQso),
+            // not synchronously on this thread. Before that method was fixed to capture its
+            // target path up front, the write raced this test's own env-var-based isolation: by
+            // the time the background task actually got scheduled, this test's `finally` block
+            // (below) could already have restored JIMMY_TEST_DB_PATH to its previous value,
+            // sending the write into the REAL production logbook.db instead of tmpDb. Confirmed
+            // live: four synthetic "N3XYZ" QSOs landed in the operator's actual logbook. This
+            // assertion is the regression guard for that fix -- it polls tmpDb (never the real
+            // path) for up to 2s waiting for the background write to land. If the path-capture
+            // fix in LiveQsoUploadOrchestrator/RunTqslUpload/RunUploadCatchUp is ever undone or a
+            // similar new Task.Run(...new LogbookDb()...) is added elsewhere, this either times
+            // out (write never reaches tmpDb) or the earlier in-memory checks above still pass
+            // while the real user's logbook silently gets contaminated again -- this is the one
+            // assertion that actually proves the write landed in the ISOLATED database, not just
+            // that logList (in-memory only) was updated.
+            bool foundInTmpDb = false;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 2000)
+            {
+                using (var verifyDb = new LogbookDb(tmpDb))
+                {
+                    if (verifyDb.SearchQsos(qsoCall, null, null, null).Count > 0) { foundInTmpDb = true; break; }
+                }
+                System.Threading.Thread.Sleep(50);
+            }
+            Check("Direct mode: the background QSO write actually lands in the ISOLATED test database",
+                  foundInTmpDb, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectModePlumbingParityTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    static DirectSnapshot ParseDirectSnapshot(string json) =>
+        System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(json, WsjtxClient.DirectJsonOptions);
+
+    // ── Alt+Q / Tune / F11-F12 fix, 2026-08-10 ──────────────────────────────────────────────
+    // Covers the parts of that fix that are deterministic and testable without a live
+    // jimmy-engine-host.exe process: DirectApplyStatus wiring the engine's own `tuning` flag
+    // through, AudioLevel()'s new tuning-OR-transmitting guard, RxLevelToDb's dB conversion, and
+    // -- found live, right after the fix first shipped -- ToggleTuningProcess incorrectly
+    // claiming "Tune started" (and letting F11/F12 proceed) even when the engine host wasn't
+    // reachable at all, because it flipped its own `tuning` field unconditionally instead of on
+    // confirmed success. No test here starts a real engine host, so DirectSetTuning/SNAPSHOT
+    // calls always fail to connect -- exactly the classic WSJT-X/UDP-mode scenario the live bug
+    // was found in.
+    static void AudioTuningHotkeyTests()
+    {
+        Console.WriteLine("\n── Alt+Q / Tune / F11-F12: tuning guard + dB conversion ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // DirectApplyStatus must set the class-level `tuning` field from radio.tuning, the
+            // same way it already did for `transmitting` -- without this, AudioLevel()'s new
+            // guard below would always read tuning=false regardless of what the engine reports.
+            var snapTuning = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": true, ""slot"": 2000 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapTuning);
+            Check("DirectApplyStatus: radio.tuning=true is applied to the class-level tuning field",
+                  wc.tuning, true);
+
+            // AudioLevel()'s new guard: `!transmitting && !tuning` -- with tuning now true (and
+            // transmitting still false), it must proceed past the early guard (return true, not
+            // the blocked-early false) even though no real engine host is reachable to actually
+            // apply anything -- the guard change is what's under test, not the SNAPSHOT round-trip.
+            Check("AudioLevel: proceeds (does not early-return false) while tuning, even though not transmitting",
+                  wc.AudioLevel(true), true);
+
+            var snapIdle = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 2001 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapIdle);
+            Check("AudioLevel: still blocked (returns false) when neither transmitting nor tuning -- baseline unchanged",
+                  wc.AudioLevel(true), false);
+
+            // The exact live bug: ToggleTuningProcess must NOT claim "Tune started" (by flipping
+            // its own `tuning` field) when DirectSetTuning couldn't even connect -- no engine
+            // host process exists in this test, so this is guaranteed to fail to connect, just
+            // like classic WSJT-X/UDP mode (nativeEngineUseDirectEngine=False) does live.
+            wc.tuning = false;
+            wc.ToggleTuningProcess();
+            Check("ToggleTuningProcess: does NOT optimistically claim tuning=true when the engine host is unreachable",
+                  wc.tuning, false);
+
+            // RxLevelToDb: pure conversion, mirrors Nexus's own canonical formula
+            // (ui/src/components/LevelMeter.tsx's rxLevelDb) exactly -- 20*log10(rms) + 90.3,
+            // clamped [0, 90].
+            Check("RxLevelToDb: silence (0.0 RMS) reads 0 dB, not -infinity",
+                  WsjtxClient.RxLevelToDb(0.0) == 0.0, true);
+            double fullScale = WsjtxClient.RxLevelToDb(1.0);
+            Check("RxLevelToDb: full-scale (1.0 RMS) reads the clamped max, 90 dB",
+                  Math.Abs(fullScale - 90.0) < 0.001, true);
+            // A healthy FT8 input (per the formula's own doc comment, "~30 dB") is roughly
+            // rms=0.03 -- 20*log10(0.03)+90.3 = 60.86, which is inside the formula's own
+            // documented "decodes fine ~15-60" window, confirming the constant (90.3) actually
+            // produces numbers in the range WSJT-X operators expect, not just "doesn't crash".
+            double healthy = WsjtxClient.RxLevelToDb(0.03);
+            Check("RxLevelToDb: a typical healthy RX level lands within the documented 15-60 dB decode-fine window",
+                  healthy >= 15.0 && healthy <= 60.0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  AudioTuningHotkeyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── OptionsDlg: constructs without throwing ─────────────────────────────────
+    // Added 2026-08-10 after a real live crash: the Options dialog's TabControl -> ListBox +
+    // detail-panel accessibility reorg reparented every category's real content panel directly
+    // into a plain Panel host -- except basicPanel, which was left as a bare TabPage (TabPage
+    // technically inherits from Panel, so this looked safe at the type level and compiled
+    // clean). It crashed at runtime the moment Options was opened: WinForms' TabPage overrides
+    // its own parent-assignment logic to throw ArgumentException unless the new parent is a
+    // real TabControl -- a runtime-only invariant a clean compile can never catch. Fixed by
+    // converting basicPanel to a plain Panel like its 15 siblings. This test is the permanent
+    // guard: OptionsDlg's entire InitializeComponent() (where the crash happened, inside the
+    // constructor, before the dialog is ever shown) runs every time this test runs, so any
+    // future control that's added/reparented incorrectly the same way fails a fast, cheap,
+    // always-on test instead of only surfacing live when a real operator next opens Options --
+    // exactly what happened here. wsjtxClient/ctrl can both be null: InitializeComponent() runs
+    // first, before either is ever touched (OptionsDlg.cs's own constructor order) -- no real
+    // Controller/WsjtxClient/ini/engine needed for this specific check.
+    static void OptionsDlgConstructionTests()
+    {
+        Console.WriteLine("\n── OptionsDlg: constructs without throwing ──");
+        try
+        {
+            using (var dlg = new OptionsDlg(null, null))
+            {
+                Check("OptionsDlg constructs (InitializeComponent) without throwing", true, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  OptionsDlg construction threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
         }
     }
 

@@ -53,7 +53,17 @@ namespace WSJTX_Controller
         private int? bandToFreq(int? idx)
         {
             if (idx == null || (int)idx < 0 || !freqsDict.Keys.Contains(mode) || (int)idx >= freqsDict[mode].Count) return null;
-            return freqsDict[mode][(int)idx];
+            int i = (int)idx;
+
+            // Options > Frequencies operator override, checked first -- 0 means no override for
+            // this band, fall through to the built-in default below. This is the single
+            // chokepoint BandUp/BandDown/SelectBand/RetuneBand/initial-connect all resolve a
+            // band index to an actual frequency through, so overriding here is sufficient
+            // everywhere without touching any of those call sites.
+            int[] overrides = mode == "FT4" ? ctrl.Frequencies.Ft4OverrideKHz : ctrl.Frequencies.Ft8OverrideKHz;
+            if (overrides != null && i < overrides.Length && overrides[i] > 0) return overrides[i];
+
+            return freqsDict[mode][i];
         }
 
         public bool BandUp()
@@ -148,18 +158,99 @@ namespace WSJTX_Controller
         // reusing ctrl.lastRadioStatus's background-timer value, since this is an explicit
         // on-demand "check now" action (Alt+Q), not a passive display. Needs Hamlib rigctld --
         // under RadioControlMode.WsjtxCat there is no separate CAT connection to poll at all.
+        // Added 2026-08-10: restored the transmit/receive split Andy WM8Q's fork's own Alt+Q
+        // handler had (WSJT-X mainwindow.cpp, NewTxMsgIdx==18: `if (m_transmitting) Power/SWR
+        // else "Audio in: %1 dB", arg(round(m_px))`) -- somewhere along the way this collapsed
+        // into always reporting the rigctld CAT poll regardless of state, so "not transmitting"
+        // silently started reporting the radio's own S-meter instead of the soundcard's own
+        // audio-in level (confirmed live, 2026-08-10: "alt q used to report in db the audio
+        // level when not transmitting and now it is doing something else"). m_px was WSJT-X's
+        // own internal measurement of the INCOMING SOUNDCARD signal -- nothing to do with the
+        // radio's S-meter. Nexus's own equivalent is RadioStatus.rx_level (tempo-app/src/
+        // engine.rs's MeterFeed doc comment: "the ballistics-shaped RX input level", updated
+        // every 20ms by the rx-dsp thread) -- see RxLevelToDb below for the exact conversion.
         public bool ReportPowerSwr()
         {
+            // sound:false, not true -- this hotkey's own documented purpose includes checking
+            // "during transmit" (see its help text), so it can fire mid-over same as AudioLevel()
+            // above. StatusView.ShowMessage's sound:true plays a Windows SystemSounds.Beep through
+            // whatever the OS DEFAULT playback device is, which on a typical ham setup IS the
+            // radio's own sound-card interface -- that beep would mix straight into the live
+            // transmitted audio. Root-caused live, 2026-08-09, same bug as AudioLevel()'s own fix.
+            // The screen-reader announcement itself is unaffected either way (ShowMsg's own
+            // SendKeys nudge is independent of sound).
+            //
+            // `transmitting || tuning`, not `transmitting` alone -- Andy's fork's own
+            // m_transmitting was true for a tune carrier too (a real carrier really is going out
+            // the antenna), but Nexus keeps these as two independent flags (tuning never sets
+            // transmitting -- confirmed via engine.rs/service.rs: set_transmitting is only ever
+            // called from the normal slot-TX machinery, never from the Tune branch). Checking
+            // both here is what makes Alt+Q report real Power/SWR during Tune, matching the
+            // original -- and matching the actual point of Tune (trim F11/F12 while watching
+            // ALC/Power/SWR settle).
+            if (transmitting || tuning)
+            {
+                if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
+                {
+                    var status = ctrl.rigctldClient.PollOnce();
+                    ctrl.lastRadioStatus = status;
+                    StatusView.ShowMessage(FormatRigctldPowerSwr(status), false);
+                    return true;
+                }
+
+                StatusView.ShowMessage("Power/SWR needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", false);
+                return true;
+            }
+
+            // Not transmitting/tuning: the soundcard's own RX audio-in level, straight from the
+            // native engine (same fresh, on-demand SNAPSHOT pattern as AudioLevel() above --
+            // deliberately not a cached/periodic value, matching this hotkey's own "check now"
+            // purpose per this method's original comment).
+            string snapJson = DirectSendCommand("SNAPSHOT");
+            if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
+            {
+                try
+                {
+                    var snap = System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(snapJson, DirectJsonOptions);
+                    if (snap?.Radio != null)
+                    {
+                        StatusView.ShowMessage($"Audio in: {RxLevelToDb(snap.Radio.RxLevel):0} dB", false);
+                        return true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugOutput($"{Time()} ReportPowerSwr: engine SNAPSHOT parse failed, falling back to Hamlib rigctld: {ex.Message}");
+                }
+            }
+
             if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
             {
                 var status = ctrl.rigctldClient.PollOnce();
                 ctrl.lastRadioStatus = status;
-                StatusView.ShowMessage(FormatRigctldPowerSwr(status), true);
+                StatusView.ShowMessage(FormatRigctldPowerSwr(status), false);
                 return true;
             }
 
-            StatusView.ShowMessage("Power/SWR needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
+            StatusView.ShowMessage("Power/SWR needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", false);
             return true;
+        }
+
+        // Mirrors Nexus's own canonical conversion exactly (nexus/ui/src/components/
+        // LevelMeter.tsx's rxLevelDb), so the number matches what Nexus's own UI -- and, by
+        // design, WSJT-X's own audio-in meter -- would show for the same signal: dB =
+        // 20*log10(rms) + 90.3, clamped [0, 90]. A healthy FT8 input reads ~30 dB (decodes fine
+        // ~15-60, too hot above ~70).
+        //
+        // internal (not private): JimmyTests exercises this pure conversion directly (see
+        // InternalsVisibleTo in AssemblyInfo.Testing.cs) -- it's the one part of the Alt+Q fix
+        // that's fully deterministic and worth a real regression test, unlike the rest of
+        // ReportPowerSwr/AudioLevel/ToggleTuningProcess, which need a live engine host to
+        // meaningfully exercise.
+        internal static double RxLevelToDb(double rms)
+        {
+            if (double.IsNaN(rms) || rms <= 0) return 0;
+            return Math.Max(0, Math.Min(90, 20 * Math.Log10(rms) + 90.3));
         }
 
         private static string FormatRigctldPowerSwr(RadioStatus status)
@@ -172,34 +263,146 @@ namespace WSJTX_Controller
             return parts.Count > 0 ? string.Join(", ", parts) : "Radio: no meter data available from rigctld.";
         }
 
-        // No native trigger exists for this yet -- jimmy-engine-host.exe has no CLI/UDP
-        // "start tuning" request of its own (tuning here otherwise only ever reflects the
-        // engine's own real txMsg=="TUNE" status reports, see ProcessTxStart/ProcessTxEnd).
+        // Added 2026-08-10: wired to the native engine's own Engine::set_tune (control port's
+        // new SET_TUNING command, EngineHost/src/main.rs) -- Engine::set_tune already existed
+        // (Nexus's own Tauri UI uses it) and already plays a continuous test carrier in small
+        // 40ms chunks (tempo-audio/src/service.rs, TUNE_CHUNK_MS) rather than one pre-rendered
+        // slot buffer, so unlike a normal FT8/FT4 transmission, F11/F12 (SET_TX_LEVEL) DOES apply
+        // live during Tune -- the correct way to trim drive level down until the radio's ALC
+        // reads at/near zero, matching how Andy WM8Q's fork's own hotkeys worked. Optimistically
+        // flips `tuning` immediately (same pattern as the original Tilly-era ToggleTuning) rather
+        // than waiting for the next 1s Direct-mode poll to reconcile it via DirectApplyStatus --
+        // but ONLY on confirmed success (found live, 2026-08-10: under classic WSJT-X/UDP mode,
+        // where jimmy-engine-host.exe never runs at all, DirectSendCommand can't connect and the
+        // old unconditional version still claimed "Tune started" and let F11/F12 proceed as if a
+        // real carrier existed -- the native engine has no equivalent to WSJT-X's own UDP-based
+        // ToggleTuning, so classic mode genuinely cannot Tune at all right now).
         public bool ToggleTuningProcess()
         {
-            StatusView.ShowMessage("Tune isn't available in Jimmy Native yet.", true);
+            bool newState = !tuning;
+            // Found live, 2026-08-10, auditing against production: the original classic-UDP
+            // ToggleTuning() (deleted this same session, replacing Andy WM8Q's proprietary
+            // sub-command 19 with this method) always did "if (txEnabled) HaltTx();" before
+            // starting a tune carrier, so a normal Tx cycle could never race against Tune. This
+            // replacement dropped that -- restored here, same condition, HaltTx() itself is
+            // already mode-aware (routes to DirectSendHaltTx() under Direct mode).
+            if (newState && txEnabled) HaltTx();
+            if (!DirectSetTuning(newState))
+            {
+                StatusView.ShowMessage("Tune needs the native engine (Options, Radio tab, Talk to engine directly) -- not available under WSJT-X CAT/UDP mode.", true);
+                return true;
+            }
+            tuning = newState;
+            if (!tuning) StartStatusTimer2(false);
+            StatusView.ShowMessage(tuning ? "Tune started" : "Tune stopped", false);
             return true;
         }
 
         // Self-sufficiency plan, Phase 1: the one and only F11/F12 redirect point (confirmed by
         // direct tracing -- HotkeyConfig.cs -> Controller.ProcessCmdKey -> here -> either path
-        // below). Needs Hamlib rigctld to adjust the radio's own AF gain -- under
-        // RadioControlMode.WsjtxCat there is no separate CAT connection to adjust at all.
+        // below).
+        //
+        // Self-sufficiency plan Phase 6 addendum, 2026-08-09: F11/F12 originally (Andy WM8Q's
+        // fork) sent a proprietary UDP sub-command (NewTxMsgIdx=20, see the very first commit in
+        // this repo's history) that told WSJT-X itself to adjust its own generated Tx tone
+        // level -- not a CAT command to the radio, and not a Windows output-device volume
+        // either. That only ever worked against Andy's actual fork; standard WSJT-X, WSJT-X
+        // Improved, and the native engine all speak the standard protocol and never understood
+        // it, which is why Phase 1 replaced it with the Hamlib-rigctld CAT path below (adjusting
+        // the radio's own receive AF gain -- a different thing, but the closest available
+        // replacement at the time, and still the only option when Radio.Mode == WsjtxCat, where
+        // nothing here has any CAT connection to the radio at all).
+        //
+        // The native engine's own Engine::set_tx_level/tx_level (tempo-app/src/engine.rs) is the
+        // real modern match to the original intent -- it's WSJT-X's own "Pwr" slider equivalent,
+        // the sound-card/software side of the signal chain (scales the generated tone before it
+        // ever reaches the sound card), already wired up on the Rust side and applied live every
+        // slot, just not exposed to Jimmy before now (control port's new SET_TX_LEVEL command,
+        // EngineHost/src/main.rs). Tried first below since it works regardless of whether
+        // Jimmy's own transport to the engine is UDP or Direct -- both talk to the same engine
+        // process over this same control port. Falls through to the legacy Hamlib-rigctld CAT
+        // path (the radio's own receive AF gain -- a different point in the signal chain, but
+        // the closest available replacement) if the engine isn't reachable at all (e.g. talking
+        // to real WSJT-X, no engine process exists).
+        //
+        // Added 2026-08-10: this used to read/write Engine::mic_gain via SET_MIC_GAIN instead --
+        // confirmed live to be wrong by tracing every consumer of mic_gain() in Nexus's own
+        // tempo-audio/src/service.rs: applied in exactly one place, explicitly commented "Only
+        // the Phone section drives these (the FT8 TX path is idle there)" -- it had no effect on
+        // FT8/FT4 transmit audio at all, and its snapshot value (rig_mic_gain.or(mic_gain),
+        // preferring a CAT-polled read-back over what was just commanded) is why repeated F11/
+        // F12 presses during one transmission kept announcing the same stale value: reported
+        // live, an operator pressed F11 five times mid-transmission and heard the same "Audio
+        // level 55%" every time, only seeing it change on the NEXT transmission. tx_level has no
+        // such CAT-read-back field muddying it, so this fix resolves both problems at once --
+        // wrong signal-chain point AND stale-reading -- with the same change.
+
         public bool AudioLevel(bool up)
         {
-            if (!transmitting) return false;
+            // "during tune or transmit" (see this hotkey's own help text, Controller.cs) --
+            // matches Andy WM8Q's fork's original gate (`newTxMsgIdx == 20 && m_transmitting`
+            // covered Tune too, since WSJT-X sets m_transmitting for a tune carrier as well).
+            // Added the `tuning` half 2026-08-10, alongside wiring up Tune itself
+            // (ToggleTuningProcess) -- Tune is the ONLY state where this actually applies live
+            // (see ToggleTuningProcess's own comment); during a real FT8/FT4 transmission this
+            // still only takes effect on the next slot, same as before.
+            if (!transmitting && !tuning) return false;
 
             if (!tuning) StartStatusTimer2(false);
 
+            // Operator-configurable (Options > Radio tab), added 2026-08-09 -- previously a
+            // hardcoded 0.05 (5%) on both this path and RigctldClient.AdjustAudioLevel's own copy
+            // below. Clamped defensively even though the NumericUpDown's own range should already
+            // keep it sane.
+            double step = Math.Max(1, Math.Min(25, ctrl.Radio.AudioStepPercent)) / 100.0;
+
+            // sound:false on every announcement below, deliberately -- this whole method only
+            // ever runs while transmitting is already true (guard above), so EVERY announcement
+            // here fires during a live over. StatusView.ShowMessage's sound:true plays a Windows
+            // SystemSounds.Beep through whatever the OS DEFAULT playback device is -- on a
+            // typical ham setup where the radio's own sound-card interface IS that default
+            // device, that beep would mix straight into the live transmitted audio. Root-caused
+            // live, 2026-08-09, from a report of hearing a Windows beep on every F11/F12 press
+            // while transmitting. The screen-reader announcement itself is unaffected (driven by
+            // ShowMsg's own SendKeys nudge, independent of sound) -- only the audible beep goes.
+            string snapJson = DirectSendCommand("SNAPSHOT");
+            if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
+            {
+                try
+                {
+                    var snap = System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(snapJson, DirectJsonOptions);
+                    // TxLevel is never null (Nexus always defaults it to 0.9, no CAT connection
+                    // needed -- unlike MicGain's Option<f32>), so only the Radio object itself
+                    // needs to exist for this path to apply.
+                    if (snap?.Radio != null)
+                    {
+                        double current = snap.Radio.TxLevel;
+                        double next = Math.Max(0.0, Math.Min(1.0, current + (up ? step : -step)));
+                        DirectSendCommand("SET_TX_LEVEL " + next.ToString(System.Globalization.CultureInfo.InvariantCulture));
+                        // Options > Radio "Remember F11/F12 audio level per band" -- see
+                        // RadioSettings.TxLevelByBand's own comment. Restored on the next band
+                        // change by WsjtxClient.Direct.cs's own band-change detection.
+                        if (ctrl.Radio.RememberTxLevelPerBand && bandIdx != null)
+                            ctrl.Radio.TxLevelByBand[(int)bandIdx] = next;
+                        StatusView.ShowMessage($"Audio level {next * 100:0}%", false);
+                        return true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    DebugOutput($"{Time()} AudioLevel: engine SNAPSHOT parse failed, falling back to Hamlib rigctld: {ex.Message}");
+                }
+            }
+
             if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
             {
-                if (ctrl.rigctldClient.AdjustAudioLevel(up, out double newLevel))
-                    StatusView.ShowMessage($"Audio level {newLevel * 100:0}%", true);
+                if (ctrl.rigctldClient.AdjustAudioLevel(up, step, out double newLevel))
+                    StatusView.ShowMessage($"Audio level {newLevel * 100:0}%", false);
                 else
-                    StatusView.ShowMessage($"Audio level: {ctrl.rigctldClient.LastError}", true);
+                    StatusView.ShowMessage($"Audio level: {ctrl.rigctldClient.LastError}", false);
             }
             else
-                StatusView.ShowMessage("Audio level needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
+                StatusView.ShowMessage("Audio level needs the native engine or Hamlib rigctld -- neither is currently available.", false);
             return true;
         }
 

@@ -152,16 +152,32 @@ namespace WSJTX_Controller
                     // terminates on its own once done -- no stdin interaction needed. Still
                     // bound the wait so a stuck/hung TQSL (e.g. an unexpected dialog somehow
                     // appearing) can't hang Jimmy's upload catch-up indefinitely.
-                    stderrText = await proc.StandardError.ReadToEndAsync().ConfigureAwait(false);
-                    bool exited = proc.WaitForExit(120_000);
-                    if (!exited)
+                    //
+                    // Found live, 2026-08-10, auditing against production: the timeout below
+                    // used to only guard WaitForExit, AFTER already unconditionally awaiting
+                    // ReadToEndAsync() -- but that read only ever completes once the process
+                    // closes stderr, which normally happens at exit. A genuinely hung TQSL (the
+                    // exact "unexpected dialog" case this timeout exists for) never closes
+                    // stderr, so the await above never returned and the 2-minute bound was never
+                    // even reached. Racing the read itself against the timeout via Task.WhenAny
+                    // (same pattern NativeEngineClient.ListDevices already uses for the identical
+                    // class of problem) actually bounds the whole wait, not just half of it.
+                    Task<string> stderrTask = proc.StandardError.ReadToEndAsync();
+                    if (await Task.WhenAny(stderrTask, Task.Delay(120_000)).ConfigureAwait(false) != stderrTask)
                     {
                         try { proc.Kill(); } catch { }
+                        // Killing the process closes its stderr handle, so the pending read can
+                        // finish now -- grab whatever partial output TQSL had already written
+                        // before being terminated, best-effort only (never let a failure here
+                        // mask the real timeout being reported).
+                        try { stderrText = await stderrTask.ConfigureAwait(false); } catch { stderrText = ""; }
                         LastError = "TQSL did not finish within 2 minutes (possibly waiting on an unexpected dialog, e.g. a passphrase prompt).";
                         LogFailure("Timeout", LastError, stderrText);
                         return false;
                     }
-                    exitCode = proc.ExitCode;
+                    stderrText = stderrTask.Result;
+                    bool exited = proc.WaitForExit(5000);
+                    exitCode = exited ? proc.ExitCode : -1;
                 }
 
                 var (code, description) = ParseFinalStatus(stderrText);

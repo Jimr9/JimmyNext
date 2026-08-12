@@ -29,7 +29,6 @@ namespace WSJTX_Controller
 
         private void ConfirmDlg_Load(object sender, EventArgs e)
         {
-            SystemSounds.Beep.Play();
             panel1.BackgroundImage = Bitmap.FromHicon(SystemIcons.Question.Handle);
             panel1.BackgroundImageLayout = System.Windows.Forms.ImageLayout.Center;
             textBox.Text = text;

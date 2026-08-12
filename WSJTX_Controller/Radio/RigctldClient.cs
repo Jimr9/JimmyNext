@@ -6,6 +6,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace WSJTX_Controller
 {
@@ -141,6 +142,15 @@ namespace WSJTX_Controller
         public bool LaunchBundled(string rigModel, string comPort, string baudRate = null)
         {
             LastError = null;
+            // Defensive: found live, 2026-08-10, auditing against production -- without this,
+            // calling LaunchBundled() a second time before StopBundled()/Dispose() on this same
+            // instance silently overwrote _bundledProcess below, orphaning the old rigctld.exe
+            // with nothing left able to stop it. Currently only ever avoided in practice by the
+            // one known caller (ApplyRadioSettings) disposing the whole client first every time
+            // -- guarding here makes it safe regardless of caller discipline, matching
+            // StopBundled's own "only ever kills what this client started" contract.
+            if (_bundledProcess != null && !_bundledProcess.HasExited)
+                StopBundled();
             try
             {
                 string rigctldPath = LocateBundledExe();
@@ -258,6 +268,18 @@ namespace WSJTX_Controller
                 {
                     LastError = $"Timed out connecting to rigctld at {_host}:{_port} after {NetworkTimeoutMs}ms " +
                                  "-- is another rigctld already bound to that port?";
+                    // Found live, 2026-08-10, auditing against production: giving up on
+                    // connectTask.Wait() above does not cancel the underlying ConnectAsync --
+                    // it keeps running in the background, and Close() below disposes the same
+                    // TcpClient out from under it. If it later completes or faults (e.g. an
+                    // ObjectDisposedException from that disposal), nothing ever observes the
+                    // result, which is exactly the shape of an unobserved-task-exception leak
+                    // under repeated connection failures (e.g. a persistently misconfigured
+                    // port). Marking it observed here, regardless of how/when it actually
+                    // finishes, closes that gap without needing a full cancellation-token rework.
+                    connectTask.ContinueWith(
+                        t => { var _ = t.Exception; },
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
                     Close();
                     return false;
                 }
@@ -429,12 +451,13 @@ namespace WSJTX_Controller
         }
 
         // Hamlib analogue of WSJT-X's software RX-gain slider that F11/F12 drives in WsjtxCat
-        // mode: adjusts the radio's own AF (audio) gain level up/down by a fixed step. Different
-        // mechanism (hardware AF gain via CAT vs. a software multiplier applied before decode)
-        // but the same practical effect on received audio level.
-        private const double AudioStep = 0.05;
-
-        public bool AdjustAudioLevel(bool up, out double newLevel)
+        // mode: adjusts the radio's own AF (audio) gain level up/down by a configurable step.
+        // Different mechanism (hardware AF gain via CAT vs. a software multiplier applied before
+        // decode) but the same practical effect on received audio level. `step` (a 0.0-1.0
+        // fraction) comes from the caller -- RadioSettings.AudioStepPercent, the same
+        // operator-facing setting the engine mic-gain path (WsjtxClient.BandAudio.cs) uses, so
+        // both F11/F12 paths always move by the same amount regardless of which one is active.
+        public bool AdjustAudioLevel(bool up, double step, out double newLevel)
         {
             newLevel = 0.0;
             string reply = SendCommand("l AF");
@@ -444,7 +467,7 @@ namespace WSJTX_Controller
                 LastError = "Could not read current AF level from rigctld.";
                 return false;
             }
-            double next = Math.Max(0.0, Math.Min(1.0, current + (up ? AudioStep : -AudioStep)));
+            double next = Math.Max(0.0, Math.Min(1.0, current + (up ? step : -step)));
             string setReply = SendCommand("L AF " + next.ToString(CultureInfo.InvariantCulture));
             if (LooksLikeError(setReply)) return false;
             newLevel = next;

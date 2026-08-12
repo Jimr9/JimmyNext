@@ -28,11 +28,13 @@ namespace WSJTX_Controller
         private WsjtxClient wsjtxClient;
         private Controller ctrl;
 
-        private const int HotkeysTabIndex      = 4;
-        private const int AdvUiTabIndex        = 5;
-        private const int WantedCallsTabIndex  = 6;
-        private const int SpotWatchTabIndex    = 7;
-        private const int SoundsTabIndex       = 8;
+        // Index into _categoryListBox (2026-08-10, Options accessibility reorg -- replaces the
+        // old tabControl1.SelectedIndex jump). Must match "Hotkeys"'s position in the Items list
+        // populated in OptionsDlg.Designer.cs's InitializeComponent(). The other four sibling
+        // constants that used to live here (AdvUiTabIndex/WantedCallsTabIndex/SpotWatchTabIndex/
+        // SoundsTabIndex) were already dead code before this change -- nothing ever read them --
+        // so they're not being carried forward.
+        private const int HotkeysCategoryIndex = 4;
 
         // Advanced UI tab — controls created dynamically in BuildAdvancedUiTab()
         private System.Windows.Forms.CheckBox advCallLayoutCheckBox;
@@ -206,17 +208,51 @@ namespace WSJTX_Controller
             BuildSpotWatchTab();
             BuildRadioTab();
             BuildDecodeEngineTab();
+            BuildDecodeTab();
+            BuildFrequenciesTab();
             BuildSoundsTab();
             BuildLogbookSyncTab();
             BuildLookupDataTab();
             BuildAppearanceTab();
             ReparentControlsToDialog();
 
+            // Order must match _categoryListBox.Items (OptionsDlg.Designer.cs) and
+            // HotkeysCategoryIndex above -- basicPanel first, so the very first item is
+            // already visible before subtitleLabel.Focus() below.
+            WireCategoryList(_categoryListBox, _categoryDetailHost, new List<Control> {
+                basicPanel, generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
+                advUiPanel, wantedCallsPanel, spotWatchPanel, soundsPanel, radioPanel,
+                decodeEnginePanel, decodePanel, frequenciesPanel, logbookSyncPanel, lookupPanel,
+                appearancePanel
+            });
+
             UpdateAllButtons();
             dxccButtonEnabled = false;  // Phase 3: New DXCC exclusive mode removed
             UpdateAllButtons();
 
             subtitleLabel.Focus();
+        }
+
+        // Generalizes WireServiceList (below, still used as-is inside Logbook Sync/Lookup Data)
+        // to the whole dialog: shows only the item matching _categoryListBox's current
+        // selection, hiding the rest. Control instead of GroupBox purely for generality --
+        // every one of the 16 top-level items is a plain Panel (basicPanel included: originally
+        // a bare TabPage, converted to a Panel here -- confirmed live that WinForms' TabPage
+        // throws ArgumentException if reparented to anything other than a real TabControl,
+        // despite TabPage technically inheriting from Panel).
+        private static void WireCategoryList(ListBox listBox, Control host, List<Control> panels)
+        {
+            Control current = null;
+            void UpdateVisibility()
+            {
+                if (current != null) host.Controls.Remove(current);
+                int idx = listBox.SelectedIndex;
+                current = (idx >= 0 && idx < panels.Count) ? panels[idx] : null;
+                if (current != null) host.Controls.Add(current);
+            }
+            listBox.SelectedIndexChanged += (s, e) => UpdateVisibility();
+            if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;
+            UpdateVisibility();
         }
 
         // ===== GENERAL TAB =====
@@ -319,7 +355,7 @@ namespace WSJTX_Controller
 
         private void OptionsDlg_KeyDown(object sender, KeyEventArgs e)
         {
-            if (e.KeyCode == Keys.Escape) { e.Handled = true; Close(); return; }
+            if (e.KeyCode == Keys.Escape) { e.Handled = true; e.SuppressKeyPress = true; Close(); return; }
             // When the capture box has focus, let the key pass through to it.
             if (IsCaptureFieldFocused()) return;
             if (e.Control && e.KeyCode == Keys.Q) Close();
@@ -336,6 +372,8 @@ namespace WSJTX_Controller
             SaveWantedCallsTab();
             SaveSpotWatchTab();
             SaveRadioTab();
+            SaveDecodeTab();
+            SaveFrequenciesTab();
             SaveSoundsTab();
             SaveLookupTab();
             SaveAppearanceTab();
@@ -837,12 +875,38 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox _engineMyGridTextBox;
         private System.Windows.Forms.ComboBox _engineAudioDeviceCombo;
         private System.Windows.Forms.ComboBox _engineAudioOutputDeviceCombo;
-        private System.Windows.Forms.CheckBox _radioDataModesPlainSsbCheckBox;
-        private System.Windows.Forms.CheckBox _radioSplitCheckBox;
+        private System.Windows.Forms.NumericUpDown _engineAudioInputLevelUpDown;
+        private System.Windows.Forms.NumericUpDown _engineAudioOutputLevelUpDown;
+        private System.Windows.Forms.CheckBox _engineUseDirectCheckBox;
+        private System.Windows.Forms.CheckBox _radioPttDataSourceCheckBox;
+        private System.Windows.Forms.ComboBox _radioPttSerialPortCombo;
+        private System.Windows.Forms.GroupBox _radioModeGroupBox;
+        private System.Windows.Forms.RadioButton _radioModeNoneRb;
+        private System.Windows.Forms.RadioButton _radioModeUsbRb;
+        private System.Windows.Forms.RadioButton _radioModeDataPktRb;
+        private System.Windows.Forms.GroupBox _radioSplitGroupBox;
+        private System.Windows.Forms.RadioButton _radioSplitNoneRb;
+        private System.Windows.Forms.RadioButton _radioSplitRigRb;
+        private System.Windows.Forms.RadioButton _radioSplitFakeItRb;
         private System.Windows.Forms.NumericUpDown _radioPollIntervalUpDown;
         private System.Windows.Forms.CheckBox _radioReadDisplayPwrSwrCheckBox;
         private System.Windows.Forms.CheckBox _radioHaltTxOnHighSwrCheckBox;
         private System.Windows.Forms.NumericUpDown _radioSwrHaltThresholdUpDown;
+        private System.Windows.Forms.CheckBox _radioStartupPowerEnabledCheckBox;
+        private System.Windows.Forms.NumericUpDown _radioStartupPowerWattsUpDown;
+        private System.Windows.Forms.NumericUpDown _radioStartupPowerMaxWattsUpDown;
+        private System.Windows.Forms.NumericUpDown _radioAudioStepUpDown;
+        private System.Windows.Forms.CheckBox _radioRememberTxLevelPerBandCheckBox;
+
+        private System.Windows.Forms.ComboBox _decodeDepthCombo;
+        private System.Windows.Forms.NumericUpDown _decodeFLowUpDown;
+        private System.Windows.Forms.NumericUpDown _decodeFHighUpDown;
+        private System.Windows.Forms.CheckBox _decodeApDecodeCheckBox;
+        private System.Windows.Forms.CheckBox _decodeApCqOnlyCheckBox;
+        private System.Windows.Forms.CheckBox _decodeSingleDecodeCheckBox;
+
+        private System.Windows.Forms.NumericUpDown[] _freqFt8UpDowns;
+        private System.Windows.Forms.NumericUpDown[] _freqFt4UpDowns;
 
         private void BuildRadioTab()
         {
@@ -1156,6 +1220,38 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioPttMethodCombo);
             y += 32;
 
+            // WSJT-X Radio tab "PTT Method" > "Port" -- a separate serial port for RTS/DTR PTT
+            // when it differs from the CAT port (an SO2R controller). Nexus's engine already
+            // supported this (Settings.ptt_serial_port); it was just never exposed here before.
+            var pttSerialPortLabel = new System.Windows.Forms.Label
+            {
+                Text = "PTT port (blank = same as CAT):",
+                AccessibleName = "PTT port label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(pttSerialPortLabel);
+            _radioPttSerialPortCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left + 260, y),
+                Size = new System.Drawing.Size(100, 21),
+                TabIndex = 10,
+                Font = font,
+                AccessibleName = "PTT port",
+                AccessibleDescription = "Separate serial port for RTS/DTR PTT keying when it differs from the CAT serial port above -- an SO2R controller routing keying on its own COM port. Blank (default) keys on the same port as CAT.",
+            };
+            _radioPttSerialPortCombo.Items.Add("");
+            foreach (var p in detectedPorts)
+                _radioPttSerialPortCombo.Items.Add(p);
+            if (!string.IsNullOrWhiteSpace(ctrl.Radio.PttSerialPort) && !detectedPorts.Contains(ctrl.Radio.PttSerialPort))
+                _radioPttSerialPortCombo.Items.Add(ctrl.Radio.PttSerialPort);
+            _radioPttSerialPortCombo.Text = ctrl.Radio.PttSerialPort;
+            radioPanel.Controls.Add(_radioPttSerialPortCombo);
+            y += 32;
+
             // Same row/placement family as real WSJT-X's own Radio tab, which puts its "Mode:
             // None/USB/Data-Pkt" choice right above "Test CAT" -- confirmed live, 2026-08-07, via
             // the operator's own JAWS navigation transcript of WSJT-X 3.0.0 rc1 mod's Radio tab.
@@ -1163,20 +1259,61 @@ namespace WSJTX_Controller
             // pickers), which the operator flagged as the wrong location: WSJT-X keeps rig-mode
             // choices with its other CAT/PTT controls, not with audio device selection, and
             // Jimmy should match that grouping for anyone already familiar with WSJT-X's layout.
-            // Only two of WSJT-X's three choices are real here (see DataModesPlainSsb's own
-            // comment for why "None" isn't available without forking Nexus's own engine code).
-            _radioDataModesPlainSsbCheckBox = new System.Windows.Forms.CheckBox
+            // Real radio buttons now (all three of WSJT-X's choices, including None), not a
+            // checkbox -- the operator flagged the old on/off checkbox as confusing, 2026-08-11.
+            _radioModeGroupBox = new System.Windows.Forms.GroupBox
             {
-                Text = "Use plain USB instead of Data/Pkt mode for FT8/FT4",
-                Checked = ctrl.Radio.DataModesPlainSsb,
+                Text = "Mode",
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(380, 45),
+                TabIndex = 16,
+                Font = font,
+                AccessibleName = "Mode",
+            };
+            _radioModeNoneRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "None", Location = new System.Drawing.Point(10, 18), AutoSize = true,
+                TabIndex = 0, Font = font, Checked = ctrl.Radio.TxMode == RadioTxMode.None,
+                AccessibleDescription = "Never send the radio a mode command at all, for any operating mode -- the operator's own manual rig setting stands.",
+            };
+            _radioModeUsbRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "USB", Location = new System.Drawing.Point(130, 18), AutoSize = true,
+                TabIndex = 1, Font = font, Checked = ctrl.Radio.TxMode == RadioTxMode.Usb,
+                AccessibleDescription = "Command plain USB instead of the Data/Pkt submode. Only try this if Data/Pkt mode isn't actually routing transmit audio to the radio correctly on your setup.",
+            };
+            _radioModeDataPktRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "Data/Pkt", Location = new System.Drawing.Point(240, 18), AutoSize = true,
+                TabIndex = 2, Font = font, Checked = ctrl.Radio.TxMode == RadioTxMode.DataPkt,
+                AccessibleDescription = "Default and recommended for most rigs, including a normal rear-panel USB or ACC digital audio interface. Commands the rig's DATA submode over CAT for every FT8/FT4 transmission.",
+            };
+            _radioModeGroupBox.Controls.Add(_radioModeNoneRb);
+            _radioModeGroupBox.Controls.Add(_radioModeUsbRb);
+            _radioModeGroupBox.Controls.Add(_radioModeDataPktRb);
+            radioPanel.Controls.Add(_radioModeGroupBox);
+            y += 52;
+
+            // Matches real WSJT-X's own Radio tab "Transmit Audio Source: Mic / Data" choice
+            // (Configuration.cpp's TX_audio_source_button_group) -- a SEPARATE control from
+            // Mode above: that one changes the CAT *mode* command (M USB vs M PKTUSB); this one
+            // changes the PTT command itself (RIG_PTT_ON vs RIG_PTT_ON_DATA), telling a rig with
+            // separate mic/data audio inputs which one to key from. Confirmed live, 2026-08-07: a
+            // real TS-590SG transmitted mic audio instead of the FT8 tone even though CAT mode
+            // already correctly showed the DATA submode -- this is the actual fix for that, not
+            // the Mode group above.
+            _radioPttDataSourceCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Transmit Audio Source: Data (not Mic)",
+                Checked = ctrl.Radio.PttDataSource,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
-                TabIndex = 10,
+                TabIndex = 17,
                 Font = font,
-                AccessibleName = "Use plain USB instead of Data mode",
-                AccessibleDescription = "Off by default (recommended for most rigs, including a normal rear-panel USB or ACC digital audio interface). Matches WSJT-X's own Radio tab 'Mode' choice: Data/Pkt (default here, off) vs USB (checked). Only try this if Data/Pkt mode isn't actually routing transmit audio to the radio correctly on your setup.",
+                AccessibleName = "Transmit Audio Source Data not Mic",
+                AccessibleDescription = "Off by default (Mic), matching WSJT-X's own default. Matches WSJT-X's own Radio tab 'Transmit Audio Source' choice: Mic (default here, off) vs Data (checked). Only try this if your interface is wired to the rig's rear DATA/ACC port and the rig still transmits mic audio instead of the FT8 tone during a real transmission.",
             };
-            radioPanel.Controls.Add(_radioDataModesPlainSsbCheckBox);
+            radioPanel.Controls.Add(_radioPttDataSourceCheckBox);
             y += 32;
 
             // Rig Data section, packed two-controls-per-row like PTT Method above it -- same
@@ -1185,19 +1322,41 @@ namespace WSJTX_Controller
             // PWR+SWR, Halt Tx on high SWR) per the operator's own request and JAWS navigation
             // transcript of WSJT-X 3.0.0 rc1 mod, 2026-08-07 -- kept on THIS tab rather than a
             // separate one because the operator explicitly said WSJT-X has it all on one Radio
-            // tab and Jimmy should match that.
-            _radioSplitCheckBox = new System.Windows.Forms.CheckBox
+            // tab and Jimmy should match that. Real radio buttons now (all three of WSJT-X's
+            // choices, including Fake It -- Engine::split_reduce/apply_tx_dial_shift already
+            // fully implement it), not a checkbox.
+            _radioSplitGroupBox = new System.Windows.Forms.GroupBox
             {
-                Text = "Use rig split (TX on VFO B)",
-                Checked = ctrl.Radio.SplitMode == RadioSplitMode.Rig,
+                Text = "Split Operation",
                 Location = new System.Drawing.Point(left, y),
-                AutoSize = true,
-                TabIndex = 11,
+                Size = new System.Drawing.Size(380, 45),
+                TabIndex = 18,
                 Font = font,
-                AccessibleName = "Use rig split",
-                AccessibleDescription = "Off by default. Matches WSJT-X's own Radio tab 'Split Operation' choice: None (default here, off) vs Rig (checked) -- true hardware split via CAT, RX on VFO A, TX on VFO B. WSJT-X's third choice, 'Fake It' (software-emulated split, no true rig split), has no equivalent here. Rarely needed for FT8/FT4, which conventionally run simplex.",
+                AccessibleName = "Split Operation",
             };
-            radioPanel.Controls.Add(_radioSplitCheckBox);
+            _radioSplitNoneRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "None", Location = new System.Drawing.Point(10, 18), AutoSize = true,
+                TabIndex = 0, Font = font, Checked = ctrl.Radio.SplitMode == RadioSplitMode.None,
+                AccessibleDescription = "Receive and transmit on the same frequency -- how ordinary FT8/FT4 works.",
+            };
+            _radioSplitRigRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "Rig", Location = new System.Drawing.Point(130, 18), AutoSize = true,
+                TabIndex = 1, Font = font, Checked = ctrl.Radio.SplitMode == RadioSplitMode.Rig,
+                AccessibleDescription = "True hardware split via CAT -- receive on VFO A, transmit on VFO B.",
+            };
+            _radioSplitFakeItRb = new System.Windows.Forms.RadioButton
+            {
+                Text = "Fake It", Location = new System.Drawing.Point(240, 18), AutoSize = true,
+                TabIndex = 2, Font = font, Checked = ctrl.Radio.SplitMode == RadioSplitMode.FakeIt,
+                AccessibleDescription = "Software-emulated split -- no true rig split needed. The engine retunes the single VFO right before each transmission and restores it after.",
+            };
+            _radioSplitGroupBox.Controls.Add(_radioSplitNoneRb);
+            _radioSplitGroupBox.Controls.Add(_radioSplitRigRb);
+            _radioSplitGroupBox.Controls.Add(_radioSplitFakeItRb);
+            radioPanel.Controls.Add(_radioSplitGroupBox);
+            y += 52;
 
             var pollIntervalLabel = new System.Windows.Forms.Label
             {
@@ -1217,7 +1376,7 @@ namespace WSJTX_Controller
                 Value = Math.Max(1, Math.Min(30, ctrl.Radio.PollIntervalMs / 1000)),
                 Location = new System.Drawing.Point(left + 410, y),
                 Size = new System.Drawing.Size(55, 21),
-                TabIndex = 12,
+                TabIndex = 19,
                 Font = font,
                 AccessibleName = "Poll interval seconds",
                 AccessibleDescription = "How often Jimmy polls the radio for S-meter/power/SWR, in seconds, while 'Read and display PWR and SWR' below is checked.",
@@ -1231,7 +1390,7 @@ namespace WSJTX_Controller
                 Checked = ctrl.Radio.ReadDisplayPwrSwr,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
-                TabIndex = 13,
+                TabIndex = 20,
                 Font = font,
                 AccessibleName = "Read and display PWR and SWR",
                 AccessibleDescription = "Off by default. Turns on the periodic S-meter/power/SWR poll (Poll interval above) that Alt+Q's on-demand check also uses. Must be checked for 'Halt Tx when SWR' below to have anything to check.",
@@ -1245,7 +1404,7 @@ namespace WSJTX_Controller
                 Checked = ctrl.Radio.HaltTxOnHighSwr,
                 Location = new System.Drawing.Point(left + 290, y),
                 AutoSize = true,
-                TabIndex = 14,
+                TabIndex = 21,
                 Font = font,
                 AccessibleName = "Halt Tx when SWR exceeds threshold",
                 AccessibleDescription = "Off by default. Matches WSJT-X's own Radio tab safety feature: automatically halts transmission if a poll (see 'Read and display PWR and SWR' above, which this requires) reports SWR above the threshold to the right.",
@@ -1261,7 +1420,7 @@ namespace WSJTX_Controller
                 Value = (decimal)Math.Max(1.0, Math.Min(10.0, ctrl.Radio.SwrHaltThreshold)),
                 Location = new System.Drawing.Point(left + 470, y),
                 Size = new System.Drawing.Size(55, 21),
-                TabIndex = 15,
+                TabIndex = 22,
                 Font = font,
                 AccessibleName = "SWR halt threshold",
                 AccessibleDescription = "SWR value above which Tx is automatically halted, when 'Halt Tx when SWR' to the left is checked. WSJT-X's own default is 2.5.",
@@ -1269,12 +1428,123 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioSwrHaltThresholdUpDown);
             y += 32;
 
+            // Startup-only power workaround for the Hamlib Kenwood-backend bug (RadioSettings.
+            // StartupPowerEnabled's own doc comment has the full story) -- off by default, so
+            // nothing changes for anyone who hasn't hit the bug. When checked, jimmy-engine-host
+            // commands Watts/Max watts (as a fraction) to the rig exactly once at startup, then
+            // leaves power alone -- changing it by hand on the rig afterward, including band
+            // changes, sticks.
+            _radioStartupPowerEnabledCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Set power once at startup",
+                Checked = ctrl.Radio.StartupPowerEnabled,
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                TabIndex = 23,
+                Font = font,
+                AccessibleName = "Set power once at startup",
+                AccessibleDescription = "Off by default. Works around a Hamlib bug on some rigs (Kenwood CAT) where the radio's power can drop unexpectedly the first time Jimmy starts. When checked, Jimmy commands the Watts value below to the rig exactly once at startup, then leaves power alone -- changing it by hand on the rig afterward, including when you change bands, sticks.",
+            };
+            _radioStartupPowerEnabledCheckBox.CheckedChanged += (s, e) => UpdateStartupPowerEnabled();
+            radioPanel.Controls.Add(_radioStartupPowerEnabledCheckBox);
+
+            var startupPowerWattsLabel = new System.Windows.Forms.Label
+            {
+                Text = "Watts:",
+                AccessibleName = "Startup power watts label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 290, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(startupPowerWattsLabel);
+
+            _radioStartupPowerWattsUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 1,
+                Maximum = 1000,
+                Value = Math.Max(1, Math.Min(1000, ctrl.Radio.StartupPowerWatts)),
+                Location = new System.Drawing.Point(left + 340, y),
+                Size = new System.Drawing.Size(55, 21),
+                TabIndex = 24,
+                Font = font,
+                AccessibleName = "Startup power watts",
+                AccessibleDescription = "Power to command at startup, in watts, when 'Set power once at startup' is checked.",
+            };
+            radioPanel.Controls.Add(_radioStartupPowerWattsUpDown);
+
+            var startupPowerMaxWattsLabel = new System.Windows.Forms.Label
+            {
+                Text = "Rig max watts:",
+                AccessibleName = "Rig maximum watts label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 410, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(startupPowerMaxWattsLabel);
+
+            _radioStartupPowerMaxWattsUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 1,
+                Maximum = 1000,
+                Value = Math.Max(1, Math.Min(1000, ctrl.Radio.StartupPowerMaxWatts)),
+                Location = new System.Drawing.Point(left + 510, y),
+                Size = new System.Drawing.Size(55, 21),
+                TabIndex = 25,
+                Font = font,
+                AccessibleName = "Rig maximum watts",
+                AccessibleDescription = "Your rig's full-power rating in watts (for example, 100). Jimmy uses this together with the Watts value to compute the fraction it commands to the rig.",
+            };
+            radioPanel.Controls.Add(_radioStartupPowerMaxWattsUpDown);
+            y += 32;
+
+            var audioStepLabel = new System.Windows.Forms.Label
+            {
+                Text = "F11/F12 audio level step (%):",
+                AccessibleName = "F11 F12 audio level step percent label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            radioPanel.Controls.Add(audioStepLabel);
+
+            _radioAudioStepUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 1,
+                Maximum = 25,
+                Value = Math.Max(1, Math.Min(25, ctrl.Radio.AudioStepPercent)),
+                Location = new System.Drawing.Point(left + 210, y),
+                Size = new System.Drawing.Size(55, 21),
+                TabIndex = 26,
+                Font = font,
+                AccessibleName = "F11 F12 audio level step percent",
+                AccessibleDescription = "How much F11 and F12 change the transmit audio level per press, as a percentage. Default 5.",
+            };
+            radioPanel.Controls.Add(_radioAudioStepUpDown);
+            y += 32;
+
+            _radioRememberTxLevelPerBandCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Remember F11/F12 audio level per band",
+                Checked = ctrl.Radio.RememberTxLevelPerBand,
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y),
+                Font = font,
+                TabIndex = 27,
+                AccessibleName = "Remember F11 F12 audio level per band",
+                AccessibleDescription = "When checked, each F11/F12 adjustment is saved for the current band and restored automatically when you return to it. When unchecked, the level carries over as-is across bands, same as before.",
+            };
+            radioPanel.Controls.Add(_radioRememberTxLevelPerBandCheckBox);
+            y += 32;
+
             _radioTestButton = new System.Windows.Forms.Button
             {
                 Text = "Test connection",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(120, 24),
-                TabIndex = 16,
+                TabIndex = 28,
                 Font = font,
                 AccessibleName = "Test radio connection",
                 AccessibleDescription = "Launches (or connects to) rigctld with the settings above and reports whether it answered.",
@@ -1296,6 +1566,7 @@ namespace WSJTX_Controller
 
             UpdateRadioHostPortEnabled();
             UpdateSwrHaltEnabled();
+            UpdateStartupPowerEnabled();
         }
 
         private void UpdateSwrHaltEnabled()
@@ -1303,6 +1574,13 @@ namespace WSJTX_Controller
             bool pollOn = _radioReadDisplayPwrSwrCheckBox?.Checked ?? false;
             if (_radioHaltTxOnHighSwrCheckBox != null) _radioHaltTxOnHighSwrCheckBox.Enabled = pollOn;
             if (_radioSwrHaltThresholdUpDown != null) _radioSwrHaltThresholdUpDown.Enabled = pollOn;
+        }
+
+        private void UpdateStartupPowerEnabled()
+        {
+            bool on = _radioStartupPowerEnabledCheckBox?.Checked ?? false;
+            if (_radioStartupPowerWattsUpDown != null) _radioStartupPowerWattsUpDown.Enabled = on;
+            if (_radioStartupPowerMaxWattsUpDown != null) _radioStartupPowerMaxWattsUpDown.Enabled = on;
         }
 
         // Split out from BuildRadioTab: this section had grown tall enough to render below the
@@ -1414,6 +1692,41 @@ namespace WSJTX_Controller
                 _engineAudioDeviceCombo.Items.Add(dev);
             _engineAudioDeviceCombo.Text = ctrl.NativeEngine.AudioInputDevice;
             decodeEnginePanel.Controls.Add(_engineAudioDeviceCombo);
+            y += 24;
+
+            var audioInputLevelLabel = new System.Windows.Forms.Label
+            {
+                Text = "Input level (%):",
+                AccessibleName = "Audio input level label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            decodeEnginePanel.Controls.Add(audioInputLevelLabel);
+
+            // Windows' own per-application session volume for the engine's capture stream on
+            // the device above -- separate from mic_gain (F11/F12), which scales the TX waveform
+            // digitally before it ever reaches Windows. This is the SAME control the Windows
+            // Volume Mixer exposes for jimmy-engine-host.exe (confirmed live, 2026-08-09, it
+            // shows there under its own raw filename since it has no embedded Windows version
+            // resource); reading/writing it here just saves hunting for that unfamiliar name.
+            // Live -- applies immediately on change, not gated behind OK, since it's OS session
+            // state, not a Jimmy setting Jimmy itself remembers/reapplies at next startup.
+            _engineAudioInputLevelUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Location = new System.Drawing.Point(left + 110, y),
+                Size = new System.Drawing.Size(55, 21),
+                TabIndex = 5,
+                Font = font,
+                AccessibleName = "Audio input level percent",
+                AccessibleDescription = "Windows' own output volume for the engine's capture stream on the device above -- the same control the Windows Volume Mixer has for jimmy-engine-host.exe, applied immediately. Only available while the native engine is running and has opened this device.",
+                Enabled = false,
+            };
+            decodeEnginePanel.Controls.Add(_engineAudioInputLevelUpDown);
+            InitAudioSessionLevelControl(_engineAudioInputLevelUpDown, isRender: false);
             y += 32;
 
             var audioOutputDeviceLabel = new System.Windows.Forms.Label
@@ -1433,7 +1746,7 @@ namespace WSJTX_Controller
                 DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDown,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(320, 21),
-                TabIndex = 5,
+                TabIndex = 6,
                 Font = font,
                 AccessibleName = "Audio output device",
                 AccessibleDescription = "Sound card output Jimmy Native transmits to -- normally the radio's own audio interface, NOT your PC speakers. Leave blank for the system default. Populated from the real devices this computer sees.",
@@ -1443,6 +1756,370 @@ namespace WSJTX_Controller
                 _engineAudioOutputDeviceCombo.Items.Add(dev);
             _engineAudioOutputDeviceCombo.Text = ctrl.NativeEngine.AudioOutputDevice;
             decodeEnginePanel.Controls.Add(_engineAudioOutputDeviceCombo);
+            y += 24;
+
+            var audioOutputLevelLabel = new System.Windows.Forms.Label
+            {
+                Text = "Output level (%):",
+                AccessibleName = "Audio output level label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            decodeEnginePanel.Controls.Add(audioOutputLevelLabel);
+
+            // Same idea as the input level control above, for the engine's RENDER stream on the
+            // device above -- this is the one that actually feeds the radio, and the slider you'd
+            // find in the Windows Volume Mixer under jimmy-engine-host.exe's own "adjust output
+            // volume." Live -- applies immediately on change.
+            _engineAudioOutputLevelUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Location = new System.Drawing.Point(left + 110, y),
+                Size = new System.Drawing.Size(55, 21),
+                TabIndex = 7,
+                Font = font,
+                AccessibleName = "Audio output level percent",
+                AccessibleDescription = "Windows' own output volume for the engine's transmit stream on the device above -- the same control the Windows Volume Mixer has for jimmy-engine-host.exe, applied immediately. This is the level that actually reaches the radio. Only available while the native engine is running and has opened this device.",
+                Enabled = false,
+            };
+            decodeEnginePanel.Controls.Add(_engineAudioOutputLevelUpDown);
+            InitAudioSessionLevelControl(_engineAudioOutputLevelUpDown, isRender: true);
+            y += 32;
+
+            _engineUseDirectCheckBox = MakeCheck(decodeEnginePanel,
+                "Talk to engine directly", "Talk to engine directly",
+                left, y, 8, ctrl.NativeEngine.UseDirectEngine, font);
+            _engineUseDirectCheckBox.AccessibleDescription =
+                "The intended way Jimmy talks to its own bundled engine: a direct control " +
+                "channel instead of emulating the standard WSJT-X network protocol. On by " +
+                "default. Turning this off falls back to the WSJT-X-compatible protocol, which " +
+                "has no way to explicitly enable transmit on the engine and is not recommended " +
+                "for normal use.";
+        }
+
+        // Reads the engine's current OS-level session volume for the given direction (input
+        // device combo's saved device for isRender:false, output device combo's for
+        // isRender:true) and shows it on upDown, enabling it only if a live session was actually
+        // found. Wires ValueChanged to apply changes immediately (ProcessAudioSessionVolume.cs) --
+        // this is real Windows session state, not a Jimmy setting saved to the ini, so there's
+        // nothing to persist and no reason to wait for OK.
+        private void InitAudioSessionLevelControl(System.Windows.Forms.NumericUpDown upDown, bool isRender)
+        {
+            int pid = ctrl.nativeEngineClient?.ProcessId ?? 0;
+            string deviceName = isRender ? ctrl.NativeEngine.AudioOutputDevice : ctrl.NativeEngine.AudioInputDevice;
+            float? current = pid > 0 ? ProcessAudioSessionVolume.GetVolume(pid, deviceName, isRender) : null;
+
+            if (current.HasValue)
+            {
+                upDown.Value = (decimal)Math.Max(0, Math.Min(100, current.Value * 100));
+                upDown.Enabled = true;
+            }
+            else
+            {
+                upDown.Value = 100;
+                upDown.Enabled = false;
+            }
+
+            upDown.ValueChanged += (s, e) =>
+            {
+                int livePid = ctrl.nativeEngineClient?.ProcessId ?? 0;
+                if (livePid <= 0) return;
+                string liveDeviceName = isRender ? ctrl.NativeEngine.AudioOutputDevice : ctrl.NativeEngine.AudioInputDevice;
+                ProcessAudioSessionVolume.SetVolume(livePid, liveDeviceName, isRender, (float)(upDown.Value / 100m));
+            };
+        }
+
+        // WSJT-X's own decode-related settings, ported over in Nexus but never previously
+        // exposed to Jimmy -- see DecodeSettings.cs's own comment for the full list and which
+        // ones are live vs. startup-only. Only takes effect for Jimmy Native (Decode Engine tab);
+        // meaningless under WSJT-X External, but shown unconditionally like the Radio tab is --
+        // no real harm in the operator seeing/setting it ahead of switching decode engines.
+        private void BuildDecodeTab()
+        {
+            decodePanel.Controls.Clear();
+
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            int y = 8;
+            const int left = 8;
+            const int w = 640;
+
+            var instrBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true,
+                Multiline = true,
+                BorderStyle = System.Windows.Forms.BorderStyle.None,
+                BackColor = decodePanel.BackColor,
+                ForeColor = System.Drawing.SystemColors.ControlText,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(w, 48),
+                Text = "WSJT-X's own decode settings, for Jimmy Native (Decode Engine tab). Decode depth " +
+                       "takes effect immediately; the rest take effect the next time the engine restarts " +
+                       "(changing them here, or changing decode engine/radio settings, restarts it).",
+                TabStop = false,
+                AccessibleName = "Decode instructions",
+                Font = font,
+            };
+            decodePanel.Controls.Add(instrBox);
+            y += 56;
+
+            var depthLabel = new System.Windows.Forms.Label
+            {
+                Text = "Decode depth:",
+                AccessibleName = "Decode depth label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            decodePanel.Controls.Add(depthLabel);
+
+            _decodeDepthCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left + 100, y),
+                Size = new System.Drawing.Size(100, 21),
+                TabIndex = 0,
+                Font = font,
+                AccessibleName = "Decode depth",
+                AccessibleDescription = "WSJT-X's Fast/Normal/Deep. Deep catches weaker signals but uses more CPU; Fast trades sensitivity for speed. Takes effect immediately, no engine restart needed.",
+            };
+            _decodeDepthCombo.Items.AddRange(new object[] { "Fast", "Normal", "Deep" });
+            _decodeDepthCombo.SelectedIndex = Math.Max(0, Math.Min(2, ctrl.Decode.DecodeDepth - 1));
+            decodePanel.Controls.Add(_decodeDepthCombo);
+            y += 32;
+
+            var flowLabel = new System.Windows.Forms.Label
+            {
+                Text = "F Low (Hz):",
+                AccessibleName = "F Low label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            decodePanel.Controls.Add(flowLabel);
+
+            _decodeFLowUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 200,
+                Maximum = 3900,
+                Value = Math.Max(200, Math.Min(3900, ctrl.Decode.DecodeFLowHz)),
+                Location = new System.Drawing.Point(left + 100, y),
+                Size = new System.Drawing.Size(70, 21),
+                TabIndex = 1,
+                Font = font,
+                AccessibleName = "Decode F Low Hz",
+                AccessibleDescription = "Decoder passband low edge in Hz -- signals below this are not searched. WSJT-X default 200.",
+            };
+            decodePanel.Controls.Add(_decodeFLowUpDown);
+
+            var fhighLabel = new System.Windows.Forms.Label
+            {
+                Text = "F High (Hz):",
+                AccessibleName = "F High label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 190, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            decodePanel.Controls.Add(fhighLabel);
+
+            _decodeFHighUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 200,
+                Maximum = 3900,
+                Value = Math.Max(200, Math.Min(3900, ctrl.Decode.DecodeFHighHz)),
+                Location = new System.Drawing.Point(left + 290, y),
+                Size = new System.Drawing.Size(70, 21),
+                TabIndex = 2,
+                Font = font,
+                AccessibleName = "Decode F High Hz",
+                AccessibleDescription = "Decoder passband high edge in Hz. WSJT-X default 2900; raise toward 4000 to catch stations calling high on a crowded band.",
+            };
+            decodePanel.Controls.Add(_decodeFHighUpDown);
+            y += 32;
+
+            _decodeApDecodeCheckBox = MakeCheck(decodePanel,
+                "Enable AP", "Enable AP",
+                left, y, 3, ctrl.Decode.ApDecode, font);
+            _decodeApDecodeCheckBox.AccessibleDescription =
+                "WSJT-X's Decode menu 'Enable AP' -- a-priori decoding. FT8 only. On by default; off means the decoder tries no hypothesis-assisted passes.";
+            _decodeApDecodeCheckBox.CheckedChanged += (s, e) => UpdateApCqOnlyEnabled();
+            y += 24;
+
+            _decodeApCqOnlyCheckBox = MakeCheck(decodePanel,
+                "AP for CQ only (expert)", "AP for CQ only, expert",
+                left, y, 4, ctrl.Decode.ApCqOnly, font);
+            _decodeApCqOnlyCheckBox.AccessibleDescription =
+                "Restricts AP to the CQ hypothesis only, requires Enable AP above. WSJT-X flips this automatically after 5 idle minutes; here it's an explicit choice. Off by default.";
+            y += 24;
+
+            _decodeSingleDecodeCheckBox = MakeCheck(decodePanel,
+                "Single decode", "Single decode",
+                left, y, 5, ctrl.Decode.SingleDecode, font);
+            _decodeSingleDecodeCheckBox.AccessibleDescription =
+                "Narrows the FT8/FT4 search to your RX offset plus or minus 25 Hz. Note: stock WSJT-X's own Single decode checkbox does nothing for FT8/FT4 -- this one actually works. Off by default (full passband).";
+            y += 32;
+
+            UpdateApCqOnlyEnabled();
+        }
+
+        private void UpdateApCqOnlyEnabled()
+        {
+            if (_decodeApCqOnlyCheckBox != null)
+                _decodeApCqOnlyCheckBox.Enabled = _decodeApDecodeCheckBox?.Checked ?? false;
+        }
+
+        // Per-band FT8/FT4 calling-frequency overrides -- WSJT-X's own Settings ▸ Frequencies,
+        // for Jimmy's own Band Up/Down/band-hotkey model (one canonical frequency per band, via
+        // bandToFreq() in WsjtxClient.BandAudio.cs). Setting a field back to its own default
+        // value removes the override (SaveFrequenciesTab treats "equals default" as "no
+        // override" -- no separate remove control needed); "Restore all to defaults" does the
+        // same for every band at once.
+        private void BuildFrequenciesTab()
+        {
+            frequenciesPanel.Controls.Clear();
+
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            int y = 8;
+            const int left = 8;
+            const int w = 640;
+
+            var instrBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true,
+                Multiline = true,
+                BorderStyle = System.Windows.Forms.BorderStyle.None,
+                BackColor = frequenciesPanel.BackColor,
+                ForeColor = System.Drawing.SystemColors.ControlText,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(w, 32),
+                Text = "Calling frequency in kHz, per band -- what Band Up/Down and the band hotkeys tune to. " +
+                       "Set a value back to its default to remove the override.",
+                TabStop = false,
+                AccessibleName = "Frequencies instructions",
+                Font = font,
+            };
+            frequenciesPanel.Controls.Add(instrBox);
+            y += 36;
+
+            var ft8HeaderLabel = new System.Windows.Forms.Label
+            {
+                Text = "FT8",
+                AccessibleName = "FT8 column header",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 70, y),
+                Font = font,
+                TabStop = false,
+            };
+            frequenciesPanel.Controls.Add(ft8HeaderLabel);
+
+            var ft4HeaderLabel = new System.Windows.Forms.Label
+            {
+                Text = "FT4",
+                AccessibleName = "FT4 column header",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left + 170, y),
+                Font = font,
+                TabStop = false,
+            };
+            frequenciesPanel.Controls.Add(ft4HeaderLabel);
+            y += 20;
+
+            var bandsMeters = wsjtxClient.BandsMeters;
+            var defaults = wsjtxClient.FreqsDictDefaults;
+            _freqFt8UpDowns = new System.Windows.Forms.NumericUpDown[bandsMeters.Count];
+            _freqFt4UpDowns = new System.Windows.Forms.NumericUpDown[bandsMeters.Count];
+            int tabIdx = 0;
+
+            for (int i = 0; i < bandsMeters.Count; i++)
+            {
+                int band = bandsMeters[i];
+                var bandLabel = new System.Windows.Forms.Label
+                {
+                    Text = $"{band}m:",
+                    AccessibleName = $"{band} meter band label",
+                    AutoSize = true,
+                    Location = new System.Drawing.Point(left, y + 3),
+                    Font = font,
+                    TabStop = false,
+                };
+                frequenciesPanel.Controls.Add(bandLabel);
+
+                int ft8Default = defaults["FT8"][i];
+                int ft8Override = ctrl.Frequencies.Ft8OverrideKHz[i];
+                var ft8UpDown = new System.Windows.Forms.NumericUpDown
+                {
+                    Minimum = 1800,
+                    Maximum = 54000,
+                    Value = ft8Override > 0 ? ft8Override : ft8Default,
+                    Location = new System.Drawing.Point(left + 70, y),
+                    Size = new System.Drawing.Size(85, 21),
+                    TabIndex = tabIdx++,
+                    Font = font,
+                    AccessibleName = $"{band} meter FT8 frequency kHz",
+                    AccessibleDescription = $"FT8 calling frequency in kHz for the {band} meter band. Default {ft8Default}.",
+                };
+                frequenciesPanel.Controls.Add(ft8UpDown);
+                _freqFt8UpDowns[i] = ft8UpDown;
+
+                int ft4Default = defaults["FT4"][i];
+                int ft4Override = ctrl.Frequencies.Ft4OverrideKHz[i];
+                var ft4UpDown = new System.Windows.Forms.NumericUpDown
+                {
+                    Minimum = 1800,
+                    Maximum = 54000,
+                    Value = ft4Override > 0 ? ft4Override : ft4Default,
+                    Location = new System.Drawing.Point(left + 170, y),
+                    Size = new System.Drawing.Size(85, 21),
+                    TabIndex = tabIdx++,
+                    Font = font,
+                    AccessibleName = $"{band} meter FT4 frequency kHz",
+                    AccessibleDescription = $"FT4 calling frequency in kHz for the {band} meter band. Default {ft4Default}.",
+                };
+                frequenciesPanel.Controls.Add(ft4UpDown);
+                _freqFt4UpDowns[i] = ft4UpDown;
+
+                y += 24;
+            }
+
+            y += 8;
+            var restoreButton = new System.Windows.Forms.Button
+            {
+                Text = "Restore all to defaults",
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(160, 24),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Restore all frequencies to defaults",
+                AccessibleDescription = "Sets every band's FT8 and FT4 frequency back to Jimmy's built-in default, removing all overrides.",
+            };
+            restoreButton.Click += (s, e) =>
+            {
+                for (int i = 0; i < bandsMeters.Count; i++)
+                {
+                    _freqFt8UpDowns[i].Value = defaults["FT8"][i];
+                    _freqFt4UpDowns[i].Value = defaults["FT4"][i];
+                }
+            };
+            frequenciesPanel.Controls.Add(restoreButton);
+        }
+
+        private void SaveFrequenciesTab()
+        {
+            if (_freqFt8UpDowns == null || _freqFt8UpDowns.Length == 0) return;
+
+            var defaults = wsjtxClient.FreqsDictDefaults;
+            for (int i = 0; i < _freqFt8UpDowns.Length; i++)
+            {
+                int ft8Val = (int)_freqFt8UpDowns[i].Value;
+                ctrl.Frequencies.Ft8OverrideKHz[i] = ft8Val == defaults["FT8"][i] ? 0 : ft8Val;
+                int ft4Val = (int)_freqFt4UpDowns[i].Value;
+                ctrl.Frequencies.Ft4OverrideKHz[i] = ft4Val == defaults["FT4"][i] ? 0 : ft4Val;
+            }
         }
 
         private void UpdateRadioHostPortEnabled()
@@ -1542,6 +2219,7 @@ namespace WSJTX_Controller
             string wasMyGrid = ctrl.NativeEngine.MyGrid;
             string wasAudioIn = ctrl.NativeEngine.AudioInputDevice;
             string wasAudioOut = ctrl.NativeEngine.AudioOutputDevice;
+            bool wasUseDirectEngine = ctrl.NativeEngine.UseDirectEngine;
             var r = ctrl.Radio;
             var wasRadioMode = r.Mode;
             string wasRigModel = r.RigModel;
@@ -1552,12 +2230,17 @@ namespace WSJTX_Controller
             int wasPort = r.RigctldPort;
             bool wasPttEnabled = r.PttEnabled;
             PttMethod wasPttMethod = r.PttMethod;
-            bool wasDataModesPlainSsb = r.DataModesPlainSsb;
+            RadioTxMode wasTxMode = r.TxMode;
+            bool wasPttDataSource = r.PttDataSource;
             RadioSplitMode wasSplitMode = r.SplitMode;
+            string wasPttSerialPort = r.PttSerialPort;
             int wasPollIntervalMs = r.PollIntervalMs;
             bool wasReadDisplayPwrSwr = r.ReadDisplayPwrSwr;
             bool wasHaltTxOnHighSwr = r.HaltTxOnHighSwr;
             double wasSwrHaltThreshold = r.SwrHaltThreshold;
+            bool wasStartupPowerEnabled = r.StartupPowerEnabled;
+            int wasStartupPowerWatts = r.StartupPowerWatts;
+            int wasStartupPowerMaxWatts = r.StartupPowerMaxWatts;
 
             ctrl.Radio.Mode = _radioHamlibRb.Checked ? RadioControlMode.HamlibRigctld : RadioControlMode.WsjtxCat;
             ctrl.Radio.RigModel = ExtractRigModelId(_radioRigModelCombo.Text.Trim());
@@ -1570,9 +2253,20 @@ namespace WSJTX_Controller
             ctrl.Radio.PttEnabled = _radioPttEnabledCheckBox.Checked;
             ctrl.Radio.PttMethod = _radioPttMethodCombo != null && Enum.TryParse(_radioPttMethodCombo.SelectedItem as string, out PttMethod pttMethod)
                 ? pttMethod : ctrl.Radio.PttMethod;
-            if (_radioDataModesPlainSsbCheckBox != null) ctrl.Radio.DataModesPlainSsb = _radioDataModesPlainSsbCheckBox.Checked;
-            if (_radioSplitCheckBox != null)
-                ctrl.Radio.SplitMode = _radioSplitCheckBox.Checked ? RadioSplitMode.Rig : RadioSplitMode.None;
+            if (_radioModeNoneRb != null)
+            {
+                ctrl.Radio.TxMode = _radioModeNoneRb.Checked ? RadioTxMode.None
+                    : _radioModeUsbRb.Checked ? RadioTxMode.Usb
+                    : RadioTxMode.DataPkt;
+            }
+            if (_radioPttDataSourceCheckBox != null) ctrl.Radio.PttDataSource = _radioPttDataSourceCheckBox.Checked;
+            if (_radioSplitNoneRb != null)
+            {
+                ctrl.Radio.SplitMode = _radioSplitRigRb.Checked ? RadioSplitMode.Rig
+                    : _radioSplitFakeItRb.Checked ? RadioSplitMode.FakeIt
+                    : RadioSplitMode.None;
+            }
+            if (_radioPttSerialPortCombo != null) ctrl.Radio.PttSerialPort = _radioPttSerialPortCombo.Text.Trim();
             if (_radioPollIntervalUpDown != null) ctrl.Radio.PollIntervalMs = (int)_radioPollIntervalUpDown.Value * 1000;
             if (_radioReadDisplayPwrSwrCheckBox != null)
             {
@@ -1581,6 +2275,17 @@ namespace WSJTX_Controller
             }
             if (_radioHaltTxOnHighSwrCheckBox != null) ctrl.Radio.HaltTxOnHighSwr = _radioHaltTxOnHighSwrCheckBox.Checked;
             if (_radioSwrHaltThresholdUpDown != null) ctrl.Radio.SwrHaltThreshold = (double)_radioSwrHaltThresholdUpDown.Value;
+            if (_radioStartupPowerEnabledCheckBox != null) ctrl.Radio.StartupPowerEnabled = _radioStartupPowerEnabledCheckBox.Checked;
+            if (_radioStartupPowerWattsUpDown != null) ctrl.Radio.StartupPowerWatts = (int)_radioStartupPowerWattsUpDown.Value;
+            if (_radioStartupPowerMaxWattsUpDown != null) ctrl.Radio.StartupPowerMaxWatts = (int)_radioStartupPowerMaxWattsUpDown.Value;
+            // Not part of radioSettingsChanged below -- read live on every AudioLevel() call
+            // (WsjtxClient.BandAudio.cs), never baked into the engine's own launch args, so no
+            // restart is ever needed for this one to take effect.
+            if (_radioAudioStepUpDown != null) ctrl.Radio.AudioStepPercent = (int)_radioAudioStepUpDown.Value;
+            // Same live-read, no-restart-needed shape as AudioStepPercent just above --
+            // WsjtxClient.BandAudio.cs's AudioLevel() and WsjtxClient.Direct.cs's band-change
+            // restore both read this directly off ctrl.Radio.
+            if (_radioRememberTxLevelPerBandCheckBox != null) ctrl.Radio.RememberTxLevelPerBand = _radioRememberTxLevelPerBandCheckBox.Checked;
 
             // Normalize case on entry: this call/grid flows straight into jimmy-engine-host's
             // --mycall (see DecodeMessage.IsCallTo's own comment on the 2026-08-07
@@ -1592,6 +2297,7 @@ namespace WSJTX_Controller
             ctrl.NativeEngine.MyGrid = FormatGridSquare(_engineMyGridTextBox.Text.Trim());
             ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
             ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
+            if (_engineUseDirectCheckBox != null) ctrl.NativeEngine.UseDirectEngine = _engineUseDirectCheckBox.Checked;
 
             // Only run either call if something it actually depends on changed -- see this
             // method's own opening comment. radioSettingsChanged also covers ApplyEngineMode(),
@@ -1600,14 +2306,18 @@ namespace WSJTX_Controller
             // take effect.
             bool engineIdentityChanged =
                 wasMyCall != ctrl.NativeEngine.MyCall || wasMyGrid != ctrl.NativeEngine.MyGrid ||
-                wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice;
+                wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice ||
+                wasUseDirectEngine != ctrl.NativeEngine.UseDirectEngine;
             bool radioSettingsChanged =
                 wasRadioMode != r.Mode || wasRigModel != r.RigModel || wasComPort != r.ComPort ||
                 wasBaudRate != r.BaudRate || wasUseExternal != r.UseExternalRigctld || wasHost != r.RigctldHost ||
                 wasPort != r.RigctldPort || wasPttEnabled != r.PttEnabled || wasPttMethod != r.PttMethod ||
-                wasDataModesPlainSsb != r.DataModesPlainSsb || wasSplitMode != r.SplitMode ||
+                wasTxMode != r.TxMode || wasPttDataSource != r.PttDataSource ||
+                wasSplitMode != r.SplitMode || wasPttSerialPort != r.PttSerialPort ||
                 wasPollIntervalMs != r.PollIntervalMs || wasReadDisplayPwrSwr != r.ReadDisplayPwrSwr ||
-                wasHaltTxOnHighSwr != r.HaltTxOnHighSwr || wasSwrHaltThreshold != r.SwrHaltThreshold;
+                wasHaltTxOnHighSwr != r.HaltTxOnHighSwr || wasSwrHaltThreshold != r.SwrHaltThreshold ||
+                wasStartupPowerEnabled != r.StartupPowerEnabled || wasStartupPowerWatts != r.StartupPowerWatts ||
+                wasStartupPowerMaxWatts != r.StartupPowerMaxWatts;
 
             // ApplyEngineMode() first (when applicable): under HamlibRigctld it launches the
             // engine host, which owns and spawns the real rigctld; ApplyRadioSettings() then
@@ -1618,6 +2328,43 @@ namespace WSJTX_Controller
                 ctrl.ApplyEngineMode();
             if (radioSettingsChanged)
                 ctrl.ApplyRadioSettings();
+        }
+
+        // Options > Decode tab. Only DecodeDepth has a live control-port path (see
+        // DirectSetDecodeDepth's own comment) -- the other four are baked into the engine host's
+        // CLI args at launch, same as Radio tab settings, so changing any of THEM needs a full
+        // ApplyEngineMode() restart. If a restart is already happening (because one of those
+        // four changed), it picks up a simultaneous depth change for free -- no need to also
+        // send the live command in that case.
+        private void SaveDecodeTab()
+        {
+            if (_decodeDepthCombo == null) return;
+
+            var d = ctrl.Decode;
+            int wasDecodeDepth = d.DecodeDepth;
+            int wasFLow = d.DecodeFLowHz;
+            int wasFHigh = d.DecodeFHighHz;
+            bool wasApDecode = d.ApDecode;
+            bool wasApCqOnly = d.ApCqOnly;
+            bool wasSingleDecode = d.SingleDecode;
+
+            d.DecodeDepth = _decodeDepthCombo.SelectedIndex + 1;
+            d.DecodeFLowHz = (int)_decodeFLowUpDown.Value;
+            d.DecodeFHighHz = (int)_decodeFHighUpDown.Value;
+            d.ApDecode = _decodeApDecodeCheckBox.Checked;
+            d.ApCqOnly = _decodeApCqOnlyCheckBox.Checked;
+            d.SingleDecode = _decodeSingleDecodeCheckBox.Checked;
+
+            bool restartNeededChanged =
+                wasFLow != d.DecodeFLowHz || wasFHigh != d.DecodeFHighHz ||
+                wasApDecode != d.ApDecode || wasApCqOnly != d.ApCqOnly ||
+                wasSingleDecode != d.SingleDecode;
+            bool depthChanged = wasDecodeDepth != d.DecodeDepth;
+
+            if (restartNeededChanged)
+                ctrl.ApplyEngineMode();
+            else if (depthChanged)
+                ctrl.wsjtxClient?.DirectSetDecodeDepth(d.DecodeDepth);
         }
 
         // ===== SOUNDS TAB =====
@@ -2202,8 +2949,8 @@ namespace WSJTX_Controller
             resetBtn.Click += ResetHotkeys_Click;
             hotkeysPanel.Controls.Add(resetBtn);
 
-            // Select the first real action (index 0 is the "General Commands" header)
-            _actionListBox.SelectedIndex = 1;
+            // Every list item is now a real, selectable action -- no header row to skip.
+            _actionListBox.SelectedIndex = 0;
         }
 
         private void BuildActionList()
@@ -2254,23 +3001,32 @@ namespace WSJTX_Controller
                 HotkeyAction.NavSpotWatch,
             };
 
-            // Group header: General Commands
-            _actionListBox.Items.Add("General Commands");
-            _listActionMap.Add(null);
-
-            foreach (var a in generalActions)
+            // Group header folded into the first real item's own text (e.g. "General
+            // Commands: Options") instead of a separate list row -- a standalone header
+            // row occupied a real ListBox item slot, which pushed every action's
+            // 1-based JAWS/NVDA "N of 52" position one higher than its actual rank
+            // among selectable actions (reported live, 2026-08-09: "Options" read as
+            // "2 of 52" instead of "1 of ..."). Folding it in gives screen-reader users
+            // the same grouping context, spoken as part of the item itself, with an
+            // accurate position count -- and removes the need to skip a
+            // never-selectable header row during arrow navigation.
+            for (int i = 0; i < generalActions.Length; i++)
             {
-                _actionListBox.Items.Add("  " + HotkeyConfig.DisplayNames[a]);
+                var a = generalActions[i];
+                string text = i == 0
+                    ? "General Commands: " + HotkeyConfig.DisplayNames[a]
+                    : "  " + HotkeyConfig.DisplayNames[a];
+                _actionListBox.Items.Add(text);
                 _listActionMap.Add(a);
             }
 
-            // Group header: Accessibility Navigation
-            _actionListBox.Items.Add("Accessibility Navigation");
-            _listActionMap.Add(null);
-
-            foreach (var a in navActions)
+            for (int i = 0; i < navActions.Length; i++)
             {
-                _actionListBox.Items.Add("  " + HotkeyConfig.DisplayNames[a]);
+                var a = navActions[i];
+                string text = i == 0
+                    ? "Accessibility Navigation: " + HotkeyConfig.DisplayNames[a]
+                    : "  " + HotkeyConfig.DisplayNames[a];
+                _actionListBox.Items.Add(text);
                 _listActionMap.Add(a);
             }
 
@@ -2289,13 +3045,13 @@ namespace WSJTX_Controller
                 HotkeyAction.Band6m,
             };
 
-            // Group header: Direct Band Selection
-            _actionListBox.Items.Add("Direct Band Selection");
-            _listActionMap.Add(null);
-
-            foreach (var a in bandActions)
+            for (int i = 0; i < bandActions.Length; i++)
             {
-                _actionListBox.Items.Add("  " + HotkeyConfig.DisplayNames[a]);
+                var a = bandActions[i];
+                string text = i == 0
+                    ? "Direct Band Selection: " + HotkeyConfig.DisplayNames[a]
+                    : "  " + HotkeyConfig.DisplayNames[a];
+                _actionListBox.Items.Add(text);
                 _listActionMap.Add(a);
             }
         }
@@ -2436,7 +3192,7 @@ namespace WSJTX_Controller
                     MessageBox.Show(
                         $"Shortcut for '{name}' is not set.",
                         ctrl.friendlyName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    tabControl1.SelectedIndex = HotkeysTabIndex;
+                    _categoryListBox.SelectedIndex = HotkeysCategoryIndex;
                     return false;
                 }
                 if (seen.Contains(k))
@@ -2444,7 +3200,7 @@ namespace WSJTX_Controller
                     MessageBox.Show(
                         "Duplicate shortcut detected. Please correct the Hotkeys settings.",
                         ctrl.friendlyName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    tabControl1.SelectedIndex = HotkeysTabIndex;
+                    _categoryListBox.SelectedIndex = HotkeysCategoryIndex;
                     return false;
                 }
                 seen.Add(k);
@@ -2516,7 +3272,6 @@ namespace WSJTX_Controller
             // ── QRZ Logbook Download / Upload ────────────────────────────────────
             tabIdx = 1;
             var qrzLogbookBox = MakeGroupBox("QRZ Logbook Download / Upload", 175, 5, pw, 182, font);
-            logbookSyncPanel.Controls.Add(qrzLogbookBox);
             panels.Add(qrzLogbookBox);
             serviceList.Items.Add("QRZ");
 
@@ -2600,7 +3355,6 @@ namespace WSJTX_Controller
             // ── LoTW Logbook Download ────────────────────────────────────────────
             tabIdx = 1;
             var lotwLogbookBox = MakeGroupBox("LoTW Logbook Download", 175, 5, pw, 210, font);
-            logbookSyncPanel.Controls.Add(lotwLogbookBox);
             panels.Add(lotwLogbookBox);
             serviceList.Items.Add("LoTW");
 
@@ -2698,7 +3452,6 @@ namespace WSJTX_Controller
             // ClubLogUploadClient.cs for why these cannot be the same credential.
             tabIdx = 1;
             var clUploadBox = MakeGroupBox("Club Log Logbook Upload", 175, 5, pw, 222, font);
-            logbookSyncPanel.Controls.Add(clUploadBox);
             panels.Add(clUploadBox);
             serviceList.Items.Add("Club Log");
 
@@ -2810,7 +3563,6 @@ namespace WSJTX_Controller
             // no bulk-fetch API, unlike QRZ/LoTW/Club Log above.
             tabIdx = 1;
             var hrdLogBox = MakeGroupBox("HRDLog.net Upload", 175, 5, pw, 160, font);
-            logbookSyncPanel.Controls.Add(hrdLogBox);
             panels.Add(hrdLogBox);
             serviceList.Items.Add("HRDLog");
 
@@ -2873,7 +3625,7 @@ namespace WSJTX_Controller
                 "not earn ARRL award credit -- LoTW above still handles DXCC/WAS confirmation.",
                 10, 148, font));
 
-            WireServiceList(serviceList, panels);
+            WireServiceList(serviceList, logbookSyncPanel, panels);
         }
 
         private void BuildLookupDataTab()
@@ -2914,7 +3666,6 @@ namespace WSJTX_Controller
             // ── QRZ Callsign Lookup ──────────────────────────────────────────────
             tabIdx = 2;
             var qrzBox = MakeGroupBox("QRZ Callsign Lookup", 175, 58, pw, 230, font);
-            lookupPanel.Controls.Add(qrzBox);
             panels.Add(qrzBox);
             serviceList.Items.Add("QRZ Callsign Lookup");
 
@@ -3048,7 +3799,6 @@ namespace WSJTX_Controller
 
             tabIdx = 2;
             var lotwBox = MakeGroupBox("LoTW User Activity  (public download — no account required)", 175, 58, pw, 160, font);
-            lookupPanel.Controls.Add(lotwBox);
             panels.Add(lotwBox);
             serviceList.Items.Add("LoTW User Activity");
 
@@ -3146,7 +3896,6 @@ namespace WSJTX_Controller
             // resolves a decoded callsign to the right entity.
             tabIdx = 2;
             var clBox = MakeGroupBox("Country & Prefix Data (automatic — no account needed)", 175, 58, pw, 76, font);
-            lookupPanel.Controls.Add(clBox);
             panels.Add(clBox);
             serviceList.Items.Add("Country & Prefix Data");
 
@@ -3198,7 +3947,6 @@ namespace WSJTX_Controller
             // the FCC's own authoritative registration data.
             tabIdx = 2;
             var fccBox = MakeGroupBox("FCC ULS US State Lookup (optional -- ~170MB download, no account needed)", 175, 58, pw, 130, font);
-            lookupPanel.Controls.Add(fccBox);
             panels.Add(fccBox);
             serviceList.Items.Add("FCC ULS");
 
@@ -3262,18 +4010,32 @@ namespace WSJTX_Controller
                 "for a callsign, offline and without needing QRZ. Weekly full refresh only (no daily deltas).",
                 10, 116, font));
 
-            WireServiceList(serviceList, panels);
+            WireServiceList(serviceList, lookupPanel, panels);
         }
 
         // Shows only the panel matching the current list selection, hiding the rest --
         // same idea as the Logbook window's Awards-tab combo-driven detail view, just
         // backed by a persistent ListBox instead of a dropdown.
-        private static void WireServiceList(System.Windows.Forms.ListBox listBox, List<System.Windows.Forms.GroupBox> panels)
+        //
+        // Added 2026-08-10: only the CURRENTLY selected panel is ever actually present in
+        // host.Controls -- the others are fully removed, not just Visible=false. Confirmed live
+        // (real JAWS testing) that the old Visible-toggle-only approach left stale content from
+        // a PREVIOUSLY-shown panel getting announced interleaved with the newly-selected one's
+        // real controls (e.g. Lookup Data's own FCC ULS description text bleeding into the QRZ
+        // panel's announcement after switching services) -- JAWS's own accessibility-tree/
+        // virtual-buffer cache does not reliably invalidate for a sibling control that's still
+        // physically parented in the same window, merely hidden. Actually removing the control
+        // from the tree, not just hiding it, is what a native TabControl's own tab-switch does
+        // structurally and is the fix that's actually needed here too.
+        private static void WireServiceList(System.Windows.Forms.ListBox listBox, System.Windows.Forms.Control host, List<System.Windows.Forms.GroupBox> panels)
         {
+            System.Windows.Forms.GroupBox current = null;
             void UpdateVisibility()
             {
-                for (int i = 0; i < panels.Count; i++)
-                    panels[i].Visible = (i == listBox.SelectedIndex);
+                if (current != null) host.Controls.Remove(current);
+                int idx = listBox.SelectedIndex;
+                current = (idx >= 0 && idx < panels.Count) ? panels[idx] : null;
+                if (current != null) host.Controls.Add(current);
             }
             listBox.SelectedIndexChanged += (s, e) => UpdateVisibility();
             if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;

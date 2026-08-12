@@ -363,13 +363,38 @@ struct Args {
     /// FT4 transmission; this maps that down to plain USB/LSB instead. Nexus itself calls this
     /// "wiring-dependent, and wrong for most rigs" (it's meant for a mic-jack-wired interface,
     /// where plain SSB is what actually routes TX audio correctly) -- exposed here anyway as an
-    /// operator-facing experiment, not a recommendation, because the automatic PKTUSB path was
-    /// confirmed live, 2026-08-07, to leave a real TS-590SG transmitting mic audio instead of
-    /// the FT8 tone despite CAT read-back reporting PKTUSB correctly (Kenwood's own "Data mode"
-    /// CAT command may not be sufficient by itself to switch its physical audio source the way
-    /// Nexus assumes for every rig). Jimmy's own Options > Radio tab is the accessible
+    /// operator-facing experiment, not a recommendation. NOTE: a real TS-590SG transmitting mic
+    /// audio instead of the FT8 tone *despite* CAT read-back correctly reporting PKTUSB
+    /// (confirmed live, 2026-08-07) turned out to be a SEPARATE issue from this one -- CAT mode
+    /// was already right; the rig's PTT command itself didn't say which audio input to key from.
+    /// See `ptt_data_source` below for that. Jimmy's own Options > Radio tab is the accessible
     /// equivalent of WSJT-X's Radio tab "Mode" dropdown this maps to.
     plain_ssb_data_modes: bool,
+    /// When true, sets `Settings.ptt_data_source` -- WSJT-X-equivalent "Transmit Audio Source:
+    /// Data" (see that Settings field's own doc comment, and `rig::ptt_line` in Nexus). Off by
+    /// default, matching WSJT-X's own default; only relevant for a rig whose Hamlib backend
+    /// distinguishes mic/data PTT AND whose interface is wired to the rig's rear DATA/ACC port.
+    /// Jimmy's own Options > Radio tab is the accessible equivalent of WSJT-X's Radio tab
+    /// "Transmit Audio Source" Mic/Data radio buttons.
+    ptt_data_source: bool,
+    /// Upload heard stations to PSK Reporter -- sets both Settings.pskreporter (live, every
+    /// tick) and RadioConfig.pskreporter (startup) so the two never briefly disagree the way
+    /// they did before this was wired through (RadioConfig defaulted off, Settings defaulted
+    /// on, so native spotting always silently flipped on within the first tick regardless of
+    /// what the operator asked for). Jimmy's own Options checkbox is the accessible equivalent
+    /// of WSJT-X's own "Enable PSK Reporter Spotting" checkbox (Reports tab).
+    pskreporter: bool,
+    /// WSJT-X Radio tab "Mode: None" -- sets Settings.dont_set_mode. Off by default, matching
+    /// WSJT-X's own default of Data/Pkt. When on, the radio loop never sends a CAT mode
+    /// command at all, for any operating mode -- the operator's own manual rig setting stands.
+    dont_set_mode: bool,
+    /// SO2R: separate serial port for RTS/DTR PTT when it differs from the CAT port -- sets
+    /// Settings.ptt_serial_port. Empty (default) = key on the same port as CAT.
+    ptt_serial_port: String,
+    /// WSJT-X Radio tab "Split Operation" -- sets Settings.split_mode. "none" (default) |
+    /// "rig" (true hardware split via CAT) | "fakeit" (software-emulated: retune before TX,
+    /// restore after -- no real rig split needed).
+    split_mode: String,
     /// Local-loopback-only TCP port this process's control server listens on for the lifetime of
     /// the session (see `run_control_server` below). NativeEngineClient.cs asks THIS already-
     /// running process for its device list instead of spawning a second, competing
@@ -380,6 +405,38 @@ struct Args {
     /// and fault natively. Keeping every device query inside the one already-running process
     /// makes that race structurally impossible instead of papering over it.
     control_port: u16,
+    /// Command RFPOWER to this fraction (0.0-1.0) exactly once, right after startup -- Jimmy's
+    /// own workaround for the Hamlib Kenwood-backend bug (see RadioSettings.StartupPowerEnabled's
+    /// doc comment): the engine's own routine PWR/SWR telemetry polling is what trips a fresh
+    /// rigctld.exe's first RFPOWER interaction into a destructive calibration sweep, so this
+    /// deliberately fires first, before that polling loop's first pass. `None` (the default, when
+    /// the operator has not opted in) means do nothing, matching today's behavior exactly.
+    startup_power_frac: Option<f32>,
+    /// WSJT-X "Fast/Normal/Deep" decoder depth (1/2/3) -- Settings.decode_depth. Startup value
+    /// only; SET_DECODE_DEPTH (control port, below) is the live path used after that, since
+    /// Engine::set_decode_depth is safe to call mid-session (the decoder reads it fresh on
+    /// every slot). Defaults to Nexus's own Settings::default() (3 = Deep) when not passed.
+    decode_depth: Option<u8>,
+    /// WSJT-X "F Low" -- decoder passband low edge in Hz. Settings.decode_flow_hz. Startup-only:
+    /// Engine has no live setter for this (its `settings` field is private to the tempo-app
+    /// crate), so unlike decode_depth this can only be set once, at Engine::with_settings(...)
+    /// construction -- an Options change here needs the usual engine restart to take effect,
+    /// same as rig-model/data-modes-plain-ssb/etc. already do.
+    decode_flow_hz: Option<u32>,
+    /// WSJT-X "F High" -- decoder passband high edge in Hz. Settings.decode_fhigh_hz.
+    /// Startup-only, same reasoning as decode_flow_hz above.
+    decode_fhigh_hz: Option<u32>,
+    /// WSJT-X "Enable AP" (Decode menu) -- a-priori decoding, FT8 only. Settings.ap_decode.
+    /// Startup-only, same reasoning as decode_flow_hz above.
+    ap_decode: Option<bool>,
+    /// WSJT-X-adjacent expert toggle: restrict AP to the CQ hypothesis only.
+    /// Settings.ap_cq_only. Startup-only, same reasoning as decode_flow_hz above.
+    ap_cq_only: Option<bool>,
+    /// "Single decode": narrows the FT8/FT4 search to the RX offset +/-25 Hz.
+    /// Settings.single_decode -- a genuine Nexus improvement over stock WSJT-X, whose own
+    /// "Single decode" checkbox is inert for FT8/FT4 (verified 3.0.2 -- only JT65/Q65/FST4 read
+    /// it). Startup-only, same reasoning as decode_flow_hz above.
+    single_decode: Option<bool>,
 }
 
 fn parse_args() -> Args {
@@ -397,7 +454,19 @@ fn parse_args() -> Args {
     let mut ptt_method = "vox".to_string();
     let mut rigctld_port: u16 = 4532;
     let mut plain_ssb_data_modes = false;
+    let mut ptt_data_source = false;
+    let mut pskreporter = false;
+    let mut dont_set_mode = false;
+    let mut ptt_serial_port = String::new();
+    let mut split_mode = "none".to_string();
     let mut control_port: u16 = 58239;
+    let mut startup_power_frac: Option<f32> = None;
+    let mut decode_depth: Option<u8> = None;
+    let mut decode_flow_hz: Option<u32> = None;
+    let mut decode_fhigh_hz: Option<u32> = None;
+    let mut ap_decode: Option<bool> = None;
+    let mut ap_cq_only: Option<bool> = None;
+    let mut single_decode: Option<bool> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -432,9 +501,49 @@ fn parse_args() -> Args {
                 }
             }
             "--plain-ssb-data-modes" => plain_ssb_data_modes = true,
+            "--ptt-data-source" => ptt_data_source = true,
+            "--pskreporter" => pskreporter = true,
+            "--dont-set-mode" => dont_set_mode = true,
+            "--ptt-serial-port" => ptt_serial_port = it.next().unwrap_or(ptt_serial_port),
+            "--split-mode" => split_mode = it.next().unwrap_or(split_mode),
             "--control-port" => {
                 if let Some(v) = it.next() {
                     control_port = v.parse().unwrap_or(control_port);
+                }
+            }
+            "--startup-power-frac" => {
+                if let Some(v) = it.next() {
+                    startup_power_frac = v.parse().ok();
+                }
+            }
+            "--decode-depth" => {
+                if let Some(v) = it.next() {
+                    decode_depth = v.parse::<u8>().ok().map(|d| d.clamp(1, 3));
+                }
+            }
+            "--decode-flow-hz" => {
+                if let Some(v) = it.next() {
+                    decode_flow_hz = v.parse().ok();
+                }
+            }
+            "--decode-fhigh-hz" => {
+                if let Some(v) = it.next() {
+                    decode_fhigh_hz = v.parse().ok();
+                }
+            }
+            "--ap-decode" => {
+                if let Some(v) = it.next() {
+                    ap_decode = Some(v.trim() == "1");
+                }
+            }
+            "--ap-cq-only" => {
+                if let Some(v) = it.next() {
+                    ap_cq_only = Some(v.trim() == "1");
+                }
+            }
+            "--single-decode" => {
+                if let Some(v) = it.next() {
+                    single_decode = Some(v.trim() == "1");
                 }
             }
             other => eprintln!("jimmy-engine-host: ignoring unrecognized argument '{other}'"),
@@ -455,22 +564,107 @@ fn parse_args() -> Args {
         ptt_method,
         rigctld_port,
         plain_ssb_data_modes,
+        ptt_data_source,
+        pskreporter,
+        dont_set_mode,
+        ptt_serial_port,
+        split_mode,
         control_port,
+        startup_power_frac,
+        decode_depth,
+        decode_flow_hz,
+        decode_fhigh_hz,
+        ap_decode,
+        ap_cq_only,
+        single_decode,
     }
 }
 
-/// Serves this already-running process's device list to NativeEngineClient.cs over a local-
-/// loopback-only TCP control port, for the lifetime of the session -- see `Args::control_port`'s
-/// own doc comment for why this exists (making the two-processes-touching-the-sound-card-at-once
-/// crash structurally impossible instead of just less likely). One-line text protocol, plain and
-/// deliberately minimal: client sends "LIST_DEVICES" or "LIST_OUTPUT_DEVICES" followed by a
-/// newline, server writes one device name per line and closes its write side (EOF signals "list
-/// complete") -- mirrors the exact line-per-device format `--list-devices`/`--list-output-devices`
-/// already print to stdout, so NativeEngineClient.cs's parsing stays identical either way. Runs on
-/// its own thread, never on the one `run_radio` blocks; `available_devices()` still goes through
-/// Nexus's own `AUDIO_HOST_LOCK`, so a query landing mid-session safely queues behind whatever
-/// `run_radio` itself is doing with the audio host rather than racing it.
-fn run_control_server(port: u16) {
+/// Serves this already-running process's device list AND (Self-sufficiency plan Phase 6) a
+/// direct, UDP-free control channel to NativeEngineClient.cs / DirectEngineClient.cs over a
+/// local-loopback-only TCP control port, for the lifetime of the session -- see
+/// `Args::control_port`'s own doc comment for why the device-listing half exists (making the
+/// two-processes-touching-the-sound-card-at-once crash structurally impossible instead of just
+/// less likely). Runs on its own thread, never on the one `run_radio` blocks;
+/// `available_devices()` still goes through Nexus's own `AUDIO_HOST_LOCK`, so a query landing
+/// mid-session safely queues behind whatever `run_radio` itself is doing with the audio host
+/// rather than racing it.
+///
+/// One-line-command text protocol, deliberately minimal, one connection per request (matching
+/// the existing LIST_DEVICES shape rather than inventing a second style):
+///   LIST_DEVICES / LIST_OUTPUT_DEVICES  -- unchanged: one device name per line, then EOF.
+///   SNAPSHOT                            -- one line: engine.snapshot() as JSON (AppSnapshot,
+///                                          already Serialize for Nexus's own Tauri IPC -- same
+///                                          data Nexus's own UI renders from, reused verbatim),
+///                                          then EOF. THE reason this whole channel exists: it
+///                                          replaces the WSJT-X UDP heartbeat/negotiation
+///                                          handshake for DirectEngineClient.cs entirely --
+///                                          connect and ask, no timing-sensitive dance to race
+///                                          against a slow CAT/audio open on a slower machine
+///                                          (root-caused live, 2026-08-08: that handshake, not
+///                                          raw UDP delivery, was the actual fragility).
+///   REPLY <json>                        -- {"dxcall":"...", "dxgrid":"...", "replyMsg":"...",
+///                                          "replySnr":-10, "dxFreqHz":1500.0} (grid/msg/snr/freq
+///                                          all optional/nullable) -- calls Engine's own
+///                                          call_station_ctx, the exact WSJT-X double-click-to-
+///                                          reply entry point. Responds "OK" or "ERR <message>".
+///   HALT_TX                             -- calls Engine::halt_tx(). Responds "OK".
+///   SET_TX_ENABLED <0|1>                -- calls Engine::set_tx_enabled(bool). Responds "OK".
+///   SET_PSKREPORTER <0|1>                -- calls Engine::set_pskreporter(bool). Responds "OK".
+///   SET_MIC_GAIN <0.0-1.0>               -- calls Engine::set_mic_gain(f32). Responds "OK" or
+///                                          "ERR <message>". Radio-side (CAT) mic gain, applied
+///                                          only for manual Phone/PTT operation (tempo-audio/
+///                                          src/service.rs: "Only the Phone section drives
+///                                          these (the FT8 TX path is idle there)") -- NOT used
+///                                          by Jimmy's F11/F12 (see SET_TX_LEVEL below, added
+///                                          2026-08-10 after finding this command has no effect
+///                                          on FT8/FT4 transmit audio at all, despite the
+///                                          original 2026-08-09 comment's belief that it did).
+///   SET_TX_LEVEL <0.0-1.0>               -- calls Engine::set_tx_level(f32). Responds "OK" or
+///                                          "ERR <message>". Jimmy's own F11/F12 hotkeys (audio
+///                                          level up/down) -- the real modern equivalent of Andy
+///                                          WM8Q's fork's original proprietary "Set Audio Level"
+///                                          UDP sub-command (NewTxMsgIdx=20), which adjusted
+///                                          WSJT-X's own generated Tx tone level (the "Pwr"
+///                                          slider) -- sound-card/software side of the signal
+///                                          chain, not the radio's own physical MIC/DATA gain.
+///                                          set_tx_level already existed in Engine and was
+///                                          already wired to the radio loop every slot
+///                                          (tempo-app/src/engine.rs's own doc comment: "takes
+///                                          effect live"); this just exposes it, matching every
+///                                          other command above -- no Nexus source touched.
+///   SET_TIER FT8|FT4                    -- calls Engine::set_tier(Tier). Responds "OK" or
+///                                          "ERR <message>". Jimmy's own Alt+M (Toggle Mode)
+///                                          hotkey -- under classic WSJT-X/UDP mode this always
+///                                          just halted Tx and left the operator to switch modes
+///                                          in WSJT-X's own UI (no outbound mode-change command
+///                                          exists in WSJT-X's UDP API at all); direct-engine mode
+///                                          has no separate UI to fall back to, so it needs this
+///                                          instead. set_tier already existed in Engine; this just
+///                                          exposes it.
+///   SET_DECODE_DEPTH 1|2|3               -- calls Engine::set_decode_depth(u8) (WSJT-X's
+///                                          "Fast/Normal/Deep"). Responds "OK" or "ERR <message>".
+///                                          Live, mid-session -- unlike the rest of Jimmy's Decode
+///                                          tab (F Low/F High/Enable AP/AP-CQ-only/Single decode),
+///                                          which have no live setter on Engine and are configured
+///                                          via CLI args at startup only (--decode-flow-hz etc.,
+///                                          see Args' own doc comments).
+///   SET_TUNING <0|1>                     -- calls Engine::set_tune(bool). Responds "OK". Jimmy's
+///                                          own Tune hotkey -- Andy WM8Q's fork's "ToggleTuning"
+///                                          UDP sub-command (NewTxMsgIdx=19) had no native-engine
+///                                          equivalent exposed before this; set_tune already
+///                                          existed in Engine (used by Nexus's own Tauri UI) and
+///                                          already plays a continuous test carrier in small
+///                                          chunks (tempo-audio/src/service.rs, TUNE_CHUNK_MS =
+///                                          40ms) rather than one pre-rendered slot buffer -- this
+///                                          just exposes it, matching every other command above.
+///                                          Added 2026-08-10 specifically so F11/F12 (SET_TX_LEVEL)
+///                                          can apply live during Tune for ALC calibration, since
+///                                          a normal FT8/FT4 slot's audio is rendered in one shot
+///                                          at slot start and can't be live-adjusted mid-over (see
+///                                          SET_TX_LEVEL's own comment) -- Tune's chunked
+///                                          generation has no such limitation.
+fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>) {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
@@ -494,17 +688,143 @@ fn run_control_server(port: u16) {
         if reader.read_line(&mut line).is_err() {
             continue;
         }
-        let cmd = line.trim();
-        if cmd != "LIST_DEVICES" && cmd != "LIST_OUTPUT_DEVICES" {
-            continue;
-        }
-        let (inputs, outputs) = tempo_audio::device::available_devices();
-        let devices = if cmd == "LIST_DEVICES" { inputs } else { outputs };
-        for dev in devices {
-            let _ = writeln!(stream, "{}", dev.name);
+        let line = line.trim();
+
+        if line == "LIST_DEVICES" || line == "LIST_OUTPUT_DEVICES" {
+            let (inputs, outputs) = tempo_audio::device::available_devices();
+            let devices = if line == "LIST_DEVICES" { inputs } else { outputs };
+            for dev in devices {
+                let _ = writeln!(stream, "{}", dev.name);
+            }
+        } else if line == "SNAPSHOT" {
+            // Poisoned-lock tolerant, same reasoning as Nexus's own src-tauri: a panic
+            // elsewhere while holding this lock must not also take the control channel's
+            // ability to report state down with it.
+            let snap = engine.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
+            match serde_json::to_string(&snap) {
+                Ok(json) => {
+                    let _ = writeln!(stream, "{json}");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR snapshot serialize failed: {e}");
+                }
+            }
+        } else if let Some(json) = line.strip_prefix("REPLY ") {
+            match serde_json::from_str::<ReplyArgs>(json) {
+                Ok(a) => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).call_station_ctx(
+                        &a.dxcall,
+                        a.dxgrid.as_deref(),
+                        a.reply_msg.as_deref(),
+                        a.reply_snr,
+                        a.dx_freq_hz,
+                    );
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad REPLY args: {e}");
+                }
+            }
+        } else if line == "HALT_TX" {
+            engine.lock().unwrap_or_else(|e| e.into_inner()).halt_tx();
+            let _ = writeln!(stream, "OK");
+        } else if let Some(v) = line.strip_prefix("SET_TX_ENABLED ") {
+            engine.lock().unwrap_or_else(|e| e.into_inner()).set_tx_enabled(v.trim() == "1");
+            let _ = writeln!(stream, "OK");
+        } else if let Some(v) = line.strip_prefix("SET_PSKREPORTER ") {
+            engine.lock().unwrap_or_else(|e| e.into_inner()).set_pskreporter(v.trim() == "1");
+            let _ = writeln!(stream, "OK");
+        } else if let Some(v) = line.strip_prefix("SET_MIC_GAIN ") {
+            match v.trim().parse::<f32>() {
+                Ok(frac) => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_mic_gain(frac);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad SET_MIC_GAIN value: {e}");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_TX_LEVEL ") {
+            // Added 2026-08-10: Jimmy's own F11/F12 (audio level up/down) hotkeys were wired to
+            // SET_MIC_GAIN above instead -- confirmed wrong, live, by tracing every consumer of
+            // Engine::mic_gain() in tempo-audio/src/service.rs: it's applied in exactly one
+            // place, explicitly commented "Only the Phone section drives these (the FT8 TX path
+            // is idle there)" -- it has no effect on FT8/FT4 transmit audio at all. Engine::
+            // set_tx_level is the real equivalent of WSJT-X's own "Pwr" slider / the original
+            // Andy WM8Q fork's proprietary "Set Audio Level" feature this hotkey was always
+            // meant to replace (see set_tx_level's own doc comment, tempo-app/src/engine.rs:
+            // "the radio loop reads settings.tx_level each slot and applies it to the audio
+            // backend, so this takes effect live"). Sound-card/software side of the signal
+            // chain (scales the generated tone before the sound card), not the radio's own
+            // physical MIC/DATA gain -- the correct place to trim drive level to avoid
+            // over-driving the radio's audio input in the first place.
+            match v.trim().parse::<f32>() {
+                Ok(frac) => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_tx_level(frac);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad SET_TX_LEVEL value: {e}");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_TIER ") {
+            // Jimmy's own Alt+M (Toggle Mode FT8/FT4) hotkey -- root-caused live, 2026-08-09:
+            // under classic WSJT-X/UDP mode, mode switching was ALWAYS just "halt Tx, then the
+            // operator changes it in WSJT-X's own UI" (WSJT-X's UDP API has no outbound
+            // mode-change command at all -- Jimmy only ever OBSERVED whichever mode WSJT-X's own
+            // Status messages reported). Direct-engine mode has no separate WSJT-X UI to fall
+            // back to, so it needs a real command instead. Engine::set_tier already exists and
+            // already safely halts any in-flight over across a tier switch (see its own doc
+            // comment) -- this just exposes it, matching every other command above.
+            match v.trim() {
+                "FT8" => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_tier(tempo_app::dto::Tier::Ft8);
+                    let _ = writeln!(stream, "OK");
+                }
+                "FT4" => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_tier(tempo_app::dto::Tier::Ft4);
+                    let _ = writeln!(stream, "OK");
+                }
+                other => {
+                    let _ = writeln!(stream, "ERR bad SET_TIER value: {other}");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_TUNING ") {
+            engine.lock().unwrap_or_else(|e| e.into_inner()).set_tune(v.trim() == "1");
+            let _ = writeln!(stream, "OK");
+        } else if let Some(v) = line.strip_prefix("SET_DECODE_DEPTH ") {
+            // WSJT-X "Fast/Normal/Deep" (1/2/3), Jimmy's Decode tab -- the one decode-tab
+            // setting with a live setter (Engine::set_decode_depth), so this can change
+            // mid-session without an engine restart, unlike SET_DECODE_FLOW_HZ/FHIGH_HZ/
+            // AP_DECODE/AP_CQ_ONLY/SINGLE_DECODE, which don't exist because Engine has no live
+            // setter for those four (Engine.settings is private to the tempo-app crate) -- they
+            // stay startup-CLI-arg-only, same as rig-model/data-modes-plain-ssb/etc.
+            match v.trim().parse::<u8>() {
+                Ok(depth) if (1..=3).contains(&depth) => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_decode_depth(depth);
+                    let _ = writeln!(stream, "OK");
+                }
+                _ => {
+                    let _ = writeln!(stream, "ERR bad SET_DECODE_DEPTH value: {}", v.trim());
+                }
+            }
+        } else {
+            let _ = writeln!(stream, "ERR unknown command");
         }
         let _ = stream.shutdown(std::net::Shutdown::Write);
     }
+}
+
+/// Wire shape for the REPLY command's JSON argument -- field names match what
+/// DirectEngineClient.cs sends (camelCase, mirroring AppSnapshot's own `rename_all`).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplyArgs {
+    dxcall: String,
+    dxgrid: Option<String>,
+    reply_msg: Option<String>,
+    reply_snr: Option<i32>,
+    dx_freq_hz: Option<f32>,
 }
 
 fn main() {
@@ -561,9 +881,7 @@ fn main() {
 
     // Read before args.* fields below get moved into settings/cfg -- control_port (u16) is
     // Copy, but grabbing it now keeps this independent of exactly which fields move later.
-    // Own thread, not the one run_radio blocks on: see run_control_server's own doc comment.
     let control_port = args.control_port;
-    std::thread::spawn(move || run_control_server(control_port));
 
     // Tx parity 0: an initial default only -- Engine::call_station_ctx (the real WSJT-X
     // double-click-to-reply entry point) recomputes the correct parity per-QSO from decode
@@ -589,10 +907,44 @@ fn main() {
         audio_out: args.output_device.clone().unwrap_or_default(),
         auto_log: false, // Jimmy owns logbook writes; the native engine must never double-log.
         data_modes_plain_ssb: args.plain_ssb_data_modes,
+        ptt_data_source: args.ptt_data_source,
+        pskreporter: args.pskreporter,
+        dont_set_mode: args.dont_set_mode,
+        ptt_serial_port: args.ptt_serial_port.clone(),
+        split_mode: match args.split_mode.as_str() {
+            "rig" => tempo_app::settings::SplitMode::Rig,
+            "fakeit" => tempo_app::settings::SplitMode::FakeIt,
+            _ => tempo_app::settings::SplitMode::None,
+        },
+        // Nexus's CAT broker (Settings::default()'s cat_broker: true) is a share endpoint for
+        // OTHER programs (VarAC, N1MM, a logger) to reach the radio through Nexus -- Jimmy never
+        // talks to it, has its own private control port instead. Left at the inherited default
+        // it silently binds cat_broker_port (also 4532 by default) -- the exact same port Jimmy
+        // explicitly asks its own per-radio rigctld for (--rigctld-port), and the broker winning
+        // that race is what left rigctld never actually listening: confirmed live, 2026-08-11,
+        // "Radio CAT link lost: ... target machine actively refused it" on every fresh connect
+        // after this crate picked up the broker feature. Off here since nothing uses it.
+        cat_broker: false,
         ..Settings::default()
     };
     settings.wsjtx_udp = true;
     settings.wsjtx_udp_addr = args.jimmy_addr.clone();
+
+    // Decode tab settings -- `if let Some` rather than folding these into the struct literal
+    // above so an operator who hasn't touched Options at all gets Nexus's own Settings::default()
+    // for each (Deep depth, 200/2900 Hz passband, AP on, AP-CQ-only off, single-decode off)
+    // rather than this file silently re-deciding what "default" means and drifting from Nexus's
+    // own choice over time. decode_depth also gets applied here as the STARTING value; unlike
+    // the other four, it additionally has a live control-port path (SET_DECODE_DEPTH below) since
+    // Engine::set_decode_depth is safe to call mid-session -- these other four have no live
+    // setter (Engine.settings is private to the tempo-app crate), so they're startup-only, same
+    // as rig-model/data-modes-plain-ssb/etc. above.
+    if let Some(v) = args.decode_depth { settings.decode_depth = v; }
+    if let Some(v) = args.decode_flow_hz { settings.decode_flow_hz = v; }
+    if let Some(v) = args.decode_fhigh_hz { settings.decode_fhigh_hz = v; }
+    if let Some(v) = args.ap_decode { settings.ap_decode = v; }
+    if let Some(v) = args.ap_cq_only { settings.ap_cq_only = v; }
+    if let Some(v) = args.single_decode { settings.single_decode = v; }
 
     let engine = Arc::new(Mutex::new(Engine::with_settings(settings)));
 
@@ -609,6 +961,25 @@ fn main() {
     // picker yet; add a --tier arg here when FT4/other modes are wired up.
     engine.lock().unwrap().set_tier(tempo_app::dto::Tier::Ft8);
 
+    // Startup-only power workaround (RadioSettings.StartupPowerEnabled's doc comment has the
+    // full Hamlib #1595 story). Deliberately called here, before run_radio's first tick, so
+    // Engine already has a desired rf_power queued up the moment the radio loop starts polling
+    // -- set_rf_power only records the desired value (clamped to the mode's power ceiling); the
+    // radio loop is what actually sends it to the rig, once, on its first pass. No further calls
+    // after this: the operator's own manual rig-knob changes afterward are left alone.
+    if let Some(frac) = args.startup_power_frac {
+        engine.lock().unwrap().set_rf_power(frac);
+    }
+
+    // Own thread, not the one run_radio blocks on: see run_control_server's own doc comment.
+    // Spawned here (after engine exists), not earlier alongside control_port's own read above,
+    // specifically so it can share this same Arc<Mutex<Engine>> -- the whole point of the
+    // SNAPSHOT/REPLY/HALT_TX/SET_TX_ENABLED commands added to it.
+    {
+        let control_engine = engine.clone();
+        std::thread::spawn(move || run_control_server(control_port, control_engine));
+    }
+
     let cfg = RadioConfig {
         ptt_method: args.ptt_method,
         rig_model: args.rig_model,
@@ -623,6 +994,19 @@ fn main() {
         wsjtx_addr: args.jimmy_addr,
         audio_in: args.device.unwrap_or_default(),
         audio_out: args.output_device.unwrap_or_default(),
+        ptt_data_source: args.ptt_data_source,
+        pskreporter: args.pskreporter,
+        ptt_serial_port: args.ptt_serial_port,
+        // RadioConfig::default()'s broker_self_port is Some(4532) -- Nexus's own CAT-broker
+        // default port, matching Settings::default()'s cat_broker/cat_broker_port. Jimmy
+        // disables the broker outright (see the Settings literal above, cat_broker: false), but
+        // this INITIAL open -- Transport::from_cfg, run_radio's very first open_rig call, before
+        // the live-settings reconciliation loop's first tick -- reads RadioConfig directly, not
+        // Settings, so it never saw that override. Confirmed live, 2026-08-11: the first CAT
+        // open died instantly on "CAT broker and rigctld are both on :4532" (open_cat's own
+        // early-return), every session, before the second (correct) attempt from the settings
+        // loop ever got a chance to leave the port in a clean state for it.
+        broker_self_port: None,
         ..RadioConfig::default()
     };
 

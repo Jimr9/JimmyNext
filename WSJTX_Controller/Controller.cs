@@ -36,6 +36,13 @@ namespace WSJTX_Controller
         // Self-sufficiency plan, Phase 0: radio-backend settings (Hamlib/rigctld). Mode defaults
         // to WsjtxCat, so nothing reads/uses this yet -- Phase 1 wires a RigctldClient to it.
         public RadioSettings Radio = new RadioSettings();
+        // Options > Decode tab: WSJT-X decode-related settings (Fast/Normal/Deep, F Low/F High,
+        // Enable AP, AP-CQ-only, Single decode), ported over in Nexus but never previously
+        // exposed to Jimmy. See DecodeSettings.cs.
+        public DecodeSettings Decode = new DecodeSettings();
+        // Options > Frequencies tab: per-band FT8/FT4 calling-frequency overrides. See
+        // FrequencySettings.cs.
+        public FrequencySettings Frequencies = new FrequencySettings();
         // Notification/accessibility architecture: INI-backed per-event-type policy (enable/
         // priority/dedup/throttle/wording). See WSJTX_Controller/Notify/ -- NotificationCenter
         // (constructed in WsjtxClient's constructor) is the only consumer of this.
@@ -550,6 +557,8 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("logClassificationParityMismatches")) ClassificationParityLogger.Enabled = iniFile.Read("logClassificationParityMismatches") == "True";
                 NativeEngine.LoadFromIni(iniFile);
                 Radio.LoadFromIni(iniFile);
+                Decode.LoadFromIni(iniFile);
+                Frequencies.LoadFromIni(iniFile);
                 Notifications.LoadFromIni(iniFile);
                 if (iniFile.KeyExists("rankMethod")) int.TryParse(iniFile.Read("rankMethod"), out rankMethodIdx);
                 if (iniFile.KeyExists("rankOrder")) rankOrderStr = iniFile.Read("rankOrder");
@@ -1079,6 +1088,8 @@ namespace WSJTX_Controller
                 iniFile.Write("showUsState", showUsStateCheckBox.Checked.ToString());
                 Settings.SaveToIni(iniFile);
                 Radio.SaveToIni(iniFile);
+                Decode.SaveToIni(iniFile);
+                Frequencies.SaveToIni(iniFile);
                 Notifications.SaveToIni(iniFile);
                 NativeEngine.SaveToIni(iniFile);
                 iniFile.Write("rawShowCq", rawShowCq.ToString());
@@ -2008,7 +2019,10 @@ namespace WSJTX_Controller
 
         public void ShowMsg(string text, bool sound)
         {
-            if (sound) SystemSounds.Beep.Play();
+            // No raw Windows system beep here, ever -- confirmed with the user, 2026-08-11:
+            // only Jimmy's own configured notification sounds (Options > Sounds) should ever
+            // be audible; hotkeys, Escape, and invalid-key rejection must stay silent. `sound`
+            // is kept as a parameter (unused now) so every existing call site stays valid.
 
             statusText.Text = text;
             statusText.SelectionStart = 0;
@@ -2085,6 +2099,15 @@ namespace WSJTX_Controller
         // these bodies are moved verbatim from WsjtxClient.ShowStatus()/ShowQueue()/ShowLogged()'s
         // former UI-touching tails; the business logic that builds headerText/items/colors stays
         // in WsjtxClient, which now calls these instead of touching controls directly.
+        // Below this gap, a second RenderStatus() call with byte-identical text is treated
+        // as an accidental duplicate (two code paths independently deciding to announce the
+        // same thing), not a legitimate periodic re-announcement -- the shortest real T/R
+        // period (FT4) is 7.5s, so any genuine "still Receiving"-style repeat is always many
+        // times further apart than this.
+        private static readonly TimeSpan RepeatStatusAnnounceSuppressWindow = TimeSpan.FromSeconds(3);
+        private string _lastAnnouncedStatusText;
+        private DateTime _lastAnnouncedStatusTime = DateTime.MinValue;
+
         public void RenderStatus(string headingText, string statusText, Color foreColor, Color backColor)
         {
             statusHeadingLabel.Text = headingText;
@@ -2098,9 +2121,30 @@ namespace WSJTX_Controller
             // SendKeys.Send uses SendInput(), which delivers to the foreground window;
             // without this guard a timer tick during focus-loss can send to Notepad.
             bool announced = this.statusText.Focused && Form.ActiveForm == this;
+            // Added 2026-08-10: suppress the screen-reader nudge for a near-immediate repeat
+            // of the exact same text -- root-caused live from a real QSO with W4MAA, where a
+            // decode arriving milliseconds after a transmit-start event triggered a SECOND
+            // ShowStatus()->RenderStatus() call with identical "Transmitting, W4MAA, sending
+            // EN34." text (one from the transmit-start transition, one from the shared
+            // decode-processing pipeline's own routine ShowStatus() call), 269ms apart.
+            // SendKeys.Send("{UP}") below always fired regardless of whether anything
+            // actually changed, so the operator heard the same status spoken twice, which
+            // read as a doubled/garbled "Transmit... Transmitting...". Text/colors are still
+            // applied every time above (cheap, idempotent) -- only the redundant nudge is
+            // skipped, and only within this short window; a legitimate periodic repeat of
+            // the same text (e.g. still "Receiving..." a full T/R period later) is far
+            // outside RepeatStatusAnnounceSuppressWindow and still announces normally.
+            bool isNearImmediateRepeat = announced && statusText == _lastAnnouncedStatusText
+                && (DateTime.UtcNow - _lastAnnouncedStatusTime) < RepeatStatusAnnounceSuppressWindow;
+            if (isNearImmediateRepeat) announced = false;
             // [ANNOUNCE] tag: see ShowMsg's identical logging for what this is for.
-            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}] '{statusText}'");
-            if (announced) SendKeys.Send("{UP}");  //triggers screen reader
+            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}]{(isNearImmediateRepeat ? " (repeat suppressed)" : "")} '{statusText}'");
+            if (announced)
+            {
+                SendKeys.Send("{UP}");  //triggers screen reader
+                _lastAnnouncedStatusText = statusText;
+                _lastAnnouncedStatusTime = DateTime.UtcNow;
+            }
         }
 
         public void ShowMessage(string text, bool sound) => ShowMsg(text, sound);
@@ -2437,7 +2481,24 @@ namespace WSJTX_Controller
         public void ApplyEngineMode()
         {
             int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
-            wsjtxClient?.ConnectNativeEngine(IPAddress.Parse("127.0.0.1"), jimmyPort);
+            // Self-sufficiency plan Phase 6: NativeEngine.UseDirectEngine (Options, default off)
+            // switches the connection side of this from the standard WSJT-X UDP heartbeat/
+            // negotiation handshake to the engine host's own local TCP control port -- see
+            // WsjtxClient.Direct.cs's own header comment for the full reasoning. The engine
+            // host process itself is launched exactly the same way either way (below); this
+            // only changes how Jimmy talks to it once it's up. TestModeGuard.IsTestMode always
+            // uses the UDP path regardless of this setting -- JimmyReplay.py simulates a
+            // standard WSJT-X-protocol peer, not this control channel.
+            if (NativeEngine.UseDirectEngine && !TestModeGuard.IsTestMode)
+            {
+                wsjtxClient?.DisconnectDirectEngine();
+                wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid);
+            }
+            else
+            {
+                wsjtxClient?.DisconnectDirectEngine();
+                wsjtxClient?.ConnectNativeEngine(IPAddress.Parse("127.0.0.1"), jimmyPort);
+            }
 
             nativeEngineClient?.Dispose();
             nativeEngineClient = null;
@@ -2457,6 +2518,7 @@ namespace WSJTX_Controller
             string myCall = NativeEngine.MyCall, myGrid = NativeEngine.MyGrid;
             string inDevice = NativeEngine.AudioInputDevice, outDevice = NativeEngine.AudioOutputDevice;
             RadioSettings radioSnapshot = Radio;
+            DecodeSettings decodeSnapshot = Decode;
             WsjtxClient wsjtx = wsjtxClient;
 
             // Launch() (specifically Process.Start()) runs on a background thread -- Process.Start()
@@ -2472,7 +2534,8 @@ namespace WSJTX_Controller
                 // ShowMessage touches statusText.
                 bool ok = client.Launch(myCall, myGrid, inDevice, jimmyPort, outDevice, radioSnapshot,
                     msg => wsjtx?.DebugOutput(msg),
-                    () => BeginInvoke(new Action(() => OnNativeEngineUnexpectedExit(client))));
+                    () => BeginInvoke(new Action(() => OnNativeEngineUnexpectedExit(client))),
+                    decodeSnapshot, wsjtx != null && wsjtx.usePskReporter);
                 if (!ok && nativeEngineClient == client)
                 {
                     BeginInvoke(new Action(() => ShowMessage($"Native engine: {client.LastError}", false)));
@@ -3018,7 +3081,6 @@ namespace WSJTX_Controller
             e.KeyChar = char.ToUpper(e.KeyChar);
             char c = e.KeyChar;
             if (c == (char)Keys.Back || c == ' ' || (c >= 'A' && c <= 'Z')) return;
-            Console.Beep();
             e.Handled = true;
         }
 
@@ -3027,7 +3089,6 @@ namespace WSJTX_Controller
             e.KeyChar = char.ToUpper(e.KeyChar);
             char c = e.KeyChar;
             if (c == (char)Keys.Back || c == ' ' || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return;
-            Console.Beep();
             e.Handled = true;
         }
 
@@ -3078,7 +3139,6 @@ namespace WSJTX_Controller
             e.KeyChar = char.ToUpper(e.KeyChar);
             char c = e.KeyChar;
             if (c == (char)Keys.Back || c == ' ' || c == '/' || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return;
-            Console.Beep();
             e.Handled = true;
         }
 
@@ -3374,10 +3434,6 @@ namespace WSJTX_Controller
                     listenModeButton_Click(null, null);
                     ShowMsg("Tx halted", true);
                 }
-                else
-                {
-                    Console.Beep();
-                }
                 BeginInvoke((Action)(() =>
                     BeginInvoke((Action)(() => RestoreFocus(focused)))
                 ));
@@ -3484,6 +3540,14 @@ namespace WSJTX_Controller
                 wsjtxClient.ApplySortOrder(dlg.SelectedOrder, dlg.SelectedBeam);
                 wsjtxClient.ApplyCategoryWeights(dlg.SelectedCategoryWeights);
                 wsjtxClient.ApplyCallingPriorities(dlg.SelectedCallingPriorities);
+                // Found live, 2026-08-10: ApplySortOrder/ApplyCategoryWeights/ApplyCallingPriorities
+                // only update the ranking SETTINGS -- none of them re-rank the calls already sitting
+                // in the queue, so a new primary sort criterion (e.g. "strongest signal") never
+                // visibly reordered anything until enough new decodes trickled in on their own to
+                // re-sort it incidentally. SortCallsPublic() already exists for exactly this
+                // ("re-rank if LoTW boost changed" is its other, pre-existing call site) -- this
+                // dialog just never called it. Confirmed present, unchanged, since before v1.90.9.
+                wsjtxClient.SortCallsPublic();
 
                 iniFile.Write("rankOrder",         string.Join(",", dlg.SelectedOrder.Select(m => MethodToRankId(m))));
                 iniFile.Write("rankBeam",          dlg.SelectedBeam.HasValue ? MethodToBeamId(dlg.SelectedBeam.Value) : "none");
@@ -4035,13 +4099,20 @@ namespace WSJTX_Controller
             }
         }
 
-        private void callListBox_KeyPress(object sender, KeyPressEventArgs e)
+        private void callListBox_KeyDown(object sender, KeyEventArgs e)
         {
             if (!formLoaded) return;
             if (callListBox.SelectionMode == SelectionMode.None) return;
-            if (e.KeyChar != (char)Keys.Space && e.KeyChar != (char)Keys.Enter) return;
+            if (e.KeyCode != Keys.Space && e.KeyCode != Keys.Enter) return;
 
-            e.Handled = true;   // prevent Win32 ListBox type-ahead after our handler
+            // SuppressKeyPress (not KeyPress's own Handled) is what actually stops the native
+            // ListBox from treating Space/Enter as a type-ahead search character -- found live,
+            // 2026-08-10: Space in particular always matched nothing (no item starts with a
+            // literal space), so the ListBox played the default Windows "no match" beep on every
+            // single selection, Handled=true on KeyPress notwithstanding (that only stops
+            // WinForms' own OnKeyPress from re-firing; it does not reach back and stop the
+            // KeyDown-level default processing that already decided to beep).
+            e.SuppressKeyPress = true;
             int idx = callListBox.SelectedIndex;
             int mappedIdx = wsjtxClient.MapNormalListIndex(idx);
             wsjtxClient.NextCall(false, mappedIdx, operatorSelected: true, expectedCall: wsjtxClient.GetCallAtIndex(mappedIdx));
@@ -4176,6 +4247,11 @@ namespace WSJTX_Controller
                 bool started = wsjtxClient.ManualEnqueueCall(callsign);
                 if (started)
                     ShowMsg($"Manual call started for {callsign}", false);
+                else
+                    // Found live, 2026-08-10: this used to be a silent no-op on failure -- the
+                    // operator got zero feedback that anything went wrong, indistinguishable
+                    // from Jimmy simply doing nothing.
+                    ShowMsg($"Manual call to {callsign} could not be started -- no connection to the radio engine.", true);
             }
         }
 
@@ -4409,19 +4485,23 @@ namespace WSJTX_Controller
                 if (idx < 0) return;
                 int queueIdx = wsjtxClient.GetQueueIndexForTx1(idx);
                 if (queueIdx >= 0) wsjtxClient.EditCallQueue(queueIdx);
+                return;
             }
-        }
 
-        private void AdvTx1ListBox_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            if (!formLoaded) return;
-            if (e.KeyChar != (char)Keys.Space && e.KeyChar != (char)Keys.Enter) return;
-
-            e.Handled = true;   // prevent Win32 ListBox type-ahead after our handler
-            int idx = advTx1ListBox.SelectedIndex;
-            if (idx < 0) idx = 0;
-            wsjtxClient.NextCallFromTx1(idx);
-            MoveFocusToStatusIfEnabled();
+            // SuppressKeyPress (not a KeyPress handler's own Handled) is what actually stops the
+            // native ListBox from treating Space/Enter as a type-ahead search character -- found
+            // live, 2026-08-10: Space in particular always matched nothing (no item starts with a
+            // literal space), so the ListBox played the default Windows "no match" beep on every
+            // single selection. Folded into this existing KeyDown handler (was a separate
+            // KeyPress handler) since SuppressKeyPress must be set here, at KeyDown, to work.
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                int idx = advTx1ListBox.SelectedIndex;
+                if (idx < 0) idx = 0;
+                wsjtxClient.NextCallFromTx1(idx);
+                MoveFocusToStatusIfEnabled();
+            }
         }
 
         private void AdvTx2ListBox_KeyDown(object sender, KeyEventArgs e)
@@ -4449,19 +4529,23 @@ namespace WSJTX_Controller
                 if (idx < 0) return;
                 int queueIdx = wsjtxClient.GetQueueIndexForTx2(idx);
                 if (queueIdx >= 0) wsjtxClient.EditCallQueue(queueIdx);
+                return;
             }
-        }
 
-        private void AdvTx2ListBox_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            if (!formLoaded) return;
-            if (e.KeyChar != (char)Keys.Space && e.KeyChar != (char)Keys.Enter) return;
-
-            e.Handled = true;   // prevent Win32 ListBox type-ahead after our handler
-            int idx = advTx2ListBox.SelectedIndex;
-            if (idx < 0) idx = 0;
-            wsjtxClient.NextCallFromTx2(idx);
-            MoveFocusToStatusIfEnabled();
+            // SuppressKeyPress (not a KeyPress handler's own Handled) is what actually stops the
+            // native ListBox from treating Space/Enter as a type-ahead search character -- found
+            // live, 2026-08-10: Space in particular always matched nothing (no item starts with a
+            // literal space), so the ListBox played the default Windows "no match" beep on every
+            // single selection. Folded into this existing KeyDown handler (was a separate
+            // KeyPress handler) since SuppressKeyPress must be set here, at KeyDown, to work.
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                int idx = advTx2ListBox.SelectedIndex;
+                if (idx < 0) idx = 0;
+                wsjtxClient.NextCallFromTx2(idx);
+                MoveFocusToStatusIfEnabled();
+            }
         }
 
         private void AdvRawListBox_KeyDown(object sender, KeyEventArgs e)
@@ -4480,19 +4564,23 @@ namespace WSJTX_Controller
                 }
                 e.Handled = true;
                 e.SuppressKeyPress = true;
+                return;
             }
-        }
 
-        private void AdvRawListBox_KeyPress(object sender, KeyPressEventArgs e)
-        {
-            if (!formLoaded) return;
-            if (e.KeyChar != (char)Keys.Space && e.KeyChar != (char)Keys.Enter) return;
-
-            e.Handled = true;   // prevent Win32 ListBox type-ahead after our handler
-            int idx = advRawListBox.SelectedIndex;
-            if (idx < 0) return;
-            wsjtxClient.NextCallFromRawDecode(idx);
-            MoveFocusToStatusIfEnabled();
+            // SuppressKeyPress (not a KeyPress handler's own Handled) is what actually stops the
+            // native ListBox from treating Space/Enter as a type-ahead search character -- found
+            // live, 2026-08-10: Space in particular always matched nothing (no item starts with a
+            // literal space), so the ListBox played the default Windows "no match" beep on every
+            // single selection. Folded into this existing KeyDown handler (was a separate
+            // KeyPress handler) since SuppressKeyPress must be set here, at KeyDown, to work.
+            if (e.KeyCode == Keys.Space || e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                int idx = advRawListBox.SelectedIndex;
+                if (idx < 0) return;
+                wsjtxClient.NextCallFromRawDecode(idx);
+                MoveFocusToStatusIfEnabled();
+            }
         }
     }
 }

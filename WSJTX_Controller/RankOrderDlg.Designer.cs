@@ -78,7 +78,7 @@ namespace WSJTX_Controller
             this.tabControl.SelectedIndex = 0;
             this.tabControl.Size          = new Size(406, 306);
             this.tabControl.TabIndex      = 0;
-            this.tabControl.AccessibleName = "Stations Available Sort Order";
+            this.tabControl.AccessibleName = "";
 
             // ══ TAB 1 – PRIORITIES & FILTERS ═══════════════════════════════════
             this.callingPrioritiesTabPage.Controls.Add(this.callingCheckedListBox);

@@ -18,7 +18,7 @@
       the production install's real settings/logbook database.
 
   Product  : Jimmy Test (WSJT-X Controller, test/beta build)
-  Version  : 2.0.0
+  Version  : 2.0.11
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy Test\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
@@ -32,7 +32,7 @@
 
   <Package
     Name="Jimmy Test"
-    Version="2.0.0"
+    Version="2.0.11"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"

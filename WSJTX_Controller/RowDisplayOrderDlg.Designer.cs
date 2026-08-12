@@ -119,7 +119,7 @@ namespace WSJTX_Controller
             this.callWaitingTabPage.Controls.Add(this.callWaitingMoveDownButton);
             this.callWaitingTabPage.Controls.Add(this.callWaitingRestoreDefaultButton);
             this.callWaitingTabPage.Text = "Stations Available Row";
-            this.callWaitingTabPage.AccessibleName = "Stations Available Row tab";
+            this.callWaitingTabPage.AccessibleName = "Stations Available Row";
             this.callWaitingTabPage.UseVisualStyleBackColor = true;
 
             //
@@ -180,7 +180,7 @@ namespace WSJTX_Controller
             this.rawDecodeTabPage.Controls.Add(this.rawDecodeMoveDownButton);
             this.rawDecodeTabPage.Controls.Add(this.rawDecodeRestoreDefaultButton);
             this.rawDecodeTabPage.Text = "Raw Decodes Row";
-            this.rawDecodeTabPage.AccessibleName = "Raw Decodes Row tab";
+            this.rawDecodeTabPage.AccessibleName = "Raw Decodes Row";
             this.rawDecodeTabPage.UseVisualStyleBackColor = true;
 
             //
@@ -241,7 +241,7 @@ namespace WSJTX_Controller
             this.spotWatchTabPage.Controls.Add(this.spotWatchMoveDownButton);
             this.spotWatchTabPage.Controls.Add(this.spotWatchRestoreDefaultButton);
             this.spotWatchTabPage.Text = "Spot Watch Row";
-            this.spotWatchTabPage.AccessibleName = "Spot Watch Row tab";
+            this.spotWatchTabPage.AccessibleName = "Spot Watch Row";
             this.spotWatchTabPage.UseVisualStyleBackColor = true;
 
             //
@@ -253,7 +253,7 @@ namespace WSJTX_Controller
             this.tabControl.Location = new Point(12, 12);
             this.tabControl.Size = new Size(360, 290);
             this.tabControl.TabIndex = 0;
-            this.tabControl.AccessibleName = "Row field editor tabs";
+            this.tabControl.AccessibleName = "";
 
             //
             // okButton

@@ -40,6 +40,7 @@ namespace WSJTX_Controller
             string directedTo = WsjtxMessage.DirectedTo(msg);
             bool isCq = emsg.IsCQ();                //CQ format check
             bool isPota = emsg.IsPota();
+            bool isSota = emsg.IsSota();
             bool isDirectedAlert = isCq && IsDirectedAlert(directedTo, classification.IsDx);
             bool isGridReply = WsjtxMessage.IsReply(emsg.Message);
             bool isAcceptableCq = isCq && (directedTo == null /*|| directedTo == "QRP"*/ || (directedTo == "DX" && classification.IsDx) || directedTo == myContinent);
@@ -95,6 +96,19 @@ namespace WSJTX_Controller
                 if (deCall == null)
                 {
                     if (debugDetail) DebugOutput($"{spacer}AddSelectedCall rejected, deCall null");
+                    return;
+                }
+
+                // Root-caused live, 2026-08-11: nothing below this point ever checks deCall
+                // against myCall -- a self-decode (Jimmy's own transmission getting redecoded,
+                // a real occurrence confirmed live in Direct mode) only ever got filtered out
+                // incidentally by the same msgType/origin/azimuth filters every other call goes
+                // through. When a stray self-decode happened to match those filters (e.g. "any
+                // message" reply mode), the operator's own callsign was admitted to the queue
+                // and shown as a workable station in the RX1/TX1 lists.
+                if (string.Equals(deCall, myCall, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (debugDetail) DebugOutput($"{spacer}AddSelectedCall rejected, deCall is myCall");
                     return;
                 }
 
@@ -156,7 +170,19 @@ namespace WSJTX_Controller
 
                 if (isCq)    //check for unwanted directed CQ
                 {
-                    if (isDirectedAlert || isAcceptableCq)      //acceptable CQ
+                    // POTA/SOTA are never "unwanted" here, regardless of the operator's alert
+                    // list (Options > Directed CQ Alert / "Hunter" role) -- they already have
+                    // dedicated, always-on detection (IsPotaCall/IsSotaCall -> CallCategory.POTA/
+                    // SOTA in AwardTagger.DeriveCategory) that runs independently of that list.
+                    // Root-caused live, 2026-08-10: with "POTA" not in the alert list (the
+                    // default), a station already validly queued from a plain CQ (e.g. "CQ K4YT
+                    // EM63") got evicted the instant a later decode from the same station was a
+                    // directed "CQ POTA K4YT" -- an already-wanted station losing its queue slot
+                    // just because it also sends the POTA-tagged variant of its own CQ. Every
+                    // other directed-CQ keyword without a dedicated category (contest prefixes,
+                    // niche/future award types) still needs the alert list as its only
+                    // wanted/unwanted signal, so this exemption is scoped to POTA/SOTA only.
+                    if (isDirectedAlert || isAcceptableCq || isPota || isSota)      //acceptable CQ
                     {
                         if (unwantedCqList.Contains(deCall))
                         {
@@ -445,29 +471,50 @@ namespace WSJTX_Controller
         public bool ManualEnqueueCall(string callsign)
         {
             if (string.IsNullOrEmpty(callsign)) return false;
-            if (udpClient2 == null) return false;
-
-            try
+            // Found live, 2026-08-10, auditing against production: this whole method used to
+            // be an unconditional "if (udpClient2 == null) return false" -- a complete, SILENT
+            // no-op under Direct mode (jimmy-engine-host.exe never gets a udpClient2 at all),
+            // with the caller (Controller.OpenManualCallDialog) showing no error either, since
+            // it only announces on success. Mirrors HaltTx()'s own existing _directConnected
+            // branch below -- same mode-detection, same pattern, not a new mechanism.
+            if (_directConnected)
             {
-                var cmsg = new ConfigureMessage
-                {
-                    SchemaVersion    = WsjtxMessage.NegotiatedSchemaVersion,
-                    Id               = WsjtxMessage.UniqueId,
-                    DXCall           = callsign,
-                    DXGrid           = "",
-                    GenerateMessages = true,
-                };
-                ba = cmsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Configure' for manual call to '{callsign}'");
+                // Engine::call_station_ctx (the real WSJT-X double-click-to-reply entry point,
+                // same one DirectSendReply already uses for queue replies) accepts a bare
+                // callsign with everything else null/absent -- exactly a manual call, where
+                // Jimmy has no decoded grid/SNR/frequency for this station at all.
+                DirectSendReply(callsign, null, null, null, null);
+                DebugOutput($"{Time()} >>>>>Sent REPLY (direct) for manual call to '{callsign}'");
+                DirectSetTxEnabled(true);
             }
-            catch (Exception ex)
+            else if (udpClient2 != null)
             {
-                DebugOutput($"{Time()} ManualEnqueueCall failed: {ex.Message}");
+                try
+                {
+                    var cmsg = new ConfigureMessage
+                    {
+                        SchemaVersion    = WsjtxMessage.NegotiatedSchemaVersion,
+                        Id               = WsjtxMessage.UniqueId,
+                        DXCall           = callsign,
+                        DXGrid           = "",
+                        GenerateMessages = true,
+                    };
+                    ba = cmsg.GetBytes();
+                    udpClient2.Send(ba, ba.Length);
+                    DebugOutput($"{Time()} >>>>>Sent 'Configure' for manual call to '{callsign}'");
+                }
+                catch (Exception ex)
+                {
+                    DebugOutput($"{Time()} ManualEnqueueCall failed: {ex.Message}");
+                    return false;
+                }
+
+                EnableTx();
+            }
+            else
+            {
                 return false;
             }
-
-            EnableTx();
 
             // Set active-call state so status shows the target callsign, matching normal queue-reply behavior
             SetCallInProg(callsign);

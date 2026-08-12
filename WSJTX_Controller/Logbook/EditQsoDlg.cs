@@ -263,7 +263,6 @@ namespace WSJTX_Controller
                 // Leave every field exactly as typed and don't move focus -- a rejected
                 // entry (e.g. a duplicate) must stay visible and fixable, never silently lost.
                 _statusTb.Text = error;
-                System.Media.SystemSounds.Exclamation.Play();
                 return;
             }
 

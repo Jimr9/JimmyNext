@@ -865,7 +865,7 @@
             this.callListBox.TabIndex = 2;
             this.callListBox.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.AdvListBox_DrawItem);
             this.callListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.CallListBox_KeyDown);
-            this.callListBox.KeyPress += new System.Windows.Forms.KeyPressEventHandler(this.callListBox_KeyPress);
+            this.callListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.callListBox_KeyDown);
             this.callListBox.MouseDown += new System.Windows.Forms.MouseEventHandler(this.callListBox_MouseDown);
             //
             // replyNormCqLabel
@@ -1383,7 +1383,6 @@
             this.advTx1ListBox.Visible = false;
             this.advTx1ListBox.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.AdvListBox_DrawItem);
             this.advTx1ListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.AdvTx1ListBox_KeyDown);
-            this.advTx1ListBox.KeyPress += new System.Windows.Forms.KeyPressEventHandler(this.AdvTx1ListBox_KeyPress);
             //
             // advTx2Label
             //
@@ -1410,7 +1409,6 @@
             this.advTx2ListBox.Visible = false;
             this.advTx2ListBox.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.AdvListBox_DrawItem);
             this.advTx2ListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.AdvTx2ListBox_KeyDown);
-            this.advTx2ListBox.KeyPress += new System.Windows.Forms.KeyPressEventHandler(this.AdvTx2ListBox_KeyPress);
             //
             // advRawLabel
             //
@@ -1437,7 +1435,6 @@
             this.advRawListBox.Visible = false;
             this.advRawListBox.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.AdvListBox_DrawItem);
             this.advRawListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.AdvRawListBox_KeyDown);
-            this.advRawListBox.KeyPress += new System.Windows.Forms.KeyPressEventHandler(this.AdvRawListBox_KeyPress);
             //
             // spotWatchLabel
             //

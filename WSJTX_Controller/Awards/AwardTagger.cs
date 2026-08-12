@@ -71,6 +71,15 @@ namespace WSJTX_Controller
             string call = d.DeCall();
             if (string.IsNullOrEmpty(call)) return;
 
+            // Added 2026-08-10: never interrupt an active exchange with an award-needed alert
+            // for band activity in general -- root-caused live from a real QSO where "KR7H, 1
+            // award needed"/"AA5QJ, 1 award needed"/etc. kept firing mid-contact, competing with
+            // the actual QSO status announcements ("Transmitting, W1XI, received +02.") for the
+            // screen reader's attention. The station itself is still tagged/queued normally
+            // (this only suppresses the spoken/beeped interruption); nothing is lost, it's just
+            // not spoken RIGHT NOW while the operator is busy with someone else.
+            if (_wc.callInProg != null) return;
+
             if (_wc.ctrl.ignoreWeakSnrCheckBox.Checked && d.Snr <= (int)_wc.ctrl.minSnrNumUpDown.Value && call != _wc.callInProg)
                 return;
 
@@ -82,17 +91,16 @@ namespace WSJTX_Controller
             _wc._awardAlertTimes[call] = DateTime.UtcNow;
             _wc.Sounds.PlaySoundEvent(_wc.ctrl.soundEnabled_AwardNeeded, _wc.ctrl.soundFile_AwardNeeded, call, matchedRuleId);
 
-            // Wave 2 of the notification architecture (WSJTX_Controller/Notify/). Deliberately
-            // independent of the 30s sound cooldown right above (WsjtxClient.
-            // AwardAlertCooldownSecs/_awardAlertTimes) -- NotificationDefaults gives
-            // AwardsNeeded its own, separately-configurable RepeatSeconds/ThrottleMilliseconds,
-            // so the beep and the spoken summary can be tuned independently. AwardCount is
-            // always 1 today: MatchedAwardRuleId returns a single rule ID, first-match-wins --
-            // this payload shape supports a future multi-match AwardTagger without changing
-            // the notification code, but nothing here produces more than one yet.
-            var awards = new[] { matchedRuleId };
-            string awardSummary = NotificationTemplateEngine.Pluralize(1, "award needed");
-            _wc.Notify.Publish(new AwardsNeededEvent(call, 1, awards, awardSummary));
+            // Removed 2026-08-10: this used to also Notify.Publish(AwardsNeededEvent(...)) here,
+            // a standalone spoken "{call}, 1 award needed" announcement independent of the
+            // routine status line. WsjtxClient.Display.cs's ShowStatus() already reports this,
+            // grouped by award type (SnapshotNeededAwardCounts -> the "needed" clause folded
+            // into callsWaiting), every routine Receiving-only summary -- that mechanism already
+            // covers everything this standalone announcement did, without ever competing with
+            // real-time QSO status the way this one did (root-caused live, 2026-08-10, from a
+            // real QSO with W1XI: "KR7H, 1 award needed" kept firing mid-contact). The sound
+            // cue above is unaffected -- still a real-time "something matched" cue, independent
+            // of when the routine status line next gets around to saying so.
         }
 
         // Returns true if dmsg is associated with a "CQ SOTA" transmission.

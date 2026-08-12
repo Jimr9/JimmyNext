@@ -18,6 +18,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.118" />
     <PackageReference Include="MQTTnet" Version="4.3.7.1207" />
     <PackageReference Include="MQTTnet.Extensions.ManagedClient" Version="4.3.7.1207" />
@@ -95,13 +96,7 @@
          install). Absent (repo cloned but the Rust side never built) is a harmless no-op in
          MSBuild, same convention as the hamlib Include above; Jimmy still builds fine
          without it, just can't use Native mode. -->
-    <None Include="..\EngineHost\target\release\jimmy-engine-host.exe;
-                    ..\EngineHost\target\release\libfftw3f-3.dll;
-                    ..\EngineHost\target\release\libgcc_s_seh-1.dll;
-                    ..\EngineHost\target\release\libgfortran-5.dll;
-                    ..\EngineHost\target\release\libquadmath-0.dll;
-                    ..\EngineHost\target\release\libstdc++-6.dll;
-                    ..\EngineHost\target\release\libwinpthread-1.dll">
+    <None Include="..\EngineHost\target\release\jimmy-engine-host.exe;&#xD;&#xA;                    ..\EngineHost\target\release\libfftw3f-3.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libgcc_s_seh-1.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libgfortran-5.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libquadmath-0.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libstdc++-6.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libwinpthread-1.dll">
       <Link>Resources\EngineHost\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
@@ -119,9 +114,7 @@
   <!-- Reads a single line out of ClubLogKeyFile without ever logging its
        content. MSBuild has no built-in "read line N of a file" task, so this
        is a small inline task via RoslynCodeTaskFactory. -->
-  <UsingTask TaskName="ReadClubLogKeyLine"
-             TaskFactory="RoslynCodeTaskFactory"
-             AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
+  <UsingTask TaskName="ReadClubLogKeyLine" TaskFactory="RoslynCodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\Microsoft.Build.Tasks.Core.dll">
     <ParameterGroup>
       <FilePath ParameterType="System.String" Required="true" />
       <LineNumber ParameterType="System.Int32" Required="true" />
@@ -152,14 +145,11 @@
        reusing those exact names here gets silently overridden and never
        runs. Unique names + explicit BeforeTargets/AfterTargets avoid that. -->
   <Target Name="JimmyClubLogKeyCheck" BeforeTargets="Build">
-    <Error Condition="!Exists('$(ClubLogKeyFile)')"
-           Text="Club Log key file not found: $(ClubLogKeyFile). Set up the key file before building." />
-    <ReadClubLogKeyLine Condition="Exists('$(ClubLogKeyFile)')"
-                         FilePath="$(ClubLogKeyFile)" LineNumber="$(ClubLogKeyLineNumber)">
+    <Error Condition="!Exists('$(ClubLogKeyFile)')" Text="Club Log key file not found: $(ClubLogKeyFile). Set up the key file before building." />
+    <ReadClubLogKeyLine Condition="Exists('$(ClubLogKeyFile)')" FilePath="$(ClubLogKeyFile)" LineNumber="$(ClubLogKeyLineNumber)">
       <Output TaskParameter="Key" PropertyName="_ClubLogKey" />
     </ReadClubLogKeyLine>
-    <Error Condition="Exists('$(ClubLogKeyFile)') and '$(_ClubLogKey)' == ''"
-           Text="Club Log key file exists but line $(ClubLogKeyLineNumber) is empty: $(ClubLogKeyFile). Fix the key file before building." />
+    <Error Condition="Exists('$(ClubLogKeyFile)') and '$(_ClubLogKey)' == ''" Text="Club Log key file exists but line $(ClubLogKeyLineNumber) is empty: $(ClubLogKeyFile). Fix the key file before building." />
   </Target>
 
   <!-- Embeds Jimmy's Club Log application key into every build's output
