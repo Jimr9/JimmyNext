@@ -143,6 +143,7 @@ namespace WSJTX_Controller
             //
             // generalPanel
             //
+            this.generalPanel.AccessibleName = "General";
             this.generalPanel.Controls.Add(this.udpOnTopCheckBox);
             this.generalPanel.Controls.Add(this.udpDiagLogCheckBox);
             this.generalPanel.Dock = System.Windows.Forms.DockStyle.Fill;
@@ -150,6 +151,7 @@ namespace WSJTX_Controller
             //
             // receiveReplyPanel
             //
+            this.receiveReplyPanel.AccessibleName = "Receive / Auto Reply";
             this.receiveReplyPanel.AutoScroll = true;
             this.receiveReplyPanel.Controls.Add(this.rcvCallingGroupBox);
             this.receiveReplyPanel.Controls.Add(this.rcvReplyingGroupBox);
@@ -211,6 +213,7 @@ namespace WSJTX_Controller
             //
             // transmitPanel
             //
+            this.transmitPanel.AccessibleName = "Transmit";
             this.transmitPanel.Controls.Add(this.rcvTransmitGroupBox);
             this.transmitPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.transmitPanel.Name = "transmitPanel";
@@ -227,6 +230,7 @@ namespace WSJTX_Controller
             //
             // basicPanel
             //
+            this.basicPanel.AccessibleName = "Basic";
             this.basicPanel.Controls.Add(this.subtitleLabel);
             this.basicPanel.Controls.Add(this.modeLabel);
             this.basicPanel.Controls.Add(this.callCqButton);
@@ -250,30 +254,35 @@ namespace WSJTX_Controller
             //
             // hotkeysPanel
             //
+            this.hotkeysPanel.AccessibleName = "Hotkeys";
             this.hotkeysPanel.AutoScroll = true;
             this.hotkeysPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.hotkeysPanel.Name = "hotkeysPanel";
             //
             // advUiPanel
             //
+            this.advUiPanel.AccessibleName = "Advanced UI";
             this.advUiPanel.AutoScroll = true;
             this.advUiPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.advUiPanel.Name = "advUiPanel";
             //
             // wantedCallsPanel
             //
+            this.wantedCallsPanel.AccessibleName = "Wanted Calls";
             this.wantedCallsPanel.AutoScroll = true;
             this.wantedCallsPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.wantedCallsPanel.Name = "wantedCallsPanel";
             //
             // spotWatchPanel
             //
+            this.spotWatchPanel.AccessibleName = "Spot Watch";
             this.spotWatchPanel.AutoScroll = true;
             this.spotWatchPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.spotWatchPanel.Name = "spotWatchPanel";
             //
             // radioPanel
             //
+            this.radioPanel.AccessibleName = "Radio";
             this.radioPanel.AutoScroll = true;
             this.radioPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.radioPanel.Name = "radioPanel";
@@ -286,6 +295,7 @@ namespace WSJTX_Controller
             //
             // decodeEnginePanel
             //
+            this.decodeEnginePanel.AccessibleName = "Decode Engine";
             this.decodeEnginePanel.AutoScroll = true;
             this.decodeEnginePanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.decodeEnginePanel.Name = "decodeEnginePanel";
@@ -297,6 +307,7 @@ namespace WSJTX_Controller
             //
             // decodePanel
             //
+            this.decodePanel.AccessibleName = "Decode";
             this.decodePanel.AutoScroll = true;
             this.decodePanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.decodePanel.Name = "decodePanel";
@@ -306,36 +317,42 @@ namespace WSJTX_Controller
             //
             // frequenciesPanel
             //
+            this.frequenciesPanel.AccessibleName = "Frequencies";
             this.frequenciesPanel.AutoScroll = true;
             this.frequenciesPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.frequenciesPanel.Name = "frequenciesPanel";
             //
             // notificationsPanel
             //
+            this.notificationsPanel.AccessibleName = "Notifications";
             this.notificationsPanel.AutoScroll = true;
             this.notificationsPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.notificationsPanel.Name = "notificationsPanel";
             //
             // soundsPanel
             //
+            this.soundsPanel.AccessibleName = "Sounds";
             this.soundsPanel.AutoScroll = true;
             this.soundsPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.soundsPanel.Name = "soundsPanel";
             //
             // appearancePanel
             //
+            this.appearancePanel.AccessibleName = "Appearance";
             this.appearancePanel.AutoScroll = true;
             this.appearancePanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.appearancePanel.Name = "appearancePanel";
             //
             // logbookSyncPanel
             //
+            this.logbookSyncPanel.AccessibleName = "Logbook Sync";
             this.logbookSyncPanel.AutoScroll = true;
             this.logbookSyncPanel.Dock       = System.Windows.Forms.DockStyle.Fill;
             this.logbookSyncPanel.Name       = "logbookSyncPanel";
             //
             // lookupPanel
             //
+            this.lookupPanel.AccessibleName = "Lookup Data";
             this.lookupPanel.AutoScroll = true;
             this.lookupPanel.Dock       = System.Windows.Forms.DockStyle.Fill;
             this.lookupPanel.Name       = "lookupPanel";

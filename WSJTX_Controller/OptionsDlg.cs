@@ -2115,14 +2115,16 @@ namespace WSJTX_Controller
             });
 
             // Tab stop 2 -- one shared capture box, same idiom as the Hotkeys panel's own
-            // _sharedCaptureBox.
+            // _sharedCaptureBox. Deliberately no ReadOnly here, matching _sharedCaptureBox --
+            // HotkeyCaptureBox already suppresses OnKeyPress itself (see that class), so
+            // ReadOnly adds no real protection, only an extra "read only" JAWS/NVDA announcement
+            // that the Hotkeys panel's own box doesn't have. Blind operator feedback, 2026-08-12.
             _freqHotkeyCaptureBox = new HotkeyCaptureBox
             {
                 Location = new System.Drawing.Point(356, 120),
                 Size = new System.Drawing.Size(160, 22),
                 TabIndex = tabIdx++,
                 Font = font,
-                ReadOnly = true,
                 AccessibleName = "Selected entry hotkey",
                 AccessibleDescription = "Press a key combination to jump straight to this frequency, switching mode if needed. Empty means no hotkey.",
             };
@@ -2233,11 +2235,14 @@ namespace WSJTX_Controller
             LoadSelectedFreqEntry();
         }
 
+        // Matches the Hotkeys panel's own BuildActionList: the row is just the one thing it's
+        // primarily about (mode + frequency here, action name there) -- the hotkey, if any, is
+        // shown only in the separate capture box below once selected, not folded into the row
+        // text. Blind operator feedback, 2026-08-12: embedding it here made every row read as
+        // a run-on "Mode — Freq kHz [Hotkey]" phrase instead of one clean piece of information.
         private static string FreqRowText(FrequencyEntry entry)
         {
-            string hotkeyPart = entry.Hotkey != System.Windows.Forms.Keys.None
-                ? $" [{HotkeyConfig.FormatKeys(entry.Hotkey)}]" : "";
-            return $"{entry.Mode} — {entry.FreqKHz:N0} kHz{hotkeyPart}";
+            return $"{entry.Mode} — {entry.FreqKHz:N0} kHz";
         }
 
         private void LoadSelectedFreqEntry()
@@ -2288,6 +2293,11 @@ namespace WSJTX_Controller
             BuildFreqList();
             int idx = _freqListBoxEntries.IndexOf(newEntry);
             if (idx >= 0) _freqListBox.SelectedIndex = idx;
+            // Blind operator feedback, 2026-08-12: without this, focus stayed on the Add button
+            // after the click -- JAWS only announces a selection change on a control that has
+            // focus, so the new entry (and the fact anything happened at all) went completely
+            // unannounced.
+            _freqListBox.Focus();
         }
 
         private void FreqRemoveButton_Click(object sender, EventArgs e)
@@ -2308,6 +2318,9 @@ namespace WSJTX_Controller
             BuildFreqList();
             if (_freqListBoxEntries.Count > 0)
                 _freqListBox.SelectedIndex = Math.Min(removedIdx, _freqListBoxEntries.Count - 1);
+            // Same focus fix as FreqAddButton_Click -- without it, the removal (and whatever
+            // entry ends up selected afterward) went completely unannounced.
+            _freqListBox.Focus();
         }
 
         // Mirrors OnKeyCaptured (Hotkeys panel) -- same reserved/valid checks, plus
