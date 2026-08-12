@@ -2481,15 +2481,18 @@ namespace WSJTX_Controller
         public void ApplyEngineMode()
         {
             int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
-            // Self-sufficiency plan Phase 6: NativeEngine.UseDirectEngine (Options, default off)
-            // switches the connection side of this from the standard WSJT-X UDP heartbeat/
-            // negotiation handshake to the engine host's own local TCP control port -- see
-            // WsjtxClient.Direct.cs's own header comment for the full reasoning. The engine
-            // host process itself is launched exactly the same way either way (below); this
-            // only changes how Jimmy talks to it once it's up. TestModeGuard.IsTestMode always
-            // uses the UDP path regardless of this setting -- JimmyReplay.py simulates a
-            // standard WSJT-X-protocol peer, not this control channel.
-            if (NativeEngine.UseDirectEngine && !TestModeGuard.IsTestMode)
+            // UDP-to-Direct parity/cleanup pass, 2026-08-12: Direct is now unconditional in
+            // production -- the "talk over classic WSJT-X UDP instead" choice was retired (see
+            // NativeEngineSettings' own comment on why it was never a real fallback). The engine
+            // host process itself is launched exactly the same way either way (below); this only
+            // ever changes how Jimmy talks to it once it's up. TestModeGuard.IsTestMode always
+            // uses the UDP path regardless -- JimmyReplay.py simulates a standard
+            // WSJT-X-protocol peer, not the Direct control channel, and its own named regression
+            // tests (QsoLoggedMessage/LoggedAdifMessage fallback, TxHaltClk/TxEnableClk
+            // Wait-and-Reply cooperation, etc.) specifically exercise that UDP-side handling --
+            // kept alive here, test-mode-only, rather than removed, so that whole suite keeps
+            // passing unchanged.
+            if (!TestModeGuard.IsTestMode)
             {
                 wsjtxClient?.DisconnectDirectEngine();
                 wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid);

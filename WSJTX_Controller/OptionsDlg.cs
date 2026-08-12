@@ -879,7 +879,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.ComboBox _engineAudioOutputDeviceCombo;
         private System.Windows.Forms.NumericUpDown _engineAudioInputLevelUpDown;
         private System.Windows.Forms.NumericUpDown _engineAudioOutputLevelUpDown;
-        private System.Windows.Forms.CheckBox _engineUseDirectCheckBox;
         private System.Windows.Forms.CheckBox _radioPttDataSourceCheckBox;
         private System.Windows.Forms.ComboBox _radioPttSerialPortCombo;
         private System.Windows.Forms.GroupBox _radioModeGroupBox;
@@ -1833,16 +1832,6 @@ namespace WSJTX_Controller
             decodeEnginePanel.Controls.Add(_engineAudioOutputLevelUpDown);
             InitAudioSessionLevelControl(_engineAudioOutputLevelUpDown, isRender: true);
             y += 32;
-
-            _engineUseDirectCheckBox = MakeCheck(decodeEnginePanel,
-                "Talk to engine directly", "Talk to engine directly",
-                left, y, 8, ctrl.NativeEngine.UseDirectEngine, font);
-            _engineUseDirectCheckBox.AccessibleDescription =
-                "The intended way Jimmy talks to its own bundled engine: a direct control " +
-                "channel instead of emulating the standard WSJT-X network protocol. On by " +
-                "default. Turning this off falls back to the WSJT-X-compatible protocol, which " +
-                "has no way to explicitly enable transmit on the engine and is not recommended " +
-                "for normal use.";
         }
 
         // Reads the engine's current OS-level session volume for the given direction (input
@@ -3087,7 +3076,6 @@ namespace WSJTX_Controller
             string wasMyGrid = ctrl.NativeEngine.MyGrid;
             string wasAudioIn = ctrl.NativeEngine.AudioInputDevice;
             string wasAudioOut = ctrl.NativeEngine.AudioOutputDevice;
-            bool wasUseDirectEngine = ctrl.NativeEngine.UseDirectEngine;
             var r = ctrl.Radio;
             var wasRadioMode = r.Mode;
             string wasRigModel = r.RigModel;
@@ -3165,7 +3153,6 @@ namespace WSJTX_Controller
             ctrl.NativeEngine.MyGrid = FormatGridSquare(_engineMyGridTextBox.Text.Trim());
             ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
             ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
-            if (_engineUseDirectCheckBox != null) ctrl.NativeEngine.UseDirectEngine = _engineUseDirectCheckBox.Checked;
 
             // Only run either call if something it actually depends on changed -- see this
             // method's own opening comment. radioSettingsChanged also covers ApplyEngineMode(),
@@ -3174,8 +3161,7 @@ namespace WSJTX_Controller
             // take effect.
             bool engineIdentityChanged =
                 wasMyCall != ctrl.NativeEngine.MyCall || wasMyGrid != ctrl.NativeEngine.MyGrid ||
-                wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice ||
-                wasUseDirectEngine != ctrl.NativeEngine.UseDirectEngine;
+                wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice;
             bool radioSettingsChanged =
                 wasRadioMode != r.Mode || wasRigModel != r.RigModel || wasComPort != r.ComPort ||
                 wasBaudRate != r.BaudRate || wasUseExternal != r.UseExternalRigctld || wasHost != r.RigctldHost ||

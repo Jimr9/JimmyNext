@@ -25,28 +25,20 @@ namespace WSJTX_Controller
         // output device.
         public string AudioOutputDevice { get; set; } = "";
 
-        // Self-sufficiency plan Phase 6: talk to the engine host directly over its local TCP
-        // control port (SNAPSHOT/REPLY/HALT_TX/SET_TX_ENABLED) instead of the standard WSJT-X
-        // UDP protocol's heartbeat/negotiation handshake -- root-caused live, 2026-08-08, that
-        // handshake (not raw UDP delivery) was the real source of the engine crashes/freezes
-        // chased through most of that day, and is specifically timing-sensitive in a way that
-        // matters more on a slower machine (a slow CAT/audio open racing the one-shot
-        // heartbeat). Now defaults to true, 2026-08-10: this is the intended primary way Jimmy
-        // talks to its own bundled engine, not a fallback -- UDP mode only exists because Jimmy
-        // originally spoke to an external, real WSJT-X, and has no purpose-built way to tell
-        // jimmy-engine-host.exe to actually enable transmit (EnableTx() there only ever sets a
-        // local flag, unlike DirectSetTxEnabled's explicit SET_TX_ENABLED command) -- found live
-        // this same night chasing a manual-call-never-transmits report that traced back to
-        // exactly that gap. See WsjtxClient.Direct.cs.
-        public bool UseDirectEngine { get; set; } = true;
-
+        // UDP-to-Direct parity/cleanup pass, 2026-08-12: the "talk over classic WSJT-X UDP
+        // instead of Direct" choice (UseDirectEngine) is retired as a production option -- UDP
+        // mode never had a working way to tell jimmy-engine-host.exe to actually enable
+        // transmit (EnableTx() there only ever set a local flag, unlike DirectSetTxEnabled's
+        // explicit SET_TX_ENABLED command), so it was never a real fallback, only a leftover
+        // from when Jimmy spoke to an external, real WSJT-X. ApplyEngineMode() now always uses
+        // Direct outside of TestModeGuard.IsTestMode (replay tests still force classic UDP,
+        // unchanged -- see that method's own comment). See WsjtxClient.Direct.cs.
         public void LoadFromIni(IniFile ini)
         {
             if (ini.KeyExists("nativeEngineMyCall")) MyCall = ini.Read("nativeEngineMyCall");
             if (ini.KeyExists("nativeEngineMyGrid")) MyGrid = ini.Read("nativeEngineMyGrid");
             if (ini.KeyExists("nativeEngineAudioDevice")) AudioInputDevice = ini.Read("nativeEngineAudioDevice");
             if (ini.KeyExists("nativeEngineAudioOutputDevice")) AudioOutputDevice = ini.Read("nativeEngineAudioOutputDevice");
-            if (ini.KeyExists("nativeEngineUseDirectEngine")) UseDirectEngine = ini.Read("nativeEngineUseDirectEngine") == "True";
         }
 
         public void SaveToIni(IniFile ini)
@@ -55,7 +47,6 @@ namespace WSJTX_Controller
             ini.Write("nativeEngineMyGrid", MyGrid);
             ini.Write("nativeEngineAudioDevice", AudioInputDevice);
             ini.Write("nativeEngineAudioOutputDevice", AudioOutputDevice);
-            ini.Write("nativeEngineUseDirectEngine", UseDirectEngine.ToString());
         }
     }
 }

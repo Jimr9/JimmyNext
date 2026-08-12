@@ -2901,13 +2901,26 @@ namespace WSJTX_Controller
         {
             try
             {
-                if (emsg == null || udpClient2 == null)
+                // UDP-to-Direct parity pass, 2026-08-12: this used to only ever flip the local
+                // txEnabled/wsjtxTxEnableButton fields, gated on udpClient2 being open -- which
+                // is never true under Direct mode, so every EnableTx() call (including the
+                // queue-reply path, ReplyTo()) was a silent no-op there. Mirrors HaltTx()'s
+                // existing _directConnected branch.
+                if (_directConnected)
+                {
+                    DirectSetTxEnabled(true);
+                    DebugOutput($"{Time()} EnableTx (direct)");
+                }
+                else if (emsg == null || udpClient2 == null)
                 {
                     DebugOutput($"{Time()} EnableTx skipped, udpClient2:{udpClient2} emsg:{emsg}");
                     return;
                 }
+                else
+                {
+                    DebugOutput($"{Time()} EnableTx, txEnabled:{txEnabled} processDecodeTimer.Enabled:{processDecodeTimer.Enabled}");
+                }
 
-                DebugOutput($"{Time()} EnableTx, txEnabled:{txEnabled} processDecodeTimer.Enabled:{processDecodeTimer.Enabled}");
                 txEnabled = true;
                 wsjtxTxEnableButton = true;
                 UpdateDblClkTip();
@@ -2928,7 +2941,14 @@ namespace WSJTX_Controller
 
             try
             {
-                if (emsg == null || udpClient2 == null)
+                // Same UDP-to-Direct parity fix as EnableTx() above -- mirrors HaltTx()'s
+                // existing _directConnected branch.
+                if (_directConnected)
+                {
+                    DirectSetTxEnabled(false);
+                    DebugOutput($"{Time()} DisableTx (direct)");
+                }
+                else if (emsg == null || udpClient2 == null)
                 {
                     DebugOutput($"{Time()} DisableTx skipped, udpClient2:{udpClient2} emsg:{emsg}");
                     return;

@@ -173,6 +173,8 @@ static class JimmyTests
         NotificationParkedEventTypesGuardTests();
         ClockSyncNotificationTests();
         ClockSyncDirectPathStateHygieneTests();
+        DirectTxHoldSafetyNetTests();
+        DirectPollFailureNotificationTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -4567,6 +4569,162 @@ static class JimmyTests
         PublishDt(1.20);
         Check("Mode switch clears stale samples: a boundary-acceptable FT4 reading is recognized as acceptable, not dragged over threshold by the prior mode's stale bad sample",
             delivery.AnnounceCount == beforeSwitch + 1, true);
+    }
+
+    // ── UDP-to-Direct parity pass, 2026-08-12: Tx-hold safety net ported to Direct mode ──
+    // The UDP path's ProcessTxEnd (WsjtxClient.cs) has always disabled Tx once too many
+    // consecutive Hold-mode transmit cycles pass with no reply (consecTxCount/
+    // maxConsecTxCount), then automatically re-enables it a couple of periods later
+    // (CheckNextXmit's ENABLED->ACTIVE->DISABLED progression). Direct mode had neither half at
+    // all before this pass -- a UDP-vs-Direct parity audit found the gap. Drives the real
+    // DirectApplyStatus/DirectApplyDecodes pipeline via TestApplyDirectSnapshot, same as the
+    // clock-sync tests above, rather than reaching into private state directly.
+    static void DirectTxHoldSafetyNetTests()
+    {
+        Console.WriteLine("\n── Direct-path Tx-hold safety net (consecTxCount/auto-freq-pause) ──");
+
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        ctrl.anyMsgRadioButton.Checked = true;
+        ctrl.replyDxCheckBox.Checked = true;
+        ctrl.replyLocalCheckBox.Checked = true;
+        // Both gates the real UDP-side consecTxCount block requires -- the safety net is
+        // deliberately Hold-mode-specific (see ProcessTxEnd's own comment on why an ordinary
+        // S&P reply must never count toward this).
+        ctrl.holdCheckBox.Checked = true;
+        ctrl.freqCheckBox.Checked = true;
+
+        const string myCall = "KB0UZT";
+        const string myGrid = "FN42";
+        ulong slot = 20000;
+
+        void ApplyTransmitting(bool transmitting)
+        {
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") + @", ""slot"": " + slot + @" },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
+        }
+
+        // Prime a real band resolution so DirectApplyStatus's one-time startup-band fallback
+        // doesn't fire mid-test and disturb anything (same dialMhz the clock-sync tests use).
+        ApplyTransmitting(false);
+        Check("Setup: auto-freq-pause starts disabled", wc.TestAutoFreqPauseDisabled, true);
+
+        // 11 full transmitting-cycles (true then false) -- one short of the 12-cycle trip --
+        // must NOT disable Tx yet.
+        for (int i = 0; i < 11; i++)
+        {
+            ApplyTransmitting(true);
+            ApplyTransmitting(false);
+        }
+        Check("11 consecutive Hold-mode Tx cycles with no reply -> not yet tripped",
+            wc.TestAutoFreqPauseDisabled, true);
+        Check("...consecTxCount reads 11", wc.TestConsecTxCount == 11, true);
+
+        // The 12th cycle trips it.
+        ApplyTransmitting(true);
+        ApplyTransmitting(false);
+        Check("12th consecutive Hold-mode Tx cycle -> auto-freq-pause trips (Tx disabled)",
+            !wc.TestAutoFreqPauseDisabled, true);
+
+        // Any decode heard FROM the calling station resets consecTxCount before it ever gets
+        // this far in real operation (ProcessDecodeMsg, WsjtxClient.cs) -- not re-tested here,
+        // that reset is shared/transport-agnostic code already exercised elsewhere; this test
+        // is specifically about the counting/trip/recovery mechanism itself.
+
+        // Recovery: the next new-slot boundary (DirectApplyDecodes) must move ENABLED -> ACTIVE,
+        // not straight back to DISABLED -- mirrors CheckNextXmit's own two-step progression.
+        slot++;
+        ApplyTransmitting(false);
+        Check("One period after tripping -> auto-freq-pause is ACTIVE, not yet cleared",
+            !wc.TestAutoFreqPauseDisabled, true);
+
+        // The period after THAT clears it and resets every counter (DisableAutoFreqPause()).
+        slot++;
+        ApplyTransmitting(false);
+        Check("Two periods after tripping -> auto-freq-pause clears (Tx protection lifted)",
+            wc.TestAutoFreqPauseDisabled, true);
+        Check("...consecTxCount reset to 0", wc.TestConsecTxCount == 0, true);
+
+        // Turning Hold off (or the freq-pause checkbox off) must mean ordinary transmit cycles
+        // never count at all -- matches the UDP path's own "else consecTxCount = 0" branch.
+        ctrl.holdCheckBox.Checked = false;
+        for (int i = 0; i < 20; i++)
+        {
+            slot++;
+            ApplyTransmitting(true);
+            ApplyTransmitting(false);
+        }
+        Check("Hold mode off -> ordinary Tx cycles never count toward the safety net",
+            wc.TestConsecTxCount == 0 && wc.TestAutoFreqPauseDisabled, true);
+    }
+
+    // ── UDP-to-Direct parity pass, 2026-08-12: connection-loss signal for a hung control port ──
+    // The UDP path announces "WSJT-X disconnected" (HeartbeatNotRecd, WsjtxClient.Protocol.cs)
+    // once its heartbeat watchdog times out. DirectPollTick's own failure branch used to only
+    // log to DebugOutput -- a hung-but-still-running engine control port produced no
+    // user-facing signal at all under Direct mode. This exercises the new
+    // DirectHandlePollFailure threshold/announce-once logic directly (via its test hook, since
+    // driving the real network-facing DirectPollTick would require an actual engine process).
+    static void DirectPollFailureNotificationTests()
+    {
+        Console.WriteLine("\n── Direct-path poll-failure connection-loss notification ──");
+
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+        var settings = new NotificationSettings();
+        settings.Policies[NotificationEventType.ConnectionLost].RepeatSeconds = 0;
+        var delivery = new FakeNotificationDelivery();
+        wc.Notify = new NotificationCenter(settings, delivery);
+
+        var savedNegoState = WsjtxMessage.NegoState;
+        try
+        {
+            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+            wc.TestSetDirectConnected(true);
+
+            wc.TestDirectHandlePollFailure();
+            wc.TestDirectHandlePollFailure();
+            Check("Two consecutive poll failures (below the 3-failure threshold) -> no announcement yet",
+                delivery.AnnounceCount == 0, true);
+
+            wc.TestDirectHandlePollFailure();
+            Check("Third consecutive poll failure -> ConnectionLost announced",
+                delivery.AnnounceCount == 1, true);
+            Check("...NegoState reset to WAIT so a later reconnect is detected as fresh",
+                WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT, true);
+
+            // Once already announced this loss episode, further failures must not repeat it.
+            wc.TestDirectHandlePollFailure();
+            wc.TestDirectHandlePollFailure();
+            Check("Further failures in the same loss episode do not re-announce",
+                delivery.AnnounceCount == 1, true);
+
+            // Disconnected entirely (e.g. operator switched transports) -> must never announce,
+            // and the early-return guard means the failure count itself must not move either.
+            int countBeforeDisconnect = wc.TestDirectConsecutivePollFailures;
+            wc.TestSetDirectConnected(false);
+            wc.TestDirectHandlePollFailure();
+            Check("Not connected at all -> poll failure handling is a no-op",
+                delivery.AnnounceCount == 1 && wc.TestDirectConsecutivePollFailures == countBeforeDisconnect, true);
+        }
+        finally
+        {
+            WsjtxMessage.NegoState = savedNegoState;
+        }
     }
 
     // ── Controller.FindPreservedSelectionIndex: list-selection identity tracking ──

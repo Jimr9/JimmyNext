@@ -18,11 +18,12 @@ namespace WSJTX_Controller
     // handshake from the picture entirely: connect, ask for a snapshot, get one back. No
     // Heartbeat, no NegoState machine, nothing to race.
     //
-    // Deliberately additive, not a replacement: WsjtxClient's existing UDP path
-    // (ConnectNativeEngine / WsjtxClient.Protocol.cs) is untouched and still the default
-    // (NativeEngineSettings.UseDirectEngine defaults to false) until this has had real live
-    // testing -- most importantly real TX/PTT, which nothing in the session that built this
-    // exercised (see that field's own comment for why).
+    // UDP-to-Direct parity pass, 2026-08-12: this is now the sole production transport --
+    // Controller.ApplyEngineMode() uses it unconditionally outside TestModeGuard.IsTestMode.
+    // WsjtxClient's UDP path (ConnectNativeEngine / WsjtxClient.Protocol.cs) still exists, kept
+    // alive specifically so JimmyReplay.py's replay-test suite (which only speaks the standard
+    // WSJT-X UDP protocol) keeps working, but is no longer reachable from any live operator
+    // session.
     //
     // Maximum reuse by design: every decode/status arriving here gets turned into the exact same
     // DecodeMessage/StatusMessage objects the UDP path already builds from wire bytes, then fed
@@ -53,6 +54,18 @@ namespace WSJTX_Controller
         // _directSeenDecodeSignatures below already dedupes for free.
         private const int DirectPollIntervalMs = 1000;
 
+        // UDP-to-Direct parity pass, 2026-08-12: the UDP path announces "WSJT-X disconnected"
+        // (Notify.Publish(ConnectionLostEvent) + a sound cue) via HeartbeatNotRecd once its own
+        // heartbeat watchdog times out. DirectPollTick's failure branch below used to only log
+        // to DebugOutput -- a hung-but-still-running control port produced no user-facing signal
+        // at all under Direct mode. Threshold of 3 consecutive failed polls (~3s at the default
+        // 1s poll interval) rather than announcing on the very first miss, so one transient
+        // hiccup doesn't false-positive; _directLossAnnounced makes sure this fires once per
+        // loss episode, not on every failed poll after the threshold.
+        private const int DirectPollFailureThreshold = 3;
+        private int _directConsecutivePollFailures;
+        private bool _directLossAnnounced;
+
         // Starts polling the engine host's control port directly. Call once the engine host
         // process is known to be starting (mirrors ConnectNativeEngine's role in the UDP path,
         // but there is no socket to "open" here -- every request is its own short-lived TCP
@@ -73,7 +86,16 @@ namespace WSJTX_Controller
             _directLastSlotSeen = 0;
             _directFirstStatusShown = false;
             _directStartupBandResolved = false;
+            _directConsecutivePollFailures = 0;
+            _directLossAnnounced = false;
             _directConnected = true;
+            // UDP-to-Direct parity pass, 2026-08-12: a stale bandIdx/lastDialFrequency surviving
+            // from a PRIOR connection could make _directStartupBandResolved's own "band still
+            // unknown, pick a fallback and retune" check above see a non-null bandIdx and skip
+            // itself, even though nothing in this new connection has actually confirmed a real
+            // band yet. Same "fresh connection = clean slate" reasoning as timeOffsets below.
+            bandIdx = null;
+            lastDialFrequency = null;
             // Found in the Direct-engine-path review, 2026-08-12: a reconnect (operator
             // relaunch, or the engine auto-restarting after a crash -- see DirectPollTick's own
             // comment) left stale pre-disconnect DT samples sitting in timeOffsets, which the
@@ -118,7 +140,11 @@ namespace WSJTX_Controller
             try
             {
                 string json = DirectSendCommand("SNAPSHOT");
-                if (json == null || json.Length == 0 || json.StartsWith("ERR")) return;
+                if (json == null || json.Length == 0 || json.StartsWith("ERR"))
+                {
+                    DirectHandlePollFailure();
+                    return;
+                }
                 snap = JsonSerializer.Deserialize<DirectSnapshot>(json, DirectJsonOptions);
             }
             catch (Exception ex)
@@ -127,9 +153,18 @@ namespace WSJTX_Controller
                 // the engine host restarting (auto-restart on crash) just means the next
                 // poll's connection attempt fails until it's back up, not a fatal error here.
                 DebugOutput($"{Time()} [DIRECT] SNAPSHOT poll failed: {ex.Message}");
+                DirectHandlePollFailure();
                 return;
             }
-            if (snap == null) return;
+            if (snap == null)
+            {
+                DirectHandlePollFailure();
+                return;
+            }
+
+            // A real snapshot came back -- whatever failure streak was building is over.
+            _directConsecutivePollFailures = 0;
+            _directLossAnnounced = false;
 
             // First successful poll = "connected" as far as every OTHER piece of Jimmy's own
             // status/UI code is concerned -- most of it gates on NegoState, not on anything
@@ -149,6 +184,29 @@ namespace WSJTX_Controller
 
             DirectApplyStatus(snap);
             DirectApplyDecodes(snap);
+        }
+
+        // Companion to the failure-tracking fields declared above -- see their own comment.
+        // Only actually announces once the failure streak crosses the threshold, and only once
+        // per streak (guarded by _directLossAnnounced), matching the UDP path's own
+        // HeartbeatNotRecd -- ResetNego()+CloseAllUdp() aren't called here since Direct mode has
+        // no persistent socket of its own to reset; NegoState is set back to WAIT so
+        // DirectPollTick's own "first snapshot received" promotion logic naturally re-fires
+        // (and re-announces via existing status machinery) once polling recovers.
+        private void DirectHandlePollFailure()
+        {
+            if (!_directConnected) return;
+            _directConsecutivePollFailures++;
+            if (_directLossAnnounced || _directConsecutivePollFailures < DirectPollFailureThreshold) return;
+
+            _directLossAnnounced = true;
+            DebugOutput($"{Time()} [DIRECT] {_directConsecutivePollFailures} consecutive SNAPSHOT poll failures -- treating as disconnected");
+            if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.RECD)
+            {
+                Notify.Publish(new ConnectionLostEvent());
+                Sounds.PlaySoundEvent(ctrl.soundEnabled_Disconnected, ctrl.soundFile_Disconnected);
+            }
+            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.WAIT;
         }
 
         private void DirectApplyStatus(DirectSnapshot snap)
@@ -204,9 +262,9 @@ namespace WSJTX_Controller
             // timing via processDecodeTimer/postDecodeTimer, TX start/end state machine,
             // dxCall/txMsg tracking editable only from a real WSJT-X UI) is either meaningless
             // here -- direct mode gets decodes straight from snap.RecentDecodes every poll, it
-            // never needs to infer decode timing from a toggling flag -- or TX-adjacent
-            // behavior this path hasn't been live-tested against yet (see
-            // NativeEngineSettings.UseDirectEngine's own comment).
+            // never needs to infer decode timing from a toggling flag -- or TX/QSO-completion
+            // tracking, which this method handles its own way below (see the curTxMsg/txMsg
+            // block's own comment).
             ulong newDialFrequency = smsg.DialFrequency;
             if (lastDialFrequency != null &&
                 Math.Abs((float)lastDialFrequency - (float)newDialFrequency) > freqChangeThreshold &&
@@ -285,6 +343,39 @@ namespace WSJTX_Controller
             // actual change), matching the UDP path's ProcessTxStart/ProcessTxEnd exactly. See
             // NotificationCenter.OnTransmittingChanged's own comment.
             if (transmittingChanged) Notify?.OnTransmittingChanged(transmitting);
+
+            // UDP-to-Direct parity pass, 2026-08-12: port the Tx-hold safety net (the UDP path's
+            // ProcessTxEnd, WsjtxClient.cs -- "too many consecutive transmits without being
+            // heard, in Hold mode" -- consecTxCount/maxConsecTxCount) so it protects Direct-mode
+            // operators too, not just UDP ones. Direct mode had NO equivalent at all before this
+            // -- confirmed by a full UDP-vs-Direct parity audit.
+            //
+            // Deliberately triggered on the same physical transmitting-just-ended edge the UDP
+            // path's ProcessTxEnd reacts to, NOT on the QSO-completion (Is73orRR73) point a few
+            // lines below in this method -- consecTxCount exists specifically to catch a station
+            // that's NEVER replying, so by definition it must count every completed Tx cycle,
+            // not just ones that reach a 73/RR73. Content-independent (doesn't consult txMsg at
+            // all), so it doesn't hit the Qso.TxNow-goes-null-early staleness problem documented
+            // on curTxMsg's own assignment above -- only the fact that a transmission just ended
+            // matters here, not what it said.
+            if (wasTransmitting && !transmitting)
+            {
+                if (ctrl.freqCheckBox.Checked && autoFreqPauseMode == autoFreqPauseModes.DISABLED && ctrl.holdCheckBox.Checked)
+                {
+                    consecTxCount++;
+                    if (consecTxCount >= maxConsecTxCount)
+                    {
+                        DisableTx(true);
+                        autoFreqPauseMode = autoFreqPauseModes.ENABLED;
+                        UpdateCallInProg();
+                        DebugOutput($"{Time()} [DIRECT] auto freq update started (consec Tx), autoFreqPauseMode:{autoFreqPauseMode}");
+                    }
+                }
+                else
+                {
+                    consecTxCount = 0;
+                }
+            }
 
             // Queue-age expiry (TrimCallQueue) and the retry-limit/discard-give-up counter used
             // to live here, gated on "transmitting just started" -- moved to DirectApplyDecodes'
@@ -433,6 +524,32 @@ namespace WSJTX_Controller
                     DebugOutput($"{spacer}[DIRECT] TrimCallQueue: expired calls removed{nl}{_callQueueStore.CallQueueString()}");
                 if (discardCall != null && discardCall == callInProg && ++discardCallCycleCount >= maxDiscardCount)
                     DiscardCall();
+
+                // UDP-to-Direct parity pass, 2026-08-12: the recovery half of the Tx-hold safety
+                // net ported into DirectApplyStatus above -- without this, autoFreqPauseMode
+                // could be set to ENABLED (by that block, once consecTxCount trips) but would
+                // then get stuck there forever under Direct mode, since the ENABLED->ACTIVE-
+                // >DISABLED progression is normally driven by the UDP path's own CheckNextXmit()
+                // (WsjtxClient.cs), which nothing in Direct mode ever calls. That would leave Tx
+                // silently, permanently disabled with no automatic recovery -- worse than not
+                // having the safety net at all. Mirrors CheckNextXmit's own two-state
+                // progression exactly (same shared autoFreqPauseMode/consecTxCount/
+                // consecCqCount/consecTimeoutCount fields, same DisableAutoFreqPause()/EnableTx()
+                // shared methods -- EnableTx() is transport-aware as of this same pass), driven
+                // from this method's own already-correct per-period boundary rather than
+                // UDP-only decode-cycle timing.
+                if (autoFreqPauseMode == autoFreqPauseModes.ENABLED)
+                {
+                    autoFreqPauseMode = autoFreqPauseModes.ACTIVE;
+                    UpdateCallInProg();
+                    DebugOutput($"{Time()} [DIRECT] auto freq update continue");
+                }
+                else if (autoFreqPauseMode == autoFreqPauseModes.ACTIVE)
+                {
+                    DisableAutoFreqPause();
+                    if (txMode == TxModes.CALL_CQ || callInProg != null) EnableTx();
+                    DebugOutput($"{Time()} [DIRECT] auto freq update end");
+                }
             }
 
             foreach (var row in snap.RecentDecodes)
@@ -644,6 +761,16 @@ namespace WSJTX_Controller
         // process this test harness deliberately never starts. This lets the clock-sync
         // notification's own FT4 test exercise a real "FT4" Mode token without one.
         internal void TestSetMode(string m) => mode = m;
+
+        // Test-only hooks for the UDP-to-Direct Tx-hold safety-net/connection-loss parity pass,
+        // 2026-08-12 -- same InternalsVisibleTo pattern as the hooks above. autoFreqPauseMode/
+        // consecTxCount/_directConnected/_directConsecutivePollFailures are all private; these
+        // let JimmyTests observe/drive them without exposing them as production API surface.
+        internal bool TestAutoFreqPauseDisabled => autoFreqPauseMode == autoFreqPauseModes.DISABLED;
+        internal int TestConsecTxCount => consecTxCount;
+        internal void TestSetDirectConnected(bool connected) => _directConnected = connected;
+        internal void TestDirectHandlePollFailure() => DirectHandlePollFailure();
+        internal int TestDirectConsecutivePollFailures => _directConsecutivePollFailures;
     }
 
     // JSON shapes matching AppSnapshot/RadioStatus/DecodeRow's own camelCase serde output
