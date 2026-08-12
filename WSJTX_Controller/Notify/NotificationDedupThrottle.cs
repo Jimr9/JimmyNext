@@ -25,6 +25,17 @@ namespace WSJTX_Controller
         private readonly Dictionary<NotificationEventType, DateTime> _lastByType
             = new Dictionary<NotificationEventType, DateTime>();
 
+        // (EventType, DedupKey) -> last actually-DELIVERED formatted text. Backs
+        // NotificationPolicy.SuppressUnchanged -- a content check, deliberately independent of
+        // _lastByIdentity's time-based one above (RepeatSeconds=0 with SuppressUnchanged=true
+        // means "never repeat the exact same words, but say it again the instant it changes").
+        // Checked separately from ShouldAnnounce/RecordFired below: the formatted text doesn't
+        // exist yet at that point in NotificationCenter.Publish (dedup/throttle run BEFORE
+        // NotificationTemplateEngine.Format, deliberately, so a suppressed event never pays for
+        // formatting it would never speak) -- see IsUnchanged/RecordText.
+        private readonly Dictionary<(NotificationEventType, string), string> _lastTextByIdentity
+            = new Dictionary<(NotificationEventType, string), string>();
+
         public bool ShouldAnnounce(NotificationEventType type, string dedupKey, NotificationPolicy policy)
         {
             DateTime now = DateTime.UtcNow;
@@ -51,5 +62,15 @@ namespace WSJTX_Controller
             _lastByIdentity[(type, dedupKey ?? "")] = now;
             _lastByType[type] = now;
         }
+
+        // True when formattedText is byte-identical to the last text actually delivered for
+        // this identity -- only meaningful (and only ever called) when
+        // NotificationPolicy.SuppressUnchanged is true. A brand-new identity (nothing recorded
+        // yet) is never "unchanged".
+        public bool IsUnchanged(NotificationEventType type, string dedupKey, string formattedText) =>
+            _lastTextByIdentity.TryGetValue((type, dedupKey ?? ""), out string last) && last == formattedText;
+
+        public void RecordText(NotificationEventType type, string dedupKey, string formattedText) =>
+            _lastTextByIdentity[(type, dedupKey ?? "")] = formattedText;
     }
 }

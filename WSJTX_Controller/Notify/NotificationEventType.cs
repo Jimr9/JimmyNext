@@ -13,5 +13,7 @@ namespace WSJTX_Controller
         ConnectionClosed,
         ConnectionLost,
         ErrorWarning,
+        ClockOutOfSync,
+        ClockSynced,
     }
 }

@@ -19,7 +19,9 @@ namespace WSJTX_Controller
         public static readonly Dictionary<NotificationEventType, NotificationPolicy> Policies =
             new Dictionary<NotificationEventType, NotificationPolicy>
         {
-            // Wave 2 (not yet wired to a call site).
+            // Wave 2 (not yet wired to a call site). DeferWhileTransmitting=true: this fires
+            // right as an over starts, so without deferring it would announce mid-Tx every
+            // single time -- see NotificationPolicy.DeferWhileTransmitting's own comment.
             [NotificationEventType.QsoStarted] = new NotificationPolicy
             {
                 Enabled = true,
@@ -27,6 +29,8 @@ namespace WSJTX_Controller
                 RepeatSeconds = 5,
                 ThrottleMilliseconds = 0,
                 Template = "Working {Callsign}",
+                Timing = NotificationTiming.Immediate,
+                DeferWhileTransmitting = true,
             },
 
             // Wave 1. Matches WsjtxClient.cs's RequestLog: ShowMessage($"Logged QSO with
@@ -47,13 +51,18 @@ namespace WSJTX_Controller
                 Priority = NotificationPriority.Normal,
                 RepeatSeconds = 0,
                 ThrottleMilliseconds = 0,
-                Template = "{Summary}",
+                Template = "Sending {Message}",
             },
 
             // Wave 2 (not yet wired to a call site). RepeatSeconds/ThrottleMilliseconds
             // deliberately independent of AwardTagger's own 30s sound cooldown
             // (WsjtxClient.AwardAlertCooldownSecs) -- see Awards/AwardTagger.cs's
-            // CheckAwardAlert call site comment once wired.
+            // CheckAwardAlert call site comment once wired. Timing=NextPeriodBoundary +
+            // DeferWhileTransmitting=true: this is exactly the "batch, don't interrupt" case --
+            // ShowStatus()'s own existing routine "needed" summary already proves this is the
+            // right cadence for award info (see the notification-consolidation history in
+            // WsjtxClient.Display.cs), so a future wiring of this event should behave the same
+            // way, not compete with it.
             [NotificationEventType.AwardsNeeded] = new NotificationPolicy
             {
                 Enabled = true,
@@ -61,6 +70,8 @@ namespace WSJTX_Controller
                 RepeatSeconds = 60,
                 ThrottleMilliseconds = 3000,
                 Template = "{Callsign}, {AwardSummary}",
+                Timing = NotificationTiming.NextPeriodBoundary,
+                DeferWhileTransmitting = true,
             },
 
             // Wave 1. Matches WsjtxClient.Protocol.cs:54: ShowMessage("WSJT-X closed", true).
@@ -105,6 +116,55 @@ namespace WSJTX_Controller
                 ThrottleMilliseconds = 0,
                 Template = "{Source}: {Detail}",
             },
+
+            // Added 2026-08-12: reuses WsjtxClient.BandAudio.cs's existing timeOffset/
+            // maxTimeOffset (already governed the pre-existing ShowStatus() "check clock time"
+            // text) -- see CalcAvgTimeOffset's own comment for the transition-gate that keeps
+            // this from firing every period while the clock stays bad. Immediate/Important:
+            // operationally significant (a bad clock silently costs missed decodes/QSOs on
+            // BOTH FT8 and FT4), matching every other Important type's own precedent of not
+            // deferring for something worth interrupting for. RepeatSeconds=60 is a flap-guard
+            // backstop, not the primary anti-chatter mechanism (that's the transition gate
+            // itself) -- see ClockOutOfSyncEvent's own comment.
+            [NotificationEventType.ClockOutOfSync] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Important,
+                RepeatSeconds = 60,
+                ThrottleMilliseconds = 0,
+                Template = "Computer clock is out of sync, offset {ClockOffset} seconds.",
+                Timing = NotificationTiming.Immediate,
+                DeferWhileTransmitting = false,
+            },
+
+            // Companion recovery notice -- independently enable/disable-able (the operator
+            // requirement: "optionally publish"), off the SAME transition gate.
+            [NotificationEventType.ClockSynced] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                RepeatSeconds = 60,
+                ThrottleMilliseconds = 0,
+                Template = "Computer clock timing is back within range.",
+                Timing = NotificationTiming.Immediate,
+                DeferWhileTransmitting = false,
+            },
+        };
+
+        // Human-readable name shown in the configurable-notifications UI's first list --
+        // mirrors HotkeyConfig.DisplayNames' exact role/shape for the Hotkeys panel.
+        public static readonly Dictionary<NotificationEventType, string> DisplayNames =
+            new Dictionary<NotificationEventType, string>
+        {
+            [NotificationEventType.QsoStarted] = "Starting a QSO",
+            [NotificationEventType.QsoCompleted] = "QSO logged",
+            [NotificationEventType.TxMessageChanged] = "Transmit message changed",
+            [NotificationEventType.AwardsNeeded] = "Award needed",
+            [NotificationEventType.ConnectionClosed] = "WSJT-X closed",
+            [NotificationEventType.ConnectionLost] = "WSJT-X disconnected",
+            [NotificationEventType.ErrorWarning] = "Error or warning",
+            [NotificationEventType.ClockOutOfSync] = "Computer clock out of sync",
+            [NotificationEventType.ClockSynced] = "Computer clock back in sync",
         };
     }
 }

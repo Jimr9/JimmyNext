@@ -210,6 +210,7 @@ namespace WSJTX_Controller
             BuildDecodeEngineTab();
             BuildDecodeTab();
             BuildFrequenciesTab();
+            BuildNotificationsTab();
             BuildSoundsTab();
             BuildLogbookSyncTab();
             BuildLookupDataTab();
@@ -222,7 +223,7 @@ namespace WSJTX_Controller
             WireCategoryList(_categoryListBox, _categoryDetailHost, new List<Control> {
                 basicPanel, generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
                 advUiPanel, wantedCallsPanel, spotWatchPanel, soundsPanel, radioPanel,
-                decodeEnginePanel, decodePanel, frequenciesPanel, logbookSyncPanel, lookupPanel,
+                decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
                 appearancePanel
             });
 
@@ -374,6 +375,7 @@ namespace WSJTX_Controller
             SaveRadioTab();
             SaveDecodeTab();
             SaveFrequenciesTab();
+            SaveNotificationsTab();
             SaveSoundsTab();
             SaveLookupTab();
             SaveAppearanceTab();
@@ -905,8 +907,51 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox _decodeApCqOnlyCheckBox;
         private System.Windows.Forms.CheckBox _decodeSingleDecodeCheckBox;
 
-        private System.Windows.Forms.NumericUpDown[] _freqFt8UpDowns;
-        private System.Windows.Forms.NumericUpDown[] _freqFt4UpDowns;
+        // Working copy, cloned from ctrl.Frequencies.Bands when the dialog opens, mutated freely
+        // by Add/Remove/edit within this session, only committed back in SaveFrequenciesTab (OK
+        // button) -- Cancel just discards this instance, same pending-until-OK shape as the
+        // Hotkeys panel's own _pendingKeys.
+        private List<FrequencyEntry>[] _pendingFreqBands;
+        private System.Windows.Forms.ListBox _freqListBox;
+        private List<FrequencyEntry> _freqListBoxEntries;      // parallel to _freqListBox.Items
+        private List<int> _freqListBoxBandIdx;                 // parallel to _freqListBox.Items -- which band each row belongs to
+        private System.Windows.Forms.NumericUpDown _freqValueUpDown;
+        private HotkeyCaptureBox _freqHotkeyCaptureBox;
+        private System.Windows.Forms.Button _freqClearHotkeyButton;
+        private System.Windows.Forms.Button _freqAddButton;
+        private System.Windows.Forms.Button _freqRemoveButton;
+        // Re-entrancy guard: true while code (not the operator) is setting field values to
+        // reflect a newly-selected list entry -- keeps those programmatic updates from being
+        // mistaken for edits and written back into the entry that's only just been read FROM.
+        private bool _freqUpdatingFields;
+
+        // ===== NOTIFICATIONS TAB fields =====
+        // Working copy, cloned from ctrl.Notifications.Policies when the dialog opens -- same
+        // pending-until-OK shape as every other tab here (Hotkeys' _pendingKeys, Frequencies'
+        // _pendingFreqBands). The template STRING is the only thing persisted per type; the
+        // variable checklist and its order are always re-derived FROM that string (via
+        // NotificationTemplateEngine.ParseComponents), never stored separately -- see
+        // RefreshNotifyVarsList's own comment.
+        private Dictionary<NotificationEventType, NotificationPolicy> _pendingNotifyPolicies;
+        private List<NotificationEventType> _notifyTypeOrder;
+        private System.Windows.Forms.CheckedListBox _notifyTypesListBox;
+        private System.Windows.Forms.CheckedListBox _notifyVarsListBox;
+        private List<NotificationVariable> _notifyVarsListEntries;   // parallel to _notifyVarsListBox.Items
+        private System.Windows.Forms.Button _notifyVarMoveUpButton;
+        private System.Windows.Forms.Button _notifyVarMoveDownButton;
+        private System.Windows.Forms.TextBox _notifyTemplateTextBox;
+        private System.Windows.Forms.RadioButton _notifyTimingImmediateRadio;
+        private System.Windows.Forms.RadioButton _notifyTimingDeferredRadio;
+        private System.Windows.Forms.CheckBox _notifyDeferWhileTxCheckBox;
+        private System.Windows.Forms.NumericUpDown _notifyRepeatSecondsUpDown;
+        private System.Windows.Forms.NumericUpDown _notifyThrottleMsUpDown;
+        private System.Windows.Forms.CheckBox _notifySuppressUnchangedCheckBox;
+        private System.Windows.Forms.ComboBox _notifyPriorityComboBox;
+        private AnnouncingLabel _notifyValidationLabel;
+        // Re-entrancy guard, same role as _freqUpdatingFields above: true while code is
+        // populating fields from a newly-selected type/re-synced template, so those
+        // programmatic changes never get mistaken for operator edits.
+        private bool _notifyUpdatingFields;
 
         private void BuildRadioTab()
         {
@@ -1973,20 +2018,21 @@ namespace WSJTX_Controller
                 _decodeApCqOnlyCheckBox.Enabled = _decodeApDecodeCheckBox?.Checked ?? false;
         }
 
-        // Per-band FT8/FT4 calling-frequency overrides -- WSJT-X's own Settings ▸ Frequencies,
-        // for Jimmy's own Band Up/Down/band-hotkey model (one canonical frequency per band, via
-        // bandToFreq() in WsjtxClient.BandAudio.cs). Setting a field back to its own default
-        // value removes the override (SaveFrequenciesTab treats "equals default" as "no
-        // override" -- no separate remove control needed); "Restore all to defaults" does the
-        // same for every band at once.
+        // Options > Frequencies panel, rebuilt 2026-08-12 (and again same day per live
+        // feedback -- "make it more like the Hotkeys panel, this doesn't navigate well"): ONE
+        // flat list, same shape as BuildHotkeysTab/BuildActionList below -- every band's entries
+        // in a single ListBox (group name folded into each band's first item, exactly like
+        // "General Commands: Options"), a small fixed set of edit fields to the right that
+        // always reflect whichever row is selected, no separate band/mode picker to navigate
+        // through first. Replaces the old fixed one-NumericUpDown-per-band-per-mode grid (22
+        // always-visible fields) and the old fixed per-band hotkeys (HotkeyAction.Band160m..
+        // Band6m, removed entirely -- not worth carrying forward, all defaulted to Keys.None).
         private void BuildFrequenciesTab()
         {
             frequenciesPanel.Controls.Clear();
 
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
-            int y = 8;
-            const int left = 8;
-            const int w = 640;
+            int tabIdx = 0;
 
             var instrBox = new System.Windows.Forms.TextBox
             {
@@ -1995,131 +2041,934 @@ namespace WSJTX_Controller
                 BorderStyle = System.Windows.Forms.BorderStyle.None,
                 BackColor = frequenciesPanel.BackColor,
                 ForeColor = System.Drawing.SystemColors.ControlText,
-                Location = new System.Drawing.Point(left, y),
-                Size = new System.Drawing.Size(w, 32),
-                Text = "Calling frequency in kHz, per band -- what Band Up/Down and the band hotkeys tune to. " +
-                       "Set a value back to its default to remove the override.",
+                Location = new System.Drawing.Point(8, 8),
+                Size = new System.Drawing.Size(640, 34),
+                Text = "Choose a frequency, then tab to the field you want to change, or the shortcut field to assign a hotkey.",
                 TabStop = false,
-                AccessibleName = "Frequencies instructions",
+                AccessibleName = "Frequencies usage instructions",
                 Font = font,
             };
             frequenciesPanel.Controls.Add(instrBox);
-            y += 36;
 
-            var ft8HeaderLabel = new System.Windows.Forms.Label
+            // Deep-clone into a working copy -- Add/Remove/edit below only ever touch this;
+            // SaveFrequenciesTab (OK button only) is what commits it back to ctrl.Frequencies.
+            // Cancel just discards this OptionsDlg instance, same pending-until-OK shape the
+            // Hotkeys panel's own _pendingKeys already uses. Every band gets its built-in
+            // defaults materialized up front (not lazily per-band) since the whole list is
+            // always on screen at once now, not revealed one band at a time.
+            _pendingFreqBands = new List<FrequencyEntry>[ctrl.Frequencies.Bands.Length];
+            for (int i = 0; i < _pendingFreqBands.Length; i++)
             {
-                Text = "FT8",
-                AccessibleName = "FT8 column header",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left + 70, y),
-                Font = font,
-                TabStop = false,
-            };
-            frequenciesPanel.Controls.Add(ft8HeaderLabel);
-
-            var ft4HeaderLabel = new System.Windows.Forms.Label
-            {
-                Text = "FT4",
-                AccessibleName = "FT4 column header",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left + 170, y),
-                Font = font,
-                TabStop = false,
-            };
-            frequenciesPanel.Controls.Add(ft4HeaderLabel);
-            y += 20;
-
-            var bandsMeters = wsjtxClient.BandsMeters;
-            var defaults = wsjtxClient.FreqsDictDefaults;
-            _freqFt8UpDowns = new System.Windows.Forms.NumericUpDown[bandsMeters.Count];
-            _freqFt4UpDowns = new System.Windows.Forms.NumericUpDown[bandsMeters.Count];
-            int tabIdx = 0;
-
-            for (int i = 0; i < bandsMeters.Count; i++)
-            {
-                int band = bandsMeters[i];
-                var bandLabel = new System.Windows.Forms.Label
-                {
-                    Text = $"{band}m:",
-                    AccessibleName = $"{band} meter band label",
-                    AutoSize = true,
-                    Location = new System.Drawing.Point(left, y + 3),
-                    Font = font,
-                    TabStop = false,
-                };
-                frequenciesPanel.Controls.Add(bandLabel);
-
-                int ft8Default = defaults["FT8"][i];
-                int ft8Override = ctrl.Frequencies.Ft8OverrideKHz[i];
-                var ft8UpDown = new System.Windows.Forms.NumericUpDown
-                {
-                    Minimum = 1800,
-                    Maximum = 54000,
-                    Value = ft8Override > 0 ? ft8Override : ft8Default,
-                    Location = new System.Drawing.Point(left + 70, y),
-                    Size = new System.Drawing.Size(85, 21),
-                    TabIndex = tabIdx++,
-                    Font = font,
-                    AccessibleName = $"{band} meter FT8 frequency kHz",
-                    AccessibleDescription = $"FT8 calling frequency in kHz for the {band} meter band. Default {ft8Default}.",
-                };
-                frequenciesPanel.Controls.Add(ft8UpDown);
-                _freqFt8UpDowns[i] = ft8UpDown;
-
-                int ft4Default = defaults["FT4"][i];
-                int ft4Override = ctrl.Frequencies.Ft4OverrideKHz[i];
-                var ft4UpDown = new System.Windows.Forms.NumericUpDown
-                {
-                    Minimum = 1800,
-                    Maximum = 54000,
-                    Value = ft4Override > 0 ? ft4Override : ft4Default,
-                    Location = new System.Drawing.Point(left + 170, y),
-                    Size = new System.Drawing.Size(85, 21),
-                    TabIndex = tabIdx++,
-                    Font = font,
-                    AccessibleName = $"{band} meter FT4 frequency kHz",
-                    AccessibleDescription = $"FT4 calling frequency in kHz for the {band} meter band. Default {ft4Default}.",
-                };
-                frequenciesPanel.Controls.Add(ft4UpDown);
-                _freqFt4UpDowns[i] = ft4UpDown;
-
-                y += 24;
+                _pendingFreqBands[i] = new List<FrequencyEntry>();
+                foreach (var e in ctrl.Frequencies.Bands[i]) _pendingFreqBands[i].Add(e.Clone());
+                EnsureBandHasEntries(i);
+                _pendingFreqBands[i].Sort((a, b) => a.FreqKHz.CompareTo(b.FreqKHz));
             }
 
-            y += 8;
+            // Frequencies list box -- Tab stop 0, same position/size as the Hotkeys panel's own
+            // action list.
+            _freqListBox = new System.Windows.Forms.ListBox
+            {
+                Location = new System.Drawing.Point(8, 50),
+                Size = new System.Drawing.Size(330, 262),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Frequencies",
+                AccessibleDescription = "Every band's FT8 and FT4 calling frequencies. The first entry for each mode in a band is what Band Up/Down tunes to.",
+            };
+            BuildFreqList();
+            _freqListBox.SelectedIndexChanged += (s, e) => LoadSelectedFreqEntry();
+            frequenciesPanel.Controls.Add(_freqListBox);
+
+            frequenciesPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Frequency (kHz):",
+                Location = new System.Drawing.Point(356, 50),
+                Size = new System.Drawing.Size(140, 18),
+                Font = font,
+                TabStop = false,
+            });
+
+            // Tab stop 1 -- edits whichever entry is selected in the list.
+            _freqValueUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 1800,
+                Maximum = 54000,
+                Location = new System.Drawing.Point(356, 70),
+                Size = new System.Drawing.Size(100, 22),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Selected frequency kHz",
+                AccessibleDescription = "Frequency in kHz for the entry currently selected in the list.",
+            };
+            _freqValueUpDown.Leave += (s, e) => CommitFreqValue();
+            frequenciesPanel.Controls.Add(_freqValueUpDown);
+
+            frequenciesPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Hotkey:",
+                Location = new System.Drawing.Point(356, 100),
+                Size = new System.Drawing.Size(140, 18),
+                Font = font,
+                TabStop = false,
+            });
+
+            // Tab stop 2 -- one shared capture box, same idiom as the Hotkeys panel's own
+            // _sharedCaptureBox.
+            _freqHotkeyCaptureBox = new HotkeyCaptureBox
+            {
+                Location = new System.Drawing.Point(356, 120),
+                Size = new System.Drawing.Size(160, 22),
+                TabIndex = tabIdx++,
+                Font = font,
+                ReadOnly = true,
+                AccessibleName = "Selected entry hotkey",
+                AccessibleDescription = "Press a key combination to jump straight to this frequency, switching mode if needed. Empty means no hotkey.",
+            };
+            _freqHotkeyCaptureBox.KeyCaptured += (s, ev) => OnFreqKeyCaptured(ev.Keys);
+            frequenciesPanel.Controls.Add(_freqHotkeyCaptureBox);
+
+            _freqClearHotkeyButton = new System.Windows.Forms.Button
+            {
+                Text = "Clear",
+                Location = new System.Drawing.Point(522, 119),
+                Size = new System.Drawing.Size(55, 23),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Clear selected entry's hotkey",
+            };
+            _freqClearHotkeyButton.Click += (s, e) => OnFreqKeyCaptured(System.Windows.Forms.Keys.None);
+            frequenciesPanel.Controls.Add(_freqClearHotkeyButton);
+
+            _freqAddButton = new System.Windows.Forms.Button
+            {
+                Text = "Add",
+                Location = new System.Drawing.Point(356, 156),
+                Size = new System.Drawing.Size(80, 24),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Add frequency",
+                AccessibleDescription = "Adds a copy of the selected entry to the same band -- edit the Frequency field afterward to the new value.",
+            };
+            _freqAddButton.Click += FreqAddButton_Click;
+            frequenciesPanel.Controls.Add(_freqAddButton);
+
+            _freqRemoveButton = new System.Windows.Forms.Button
+            {
+                Text = "Remove",
+                Location = new System.Drawing.Point(446, 156),
+                Size = new System.Drawing.Size(80, 24),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Remove frequency",
+                AccessibleDescription = "Removes the selected entry. A band's last FT8 or last FT4 entry cannot be removed.",
+            };
+            _freqRemoveButton.Click += FreqRemoveButton_Click;
+            frequenciesPanel.Controls.Add(_freqRemoveButton);
+
             var restoreButton = new System.Windows.Forms.Button
             {
-                Text = "Restore all to defaults",
-                Location = new System.Drawing.Point(left, y),
-                Size = new System.Drawing.Size(160, 24),
+                Text = "Restore All to Defaults",
+                Location = new System.Drawing.Point(356, 192),
+                Size = new System.Drawing.Size(160, 27),
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Restore all frequencies to defaults",
-                AccessibleDescription = "Sets every band's FT8 and FT4 frequency back to Jimmy's built-in default, removing all overrides.",
+                AccessibleDescription = "Removes every custom frequency and hotkey on every band, back to Jimmy's single built-in calling frequency per band.",
             };
             restoreButton.Click += (s, e) =>
             {
-                for (int i = 0; i < bandsMeters.Count; i++)
+                for (int i = 0; i < _pendingFreqBands.Length; i++)
                 {
-                    _freqFt8UpDowns[i].Value = defaults["FT8"][i];
-                    _freqFt4UpDowns[i].Value = defaults["FT4"][i];
+                    _pendingFreqBands[i].Clear();
+                    EnsureBandHasEntries(i);
                 }
+                BuildFreqList();
             };
             frequenciesPanel.Controls.Add(restoreButton);
+
+            _freqListBox.SelectedIndex = 0;
+        }
+
+        // Every band+mode always has at least one real entry once this runs -- an operator who
+        // never customized a band sees its built-in default here rather than the panel needing
+        // separate "no entries yet" display logic anywhere else.
+        private void EnsureBandHasEntries(int bandIdx)
+        {
+            if (_pendingFreqBands[bandIdx].Count > 0) return;
+            var defaults = wsjtxClient.FreqsDictDefaults;
+            _pendingFreqBands[bandIdx].Add(new FrequencyEntry { Mode = "FT8", FreqKHz = defaults["FT8"][bandIdx] });
+            _pendingFreqBands[bandIdx].Add(new FrequencyEntry { Mode = "FT4", FreqKHz = defaults["FT4"][bandIdx] });
+        }
+
+        // Rebuilds the flat list from every band's _pendingFreqBands entries -- each band's
+        // first entry gets the band name folded into its own row text ("160 Meter Band: FT8 —
+        // 1,840 kHz"), every other entry in that band just indents, exactly the same grouping
+        // idiom BuildActionList uses for "General Commands:" / "Accessibility Navigation:".
+        private void BuildFreqList()
+        {
+            var bandsMeters = wsjtxClient.BandsMeters;
+            _freqListBox.Items.Clear();
+            _freqListBoxEntries = new List<FrequencyEntry>();
+            _freqListBoxBandIdx = new List<int>();
+            for (int b = 0; b < _pendingFreqBands.Length; b++)
+            {
+                var entries = _pendingFreqBands[b];
+                for (int i = 0; i < entries.Count; i++)
+                {
+                    var entry = entries[i];
+                    _freqListBoxEntries.Add(entry);
+                    _freqListBoxBandIdx.Add(b);
+                    string prefix = i == 0 ? $"{bandsMeters[b]} Meter Band: " : "  ";
+                    _freqListBox.Items.Add(prefix + FreqRowText(entry));
+                }
+            }
+            _freqListBox.SelectedIndex = _freqListBoxEntries.Count > 0 ? 0 : -1;
+            // Setting SelectedIndex above only fires SelectedIndexChanged on an actual change --
+            // harmless to also call this directly so the edit fields are never left stale.
+            LoadSelectedFreqEntry();
+        }
+
+        private static string FreqRowText(FrequencyEntry entry)
+        {
+            string hotkeyPart = entry.Hotkey != System.Windows.Forms.Keys.None
+                ? $" [{HotkeyConfig.FormatKeys(entry.Hotkey)}]" : "";
+            return $"{entry.Mode} — {entry.FreqKHz:N0} kHz{hotkeyPart}";
+        }
+
+        private void LoadSelectedFreqEntry()
+        {
+            bool hasSelection = _freqListBoxEntries != null
+                && _freqListBox.SelectedIndex >= 0 && _freqListBox.SelectedIndex < _freqListBoxEntries.Count;
+            _freqValueUpDown.Enabled = hasSelection;
+            _freqHotkeyCaptureBox.Enabled = hasSelection;
+            _freqClearHotkeyButton.Enabled = hasSelection;
+            _freqRemoveButton.Enabled = hasSelection;
+            if (!hasSelection) return;
+
+            var entry = _freqListBoxEntries[_freqListBox.SelectedIndex];
+            _freqUpdatingFields = true;
+            try
+            {
+                _freqValueUpDown.Value = Math.Max(_freqValueUpDown.Minimum, Math.Min(_freqValueUpDown.Maximum, entry.FreqKHz));
+                _freqHotkeyCaptureBox.SetValue(entry.Hotkey);
+            }
+            finally
+            {
+                _freqUpdatingFields = false;
+            }
+        }
+
+        private void CommitFreqValue()
+        {
+            if (_freqUpdatingFields || _freqListBox.SelectedIndex < 0) return;
+            var entry = _freqListBoxEntries[_freqListBox.SelectedIndex];
+            int newVal = (int)_freqValueUpDown.Value;
+            if (entry.FreqKHz == newVal) return;
+            int bandIdx = _freqListBoxBandIdx[_freqListBox.SelectedIndex];
+            entry.FreqKHz = newVal;
+            _pendingFreqBands[bandIdx].Sort((a, b) => a.FreqKHz.CompareTo(b.FreqKHz));
+            BuildFreqList();
+            int idx = _freqListBoxEntries.IndexOf(entry);
+            if (idx >= 0) _freqListBox.SelectedIndex = idx;
+        }
+
+        private void FreqAddButton_Click(object sender, EventArgs e)
+        {
+            if (_freqListBox.SelectedIndex < 0) return;
+            int bandIdx = _freqListBoxBandIdx[_freqListBox.SelectedIndex];
+            var selected = _freqListBoxEntries[_freqListBox.SelectedIndex];
+            var newEntry = new FrequencyEntry { Mode = selected.Mode, FreqKHz = selected.FreqKHz, Hotkey = Keys.None };
+            _pendingFreqBands[bandIdx].Add(newEntry);
+            _pendingFreqBands[bandIdx].Sort((a, b) => a.FreqKHz.CompareTo(b.FreqKHz));
+            BuildFreqList();
+            int idx = _freqListBoxEntries.IndexOf(newEntry);
+            if (idx >= 0) _freqListBox.SelectedIndex = idx;
+        }
+
+        private void FreqRemoveButton_Click(object sender, EventArgs e)
+        {
+            if (_freqListBox.SelectedIndex < 0) return;
+            int bandIdx = _freqListBoxBandIdx[_freqListBox.SelectedIndex];
+            var entry = _freqListBoxEntries[_freqListBox.SelectedIndex];
+            int othersOfMode = 0;
+            foreach (var other in _pendingFreqBands[bandIdx]) if (other != entry && other.Mode == entry.Mode) othersOfMode++;
+            if (othersOfMode == 0)
+            {
+                MessageBox.Show($"Can't remove the last {entry.Mode} entry on this band.",
+                    ctrl.friendlyName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            int removedIdx = _freqListBox.SelectedIndex;
+            _pendingFreqBands[bandIdx].Remove(entry);
+            BuildFreqList();
+            if (_freqListBoxEntries.Count > 0)
+                _freqListBox.SelectedIndex = Math.Min(removedIdx, _freqListBoxEntries.Count - 1);
+        }
+
+        // Mirrors OnKeyCaptured (Hotkeys panel) -- same reserved/valid checks, plus
+        // conflict-checking against both the pending Hotkeys-panel assignments and every other
+        // frequency entry across every band (a hotkey has to be globally unique regardless of
+        // which panel assigned it, not just unique within the current band).
+        private void OnFreqKeyCaptured(Keys keys)
+        {
+            if (_freqListBox.SelectedIndex < 0) return;
+            var entry = _freqListBoxEntries[_freqListBox.SelectedIndex];
+
+            if (keys != Keys.None)
+            {
+                string keyStr = HotkeyConfig.FormatKeys(keys);
+                if (HotkeyConfig.IsReserved(keys))
+                {
+                    MessageBox.Show($"{keyStr} is a reserved system shortcut and cannot be assigned.",
+                        ctrl.friendlyName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _freqHotkeyCaptureBox.SetValue(entry.Hotkey);
+                    return;
+                }
+                if (!HotkeyConfig.IsValid(keys))
+                {
+                    MessageBox.Show(
+                        $"{keyStr} is not a valid shortcut.\r\n\r\nUse a combination with Alt or Ctrl, or a function key (F1-F24).",
+                        ctrl.friendlyName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    _freqHotkeyCaptureBox.SetValue(entry.Hotkey);
+                    return;
+                }
+                if (_pendingKeys != null)
+                {
+                    foreach (var kv in _pendingKeys)
+                    {
+                        if (kv.Value != keys) continue;
+                        MessageBox.Show($"{keyStr} is already assigned to {HotkeyConfig.DisplayNames[kv.Key]}.",
+                            ctrl.friendlyName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        _freqHotkeyCaptureBox.SetValue(entry.Hotkey);
+                        return;
+                    }
+                }
+                foreach (var bandList in _pendingFreqBands)
+                {
+                    foreach (var other in bandList)
+                    {
+                        if (other == entry || other.Hotkey != keys) continue;
+                        MessageBox.Show($"{keyStr} is already assigned to another frequency entry.",
+                            ctrl.friendlyName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        _freqHotkeyCaptureBox.SetValue(entry.Hotkey);
+                        return;
+                    }
+                }
+            }
+
+            entry.Hotkey = keys;
+            BuildFreqList();
+            int idx = _freqListBoxEntries.IndexOf(entry);
+            if (idx >= 0) _freqListBox.SelectedIndex = idx;
         }
 
         private void SaveFrequenciesTab()
         {
-            if (_freqFt8UpDowns == null || _freqFt8UpDowns.Length == 0) return;
-
-            var defaults = wsjtxClient.FreqsDictDefaults;
-            for (int i = 0; i < _freqFt8UpDowns.Length; i++)
+            if (_pendingFreqBands == null) return;
+            for (int i = 0; i < _pendingFreqBands.Length; i++)
             {
-                int ft8Val = (int)_freqFt8UpDowns[i].Value;
-                ctrl.Frequencies.Ft8OverrideKHz[i] = ft8Val == defaults["FT8"][i] ? 0 : ft8Val;
-                int ft4Val = (int)_freqFt4UpDowns[i].Value;
-                ctrl.Frequencies.Ft4OverrideKHz[i] = ft4Val == defaults["FT4"][i] ? 0 : ft4Val;
+                ctrl.Frequencies.Bands[i].Clear();
+                ctrl.Frequencies.Bands[i].AddRange(_pendingFreqBands[i]);
             }
+        }
+
+        // ===== NOTIFICATIONS TAB =====
+        //
+        // Same overall shape as the Hotkeys/Frequencies panels: one flat list you arrow
+        // through (here, every configurable notification type, checked = enabled), a small
+        // fixed set of controls to the right/below that always reflect whichever type is
+        // currently selected. Two things are specific to this panel:
+        //
+        // 1. A SECOND list -- the variables applicable to the selected type, checked = present
+        //    in its template, with Move Up/Down to reorder. Checking/unchecking/reordering here
+        //    edits the Template text box live; typing directly into the Template box re-syncs
+        //    this list's checked state and order on the way out. The template STRING is always
+        //    the single source of truth (see NotificationVariableRegistry.Validate) -- this
+        //    list is a view onto it, never a second place the same information is stored.
+        //
+        // 2. An Advanced section (Timing/Defer-while-transmitting/Repeat/Throttle/Suppress-
+        //    unchanged/Priority) -- reachable by Tab for anyone who wants it, but a simple
+        //    operator only ever needs the first list's checkboxes and can leave everything
+        //    else at its default.
+        private void BuildNotificationsTab()
+        {
+            notificationsPanel.Controls.Clear();
+
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            int tabIdx = 0;
+
+            var instrBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true,
+                Multiline = true,
+                BorderStyle = System.Windows.Forms.BorderStyle.None,
+                BackColor = notificationsPanel.BackColor,
+                ForeColor = System.Drawing.SystemColors.ControlText,
+                Location = new System.Drawing.Point(8, 8),
+                Size = new System.Drawing.Size(660, 34),
+                Text = "Check a notification to enable it. Choose one to edit what it says and, further down, when and how it announces.",
+                TabStop = false,
+                AccessibleName = "Notifications usage instructions",
+                Font = font,
+            };
+            notificationsPanel.Controls.Add(instrBox);
+
+            // Deep-clone into a working copy -- every control below only ever touches this;
+            // SaveNotificationsTab (OK button only) commits it back to ctrl.Notifications.
+            // Cancel just discards this OptionsDlg instance.
+            _pendingNotifyPolicies = new Dictionary<NotificationEventType, NotificationPolicy>();
+            foreach (var kv in ctrl.Notifications.Policies) _pendingNotifyPolicies[kv.Key] = kv.Value.Clone();
+            // Stable, deliberate order (not Enum.GetValues' declaration order) -- groups the
+            // three currently-live types together, first, since they're the ones an operator is
+            // most likely to actually hear today; the four parked types follow. Both groups are
+            // fully configurable either way (see NotificationEvents.cs's own comment on why
+            // configurability and "is anything publishing this yet" are separate questions).
+            _notifyTypeOrder = new List<NotificationEventType>
+            {
+                NotificationEventType.ConnectionLost,
+                NotificationEventType.ConnectionClosed,
+                NotificationEventType.ErrorWarning,
+                NotificationEventType.ClockOutOfSync,
+                NotificationEventType.ClockSynced,
+                NotificationEventType.QsoStarted,
+                NotificationEventType.QsoCompleted,
+                NotificationEventType.TxMessageChanged,
+                NotificationEventType.AwardsNeeded,
+            };
+
+            _notifyTypesListBox = new System.Windows.Forms.CheckedListBox
+            {
+                Location = new System.Drawing.Point(8, 50),
+                Size = new System.Drawing.Size(230, 150),
+                TabIndex = tabIdx++,
+                Font = font,
+                CheckOnClick = true,
+                AccessibleName = "Notifications",
+                AccessibleDescription = "Every configurable notification. Check to enable.",
+            };
+            foreach (var type in _notifyTypeOrder)
+                _notifyTypesListBox.Items.Add(NotificationDefaults.DisplayNames[type], _pendingNotifyPolicies[type].Enabled);
+            _notifyTypesListBox.SelectedIndexChanged += (s, e) => LoadSelectedNotifyType();
+            _notifyTypesListBox.ItemCheck += (s, e) =>
+            {
+                // ItemCheck fires BEFORE the box's own state updates -- e.NewValue is
+                // authoritative for what it's about to become.
+                var type = _notifyTypeOrder[e.Index];
+                _pendingNotifyPolicies[type].Enabled = e.NewValue == System.Windows.Forms.CheckState.Checked;
+            };
+            notificationsPanel.Controls.Add(_notifyTypesListBox);
+
+            notificationsPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Variables for this notification (check to include):",
+                Location = new System.Drawing.Point(246, 50),
+                Size = new System.Drawing.Size(260, 18),
+                Font = font,
+                TabStop = false,
+            });
+
+            _notifyVarsListBox = new System.Windows.Forms.CheckedListBox
+            {
+                Location = new System.Drawing.Point(246, 68),
+                Size = new System.Drawing.Size(260, 132),
+                TabIndex = tabIdx++,
+                Font = font,
+                CheckOnClick = true,
+                AccessibleName = "Template variables",
+                AccessibleDescription = "Variables this notification can include. Check to add to the template, uncheck to remove. Order matches the template's own left-to-right order.",
+            };
+            _notifyVarsListBox.ItemCheck += (s, e) => NotifyVarCheckChanged(e);
+            notificationsPanel.Controls.Add(_notifyVarsListBox);
+
+            _notifyVarMoveUpButton = new System.Windows.Forms.Button
+            {
+                Text = "Move Up",
+                Location = new System.Drawing.Point(514, 68),
+                Size = new System.Drawing.Size(90, 24),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Move selected variable earlier in the template",
+            };
+            _notifyVarMoveUpButton.Click += (s, e) => MoveNotifyVar(-1);
+            notificationsPanel.Controls.Add(_notifyVarMoveUpButton);
+
+            _notifyVarMoveDownButton = new System.Windows.Forms.Button
+            {
+                Text = "Move Down",
+                Location = new System.Drawing.Point(514, 96),
+                Size = new System.Drawing.Size(90, 24),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Move selected variable later in the template",
+            };
+            _notifyVarMoveDownButton.Click += (s, e) => MoveNotifyVar(1);
+            notificationsPanel.Controls.Add(_notifyVarMoveDownButton);
+
+            notificationsPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Template:",
+                Location = new System.Drawing.Point(8, 210),
+                Size = new System.Drawing.Size(120, 18),
+                Font = font,
+                TabStop = false,
+            });
+
+            _notifyTemplateTextBox = new System.Windows.Forms.TextBox
+            {
+                Location = new System.Drawing.Point(8, 228),
+                Size = new System.Drawing.Size(596, 22),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Template text",
+                AccessibleDescription = "The exact wording spoken, including {Variable} placeholders and any literal text you type.",
+            };
+            _notifyTemplateTextBox.Leave += (s, e) => CommitNotifyTemplateText();
+            notificationsPanel.Controls.Add(_notifyTemplateTextBox);
+
+            _notifyValidationLabel = new AnnouncingLabel
+            {
+                Text = "",
+                Location = new System.Drawing.Point(8, 252),
+                Size = new System.Drawing.Size(660, 18),
+                Font = font,
+                ForeColor = System.Drawing.Color.Firebrick,
+                AccessibleName = "Template validation result",
+                TabStop = false,
+            };
+            notificationsPanel.Controls.Add(_notifyValidationLabel);
+
+            var advancedGroup = new System.Windows.Forms.GroupBox
+            {
+                Text = "Advanced (timing and repeat behavior)",
+                Location = new System.Drawing.Point(8, 278),
+                Size = new System.Drawing.Size(596, 168),
+                Font = font,
+            };
+            notificationsPanel.Controls.Add(advancedGroup);
+
+            var whenLabel = new System.Windows.Forms.Label
+            {
+                Text = "When to announce it:",
+                Location = new System.Drawing.Point(10, 22),
+                Size = new System.Drawing.Size(160, 18),
+                Font = font,
+                TabStop = false,
+            };
+            advancedGroup.Controls.Add(whenLabel);
+
+            _notifyTimingImmediateRadio = new System.Windows.Forms.RadioButton
+            {
+                Text = "Immediately, the moment it happens",
+                Location = new System.Drawing.Point(10, 42),
+                Size = new System.Drawing.Size(280, 20),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Announce immediately",
+            };
+            advancedGroup.Controls.Add(_notifyTimingImmediateRadio);
+
+            _notifyTimingDeferredRadio = new System.Windows.Forms.RadioButton
+            {
+                Text = "Wait for the next receive cycle (batches repeats)",
+                Location = new System.Drawing.Point(10, 64),
+                Size = new System.Drawing.Size(320, 20),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Announce at the next receive cycle",
+            };
+            advancedGroup.Controls.Add(_notifyTimingDeferredRadio);
+            _notifyTimingImmediateRadio.CheckedChanged += (s, e) => CommitNotifyTiming();
+            _notifyTimingDeferredRadio.CheckedChanged += (s, e) => CommitNotifyTiming();
+
+            _notifyDeferWhileTxCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Wait until transmitting stops",
+                Location = new System.Drawing.Point(10, 88),
+                Size = new System.Drawing.Size(280, 20),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Defer while transmitting",
+                AccessibleDescription = "When checked, this notification never interrupts an active transmission -- it waits until the current one ends.",
+            };
+            _notifyDeferWhileTxCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
+            advancedGroup.Controls.Add(_notifyDeferWhileTxCheckBox);
+
+            _notifySuppressUnchangedCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Don't repeat if nothing changed",
+                Location = new System.Drawing.Point(10, 110),
+                Size = new System.Drawing.Size(280, 20),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Suppress unchanged repeats",
+                AccessibleDescription = "When checked, this notification stays silent if the exact same wording was already just announced.",
+            };
+            _notifySuppressUnchangedCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
+            advancedGroup.Controls.Add(_notifySuppressUnchangedCheckBox);
+
+            var repeatLabel = new System.Windows.Forms.Label
+            {
+                Text = "Don't repeat within (seconds, 0 = no limit):",
+                Location = new System.Drawing.Point(300, 42),
+                Size = new System.Drawing.Size(240, 18),
+                Font = font,
+                TabStop = false,
+            };
+            advancedGroup.Controls.Add(repeatLabel);
+
+            _notifyRepeatSecondsUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 0,
+                Maximum = 600,
+                Location = new System.Drawing.Point(300, 60),
+                Size = new System.Drawing.Size(70, 22),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Minimum seconds between repeats",
+            };
+            _notifyRepeatSecondsUpDown.ValueChanged += (s, e) => CommitNotifyNumeric();
+            advancedGroup.Controls.Add(_notifyRepeatSecondsUpDown);
+
+            var throttleLabel = new System.Windows.Forms.Label
+            {
+                Text = "Minimum gap between any two (ms, 0 = none):",
+                Location = new System.Drawing.Point(300, 88),
+                Size = new System.Drawing.Size(250, 18),
+                Font = font,
+                TabStop = false,
+            };
+            advancedGroup.Controls.Add(throttleLabel);
+
+            _notifyThrottleMsUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 0,
+                Maximum = 60000,
+                Increment = 100,
+                Location = new System.Drawing.Point(300, 106),
+                Size = new System.Drawing.Size(80, 22),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Minimum milliseconds between any two announcements of this type",
+            };
+            _notifyThrottleMsUpDown.ValueChanged += (s, e) => CommitNotifyNumeric();
+            advancedGroup.Controls.Add(_notifyThrottleMsUpDown);
+
+            var priorityLabel = new System.Windows.Forms.Label
+            {
+                Text = "Priority:",
+                Location = new System.Drawing.Point(300, 134),
+                Size = new System.Drawing.Size(60, 18),
+                Font = font,
+                TabStop = false,
+            };
+            advancedGroup.Controls.Add(priorityLabel);
+
+            _notifyPriorityComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(360, 130),
+                Size = new System.Drawing.Size(110, 21),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Priority",
+                AccessibleDescription = "Important notifications also play the audible alert tone.",
+            };
+            _notifyPriorityComboBox.Items.Add("Normal");
+            _notifyPriorityComboBox.Items.Add("Important");
+            _notifyPriorityComboBox.SelectedIndexChanged += (s, e) => CommitNotifyCheckboxes();
+            advancedGroup.Controls.Add(_notifyPriorityComboBox);
+
+            var resetThisButton = new System.Windows.Forms.Button
+            {
+                Text = "Reset This Notification to Default",
+                Location = new System.Drawing.Point(8, 454),
+                Size = new System.Drawing.Size(220, 27),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Reset this notification to default",
+                AccessibleDescription = "Restores the selected notification's template, timing, and repeat settings to Jimmy's built-in defaults.",
+            };
+            resetThisButton.Click += ResetThisNotification_Click;
+            notificationsPanel.Controls.Add(resetThisButton);
+
+            var resetAllButton = new System.Windows.Forms.Button
+            {
+                Text = "Reset All Notification Settings to Defaults",
+                Location = new System.Drawing.Point(236, 454),
+                Size = new System.Drawing.Size(260, 27),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Reset all notification settings to defaults",
+                AccessibleDescription = "Restores every notification's template, timing, and repeat settings to Jimmy's built-in defaults. Enabled/disabled state is reset too.",
+            };
+            resetAllButton.Click += ResetAllNotifications_Click;
+            notificationsPanel.Controls.Add(resetAllButton);
+
+            _notifyTypesListBox.SelectedIndex = 0;
+        }
+
+        private NotificationPolicy CurrentNotifyPolicy()
+        {
+            if (_notifyTypesListBox.SelectedIndex < 0) return null;
+            return _pendingNotifyPolicies[_notifyTypeOrder[_notifyTypesListBox.SelectedIndex]];
+        }
+
+        private void LoadSelectedNotifyType()
+        {
+            var policy = CurrentNotifyPolicy();
+            bool has = policy != null;
+            _notifyVarsListBox.Enabled = has;
+            _notifyVarMoveUpButton.Enabled = has;
+            _notifyVarMoveDownButton.Enabled = has;
+            _notifyTemplateTextBox.Enabled = has;
+            _notifyTimingImmediateRadio.Enabled = has;
+            _notifyTimingDeferredRadio.Enabled = has;
+            _notifyDeferWhileTxCheckBox.Enabled = has;
+            _notifySuppressUnchangedCheckBox.Enabled = has;
+            _notifyRepeatSecondsUpDown.Enabled = has;
+            _notifyThrottleMsUpDown.Enabled = has;
+            _notifyPriorityComboBox.Enabled = has;
+            if (!has) return;
+
+            _notifyUpdatingFields = true;
+            try
+            {
+                _notifyTemplateTextBox.Text = policy.Template;
+                _notifyValidationLabel.Text = "";
+                _notifyTimingImmediateRadio.Checked = policy.Timing == NotificationTiming.Immediate;
+                _notifyTimingDeferredRadio.Checked = policy.Timing == NotificationTiming.NextPeriodBoundary;
+                _notifyDeferWhileTxCheckBox.Checked = policy.DeferWhileTransmitting;
+                _notifySuppressUnchangedCheckBox.Checked = policy.SuppressUnchanged;
+                _notifyRepeatSecondsUpDown.Value = System.Math.Max(_notifyRepeatSecondsUpDown.Minimum, System.Math.Min(_notifyRepeatSecondsUpDown.Maximum, policy.RepeatSeconds));
+                _notifyThrottleMsUpDown.Value = System.Math.Max(_notifyThrottleMsUpDown.Minimum, System.Math.Min(_notifyThrottleMsUpDown.Maximum, policy.ThrottleMilliseconds));
+                _notifyPriorityComboBox.SelectedIndex = policy.Priority == NotificationPriority.Important ? 1 : 0;
+                RefreshNotifyVarsList();
+            }
+            finally
+            {
+                _notifyUpdatingFields = false;
+            }
+        }
+
+        // Rebuilds the variables checklist from the CURRENT template text -- the template
+        // string is the single source of truth (see this method's own header comment on the
+        // class), so this is the one and only place that reads it back into checked/order form.
+        // Called after every edit path (checkbox, move, or direct typing), never the reverse.
+        private void RefreshNotifyVarsList()
+        {
+            var type = _notifyTypeOrder[_notifyTypesListBox.SelectedIndex];
+            var applicable = NotificationVariableRegistry.For(type);
+            var present = NotificationTemplateEngine.ExtractVariableNames(_notifyTemplateTextBox.Text);
+
+            // Present-and-known variables first, in their real template order (so the list's
+            // top-to-bottom order matches Move Up/Down's own effect); any applicable variable
+            // not yet used follows, alphabetical-by-declaration-order from the registry.
+            _notifyVarsListEntries = new List<NotificationVariable>();
+            foreach (string key in present)
+            {
+                NotificationVariable found = null;
+                foreach (var x in applicable) { if (x.Key == key) { found = x; break; } }
+                if (found != null) _notifyVarsListEntries.Add(found);
+            }
+            foreach (var v in applicable)
+                if (!_notifyVarsListEntries.Contains(v)) _notifyVarsListEntries.Add(v);
+
+            _notifyUpdatingFields = true;
+            try
+            {
+                _notifyVarsListBox.Items.Clear();
+                var presentSet = new HashSet<string>(present);
+                foreach (var v in _notifyVarsListEntries)
+                    _notifyVarsListBox.Items.Add($"{v.Key} — {v.Description}", presentSet.Contains(v.Key));
+            }
+            finally
+            {
+                _notifyUpdatingFields = false;
+            }
+        }
+
+        private void NotifyVarCheckChanged(System.Windows.Forms.ItemCheckEventArgs e)
+        {
+            if (_notifyUpdatingFields) return;
+            var policy = CurrentNotifyPolicy();
+            if (policy == null) return;
+            var variable = _notifyVarsListEntries[e.Index];
+            bool nowChecked = e.NewValue == System.Windows.Forms.CheckState.Checked;
+
+            var components = NotificationTemplateEngine.ParseComponents(policy.Template);
+            if (nowChecked)
+            {
+                // Append at the end, space-separated from whatever's already there -- literal
+                // text already in the template is never touched.
+                string sep = components.Count > 0 && !string.IsNullOrEmpty(policy.Template) && !policy.Template.EndsWith(" ") ? ", " : "";
+                policy.Template = policy.Template + sep + "{" + variable.Key + "}";
+            }
+            else
+            {
+                // Remove every occurrence of just this variable's own token -- literal text
+                // (including any the operator typed around it) is left exactly where it is.
+                var sb = new System.Text.StringBuilder();
+                foreach (var c in components)
+                {
+                    if (c.IsVariable && c.Text == variable.Key) continue;
+                    sb.Append(c.IsVariable ? "{" + c.Text + "}" : c.Text);
+                }
+                policy.Template = sb.ToString();
+            }
+
+            _notifyUpdatingFields = true;
+            _notifyTemplateTextBox.Text = policy.Template;
+            _notifyValidationLabel.Text = "";
+            _notifyUpdatingFields = false;
+
+            // Defer the checklist rebuild rather than calling RefreshNotifyVarsList()
+            // synchronously here: ItemCheck fires BEFORE this CheckedListBox's own Items/
+            // checked-state collection actually updates, so clearing and re-adding Items from
+            // inside this same event would fight WinForms' own in-flight update to the box that
+            // raised it. Posting it to run right after this event finishes is the standard safe
+            // pattern for a CheckedListBox that needs to mutate its own Items from its own
+            // ItemCheck handler. (MoveNotifyVar's own resync is NOT deferred -- it's triggered
+            // by a Button click, not an in-flight ItemCheck, so there's nothing to race there.)
+            BeginInvoke(new Action(RefreshNotifyVarsList));
+        }
+
+        private void MoveNotifyVar(int direction)
+        {
+            var policy = CurrentNotifyPolicy();
+            if (policy == null || _notifyVarsListBox.SelectedIndex < 0) return;
+            var variable = _notifyVarsListEntries[_notifyVarsListBox.SelectedIndex];
+
+            var components = NotificationTemplateEngine.ParseComponents(policy.Template);
+            var varIndexes = new List<int>();
+            for (int i = 0; i < components.Count; i++) if (components[i].IsVariable) varIndexes.Add(i);
+            int thisPos = varIndexes.FindIndex(i => components[i].Text == variable.Key);
+            int swapWith = thisPos + direction;
+            if (thisPos < 0 || swapWith < 0 || swapWith >= varIndexes.Count) return;   // already checked not-present/not-movable by the button's Enabled state, but stay safe
+
+            // Swap just the two variable TOKENS' text in place -- every literal-text component
+            // stays exactly where it is, so nothing an operator typed around them ever moves.
+            int a = varIndexes[thisPos], b = varIndexes[swapWith];
+            var tmp = components[a];
+            components[a] = components[b];
+            components[b] = tmp;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (var c in components) sb.Append(c.IsVariable ? "{" + c.Text + "}" : c.Text);
+            policy.Template = sb.ToString();
+
+            ApplyNotifyTemplateChange(policy, resyncVars: true);
+            // Re-select the moved variable so repeated Move Up/Down presses keep tracking it.
+            int newIdx = _notifyVarsListEntries.FindIndex(v => v.Key == variable.Key);
+            if (newIdx >= 0) _notifyVarsListBox.SelectedIndex = newIdx;
+        }
+
+        private void CommitNotifyTemplateText()
+        {
+            if (_notifyUpdatingFields) return;
+            var policy = CurrentNotifyPolicy();
+            if (policy == null) return;
+            if (policy.Template == _notifyTemplateTextBox.Text) return;
+
+            var type = _notifyTypeOrder[_notifyTypesListBox.SelectedIndex];
+            string error = NotificationVariableRegistry.Validate(_notifyTemplateTextBox.Text, type);
+            if (error != null)
+            {
+                // Do NOT touch policy.Template or the text box's own text -- the operator's
+                // edit stays exactly as typed so they can fix it, per the feature's own
+                // "never destroy the user's edit on validation failure" requirement.
+                _notifyValidationLabel.Text = error;
+                return;
+            }
+
+            _notifyValidationLabel.Text = "";
+            policy.Template = _notifyTemplateTextBox.Text;
+            RefreshNotifyVarsList();
+        }
+
+        // Shared tail for both the checklist-driven and Move-Up/Down-driven template edits:
+        // both already know the new template text is well-formed (built from real components,
+        // never hand-typed), so there's nothing to validate -- just push it into the text box
+        // and, when the edit could have changed presence/order (a move; a checklist add/remove
+        // already IS the list, so it skips this), resync the checklist from it.
+        private void ApplyNotifyTemplateChange(NotificationPolicy policy, bool resyncVars)
+        {
+            _notifyUpdatingFields = true;
+            try
+            {
+                _notifyTemplateTextBox.Text = policy.Template;
+                _notifyValidationLabel.Text = "";
+            }
+            finally
+            {
+                _notifyUpdatingFields = false;
+            }
+            if (resyncVars) RefreshNotifyVarsList();
+        }
+
+        private void CommitNotifyTiming()
+        {
+            if (_notifyUpdatingFields) return;
+            var policy = CurrentNotifyPolicy();
+            if (policy == null) return;
+            policy.Timing = _notifyTimingDeferredRadio.Checked ? NotificationTiming.NextPeriodBoundary : NotificationTiming.Immediate;
+        }
+
+        private void CommitNotifyCheckboxes()
+        {
+            if (_notifyUpdatingFields) return;
+            var policy = CurrentNotifyPolicy();
+            if (policy == null) return;
+            policy.DeferWhileTransmitting = _notifyDeferWhileTxCheckBox.Checked;
+            policy.SuppressUnchanged = _notifySuppressUnchangedCheckBox.Checked;
+            policy.Priority = _notifyPriorityComboBox.SelectedIndex == 1 ? NotificationPriority.Important : NotificationPriority.Normal;
+        }
+
+        private void CommitNotifyNumeric()
+        {
+            if (_notifyUpdatingFields) return;
+            var policy = CurrentNotifyPolicy();
+            if (policy == null) return;
+            policy.RepeatSeconds = (int)_notifyRepeatSecondsUpDown.Value;
+            policy.ThrottleMilliseconds = (int)_notifyThrottleMsUpDown.Value;
+        }
+
+        private void ResetThisNotification_Click(object sender, EventArgs e)
+        {
+            if (_notifyTypesListBox.SelectedIndex < 0) return;
+            var type = _notifyTypeOrder[_notifyTypesListBox.SelectedIndex];
+            _pendingNotifyPolicies[type] = NotificationDefaults.Policies[type].Clone();
+            _notifyUpdatingFields = true;
+            _notifyTypesListBox.SetItemChecked(_notifyTypesListBox.SelectedIndex, _pendingNotifyPolicies[type].Enabled);
+            _notifyUpdatingFields = false;
+            LoadSelectedNotifyType();
+        }
+
+        private void ResetAllNotifications_Click(object sender, EventArgs e)
+        {
+            var result = MessageBox.Show(
+                "Reset every notification's template, timing, and repeat settings to Jimmy's built-in defaults?",
+                ctrl.friendlyName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (result != DialogResult.Yes) return;
+
+            foreach (var type in _notifyTypeOrder)
+                _pendingNotifyPolicies[type] = NotificationDefaults.Policies[type].Clone();
+
+            _notifyUpdatingFields = true;
+            for (int i = 0; i < _notifyTypeOrder.Count; i++)
+                _notifyTypesListBox.SetItemChecked(i, _pendingNotifyPolicies[_notifyTypeOrder[i]].Enabled);
+            _notifyUpdatingFields = false;
+            LoadSelectedNotifyType();
+        }
+
+        private void SaveNotificationsTab()
+        {
+            if (_pendingNotifyPolicies == null) return;
+            // Commit the field the operator is currently sitting in, in case OK was clicked
+            // without ever leaving the Template box (Leave never fired).
+            CommitNotifyTemplateText();
+            foreach (var kv in _pendingNotifyPolicies)
+                ctrl.Notifications.Policies[kv.Key] = kv.Value;
         }
 
         private void UpdateRadioHostPortEnabled()
@@ -3030,30 +3879,6 @@ namespace WSJTX_Controller
                 _listActionMap.Add(a);
             }
 
-            var bandActions = new HotkeyAction[]
-            {
-                HotkeyAction.Band160m,
-                HotkeyAction.Band80m,
-                HotkeyAction.Band60m,
-                HotkeyAction.Band40m,
-                HotkeyAction.Band30m,
-                HotkeyAction.Band20m,
-                HotkeyAction.Band17m,
-                HotkeyAction.Band15m,
-                HotkeyAction.Band12m,
-                HotkeyAction.Band10m,
-                HotkeyAction.Band6m,
-            };
-
-            for (int i = 0; i < bandActions.Length; i++)
-            {
-                var a = bandActions[i];
-                string text = i == 0
-                    ? "Direct Band Selection: " + HotkeyConfig.DisplayNames[a]
-                    : "  " + HotkeyConfig.DisplayNames[a];
-                _actionListBox.Items.Add(text);
-                _listActionMap.Add(a);
-            }
         }
 
         private void ActionListBox_SelectedIndexChanged(object sender, EventArgs e)

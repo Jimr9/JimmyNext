@@ -55,13 +55,14 @@ namespace WSJTX_Controller
             if (idx == null || (int)idx < 0 || !freqsDict.Keys.Contains(mode) || (int)idx >= freqsDict[mode].Count) return null;
             int i = (int)idx;
 
-            // Options > Frequencies operator override, checked first -- 0 means no override for
-            // this band, fall through to the built-in default below. This is the single
-            // chokepoint BandUp/BandDown/SelectBand/RetuneBand/initial-connect all resolve a
-            // band index to an actual frequency through, so overriding here is sufficient
+            // Options > Frequencies: the first (lowest) entry for the current mode in this
+            // band's list is its primary/canonical frequency -- empty (operator never
+            // customized this band) falls through to the built-in default below. This is the
+            // single chokepoint BandUp/BandDown/SelectBand/RetuneBand/initial-connect all
+            // resolve a band index to an actual frequency through, so this is sufficient
             // everywhere without touching any of those call sites.
-            int[] overrides = mode == "FT4" ? ctrl.Frequencies.Ft4OverrideKHz : ctrl.Frequencies.Ft8OverrideKHz;
-            if (overrides != null && i < overrides.Length && overrides[i] > 0) return overrides[i];
+            foreach (var entry in ctrl.Frequencies.Bands[i])
+                if (entry.Mode == mode) return entry.FreqKHz;
 
             return freqsDict[mode][i];
         }
@@ -125,6 +126,27 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // Options > Frequencies per-entry hotkey: jump straight to one specific frequency row
+        // (not necessarily a band's primary/first entry the way SelectBand's bandToFreq lookup
+        // always resolves to) -- switches mode first if the entry's mode differs from the
+        // current one, matching Alt+M's own SetOperatingMode path.
+        public bool SelectFrequency(int targetIdx, string entryMode, int freqKHz)
+        {
+            if (targetIdx < 0 || targetIdx >= bands.Count) return false;
+            if (freqKHz <= 0) return false;
+
+            if (entryMode != mode) SetOperatingMode(entryMode);
+
+            ClearAudioOffsets();
+            AutoFreqChanged(false, true);
+            Pause(true, false);
+            CancelQso();
+
+            if (RetuneBand(targetIdx, (uint)(freqKHz * 1000), "SelectFrequency"))
+                ShowBandChangePending(targetIdx, $"{freqKHz} kHz");
+            return true;
+        }
+
         // Self-sufficiency plan, Phase 5: band changes retune the radio directly over rigctld --
         // the engine's own poll loop picks up the new dial on its next tick (see
         // RigctldClient.SetFrequency's own comment) exactly like a knob-QSY would. Under
@@ -132,10 +154,14 @@ namespace WSJTX_Controller
         // comes read-only from the engine's own StatusMessage broadcasts), so there is nothing
         // to retune -- returns false so callers skip the "Changing to..." status announcement
         // instead of claiming a band change that never happens.
-        private bool RetuneBand(int targetIdx, string caller)
+        private bool RetuneBand(int targetIdx, string caller) =>
+            RetuneBand(targetIdx, (uint)(bandToFreq(targetIdx) * 1000), caller);
+
+        // SelectFrequency's own entry point: an explicit target frequency, not necessarily the
+        // band's primary/first entry bandToFreq(targetIdx) would resolve to.
+        private bool RetuneBand(int targetIdx, uint freqHz, string caller)
         {
             _pendingBandIdx = targetIdx;
-            uint freqHz = (uint)(bandToFreq(targetIdx) * 1000);
             DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst}");
             if (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld || ctrl.rigctldClient == null)
             {
@@ -146,11 +172,11 @@ namespace WSJTX_Controller
             return true;
         }
 
-        private void ShowBandChangePending(int targetIdx)
+        private void ShowBandChangePending(int targetIdx, string detail = null)
         {
             ctrl.statusText.ForeColor = Color.Black;
             ctrl.statusText.BackColor = Color.Yellow;
-            ctrl.statusText.Text = $"Changing to {bands[targetIdx]} meter band...";
+            ctrl.statusText.Text = $"Changing to {detail ?? $"{bands[targetIdx]} meter band"}...";
             ctrl.statusText.SelectionStart = 0;
         }
 
@@ -556,6 +582,24 @@ namespace WSJTX_Controller
 
             DebugOutput($"{Time()} CalcAvgTimeOffset, timeOffset:{timeOffset:F2} clear:{clear}");
             if (clear) timeOffsets.Clear();
+
+            // Clock-sync notification, 2026-08-12: only evaluated on the authoritative
+            // end-of-period average (clear:true) -- the two other call sites (WsjtxClient.
+            // Protocol.cs, mid-cycle interim recalculations with clear:false) see a less
+            // stable, still-accumulating average and must never trigger a transition off of
+            // it. Transition-gated by design: _clockWasAcceptable only ever changes here, so a
+            // clock that STAYS bad for many periods in a row publishes exactly once, not once
+            // per period -- see ClockOutOfSyncEvent/ClockSyncedEvent's own dedup-key comments
+            // for the second, independent backstop against exactly that kind of repeat.
+            if (clear)
+            {
+                bool acceptable = Math.Abs(timeOffset) <= maxTimeOffset;
+                if (_clockWasAcceptable == false && acceptable)
+                    Notify?.Publish(new ClockSyncedEvent(mode));
+                else if (_clockWasAcceptable != false && !acceptable)
+                    Notify?.Publish(new ClockOutOfSyncEvent(timeOffset, mode));
+                _clockWasAcceptable = acceptable;
+            }
         }
     }
 }

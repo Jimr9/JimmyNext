@@ -38,6 +38,7 @@ namespace WSJTX_Controller
             this.decodeEnginePanel = new System.Windows.Forms.Panel();
             this.decodePanel = new System.Windows.Forms.Panel();
             this.frequenciesPanel = new System.Windows.Forms.Panel();
+            this.notificationsPanel = new System.Windows.Forms.Panel();
             this.soundsPanel = new System.Windows.Forms.Panel();
             this.appearancePanel = new System.Windows.Forms.Panel();
             this.udpOnTopCheckBox = new System.Windows.Forms.CheckBox();
@@ -74,6 +75,7 @@ namespace WSJTX_Controller
             this.decodeEnginePanel.SuspendLayout();
             this.decodePanel.SuspendLayout();
             this.frequenciesPanel.SuspendLayout();
+            this.notificationsPanel.SuspendLayout();
             this.soundsPanel.SuspendLayout();
             this.appearancePanel.SuspendLayout();
             this.SuspendLayout();
@@ -106,6 +108,7 @@ namespace WSJTX_Controller
                 "Decode Engine",
                 "Decode",
                 "Frequencies",
+                "Notifications",
                 "Logbook Sync",
                 "Lookup Data",
                 "Appearance"});
@@ -306,6 +309,12 @@ namespace WSJTX_Controller
             this.frequenciesPanel.AutoScroll = true;
             this.frequenciesPanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.frequenciesPanel.Name = "frequenciesPanel";
+            //
+            // notificationsPanel
+            //
+            this.notificationsPanel.AutoScroll = true;
+            this.notificationsPanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.notificationsPanel.Name = "notificationsPanel";
             //
             // soundsPanel
             //
@@ -630,6 +639,7 @@ namespace WSJTX_Controller
             this.decodeEnginePanel.ResumeLayout(false);
             this.decodePanel.ResumeLayout(false);
             this.frequenciesPanel.ResumeLayout(false);
+            this.notificationsPanel.ResumeLayout(false);
             this.soundsPanel.ResumeLayout(false);
             this.appearancePanel.ResumeLayout(false);
             this.ResumeLayout(false);
@@ -679,6 +689,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Panel decodeEnginePanel;
         private System.Windows.Forms.Panel decodePanel;
         private System.Windows.Forms.Panel frequenciesPanel;
+        private System.Windows.Forms.Panel notificationsPanel;
         private System.Windows.Forms.Panel soundsPanel;
         private System.Windows.Forms.Panel logbookSyncPanel;
         private System.Windows.Forms.Panel lookupPanel;

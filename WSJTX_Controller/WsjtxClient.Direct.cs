@@ -74,6 +74,20 @@ namespace WSJTX_Controller
             _directFirstStatusShown = false;
             _directStartupBandResolved = false;
             _directConnected = true;
+            // Found in the Direct-engine-path review, 2026-08-12: a reconnect (operator
+            // relaunch, or the engine auto-restarting after a crash -- see DirectPollTick's own
+            // comment) left stale pre-disconnect DT samples sitting in timeOffsets, which the
+            // next period boundary would then average together with fresh post-reconnect
+            // decodes as if they were one continuous measurement. A fresh connection is a clean
+            // slate for clock-offset tracking, same as _directLastSlotSeen/
+            // _directSeenDecodeSignatures just above already are for decode tracking.
+            // _clockWasAcceptable resets to null (not false or true): the clock's condition
+            // under THIS connection genuinely hasn't been measured yet, so the very next real
+            // evaluation is free to announce either way without being compared against a
+            // possibly-stale assumption carried over from before the reconnect.
+            timeOffsets.Clear();
+            timeOffset = 0;
+            _clockWasAcceptable = null;
             opMode = OpModes.ACTIVE;
             // jimmy-engine-host itself always starts a fresh session hardcoded to Tier::Ft8
             // (main.rs's own startup set_tier call) -- match that here so this tracked value
@@ -267,6 +281,10 @@ namespace WSJTX_Controller
             bool wasTransmitting = transmitting;
             transmitting = radio.Transmitting;
             bool transmittingChanged = wasTransmitting != transmitting;
+            // Direct mode's own real transmitting-flag transition -- edge-triggered (only on an
+            // actual change), matching the UDP path's ProcessTxStart/ProcessTxEnd exactly. See
+            // NotificationCenter.OnTransmittingChanged's own comment.
+            if (transmittingChanged) Notify?.OnTransmittingChanged(transmitting);
 
             // Queue-age expiry (TrimCallQueue) and the retry-limit/discard-give-up counter used
             // to live here, gated on "transmitting just started" -- moved to DirectApplyDecodes'
@@ -378,6 +396,27 @@ namespace WSJTX_Controller
             {
                 _directLastSlotSeen = snap.Radio.Slot;
                 _directSeenDecodeSignatures.Clear();
+
+                // Direct mode's own real "a receive period just completed" transition -- see
+                // NotificationCenter.OnPeriodBoundary's own comment. Same real per-period
+                // boundary this block's own comment below already establishes for queue-age
+                // expiry, reused here rather than inventing a second one.
+                Notify?.OnPeriodBoundary();
+
+                // Root-caused live, 2026-08-12: timeOffsets (WsjtxClient.cs) was already being
+                // populated in Direct mode (ProcessDecodeMsg -- the exact same shared method the
+                // UDP path uses -- adds dmsg.DeltaTime from every decode regardless of
+                // transport), but CalcAvgTimeOffset(true) itself, the ONLY thing that turns that
+                // raw list into the actual timeOffset average ShowStatus()'s "check clock time"
+                // text and the new clock-sync notification below both read, was only ever called
+                // from the UDP-only DecodesCompleted()/postDecodeTimer machinery
+                // (WsjtxClient.cs). Direct mode collected real clock-offset data all session and
+                // never once acted on it. This is the direct-mode equivalent of that same
+                // finalization, at the same real per-period boundary as OnPeriodBoundary() just
+                // above -- finalizes the period that just ended (using whatever accumulated in
+                // timeOffsets before this snapshot's own fresh decodes are processed below) and
+                // clears ready for the next one.
+                CalcAvgTimeOffset(true);
 
                 // Queue-age expiry + the retry-limit/discard-give-up counter -- moved here
                 // 2026-08-11 from DirectApplyStatus's own "transmitting just started" gate,
@@ -597,6 +636,14 @@ namespace WSJTX_Controller
 
         internal string TestCallQueueString => _callQueueStore.CallQueueString();
         internal List<EnqueueDecodeMessage> TestRawDecodeHistory => _rawDecodeHistory;
+
+        // Test-only: `mode` is private and DirectApplyStatus only ever sets it to "FT8" (its
+        // own lazy first-run fallback -- see that method's own comment on why Direct mode has
+        // no server-side tier read-back to set it any other way). Real FT4 operation only ever
+        // changes it via SetOperatingMode/DirectSetTier, both of which need a live engine
+        // process this test harness deliberately never starts. This lets the clock-sync
+        // notification's own FT4 test exercise a real "FT4" Mode token without one.
+        internal void TestSetMode(string m) => mode = m;
     }
 
     // JSON shapes matching AppSnapshot/RadioStatus/DecodeRow's own camelCase serde output

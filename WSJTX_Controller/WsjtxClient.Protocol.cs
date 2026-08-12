@@ -176,6 +176,16 @@ namespace WSJTX_Controller
                 // under the old period's timing is stale, same treatment DirectApplyStatus's own
                 // band-change handling already gives a confirmed band change.
                 trPeriod = null;
+                // Found in the Direct-engine-path review, 2026-08-12: DT samples measured under
+                // one mode's decode correlator aren't directly comparable to the other mode's --
+                // averaging an FT8 sample together with a fresh FT4 one at the next boundary
+                // would measure something incoherent. _clockWasAcceptable deliberately NOT
+                // reset here (unlike ConnectDirectEngine's own reset): the operator's actual
+                // clock didn't change just because they switched modes, so the transition gate
+                // should keep its real, current answer rather than being forced to re-announce
+                // "still fine"/"still bad" on every mode toggle.
+                timeOffsets.Clear();
+                timeOffset = 0;
                 _rawDecodeHistory.Clear();
                 if (ctrl.advShowRaw) ShowRawDecodes();
                 ClearCalls(true);

@@ -55,7 +55,25 @@ namespace WSJTX_Controller
 
                 string template = ini.Read($"notifyTemplate_{type}");
                 if (!string.IsNullOrWhiteSpace(template))
-                    policy.Template = template;
+                {
+                    // A saved template that no longer validates against this type's variable
+                    // registry (e.g. hand-edited ini, or a future Jimmy version renames a
+                    // variable) falls back to the code default rather than shipping a broken
+                    // announcement -- "bad configuration must fail safely" per the
+                    // configurable-notifications feature's own requirement. The code default is
+                    // authored and tested against the current registry, so it's always valid.
+                    if (NotificationVariableRegistry.Validate(template, type) == null)
+                        policy.Template = template;
+                }
+
+                if (Enum.TryParse(ini.Read($"notifyTiming_{type}"), out NotificationTiming timing))
+                    policy.Timing = timing;
+
+                if (ini.KeyExists($"notifyDeferWhileTx_{type}"))
+                    policy.DeferWhileTransmitting = ini.Read($"notifyDeferWhileTx_{type}") == "True";
+
+                if (ini.KeyExists($"notifySuppressUnchanged_{type}"))
+                    policy.SuppressUnchanged = ini.Read($"notifySuppressUnchanged_{type}") == "True";
 
                 Policies[type] = policy;
             }
@@ -72,6 +90,9 @@ namespace WSJTX_Controller
                 ini.Write($"notifyRepeatSeconds_{type}", policy.RepeatSeconds.ToString());
                 ini.Write($"notifyThrottleMs_{type}", policy.ThrottleMilliseconds.ToString());
                 ini.Write($"notifyTemplate_{type}", policy.Template);
+                ini.Write($"notifyTiming_{type}", policy.Timing.ToString());
+                ini.Write($"notifyDeferWhileTx_{type}", policy.DeferWhileTransmitting.ToString());
+                ini.Write($"notifySuppressUnchanged_{type}", policy.SuppressUnchanged.ToString());
             }
         }
     }

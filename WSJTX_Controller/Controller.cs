@@ -1314,17 +1314,17 @@ namespace WSJTX_Controller
                 return wsjtxClient.BandDown();
             }
 
-            if (hotkeyConfig[HotkeyAction.Band160m] != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band160m]) return wsjtxClient.SelectBand(0);
-            if (hotkeyConfig[HotkeyAction.Band80m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band80m])  return wsjtxClient.SelectBand(1);
-            if (hotkeyConfig[HotkeyAction.Band60m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band60m])  return wsjtxClient.SelectBand(2);
-            if (hotkeyConfig[HotkeyAction.Band40m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band40m])  return wsjtxClient.SelectBand(3);
-            if (hotkeyConfig[HotkeyAction.Band30m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band30m])  return wsjtxClient.SelectBand(4);
-            if (hotkeyConfig[HotkeyAction.Band20m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band20m])  return wsjtxClient.SelectBand(5);
-            if (hotkeyConfig[HotkeyAction.Band17m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band17m])  return wsjtxClient.SelectBand(6);
-            if (hotkeyConfig[HotkeyAction.Band15m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band15m])  return wsjtxClient.SelectBand(7);
-            if (hotkeyConfig[HotkeyAction.Band12m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band12m])  return wsjtxClient.SelectBand(8);
-            if (hotkeyConfig[HotkeyAction.Band10m]  != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band10m])  return wsjtxClient.SelectBand(9);
-            if (hotkeyConfig[HotkeyAction.Band6m]   != Keys.None && keyData == hotkeyConfig[HotkeyAction.Band6m])   return wsjtxClient.SelectBand(10);
+            // Options > Frequencies: each frequency row can carry its own direct-jump hotkey
+            // (replaces the old fixed HotkeyAction.Band160m..Band6m, one per band only, removed
+            // entirely). Data-driven, not enum-based, so this scans instead of a fixed if-chain.
+            for (int bi = 0; bi < Frequencies.Bands.Length; bi++)
+            {
+                foreach (var entry in Frequencies.Bands[bi])
+                {
+                    if (entry.Hotkey != Keys.None && keyData == entry.Hotkey)
+                        return wsjtxClient.SelectFrequency(bi, entry.Mode, entry.FreqKHz);
+                }
+            }
 
 
             if (!wsjtxClient.ConnectedToWsjtx()) return false;

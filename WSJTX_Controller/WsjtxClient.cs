@@ -400,6 +400,16 @@ namespace WSJTX_Controller
         private List<double> timeOffsets = new List<double>();
         private double timeOffset = 0;
         private double maxTimeOffset = 1.20;
+        // Clock-sync notification, 2026-08-12: null = not yet evaluated this session (the
+        // clock's actual condition is unknown, not assumed good) -- see CalcAvgTimeOffset
+        // (WsjtxClient.BandAudio.cs) for the transition-detection logic this backs. Deliberately
+        // ONE shared threshold (maxTimeOffset above) for every mode: that field already existed
+        // as a single, unconditional-on-mode value before this feature, already governing the
+        // pre-existing ShowStatus() "check clock time" text (WsjtxClient.Display.cs) for
+        // whatever real operating this app has seen -- inventing a second, FT4-specific number
+        // now, with no engine-level evidence FT4 actually needs a tighter one, would be exactly
+        // the "blindly choose a threshold" this feature was told not to do.
+        private bool? _clockWasAcceptable;
         private bool txEnableChanged = false;
         private bool promptsChanged = false;
         private string toCallStatus = null;
@@ -1616,6 +1626,10 @@ namespace WSJTX_Controller
         private void ProcessDecodes()
         {
             //always called shortly before the tx period begins
+            // UDP path's own "a receive period just completed" transition -- see
+            // NotificationCenter.OnPeriodBoundary's own comment for why this specific,
+            // already-proven-reliable call site (not a new timer) is the right one.
+            Notify?.OnPeriodBoundary();
             cancelledCall = null;
             UpdateMaxTxRepeat();
             // Count of consecutive rx periods since a message from discardCall was last received --
@@ -1758,6 +1772,9 @@ namespace WSJTX_Controller
         //check for time to log (best done at Tx-start to avoid any logging/dequeueing timing problem if done at Tx end)
         private void ProcessTxStart()
         {
+            // UDP path's own real transmitting-flag transition -- see
+            // NotificationCenter.OnTransmittingChanged's own comment.
+            Notify?.OnTransmittingChanged(true);
             if (!ctrl.keepTransmitListDuringTx)
             {
                 if (txFirst)   // TX1 transmitting → clear TX1
@@ -1815,6 +1832,9 @@ namespace WSJTX_Controller
         //check for QSO end or timeout (and possibly logging (if txMsg changed between Tx start and Tx end)
         private void ProcessTxEnd()
         {
+            // UDP path's own real transmitting-flag transition -- see
+            // NotificationCenter.OnTransmittingChanged's own comment.
+            Notify?.OnTransmittingChanged(false);
             string toCall = WsjtxMessage.ToCall(txMsg);
             string lastToCall = WsjtxMessage.ToCall(lastTxMsg);
             string deCall = WsjtxMessage.DeCall(replyCmd);

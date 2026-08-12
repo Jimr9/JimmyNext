@@ -164,6 +164,14 @@ static class JimmyTests
         NotificationSettingsRoundTripTests();
         NotificationDedupThrottleTests();
         NotificationCenterPublishTests();
+        NotificationTemplateComponentParserTests();
+        NotificationVariableRegistryTests();
+        NotificationDefaultsAllTemplatesValidTests();
+        NotificationPolicyExtendedFieldsTests();
+        NotificationCenterDeferredDeliveryTests();
+        NotificationParkedEventTypesGuardTests();
+        ClockSyncNotificationTests();
+        ClockSyncDirectPathStateHygieneTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed ===");
@@ -3894,6 +3902,595 @@ static class JimmyTests
 
         center.Publish(null);
         Check("Publish(null) is a safe no-op", delivery.AnnounceCount == afterFirst, true);
+    }
+
+    // ── NotificationTemplateEngine.ParseComponents/ExtractVariableNames ──
+    // Configurable-notification-templates feature, 2026-08-12.
+    static void NotificationTemplateComponentParserTests()
+    {
+        Console.WriteLine("\n── NotificationTemplateEngine: ParseComponents / ExtractVariableNames ──");
+
+        var c = NotificationTemplateEngine.ParseComponents("Calling {Callsign} in {Country}");
+        Check("ParseComponents: literal + variable + literal + variable = 4 components", c.Count == 4, true);
+        Check("ParseComponents: component 0 is literal 'Calling '", !c[0].IsVariable && c[0].Text == "Calling ", true);
+        Check("ParseComponents: component 1 is variable 'Callsign'", c[1].IsVariable && c[1].Text == "Callsign", true);
+        Check("ParseComponents: component 2 is literal ' in '", !c[2].IsVariable && c[2].Text == " in ", true);
+        Check("ParseComponents: component 3 is variable 'Country'", c[3].IsVariable && c[3].Text == "Country", true);
+
+        var empty = NotificationTemplateEngine.ParseComponents("");
+        Check("ParseComponents: empty template -> no components", empty.Count == 0, true);
+
+        var nullTemplate = NotificationTemplateEngine.ParseComponents(null);
+        Check("ParseComponents: null template -> no components, never throws", nullTemplate.Count == 0, true);
+
+        var malformed = NotificationTemplateEngine.ParseComponents("Calling {Callsign, no closing brace");
+        Check("ParseComponents: unclosed '{' falls back to a single literal component",
+            malformed.Count == 1 && !malformed[0].IsVariable, true);
+        CheckStr("ParseComponents: unclosed '{' text preserved verbatim", malformed[0].Text, "Calling {Callsign, no closing brace");
+
+        var pureLiteral = NotificationTemplateEngine.ParseComponents("Listening");
+        Check("ParseComponents: pure literal template -> one literal component, no variables",
+            pureLiteral.Count == 1 && !pureLiteral[0].IsVariable, true);
+
+        var dup = NotificationTemplateEngine.ExtractVariableNames("{Callsign} worked {Callsign} again");
+        Check("ExtractVariableNames: duplicate variable only counted once", dup.Count == 1 && dup[0] == "Callsign", true);
+
+        var ordered = NotificationTemplateEngine.ExtractVariableNames("{Country}, {Callsign}, {Band}");
+        Check("ExtractVariableNames: preserves left-to-right template order",
+            ordered.Count == 3 && ordered[0] == "Country" && ordered[1] == "Callsign" && ordered[2] == "Band", true);
+
+        // Round-trip: reassembling ParseComponents' own output must reproduce the original
+        // string exactly -- this is the exact operation MoveNotifyVar/NotifyVarCheckChanged
+        // (OptionsDlg.cs) rely on when they rebuild a template from an edited component list.
+        string original = "Working {Callsign}, {Distance} miles away in {Country}";
+        var roundTripSb = new System.Text.StringBuilder();
+        foreach (var comp in NotificationTemplateEngine.ParseComponents(original))
+            roundTripSb.Append(comp.IsVariable ? "{" + comp.Text + "}" : comp.Text);
+        CheckStr("ParseComponents round-trips exactly back to the original template", roundTripSb.ToString(), original);
+
+        // Format() must still produce byte-identical output to before this parser refactor --
+        // regression guard for the "reuse one shared scanner" change (NotificationTemplateEngine.cs).
+        var tokens = new Dictionary<string, string> { ["Callsign"] = "K4YT" };
+        CheckStr("Format still substitutes known tokens after the ParseComponents refactor",
+            NotificationTemplateEngine.Format("Working {Callsign}", tokens), "Working K4YT");
+        CheckStr("Format still leaves unknown tokens literal after the refactor",
+            NotificationTemplateEngine.Format("{Callsign} {Countri}", tokens), "K4YT {Countri}");
+    }
+
+    // ── NotificationVariableRegistry ──
+    static void NotificationVariableRegistryTests()
+    {
+        Console.WriteLine("\n── NotificationVariableRegistry ──");
+
+        Check("Validate: a template using only known variables passes",
+            NotificationVariableRegistry.Validate("Working {Callsign} in {Country}", NotificationEventType.QsoStarted) == null, true);
+
+        Check("Validate: pure literal text (no variables at all) passes",
+            NotificationVariableRegistry.Validate("Listening", NotificationEventType.ConnectionClosed) == null, true);
+
+        string error = NotificationVariableRegistry.Validate("{Callsign} {Countri}", NotificationEventType.QsoStarted);
+        CheckStr("Validate: unknown keyword produces the exact required error message",
+            error, "Unknown template keyword: Countri");
+
+        Check("Validate: a variable valid for ONE type is rejected for a type that doesn't offer it",
+            NotificationVariableRegistry.Validate("{AwardSummary}", NotificationEventType.ConnectionLost) != null, true);
+
+        Check("Every type offers the universal {Time} variable",
+            NotificationVariableRegistry.Validate("{Time}", NotificationEventType.ConnectionClosed) == null, true);
+
+        // Keeps the registry honest: constructs a representative instance of every event class
+        // and diffs its REAL ToTokens().Keys against what the registry claims is available for
+        // that type (minus the one universal {Time}, injected centrally by NotificationCenter,
+        // not by any individual event's own ToTokens()). If a future edit adds/renames/removes
+        // a field on one side and forgets the other, this fails immediately instead of an
+        // operator discovering a "valid" template that renders with a literal {Typo}.
+        var sampleEvents = new Dictionary<NotificationEventType, INotificationEvent>
+        {
+            [NotificationEventType.QsoStarted] = new QsoStartedEvent("K4YT", "20m", "FT8", "EM79", "USA", 500, 90),
+            [NotificationEventType.QsoCompleted] = new QsoCompletedEvent("K4YT", "20m", "FT8", "EM79", "USA", 500, 90, "-05", "+02"),
+            [NotificationEventType.TxMessageChanged] = new TxMessageChangedEvent("K4YT", "K4YT KB0UZT -05", "20m", "FT8"),
+            [NotificationEventType.AwardsNeeded] = new AwardsNeededEvent("K4YT", 2, new[] { "WAS", "DXCC" }, "2 awards needed", "USA"),
+            [NotificationEventType.ConnectionClosed] = new ConnectionClosedEvent(),
+            [NotificationEventType.ConnectionLost] = new ConnectionLostEvent("heartbeat timeout"),
+            [NotificationEventType.ErrorWarning] = new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "CAT link lost"),
+        };
+        foreach (var kv in sampleEvents)
+        {
+            var registryKeys = new HashSet<string>();
+            foreach (var v in NotificationVariableRegistry.For(kv.Key))
+                if (v.Key != NotificationVariableRegistry.TimeKey) registryKeys.Add(v.Key);
+            var realKeys = new HashSet<string>(kv.Value.ToTokens().Keys);
+            Check($"Registry variable set for {kv.Key} exactly matches its event class's real ToTokens() keys",
+                registryKeys.SetEquals(realKeys), true);
+        }
+    }
+
+    // ── NotificationDefaults: every shipped default template is valid ──
+    // Regression guard: a typo'd default template (e.g. {Countri} instead of {Country}) would
+    // otherwise ship silently -- NotificationSettings.LoadFromIni's own fallback only protects
+    // against a BAD ini value, not a bad code default, since the code default IS what it falls
+    // back to.
+    static void NotificationDefaultsAllTemplatesValidTests()
+    {
+        Console.WriteLine("\n── NotificationDefaults: every default template validates ──");
+
+        foreach (var kv in NotificationDefaults.Policies)
+        {
+            string error = NotificationVariableRegistry.Validate(kv.Value.Template, kv.Key);
+            Check($"Default template for {kv.Key} contains only known variables", error == null, true);
+        }
+
+        Check("Every NotificationEventType has a DisplayNames entry",
+            System.Enum.GetValues(typeof(NotificationEventType)).Length == NotificationDefaults.DisplayNames.Count, true);
+    }
+
+    // ── NotificationPolicy: new fields (Timing/DeferWhileTransmitting/SuppressUnchanged) ──
+    static void NotificationPolicyExtendedFieldsTests()
+    {
+        Console.WriteLine("\n── NotificationPolicy: extended fields (Clone + persistence) ──");
+
+        var p = new NotificationPolicy
+        {
+            Timing = NotificationTiming.NextPeriodBoundary,
+            DeferWhileTransmitting = true,
+            SuppressUnchanged = true,
+        };
+        var cloned = p.Clone();
+        Check("Clone() copies Timing", cloned.Timing == NotificationTiming.NextPeriodBoundary, true);
+        Check("Clone() copies DeferWhileTransmitting", cloned.DeferWhileTransmitting, true);
+        Check("Clone() copies SuppressUnchanged", cloned.SuppressUnchanged, true);
+
+        // Persistence round-trip through the real IniFile-backed save/load path -- same shape
+        // as NotificationSettingsRoundTripTests, extended to the three new fields.
+        string tmpIni = Path.Combine(Path.GetTempPath(), $"jimmy_notify_ext_{System.Guid.NewGuid():N}.ini");
+        try
+        {
+            var settings = new NotificationSettings();
+            settings.Policies[NotificationEventType.AwardsNeeded].Timing = NotificationTiming.Immediate;
+            settings.Policies[NotificationEventType.AwardsNeeded].DeferWhileTransmitting = false;
+            settings.Policies[NotificationEventType.AwardsNeeded].SuppressUnchanged = true;
+            var ini = new IniFile(tmpIni);
+            settings.SaveToIni(ini);
+
+            var reloaded = new NotificationSettings();
+            reloaded.LoadFromIni(new IniFile(tmpIni));
+            Check("Round-trip: Timing overridden away from AwardsNeeded's own default survives save/load",
+                reloaded.Policies[NotificationEventType.AwardsNeeded].Timing == NotificationTiming.Immediate, true);
+            Check("Round-trip: DeferWhileTransmitting survives save/load",
+                reloaded.Policies[NotificationEventType.AwardsNeeded].DeferWhileTransmitting == false, true);
+            Check("Round-trip: SuppressUnchanged survives save/load",
+                reloaded.Policies[NotificationEventType.AwardsNeeded].SuppressUnchanged, true);
+
+            // Missing keys (an ini saved by an older Jimmy version, before this feature existed)
+            // must fall back to the code default, never throw or leave a half-set policy --
+            // same "fail safe" contract NotificationSettings.cs's own header comment documents.
+            var emptyIni = new IniFile(Path.Combine(Path.GetTempPath(), $"jimmy_notify_empty_{System.Guid.NewGuid():N}.ini"));
+            var migratedSettings = new NotificationSettings();
+            migratedSettings.LoadFromIni(emptyIni);
+            Check("Missing notifyTiming_ key falls back to the code default (Immediate for QsoStarted)",
+                migratedSettings.Policies[NotificationEventType.QsoStarted].Timing == NotificationTiming.Immediate, true);
+            Check("Missing notifyTiming_ key falls back to the code default (NextPeriodBoundary for AwardsNeeded)",
+                migratedSettings.Policies[NotificationEventType.AwardsNeeded].Timing == NotificationTiming.NextPeriodBoundary, true);
+
+            // A corrupted/invalid template in the ini (e.g. hand-edited, or a future rename)
+            // must fall back to the valid code default rather than shipping a broken
+            // announcement -- NotificationSettings.LoadFromIni's own Validate-before-accept.
+            var badTemplateIni = new IniFile(Path.Combine(Path.GetTempPath(), $"jimmy_notify_bad_{System.Guid.NewGuid():N}.ini"));
+            badTemplateIni.Write($"notifyTemplate_{NotificationEventType.QsoStarted}", "{NotARealVariable}");
+            var badSettings = new NotificationSettings();
+            badSettings.LoadFromIni(badTemplateIni);
+            CheckStr("An invalid saved template falls back to the valid code default, not the broken one",
+                badSettings.Policies[NotificationEventType.QsoStarted].Template,
+                NotificationDefaults.Policies[NotificationEventType.QsoStarted].Template);
+        }
+        finally
+        {
+            try { File.Delete(tmpIni); } catch { }
+        }
+    }
+
+    // ── NotificationCenter: deferred delivery (Timing + DeferWhileTransmitting) ──
+    // Configurable-notification-timing feature. FT8/FT4-agnostic by design (see
+    // NotificationCenter.OnPeriodBoundary's own comment) -- these methods take no period-length
+    // parameter at all, so there is nothing FT8- or FT4-specific to vary in these tests; the
+    // real mode-dependent duration lives entirely upstream in DefaultTrPeriodMsTests' own
+    // domain (WsjtxClient's trPeriod), not here.
+    static void NotificationCenterDeferredDeliveryTests()
+    {
+        Console.WriteLine("\n── NotificationCenter: deferred delivery (Timing / DeferWhileTransmitting) ──");
+
+        // Timing.NextPeriodBoundary: held until a boundary, not delivered from Publish itself.
+        var settings = new NotificationSettings();
+        settings.Policies[NotificationEventType.AwardsNeeded].RepeatSeconds = 0;
+        settings.Policies[NotificationEventType.AwardsNeeded].ThrottleMilliseconds = 0;
+        settings.Policies[NotificationEventType.AwardsNeeded].Timing = NotificationTiming.NextPeriodBoundary;
+        settings.Policies[NotificationEventType.AwardsNeeded].DeferWhileTransmitting = false;
+        var delivery = new FakeNotificationDelivery();
+        var center = new NotificationCenter(settings, delivery);
+
+        center.Publish(new AwardsNeededEvent("K4YT", 1, new[] { "WAS" }, "1 award needed"));
+        Check("NextPeriodBoundary-timed event does not deliver immediately from Publish",
+            delivery.AnnounceCount == 0, true);
+        center.OnPeriodBoundary();
+        Check("...but does deliver once a real period boundary fires",
+            delivery.AnnounceCount == 1, true);
+        CheckStr("...with the correct formatted text", delivery.LastText, "K4YT, 1 award needed");
+
+        // Latest-wins: two publishes of the SAME identity before a boundary must only ever
+        // deliver the second (latest) one -- never both, never the stale first.
+        center.Publish(new AwardsNeededEvent("W1AW", 1, new[] { "WAS" }, "1 award needed"));
+        center.Publish(new AwardsNeededEvent("W1AW", 2, new[] { "WAS", "DXCC" }, "2 awards needed"));
+        int beforeBoundary = delivery.AnnounceCount;
+        center.OnPeriodBoundary();
+        Check("Two publishes of the same identity before a boundary -> exactly ONE delivery",
+            delivery.AnnounceCount == beforeBoundary + 1, true);
+        CheckStr("...and it's the LATEST one, not the first (no stale data)",
+            delivery.LastText, "W1AW, 2 awards needed");
+
+        // A boundary that finds nothing pending is a safe no-op, and a boundary never
+        // re-delivers something already flushed (no double-delivery -- the exact bug class the
+        // W4MAA incident was rooted in).
+        int afterFirstFlush = delivery.AnnounceCount;
+        center.OnPeriodBoundary();
+        Check("A period boundary with nothing pending does not deliver anything",
+            delivery.AnnounceCount == afterFirstFlush, true);
+
+        // DeferWhileTransmitting: an Immediate-timed event published mid-transmission must wait
+        // for OnTransmittingChanged(false), not deliver from Publish, and not wait for a period
+        // boundary either (that's NextPeriodBoundary's job, a separate axis).
+        var txSettings = new NotificationSettings();
+        txSettings.Policies[NotificationEventType.QsoStarted].Timing = NotificationTiming.Immediate;
+        txSettings.Policies[NotificationEventType.QsoStarted].DeferWhileTransmitting = true;
+        txSettings.Policies[NotificationEventType.QsoStarted].RepeatSeconds = 0;
+        var txDelivery = new FakeNotificationDelivery();
+        var txCenter = new NotificationCenter(txSettings, txDelivery);
+
+        txCenter.OnTransmittingChanged(true);
+        txCenter.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));
+        Check("DeferWhileTransmitting: Immediate event published mid-Tx does not deliver yet",
+            txDelivery.AnnounceCount == 0, true);
+        txCenter.OnPeriodBoundary();
+        Check("...a period boundary during Tx does not release it either (still transmitting)",
+            txDelivery.AnnounceCount == 0, true);
+        txCenter.OnTransmittingChanged(false);
+        Check("...but it delivers the instant transmitting ends",
+            txDelivery.AnnounceCount == 1, true);
+
+        // NextPeriodBoundary + DeferWhileTransmitting together: Tx ending alone must NOT
+        // release it (that would shorten a "batched" notification's cadence to whatever the
+        // current over happens to last) -- only a real period boundary that lands while not
+        // transmitting does.
+        var bothSettings = new NotificationSettings();
+        bothSettings.Policies[NotificationEventType.AwardsNeeded].Timing = NotificationTiming.NextPeriodBoundary;
+        bothSettings.Policies[NotificationEventType.AwardsNeeded].DeferWhileTransmitting = true;
+        bothSettings.Policies[NotificationEventType.AwardsNeeded].RepeatSeconds = 0;
+        bothSettings.Policies[NotificationEventType.AwardsNeeded].ThrottleMilliseconds = 0;
+        var bothDelivery = new FakeNotificationDelivery();
+        var bothCenter = new NotificationCenter(bothSettings, bothDelivery);
+
+        bothCenter.OnTransmittingChanged(true);
+        bothCenter.Publish(new AwardsNeededEvent("K4YT", 1, new[] { "WAS" }, "1 award needed"));
+        bothCenter.OnTransmittingChanged(false);
+        Check("NextPeriodBoundary+DeferWhileTransmitting: Tx ending alone does NOT release it",
+            bothDelivery.AnnounceCount == 0, true);
+        bothCenter.OnPeriodBoundary();
+        Check("...only a real period boundary (now that Tx has ended) releases it",
+            bothDelivery.AnnounceCount == 1, true);
+
+        // SuppressUnchanged: identical formatted text back-to-back is suppressed even with
+        // RepeatSeconds=0 (a content check, independent of the time-based one).
+        var suSettings = new NotificationSettings();
+        // Explicit template including {Band} -- the shipped default ("Working {Callsign}")
+        // deliberately has nothing that varies with Band, which would make "a genuinely
+        // changed value" below vacuously true regardless of whether SuppressUnchanged actually
+        // works. Setting it here makes the test's own premise (this publish's formatted text
+        // really does differ) hold regardless of what the default template happens to say.
+        suSettings.Policies[NotificationEventType.QsoStarted].Template = "Working {Callsign} on {Band}";
+        suSettings.Policies[NotificationEventType.QsoStarted].RepeatSeconds = 0;
+        suSettings.Policies[NotificationEventType.QsoStarted].SuppressUnchanged = true;
+        var suDelivery = new FakeNotificationDelivery();
+        var suCenter = new NotificationCenter(suSettings, suDelivery);
+
+        suCenter.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));
+        int afterFirstSu = suDelivery.AnnounceCount;
+        suCenter.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));   // identical formatted text
+        Check("SuppressUnchanged: identical repeat is suppressed even with RepeatSeconds=0",
+            suDelivery.AnnounceCount == afterFirstSu, true);
+        suCenter.Publish(new QsoStartedEvent("K4YT", "40m", "FT8"));   // different Band -> different text
+        Check("SuppressUnchanged: a genuinely changed value is still announced",
+            suDelivery.AnnounceCount == afterFirstSu + 1, true);
+    }
+
+    // ── Parked notification event types stay parked ──
+    // Direct requirement from the configurable-notification-templates feature spec: QsoStarted/
+    // QsoCompleted/TxMessageChanged/AwardsNeeded must remain fully configurable (template/
+    // timing/policy) WITHOUT gaining a new live Notify.Publish(...) call site, per the W4MAA
+    // double-announcement lesson (see NotificationEvents.cs's own header comment). Scans the
+    // real WSJTX_Controller source tree rather than trusting a hand-maintained list, so this
+    // fails the moment anyone adds a new construction site, intentionally or not.
+    static void NotificationParkedEventTypesGuardTests()
+    {
+        Console.WriteLine("\n── Parked notification event types remain parked ──");
+
+        string srcRoot = FindRepoFile("WSJTX_Controller");
+        if (srcRoot == null || !Directory.Exists(srcRoot))
+        {
+            Console.WriteLine("  SKIP  Parked-event-types guard: WSJTX_Controller source tree not found from this binary's location");
+            return;
+        }
+
+        var parkedCtors = new[] { "new QsoStartedEvent(", "new QsoCompletedEvent(", "new TxMessageChangedEvent(", "new AwardsNeededEvent(" };
+        var offenders = new List<string>();
+        foreach (string file in Directory.GetFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+        {
+            string text = File.ReadAllText(file);
+            foreach (string ctor in parkedCtors)
+                if (text.Contains(ctor)) offenders.Add($"{Path.GetFileName(file)} ({ctor.TrimEnd('(')})");
+        }
+        Check("No production WSJTX_Controller source file constructs a parked event type " +
+              (offenders.Count > 0 ? $"(found: {string.Join(", ", offenders)})" : ""),
+              offenders.Count == 0, true);
+    }
+
+    // ── Clock-sync notification (ClockOutOfSync/ClockSynced) ──
+    // Drives the REAL Direct-mode ingestion pipeline (TestApplyDirectSnapshot ->
+    // DirectApplyDecodes -> ProcessDecodeMsg -> timeOffsets, then the new-slot boundary ->
+    // CalcAvgTimeOffset(true), same shape as DirectModePlumbingParityTests above) rather than a
+    // synthetic bypass -- this is the actual, previously-broken-in-Direct-mode path being
+    // exercised end to end, root-caused live 2026-08-12 (see CalcAvgTimeOffset's own comment).
+    //
+    // One mechanical wrinkle every assertion below has to account for: a snapshot's own DT
+    // value is added to timeOffsets during ITS OWN processing, but only EVALUATED (averaged,
+    // compared against maxTimeOffset, and a transition possibly published) at the START of the
+    // NEXT snapshot that carries a new slot number -- there is an inherent one-period lag
+    // between "data collected" and "period finalized", exactly like the real engine. Each
+    // section below publishes its target DT twice in a row to settle fully through that lag
+    // before asserting.
+    static void ClockSyncNotificationTests()
+    {
+        Console.WriteLine("\n── Clock-sync notification (ClockOutOfSync / ClockSynced) ──");
+
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        ctrl.anyMsgRadioButton.Checked = true;
+        ctrl.replyDxCheckBox.Checked = true;
+        ctrl.replyLocalCheckBox.Checked = true;
+
+        var settings = new NotificationSettings();
+        // RepeatSeconds=0 here: the default 60s is a real wall-clock flap-guard (a SEPARATE,
+        // already-covered mechanism -- see NotificationDedupThrottleTests), which would
+        // otherwise suppress this test's later, deliberately-rapid transitions purely because
+        // they happen within 60 real seconds of an earlier one. This test isolates the
+        // transition-gate logic (CalcAvgTimeOffset's own _clockWasAcceptable) specifically.
+        settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 0;
+        settings.Policies[NotificationEventType.ClockSynced].RepeatSeconds = 0;
+        var delivery = new FakeNotificationDelivery();
+        wc.Notify = new NotificationCenter(settings, delivery);
+
+        const string myCall = "KB0UZT";
+        const string myGrid = "FN42";
+        ulong slot = 5000;
+
+        void PublishDt(double dt)
+        {
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (slot++) + @" },
+                ""recentDecodes"": [
+                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
+                ]
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
+        }
+
+        // Priming snapshot: first slot ever seen, so its own boundary check runs against an
+        // empty timeOffsets (a no-op) before this snapshot's own DT is added.
+        PublishDt(0.1);
+
+        // Acceptable from the start (0.1s, well under the 1.20s default threshold) -- starting
+        // acceptable must never itself announce anything.
+        PublishDt(0.1);
+        PublishDt(0.1);
+        Check("Acceptable clock offset from the start -> no clock notification", delivery.AnnounceCount == 0, true);
+
+        // Clearly unacceptable (2.0s > 1.20s threshold) -- exactly one warning once it settles.
+        PublishDt(2.0);
+        PublishDt(2.0);
+        Check("Clock offset exceeding the threshold -> exactly one ClockOutOfSync notification",
+            delivery.AnnounceCount == 1, true);
+        CheckStr("...with the exact required wording and the real measured offset",
+            delivery.LastText, "Computer clock is out of sync, offset 2.0 seconds.");
+        Check("...delivered as Important (audible cue) -- operationally significant on both FT8 and FT4",
+            delivery.LastImportant == true, true);
+
+        // Stays bad for several more periods -- transition-gated, so no repeat chatter.
+        PublishDt(2.0);
+        PublishDt(2.0);
+        PublishDt(2.0);
+        Check("Clock remains out of sync across several more periods -> still exactly one notification (no per-cycle chatter)",
+            delivery.AnnounceCount == 1, true);
+
+        // Recovers -- a distinct ClockSynced notification, not a repeat of the warning.
+        PublishDt(0.1);
+        PublishDt(0.1);
+        Check("Clock returns to acceptable -> a ClockSynced recovery notification fires",
+            delivery.AnnounceCount == 2, true);
+        CheckStr("...with the exact required recovery wording", delivery.LastText, "Computer clock timing is back within range.");
+
+        // Becomes unacceptable again later -- a genuinely NEW transition, must announce again.
+        PublishDt(1.5);
+        PublishDt(1.5);
+        Check("Clock becomes unacceptable again after recovering -> announces again (new transition, not suppressed)",
+            delivery.AnnounceCount == 3, true);
+
+        // Disabling the type stops it from announcing at all, same as every other notification.
+        settings.Policies[NotificationEventType.ClockOutOfSync].Enabled = false;
+        settings.Policies[NotificationEventType.ClockSynced].Enabled = false;
+        PublishDt(0.1);
+        PublishDt(0.1);   // recovery transition
+        PublishDt(2.0);
+        PublishDt(2.0);   // out-of-sync transition again
+        Check("Disabled ClockOutOfSync/ClockSynced -> no further clock notifications at all",
+            delivery.AnnounceCount == 3, true);
+
+        // ── Boundary precision, isolated from the above sequence's ongoing state ──
+        var boundarySettings = new NotificationSettings();
+        var boundaryDelivery = new FakeNotificationDelivery();
+        var boundaryWc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        boundaryWc.Notify = new NotificationCenter(boundarySettings, boundaryDelivery);
+        ulong bSlot = 6000;
+        void PublishBoundaryDt(double dt)
+        {
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (bSlot++) + @" },
+                ""recentDecodes"": [
+                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
+                ]
+            }");
+            boundaryWc.TestApplyDirectSnapshot(myCall, myGrid, snap);
+        }
+        PublishBoundaryDt(1.20);   // priming
+        PublishBoundaryDt(1.20);
+        PublishBoundaryDt(1.20);
+        Check("Offset exactly AT the threshold (1.20s) is still acceptable (<=, not <)",
+            boundaryDelivery.AnnounceCount == 0, true);
+        PublishBoundaryDt(1.21);
+        PublishBoundaryDt(1.21);
+        Check("Offset just OVER the threshold (1.21s) is unacceptable",
+            boundaryDelivery.AnnounceCount == 1, true);
+
+        // ── FT8 vs FT4: same shared threshold, {Mode} token reflects whichever is active ──
+        // See CalcAvgTimeOffset's own comment for why this is deliberately ONE threshold for
+        // both modes, not two -- Jimmy's pre-existing maxTimeOffset was already unconditional
+        // on mode before this feature, with no engine-level evidence FT4 needs a different one.
+        var ft4Settings = new NotificationSettings();
+        ft4Settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 0;   // see the main settings object's own comment above
+        ft4Settings.Policies[NotificationEventType.ClockSynced].RepeatSeconds = 0;
+        var ft4Delivery = new FakeNotificationDelivery();
+        var ft4Wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        ft4Wc.Notify = new NotificationCenter(ft4Settings, ft4Delivery);
+        ft4Wc.TestSetMode("FT4");
+        ulong ft4Slot = 7000;
+        void PublishFt4Dt(double dt)
+        {
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (ft4Slot++) + @" },
+                ""recentDecodes"": [
+                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
+                ]
+            }");
+            ft4Wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
+        }
+        PublishFt4Dt(0.1);
+        PublishFt4Dt(2.0);
+        PublishFt4Dt(2.0);
+        Check("FT4 mode: the same shared threshold still triggers the warning", ft4Delivery.AnnounceCount == 1, true);
+        // Default template doesn't reference {Mode} at all -- switch to one that does, to prove
+        // the token itself carries "FT4" correctly rather than a hardcoded FT8 assumption.
+        ft4Settings.Policies[NotificationEventType.ClockOutOfSync].Template = "{Mode} clock offset {ClockOffset}";
+        ft4Settings.Policies[NotificationEventType.ClockOutOfSync].SuppressUnchanged = false;
+        // Force a fresh transition to re-fire with the new template active.
+        PublishFt4Dt(0.1);
+        PublishFt4Dt(0.1);
+        PublishFt4Dt(2.5);
+        PublishFt4Dt(2.5);
+        CheckStr("FT4 mode: {Mode} token renders as \"FT4\" when the template actually uses it",
+            ft4Delivery.LastText, "FT4 clock offset 2.5");
+    }
+
+    // ── Clock-sync: Direct-path reconnect / mode-switch state hygiene ──
+    // Found in the 2026-08-12 Direct-engine-path review: ConnectDirectEngine and
+    // SetOperatingMode's own Direct-mode branch didn't clear timeOffsets/timeOffset (and, for
+    // reconnect, _clockWasAcceptable), so stale pre-reconnect or prior-mode DT samples could
+    // contaminate the very next average. Fixed at both sites (WsjtxClient.Direct.cs /
+    // WsjtxClient.Protocol.cs); this proves it via OBSERABLE behavior (whether a spurious
+    // announcement fires), not by reaching into private state.
+    static void ClockSyncDirectPathStateHygieneTests()
+    {
+        Console.WriteLine("\n── Clock-sync: Direct-path reconnect / mode-switch state hygiene ──");
+
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        ctrl.anyMsgRadioButton.Checked = true;
+        ctrl.replyDxCheckBox.Checked = true;
+        ctrl.replyLocalCheckBox.Checked = true;
+
+        var settings = new NotificationSettings();
+        settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 0;
+        settings.Policies[NotificationEventType.ClockSynced].RepeatSeconds = 0;
+        var delivery = new FakeNotificationDelivery();
+        wc.Notify = new NotificationCenter(settings, delivery);
+
+        const string myCall = "KB0UZT";
+        const string myGrid = "FN42";
+        ulong slot = 9000;
+        void PublishDt(double dt)
+        {
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (slot++) + @" },
+                ""recentDecodes"": [
+                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
+                ]
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
+        }
+
+        wc.ConnectDirectEngine(myCall, myGrid);
+
+        // Drive it bad before the reconnect under test.
+        PublishDt(0.1);
+        PublishDt(2.0);
+        PublishDt(2.0);
+        Check("Setup: clock reads out of sync before the reconnect under test", delivery.AnnounceCount == 1, true);
+
+        // A reconnect must reset clock tracking to "unmeasured", not "still bad" -- proven by
+        // fresh acceptable data staying silent (no spurious recovery announcement), since a
+        // truly fresh connection has nothing to "recover" FROM yet.
+        wc.ConnectDirectEngine(myCall, myGrid);
+        int afterReconnect = delivery.AnnounceCount;
+        PublishDt(0.1);
+        PublishDt(0.1);
+        Check("Reconnect resets clock state: fresh acceptable data right after reconnecting does not fire a spurious recovery",
+            delivery.AnnounceCount == afterReconnect, true);
+
+        // ...and a genuinely bad reading after reconnecting still announces normally (the reset
+        // didn't disable the feature, only cleared stale state).
+        PublishDt(2.0);
+        PublishDt(2.0);
+        Check("...but a genuinely bad reading after reconnecting still announces normally",
+            delivery.AnnounceCount == afterReconnect + 1, true);
+
+        // Mode switch: stale samples from the prior mode must not contaminate the new mode's
+        // first average. Currently mid-"bad" (from the check just above, one 2.0s sample still
+        // sitting unevaluated in timeOffsets right before the switch) -- feeding a reading
+        // exactly AT the acceptable boundary (1.20s) right after switching is a value chosen
+        // specifically to tell contaminated from clean apart: blended with the stale 2.0s
+        // sample the average would land at 1.60s (still unacceptable, no transition, test
+        // would correctly catch the bug), where a properly-cleared average reads exactly
+        // 1.20s -- acceptable -- and fires a real recovery transition. A genuine recovery IS
+        // the expected, correct outcome here (the clock really was bad, is now genuinely
+        // measured as fine); what this proves is that the reading behind it wasn't contaminated.
+        int beforeSwitch = delivery.AnnounceCount;
+        wc.SetOperatingMode("FT4");
+        PublishDt(1.20);
+        PublishDt(1.20);
+        Check("Mode switch clears stale samples: a boundary-acceptable FT4 reading is recognized as acceptable, not dragged over threshold by the prior mode's stale bad sample",
+            delivery.AnnounceCount == beforeSwitch + 1, true);
     }
 
     // ── Controller.FindPreservedSelectionIndex: list-selection identity tracking ──
