@@ -18,7 +18,7 @@
       the production install's real settings/logbook database.
 
   Product  : Jimmy Test (WSJT-X Controller, test/beta build)
-  Version  : 2.0.11
+  Version  : 2.0.13
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy Test\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
@@ -32,7 +32,7 @@
 
   <Package
     Name="Jimmy Test"
-    Version="2.0.11"
+    Version="2.0.13"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"
@@ -74,6 +74,9 @@
       <ComponentGroupRef Id="PublishComponents" />
       <ComponentGroupRef Id="RuleDefinitionsComponents" />
       <ComponentGroupRef Id="RuleDefinitionsListsComponents" />
+      <ComponentGroupRef Id="ResourcesComponents" />
+      <ComponentGroupRef Id="ResourcesEngineHostComponents" />
+      <ComponentGroupRef Id="ResourcesHamlibComponents" />
       <ComponentRef Id="DesktopShortcutComp" />
       <ComponentRef Id="StartMenuShortcutComp" />
       <ComponentRef Id="RigctldFirewallComp" />
@@ -120,16 +123,24 @@
     <StandardDirectory Id="ProgramFilesFolder">
       <Directory Id="ManufacturerDir" Name="KB0UZT">
         <Directory Id="INSTALLFOLDER" Name="Jimmy Test">
-          <!-- Declared explicitly (not left to harvesting) only for
-               RuleDefinitions\, because it mixes direct files (*.ini) with a
-               subdirectory (Lists\); this is exactly the known WiX 5
-               harvesting bug the roadmap flagged (wixtoolset/issues#8608):
-               a folder that has both won't get harvested as one Directory
-               row, it gets two duplicate rows with the same name. Every
-               other folder here (Resources\, each locale subfolder) is
-               leaf-only, so plain recursive harvesting is safe for them. -->
+          <!-- Declared explicitly (not left to harvesting) for RuleDefinitions\
+               and Resources\, because both mix direct files with a
+               subdirectory; this is exactly the known WiX 5 harvesting bug
+               (wixtoolset/issues#8608) already found and fixed in production's
+               own Jimmy.wxs: a folder that has both won't get harvested as
+               one Directory row, it gets duplicate rows with the same name.
+               This file originally predated that fix and never picked it up,
+               meaning a Test install's Resources\EngineHost\ and
+               Resources\hamlib\ (rigctld, jimmy-engine-host.exe: Native
+               mode and CAT control) were never reliably packaged. Every other
+               folder here (each locale subfolder) is leaf-only, so plain
+               recursive harvesting is safe for those. -->
           <Directory Id="RuleDefinitionsDir" Name="RuleDefinitions">
             <Directory Id="RuleDefinitionsListsDir" Name="Lists" />
+          </Directory>
+          <Directory Id="ResourcesDir" Name="Resources">
+            <Directory Id="ResourcesEngineHostDir" Name="EngineHost" />
+            <Directory Id="ResourcesHamlibDir" Name="hamlib" />
           </Directory>
         </Directory>
       </Directory>
@@ -151,6 +162,7 @@
     <ComponentGroup Id="PublishComponents" Directory="INSTALLFOLDER">
       <Files Include="PublishOutputTest\**">
         <Exclude Files="PublishOutputTest\RuleDefinitions\**" />
+        <Exclude Files="PublishOutputTest\Resources\**" />
       </Files>
     </ComponentGroup>
 
@@ -160,6 +172,21 @@
 
     <ComponentGroup Id="RuleDefinitionsListsComponents" Directory="RuleDefinitionsListsDir">
       <Files Include="PublishOutputTest\RuleDefinitions\Lists\*" />
+    </ComponentGroup>
+
+    <!-- Resources\ split the same way as RuleDefinitions\ above, for the same reason
+         (mixed direct files + subdirectories; see the Directory declaration's own
+         comment). -->
+    <ComponentGroup Id="ResourcesComponents" Directory="ResourcesDir">
+      <Files Include="PublishOutputTest\Resources\*" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="ResourcesEngineHostComponents" Directory="ResourcesEngineHostDir">
+      <Files Include="PublishOutputTest\Resources\EngineHost\*" />
+    </ComponentGroup>
+
+    <ComponentGroup Id="ResourcesHamlibComponents" Directory="ResourcesHamlibDir">
+      <Files Include="PublishOutputTest\Resources\hamlib\*" />
     </ComponentGroup>
   </Fragment>
 

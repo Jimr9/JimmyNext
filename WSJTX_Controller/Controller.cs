@@ -357,6 +357,18 @@ namespace WSJTX_Controller
             string pgmName = Assembly.GetExecutingAssembly().GetName().Name.ToString();
             string path = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{pgmName}";
             string pathFileNameExt = path + "\\" + pgmName + ".ini";
+            // Production-safety isolation (urgent fix, 2026-08-13): Properties.Settings.Default
+            // is the legacy .NET user.config-backed settings store, predating the .ini file
+            // system below. Its on-disk path is derived from assembly Product/Company identity
+            // and evidence, NOT from pgmName the way every other persistence path in this app
+            // deliberately is -- so unlike the .ini file, the logbook/lookup DataRoot, and the
+            // diagnostic log (all keyed off Assembly.GetExecutingAssembly().GetName().Name),
+            // there is no guarantee this legacy store is isolated per build identity. A
+            // side-by-side "Jimmy Test" build has no legitimate reason to read it at all -- it
+            // should always start from clean defaults, never inherit another install's history --
+            // so every read of Properties.Settings.Default below is now gated on this being the
+            // real production identity specifically, not just "any .ini-less first run".
+            bool isProductionIdentity = pgmName == "Jimmy";
             List<string> parsedCallWaitingRowOrder = null;
             List<string> parsedRawDecodeRowOrder = null;
             hotkeyConfig = new HotkeyConfig();
@@ -420,35 +432,42 @@ namespace WSJTX_Controller
 
             if (iniFile == null || !iniFile.KeyExists("firstRun"))     //.ini file not written yet, read properties (possibly set defaults)
             {
-                debug = Properties.Settings.Default.debug;
-                if (Properties.Settings.Default.windowPos != new Point(0, 0)) 
-                    this.Location = Properties.Settings.Default.windowPos;
-                if (Properties.Settings.Default.windowHt != 0) 
-                    this.Height = Properties.Settings.Default.windowHt;
-                ipAddrStr = Properties.Settings.Default.ipAddress;
-                port = Properties.Settings.Default.port;
-                multicast = Properties.Settings.Default.multicast;
-                timeoutNumUpDown.Value = Properties.Settings.Default.timeout;
-                directedTextBox.Text = Properties.Settings.Default.directeds;
-                callDirCqCheckBox.Checked = Properties.Settings.Default.useDirected;
-                mycallCheckBox.Checked = Properties.Settings.Default.playMyCall;
-                loggedCheckBox.Checked = Properties.Settings.Default.playLogged;
-                alertTextBox.Text = Properties.Settings.Default.alertDirecteds;
-                replyDirCqCheckBox.Checked = Properties.Settings.Default.useAlertDirected;
-                logEarlyCheckBox.Checked = Properties.Settings.Default.logEarly;
-                alwaysOnTop = Properties.Settings.Default.alwaysOnTop;
-                useRR73 = Properties.Settings.Default.useRR73;
-                skipGridCheckBox.Checked = Properties.Settings.Default.skipGrid;
-                diagLog = Properties.Settings.Default.diagLog;
-                callAddedCheckBox.Checked = Properties.Settings.Default.playCallAdded;
-                replyLocalCheckBox.Checked = Properties.Settings.Default.enableReplyLocal;
-                replyDxCheckBox.Checked = Properties.Settings.Default.enableReplyDx;
-                freqCheckBox.Checked = Properties.Settings.Default.bestOffset;
-                replyRR73CheckBox.Checked = Properties.Settings.Default.replyRR73;
-                newOnBand = Properties.Settings.Default.newOnBand;
-                cmdPrompts = Properties.Settings.Default.cmdPrompts;
+                if (isProductionIdentity)
+                {
+                    debug = Properties.Settings.Default.debug;
+                    if (Properties.Settings.Default.windowPos != new Point(0, 0))
+                        this.Location = Properties.Settings.Default.windowPos;
+                    if (Properties.Settings.Default.windowHt != 0)
+                        this.Height = Properties.Settings.Default.windowHt;
+                    ipAddrStr = Properties.Settings.Default.ipAddress;
+                    port = Properties.Settings.Default.port;
+                    multicast = Properties.Settings.Default.multicast;
+                    timeoutNumUpDown.Value = Properties.Settings.Default.timeout;
+                    directedTextBox.Text = Properties.Settings.Default.directeds;
+                    callDirCqCheckBox.Checked = Properties.Settings.Default.useDirected;
+                    mycallCheckBox.Checked = Properties.Settings.Default.playMyCall;
+                    loggedCheckBox.Checked = Properties.Settings.Default.playLogged;
+                    alertTextBox.Text = Properties.Settings.Default.alertDirecteds;
+                    replyDirCqCheckBox.Checked = Properties.Settings.Default.useAlertDirected;
+                    logEarlyCheckBox.Checked = Properties.Settings.Default.logEarly;
+                    alwaysOnTop = Properties.Settings.Default.alwaysOnTop;
+                    useRR73 = Properties.Settings.Default.useRR73;
+                    skipGridCheckBox.Checked = Properties.Settings.Default.skipGrid;
+                    diagLog = Properties.Settings.Default.diagLog;
+                    callAddedCheckBox.Checked = Properties.Settings.Default.playCallAdded;
+                    replyLocalCheckBox.Checked = Properties.Settings.Default.enableReplyLocal;
+                    replyDxCheckBox.Checked = Properties.Settings.Default.enableReplyDx;
+                    freqCheckBox.Checked = Properties.Settings.Default.bestOffset;
+                    replyRR73CheckBox.Checked = Properties.Settings.Default.replyRR73;
+                    newOnBand = Properties.Settings.Default.newOnBand;
+                    cmdPrompts = Properties.Settings.Default.cmdPrompts;
+                    usePskReporter = Properties.Settings.Default.usePskReporter;
+                }
+                // Jimmy Test (or any other non-production identity) falls through with the
+                // plain C# defaults already declared above (newOnBand=true, cmdPrompts=true,
+                // usePskReporter=true, etc.) and whatever Designer.cs set each control's
+                // Checked/Text to -- a genuinely clean first run, not production's history.
                 bandComboBox.SelectedIndex = newOnBand ? 1 : 0;
-                usePskReporter = Properties.Settings.Default.usePskReporter;
                 optimizeCheckBox.Checked = true;
                 callNonDirCqCheckBox.Checked = true;
                 showUsStateCheckBox.Checked = true;
@@ -505,9 +524,14 @@ namespace WSJTX_Controller
                 }
                 catch (Exception)
                 {
-                    ipAddrStr = Properties.Settings.Default.ipAddress;
-                    port = Properties.Settings.Default.port;
-                    multicast = Properties.Settings.Default.multicast;
+                    // Same isolation rule as the first-run migration block above: production
+                    // alone may fall back to the legacy Properties.Settings.Default store.
+                    // Every other identity (Jimmy Test included) falls back to WSJT-X's own
+                    // standard UDP defaults instead (matching App.config's own default values),
+                    // never another install's possibly-different saved settings.
+                    ipAddrStr = isProductionIdentity ? Properties.Settings.Default.ipAddress : "127.0.0.1";
+                    port = isProductionIdentity ? Properties.Settings.Default.port : 2237;
+                    multicast = isProductionIdentity && Properties.Settings.Default.multicast;
                 }
 
                 int.TryParse(iniFile.Read("timeout"), out i);

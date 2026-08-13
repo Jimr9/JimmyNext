@@ -17,6 +17,14 @@
     <NoWarn>$(NoWarn);WFO1000</NoWarn>
   </PropertyGroup>
 
+  <!-- Production-safety isolation (urgent fix, 2026-08-13): the same -p:AssemblyName="Jimmy Test"
+       override that build.bat/JimmyTest.wxs already use to isolate the .ini/data folder now also
+       drives AssemblyInfo.cs's Title/Product attributes (see that file's own comment), so a Test
+       build's on-disk identity is consistently "Jimmy Test" everywhere, not just the file name. -->
+  <PropertyGroup Condition="'$(AssemblyName)' == 'Jimmy Test'">
+    <DefineConstants>$(DefineConstants);JIMMY_TEST_BUILD</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <PackageReference Include="NAudio" Version="2.3.0" />
     <PackageReference Include="System.Data.SQLite.Core" Version="1.0.118" />
