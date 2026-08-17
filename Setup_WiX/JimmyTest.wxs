@@ -18,7 +18,7 @@
       the production install's real settings/logbook database.
 
   Product  : Jimmy Test (WSJT-X Controller, test/beta build)
-  Version  : 2.0.13
+  Version  : 2.0.14
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy Test\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
@@ -32,7 +32,7 @@
 
   <Package
     Name="Jimmy Test"
-    Version="2.0.13"
+    Version="2.0.14"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"
@@ -141,22 +141,23 @@
           </Directory>
           <Directory Id="ResourcesDir" Name="Resources">
             <Directory Id="ResourcesEngineHostDir" Name="EngineHost">
-              <!-- Nexus/EngineHost owns launching and controlling rigctld -- Jimmy Test never
+              <!-- Nexus/EngineHost owns launching and controlling rigctld; Jimmy Test never
                    independently launches or owns a second one for this path. Nexus's own
                    official build does not embed/build Hamlib into any crate (confirmed:
                    tempo-fast-sys's build.rs has zero hamlib/rigctld references); it EXPECTS
                    the consuming application to package it, exactly like Nexus's own official
                    Tauri app does at src-tauri/resources/hamlib/ (staged by Nexus's own
-                   scripts/fetch-hamlib.sh) -- resolve_rigctld's "resources/hamlib/rigctld.exe"
+                   scripts/fetch-hamlib.sh); resolve_rigctld's "resources/hamlib/rigctld.exe"
                    candidate exists specifically to match that convention. Jimmy's own
                    fetch-hamlib.ps1 already mirrors that script exactly (same release, same
                    file list, same checksum) for WSJTX_Controller's own Resources\hamlib\
-                   (Jimmy's own RigctldClient.cs, a separate read-mostly telemetry client --
-                   see Controller.cs's ApplyRadioSettings). This second copy just supplies the
-                   SAME already-fetched bytes at a second location resolve_rigctld's candidate
-                   list already searches relative to jimmy-engine-host.exe's own directory
-                   ("hamlib/rigctld.exe") -- Nexus still does all the launching, Jimmy only
-                   supplies the binary, and zero Nexus source is touched. -->
+                   (used by Jimmy's own RigctldClient.cs, a separate read-mostly telemetry
+                   client; see Controller.cs's ApplyRadioSettings). This second copy just
+                   supplies the SAME already-fetched bytes at a second location
+                   resolve_rigctld's candidate list already searches relative to
+                   jimmy-engine-host.exe's own directory ("hamlib/rigctld.exe"); Nexus still
+                   does all the launching, Jimmy only supplies the binary, and zero Nexus
+                   source is touched. -->
               <Directory Id="ResourcesEngineHostHamlibDir" Name="hamlib" />
             </Directory>
             <Directory Id="ResourcesHamlibDir" Name="hamlib" />
@@ -208,10 +209,14 @@
       <Files Include="PublishOutputTest\Resources\hamlib\*" />
     </ComponentGroup>
 
-    <!-- Second copy of the same harvested hamlib files, installed under
-         Resources\EngineHost\hamlib\ -- see the Directory declaration above for why. -->
+    <!-- A second physical on-disk copy of the same hamlib files, published separately by
+         Jimmy.csproj into PublishOutputTest\Resources\EngineHost\hamlib\ (see that project's
+         own comment): WiX's file harvesting dedupes by SOURCE path, so pointing a second
+         <Files Include> at the SAME Resources\hamlib\ source silently harvests nothing (found
+         via a real build: WIX8602 "Skipping file that has already been harvested" on every
+         file). Harvesting a second, genuinely distinct source path is what actually works. -->
     <ComponentGroup Id="ResourcesEngineHostHamlibComponents" Directory="ResourcesEngineHostHamlibDir">
-      <Files Include="PublishOutputTest\Resources\hamlib\*" />
+      <Files Include="PublishOutputTest\Resources\EngineHost\hamlib\*" />
     </ComponentGroup>
   </Fragment>
 

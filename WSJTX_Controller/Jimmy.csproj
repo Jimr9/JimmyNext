@@ -108,6 +108,21 @@
       <Link>Resources\EngineHost\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- A second physical on-disk copy of Resources\hamlib\ (see the ItemGroup above), landed
+         at Resources\EngineHost\hamlib\ so Nexus's own unmodified rigctld_proc::resolve_rigctld
+         (crates/tempo-audio) finds it via its "hamlib/rigctld.exe" candidate, relative to
+         jimmy-engine-host.exe's own directory. Resources\hamlib\ is a SIBLING of
+         Resources\EngineHost\, not a child of it, so resolve_rigctld's candidates never reach
+         it there. Setup_WiX\JimmyTest.wxs's ResourcesEngineHostHamlibComponents harvests THIS
+         physical copy (not Resources\hamlib\ a second time) because WiX's own file harvesting
+         dedupes by source path; an install-time-only duplication trick does not work, this has
+         to be two real files on disk. See that .wxs file's own Directory-declaration comment
+         for the full ownership-model reasoning (Nexus/EngineHost still does all the launching;
+         this just supplies the binary where its own unmodified search already looks). -->
+    <None Include="Resources\hamlib\**\*.*">
+      <Link>Resources\EngineHost\hamlib\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
   <!-- Jimmy's Club Log application key lives in a private file outside the
