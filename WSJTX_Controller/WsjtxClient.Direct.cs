@@ -623,14 +623,27 @@ namespace WSJTX_Controller
             DirectSendCommand("REPLY " + json);
         }
 
+        // Fire-and-forget by design (see DirectSendCommand's own comment on the bounded
+        // connect/read pair) -- NOT changed to retry or block here, since altering a TX-safety
+        // command's timing/retry behavior needs real-radio verification this pass doesn't have.
+        // What IS safe and added here: a failed response no longer disappears silently. Every
+        // call site already treats "the command may not have reached the engine" as an expected,
+        // recoverable case (that's what DirectPollTick's own next SNAPSHOT poll is for -- it will
+        // surface a real disconnect via DirectHandlePollFailure within a few seconds either way),
+        // so this only adds visibility for diagnosing a suspected TX-command failure after the
+        // fact, never a behavior change.
         public void DirectSendHaltTx()
         {
-            DirectSendCommand("HALT_TX");
+            string resp = DirectSendCommand("HALT_TX");
+            if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
+                DebugOutput($"{Time()} [DIRECT] HALT_TX did not return OK (response: {(resp ?? "<no response>")})");
         }
 
         public void DirectSetTxEnabled(bool enabled)
         {
-            DirectSendCommand("SET_TX_ENABLED " + (enabled ? "1" : "0"));
+            string resp = DirectSendCommand("SET_TX_ENABLED " + (enabled ? "1" : "0"));
+            if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
+                DebugOutput($"{Time()} [DIRECT] SET_TX_ENABLED {(enabled ? 1 : 0)} did not return OK (response: {(resp ?? "<no response>")})");
         }
 
         // PSK Reporter checkbox (Options), live path for direct-engine mode -- see
