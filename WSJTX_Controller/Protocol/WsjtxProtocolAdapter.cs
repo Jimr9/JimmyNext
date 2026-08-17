@@ -16,6 +16,13 @@ namespace WSJTX_Controller
         public IPEndPoint e;
     }
 
+    // Test/replay-only in current production (see WsjtxClient.Protocol.cs's own top-of-file
+    // banner comment): the sockets this owns are opened only via ConnectNativeEngine, which
+    // Controller.ApplyEngineMode() calls only under TestModeGuard.IsTestMode. Real production
+    // always uses Direct (WsjtxClient.Direct.cs) and never opens a UDP socket at all. Kept
+    // because run_replay_tests.bat's JimmyReplay.py genuinely depends on this socket mechanics
+    // working end to end against a real running Jimmy Test.exe.
+    //
     // Migration Stage A3 (Jimmy_Master_Migration_Roadmap.md / Architecture Blueprint):
     // Protocol Adapter boundary for WsjtxClient.Protocol.cs's socket ownership, zero
     // wire-format/behavior change.

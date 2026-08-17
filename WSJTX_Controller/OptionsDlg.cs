@@ -1911,9 +1911,9 @@ namespace WSJTX_Controller
 
         // WSJT-X's own decode-related settings, ported over in Nexus but never previously
         // exposed to Jimmy -- see DecodeSettings.cs's own comment for the full list and which
-        // ones are live vs. startup-only. Only takes effect for Jimmy Native (Decode Engine tab);
-        // meaningless under WSJT-X External, but shown unconditionally like the Radio tab is --
-        // no real harm in the operator seeing/setting it ahead of switching decode engines.
+        // ones are live vs. startup-only. Jimmy Next always runs the native engine (Controller.cs
+        // Form_Load's ApplyEngineMode() call, unconditional -- there is no remaining "WSJT-X
+        // External" mode to switch to), so this always applies.
         private void BuildDecodeTab()
         {
             decodePanel.Controls.Clear();

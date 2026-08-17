@@ -25,6 +25,33 @@ WinForms (C#, WSJTX_Controller/*.Designer.cs, Controller.cs's UI half)
     accessible operator interface (JAWS/NVDA)
 ```
 
+**Direct is the sole production transport.** `Jimmy Test -> Direct (TCP control port) ->
+EngineHost -> Nexus` is not "the preferred path" or "the default" -- it is the only one real
+production code can reach. `Controller.Form_Load` always calls `ApplyEngineMode()`
+unconditionally (its own comment: *"Phase 4g: always launches the native engine host"*), which
+outside `TestModeGuard.IsTestMode` always calls `ConnectDirectEngine()`
+(`WsjtxClient.Direct.cs`) -- never the classic WSJT-X UDP protocol handling in
+`WsjtxClient.Protocol.cs`. There is no remaining Options toggle, settings value, or startup
+branch that can select anything else; the older "talk over classic WSJT-X UDP instead of
+Direct" choice (`UseDirectEngine`) was fully removed in an earlier pass
+(`NativeEngineSettings.cs`'s own comment), and a handful of user-facing error messages and
+comments that still referenced a "switch Decode Engine back to WSJT-X External" escape hatch
+were found stale and corrected during a focused audit (2026-08-17) -- that escape hatch no
+longer exists; jimmy-engine-host.exe not being reachable is now a hard error, not a fallback
+trigger.
+
+The classic UDP protocol code (`WsjtxClient.Protocol.cs`, `Protocol/WsjtxProtocolAdapter.cs`,
+`WsjtxUdpLib`'s message classes) was **not deleted** -- it is genuinely load-bearing test
+infrastructure, not vestigial production code. `run_replay_tests.bat` sets
+`TestModeGuard.IsTestMode`, which routes `ApplyEngineMode()` to `ConnectNativeEngine()`
+(`WsjtxClient.Protocol.cs`) instead, opening a real UDP socket that `JimmyReplay.py` sends real
+packets to against a real running `Jimmy Test.exe` process -- an end-to-end replay harness, not
+an in-process mock. Deleting this would break that harness for no production benefit. Instead,
+every entry point (`WsjtxClient.Protocol.cs`'s own top-of-file banner comment,
+`ConnectNativeEngine`, `UdpLoop`, `WsjtxProtocolAdapter`'s class comment) now says explicitly
+"test/replay-only in current production" rather than leaving that to be inferred or -- worse --
+misread as a live alternate transport.
+
 **EngineHost is genuinely thin.** `EngineHost/Cargo.toml`'s own header comment documents that
 it used to hand-roll its own decode/TX-scheduling/PTT loop and was migrated ("Self-sufficiency
 plan Phase 5") to call Nexus's real production `run_radio` instead -- there is no duplicate

@@ -302,8 +302,8 @@ namespace WSJTX_Controller
             // WSJT-X's own decode-related settings (Fast/Normal/Deep depth, F Low/F High, Enable
             // AP, AP-CQ-only, Single decode) -- ported over in Nexus but never previously exposed
             // to Jimmy. Deliberately its own category, separate from decodeEnginePanel above
-            // (which is about WHICH decode engine/backend runs -- native vs WSJT-X External --
-            // not WSJT-X's own decode-quality settings).
+            // (which configures the always-on native engine itself -- My Call/My Grid, audio
+            // devices, DX Cluster server -- not WSJT-X's own decode-quality settings).
             //
             // decodePanel
             //

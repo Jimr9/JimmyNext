@@ -15,6 +15,19 @@ using WsjtxUdpLib.Messages.Out;
 
 namespace WSJTX_Controller
 {
+    // ═══════════════════════════════════════════════════════════════════════════════════
+    // TEST/REPLAY-ONLY IN CURRENT PRODUCTION. Jimmy Next's sole production transport is
+    // Jimmy Test -> Direct (control port) -> EngineHost -> Nexus (WsjtxClient.Direct.cs).
+    // Controller.Form_Load's ApplyEngineMode() call always launches the native engine host
+    // and always connects to it via ConnectDirectEngine() outside TestModeGuard.IsTestMode
+    // -- there is no remaining operator choice or code path that reaches this file's
+    // classic WSJT-X UDP protocol handling in a real session. It is exercised ONLY when
+    // TestModeGuard.IsTestMode is true, by run_replay_tests.bat's JimmyReplay.py driving a
+    // real Jimmy Test.exe process over real UDP packets, simulating a standard WSJT-X peer
+    // -- genuinely load-bearing test infrastructure, not dead code, kept exactly because
+    // that harness (and the message-parsing library it exercises, WsjtxUdpLib) still needs
+    // it to work. See ConnectNativeEngine's own comment below for the entry point.
+    // ═══════════════════════════════════════════════════════════════════════════════════
     public partial class WsjtxClient
     {
         // Stage A3: body moved to WsjtxProtocolAdapter.ReceiveCallback (Protocol/
@@ -32,6 +45,12 @@ namespace WSJTX_Controller
 
         public void UdpLoop()
         {
+            // Called once per mainLoopTimer tick unconditionally (Controller.cs) regardless of
+            // transport -- the _directConnected guard immediately below is what makes it a no-op
+            // in real production (see this file's own top-of-file banner comment). Kept as an
+            // unconditional call site, not itself gated by TestModeGuard.IsTestMode, so replay
+            // tests don't need Controller.cs to know which mode is active.
+            //
             // Structural mutual-exclusivity fix, 2026-08-10: this whole method must be a no-op
             // whenever Direct mode (WsjtxClient.Direct.cs) is the active transport to the engine.
             // Before this check existed, the two pipelines could both end up live at once: this
@@ -88,6 +107,12 @@ namespace WSJTX_Controller
             }
         }
 
+        // ONLY called from Controller.ApplyEngineMode()'s TestModeGuard.IsTestMode branch --
+        // real production always calls ConnectDirectEngine() (WsjtxClient.Direct.cs) instead.
+        // Kept and still genuinely exercised: it's what a replay-test run's real Jimmy Test.exe
+        // process uses to open the real UDP socket JimmyReplay.py sends packets to (see this
+        // file's own top-of-file banner comment) -- not a dead alternate production path.
+        //
         // Jimmy Native's own connection path -- deliberately bypasses CheckWsjtxRunning()
         // entirely rather than reusing it. That method exists to detect and reconnect to a
         // SEPARATE, already-running real WSJT-X.exe: it reads WSJT-X's own ini file for its

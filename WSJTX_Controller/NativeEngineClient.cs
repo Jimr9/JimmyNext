@@ -123,8 +123,15 @@ namespace WSJTX_Controller
                 string exePath = LocateExe();
                 if (exePath == null)
                 {
-                    LastError = "jimmy-engine-host.exe not found. Build EngineHost first (cargo build --release), " +
-                                 "or switch Decode Engine back to WSJT-X External.";
+                    // "or switch Decode Engine back to WSJT-X External" used to be offered here as
+                    // an escape hatch -- removed (found stale while auditing UDP-transport code,
+                    // 2026-08-17): Jimmy Next's Form_Load always calls ApplyEngineMode(), which
+                    // always launches the native engine host unconditionally (Controller.cs's own
+                    // "Phase 4g: always launches the native engine host" comment) -- there is no
+                    // remaining way to run against a separate, real external WSJT-X, so telling an
+                    // operator to switch to it would send them looking for a setting that no
+                    // longer exists.
+                    LastError = "jimmy-engine-host.exe not found. Build EngineHost first (cargo build --release).";
                     return false;
                 }
                 if (string.IsNullOrWhiteSpace(mycall) || string.IsNullOrWhiteSpace(mygrid))

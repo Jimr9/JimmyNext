@@ -315,7 +315,13 @@ namespace WSJTX_Controller
             if (newState && txEnabled) HaltTx();
             if (!DirectSetTuning(newState))
             {
-                StatusView.ShowMessage("Tune needs the native engine (Options, Radio tab, Talk to engine directly) -- not available under WSJT-X CAT/UDP mode.", true);
+                // "Talk to engine directly" used to be a real Options toggle this message could
+                // point the operator at -- removed (found stale while auditing UDP-transport
+                // code, 2026-08-17): the native engine is always running and always the only
+                // transport in production now (see NativeEngineSettings.cs's own comment), so a
+                // failure here means the engine process itself isn't reachable, not a mode
+                // choice.
+                StatusView.ShowMessage("Tune needs the native engine, which isn't currently reachable.", true);
                 return true;
             }
             tuning = newState;
