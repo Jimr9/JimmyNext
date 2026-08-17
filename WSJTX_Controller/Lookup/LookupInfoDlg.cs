@@ -22,14 +22,27 @@ namespace WSJTX_Controller
 
         private readonly LookupManager _manager;
         private readonly string        _call;
+        private readonly bool          _hamQthEnabled;
+        private readonly string        _hamQthUsername;
+        private readonly string        _hamQthPassword;
         private bool _canQrz;
 
         public bool QrzLookupOccurred { get; private set; }
 
-        public LookupInfoDlg(string call, LookupManager manager)
+        // hamQthEnabled/Username/Password: a snapshot at open time is fine here (unlike
+        // LogbookWindow's Func<string> credentials, which stay open across a whole session) --
+        // this dialog is short-lived and modal, so settings can't change underneath it.
+        // On-demand only, and only supplements fields QRZ/offline data left blank -- see
+        // ARCHITECTURE.md: HamQTH isn't in LookupManager's own automatic provider chain yet,
+        // this is the deliberately smaller, contained integration for this release-candidate pass.
+        public LookupInfoDlg(string call, LookupManager manager,
+            bool hamQthEnabled = false, string hamQthUsername = null, string hamQthPassword = null)
         {
             _call    = call?.ToUpperInvariant() ?? "";
             _manager = manager;
+            _hamQthEnabled  = hamQthEnabled;
+            _hamQthUsername = hamQthUsername;
+            _hamQthPassword = hamQthPassword;
 
             Text            = $"Station Lookup — {_call}";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -117,6 +130,9 @@ namespace WSJTX_Controller
                         ? $"QRZ data from {FormatAge(cachedAt.Value)}."
                         : "Using cached data.";
                 }
+
+                if (_hamQthEnabled && !string.IsNullOrWhiteSpace(_hamQthUsername) && !string.IsNullOrWhiteSpace(_hamQthPassword))
+                    await DoHamQthSupplementAsync();
             };
         }
 
@@ -207,6 +223,51 @@ namespace WSJTX_Controller
             // the label never regains focus on its own, so silently updating .Text
             // would otherwise go unnoticed by screen-reader users.
             _statusValue.Focus();
+        }
+
+        // On-demand HamQTH lookup, run after QRZ/offline data has already populated what it
+        // can -- only fills fields still showing "—", never overwrites an already-known
+        // answer from Jimmy's own offline/QRZ data. ExternalDataClient's call is synchronous
+        // (a bounded blocking TCP round-trip to EngineHost), so it's wrapped in Task.Run to
+        // keep this modal dialog's UI thread responsive while it runs.
+        private async Task DoHamQthSupplementAsync()
+        {
+            var client = new ExternalDataClient();
+            var (result, error) = await Task.Run(() =>
+            {
+                var r = client.LookupHamQth(_hamQthUsername, _hamQthPassword, _call, out string err);
+                return (r, err);
+            });
+            if (IsDisposed) return;
+
+            string suffix;
+            if (error != null)
+            {
+                suffix = $" HamQTH: {error}";
+            }
+            else if (result == null)
+            {
+                suffix = " HamQTH: no data returned.";
+            }
+            else
+            {
+                int filled = 0;
+                filled += FillIfBlank(_nameValue, result.Name);
+                filled += FillIfBlank(_gridValue, result.Grid);
+                filled += FillIfBlank(_stateValue, result.State);
+                filled += FillIfBlank(_countryValue, result.Country);
+                suffix = filled > 0 ? $" HamQTH: supplemented {filled} field{(filled == 1 ? "" : "s")}." : " HamQTH: no additional fields.";
+            }
+            _statusValue.Text += suffix;
+            _statusValue.Focus();
+        }
+
+        private static int FillIfBlank(TextBox box, string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return 0;
+            if (box.Text != "—" && !string.IsNullOrWhiteSpace(box.Text)) return 0;
+            box.Text = value;
+            return 1;
         }
 
         // Concise, screen-reader-friendly age phrase (cachedAtUtc is always UTC --

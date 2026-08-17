@@ -242,6 +242,15 @@ namespace WSJTX_Controller
 
                 SetMeta("db_version", "6");
             }
+
+            // v7: same per-QSO outbound upload tracking, extended to eQSL.cc (uploaded via
+            // EngineHost/Nexus's own transport -- see ExternalDataClient.UploadEqsl).
+            if (ver < 7)
+            {
+                Exec("ALTER TABLE qso ADD COLUMN eqsl_uploaded_at TEXT DEFAULT '';");
+
+                SetMeta("db_version", "7");
+            }
         }
 
         // ── Meta ─────────────────────────────────────────────────────────────────
@@ -685,6 +694,7 @@ ON CONFLICT(dedup_key) DO UPDATE SET
                 case "CLUBLOG": return "clublog_uploaded_at";
                 case "LOTW":    return "lotw_uploaded_at";
                 case "HRDLOG":  return "hrdlog_uploaded_at";
+                case "EQSL":    return "eqsl_uploaded_at";
                 default: throw new ArgumentException("Unknown upload service: " + service);
             }
         }

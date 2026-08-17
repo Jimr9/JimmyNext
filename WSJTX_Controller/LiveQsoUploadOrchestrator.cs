@@ -25,6 +25,14 @@ namespace WSJTX_Controller
         public bool HrdLogUploadRealtime;
         public string HrdLogUploadCode;
         public string HrdLogUploadCallsign;
+        // eQSL.cc, uploaded via EngineHost/Nexus's own transport (propagation::live::eqsl) --
+        // see ExternalDataClient.UploadEqsl. Same shape as the others; no app-level credential,
+        // the operator supplies their own eQSL.cc username/password (eQSL has no API-key model
+        // the way QRZ/Club Log/HRDLog do).
+        public bool EqslUploadEnabled;
+        public bool EqslUploadRealtime;
+        public string EqslUsername;
+        public string EqslPassword;
     }
 
     // Extracted from WsjtxClient.ImportLiveLoggedQso (Phase 2.6 of the modernization plan) --
@@ -123,8 +131,15 @@ namespace WSJTX_Controller
                         bool needHrdLog = creds.HrdLogUploadEnabled && creds.HrdLogUploadRealtime &&
                                        !string.IsNullOrWhiteSpace(creds.HrdLogUploadCode) &&
                                        !string.IsNullOrWhiteSpace(creds.HrdLogUploadCallsign);
+                        // No circuit breaker: eQSL's transport goes through EngineHost, which
+                        // already applies its own bounded timeout (ExternalDataClient.SlowTimeoutMs)
+                        // per call -- a single slow/failed upload can't cascade the way an
+                        // unbounded HTTP retry storm could.
+                        bool needEqsl = creds.EqslUploadEnabled && creds.EqslUploadRealtime &&
+                                       !string.IsNullOrWhiteSpace(creds.EqslUsername) &&
+                                       !string.IsNullOrWhiteSpace(creds.EqslPassword);
 
-                        if (!needQrz && !needClubLog && !needHrdLog) return;
+                        if (!needQrz && !needClubLog && !needHrdLog && !needEqsl) return;
 
                         if (needQrz)
                         {
@@ -162,6 +177,29 @@ namespace WSJTX_Controller
                                 creds.HrdLogUploadCallsign, creds.HrdLogUploadCode, adifRecord).ConfigureAwait(false);
                             if (ok) db.MarkUploaded(dedupKey, "HRDLOG", DateTime.UtcNow);
                             else _debugLog($"HRDLog.net real-time upload failed for {dxCall}: {hrdClient.LastError}");
+                        }
+
+                        if (needEqsl)
+                        {
+                            // ExternalDataClient's calls are synchronous (a bounded blocking TCP
+                            // round-trip to EngineHost, not an async HTTP call) -- already off the
+                            // UI thread here, so calling it directly is fine, same reasoning as
+                            // OtaSpotsWindow's own RefreshSpots().
+                            var eqslClient = new ExternalDataClient();
+                            string outcome = eqslClient.UploadEqsl(creds.EqslUsername, creds.EqslPassword, adifRecord, out string eqslError);
+                            if (eqslError != null)
+                            {
+                                _debugLog($"eQSL real-time upload failed for {dxCall}: {eqslError}");
+                            }
+                            else if (outcome == "rejected" || outcome == "auth_fail")
+                            {
+                                _debugLog($"eQSL real-time upload rejected for {dxCall}: {outcome}");
+                            }
+                            else
+                            {
+                                // "accepted"/"pending"/"duplicate" all mean eQSL has the record.
+                                db.MarkUploaded(dedupKey, "EQSL", DateTime.UtcNow);
+                            }
                         }
                     }
                 }

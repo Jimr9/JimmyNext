@@ -647,6 +647,10 @@ namespace WSJTX_Controller
                     HrdLogUploadRealtime = ctrl.hrdLogUploadRealtime,
                     HrdLogUploadCode = ctrl.hrdLogUploadCode,
                     HrdLogUploadCallsign = ctrl.hrdLogUploadCallsign,
+                    EqslUploadEnabled = ctrl.eqslUploadEnabled,
+                    EqslUploadRealtime = ctrl.eqslUploadRealtime,
+                    EqslUsername = ctrl.eqslUsername,
+                    EqslPassword = ctrl.eqslPassword,
                 },
                 notifyImported: () => ctrl.BeginInvoke(new Action(() =>
                 {

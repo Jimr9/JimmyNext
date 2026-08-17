@@ -113,6 +113,13 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox         _hrdLogUploadCallsignTb;
         private System.Windows.Forms.TextBox         _hrdLogUploadCodeTb;
         private System.Windows.Forms.TextBox         _tqslStationLocationTb;
+        private System.Windows.Forms.CheckBox        _eqslUploadEnabledCb;
+        private System.Windows.Forms.CheckBox        _eqslUploadRealtimeCb;
+        private System.Windows.Forms.TextBox         _eqslUsernameTb;
+        private System.Windows.Forms.TextBox         _eqslPasswordTb;
+        private System.Windows.Forms.CheckBox        _hamQthEnabledCb;
+        private System.Windows.Forms.TextBox         _hamQthUsernameTb;
+        private System.Windows.Forms.TextBox         _hamQthPasswordTb;
 
         private sealed class SoundRow
         {
@@ -4469,6 +4476,71 @@ namespace WSJTX_Controller
                 "not earn ARRL award credit -- LoTW above still handles DXCC/WAS confirmation.",
                 10, 148, font));
 
+            // ── eQSL.cc Upload ────────────────────────────────────────────────────
+            // Uploaded via EngineHost/Nexus's own eQSL transport (propagation::live::eqsl) --
+            // Jimmy Test supplies the operator's own eQSL.cc credentials and the completed
+            // ADIF record; Nexus already implements the upload plumbing well, so it isn't
+            // duplicated here (see ARCHITECTURE.md's logbook/logging comparison). No auto-
+            // download here yet -- see ARCHITECTURE.md for the deferred download/reconciliation
+            // contract.
+            tabIdx = 1;
+            var eqslBox = MakeGroupBox("eQSL.cc Upload", 175, 5, pw, 145, font);
+            panels.Add(eqslBox);
+            serviceList.Items.Add("eQSL");
+
+            _eqslUploadEnabledCb = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Enable eQSL.cc upload",
+                Checked        = ctrl.eqslUploadEnabled,
+                Location       = new System.Drawing.Point(10, 20),
+                AutoSize       = true,
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Enable eQSL.cc upload",
+            };
+            eqslBox.Controls.Add(_eqslUploadEnabledCb);
+
+            _eqslUploadRealtimeCb = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Upload automatically as each QSO completes",
+                Checked        = ctrl.eqslUploadRealtime,
+                Location       = new System.Drawing.Point(28, 42),
+                AutoSize       = true,
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Upload to eQSL.cc automatically in real time",
+            };
+            eqslBox.Controls.Add(_eqslUploadRealtimeCb);
+
+            eqslBox.Controls.Add(MakeLabel("Username:", 10, 68, font));
+            _eqslUsernameTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ctrl.eqslUsername ?? "",
+                Location       = new System.Drawing.Point(90, 65),
+                Size           = new System.Drawing.Size(120, 20),
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "eQSL.cc username",
+            };
+            eqslBox.Controls.Add(_eqslUsernameTb);
+
+            eqslBox.Controls.Add(MakeLabel("Password:", 10, 92, font));
+            _eqslPasswordTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ctrl.eqslPassword ?? "",
+                Location       = new System.Drawing.Point(90, 89),
+                Size           = new System.Drawing.Size(160, 20),
+                PasswordChar   = '●',
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "eQSL.cc password",
+            };
+            eqslBox.Controls.Add(_eqslPasswordTb);
+
+            eqslBox.Controls.Add(MakeLabel(
+                "Uploads QSOs to your eQSL.cc account using your normal eQSL.cc login and password.",
+                10, 116, font));
+
             WireServiceList(serviceList, logbookSyncPanel, panels);
         }
 
@@ -4854,6 +4926,60 @@ namespace WSJTX_Controller
                 "for a callsign, offline and without needing QRZ. Weekly full refresh only (no daily deltas).",
                 10, 116, font));
 
+            // ── HamQTH Callsign Lookup ───────────────────────────────────────────
+            // Uploaded via EngineHost/Nexus's own HamQTH transport (propagation::live::hamqth) --
+            // login+lookup combined per call, no session caching (see ExternalDataClient.
+            // LookupHamQth). Not yet wired into LookupManager's own provider chain (that would
+            // change lookup precedence/behavior for every existing operator and needs its own
+            // deliberate design pass) -- see ARCHITECTURE.md. For now this is a standalone,
+            // on-demand credential panel; a future pass can register it as an additional
+            // ILookupProvider once the precedence question is settled.
+            tabIdx = 2;
+            var hamQthBox = MakeGroupBox("HamQTH Callsign Lookup", 175, 58, pw, 110, font);
+            panels.Add(hamQthBox);
+            serviceList.Items.Add("HamQTH");
+
+            _hamQthEnabledCb = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Enable HamQTH callsign lookup",
+                Checked        = ctrl.hamQthEnabled,
+                Location       = new System.Drawing.Point(10, 20),
+                AutoSize       = true,
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Enable HamQTH lookup",
+            };
+            hamQthBox.Controls.Add(_hamQthEnabledCb);
+
+            hamQthBox.Controls.Add(MakeLabel("Username:", 10, 46, font));
+            _hamQthUsernameTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ctrl.hamQthUsername ?? "",
+                Location       = new System.Drawing.Point(90, 43),
+                Size           = new System.Drawing.Size(160, 20),
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "HamQTH username",
+            };
+            hamQthBox.Controls.Add(_hamQthUsernameTb);
+
+            hamQthBox.Controls.Add(MakeLabel("Password:", 10, 70, font));
+            _hamQthPasswordTb = new System.Windows.Forms.TextBox
+            {
+                Text           = ctrl.hamQthPassword ?? "",
+                Location       = new System.Drawing.Point(90, 67),
+                Size           = new System.Drawing.Size(160, 20),
+                PasswordChar   = '●',
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "HamQTH password",
+            };
+            hamQthBox.Controls.Add(_hamQthPasswordTb);
+
+            hamQthBox.Controls.Add(MakeLabel(
+                "Uses your normal HamQTH.com login. Currently used only from the Lookup Selected Station",
+                10, 94, font));
+
             WireServiceList(serviceList, lookupPanel, panels);
         }
 
@@ -4987,6 +5113,13 @@ namespace WSJTX_Controller
             ctrl.tqslStationLocation     = _tqslStationLocationTb?.Text.Trim()    ?? "";
             ctrl.fccUlsEnabled           = _fccUlsEnabledCb?.Checked           ?? false;
             ctrl.fccUlsRefreshDays       = (int)(_fccUlsRefreshDaysNum?.Value   ?? 7);
+            ctrl.eqslUploadEnabled       = _eqslUploadEnabledCb?.Checked       ?? false;
+            ctrl.eqslUploadRealtime      = _eqslUploadRealtimeCb?.Checked      ?? false;
+            ctrl.eqslUsername            = _eqslUsernameTb?.Text.Trim()        ?? "";
+            ctrl.eqslPassword            = _eqslPasswordTb?.Text              ?? "";
+            ctrl.hamQthEnabled           = _hamQthEnabledCb?.Checked           ?? false;
+            ctrl.hamQthUsername          = _hamQthUsernameTb?.Text.Trim()      ?? "";
+            ctrl.hamQthPassword          = _hamQthPasswordTb?.Text            ?? "";
         }
 
         // ===== APPEARANCE TAB =====

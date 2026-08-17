@@ -2108,7 +2108,7 @@ namespace WSJTX_Controller
                 }
             }
             if (string.IsNullOrEmpty(call)) return;
-            using (var dlg = new LookupInfoDlg(call, lookupManager))
+            using (var dlg = new LookupInfoDlg(call, lookupManager, hamQthEnabled, hamQthUsername, hamQthPassword))
             {
                 dlg.ShowDialog(this);
                 if (dlg.QrzLookupOccurred)
