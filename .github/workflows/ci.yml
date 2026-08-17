@@ -32,28 +32,21 @@ jobs:
         with:
           msystem: UCRT64
           update: true
+          # A dedicated listing step across three failed runs confirmed pacman DOES install the
+          # packages below (its own output says so), yet C:\msys64\ucrt64\bin -- the path every
+          # local dev build on this repo uses -- did not exist afterward, and neither PATH nor
+          # CC/CXX/FC pointed at it working. Guessing a different fixed path blind again isn't
+          # worth another round trip: using the action's own `shell: msys2 {0}` wrapper for the
+          # build/test steps below sidesteps needing to know the exact path at all. `inherit`
+          # keeps the Windows PATH (rustup/cargo, preinstalled on this runner image) available
+          # from inside that wrapper too, since cargo itself isn't one of the installed packages.
+          path-type: inherit
           install: >-
             mingw-w64-ucrt-x86_64-gcc-fortran
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-fftw
             mingw-w64-ucrt-x86_64-pkgconf
-
-      # Diagnostic: the prior CI run's CC/CXX/FC override to C:\msys64\ucrt64\bin\gfortran.exe
-      # failed with "could not find the compiler specified" -- meaning either the package didn't
-      # land under that path or the action installs somewhere else on this runner. Confirming
-      # what's actually there before guessing again.
-      - name: List what MSYS2 UCRT64 actually installed
-        run: |
-          Write-Host "C:\msys64 exists: $(Test-Path 'C:\msys64')"
-          if (Test-Path 'C:\msys64\ucrt64\bin') {
-            Get-ChildItem 'C:\msys64\ucrt64\bin' -Filter "*gcc*" | Select-Object -ExpandProperty Name
-            Get-ChildItem 'C:\msys64\ucrt64\bin' -Filter "*gfortran*" | Select-Object -ExpandProperty Name
-            Get-ChildItem 'C:\msys64\ucrt64\bin' -Filter "*pkg*" | Select-Object -ExpandProperty Name
-          } else {
-            Write-Host "C:\msys64\ucrt64\bin does not exist"
-          }
-          Write-Host "PATH: $env:PATH"
 
       - name: Prepare pinned + patched Nexus
         run: powershell -ExecutionPolicy Bypass -File scripts\prepare-nexus.ps1
@@ -68,42 +61,39 @@ jobs:
           }
 
       - name: Build EngineHost (release)
+        shell: msys2 {0}
         run: |
-          $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
-          $env:LIBRARY_PATH = "C:\msys64\ucrt64\lib;$env:LIBRARY_PATH"
-          # windows-latest runners carry their own pre-installed MinGW (C:\mingw64) that CMake's
-          # plain find_program search picked up ahead of the MSYS2 UCRT64 one on the prior run,
-          # despite the PATH prepend above -- forcing CC/CXX/FC explicitly removes the ambiguity
-          # rather than depending on search-order behavior that didn't hold. Matters here
-          # specifically because pkg-config will resolve fftw3f from the MSYS2 UCRT64 install;
-          # linking that against a DIFFERENT MinGW distribution's runtime risks an ABI mismatch.
-          if (Test-Path 'C:\msys64\ucrt64\bin\gfortran.exe') {
-            $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
-            $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
-            $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
-          } else {
-            Write-Host "C:\msys64\ucrt64\bin\gfortran.exe not found -- leaving CC/CXX/FC unset, falling back to PATH search"
-          }
           cd EngineHost
           cargo build --release
 
       - name: Test EngineHost
+        shell: msys2 {0}
         run: |
-          $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
-          $env:LIBRARY_PATH = "C:\msys64\ucrt64\lib;$env:LIBRARY_PATH"
-          if (Test-Path 'C:\msys64\ucrt64\bin\gfortran.exe') {
-            $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
-            $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
-            $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
-          }
           cd EngineHost
           cargo test --release
 
-      - name: Stage EngineHost runtime DLLs
-        run: powershell -ExecutionPolicy Bypass -File EngineHost\stage-runtime-dlls.ps1
-
       - name: Fetch bundled Hamlib
         run: powershell -ExecutionPolicy Bypass -File fetch-hamlib.ps1
+
+      # Same DLLs stage-runtime-dlls.ps1 stages locally (see that script's own comment for why
+      # jimmy-engine-host.exe needs them next to itself), copied via bash/$MINGW_PREFIX instead
+      # of that script directly: its own hardcoded C:\msys64\ucrt64 path is a real local-dev
+      # convention this runner doesn't share (confirmed: the actual MSYS2 install location here
+      # isn't fixed/guessable from a plain pwsh step), so build/test above already moved to the
+      # action's own `shell: msys2 {0}` wrapper for the same reason. Reordered after the Hamlib
+      # fetch above (unlike stage-runtime-dlls.ps1, which requires Hamlib already fetched but
+      # doesn't fetch it itself) so the hamlib\ copy below has a real source to copy from.
+      - name: Stage EngineHost runtime DLLs
+        shell: msys2 {0}
+        run: |
+          cp "$MINGW_PREFIX"/bin/libgfortran-5.dll EngineHost/target/release/
+          cp "$MINGW_PREFIX"/bin/libstdc++-6.dll EngineHost/target/release/
+          cp "$MINGW_PREFIX"/bin/libfftw3f-3.dll EngineHost/target/release/
+          cp "$MINGW_PREFIX"/bin/libquadmath-0.dll EngineHost/target/release/
+          cp "$MINGW_PREFIX"/bin/libgcc_s_seh-1.dll EngineHost/target/release/
+          cp "$MINGW_PREFIX"/bin/libwinpthread-1.dll EngineHost/target/release/
+          mkdir -p EngineHost/target/release/hamlib
+          cp WSJTX_Controller/Resources/hamlib/* EngineHost/target/release/hamlib/
 
       - name: Build Jimmy Test (Debug, isolated identity)
         run: dotnet build "WSJTX_Controller\Jimmy.csproj" -c Debug -p:AssemblyName="Jimmy Test" -v:minimal
