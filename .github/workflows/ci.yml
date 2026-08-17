@@ -42,9 +42,12 @@ jobs:
         run: powershell -ExecutionPolicy Bypass -File scripts\prepare-nexus.ps1
 
       - name: Verify no developer-specific Nexus path leaked into the build config
+        # Scoped to actual dependency path lines, not the whole file -- Cargo.toml's own
+        # explanatory comments legitimately mention a developer checkout path as an example
+        # of what NOT to depend on, which a whole-file match would misfire on.
         run: |
-          if (Select-String -Path EngineHost\Cargo.toml -Pattern "C:[/\\]claude[/\\]nexus" -Quiet) {
-            throw "EngineHost/Cargo.toml references a developer-specific Nexus checkout path -- see EngineHost/nexus-compat/README.md"
+          if (Select-String -Path EngineHost\Cargo.toml -Pattern '^\s*\w[\w-]*\s*=\s*\{[^}]*path\s*=\s*"C:' -Quiet) {
+            throw "EngineHost/Cargo.toml has a dependency path pointing at an absolute developer-specific location -- see EngineHost/nexus-compat/README.md"
           }
 
       - name: Build EngineHost (release)
