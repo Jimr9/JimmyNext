@@ -145,19 +145,85 @@ Requested specifically: don't assume Jimmy's logbook is untouchable just because
 
 **Decision: Jimmy's logbook/upload stack stays fully authoritative. No migration, no cutover.** This isn't a default-to-caution non-answer -- the comparison found Jimmy's implementation is the correct owner for its own data model and operator workflow, not merely "too risky to check." The one real gap (eQSL/HamQTH) is additive, not a replacement, and deferred as new scope rather than rushed.
 
+## TX-safety / recovery audit
+
+Read the actual crash/recovery/shutdown code rather than assuming it needed building from
+scratch -- it turned out to already be largely solid, verified layer by layer:
+
+- **Crash detection**: `NativeEngineClient`'s `Process.Exited` handler distinguishes an
+  intentional `Stop()` from a genuine unexpected exit (`_stopping` flag), and reports the exit
+  code so a real crash is distinguishable from a clean shutdown in diagnostics.
+- **Bounded auto-restart**: `Controller.OnNativeEngineUnexpectedExit` -- 5 attempts per rolling
+  5-minute window, then gives up with a clear operator-facing message rather than looping. This
+  logic is now extracted into `EngineRestartPolicy.cs` (see "Modularization" below) with direct
+  test coverage proving the rolling-window behavior, which it had none of before this pass.
+- **Reconnect obtains a fresh authoritative snapshot**: `ConnectDirectEngine` resets every piece
+  of session state (decode dedup, clock-offset samples, band tracking) on each (re)connect, and
+  `DirectPollTick` only promotes to "connected" after a real snapshot round-trip succeeds --
+  already matches "snapshot = what is true now" from the target contract design.
+- **Orphan-process safety**: verified, not assumed. `NativeEngineClient.Stop()` does a bounded
+  `Kill()` + `WaitForExit()`. If that kill happens while `jimmy-engine-host.exe` had its own
+  spawned `rigctld.exe` child, Nexus's own `RigctldProc` (tempo-audio/src/rigctld_proc.rs) binds
+  that child to a Windows Job Object with `KILL_ON_JOB_CLOSE` -- an OS-level guarantee the child
+  cannot survive the parent's death, even a forceful one. No orphan risk found.
+- **Shutdown**: `Controller_FormClosing` disposes both `rigctldClient` and `nativeEngineClient`
+  unconditionally; the latter's own comment confirms this force-releases PTT if held.
+- **One real defect found and fixed**: a comment in `NativeEngineClient.Launch` claimed
+  "NativeTxPttListener's own watchdog is still the real backstop" for a hung engine host --
+  that class was already retired (PTT moved in-process in an earlier phase) by the time the
+  comment was written, and was never updated. Corrected to describe the three mechanisms that
+  actually provide this protection today (listed above), verified by reading the code rather
+  than trusting the stale comment.
+- **Not verifiable without a physical radio**: real CAT/PTT timing under an actual TX-safety
+  fault (e.g. a hung serial port mid-transmission) -- on the live-test list.
+
+## Modularization
+
+One slice completed this pass, chosen because it served TX-safety testability directly, not
+picked arbitrarily: `EngineRestartPolicy.cs`, extracted from `Controller.cs` following the same
+shape `LiveQsoUploadOrchestrator` had already proven (a standalone class with no WinForms/
+Controller reference). The bounded-restart decision was previously pure counting/clock logic
+inlined in a WinForms code-behind file, untestable without constructing a `Form`; it now has 15
+dedicated automated tests proving the rolling-window behavior (budget exhaustion, window
+rollover) that had zero direct test coverage before. Full suite: 883/883 passing.
+
+Not a large-scale restructuring of the ~28,800-line top-level `WSJTX_Controller/*.cs` -- one
+coherent, low-risk, high-value slice, matching the instruction to work in slices rather than
+attempt a rewrite. Further candidates (Notify/, Awards/ boundary tightening) remain open for a
+future pass.
+
+## Direct-contract hardening
+
+- **Added**: `HALT_TX`/`SET_TX_ENABLED` (previously fully fire-and-forget, no visibility at all
+  on failure) now log a diagnostic line when the engine's response indicates failure --
+  additive only, no change to timing, retries, or control flow, since altering a TX-safety
+  command's reliability behavior needs real-radio verification this pass doesn't have.
+- **Deliberately deferred, not forgotten**: explicit protocol/version negotiation and a central
+  capability model. Investigated first, not assumed unnecessary: `jimmy-engine-host.exe` and
+  `Jimmy Test.exe` are always built, versioned, and shipped together from the same commit in the
+  same MSI -- there is no current real-world scenario where they'd be mismatched, so a
+  negotiation system would police a case that cannot happen yet. The control protocol is a
+  simple line-based command dispatch (`EngineHost/src/main.rs`'s `line.strip_prefix(...)` match
+  arms) that a future `VERSION`/capability command could be added to non-breakingly whenever
+  Jimmy-to-Jimmy networking or remote EngineHost (both explicitly future work, not this pass)
+  make mismatch a real possibility -- deferring this now creates no architectural debt to pay
+  down later.
+- **Already correct, verified rather than assumed**: snapshot-is-authoritative, reconnect
+  rebuilds state, and bounded recovery -- see the TX-safety section above, which covers the same
+  ground.
+
 ## Not yet done (scope for a future pass, not attempted here)
 
 - Systematic duplication audit beyond radio ownership + the DXCC finding above (the plan asks
   for a broad review across QSO sequencing, callsign normalization, and more -- what's above is
   what surfaced from a focused, not exhaustive, pass).
-- Modularization of the ~28,800-line top-level `WSJTX_Controller/*.cs` into smaller focused
-  areas.
-- Direct-contract hardening (capability negotiation, structured errors/correlation IDs).
-- TX-safety/recovery audit beyond confirming Nexus already owns the physical PTT path.
-- CI wiring for `scripts/prepare-nexus.ps1` + EngineHost tests.
-- Installer version bump / MSI release-candidate production.
+- Further modularization slices beyond `EngineRestartPolicy` (Notify/, Awards/ boundary
+  tightening).
+- Explicit Direct-contract version/capability negotiation (see above for why this is a
+  deliberate, low-risk deferral, not an oversight).
+- eQSL / HamQTH integration (see "Logbook / logging comparison" above).
 
 Each of these is a substantial, independently-scoped piece of work; attempting them without the
-same proof-before-cutover rigor used for the Nexus dependency fix in this pass (isolated patch,
-full test suite, real build verification before commit) would risk exactly the kind of
-regression the operator's plan explicitly warns against.
+same proof-before-cutover rigor used elsewhere in this pass (isolated change, full test suite,
+real build verification before commit) would risk exactly the kind of regression the operator's
+plan explicitly warns against.
