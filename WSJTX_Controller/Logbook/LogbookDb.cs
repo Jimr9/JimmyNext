@@ -251,6 +251,20 @@ namespace WSJTX_Controller
 
                 SetMeta("db_version", "7");
             }
+
+            // v8: eQSL INBOUND confirmation (EQSL_QSL_RCVD from a downloaded InBox record),
+            // separate from eqsl_uploaded_at (v7, our own outbound push). Deliberately its own
+            // column, not folded into lotw_qsl_rcvd/qrz_qsl_rcvd or RuleConfirmation's award-
+            // counting SQL (Awards/RuleEngine.cs) -- eQSL is not an ARRL-recognized DXCC/WAS
+            // confirmation source (matches Nexus's own documented "confirmed=true but
+            // award_confirmed=false" distinction for eQSL, docs/manual/Logbook-and-Awards.md).
+            // Informational only: shown to the operator, never advances Still-Need counts.
+            if (ver < 8)
+            {
+                Exec("ALTER TABLE qso ADD COLUMN eqsl_qsl_rcvd TEXT DEFAULT '';");
+
+                SetMeta("db_version", "8");
+            }
         }
 
         // ── Meta ─────────────────────────────────────────────────────────────────
@@ -699,6 +713,97 @@ ON CONFLICT(dedup_key) DO UPDATE SET
             }
         }
 
+        public enum EqslReconcileOutcome { Matched, AlreadyConfirmed, Ambiguous, Unmatched }
+
+        // Conservative, deterministic, idempotent match against EXISTING qso rows -- unlike
+        // Upsert/AdifImporter.Import (which QRZ/LoTW/Club Log downloads use, and which CAN
+        // create a new row for a record Jimmy Test doesn't have yet), this method never
+        // creates a row and never guesses: an eQSL InBox "confirmation" is someone else's
+        // report about a QSO, not a request to add one, so ambiguous or absent matches are
+        // simply left alone (see EqslReconciler, the caller). Match key: callsign + band
+        // exactly, qso_date within +/-1 day (mirrors Nexus's own LoTW reconcile tolerance for
+        // midnight-boundary clock skew between the two operators' logs -- docs/manual/
+        // Logbook-and-Awards.md). If more than one row matches that window, mode (when the
+        // eQSL record carries one) narrows it; if still ambiguous, no row is touched.
+        // Never clears eqsl_qsl_rcvd once set -- monotonic, same as LoTW/QRZ confirmation.
+        public EqslReconcileOutcome TryMarkEqslConfirmed(string callsign, string band, string qsoDateAdif, string mode)
+        {
+            if (string.IsNullOrWhiteSpace(callsign) || string.IsNullOrWhiteSpace(band) || string.IsNullOrWhiteSpace(qsoDateAdif))
+                return EqslReconcileOutcome.Unmatched;
+
+            string call = callsign.Trim().ToUpperInvariant();
+            string bandNorm = band.Trim().ToLowerInvariant();
+            var dateWindow = DateWindow(qsoDateAdif);
+            if (dateWindow.Length == 0) return EqslReconcileOutcome.Unmatched;
+
+            lock (_lock)
+            {
+                var candidates = new List<(long id, string eqslRcvd)>();
+                using (var cmd = _conn.CreateCommand())
+                {
+                    string dateParams = string.Join(",", Enumerable.Range(0, dateWindow.Length).Select(i => $"@d{i}"));
+                    cmd.CommandText = $"SELECT id, eqsl_qsl_rcvd FROM qso WHERE callsign=@call AND band=@band AND qso_date IN ({dateParams});";
+                    cmd.Parameters.AddWithValue("@call", call);
+                    cmd.Parameters.AddWithValue("@band", bandNorm);
+                    for (int i = 0; i < dateWindow.Length; i++)
+                        cmd.Parameters.AddWithValue($"@d{i}", dateWindow[i]);
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read())
+                            candidates.Add((r.GetInt64(0), r.IsDBNull(1) ? "" : r.GetString(1)));
+                }
+
+                if (candidates.Count == 0) return EqslReconcileOutcome.Unmatched;
+
+                if (candidates.Count > 1 && !string.IsNullOrWhiteSpace(mode))
+                {
+                    var narrowed = new List<(long id, string eqslRcvd)>();
+                    using (var cmd = _conn.CreateCommand())
+                    {
+                        string dateParams = string.Join(",", Enumerable.Range(0, dateWindow.Length).Select(i => $"@d{i}"));
+                        cmd.CommandText = $"SELECT id, eqsl_qsl_rcvd FROM qso WHERE callsign=@call AND band=@band AND qso_date IN ({dateParams}) AND mode=@mode COLLATE NOCASE;";
+                        cmd.Parameters.AddWithValue("@call", call);
+                        cmd.Parameters.AddWithValue("@band", bandNorm);
+                        cmd.Parameters.AddWithValue("@mode", mode.Trim());
+                        for (int i = 0; i < dateWindow.Length; i++)
+                            cmd.Parameters.AddWithValue($"@d{i}", dateWindow[i]);
+                        using (var r = cmd.ExecuteReader())
+                            while (r.Read())
+                                narrowed.Add((r.GetInt64(0), r.IsDBNull(1) ? "" : r.GetString(1)));
+                    }
+                    if (narrowed.Count > 0) candidates = narrowed;
+                }
+
+                if (candidates.Count != 1) return EqslReconcileOutcome.Ambiguous;
+
+                var (id, eqslRcvd) = candidates[0];
+                if (eqslRcvd == "Y") return EqslReconcileOutcome.AlreadyConfirmed;
+
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = "UPDATE qso SET eqsl_qsl_rcvd='Y' WHERE id=@id;";
+                    cmd.Parameters.AddWithValue("@id", id);
+                    cmd.ExecuteNonQuery();
+                }
+                return EqslReconcileOutcome.Matched;
+            }
+        }
+
+        // qsoDateAdif is ADIF's YYYYMMDD. Returns [date-1, date, date+1] as YYYYMMDD strings
+        // for the +/-1 day match window, or an empty array if the date can't be parsed (caller
+        // treats that as Unmatched rather than matching everything).
+        private static string[] DateWindow(string qsoDateAdif)
+        {
+            if (!DateTime.TryParseExact(qsoDateAdif.Trim(), "yyyyMMdd",
+                System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d))
+                return Array.Empty<string>();
+            return new[]
+            {
+                d.AddDays(-1).ToString("yyyyMMdd"),
+                d.ToString("yyyyMMdd"),
+                d.AddDays(1).ToString("yyyyMMdd"),
+            };
+        }
+
         public class UploadSyncStatus
         {
             public int      PendingCount;
@@ -775,6 +880,12 @@ ON CONFLICT(dedup_key) DO UPDATE SET
 
         public int QrzConfirmedQsos() =>
             QueryScalar("SELECT COUNT(*) FROM qso WHERE qrz_qsl_rcvd='Y';");
+
+        // Informational only -- eqsl_qsl_rcvd never feeds ConfirmedQsos/RuleConfirmation's
+        // award counts (see TryMarkEqslConfirmed's own comment: eQSL is not an ARRL-recognized
+        // DXCC/WAS confirmation source).
+        public int EqslConfirmedQsos() =>
+            QueryScalar("SELECT COUNT(*) FROM qso WHERE eqsl_qsl_rcvd='Y';");
 
         // ── Band / mode / year stats ──────────────────────────────────────────────
 

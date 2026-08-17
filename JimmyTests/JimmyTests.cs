@@ -130,6 +130,8 @@ static class JimmyTests
         JimmySettingsDefaultsTests();
         EngineRestartPolicyTests();
         OtaSpotAnnotatorTests();
+        EqslReconcileTests();
+        LookupManagerPrimaryProviderTests();
         FindPreservedSelectionIndexTests();
         ResolveDispatchIndexTests();
         SpotWatchCallsRoundTripTests();
@@ -532,6 +534,159 @@ static class JimmyTests
         finally
         {
             try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── eQSL reconciliation: LogbookDb.TryMarkEqslConfirmed + EqslReconciler ───
+    // Conservative match-only reconciliation against EXISTING qso rows -- never creates a
+    // row, never guesses an ambiguous match, never clears eqsl_qsl_rcvd once set. No network:
+    // exercises the offline matching/parsing logic only (real eQSL transport is EngineHost's,
+    // untestable here -- same reasoning as every other network provider in this suite).
+    static void EqslReconcileTests()
+    {
+        Console.WriteLine("\n── eQSL reconciliation (TryMarkEqslConfirmed + EqslReconciler) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_Eqsl_" + Guid.NewGuid().ToString("N") + ".db");
+        string tmpDb2 = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_Eqsl2_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, band: "20m", qsoDate: "20241201");
+                InsertQso(db, "OK7AN", "", dxcc: 503, zone: 15, band: "40m", qsoDate: "20241205");
+
+                Check("Exact call+band+date match -> Matched",
+                    db.TryMarkEqslConfirmed("W1AW", "20m", "20241201", null) == LogbookDb.EqslReconcileOutcome.Matched, true);
+                Check("Re-marking the same QSO -> AlreadyConfirmed (idempotent, no error)",
+                    db.TryMarkEqslConfirmed("W1AW", "20m", "20241201", null) == LogbookDb.EqslReconcileOutcome.AlreadyConfirmed, true);
+
+                // +/-1 day tolerance: the QSO is dated 20241205, an eQSL record dated one day
+                // either side must still match (midnight-boundary clock-skew tolerance).
+                Check("Date one day BEFORE the QSO date still matches (+/-1 day window)",
+                    db.TryMarkEqslConfirmed("OK7AN", "40m", "20241204", "FT8") == LogbookDb.EqslReconcileOutcome.Matched, true);
+
+                Check("Unknown callsign -> Unmatched (never invents a row)",
+                    db.TryMarkEqslConfirmed("ZZ1NOPE", "20m", "20241201", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
+                Check("Right callsign, wrong band -> Unmatched",
+                    db.TryMarkEqslConfirmed("W1AW", "40m", "20241201", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
+                Check("Date more than 1 day away -> Unmatched",
+                    db.TryMarkEqslConfirmed("W1AW", "20m", "20241210", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
+
+                // Ambiguity: two DISTINCT QSO rows (different time_on -> different dedup_key)
+                // sharing the same callsign+band+date, with no mode given to disambiguate --
+                // must be left alone, not guessed.
+                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, band: "15m", qsoDate: "20241215", timeOn: "1200");
+                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, band: "15m", qsoDate: "20241215", timeOn: "1800");
+                Check("Two equally-plausible candidates, no mode to disambiguate -> Ambiguous",
+                    db.TryMarkEqslConfirmed("W1AW", "15m", "20241215", null) == LogbookDb.EqslReconcileOutcome.Ambiguous, true);
+
+                // Unparseable date -> Unmatched, not an exception and not a wildcard match.
+                Check("Malformed QSO_DATE -> Unmatched, not an exception",
+                    db.TryMarkEqslConfirmed("W1AW", "20m", "not-a-date", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
+            }
+
+            // End-to-end via EqslReconciler.Reconcile against a small synthetic ADIF InBox --
+            // proves the ADIF-record -> match-call shape works, including that a record
+            // WITHOUT EQSL_QSL_RCVD=Y (e.g. a pending/unconfirmed entry) is skipped, not treated
+            // as a confirmation. Own fresh database file -- the block above already left
+            // confirmations on tmpDb, which would make an absolute EqslConfirmedQsos() count
+            // here misleading.
+            using (var db = new LogbookDb(tmpDb2))
+            {
+                InsertQso(db, "N0CALL", "MO", dxcc: 291, zone: 4, band: "20m", qsoDate: "20241220");
+
+                string adif =
+                    "ADIF 3 Export from eQSL.cc\n<PROGRAMID:21>eQSL.cc DownloadInBox <ADIF_Ver:5>3.1.6 <EOH>\n" +
+                    "<CALL:6>N0CALL <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20241220 <EQSL_QSL_RCVD:1>Y <EOR>\n" +
+                    "<CALL:6>ZZ9NUL <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20241220 <EQSL_QSL_RCVD:1>N <EOR>\n";
+
+                var result = EqslReconciler.Reconcile(db, adif);
+                Check("Reconcile: confirmed record matches -> Matched == 1", result.Matched == 1, true);
+                Check("Reconcile: EQSL_QSL_RCVD != Y record is skipped, not counted as Unmatched",
+                    result.Skipped == 1, true);
+                Check("Reconcile: unconfirmed record does not touch the confirmed count",
+                    result.Unmatched == 0, true);
+                Check("Reconcile: eqsl_qsl_rcvd actually persisted",
+                    db.EqslConfirmedQsos() == 1, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  EqslReconcileTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { File.Delete(tmpDb); } catch { }
+            try { File.Delete(tmpDb2); } catch { }
+        }
+    }
+
+    // ── LookupManager: primary provider selection (QRZ vs HamQTH) ──────────────
+    // Offline/cache-only -- no real QRZ/HamQTH network traffic. Proves the provider-selection
+    // plumbing itself (PrimaryProvider resolution, CanAutoQueue/PrimaryNeedsLookup routing,
+    // and Build()'s passive-contribution merge order), not the providers' own network calls.
+    static void LookupManagerPrimaryProviderTests()
+    {
+        Console.WriteLine("\n── LookupManager: primary provider selection ──");
+        var manager = new LookupManager();
+        try
+        {
+            Check("Default PrimaryProvider is QRZ (existing installations unchanged)",
+                ReferenceEquals(manager.PrimaryProvider, manager.Qrz), true);
+
+            manager.Initialize(
+                useLookupData: true,
+                qrzEnabled: true, qrzUser: "testuser", qrzPass: "testpass", qrzCacheDays: 7,
+                lotwEnabled: false, lotwDays: 30,
+                clubLogAppKey: "", clubLogDays: 30,
+                fccUlsEnabled: false,
+                policy: QrzLookupPolicy.Disabled, qrzMinIntervalSeconds: 10,
+                primaryProvider: CallsignLookupProvider.HamQth,
+                hamQthEnabled: true, hamQthUser: "hamuser", hamQthPass: "hampass", hamQthCacheDays: 7);
+
+            Check("After selecting HamQth, PrimaryProvider is HamQth",
+                ReferenceEquals(manager.PrimaryProvider, manager.HamQth), true);
+            Check("QRZ provider itself is still independently enabled (lookup choice != log-upload choice)",
+                manager.Qrz.IsEnabled, true);
+            Check("HamQth provider is enabled",
+                manager.HamQth.IsEnabled, true);
+
+            // Switch back to QRZ -- proves this isn't a one-way/init-only choice.
+            manager.Initialize(
+                useLookupData: true,
+                qrzEnabled: true, qrzUser: "testuser", qrzPass: "testpass", qrzCacheDays: 7,
+                lotwEnabled: false, lotwDays: 30,
+                clubLogAppKey: "", clubLogDays: 30,
+                fccUlsEnabled: false,
+                policy: QrzLookupPolicy.Disabled, qrzMinIntervalSeconds: 10,
+                primaryProvider: CallsignLookupProvider.Qrz,
+                hamQthEnabled: true, hamQthUser: "hamuser", hamQthPass: "hampass", hamQthCacheDays: 7);
+            Check("Switching CallsignLookupProvider back to Qrz updates PrimaryProvider",
+                ReferenceEquals(manager.PrimaryProvider, manager.Qrz), true);
+
+            // CanAutoQueue must route through whichever is primary, not always QRZ.
+            manager.Initialize(
+                useLookupData: true,
+                qrzEnabled: false, qrzUser: "", qrzPass: "", qrzCacheDays: 7,
+                lotwEnabled: false, lotwDays: 30,
+                clubLogAppKey: "", clubLogDays: 30,
+                fccUlsEnabled: false,
+                policy: QrzLookupPolicy.UnidentifiedQueue, qrzMinIntervalSeconds: 10,
+                primaryProvider: CallsignLookupProvider.HamQth,
+                hamQthEnabled: true, hamQthUser: "hamuser", hamQthPass: "hampass", hamQthCacheDays: 7);
+            Check("CanAutoQueue is true when HamQth is primary and enabled, even with QRZ disabled",
+                manager.CanAutoQueue("W1AW"), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  LookupManagerPrimaryProviderTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            manager.Dispose();
         }
     }
 
@@ -2340,11 +2495,12 @@ static class JimmyTests
     // 2024-12-01, no continent) keep working unchanged.
     static void InsertQso(LogbookDb db, string call, string state,
         int dxcc, int zone, string lotwRcvd = "", string qrzRcvd = "",
-        string band = "20m", string qsoDate = "20241201", string continent = "")
+        string band = "20m", string qsoDate = "20241201", string continent = "",
+        string timeOn = "1200")
     {
-        string key = AdifImporter.BuildDedupKey(call, band, "FT8", qsoDate, "1200");
+        string key = AdifImporter.BuildDedupKey(call, band, "FT8", qsoDate, timeOn);
         // Parameter order: ..., lotwQslSent, lotwQslRcvd, qrzQslSent, qrzQslRcvd, ...
-        db.Upsert(call, band, "FT8", qsoDate, "1200", "1215",
+        db.Upsert(call, band, "FT8", qsoDate, timeOn, "1215",
             14_074_000, "-10", "-05", state, "Test", dxcc, zone,
             "", "", "", "", "", "", "",
             "", lotwRcvd, "", qrzRcvd,

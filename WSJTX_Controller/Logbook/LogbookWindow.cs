@@ -24,6 +24,8 @@ namespace WSJTX_Controller
         private readonly Func<string> _clubLogEmail;
         private readonly Func<string> _clubLogPassword;
         private readonly Func<string> _clubLogCallsign;
+        private readonly Func<string> _eqslUsername;
+        private readonly Func<string> _eqslPassword;
         private readonly Action   _onImportComplete;
         private readonly HashSet<string> _activeAwardRuleIds;
         private readonly Action<string, bool> _onActiveAwardRuleIdsChanged;
@@ -104,9 +106,11 @@ namespace WSJTX_Controller
         private Button   _syncQrzBtn;
         private Button   _syncLotwBtn;
         private Button   _syncClubLogBtn;
+        private Button   _syncEqslBtn;
         private Label    _srcQrzStatusLbl;
         private Label    _srcLotwStatusLbl;
         private Label    _srcClubLogStatusLbl;
+        private Label    _srcEqslStatusLbl;
         private ListView _srcHistoryLv;
 
         // ── Edit Log controls ─────────────────────────────────────────────────────
@@ -151,6 +155,7 @@ namespace WSJTX_Controller
 
         public LogbookWindow(IniFile ini, Func<string> qrzApiKey, Func<string> lotwUser, Func<string> lotwPass,
             Func<string> clubLogEmail = null, Func<string> clubLogPassword = null, Func<string> clubLogCallsign = null,
+            Func<string> eqslUsername = null, Func<string> eqslPassword = null,
             Action onImportComplete = null,
             HashSet<string> initialActiveAwardRuleIds = null,
             Action<string, bool> onActiveAwardRuleIdsChanged = null,
@@ -168,6 +173,8 @@ namespace WSJTX_Controller
             _clubLogEmail     = clubLogEmail     ?? (() => "");
             _clubLogPassword  = clubLogPassword  ?? (() => "");
             _clubLogCallsign  = clubLogCallsign  ?? (() => "");
+            _eqslUsername     = eqslUsername     ?? (() => "");
+            _eqslPassword     = eqslPassword     ?? (() => "");
             _onImportComplete = onImportComplete;
             _activeAwardRuleIds = initialActiveAwardRuleIds ?? new HashSet<string>();
             _onActiveAwardRuleIdsChanged = onActiveAwardRuleIdsChanged;
@@ -399,6 +406,24 @@ namespace WSJTX_Controller
             _syncPanel.Controls.AddRange(new Control[] { _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncClubLogBtn });
             y += 34;
 
+            // Own row: the first row (Import/QRZ/LoTW/Club Log) is already close to this
+            // window's MinimumSize width (720) -- a 5th button on the same row would clip
+            // when resized down. Only a match-only reconciliation against Jimmy's local
+            // logbook (EqslReconciler), not a full import -- see EqslRefreshBtn_Click.
+            _syncEqslBtn = new Button
+            {
+                Text           = "Download from eQSL",
+                AccessibleName = "Download and reconcile eQSL confirmations",
+                Size           = new Size(150, 26),
+                Location       = new Point(8, y),
+                Font           = font,
+                TabIndex       = 5,
+                Enabled        = !string.IsNullOrWhiteSpace(_eqslUsername()) && !string.IsNullOrWhiteSpace(_eqslPassword()),
+            };
+            _syncEqslBtn.Click += EqslRefreshBtn_Click;
+            _syncPanel.Controls.Add(_syncEqslBtn);
+            y += 34;
+
             _syncExportBtn = new Button
             {
                 Text           = "Export ADIF...",
@@ -406,7 +431,7 @@ namespace WSJTX_Controller
                 Size           = new Size(120, 26),
                 Location       = new Point(8, y),
                 Font           = font,
-                TabIndex       = 5,
+                TabIndex       = 6,
             };
             _syncExportBtn.Click += (s, e) => ExportAdif(null);
             _syncPanel.Controls.Add(_syncExportBtn);
@@ -418,6 +443,10 @@ namespace WSJTX_Controller
 
             AddSectionLabel(_syncPanel, "LoTW", hfont, ref y);
             _srcLotwStatusLbl = AddInfoLabel(_syncPanel, "Status: not configured", font, ref y);
+            y += 4;
+
+            AddSectionLabel(_syncPanel, "eQSL", hfont, ref y);
+            _srcEqslStatusLbl = AddInfoLabel(_syncPanel, "Status: not configured", font, ref y);
             y += 4;
 
             AddSectionLabel(_syncPanel, "Club Log", hfont, ref y);
@@ -1299,6 +1328,17 @@ namespace WSJTX_Controller
                     _srcLotwStatusLbl.Text = $"Username: {_lotwUser()}.  Last refresh: {dt}.  QSOs: {cnt:N0}.";
                 }
 
+                // eQSL status -- confirmed count is informational only (not an award-eligible
+                // confirmation source, see LogbookDb.EqslConfirmedQsos's own comment).
+                if (string.IsNullOrWhiteSpace(_eqslUsername()) || string.IsNullOrWhiteSpace(_eqslPassword()))
+                    _srcEqslStatusLbl.Text = "eQSL credentials not configured.  (Options > Logbook)";
+                else
+                {
+                    string dt = ReadableDate(_ini?.Read("LogbookLastEqslRefresh"));
+                    int cnt   = _db.EqslConfirmedQsos();
+                    _srcEqslStatusLbl.Text = $"Username: {_eqslUsername()}.  Last refresh: {dt}.  Confirmed (informational): {cnt:N0}.";
+                }
+
                 // Club Log status
                 if (string.IsNullOrWhiteSpace(_clubLogEmail()) || string.IsNullOrWhiteSpace(_clubLogPassword()) || string.IsNullOrWhiteSpace(_clubLogCallsign()))
                     _srcClubLogStatusLbl.Text = "Club Log upload credentials not configured.  (Options > Logbook)";
@@ -1873,6 +1913,67 @@ namespace WSJTX_Controller
             finally { SetBusy(false); }
         }
 
+        // Downloads and reconciles eQSL InBox confirmations -- deliberately NOT
+        // RunImportFromText/AdifImporter.Import (see EqslReconciler's own comment: an eQSL
+        // InBox record is someone else's confirmation report, not Jimmy Test's own logbook,
+        // so it must never create a new local QSO row). since_unix is Jimmy's own last-synced
+        // watermark, same "always incremental after the first pull" idea LoTW/QRZ/Club Log
+        // already use -- but unlike them, a fresh install still does a full pull (since_unix
+        // null) since there's no prior watermark yet.
+        private async void EqslRefreshBtn_Click(object sender, EventArgs e)
+        {
+            if (_db == null) { SetStatus("Database not available."); return; }
+            if (string.IsNullOrWhiteSpace(_eqslUsername()) || string.IsNullOrWhiteSpace(_eqslPassword()))
+            {
+                SetStatus("eQSL credentials not configured.");
+                return;
+            }
+
+            SetStatus("Fetching eQSL InBox…");
+            SetBusy(true);
+            int logId = _db.LogImportStart("EQSL");
+            try
+            {
+                string lastRefresh = _ini?.Read("LogbookLastEqslRefresh");
+                long? sinceUnix = DateTime.TryParse(lastRefresh,
+                    System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var last)
+                    ? (long?)new DateTimeOffset(last.ToUniversalTime()).ToUnixTimeSeconds()
+                    : null;
+
+                var client = new ExternalDataClient();
+                string adif = null;
+                string error = null;
+                await Task.Run(() => { adif = client.DownloadEqsl(_eqslUsername(), _eqslPassword(), sinceUnix, out error); }).ConfigureAwait(true);
+
+                if (adif == null)
+                {
+                    string msg = "eQSL error: " + (error ?? "Unknown error");
+                    _db.LogImportFinish(logId, 0, 0, 0, 0, 0, msg);
+                    SetStatus(msg);
+                    return;
+                }
+
+                var result = await Task.Run(() => EqslReconciler.Reconcile(_db, adif)).ConfigureAwait(true);
+                int processed = result.Matched + result.AlreadyConfirmed + result.Ambiguous + result.Unmatched + result.Skipped;
+                int skippedTotal = result.AlreadyConfirmed + result.Ambiguous + result.Unmatched + result.Skipped;
+                string note = result.Ambiguous > 0
+                    ? $"{result.Ambiguous} ambiguous match(es) skipped (never guessed)."
+                    : "";
+                _db.LogImportFinish(logId, processed, 0, result.Matched, 0, skippedTotal, note);
+                _ini?.Write("LogbookLastEqslRefresh", DateTime.UtcNow.ToString("o"));
+
+                SetStatus($"eQSL reconcile complete: {result}");
+
+                if (_activePage == _syncPanel) PopulateSync();
+            }
+            catch (Exception ex)
+            {
+                _db.LogImportFinish(logId, 0, 0, 0, 0, 0, ex.Message);
+                SetStatus("eQSL reconcile error: " + ex.Message);
+            }
+            finally { SetBusy(false); }
+        }
+
         // Records a history row for a sync attempt that failed before any ADIF data
         // reached RunImportFromText (which logs its own row on success/parse-level errors).
         private void LogSyncFailure(string source, string message)
@@ -2069,6 +2170,7 @@ namespace WSJTX_Controller
             _syncLotwBtn.Enabled    = !busy && !string.IsNullOrWhiteSpace(_lotwUser()) && !string.IsNullOrWhiteSpace(_lotwPass());
             _syncClubLogBtn.Enabled = !busy && !string.IsNullOrWhiteSpace(_clubLogEmail()) &&
                                        !string.IsNullOrWhiteSpace(_clubLogPassword()) && !string.IsNullOrWhiteSpace(_clubLogCallsign());
+            _syncEqslBtn.Enabled    = !busy && !string.IsNullOrWhiteSpace(_eqslUsername()) && !string.IsNullOrWhiteSpace(_eqslPassword());
         }
 
         private string SetStatus_Text;
