@@ -271,12 +271,16 @@ wired via `HamQthProvider.Contribute()`'s blank-fill into `Build()`, positioned 
 
 **Decision: Jimmy's logbook/upload stack stays fully authoritative; eQSL and HamQTH are additive integrations on top of it, not a replacement or migration.** Both are now genuinely usable end to end (eQSL upload+download+reconciliation, HamQTH as a real alternative primary lookup provider), built strictly against what Nexus actually implements -- nothing was duplicated in C# that Nexus already does, and nothing was claimed that Nexus doesn't yet support (eQSL OutBox/update/delete, HamQTH upload/download/sync/spots all remain unbuilt because Nexus has no such capability to expose, not because Jimmy Test chose to skip them).
 
-## Nexus-backed facts beyond FT8/FT4: POTA, SOTA, space weather
+## Nexus-backed facts beyond FT8/FT4: POTA, SOTA, DX spots, band conditions, space weather
 
 Per operator request: take advantage of useful Nexus information beyond the basic FT8/FT4 engine
--- POTA, SOTA, and propagation/space-weather facts -- without copying Nexus's own visual UI.
-Ownership split follows the same pattern as everything else in this document: **Nexus supplies
-the facts, Jimmy applies its own operator intelligence and presents them accessibly.**
+-- POTA, SOTA, DX/current spots, propagation/band-condition text, and space-weather facts --
+without copying Nexus's own visual UI. Ownership split follows the same pattern as everything
+else in this document: **Nexus supplies the facts, Jimmy applies its own operator intelligence
+and presents them accessibly.** Delivered in two passes: POTA/SOTA + space weather first, then
+(after the operator asked specifically where the rest of the promised categories actually were)
+DX cluster/RBN spots and a real plain-language band-conditions nowcast, all as tabs of the same
+`Alt+G` window rather than separate windows.
 
 - **Nexus's `propagation` crate promoted from dev-only to a real runtime dependency** (with its
   `live` feature) -- previously only used by Jimmy's own shadow-comparison test tooling. Its
@@ -300,25 +304,65 @@ the facts, Jimmy applies its own operator intelligence and presents them accessi
   **not** touch `AwardMatcher`/`RuleEngine`/`Awards` -- POTA/SOTA is not folded into the awards
   engine's own design, exactly as instructed; this is a new, additive, read-only consumer of data
   those systems already expose publicly.
-- **`OtaSpotsWindow.cs`**: the accessible presentation. A plain `ListView` (View=Details) --
-  natively keyboard-navigable, no custom accessibility plumbing needed -- with columns Program /
-  Reference / Activator / Freq-Mode / Age / Status ("worked before, needed for N awards"),
-  matching the requested presentation style ("K1ABC -- POTA K-1234 -- 20m FT8 -- spotted 2 min
-  ago -- needed for 2 awards") via each row's tooltip/accessible text. Non-modal singleton window,
-  following `LogbookWindow`'s exact established pattern (own `LogbookDb` instance, `Show()` not
-  `ShowDialog()`, no `Owner`, cleanup via `FormClosed` + `Controller_FormClosing`). Opened via a
-  new button next to Logbook and a new `Alt+G` hotkey (`HotkeyAction.OpenOtaSpots`), both routed
-  through the existing `HotkeyConfig`/`OptionsDlg` hotkey editor like every other shortcut.
-  Deliberately plain -- no custom dashboard rendering -- so JAWS/NVDA read it the same as any
-  other list already in the app.
+- **`OtaSpotsWindow.cs`**: the accessible presentation, now a `TabControl` with four independently
+  refreshable tabs (own Refresh button per tab, plus a shared 15s background timer and F5). Every
+  list is a plain `ListView` (View=Details) -- natively keyboard-navigable, no custom
+  accessibility plumbing needed. Non-modal singleton window, following `LogbookWindow`'s exact
+  established pattern (own `LogbookDb` instance, `Show()` not `ShowDialog()`, no `Owner`, cleanup
+  via `FormClosed` + `Controller_FormClosing`). Opened via a button next to Logbook and the
+  `Alt+G` hotkey (`HotkeyAction.OpenOtaSpots`, fully remappable through the same
+  `HotkeyConfig`/`OptionsDlg` editor as every other shortcut). Deliberately plain -- no custom
+  dashboard rendering -- so JAWS/NVDA read every tab the same as any other list already in the
+  app.
+  - **POTA / SOTA** tab: Program / Reference / Activator / Freq-Mode / Age / Status ("worked
+    before, needed for N awards"), matching the requested presentation style ("K1ABC -- POTA
+    K-1234 -- 20m FT8 -- spotted 2 min ago -- needed for 2 awards") via each row's tooltip.
+  - **Band Conditions** tab: Nexus's own `propagation::PropAdvisor` (advisor.rs) -- "data-driven,
+    plain-language what's-open-now, no VOACAP expertise required" (its own doc comment) -- run
+    over a rolling window of the operator's own PSK Reporter reciprocal spots ("who hears me / who
+    I hear", fetched live via `tempo_net::mqtt`'s hand-rolled MQTT client + `propagation::
+    pskr_mqtt`, mirroring Nexus's own `start_pskr_feed` exactly). Shows a one-sentence headline,
+    a per-band Tier/Confidence/stations-heard/best-region/reason table, and any alert banners.
+    Always on -- mycall/mygrid are already known to EngineHost at startup, no operator
+    configuration needed. Deliberately does NOT replicate Nexus's own region/worldwide-activity
+    matrix, openings tracker, or map-spot building (`get_propagation` in Nexus's Tauri app) -- that
+    whole surrounding machinery supports Nexus's own visual dashboard and is out of scope for
+    "useful textual conditions rather than Nexus's visual maps."
+  - **DX Spots** tab: a real DX-cluster/RBN telnet feed (`tempo_net::cluster`, the same
+    session/parse core Nexus's own app uses, "fully unit-tested (no socket)" per its own doc
+    comment) -- DX call, frequency, mode (RBN skimmer spots carry a trusted machine-generated mode
+    token; human cluster spots never do, by design), spotter, age, comment. Opt-in only: unlike
+    PSK Reporter's one public broker, a DX cluster is an independently-run federation with no
+    universal default, so this requires the operator to configure a server address (Options >
+    Decode Engine tab > "DX Cluster server", `host:port`) -- empty (default) leaves the tab
+    reporting "not configured" rather than attempting a connection. Startup-CLI-arg-only
+    (`--dx-cluster`), same convention as the Decode tab's other non-live-settable options --
+    changing it restarts the native engine, exactly like changing My Call/My Grid/audio device
+    already does.
+  - **Space Weather** tab: SFI, SSN, Kp, A-index, and X-ray flux as plain read-only fields (the
+    same `SPACE_WX`-cached data the Band Conditions tab's advisor also reads) -- presented as
+    facts, not interpreted; the Band Conditions tab is where interpretation belongs.
+- **New EngineHost module, `live_feeds.rs`**: owns both live feeds above (`LiveFeedsCache`), same
+  background-cache-with-graceful-degradation discipline as `external_data.rs`'s `SharedCache` --
+  a feed that can't connect, or hasn't produced enough data yet, degrades to "no data yet" /
+  stale-but-real cached data, never affects engine/decode/TX. New control-port commands
+  `BAND_CONDITIONS` and `DX_SPOTS`, both cache-only reads (fast enough to run inline on the
+  control server's accept loop, same as `SNAPSHOT`/`OTA_SPOTS`/`SPACE_WX`). Added `tempo-net` as
+  an EngineHost dependency for this -- confirmed low-risk before adding it: both `tempo_net::mqtt`
+  and `tempo_net::cluster` are hand-rolled, pure-`std::net::TcpStream` clients (no external MQTT/
+  telnet crate, no new native/transitive dependencies), matching the risk bar every other Nexus
+  reuse in this project was held to.
 
-**Deferred, documented, not attempted this pass: POTA/SOTA notifications.** The operator asked
-for optional, non-chatty notifications when a worth-chasing spot appears. `OtaSpotsWindow` is
-pull-only (operator opens it, sees current facts) and satisfies the core accessibility
-requirement without this. A push notification needs: a background poll independent of the window
-being open (today, nothing fetches OTA data unless the window is open), and per-spot dedup state
-so the same activator/reference doesn't re-announce every refresh cycle. Jimmy already has a
-complete, well-tested notification framework for exactly this shape of problem
+**Deferred, documented, not attempted this pass: POTA/SOTA/DX-spot "worth chasing" notifications.**
+The operator asked for optional, non-chatty notifications when a worth-chasing spot appears.
+`OtaSpotsWindow` is pull-only (operator opens it, sees current facts) and satisfies the core
+accessibility requirement without this. A push notification needs: a background poll independent
+of the window being open (today, nothing fetches this data unless the window is open -- except
+the two live feeds behind Band Conditions/DX Spots, which now DO run continuously regardless of
+whether the window is open, since PropAdvisor needs a populated rolling window to be useful the
+moment the operator looks; POTA/SOTA's own refresh is still window-gated), and per-spot dedup
+state so the same activator/reference/DX call doesn't re-announce every refresh cycle. Jimmy
+already has a complete, well-tested notification framework for exactly this shape of problem
 (`Notify/NotificationEventType.cs`, `NotificationCenter`, `NotificationPolicy` with
 Timing/DeferWhileTransmitting/SuppressUnchanged) -- the clean path is a new
 `NotificationEventType.OtaSpotWorthChasing` following that framework's existing "one new type,
@@ -417,8 +461,11 @@ future pass.
 - A map/photo display for lat/lon and profile-picture fields QRZ/HamQTH both can return -- neither
   side's lookup DTO currently has anywhere in Jimmy's UI to put them; a real but small UI-design
   decision, not attempted here (see the QRZ vs HamQTH comparison above).
-- POTA/SOTA "worth chasing" notifications (see "Nexus-backed facts beyond FT8/FT4" above for the
-  concrete design seam left for this).
+- POTA/SOTA/DX-spot "worth chasing" notifications (see "Nexus-backed facts beyond FT8/FT4" above
+  for the concrete design seam left for this).
+- Band Conditions' region/worldwide-activity matrix, openings tracker, and map-spot building
+  (Nexus's own `get_propagation`) -- deliberately not replicated; that machinery supports Nexus's
+  own visual dashboard, out of scope for "useful textual conditions rather than visual maps."
 
 Each of these is a substantial, independently-scoped piece of work; attempting them without the
 same proof-before-cutover rigor used elsewhere in this pass (isolated change, full test suite,
