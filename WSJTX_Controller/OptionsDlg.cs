@@ -890,6 +890,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.ComboBox _engineAudioOutputDeviceCombo;
         private System.Windows.Forms.NumericUpDown _engineAudioInputLevelUpDown;
         private System.Windows.Forms.NumericUpDown _engineAudioOutputLevelUpDown;
+        private System.Windows.Forms.TextBox _dxClusterAddressTextBox;
         private System.Windows.Forms.CheckBox _radioPttDataSourceCheckBox;
         private System.Windows.Forms.ComboBox _radioPttSerialPortCombo;
         private System.Windows.Forms.GroupBox _radioModeGroupBox;
@@ -1843,6 +1844,37 @@ namespace WSJTX_Controller
             decodeEnginePanel.Controls.Add(_engineAudioOutputLevelUpDown);
             InitAudioSessionLevelControl(_engineAudioOutputLevelUpDown, isRender: true);
             y += 32;
+
+            var dxClusterLabel = new System.Windows.Forms.Label
+            {
+                Text = "DX Cluster server (optional, host:port):",
+                AccessibleName = "DX Cluster server label",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            decodeEnginePanel.Controls.Add(dxClusterLabel);
+            y += 20;
+
+            // Feeds the DX Spots tab of the POTA/SOTA/DX Spots window (Alt+G). Unlike PSK
+            // Reporter's single public broker (Band Conditions tab, always on, no setting
+            // needed), a DX cluster is an independently-run telnet node the operator picks --
+            // there is no universal correct default. Empty = that tab's feed stays disabled.
+            // Startup-only, like every other control on this tab -- changing it restarts the
+            // engine, same as My Call/My Grid/audio device above.
+            _dxClusterAddressTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.dxClusterAddress ?? "",
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(240, 21),
+                TabIndex = 8,
+                Font = font,
+                AccessibleName = "DX Cluster server address",
+                AccessibleDescription = "Optional host:port of a DX-cluster or RBN telnet node, e.g. dxc.nc7j.com:7373. Leave blank to leave the DX Spots tab disabled.",
+            };
+            decodeEnginePanel.Controls.Add(_dxClusterAddressTextBox);
+            y += 24;
         }
 
         // Reads the engine's current OS-level session volume for the given direction (input
@@ -3100,6 +3132,7 @@ namespace WSJTX_Controller
             string wasMyGrid = ctrl.NativeEngine.MyGrid;
             string wasAudioIn = ctrl.NativeEngine.AudioInputDevice;
             string wasAudioOut = ctrl.NativeEngine.AudioOutputDevice;
+            string wasDxClusterAddress = ctrl.dxClusterAddress;
             var r = ctrl.Radio;
             var wasRadioMode = r.Mode;
             string wasRigModel = r.RigModel;
@@ -3177,6 +3210,7 @@ namespace WSJTX_Controller
             ctrl.NativeEngine.MyGrid = FormatGridSquare(_engineMyGridTextBox.Text.Trim());
             ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
             ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
+            if (_dxClusterAddressTextBox != null) ctrl.dxClusterAddress = _dxClusterAddressTextBox.Text.Trim();
 
             // Only run either call if something it actually depends on changed -- see this
             // method's own opening comment. radioSettingsChanged also covers ApplyEngineMode(),
@@ -3185,7 +3219,8 @@ namespace WSJTX_Controller
             // take effect.
             bool engineIdentityChanged =
                 wasMyCall != ctrl.NativeEngine.MyCall || wasMyGrid != ctrl.NativeEngine.MyGrid ||
-                wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice;
+                wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice ||
+                wasDxClusterAddress != ctrl.dxClusterAddress;
             bool radioSettingsChanged =
                 wasRadioMode != r.Mode || wasRigModel != r.RigModel || wasComPort != r.ComPort ||
                 wasBaudRate != r.BaudRate || wasUseExternal != r.UseExternalRigctld || wasHost != r.RigctldHost ||

@@ -177,6 +177,13 @@ namespace WSJTX_Controller
         // existing installation's behavior unchanged.
         public CallsignLookupProvider callsignLookupProvider = CallsignLookupProvider.Qrz;
 
+        // DX Spots (Alt+G window, DX Cluster tab): "host:port" of an operator-chosen DX-
+        // cluster/RBN telnet node. Empty (default) disables that tab's feed entirely -- unlike
+        // PSK Reporter's single public broker, DX clusters are an independently-run federation
+        // with no universal default. Startup-CLI-arg-only (NativeEngineClient.Launch), like the
+        // Decode tab's non-live-settable options -- changing it needs the usual engine restart.
+        public string dxClusterAddress = "";
+
         // Automatic logbook download/sync (opt-in, default off so existing users aren't
         // suddenly downloading full logbooks on their next update without asking). Runs
         // once per session via LogbookAutoSync, a fixed delay after reaching ACTIVE --
@@ -723,6 +730,7 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("hamQthCacheDays"))    int.TryParse(iniFile.Read("hamQthCacheDays"), out hamQthCacheDays);
                 if (iniFile.KeyExists("callsignLookupProvider"))
                     Enum.TryParse(iniFile.Read("callsignLookupProvider"), out callsignLookupProvider);
+                if (iniFile.KeyExists("dxClusterAddress")) dxClusterAddress = iniFile.Read("dxClusterAddress") ?? "";
                 if (iniFile.KeyExists("tqslStationLocation"))    tqslStationLocation   = iniFile.Read("tqslStationLocation")    ?? "";
                 if (iniFile.KeyExists("qrzLogbookAutoSyncEnabled"))     qrzLogbookAutoSyncEnabled     = iniFile.Read("qrzLogbookAutoSyncEnabled")     == "True";
                 int qrzld; if (iniFile.KeyExists("qrzLogbookRefreshDays") && int.TryParse(iniFile.Read("qrzLogbookRefreshDays"), out qrzld) && qrzld >= 1) qrzLogbookRefreshDays = qrzld;
@@ -918,11 +926,12 @@ namespace WSJTX_Controller
             this.Controls.Add(logbookButton);
             logbookButton.BringToFront();
 
-            // POTA/SOTA spots button — below logbookButton at y=361, same footprint.
+            // POTA/SOTA/DX Spots/Band Conditions/Space Weather window button — below
+            // logbookButton at y=361, same footprint.
             otaSpotsButton = new System.Windows.Forms.Button
             {
-                Text           = "POTA / SOTA Spots",
-                AccessibleName = "POTA and SOTA spots, " + FormatKeysForAccessibleName(HotkeyAction.OpenOtaSpots),
+                Text           = "POTA / SOTA / DX Spots",
+                AccessibleName = "POTA, SOTA, and DX spots, " + FormatKeysForAccessibleName(HotkeyAction.OpenOtaSpots),
                 Location       = new System.Drawing.Point(10, 361),
                 Size           = new System.Drawing.Size(492, 24),
                 Anchor         = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right,
@@ -1252,6 +1261,7 @@ namespace WSJTX_Controller
                 iniFile.Write("hamQthPassword",          CredentialProtector.Protect(hamQthPassword));
                 iniFile.Write("hamQthCacheDays",         hamQthCacheDays.ToString());
                 iniFile.Write("callsignLookupProvider",  callsignLookupProvider.ToString());
+                iniFile.Write("dxClusterAddress",        dxClusterAddress        ?? "");
                 iniFile.Write("tqslStationLocation",     tqslStationLocation      ?? "");
                 iniFile.Write("qrzLogbookAutoSyncEnabled",     qrzLogbookAutoSyncEnabled.ToString());
                 iniFile.Write("qrzLogbookRefreshDays",         qrzLogbookRefreshDays.ToString());
@@ -1302,7 +1312,7 @@ namespace WSJTX_Controller
             if (logbookButton != null)
                 logbookButton.AccessibleName = "Logbook, " + FormatKeysForAccessibleName(HotkeyAction.OpenLogbook);
             if (otaSpotsButton != null)
-                otaSpotsButton.AccessibleName = "POTA and SOTA spots, " + FormatKeysForAccessibleName(HotkeyAction.OpenOtaSpots);
+                otaSpotsButton.AccessibleName = "POTA, SOTA, and DX spots, " + FormatKeysForAccessibleName(HotkeyAction.OpenOtaSpots);
         }
 
         private string FormatKeysForAccessibleName(HotkeyAction action)
@@ -2016,7 +2026,7 @@ namespace WSJTX_Controller
                 _otaSpotsWindow = null;
                 MessageBox.Show(
                     ex.GetType().Name + ": " + ex.Message + "\r\n\r\n" + ex.StackTrace,
-                    "POTA / SOTA Spots Error",
+                    "POTA / SOTA / DX Spots Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -2657,7 +2667,8 @@ namespace WSJTX_Controller
                 bool ok = client.Launch(myCall, myGrid, inDevice, jimmyPort, outDevice, radioSnapshot,
                     msg => wsjtx?.DebugOutput(msg),
                     () => BeginInvoke(new Action(() => OnNativeEngineUnexpectedExit(client))),
-                    decodeSnapshot, wsjtx != null && wsjtx.usePskReporter);
+                    decodeSnapshot, wsjtx != null && wsjtx.usePskReporter,
+                    dxClusterAddress);
                 if (!ok && nativeEngineClient == client)
                 {
                     BeginInvoke(new Action(() => ShowMessage($"Native engine: {client.LastError}", false)));
@@ -3040,7 +3051,7 @@ namespace WSJTX_Controller
                 $"{nl}{K(HotkeyAction.LookupStation)}: Look up selected station (shows callsign, country, state, LoTW status, and more)." +
                 $"{nl}{K(HotkeyAction.OpenLogbook)}: Open the Ham Radio Center logbook." +
                 $"{nl}{K(HotkeyAction.AddManualQso)}: Add a manually-logged QSO (e.g. worked outside WSJT-X)." +
-                $"{nl}{K(HotkeyAction.OpenOtaSpots)}: Open the POTA / SOTA spots list." +
+                $"{nl}{K(HotkeyAction.OpenOtaSpots)}: Open POTA / SOTA spots, DX spots, band conditions, and space weather." +
 
                 $"{nl}{nl}Radio configuration keys:" +
                 $"{nl}{K(HotkeyAction.TuneMode)}: Toggle Tune mode, to determine correct audio output level to radio ({K(HotkeyAction.AudioUp)} and {K(HotkeyAction.AudioDown)} keys to adjust, {K(HotkeyAction.Prompts)} for fast or complete updates)." +

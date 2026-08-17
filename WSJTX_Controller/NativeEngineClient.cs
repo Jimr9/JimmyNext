@@ -114,7 +114,8 @@ namespace WSJTX_Controller
         public bool Launch(string mycall, string mygrid, string audioDevice, int jimmyPort,
                             string outputDevice = null, RadioSettings radio = null,
                             Action<string> debugOutput = null, Action onUnexpectedExit = null,
-                            DecodeSettings decode = null, bool pskreporter = false)
+                            DecodeSettings decode = null, bool pskreporter = false,
+                            string dxClusterAddress = null)
         {
             LastError = null;
             try
@@ -159,6 +160,14 @@ namespace WSJTX_Controller
                 // own comment, WsjtxClient.Protocol.cs) -- the engine's own native PSK Reporter
                 // spotting ran unconditionally regardless of what this checkbox said.
                 if (pskreporter) args += " --pskreporter";
+
+                // DX Spots (Alt+G window): a real DX-cluster/RBN telnet server the operator
+                // chooses -- unlike PSK Reporter's single public broker, there is no universal
+                // default, so this is opt-in only (empty = feed disabled). Startup-CLI-arg-only,
+                // same reasoning as the decode block above -- changing it in Options requires
+                // the usual engine restart.
+                if (!string.IsNullOrWhiteSpace(dxClusterAddress))
+                    args += $" --dx-cluster \"{dxClusterAddress.Trim()}\"";
 
                 if (radio != null && radio.Mode == RadioControlMode.HamlibRigctld)
                 {

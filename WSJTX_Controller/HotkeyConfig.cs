@@ -129,7 +129,7 @@ namespace WSJTX_Controller
             [HotkeyAction.LookupStation]   = "Lookup Selected Station",
             [HotkeyAction.OpenLogbook]     = "Open Ham Radio Center Logbook",
             [HotkeyAction.AddManualQso]    = "Add Manual QSO to Logbook",
-            [HotkeyAction.OpenOtaSpots]    = "Open POTA / SOTA Spots",
+            [HotkeyAction.OpenOtaSpots]    = "Open POTA / SOTA / DX Spots",
             [HotkeyAction.ResetWindowSize] = "Reset Window Size to Default",
             [HotkeyAction.NavStatus]       = "Focus Status Area",
             [HotkeyAction.NavCallList]     = "Focus Available Stations List",

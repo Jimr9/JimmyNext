@@ -46,6 +46,77 @@ namespace WSJTX_Controller
         public string LastError { get; set; }
     }
 
+    // Mirrors EngineHost's RegionReportPayload (live_feeds.rs) -- the strongest region on a
+    // band, with a compass heading from the operator.
+    public class RegionReport
+    {
+        public string Region { get; set; }
+        public string Octant { get; set; }
+        public float BearingDeg { get; set; }
+        public uint Stations { get; set; }
+        public bool Bidirectional { get; set; }
+    }
+
+    // Mirrors EngineHost's BandReportPayload -- one band's nowcast, from Nexus's own
+    // PropAdvisor (propagation::advisor). Tier/Confidence arrive as plain strings
+    // ("Active"/"Moderate"/"Quiet"/"Closed", "Strong"/"Likely"/"Marginal") -- Nexus's own
+    // ActivityTier/Confidence enums' .label() text, not re-parsed into a C# enum, since nothing
+    // here needs to branch on them beyond display.
+    public class BandReport
+    {
+        public string Band { get; set; }
+        public string Tier { get; set; }
+        public float Score { get; set; }
+        public uint NHearMe { get; set; }
+        public uint NIHear { get; set; }
+        public string Confidence { get; set; }
+        public string Reason { get; set; }
+        public string Modeled { get; set; }
+        public string ModeledReason { get; set; }
+        public RegionReport BestRegion { get; set; }
+    }
+
+    // Mirrors EngineHost's BandConditionsPayload -- Nexus's plain-language "what's open now"
+    // nowcast, built from the operator's own PSK Reporter reciprocal-spot window (see
+    // live_feeds.rs). Always-on: no credentials or configuration needed, since mycall/mygrid
+    // are already known to EngineHost at startup.
+    public class BandConditionsResult
+    {
+        public string Headline { get; set; }
+        public BandReport[] Bands { get; set; } = Array.Empty<BandReport>();
+        public string[] Banners { get; set; } = Array.Empty<string>();
+        public int SpotCount { get; set; }
+        public bool Connected { get; set; }
+        public long? LastEventAgeSecs { get; set; }
+        public string Error { get; set; }
+    }
+
+    // Mirrors EngineHost's DxSpotPayload -- one DX-cluster/RBN telnet spot (tempo_net::cluster).
+    public class DxSpot
+    {
+        public string Spotter { get; set; }
+        public string DxCall { get; set; }
+        public double FreqKhz { get; set; }
+        public string Comment { get; set; }
+        public string TimeUtc { get; set; }
+        public long? AgeSecs { get; set; }
+        public bool Rbn { get; set; }
+        public string SkimmerMode { get; set; }
+    }
+
+    // Mirrors EngineHost's DxSpotsPayload. Configured=false means the operator hasn't set a DX
+    // cluster server address (Options > ... > DX Cluster) -- distinct from Connected=false
+    // (configured but not currently reachable), so the UI can tell "nothing to connect to" from
+    // "trying to connect".
+    public class DxSpotsResult
+    {
+        public bool Configured { get; set; }
+        public bool Connected { get; set; }
+        public bool Stale { get; set; }
+        public long? LastEventAgeSecs { get; set; }
+        public DxSpot[] Spots { get; set; } = Array.Empty<DxSpot>();
+    }
+
     public class HamQthLookupResult
     {
         public string Call { get; set; }
@@ -117,6 +188,38 @@ namespace WSJTX_Controller
             catch (Exception ex)
             {
                 error = $"Could not parse SPACE_WX response: {ex.Message}";
+                return null;
+            }
+        }
+
+        public BandConditionsResult GetBandConditions(out string error)
+        {
+            error = null;
+            string json = SendCommand("BAND_CONDITIONS", FastTimeoutMs);
+            if (json == null) { error = "No response from engine host."; return null; }
+            try
+            {
+                return JsonSerializer.Deserialize<BandConditionsResult>(json, JsonOptions);
+            }
+            catch (Exception ex)
+            {
+                error = $"Could not parse BAND_CONDITIONS response: {ex.Message}";
+                return null;
+            }
+        }
+
+        public DxSpotsResult GetDxSpots(out string error)
+        {
+            error = null;
+            string json = SendCommand("DX_SPOTS", FastTimeoutMs);
+            if (json == null) { error = "No response from engine host."; return null; }
+            try
+            {
+                return JsonSerializer.Deserialize<DxSpotsResult>(json, JsonOptions);
+            }
+            catch (Exception ex)
+            {
+                error = $"Could not parse DX_SPOTS response: {ex.Message}";
                 return null;
             }
         }
