@@ -191,7 +191,7 @@ pub struct EqslUploadArgs {
 }
 
 /// Uploads one QSO to eQSL. Returns a wire-tagged outcome ("pending"/"accepted"/"duplicate"/
-/// "rejected"/"auth_fail") on a successful round trip, or Err with a redacted (never
+/// "rejected"/"authfail") on a successful round trip, or Err with a redacted (never
 /// credential-bearing) message on transport failure.
 pub fn eqsl_upload(args: &EqslUploadArgs) -> Result<&'static str, String> {
     let body = tempo_core::eqsl::build_upload_body(&args.username, &args.password, &args.record_adif);

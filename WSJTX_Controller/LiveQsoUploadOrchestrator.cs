@@ -191,7 +191,7 @@ namespace WSJTX_Controller
                             {
                                 _debugLog($"eQSL real-time upload failed for {dxCall}: {eqslError}");
                             }
-                            else if (outcome == "rejected" || outcome == "auth_fail")
+                            else if (outcome == "rejected" || outcome == "authfail")
                             {
                                 _debugLog($"eQSL real-time upload rejected for {dxCall}: {outcome}");
                             }

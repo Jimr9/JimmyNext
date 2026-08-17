@@ -119,7 +119,7 @@ namespace WSJTX_Controller
         }
 
         // Returns eQSL's wire-tagged outcome ("pending"/"accepted"/"duplicate"/"rejected"/
-        // "auth_fail") on success. Jimmy's own upload-tracking (LogbookDb.MarkUploaded) decides
+        // "authfail") on success. Jimmy's own upload-tracking (LogbookDb.MarkUploaded) decides
         // what each outcome means for local bookkeeping -- this client only relays the fact.
         public string UploadEqsl(string username, string password, string recordAdif, out string error)
         {
