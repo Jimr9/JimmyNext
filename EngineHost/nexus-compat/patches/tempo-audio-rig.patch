@@ -1,0 +1,80 @@
+diff --git a/src/rig.rs b/src/rig.rs
+index 4d3711d..32fd7db 100644
+--- a/src/rig.rs
++++ b/src/rig.rs
+@@ -46,8 +46,18 @@ pub enum PttMode {
+ const PTT_DEADLINE_MS: u64 = 700;
+ 
+ /// rigctld command line for PTT.
+-pub fn ptt_line(on: bool) -> String {
+-    format!("T {}\n", on as u8)
++///
++/// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): Hamlib's `set_ptt` takes more than a
++/// boolean: `RIG_PTT_ON` (1) is generic, while `RIG_PTT_ON_MIC` (2) / `RIG_PTT_ON_DATA` (3) tell
++/// a rig with separate mic/data audio inputs which one to transmit from. `data_source` mirrors
++/// WSJT-X's own "Transmit Audio Source: Data" radio button (`HamlibTransceiver::do_ptt`'s
++/// `back_ptt_port_` check) — operator-configured, off by default, exactly like WSJT-X's own
++/// `TXAudioSource` setting (default `TX_audio_source_front`). Backends that don't distinguish
++/// mic/data treat any nonzero value as plain PTT-on, so sending `RIG_PTT_ON` unconditionally
++/// when `data_source` is off is safe generally.
++pub fn ptt_line(on: bool, data_source: bool) -> String {
++    let v = if !on { 0 } else if data_source { 3 } else { 1 };
++    format!("T {v}\n")
+ }
+ /// rigctld command line to set the dial frequency (Hz).
+ pub fn freq_line(hz: u64) -> String {
+@@ -313,6 +323,10 @@ pub struct Rig {
+     /// uses a much shorter per-command deadline — a stalled serial read then can't hold the radio
+     /// loop (and the fast dial poll) for 2.5 s. Default false (serial / local).
+     slow_transport: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X-equivalent "Transmit Audio
++    /// Source: Data" (see [`ptt_line`]) — operator-configured, default false (matches WSJT-X's
++    /// own `TX_audio_source_front` default).
++    ptt_data_source: bool,
+ }
+ 
+ impl Rig {
+@@ -328,6 +342,7 @@ impl Rig {
+             serial: None,
+             keyed: false,
+             slow_transport: false,
++            ptt_data_source: false,
+         }
+     }
+ 
+@@ -337,6 +352,13 @@ impl Rig {
+     pub fn set_slow_transport(&mut self, slow: bool) {
+         self.slow_transport = slow;
+     }
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X-equivalent "Transmit Audio
++    /// Source: Data" toggle (see [`ptt_line`]'s doc comment). Operator-configured; leave default
++    /// (false) unless the rig's Hamlib backend supports the mic/data PTT distinction AND the
++    /// interface is wired to the rig's rear DATA/ACC port.
++    pub fn set_ptt_data_source(&mut self, data_source: bool) {
++        self.ptt_data_source = data_source;
++    }
+     /// Change how this rig is keyed WITHOUT touching its (already-open) CAT control channel. Used by
+     /// the dual-radio handoff: a monitor rig is opened read-only (`PttMode::Vox`), so when it's adopted
+     /// as the ACTIVE radio it must be switched to the profile's real PTT mode (`Cat`/`Serial`) or
+@@ -581,7 +603,7 @@ impl Rig {
+                 } else {
+                     // PTT is time-critical: a fixed 700 ms deadline (not the slow-transport
+                     // 2.5 s read window) so the un-key can't hang the radio loop.
+-                    match self.command_with_deadline(&ptt_line(on), Some(PTT_DEADLINE_MS)) {
++                    match self.command_with_deadline(&ptt_line(on, self.ptt_data_source), Some(PTT_DEADLINE_MS)) {
+                         Ok(reply) if reply_ok(&reply) || reply.is_empty() => Ok(()),
+                         Ok(reply) => Err(std::io::Error::other(format!(
+                             "rigctld PTT error: {reply:?}"
+@@ -1023,8 +1045,10 @@ mod tests {
+ 
+     #[test]
+     fn command_lines_match_rigctld_protocol() {
+-        assert_eq!(ptt_line(true), "T 1\n");
+-        assert_eq!(ptt_line(false), "T 0\n");
++        assert_eq!(ptt_line(true, false), "T 1\n");
++        assert_eq!(ptt_line(true, true), "T 3\n");
++        assert_eq!(ptt_line(false, false), "T 0\n");
++        assert_eq!(ptt_line(false, true), "T 0\n");
+         assert_eq!(freq_line(14_074_000), "F 14074000\n");
+         assert_eq!(mode_line("USB", 0), "M USB 0\n");
+         assert_eq!(mode_line("FM", 0), "M FM 0\n");

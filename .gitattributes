@@ -1,2 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Nexus compatibility patches must stay byte-identical to what `git diff`/`patch` produced --
+# Nexus's own source is LF-only, and a CRLF-converted patch (autocrlf=true on Windows clones)
+# would fail to apply against it. Force LF, no exceptions, regardless of platform/config.
+EngineHost/nexus-compat/patches/*.patch text eol=lf

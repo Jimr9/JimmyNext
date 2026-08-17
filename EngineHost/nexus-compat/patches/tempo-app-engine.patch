@@ -1,0 +1,81 @@
+diff --git a/src/engine.rs b/src/engine.rs
+index 4561f89..3ce8591 100644
+--- a/src/engine.rs
++++ b/src/engine.rs
+@@ -5494,6 +5494,15 @@ impl Engine {
+     /// The mode the radio loop should COMMAND: the operator's transient Phone override when set,
+     /// else the band-derived policy (`settings.rig_mode`). Write-side canon for the rig `M` verb.
+     pub fn rig_mode_effective(&self) -> String {
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X Radio tab "Mode: None" —
++        // checked FIRST, ahead of every other rule below (APRS/repeater FM parking, SSTV's DATA-
++        // submode need, everything): "None" means never touch the rig's mode at all,
++        // unconditionally, matching WSJT-X's own semantics exactly. An empty string is already
++        // the established "nothing to command" sentinel every mode-set call site in the radio
++        // loop checks for.
++        if self.settings.dont_set_mode {
++            return String::new();
++        }
+         // APRS parks the rig in FM regardless of the operating section it was navigated from — a
+         // 2 m packet signal demodulated as USB is garbage, so this is a correctness gate, not a
+         // preference. Gated on STILL being on 2 m: a knob-QSY (`observe_rig_freq`) or a manual
+@@ -5877,6 +5886,14 @@ impl Engine {
+         self.settings.decode_depth = depth.clamp(1, 3);
+     }
+ 
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): upload heard stations to PSK
++    /// Reporter. Live-settable so an operator-facing toggle can change it mid-session without a
++    /// restart; the radio loop reads `settings.pskreporter` each tick and starts/stops the
++    /// native reporter to match (tempo-audio/service.rs).
++    pub fn set_pskreporter(&mut self, on: bool) {
++        self.settings.pskreporter = on;
++    }
++
+     /// Operator CW decode sensitivity in [0, 1] (0.5 = the original gates; higher catches
+     /// weaker/off-pitch marks like the skimmer, lower rejects more noise).
+     pub fn set_cw_sensitivity(&mut self, s: f32) {
+@@ -7899,6 +7916,18 @@ impl Engine {
+         }
+     }
+ 
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the text of the most recent real
++    /// over we transmitted (structured FT8/FT4/etc, or free text) — the same content
++    /// [`Self::record_own_tx`] feeds into the band-activity decode feed as a `mine: true` row.
++    /// Empty when nothing has been sent yet this session. A WSJT-X-protocol `Status` message's
++    /// `tx_message` field is meant to carry exactly this (the text of the over in progress/just
++    /// sent) — leaving it hardcoded empty starves any client that parses it to track QSO state
++    /// (which callsign, which exchange step) of the one signal it needs, even though the audio
++    /// transmitted was correct.
++    pub fn last_own_tx_text(&self) -> &str {
++        self.own_tx.back().map_or("", |t| t.text.as_str())
++    }
++
+     /// Send the delivery ACKs we owe: a 1-frame RR73 to each sender whose directed
+     /// message we just fully received. Queued onto the chat broadcast path; the receiver
+     /// (the original sender) sees it and marks the message delivered, ending the resend.
+@@ -14265,8 +14294,24 @@ impl Engine {
+         while self.decode_history.len() > 240 {
+             self.decode_history.pop_front();
+         }
+-        self.last_wire_decodes = wire_copy.unwrap_or_else(|| decodes.clone());
+-        self.last_decodes = decodes;
++        let fresh_wire = wire_copy.unwrap_or_else(|| decodes.clone());
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a second call for the SAME slot
++        // (the boundary pass, following an earlier early-pass call) — ACCUMULATE rather than
++        // replace. `decodes` here has already had the early pass's messages dropped by
++        // `drop_early_dupes` (correct: `observe`/the sequencer must not act on the same message
++        // twice), but a plain overwrite of `last_wire_decodes` would ALSO drop them from the UDP
++        // Decode broadcast, even though the sequencer already used them. A QSO partner's reply,
++        // caught only by the early pass, correctly drives the next transmitted over, but never
++        // reaches Jimmy's own decode tracking over the Direct/UDP boundary — its QSO-progress
++        // state silently never sees the message the engine itself already acted on, breaking
++        // auto-logging for a QSO that otherwise completed normally.
++        if self.last_decode_slot == Some(slot) {
++            self.last_wire_decodes.extend(fresh_wire);
++            self.last_decodes.extend(decodes);
++        } else {
++            self.last_wire_decodes = fresh_wire;
++            self.last_decodes = decodes;
++        }
+         self.last_decode_slot = Some(slot);
+         n
+     }

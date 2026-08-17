@@ -17,9 +17,16 @@ edition = "2021"
 # reusing Nexus the right way, and it turned out to be re-deriving run_radio by hand).
 #
 # Nexus's crates are GPL-3.0; this crate inherits that for the same reason Nexus's own NOTICE
-# documents (linking GPLv3-derived modem code). Path dependencies point at the local Nexus clone
-# -- a development-time convenience; shipping this for real needs a proper vendoring strategy, a
-# separate decision from proving the architecture works.
+# documents (linking GPLv3-derived modem code).
+#
+# Path dependencies below point at EngineHost/.nexus-src -- NOT a developer's own Nexus clone.
+# That directory is git-ignored, build-generated, and owned entirely by
+# scripts/prepare-nexus.ps1: a clean checkout of official Nexus at the exact revision pinned in
+# EngineHost/nexus-compat/pin.txt, with the small set of Jimmy-owned compatibility patches in
+# EngineHost/nexus-compat/patches/ applied on top (see EngineHost/nexus-compat/README.md for
+# what each one does and why). Run that script before building if EngineHost/.nexus-src doesn't
+# exist yet. A developer's own reference clone of Nexus (e.g. C:\claude\nexus) is never modified
+# -- the script only ever reads git objects from it (for a faster clone), never writes to it.
 license = "GPL-3.0-only"
 
 [[bin]]
@@ -29,13 +36,13 @@ path = "src/main.rs"
 [dependencies]
 # Engine: the real QSO/TX/decode orchestrator (FT8/FT4/WSPR/FST4/... all live here). Nexus's own
 # desktop app drives this exact type the same way this crate now does.
-tempo-app = { path = "C:/claude/nexus/crates/tempo-app" }
+tempo-app = { path = ".nexus-src/crates/tempo-app" }
 # `device`: real sound-card I/O (cpal) -- also what gates on tempo-audio's `service` module
 # (run_radio itself). `serial`: RTS/DTR PTT via the `serialport` crate -- Windows only needs
 # this for serial enumeration/control, no libudev involved (that's the Linux-only concern the
 # feature's own doc comment flags).
-tempo-audio = { path = "C:/claude/nexus/crates/tempo-audio", features = ["device", "serial"] }
-tempo-core = { path = "C:/claude/nexus/crates/tempo-core" }
+tempo-audio = { path = ".nexus-src/crates/tempo-audio", features = ["device", "serial"] }
+tempo-core = { path = ".nexus-src/crates/tempo-core" }
 # Direct-TCP control channel (Self-sufficiency plan Phase 6): serializes Engine::snapshot()'s
 # AppSnapshot to JSON for Jimmy's own DirectEngineClient to poll over the control port, replacing
 # the WSJT-X UDP heartbeat/negotiation handshake for that path entirely. AppSnapshot already
@@ -45,25 +52,13 @@ tempo-core = { path = "C:/claude/nexus/crates/tempo-core" }
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 
-# tempo-core/tempo-audio/tempo-app -> tempo-fast-sys, whose OWN build.rs hits a \\?\-long-path
-# interop bug between cmake/ninja/gfortran in this environment (a Rust canonicalize() quirk) --
-# not a bug in the FT8/modem code itself, and not something to fix by editing Nexus's own source.
-# Redirects every transitive use of tempo-fast-sys to ../vendor/tempo-fast-sys-patched -- a local
-# copy of Nexus's own crate with ONLY the canonicalize()/\\?\ handling changed (see that copy's
-# build.rs header comment); it still builds the real, unmodified Nexus libtempo/ source tree in
-# place. Nexus's own checkout at C:/claude/nexus is not modified by this. Kept in sync with
-# Nexus's real tempo-fast-sys FFI declarations by hand (see that file's own note from the
-# 2026-08-06 resync after a drift caused a build failure) -- there is no automated check for this
-# yet.
-[patch."file:///C:/claude/nexus/crates/tempo-fast-sys"]
-tempo-fast-sys = { path = "../vendor/tempo-fast-sys-patched" }
-
 [dev-dependencies]
 # Not needed by main.rs itself (Engine calls the native FT8 encoder/decoder internally) -- only
 # by tests/{roundtrip,qso_sequencing}.rs, which regression-test the underlying DSP/QSO-sequencer
-# primitives Engine now wraps, directly and independently of Engine itself.
-ft8 = { path = "C:/claude/nexus/crates/ft8" }
-modes = { path = "C:/claude/nexus/crates/modes" }
+# primitives Engine now wraps, directly and independently of Engine itself. Sourced from the same
+# prepared checkout as tempo-app/tempo-audio above -- see that comment.
+ft8 = { path = ".nexus-src/crates/ft8" }
+modes = { path = ".nexus-src/crates/modes" }
 
 # This crate had no [profile.release] of its own -- silently relying on whatever the toolchain
 # does by default instead of matching Nexus's own real, shipped configuration. Nexus's own root

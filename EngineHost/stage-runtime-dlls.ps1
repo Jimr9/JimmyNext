@@ -7,7 +7,7 @@
 .DESCRIPTION
     jimmy-engine-host.exe dynamically links against gfortran/fftw3f/stdc++/quadmath/
     winpthread/gcc_s_seh (tempo-fast-sys's own build.rs links these `dylib`, matching
-    Nexus's own native-build convention -- see vendor/tempo-fast-sys-patched/build.rs).
+    Nexus's own native-build convention -- see EngineHost/nexus-compat/README.md).
     Every session of THIS development conversation up to this point ran the exe from a
     shell that had manually added C:\msys64\ucrt64\bin to PATH, which silently masked a
     real bug: a normal launch of Jimmy.exe (no such PATH) has Jimmy's own NativeEngineClient

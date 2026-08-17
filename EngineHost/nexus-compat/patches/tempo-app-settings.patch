@@ -1,0 +1,36 @@
+diff --git a/src/settings.rs b/src/settings.rs
+index 8dd5630..c060f5b 100644
+--- a/src/settings.rs
++++ b/src/settings.rs
+@@ -756,6 +756,22 @@ pub struct Settings {
+     /// (flat mirror — see [`RadioProfile::data_modes_plain_ssb`]). Default off.
+     #[serde(default)]
+     pub data_modes_plain_ssb: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X-equivalent "Transmit Audio
++    /// Source: Data" (`rig::ptt_line`'s doc comment / WSJT-X's own `HamlibTransceiver::do_ptt`
++    /// `back_ptt_port_` check) — sends `RIG_PTT_ON_DATA` instead of plain `RIG_PTT_ON` for CAT
++    /// PTT. Default off, matching WSJT-X's own `TX_audio_source_front` default; only relevant
++    /// for a rig whose Hamlib backend distinguishes mic/data PTT AND whose interface is wired
++    /// to the rig's rear DATA/ACC port.
++    #[serde(default)]
++    pub ptt_data_source: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X Radio tab "Mode: None" —
++    /// when true, the radio loop never sends a CAT mode (`M`) command at all, for any operating
++    /// mode (Digital/Phone/CW/RTTY/FM alike), leaving the rig exactly as the operator set it by
++    /// hand. Default off (matches WSJT-X's own default of Data/Pkt). See
++    /// `Engine::rig_mode_effective`, which returns an empty string when this is set — every
++    /// mode-set call site already treats an empty string as "nothing to do".
++    #[serde(default)]
++    pub dont_set_mode: bool,
+     /// DEPRECATED / ignored. Digital now ALWAYS forces the DATA submode (like Phone/CW
+     /// force their mode), so this opt-out is no longer consulted by
+     /// [`rig_mode`](Self::rig_mode). Kept only so older settings files still deserialize.
+@@ -2553,6 +2569,8 @@ impl Default for Settings {
+             rig_addr: String::new(),
+             icom_native_cat: false,
+             data_modes_plain_ssb: false,
++            ptt_data_source: false,
++            dont_set_mode: false,
+             set_rig_mode: true, // force the DATA submode for digital, so sections set the rig
+             operating_mode: OperatingMode::Digital, // digital obeys; phone/CW force
+             license_class: LicenseClass::Open, // no TX lockout until the operator declares a class

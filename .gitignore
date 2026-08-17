@@ -75,5 +75,11 @@ WSJTX_Controller/Resources/hamlib/
 # (binary crate, not a library -- reproducible builds matter more than lockfile churn here).
 EngineHost/target/
 
+# Build-generated staging checkout of official Nexus at the pinned revision (with
+# EngineHost/nexus-compat/patches/ applied) -- created by scripts/prepare-nexus.ps1, never
+# hand-edited, never committed. See EngineHost/nexus-compat/README.md.
+EngineHost/.nexus-src/
+EngineHost/.nexus-src-info.json
+
 # build.bat's captured output log, not source
 build_out.txt

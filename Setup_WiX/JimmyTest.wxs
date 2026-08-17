@@ -77,6 +77,7 @@
       <ComponentGroupRef Id="ResourcesComponents" />
       <ComponentGroupRef Id="ResourcesEngineHostComponents" />
       <ComponentGroupRef Id="ResourcesHamlibComponents" />
+      <ComponentGroupRef Id="ResourcesEngineHostHamlibComponents" />
       <ComponentRef Id="DesktopShortcutComp" />
       <ComponentRef Id="StartMenuShortcutComp" />
       <ComponentRef Id="RigctldFirewallComp" />
@@ -139,7 +140,18 @@
             <Directory Id="RuleDefinitionsListsDir" Name="Lists" />
           </Directory>
           <Directory Id="ResourcesDir" Name="Resources">
-            <Directory Id="ResourcesEngineHostDir" Name="EngineHost" />
+            <Directory Id="ResourcesEngineHostDir" Name="EngineHost">
+              <!-- Nexus's own rigctld resolver (crates/tempo-audio/rigctld_proc.rs,
+                   resolve_rigctld) searches a fixed, unmodified candidate list relative to
+                   jimmy-engine-host.exe's own directory: "hamlib/rigctld.exe",
+                   "resources/hamlib/rigctld.exe", "rigctld.exe", "hamlib/rigctld" -- none of
+                   which reach Resources\hamlib\ (a SIBLING of Resources\EngineHost\, not a
+                   child of it). Rather than teach Nexus about Jimmy's layout, Jimmy's own
+                   installer matches a layout Nexus already searches: this second copy (same
+                   harvested files, see ResourcesEngineHostHamlibComponents below) lets the
+                   native engine host's CAT connection resolve rigctld with ZERO Nexus changes. -->
+              <Directory Id="ResourcesEngineHostHamlibDir" Name="hamlib" />
+            </Directory>
             <Directory Id="ResourcesHamlibDir" Name="hamlib" />
           </Directory>
         </Directory>
@@ -186,6 +198,12 @@
     </ComponentGroup>
 
     <ComponentGroup Id="ResourcesHamlibComponents" Directory="ResourcesHamlibDir">
+      <Files Include="PublishOutputTest\Resources\hamlib\*" />
+    </ComponentGroup>
+
+    <!-- Second copy of the same harvested hamlib files, installed under
+         Resources\EngineHost\hamlib\ -- see the Directory declaration above for why. -->
+    <ComponentGroup Id="ResourcesEngineHostHamlibComponents" Directory="ResourcesEngineHostHamlibDir">
       <Files Include="PublishOutputTest\Resources\hamlib\*" />
     </ComponentGroup>
   </Fragment>

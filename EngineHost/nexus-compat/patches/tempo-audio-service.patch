@@ -1,0 +1,96 @@
+diff --git a/src/service.rs b/src/service.rs
+index d4af6ba..ca36fbf 100644
+--- a/src/service.rs
++++ b/src/service.rs
+@@ -725,6 +725,14 @@ pub struct RadioConfig {
+     pub tx_level: f32,
+     /// RX capture gain (≥1.0) applied to received audio before decode.
+     pub rx_gain: f32,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X-equivalent "Transmit Audio
++    /// Source: Data" (see `rig::ptt_line`'s doc comment) — operator-configured, off by default.
++    /// Only meaningful for CAT PTT on a rig whose Hamlib backend supports the mic/data
++    /// distinction AND whose interface is wired to the rig's rear DATA/ACC port.
++    pub ptt_data_source: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X Radio tab "Mode: None" — see
++    /// `Settings::dont_set_mode`'s doc comment.
++    pub dont_set_mode: bool,
+ }
+ 
+ impl Default for RadioConfig {
+@@ -757,6 +765,8 @@ impl Default for RadioConfig {
+             audio_out: String::new(),
+             tx_level: 0.9,
+             rx_gain: 1.0,
++            ptt_data_source: false,
++            dont_set_mode: false,
+         }
+     }
+ }
+@@ -1139,6 +1149,9 @@ impl Transport {
+             monitor_enabled: false,
+             monitor_device: String::new(),
+             monitor_level: 0.5,
++            // A monitor radio is read-only (PttMode::Vox — see open_monitor), so this is never
++            // consulted, same reasoning as ptt_serial_port above.
++            ptt_data_source: false,
+         }
+     }
+ }
+@@ -6925,7 +6938,7 @@ impl RadioLoop {
+                     // T/R period (s), mode-driven: FT1 = 4, FT4 ≈ 8, FT8/DX1 = 15.
+                     tr_period: eng.active_slot_secs().round() as u32,
+                     config_name: "Default",
+-                    tx_message: "",
++                    tx_message: eng.last_own_tx_text(),
+                 });
+                 if let Some(fd) = snap.field_day.as_ref() {
+                     if fd.qso_count > station.last_fd_qsos {
+@@ -7326,6 +7339,8 @@ struct Transport {
+     monitor_enabled: bool,
+     monitor_device: String,
+     monitor_level: f32,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): see `RadioConfig::ptt_data_source`.
++    ptt_data_source: bool,
+ }
+ 
+ impl Transport {
+@@ -7334,6 +7349,7 @@ impl Transport {
+             ptt_method: c.ptt_method.clone(),
+             rig_model: c.rig_model,
+             serial_port: c.serial_port.clone(),
++            ptt_data_source: c.ptt_data_source,
+             // Not part of the per-radio startup seed (it's a GLOBAL keying-line setting):
+             // the live per-tick `from_settings` rebuild supplies the real value, and empty
+             // here just falls back to `serial_port` for the brief pre-first-tick window.
+@@ -7398,6 +7414,7 @@ impl Transport {
+             monitor_enabled: s.monitor_enabled,
+             monitor_device: s.monitor_device.clone(),
+             monitor_level: s.monitor_level,
++            ptt_data_source: s.ptt_data_source,
+         }
+     }
+ 
+@@ -7946,6 +7963,7 @@ fn open_cat(
+             rig.set_slow_transport(t.is_network() || t.is_slow_serial_link());
+             // network chains + slow serial links (Xiegu / vintage Kenwood / any rig ≤ 19200
+             // baud) get the long command deadline
++            rig.set_ptt_data_source(t.ptt_data_source);
+             let mut probe = finish_cat_open(&mut rig, t);
+             probe.detail = format!(
+                 "Sharing the rigctld already on :{} — {}",
+@@ -7994,6 +8012,7 @@ fn open_cat(
+             rig.set_slow_transport(
+                 network || native_civ_addr(t).is_some() || t.is_slow_serial_link(),
+             ); // network chains + the native daemon + slow serial links (Xiegu / vintage Kenwood / any rig ≤ 19200 baud) get the long deadline
++            rig.set_ptt_data_source(t.ptt_data_source);
+             let mut probe = finish_cat_open(&mut rig, t);
+             // Say WHICH backend this result came from — a native-CI-V radio silently
+             // falling back to rigctld otherwise reads as "native was tested and failed".
+@@ -13558,6 +13577,7 @@ mod tests {
+             monitor_enabled: false,
+             monitor_device: String::new(),
+             monitor_level: 0.5,
++            ptt_data_source: false,
+         }
+     }
+ 

@@ -1,0 +1,44 @@
+diff --git a/build.rs b/build.rs
+index 9bef911..8e4a677 100644
+--- a/build.rs
++++ b/build.rs
+@@ -27,10 +27,12 @@ mod manifest_gate;
+ 
+ fn main() {
+     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+-    let libtempo_src = manifest
+-        .join("../../libtempo")
+-        .canonicalize()
+-        .expect("locate tempo/libtempo");
++    let libtempo_src = strip_verbatim_prefix(
++        manifest
++            .join("../../libtempo")
++            .canonicalize()
++            .expect("locate tempo/libtempo"),
++    );
+     check_state_manifest(&libtempo_src);
+     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
+ 
+@@ -402,6 +404,22 @@ fn emit_rerun_glob(p: &std::path::Path) {
+     }
+ }
+ 
++/// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): `Path::canonicalize()` on Windows
++/// returns the `\\?\`-prefixed "verbatim" form. CMake accepts it fine as `-S`, but bakes it into
++/// every generated Ninja/Makefile rule; MSYS2/MinGW gfortran (invoked by CMake to compile the
++/// Fortran modem sources) does not understand that prefix once it reaches its own path handling
++/// and mis-splits it, failing with "No such file or directory" naming only the last path segment
++/// — a full rebuild from a fresh build dir fails every Fortran compile step this way.
++/// Symlinks and `..` are already resolved by `canonicalize()` by the time this runs, so stripping
++/// the prefix changes nothing except making the string one that non-Rust-aware external tools
++/// can actually parse. No-op on non-Windows, where `canonicalize()` never produces this prefix.
++fn strip_verbatim_prefix(p: PathBuf) -> PathBuf {
++    match p.to_str().and_then(|s| s.strip_prefix(r"\\?\")) {
++        Some(stripped) => PathBuf::from(stripped),
++        None => p,
++    }
++}
++
+ fn run(cmd: &mut Command) {
+     let status = cmd
+         .status()

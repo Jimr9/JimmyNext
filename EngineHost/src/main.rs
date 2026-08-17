@@ -996,7 +996,10 @@ fn main() {
         audio_out: args.output_device.unwrap_or_default(),
         ptt_data_source: args.ptt_data_source,
         pskreporter: args.pskreporter,
-        ptt_serial_port: args.ptt_serial_port,
+        // RadioConfig has no ptt_serial_port field -- Transport::from_cfg (tempo-audio/service.rs)
+        // deliberately seeds it empty regardless (it's a GLOBAL keying-line setting the live
+        // per-tick Transport::from_settings rebuild supplies instead); Settings.ptt_serial_port
+        // above is what actually matters and is already native to Nexus.
         // RadioConfig::default()'s broker_self_port is Some(4532) -- Nexus's own CAT-broker
         // default port, matching Settings::default()'s cat_broker/cat_broker_port. Jimmy
         // disables the broker outright (see the Settings literal above, cat_broker: false), but
