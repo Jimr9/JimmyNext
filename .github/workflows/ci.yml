@@ -47,6 +47,7 @@ jobs:
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-fftw
             mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-boost
 
       - name: Prepare pinned + patched Nexus
         run: powershell -ExecutionPolicy Bypass -File scripts\prepare-nexus.ps1
