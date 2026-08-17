@@ -56,9 +56,12 @@ foreach ($key in @("NEXUS_REPO", "NEXUS_TAG", "NEXUS_COMMIT")) {
 Write-Host "Pinned Nexus revision: $($Pin.NEXUS_TAG) ($($Pin.NEXUS_COMMIT))"
 
 # --- Locate patch.exe (Git for Windows ships GNU patch under usr\bin) --------------------
+# Deliberately prefers Git for Windows' own copy over whatever "patch.exe" a PATH search
+# turns up FIRST -- a step earlier in CI that adds MSYS2 to PATH (for tempo-fast-sys's native
+# libtempo build) can shadow Git's with MSYS2's own patch.exe, which crashed applying these
+# exact patches ("Assertation failed!", no further detail) the first time this ran in CI, while
+# Git's own copy has been reliable in every local test. Check the Git-relative path FIRST.
 function Find-PatchExe {
-    $cmd = Get-Command patch.exe -ErrorAction SilentlyContinue
-    if ($cmd) { return $cmd.Source }
     $gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
     if ($gitCmd) {
         $candidate = Join-Path (Split-Path (Split-Path $gitCmd.Source)) "usr\bin\patch.exe"
@@ -67,6 +70,8 @@ function Find-PatchExe {
     foreach ($guess in @("C:\Program Files\Git\usr\bin\patch.exe", "C:\Program Files (x86)\Git\usr\bin\patch.exe")) {
         if (Test-Path $guess) { return $guess }
     }
+    $cmd = Get-Command patch.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
     throw "Could not find patch.exe (normally bundled with Git for Windows under usr\bin). Install Git for Windows or add patch.exe to PATH."
 }
 $PatchExe = Find-PatchExe
