@@ -1,0 +1,92 @@
+name: CI
+
+# Practical safety net, not a replacement for JAWS/NVDA or real-radio testing (see
+# ARCHITECTURE.md). Mirrors the exact manual build sequence used during development:
+# prepare pinned+patched Nexus, build/test EngineHost, build/test Jimmy Test.
+on:
+  push:
+    branches: [development/jimmy-next]
+  pull_request:
+    branches: [development/jimmy-next]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # Provides gfortran/cmake/ninja/fftw for tempo-fast-sys's native libtempo build --
+      # the same MSYS2 UCRT64 toolchain used for every local build in this repo.
+      - name: Setup MSYS2 UCRT64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc-fortran
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-fftw
+
+      - name: Prepare pinned + patched Nexus
+        run: powershell -ExecutionPolicy Bypass -File scripts\prepare-nexus.ps1
+
+      - name: Verify no developer-specific Nexus path leaked into the build config
+        run: |
+          if (Select-String -Path EngineHost\Cargo.toml -Pattern "C:[/\\]claude[/\\]nexus" -Quiet) {
+            throw "EngineHost/Cargo.toml references a developer-specific Nexus checkout path -- see EngineHost/nexus-compat/README.md"
+          }
+
+      - name: Build EngineHost (release)
+        run: |
+          $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+          $env:LIBRARY_PATH = "C:\msys64\ucrt64\lib;$env:LIBRARY_PATH"
+          cd EngineHost
+          cargo build --release
+
+      - name: Test EngineHost
+        run: |
+          $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+          $env:LIBRARY_PATH = "C:\msys64\ucrt64\lib;$env:LIBRARY_PATH"
+          cd EngineHost
+          cargo test --release
+
+      - name: Stage EngineHost runtime DLLs
+        run: powershell -ExecutionPolicy Bypass -File EngineHost\stage-runtime-dlls.ps1
+
+      - name: Fetch bundled Hamlib
+        run: powershell -ExecutionPolicy Bypass -File fetch-hamlib.ps1
+
+      - name: Build Jimmy Test (Debug, isolated identity)
+        run: dotnet build "WSJTX_Controller\Jimmy.csproj" -c Debug -p:AssemblyName="Jimmy Test" -v:minimal
+
+      - name: Build JimmyTests
+        run: dotnet build "JimmyTests\JimmyTests.csproj" -c Debug -v:minimal
+
+      - name: Run JimmyTests
+        run: '& "JimmyTests\bin\Debug\net10.0-windows\JimmyTests.exe"'
+
+      - name: Publish self-contained Jimmy Test + build installer MSI
+        run: |
+          cd Setup_WiX
+          dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Test" -p:SelfContained=true -r win-x64 -o PublishOutputTest
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add WixToolset.Firewall.wixext/5.0.2 WixToolset.UI.wixext/5.0.2
+          wix build JimmyTest.wxs -ext WixToolset.Firewall.wixext -ext WixToolset.UI.wixext -arch x64 -o JimmyTest.msi
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JimmyTest-msi
+          path: Setup_WiX/JimmyTest.msi
+          retention-days: 14
