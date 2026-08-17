@@ -141,15 +141,22 @@
           </Directory>
           <Directory Id="ResourcesDir" Name="Resources">
             <Directory Id="ResourcesEngineHostDir" Name="EngineHost">
-              <!-- Nexus's own rigctld resolver (crates/tempo-audio/rigctld_proc.rs,
-                   resolve_rigctld) searches a fixed, unmodified candidate list relative to
-                   jimmy-engine-host.exe's own directory: "hamlib/rigctld.exe",
-                   "resources/hamlib/rigctld.exe", "rigctld.exe", "hamlib/rigctld" -- none of
-                   which reach Resources\hamlib\ (a SIBLING of Resources\EngineHost\, not a
-                   child of it). Rather than teach Nexus about Jimmy's layout, Jimmy's own
-                   installer matches a layout Nexus already searches: this second copy (same
-                   harvested files, see ResourcesEngineHostHamlibComponents below) lets the
-                   native engine host's CAT connection resolve rigctld with ZERO Nexus changes. -->
+              <!-- Nexus/EngineHost owns launching and controlling rigctld -- Jimmy Test never
+                   independently launches or owns a second one for this path. Nexus's own
+                   official build does not embed/build Hamlib into any crate (confirmed:
+                   tempo-fast-sys's build.rs has zero hamlib/rigctld references); it EXPECTS
+                   the consuming application to package it, exactly like Nexus's own official
+                   Tauri app does at src-tauri/resources/hamlib/ (staged by Nexus's own
+                   scripts/fetch-hamlib.sh) -- resolve_rigctld's "resources/hamlib/rigctld.exe"
+                   candidate exists specifically to match that convention. Jimmy's own
+                   fetch-hamlib.ps1 already mirrors that script exactly (same release, same
+                   file list, same checksum) for WSJTX_Controller's own Resources\hamlib\
+                   (Jimmy's own RigctldClient.cs, a separate read-mostly telemetry client --
+                   see Controller.cs's ApplyRadioSettings). This second copy just supplies the
+                   SAME already-fetched bytes at a second location resolve_rigctld's candidate
+                   list already searches relative to jimmy-engine-host.exe's own directory
+                   ("hamlib/rigctld.exe") -- Nexus still does all the launching, Jimmy only
+                   supplies the binary, and zero Nexus source is touched. -->
               <Directory Id="ResourcesEngineHostHamlibDir" Name="hamlib" />
             </Directory>
             <Directory Id="ResourcesHamlibDir" Name="hamlib" />

@@ -59,6 +59,10 @@ serde = { version = "1", features = ["derive"] }
 # prepared checkout as tempo-app/tempo-audio above -- see that comment.
 ft8 = { path = ".nexus-src/crates/ft8" }
 modes = { path = ".nexus-src/crates/modes" }
+# tests/dxcc_shadow_dump.rs: dumps propagation::dxcc::resolve() for a fixed callsign list so
+# it can be diffed against Jimmy's own ClubLogProvider (WSJTX_Controller/Lookup/) for the DXCC-
+# source shadow comparison. Not used by main.rs -- investigative/comparison tooling only.
+propagation = { path = ".nexus-src/crates/propagation" }
 
 # This crate had no [profile.release] of its own -- silently relying on whatever the toolchain
 # does by default instead of matching Nexus's own real, shipped configuration. Nexus's own root

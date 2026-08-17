@@ -81,6 +81,11 @@ static class JimmyTests
             VerifyClubLogEquivalence();
             return;
         }
+        if (args.Length > 0 && args[0] == "--dxcc-shadow-dump")
+        {
+            DxccShadowDump();
+            return;
+        }
 
         Console.WriteLine("=== Jimmy Parser Unit Tests ===");
         Console.WriteLine($"  WsjtxMessage static classifiers + AP strip logic");
@@ -2502,6 +2507,51 @@ static class JimmyTests
         Console.WriteLine(kg44ww == null
             ? "  KG44WW: FAIL -- did not resolve at all"
             : $"  KG44WW: Adif={kg44ww.Adif} ({kg44ww.Name}) -- {(kg44ww.Adif == 105 ? "PASS" : "FAIL, expected 105 (Guantanamo Bay)")}");
+    }
+
+    // DXCC shadow comparison (development pass, see ARCHITECTURE.md): dumps Jimmy's own
+    // ClubLogProvider.FindByCallsign() output, in the same pipe-delimited format as
+    // EngineHost/tests/dxcc_shadow_dump.rs's dump of Nexus's propagation::dxcc::resolve(),
+    // for the SAME fixed callsign list -- so the two can be diffed directly. Reuses whatever
+    // is already cached under LookupManager.DataRoot\ClubLog (real data from normal Jimmy
+    // Test usage on this machine) rather than requiring a fresh download/API key. Not called
+    // from Main()'s normal run; invoked via --dxcc-shadow-dump.
+    static void DxccShadowDump()
+    {
+        var provider = new ClubLogProvider(LookupManager.DataRoot);
+        provider.Configure(true, "");
+        provider.Load();
+        if (provider.EntityCount == 0)
+        {
+            Console.WriteLine($"No cached Club Log data under {LookupManager.DataRoot}\\ClubLog -- run Jimmy Test normally first (Options > Awards/Lookup) so it downloads once, then re-run this.");
+            return;
+        }
+
+        // Must match EngineHost/tests/dxcc_shadow_dump.rs's CALLS list exactly, same order.
+        string[] calls =
+        {
+            "W1AW", "K9ABC", "N4XYZ", "AA1AA",
+            "KG4AB", "KG4XYZ", "KG4JOK",
+            "K4YT", "K4ABC",
+            "NP4TX", "KP4AA",
+            "KH6XX", "KL7AA",
+            "G3ABC", "JA1ABC", "VK2ABC", "ZS6ABC", "PY2ABC", "9V1ABC", "4X1ABC",
+            "VE3ABC", "VE7ABC",
+            "W1AW/P", "W1AW/MM", "DL/W1AW",
+            "3Y0J",
+            "K1ABC/H", "W5HRC", "G3HRC", "K5SNL", "PY5SNL", "K3ZK",
+            "ZZZZZ99",
+        };
+
+        Console.WriteLine($"ClubLogProvider: EntityCount={provider.EntityCount}, LastUpdate={provider.LastUpdate}, BigCtyAliasCount={provider.BigCtyAliasCount}, BigCtyLastUpdate={provider.BigCtyLastUpdate}");
+        Console.WriteLine("CALL|ENTITY|CONT|CQ_ZONE|ADIF");
+        foreach (var call in calls)
+        {
+            var e = provider.FindByCallsign(call);
+            Console.WriteLine(e == null
+                ? $"{call}|<NONE>|||"
+                : $"{call}|{e.Name}|{e.Continent}|{e.CqZone}|{e.Adif}");
+        }
     }
 
     static void CompareUniverses(string newToken, string oldToken, string listsFolder, ClubLogProvider clubLog)

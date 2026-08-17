@@ -77,8 +77,44 @@ revision (`EngineHost/nexus-compat/pin.txt`).
 - CAT/PTT -- Nexus is the sole physical-radio owner (see above).
 - PSK Reporter upload -- Nexus's own native uploader, toggled live via `Engine::set_pskreporter()` (one of the 5 compatibility patches). Jimmy has no separate PSK Reporter uploader; `DxSpotWatcher.cs` is unrelated (it *consumes* PSK Reporter's public live-spot MQTT feed for DX-spot alerting, a different feature).
 
-**2. Available in Nexus and should be used by Jimmy now:**
-- **DXCC entity / continent / state resolution.** Jimmy's `LookupManager` currently resolves a callsign's country/continent by calling out to QRZ/Club Log/FCC ULS/LoTW -- network-dependent, needs credentials/API keys for the richer providers, and subject to each provider's own rate limits and occasional downtime. Nexus's `propagation` crate (`crates/propagation/src/dxcc.rs`, and a substantial new `crates/propagation/src/province.rs` for US state/VE province resolution) is a local, offline, instant DXCC-entity/state resolver -- exactly the "factual DXCC/entity/state/grid/geography information" the operator's plan calls out. This looks like a genuine win: a fast local fact source Jimmy could use as a fallback (or primary source, with QRZ/Club Log kept for the richer enrichment they alone provide -- confirmed-QSL status, bio, etc.) when Jimmy's own network lookup is disabled, rate-limited, or offline. **Not implemented in this pass** -- swapping or augmenting the fact source `ClassificationEngine` and `AwardTagger` both depend on needs a proven-parity comparison against Jimmy's current QRZ/Club Log-derived country/continent strings before it can be trusted for award-triggering decisions (a wrong DXCC entity is a wrong award claim). Recommended as the top candidate for the next development pass, with a shadow-comparison test (compute both, log any mismatch, don't act on Nexus's answer yet) as the proving step before cutover -- the same pattern already used successfully for the WSJT-X-wire-vs-ClassificationEngine migration (`ClassificationCutover.cs`).
+**2. Available in Nexus and should be used by Jimmy now:** none found for DXCC specifically --
+see the shadow-comparison result below. Revisit after a future Nexus update if
+`propagation::dxcc::DxccInfo` gains a numeric entity ID.
+
+**DXCC/country/continent shadow comparison -- cutover NOT made, current path stays authoritative.**
+Correcting an earlier draft of this document: Jimmy's `ClubLogProvider`
+(`WSJTX_Controller/Lookup/ClubLogProvider.cs`) is *not* a live-network-per-lookup path --
+it's already a mature, offline, prefix-based resolver (AD1C's Big CTY country file, cached
+locally, refreshed periodically, zero network calls on the per-decode hot path) with real
+field-tested edge-case handling: the KG4-format Guantanamo Bay rule, K4-prefix current-vs-
+expired precedence, per-callarea CQ-zone overrides. Nexus's `propagation::dxcc::resolve()` draws
+from the same AD1C `cty.dat` family, so a real comparison was worth doing rather than assuming
+Nexus wins on "local and fast" (it wasn't a legitimate advantage here -- Jimmy's path already is).
+
+Ran both resolvers (`EngineHost/tests/dxcc_shadow_dump.rs` for Nexus,
+`JimmyTests.exe --dxcc-shadow-dump` for Jimmy, same 33-callsign list covering every edge case
+above plus international spread, portable suffixes, and the `3Y0J` Bouvet exact-call-override
+case) and diffed the output by hand:
+
+- **32 of 33 calls agreed exactly** on entity, continent, and CQ zone -- including every hard
+  edge case (KG4AB -> Guantanamo Bay, KG4JOK -> USA, K4YT -> current USA not expired Puerto
+  Rico, VE3 zone 4 vs VE7 zone 3, 3Y0J -> Bouvet). Real, meaningful equivalence on the common
+  path.
+- **One real disagreement:** `K1ABC/H` (Fox/Hound-style `/H` suffix) -- Nexus's resolver
+  returns no match; Jimmy's resolves it to USA via ordinary prefix stripping.
+- **One structural gap that blocks cutover regardless of the above:** `propagation::DxccInfo`
+  exposes only an entity *name* string, no numeric ADIF/DXCC-entity ID. Jimmy's award system
+  (`AwardTagger.cs`) matches entities by exact numeric ID
+  (`hrcUnconfirmedDxcc.Contains(rec.Dxcc)`), and the two sides' entity name strings differ in
+  formatting ("South Africa" vs Jimmy's "REPUBLIC OF SOUTH AFRICA") in ways that would make
+  name-based matching fragile. Using Nexus's resolver for award-triggering decisions would mean
+  Jimmy building and maintaining its own name -> ADIF mapping -- recreating the exact kind of
+  duplicate logic this review exists to avoid.
+
+**Decision: kept `ClubLogProvider` as the authoritative source. No cutover.** The comparison
+tooling (both dump scripts) is left in place, not deleted -- worth re-running after a future
+deliberate Nexus version update in case `DxccInfo` gains a numeric entity ID, which would remove
+the structural blocker above.
 
 **3. Available in Nexus but needs more Jimmy work before it is useful:**
 - `bandplan.rs` / `privileges.rs` (amateur-radio band edges + license-class privilege checking). Jimmy has no equivalent today (no TX-legality warnings) and no operator-facing feature that would consume it yet -- would need a UI/workflow decision first, not just a wire-up.
