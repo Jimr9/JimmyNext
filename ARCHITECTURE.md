@@ -38,6 +38,19 @@ contract (S-meter, SWR, power) plus a couple of operator actions (Band Up/Down r
 step). This is "multiple intentional clients of one service," not a competing owner -- confirmed
 by reading the code, not just inferred.
 
+**Both installed Hamlib copies (`Resources\hamlib\` and `Resources\EngineHost\hamlib\`) are
+genuinely required -- verified by tracing the actual call site, not re-asserted from memory.**
+`Resources\EngineHost\hamlib\` is for Nexus's own unmodified `resolve_rigctld()`, relative to
+`jimmy-engine-host.exe`'s own directory (see the Hamlib-packaging note above). `Resources\
+hamlib\` looked like it might be redundant now that the live session's `RigctldClient` never
+launches its own copy -- but `grep`-ing every call site of `RigctldClient.LaunchBundled()` found
+exactly one: `OptionsDlg.cs`'s `RadioTestButton_Click` (Options > Radio > Test Connection),
+which launches Jimmy's own bundled copy to verify a configured rig model/COM port/baud rate
+*independent of whether the native engine is even running*. Two separate processes
+(`Jimmy Test.exe` and `jimmy-engine-host.exe`), each needing the binary at a path relative to
+its own executable, for two separate still-used purposes -- not architectural duplication for
+appearance's sake. Nothing removed.
+
 ## Nexus dependency (verified)
 
 EngineHost builds against a clean, pinned copy of official Nexus, never a developer's own
@@ -139,7 +152,10 @@ Requested specifically: don't assume Jimmy's logbook is untouchable just because
 - **Credentials.** Jimmy encrypts stored credentials at rest via Windows DPAPI (`CredentialProtector.cs`), scoped to the current Windows user. Nexus's `lotw.rs` authenticates via the LoTW *website* password over an HTTPS query string; Jimmy's LoTW integration instead uses TQSL (`TqslUploadClient.cs`), ARRL's own official certificate-based signing tool -- arguably the more standard and secure of the two approaches, not a gap to close.
 
 **2. Genuine capability Jimmy doesn't have, real but not adopted this pass:**
-- **eQSL and HamQTH.** Nexus has working integrations (`eqsl.rs`, `hamqth.rs`); Jimmy has neither. This is an actual feature gap, not an architecture question -- adding it means a new credentialed external service end to end (settings UI, credential storage, upload client, retry/circuit-breaking, tests), the same shape of work Jimmy's existing four services each already received individually. Not safe to add for the first time, this late in an already large release pass, without the same care. Recorded as a real candidate for a future, dedicated pass -- not because it's hard, but because it's new, untested surface area, and rushing exactly this kind of thing is what the operator's conservatism instruction on data-adjacent work exists to prevent.
+- **eQSL and HamQTH -- focused suitability check (per operator request).** Read Nexus's actual transports (`propagation/src/live/eqsl.rs`, `hamqth.rs`) rather than assuming either was a fit.
+  - **eQSL**: a QSL-*confirmation* service, the same role LoTW/Club Log already play for Jimmy's "still need" award data -- a two-step authenticated fetch requiring an eQSL account username+password, with careful password redaction (Nexus never lets a `reqwest::Error`'s `Display` echo the credential-bearing URL). Genuinely useful to *some* operators (eQSL confirmations are common, especially outside strict DXCC chasing), but Jimmy already has two confirmation-capable services (LoTW via TQSL, Club Log) covering the primary DXCC-credit path most award chasers rely on -- this is an incremental nicety, not a gap blocking current award accuracy. Adding it means the same shape of work as any of Jimmy's existing four services individually: new DPAPI-encrypted credential storage, Options UI, a dedicated upload/reconcile client, tests.
+  - **HamQTH**: a callbook *lookup* service (name/QTH/bio), the same role QRZ already plays -- Nexus's own doc comment calls it "the free-account fallback for QRZ." Jimmy's `LookupManager` already covers this need via FCC ULS (free, US) + Club Log (free, DXCC/country) + QRZ (paid, full callbook); HamQTH's only incremental value is free full-callbook data for non-US calls when QRZ isn't configured -- a narrower gap than eQSL's, and one Jimmy already degrades gracefully around today (no lookup for that specific case, not a broken feature).
+  - **Neither is uniquely tied to FT8/FT4 operation** the way POTA/SOTA chasing is -- both are general logbook/confirmation conveniences that would apply identically to any mode. Given both require full new credentialed-service surface area (the same discipline QRZ/Club Log/LoTW/HRDLog each already received on their own), **deferred as future scope**, not forced into this pass.
 
 **3. Diagnostic/application logging vs. QSO logbook.** Kept explicitly separate per the operator's request. Jimmy's `SupportReportBuilder.cs` (766 lines, already redacts credential-shaped keywords before building a support report) is diagnostic-only and has no overlap with QSO data. Nexus's own diagnostics (`crates/tempo-core/src/diagnostics.rs`) were not compared in depth -- no evidence surfaced during this pass that Jimmy's diagnostic logging has a gap worth closing, and application/crash diagnostics carry none of the QSO-data risk that would make this urgent for a release-candidate pass.
 

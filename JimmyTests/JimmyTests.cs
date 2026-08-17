@@ -129,6 +129,7 @@ static class JimmyTests
         JimmySettingsRoundTripTests();
         JimmySettingsDefaultsTests();
         EngineRestartPolicyTests();
+        OtaSpotAnnotatorTests();
         FindPreservedSelectionIndexTests();
         ResolveDispatchIndexTests();
         SpotWatchCallsRoundTripTests();
@@ -3850,6 +3851,49 @@ static class JimmyTests
         bool afterWindow = policy.RecordAttemptAndShouldRestart(out int freshAttemptNumber);
         Check("Attempt after the window elapses -> budget resets, should restart again", afterWindow, true);
         Check("First attempt in the new window reports attemptNumber 1", freshAttemptNumber == 1, true);
+    }
+
+    // ── OtaSpotAnnotator (POTA/SOTA spot -> Jimmy's own worked-before/needed-award facts) ──
+
+    static void OtaSpotAnnotatorTests()
+    {
+        Console.WriteLine("\n── OtaSpotAnnotator: applies Jimmy's own award/logbook intelligence ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_OtaAnnotate_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                InsertQso(db, "W1WORKED", "TX", dxcc: 291, zone: 5, band: "20m");
+
+                var tags = new Dictionary<string, WsjtxClient.ActiveAwardTag>
+                {
+                    ["r1"] = new WsjtxClient.ActiveAwardTag { RuleId = "r1", RuleName = "Award One", GroupBy = RuleGroupBy.Callsign, Set = new HashSet<string> { "K1ABC" } },
+                    ["r2"] = new WsjtxClient.ActiveAwardTag { RuleId = "r2", RuleName = "Award Two", GroupBy = RuleGroupBy.Callsign, Set = new HashSet<string> { "K1ABC" } },
+                    ["r3"] = new WsjtxClient.ActiveAwardTag { RuleId = "r3", RuleName = "Award Three (no match)", GroupBy = RuleGroupBy.Callsign, Set = new HashSet<string> { "SOMEONE-ELSE" } },
+                    ["r4"] = new WsjtxClient.ActiveAwardTag { RuleId = "r4", RuleName = "Empty set is skipped", GroupBy = RuleGroupBy.Callsign, Set = new HashSet<string>() },
+                };
+
+                var needed = OtaSpotAnnotator.Annotate("K1ABC", "20m", db, null, tags);
+                Check("K1ABC not previously worked -> WorkedBefore false", needed.WorkedBefore, false);
+                Check("K1ABC matches exactly 2 active awards -> NeededForAwardCount 2", needed.NeededForAwardCount == 2, true);
+
+                var worked = OtaSpotAnnotator.Annotate("W1WORKED", "20m", db, null, tags);
+                Check("W1WORKED already logged on 20m -> WorkedBefore true", worked.WorkedBefore, true);
+                Check("W1WORKED matches no active award (not in any Set) -> NeededForAwardCount 0", worked.NeededForAwardCount == 0, true);
+
+                var noAwards = OtaSpotAnnotator.Annotate("K1ABC", "20m", db, null, null);
+                Check("Null activeAwardTags -> NeededForAwardCount 0, not a crash", noAwards.NeededForAwardCount == 0, true);
+
+                var empty = OtaSpotAnnotator.Annotate("", "20m", db, null, tags);
+                Check("Empty callsign -> WorkedBefore false (default, no lookup attempted)", empty.WorkedBefore, false);
+                Check("Empty callsign -> NeededForAwardCount 0 (default, no lookup attempted)", empty.NeededForAwardCount == 0, true);
+            }
+        }
+        finally
+        {
+            try { File.Delete(tmpDb); } catch { }
+        }
     }
 
     // ── Notification architecture (WSJTX_Controller/Notify/) ──────────────────────────

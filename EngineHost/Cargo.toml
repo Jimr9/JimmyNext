@@ -51,6 +51,13 @@ tempo-core = { path = ".nexus-src/crates/tempo-core" }
 # (the REPLY command's inbound JSON shape) needs #[derive(Deserialize)] too.
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+# POTA/SOTA activator-spot + space-weather facts (release-candidate pass: "use Nexus for what it
+# already does well"). `live` feature: Nexus's own blocking HTTP fetchers for the public POTA/
+# SOTA/NOAA-SWPC feeds (crates/propagation/src/live/{pota,swpc}.rs) -- reused as-is, not
+# reimplemented; EngineHost only adds the periodic-fetch/cache/control-command wiring around
+# them (see main.rs's own comment on the ota_spots module). No credentials, no auth on any of
+# these three feeds.
+propagation = { path = ".nexus-src/crates/propagation", features = ["live"] }
 
 [dev-dependencies]
 # Not needed by main.rs itself (Engine calls the native FT8 encoder/decoder internally) -- only
@@ -59,10 +66,6 @@ serde = { version = "1", features = ["derive"] }
 # prepared checkout as tempo-app/tempo-audio above -- see that comment.
 ft8 = { path = ".nexus-src/crates/ft8" }
 modes = { path = ".nexus-src/crates/modes" }
-# tests/dxcc_shadow_dump.rs: dumps propagation::dxcc::resolve() for a fixed callsign list so
-# it can be diffed against Jimmy's own ClubLogProvider (WSJTX_Controller/Lookup/) for the DXCC-
-# source shadow comparison. Not used by main.rs -- investigative/comparison tooling only.
-propagation = { path = ".nexus-src/crates/propagation" }
 
 # This crate had no [profile.release] of its own -- silently relying on whatever the toolchain
 # does by default instead of matching Nexus's own real, shipped configuration. Nexus's own root

@@ -160,6 +160,19 @@ namespace WSJTX_Controller
         public bool   hrdLogUploadRealtime   = false;
         public string hrdLogUploadCode       = "";
         public string hrdLogUploadCallsign   = "";
+        // eQSL / HamQTH (release-candidate pass: exposed through EngineHost, reusing Nexus's own
+        // mature transports -- see EngineHost/src/external_data.rs). Same credential shape as
+        // Club Log above (account username + DPAPI-protected password); the operator supplies
+        // their own account, never a shared application credential. INI-only for this release
+        // (same convention as ClassificationCutover's own rollback valve) -- not yet exposed as
+        // Options UI controls, see ARCHITECTURE.md for why and what's deferred.
+        public bool   eqslUploadEnabled      = false;
+        public bool   eqslUploadRealtime     = false;
+        public string eqslUsername           = "";
+        public string eqslPassword           = "";
+        public bool   hamQthEnabled          = false;
+        public string hamQthUsername         = "";
+        public string hamQthPassword         = "";
 
         // Automatic logbook download/sync (opt-in, default off so existing users aren't
         // suddenly downloading full logbooks on their next update without asking). Runs
@@ -695,6 +708,13 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("hrdLogUploadRealtime"))   hrdLogUploadRealtime  = iniFile.Read("hrdLogUploadRealtime")   == "True";
                 if (iniFile.KeyExists("hrdLogUploadCode"))       hrdLogUploadCode      = CredentialProtector.Unprotect(iniFile.Read("hrdLogUploadCode"));
                 if (iniFile.KeyExists("hrdLogUploadCallsign"))   hrdLogUploadCallsign  = iniFile.Read("hrdLogUploadCallsign")   ?? "";
+                if (iniFile.KeyExists("eqslUploadEnabled"))  eqslUploadEnabled  = iniFile.Read("eqslUploadEnabled")  == "True";
+                if (iniFile.KeyExists("eqslUploadRealtime")) eqslUploadRealtime = iniFile.Read("eqslUploadRealtime") == "True";
+                if (iniFile.KeyExists("eqslUsername"))       eqslUsername       = iniFile.Read("eqslUsername") ?? "";
+                if (iniFile.KeyExists("eqslPassword"))       eqslPassword       = CredentialProtector.Unprotect(iniFile.Read("eqslPassword"));
+                if (iniFile.KeyExists("hamQthEnabled"))      hamQthEnabled      = iniFile.Read("hamQthEnabled")  == "True";
+                if (iniFile.KeyExists("hamQthUsername"))     hamQthUsername     = iniFile.Read("hamQthUsername") ?? "";
+                if (iniFile.KeyExists("hamQthPassword"))     hamQthPassword     = CredentialProtector.Unprotect(iniFile.Read("hamQthPassword"));
                 if (iniFile.KeyExists("tqslStationLocation"))    tqslStationLocation   = iniFile.Read("tqslStationLocation")    ?? "";
                 if (iniFile.KeyExists("qrzLogbookAutoSyncEnabled"))     qrzLogbookAutoSyncEnabled     = iniFile.Read("qrzLogbookAutoSyncEnabled")     == "True";
                 int qrzld; if (iniFile.KeyExists("qrzLogbookRefreshDays") && int.TryParse(iniFile.Read("qrzLogbookRefreshDays"), out qrzld) && qrzld >= 1) qrzLogbookRefreshDays = qrzld;
@@ -1199,6 +1219,13 @@ namespace WSJTX_Controller
                 iniFile.Write("hrdLogUploadRealtime",    hrdLogUploadRealtime.ToString());
                 iniFile.Write("hrdLogUploadCode",        CredentialProtector.Protect(hrdLogUploadCode));
                 iniFile.Write("hrdLogUploadCallsign",    hrdLogUploadCallsign     ?? "");
+                iniFile.Write("eqslUploadEnabled",       eqslUploadEnabled.ToString());
+                iniFile.Write("eqslUploadRealtime",      eqslUploadRealtime.ToString());
+                iniFile.Write("eqslUsername",            eqslUsername             ?? "");
+                iniFile.Write("eqslPassword",            CredentialProtector.Protect(eqslPassword));
+                iniFile.Write("hamQthEnabled",           hamQthEnabled.ToString());
+                iniFile.Write("hamQthUsername",          hamQthUsername           ?? "");
+                iniFile.Write("hamQthPassword",          CredentialProtector.Protect(hamQthPassword));
                 iniFile.Write("tqslStationLocation",     tqslStationLocation      ?? "");
                 iniFile.Write("qrzLogbookAutoSyncEnabled",     qrzLogbookAutoSyncEnabled.ToString());
                 iniFile.Write("qrzLogbookRefreshDays",         qrzLogbookRefreshDays.ToString());

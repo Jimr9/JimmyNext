@@ -317,6 +317,8 @@ mod crashlog {
 
 use std::sync::{Arc, Mutex};
 
+mod external_data;
+
 use tempo_app::engine::Engine;
 use tempo_app::settings::Settings;
 use tempo_audio::service::{run_radio, RadioConfig};
@@ -664,7 +666,7 @@ fn parse_args() -> Args {
 ///                                          at slot start and can't be live-adjusted mid-over (see
 ///                                          SET_TX_LEVEL's own comment) -- Tune's chunked
 ///                                          generation has no such limitation.
-fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>) {
+fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>, external_cache: Arc<external_data::SharedCache>) {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
@@ -808,6 +810,94 @@ fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>) {
                     let _ = writeln!(stream, "ERR bad SET_DECODE_DEPTH value: {}", v.trim());
                 }
             }
+        } else if line == "OTA_SPOTS" {
+            // Cache-only, always fast -- safe to handle inline on this accept loop like SNAPSHOT.
+            let _ = writeln!(stream, "{}", external_cache.spots_json());
+        } else if line == "SPACE_WX" {
+            let _ = writeln!(stream, "{}", external_cache.space_wx_json());
+        } else if let Some(json) = line.strip_prefix("EQSL_UPLOAD ") {
+            // Credential-bearing, real network I/O (eQSL can take up to ~60s -- it builds the
+            // file server-side). MUST NOT run inline: this accept loop is single-threaded, and
+            // Jimmy Test polls SNAPSHOT every ~1s -- blocking it here for a minute would read as
+            // a false-positive engine disconnect. Spawn a dedicated thread for just this
+            // connection's request/response and let the accept loop move on immediately.
+            match serde_json::from_str::<external_data::EqslUploadArgs>(json) {
+                Ok(args) => {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        match external_data::eqsl_upload(&args) {
+                            Ok(outcome) => {
+                                let _ = writeln!(stream, "OK {outcome}");
+                            }
+                            Err(e) => {
+                                let _ = writeln!(stream, "ERR {e}");
+                            }
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad EQSL_UPLOAD args: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            }
+            continue;
+        } else if let Some(json) = line.strip_prefix("EQSL_DOWNLOAD ") {
+            match serde_json::from_str::<external_data::EqslDownloadArgs>(json) {
+                Ok(args) => {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        match external_data::eqsl_download(&args) {
+                            // The ADIF body can itself contain newlines -- encode as one JSON
+                            // string line so the wire framing (one response per line) holds.
+                            Ok(adif) => match serde_json::to_string(&adif) {
+                                Ok(json_str) => {
+                                    let _ = writeln!(stream, "OK {json_str}");
+                                }
+                                Err(e) => {
+                                    let _ = writeln!(stream, "ERR could not encode InBox body: {e}");
+                                }
+                            },
+                            Err(e) => {
+                                let _ = writeln!(stream, "ERR {e}");
+                            }
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad EQSL_DOWNLOAD args: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            }
+            continue;
+        } else if let Some(json) = line.strip_prefix("HAMQTH_LOOKUP ") {
+            match serde_json::from_str::<external_data::HamQthLookupArgs>(json) {
+                Ok(args) => {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        match external_data::hamqth_lookup(&args) {
+                            Ok(result) => match serde_json::to_string(&result) {
+                                Ok(json_str) => {
+                                    let _ = writeln!(stream, "OK {json_str}");
+                                }
+                                Err(e) => {
+                                    let _ = writeln!(stream, "ERR could not encode lookup result: {e}");
+                                }
+                            },
+                            Err(e) => {
+                                let _ = writeln!(stream, "ERR {e}");
+                            }
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad HAMQTH_LOOKUP args: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            }
+            continue;
         } else {
             let _ = writeln!(stream, "ERR unknown command");
         }
@@ -971,13 +1061,20 @@ fn main() {
         engine.lock().unwrap().set_rf_power(frac);
     }
 
+    // POTA/SOTA spots + space weather: background-refreshed, credential-free, cached in memory
+    // (see external_data.rs's own header comment). Independent of the engine/radio loop
+    // entirely -- a POTA/SWPC outage can never affect decode/TX.
+    let external_cache = external_data::SharedCache::new();
+    external_cache.spawn_refresh_thread();
+
     // Own thread, not the one run_radio blocks on: see run_control_server's own doc comment.
     // Spawned here (after engine exists), not earlier alongside control_port's own read above,
     // specifically so it can share this same Arc<Mutex<Engine>> -- the whole point of the
     // SNAPSHOT/REPLY/HALT_TX/SET_TX_ENABLED commands added to it.
     {
         let control_engine = engine.clone();
-        std::thread::spawn(move || run_control_server(control_port, control_engine));
+        let control_cache = external_cache.clone();
+        std::thread::spawn(move || run_control_server(control_port, control_engine, control_cache));
     }
 
     let cfg = RadioConfig {
