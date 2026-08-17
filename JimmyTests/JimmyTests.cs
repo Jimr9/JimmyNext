@@ -128,6 +128,7 @@ static class JimmyTests
         CallQueueRankerBeamRankTests();
         JimmySettingsRoundTripTests();
         JimmySettingsDefaultsTests();
+        EngineRestartPolicyTests();
         FindPreservedSelectionIndexTests();
         ResolveDispatchIndexTests();
         SpotWatchCallsRoundTripTests();
@@ -3815,6 +3816,40 @@ static class JimmyTests
         {
             try { File.Delete(tmpIni); } catch { }
         }
+    }
+
+    // ── EngineRestartPolicy (bounded native-engine auto-restart, extracted from Controller) ──
+
+    static void EngineRestartPolicyTests()
+    {
+        Console.WriteLine("\n── EngineRestartPolicy: bounded rolling-window auto-restart ──");
+
+        // Fake clock: starts at a fixed instant and only advances when the test tells it to --
+        // makes the 5-minute window boundary exactly testable without a real sleep.
+        DateTime clock = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var policy = new EngineRestartPolicy(5, TimeSpan.FromMinutes(5), () => clock);
+
+        for (int i = 1; i <= 5; i++)
+        {
+            bool should = policy.RecordAttemptAndShouldRestart(out int attemptNumber);
+            Check($"Attempt {i} within budget -> should restart", should, true);
+            Check($"Attempt {i} reports attemptNumber {i}", attemptNumber == i, true);
+            clock = clock.AddSeconds(1); // crashes seconds apart, same window
+        }
+
+        bool sixth = policy.RecordAttemptAndShouldRestart(out int sixthAttemptNumber);
+        Check("6th attempt within the same 5-minute window -> gives up", sixth, false);
+        Check("6th attempt still reports attemptNumber 6 (count keeps accumulating)", sixthAttemptNumber == 6, true);
+
+        bool seventh = policy.RecordAttemptAndShouldRestart(out _);
+        Check("7th attempt, still same window -> still gives up (not a one-shot deny)", seventh, false);
+
+        // Window elapses -- a persistently-flaky-but-not-crash-looping engine gets a fresh budget,
+        // matching the original inline comment's own reasoning (a rolling window, not a lifetime cap).
+        clock = clock.AddMinutes(6);
+        bool afterWindow = policy.RecordAttemptAndShouldRestart(out int freshAttemptNumber);
+        Check("Attempt after the window elapses -> budget resets, should restart again", afterWindow, true);
+        Check("First attempt in the new window reports attemptNumber 1", freshAttemptNumber == 1, true);
     }
 
     // ── Notification architecture (WSJTX_Controller/Notify/) ──────────────────────────

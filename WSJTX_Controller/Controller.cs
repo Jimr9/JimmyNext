@@ -2581,30 +2581,24 @@ namespace WSJTX_Controller
         // as to missed decodes. Capped and backed off so a persistently-crashing engine (a real
         // config problem, not a transient fault) degrades to a clear "stopped trying" message
         // instead of a tight restart loop hammering the audio device/COM port.
-        private int _nativeEngineAutoRestartCount = 0;
-        private DateTime _nativeEngineAutoRestartWindowStart = DateTime.MinValue;
         private const int MaxNativeEngineAutoRestartsPerWindow = 5;
         private static readonly TimeSpan NativeEngineAutoRestartWindow = TimeSpan.FromMinutes(5);
+        // Extracted (see EngineRestartPolicy.cs's own comment) -- same bounded-retry counting,
+        // now independently testable without a Form/Controller instance.
+        private readonly EngineRestartPolicy _nativeEngineRestartPolicy =
+            new EngineRestartPolicy(MaxNativeEngineAutoRestartsPerWindow, NativeEngineAutoRestartWindow);
 
         private void OnNativeEngineUnexpectedExit(NativeEngineClient exitedClient)
         {
             if (nativeEngineClient != exitedClient) return;    // superseded by a newer launch already
 
-            DateTime now = DateTime.UtcNow;
-            if (now - _nativeEngineAutoRestartWindowStart > NativeEngineAutoRestartWindow)
-            {
-                _nativeEngineAutoRestartWindowStart = now;
-                _nativeEngineAutoRestartCount = 0;
-            }
-            _nativeEngineAutoRestartCount++;
-
-            if (_nativeEngineAutoRestartCount > MaxNativeEngineAutoRestartsPerWindow)
+            if (!_nativeEngineRestartPolicy.RecordAttemptAndShouldRestart(out int attemptNumber))
             {
                 ShowMessage("Native engine host stopped unexpectedly -- gave up auto-restarting after repeated crashes. Check Options > Decode Engine and try again.", true);
                 return;
             }
 
-            ShowMessage($"Native engine host stopped unexpectedly -- restarting ({_nativeEngineAutoRestartCount}/{MaxNativeEngineAutoRestartsPerWindow})...", true);
+            ShowMessage($"Native engine host stopped unexpectedly -- restarting ({attemptNumber}/{MaxNativeEngineAutoRestartsPerWindow})...", true);
             var restartTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             restartTimer.Tick += (s, e) =>
             {
