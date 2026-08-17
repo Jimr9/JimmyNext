@@ -164,6 +164,8 @@ static class JimmyTests
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
+        TxLevelPerBandRestoreTests();
+        DirectPathTxLevelBandTrackingTests();
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
@@ -1568,6 +1570,114 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  AudioTuningHotkeyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── "Remember F11/F12 audio level per band" restore decision, 2026-08-17 ───────────────
+    // Found live: the restore-on-band-change call only ever existed on WsjtxClient.Direct.cs's
+    // poll path -- the classic WSJT-X/UDP StatusMessage band-change handler
+    // (WsjtxClient.Protocol.cs) had no restore call at all, so an operator not on pure
+    // Direct-mode-with-Jimmy-Native got a feature that silently SAVED (AudioLevel() reaches the
+    // engine's own control port directly, independent of transport) but never restored. Fixed by
+    // sharing one decision function (ShouldRestoreTxLevel) from both call sites. This tests the
+    // pure decision only -- the actual SET_TX_LEVEL send needs a live engine host and isn't
+    // covered here, same as every other DirectSendCommand-driven behavior in this suite.
+    static void TxLevelPerBandRestoreTests()
+    {
+        Console.WriteLine("\n── Remember TX level per band: restore decision ──");
+        try
+        {
+            var levels = new Dictionary<int, double> { [5] = 0.65, [9] = 0.40 };  // 20m, 10m
+
+            Check("Feature disabled -> never restores, even with a saved entry",
+                WsjtxClient.ShouldRestoreTxLevel(false, 5, levels, out _), false);
+
+            Check("No band known (null) -> never restores",
+                WsjtxClient.ShouldRestoreTxLevel(true, null, levels, out _), false);
+
+            Check("Band with no saved entry -> does not restore",
+                WsjtxClient.ShouldRestoreTxLevel(true, 7, levels, out _), false);
+
+            bool restored20m = WsjtxClient.ShouldRestoreTxLevel(true, 5, levels, out double level20m);
+            Check("Enabled + known band + saved entry -> restores", restored20m, true);
+            Check("...with the exact saved value for that band", Math.Abs(level20m - 0.65) < 0.0001, true);
+
+            bool restored10m = WsjtxClient.ShouldRestoreTxLevel(true, 9, levels, out double level10m);
+            Check("A different band's own saved value is used, not the first band checked",
+                restored10m && Math.Abs(level10m - 0.40) < 0.0001, true);
+
+            Check("Null dictionary -> does not restore, does not throw",
+                WsjtxClient.ShouldRestoreTxLevel(true, 5, null, out _), false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  TxLevelPerBandRestoreTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── TX-level-per-band: real band tracking through the production Direct pipeline ───────
+    // Companion to TxLevelPerBandRestoreTests above: that one covers the pure decision function
+    // in isolation; this one proves the band-index tracking that decision depends on is correct
+    // going through DirectApplyStatus itself (via TestApplyDirectSnapshot -- the exact same
+    // pipeline the real ~1s SNAPSHOT poll drives in production, which is Jimmy Next's ONLY
+    // production transport: ApplyEngineMode always uses Direct outside of
+    // TestModeGuard.IsTestMode, so this -- not the classic WSJT-X/UDP StatusMessage handler in
+    // WsjtxClient.Protocol.cs, which only ever runs in replay tests -- is the real path an
+    // operator's F11/F12 press and band change actually go through). Feeds a real switch away
+    // from and back to a band, then confirms ShouldRestoreTxLevel would pick the right saved
+    // level at each stop -- exactly "switch bands, come back, get the level I had there."
+    static void DirectPathTxLevelBandTrackingTests()
+    {
+        Console.WriteLine("\n── TX level per band: real band tracking (Direct pipeline) ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            ctrl.Radio.RememberTxLevelPerBand = true;
+            ctrl.Radio.TxLevelByBand[5] = 0.70;   // 20m, saved earlier
+            ctrl.Radio.TxLevelByBand[3] = 0.30;   // 40m, saved earlier
+
+            var snap20m = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
+            Check("Initial snapshot on 20m -> bandIdx resolves to 20m (index 5)",
+                wc.TestBandIdx == 5, true);
+            bool restore20a = WsjtxClient.ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, wc.TestBandIdx, ctrl.Radio.TxLevelByBand, out double v20a);
+            Check("...and the real tracked band correctly picks 20m's own saved level",
+                restore20a && Math.Abs(v20a - 0.70) < 0.0001, true);
+
+            var snap40m = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 7.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3001 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap40m);
+            Check("Switching to 40m -> bandIdx follows the real dial frequency (index 3)",
+                wc.TestBandIdx == 3, true);
+            bool restore40 = WsjtxClient.ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, wc.TestBandIdx, ctrl.Radio.TxLevelByBand, out double v40);
+            Check("...and picks 40m's own saved level, not 20m's",
+                restore40 && Math.Abs(v40 - 0.30) < 0.0001, true);
+
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
+            Check("Returning to 20m -> bandIdx correctly comes back to index 5, not stuck on 40m",
+                wc.TestBandIdx == 5, true);
+            bool restore20b = WsjtxClient.ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, wc.TestBandIdx, ctrl.Radio.TxLevelByBand, out double v20b);
+            Check("...and restores the ORIGINAL 20m level again -- the exact 'switch away and back' case",
+                restore20b && Math.Abs(v20b - 0.70) < 0.0001, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectPathTxLevelBandTrackingTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

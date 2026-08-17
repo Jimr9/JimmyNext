@@ -291,17 +291,11 @@ namespace WSJTX_Controller
             // frequency, so startup always announced "Unknown band selected" no matter what.
             bandIdx = FreqToBandIdx(newDialFrequency / 1e6);
 
-            // Options > Radio "Remember F11/F12 audio level per band" (RadioSettings.
-            // TxLevelByBand). Only on a genuine confirmed band change (newBand, set just above),
-            // not every poll tick -- restoring the same value repeatedly would be harmless but
-            // pointless SET_TX_LEVEL traffic. No saved entry for this band yet just leaves the
-            // engine's current level alone, same as when the feature is off entirely.
-            if (newBand && ctrl.Radio.RememberTxLevelPerBand && bandIdx != null
-                && ctrl.Radio.TxLevelByBand.TryGetValue((int)bandIdx, out double savedLevel))
-            {
-                DirectSendCommand("SET_TX_LEVEL " + savedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                DebugOutput($"{Time()} [DIRECT] restored tx level {savedLevel:0.00} for band index {bandIdx}");
-            }
+            // Options > Radio "Remember F11/F12 audio level per band" -- only on a genuine
+            // confirmed band change (newBand, set just above), not every poll tick. See
+            // RestoreTxLevelForBand's own comment (WsjtxClient.BandAudio.cs) -- shared with the
+            // classic WSJT-X/UDP path.
+            if (newBand) RestoreTxLevelForBand();
 
             // One-time-per-connection startup fallback, requested live 2026-08-10: if the very
             // first band resolution attempt this session still comes back unknown (no CAT data
@@ -798,6 +792,20 @@ namespace WSJTX_Controller
         internal void TestSetDirectConnected(bool connected) => _directConnected = connected;
         internal void TestDirectHandlePollFailure() => DirectHandlePollFailure();
         internal int TestDirectConsecutivePollFailures => _directConsecutivePollFailures;
+
+        // "Remember F11/F12 audio level per band" regression coverage: bandIdx is private,
+        // updated only inside DirectApplyStatus (the real production poll pipeline, exercised
+        // here via TestApplyDirectSnapshot -- same hook every test above already uses).
+        // RestoreTxLevelForBand's own DirectSendCommand call is a real, un-mockable TCP attempt
+        // (fails fast, bounded 1s, in a test environment with no engine listening -- same
+        // tolerance AudioTuningHotkeyTests already documents for DirectSetTuning/SNAPSHOT), so
+        // it isn't directly observable here; this accessor instead lets a test prove the
+        // DETECTION half that gates it -- does switching bands and returning correctly identify
+        // the same band index again -- end to end through the real pipeline, not a hand-rolled
+        // stand-in for it. (newBand itself is deliberately not exposed: DirectApplyStatus
+        // consumes and resets it via ShowStatus() within the same call TestApplyDirectSnapshot
+        // makes, so reading it afterward would race that reset rather than test anything real.)
+        internal int? TestBandIdx => bandIdx;
     }
 
     // JSON shapes matching AppSnapshot/RadioStatus/DecodeRow's own camelCase serde output

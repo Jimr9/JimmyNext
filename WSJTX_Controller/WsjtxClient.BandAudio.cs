@@ -432,6 +432,36 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // Pure decision for the restore half of "Remember F11/F12 audio level per band"
+        // (RadioSettings.TxLevelByBand -- AudioLevel() above is the save half). Split out from
+        // the actual SET_TX_LEVEL send so this is unit-testable without a live engine host --
+        // same reasoning as EngineHost's own reply_wire_response extraction. internal (not
+        // private): JimmyTests reaches it via InternalsVisibleTo (AssemblyInfo.Testing.cs).
+        internal static bool ShouldRestoreTxLevel(bool rememberEnabled, int? bandIdx,
+            IReadOnlyDictionary<int, double> txLevelByBand, out double level)
+        {
+            level = 0;
+            if (!rememberEnabled || bandIdx == null || txLevelByBand == null) return false;
+            return txLevelByBand.TryGetValue((int)bandIdx, out level);
+        }
+
+        // Called on every genuinely confirmed band change, from BOTH transports: WsjtxClient.
+        // Direct.cs's own poll tick (native engine, Direct control-port mode) and
+        // WsjtxClient.Protocol.cs's classic WSJT-X/UDP StatusMessage band-change handler. Found
+        // live, 2026-08-17: only the Direct.cs call site existed before this -- an operator not
+        // on pure Direct-mode-with-Jimmy-Native got a feature (AudioLevel() above already SAVES
+        // correctly under either transport, since it reaches the engine's own control port
+        // directly) that silently saved but never restored, because the restore call was never
+        // mirrored into the classic UDP path. No saved entry for this band yet leaves the
+        // engine's current level alone, same as when the feature is off entirely.
+        private void RestoreTxLevelForBand()
+        {
+            if (!ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, bandIdx, ctrl.Radio.TxLevelByBand, out double savedLevel))
+                return;
+            DirectSendCommand("SET_TX_LEVEL " + savedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            DebugOutput($"{Time()} restored tx level {savedLevel:0.00} for band index {bandIdx}");
+        }
+
         private bool CalcBestOffset(List<int> offsetList, Periods decodePeriod, bool clearList)
         {
             DebugOutput($"{Time()} CalcBestOffset, decodePeriod:{decodePeriod} clearList:{clearList} offsetList.Count:{offsetList.Count()} skipFirstDecodeSeries:{skipFirstDecodeSeries}");

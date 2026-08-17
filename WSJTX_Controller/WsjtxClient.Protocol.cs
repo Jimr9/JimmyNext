@@ -916,6 +916,14 @@ namespace WSJTX_Controller
                             // See WsjtxClient.BandAudio.cs BandUp() -- not arming
                             // _requireOffsetForActive on band change (2026-07-12).
                             newBand = true;
+
+                            // Options > Radio "Remember F11/F12 audio level per band" -- this
+                            // classic WSJT-X/UDP path had NO restore call at all before this fix
+                            // (found live, 2026-08-17: an operator reported the level never
+                            // coming back on returning to a band). See RestoreTxLevelForBand's
+                            // own comment (WsjtxClient.BandAudio.cs) for the full story.
+                            RestoreTxLevelForBand();
+
                             decodeCount = 0;
                             consecNoDecodes = 0;
                             AutoFreqChanged(false, true);
