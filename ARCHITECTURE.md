@@ -151,15 +151,111 @@ Requested specifically: don't assume Jimmy's logbook is untouchable just because
 - **Local logging never blocks on an external service.** `LiveQsoUploadOrchestrator` runs uploads on a background `Task`, independent of the synchronous local SQLite write, with a circuit breaker for Club Log specifically (matching Club Log's own documented API requirement: stop retrying after a failure until the operator fixes something). A QRZ/Club Log/HRDLog outage cannot prevent or delay safe local logging. This class is also a good, already-proven precedent for the modularization work below -- it was already extracted from `WsjtxClient` with no WinForms/Controller reference at all.
 - **Credentials.** Jimmy encrypts stored credentials at rest via Windows DPAPI (`CredentialProtector.cs`), scoped to the current Windows user. Nexus's `lotw.rs` authenticates via the LoTW *website* password over an HTTPS query string; Jimmy's LoTW integration instead uses TQSL (`TqslUploadClient.cs`), ARRL's own official certificate-based signing tool -- arguably the more standard and secure of the two approaches, not a gap to close.
 
-**2. Genuine capability Jimmy doesn't have, real but not adopted this pass:**
-- **eQSL and HamQTH -- focused suitability check (per operator request).** Read Nexus's actual transports (`propagation/src/live/eqsl.rs`, `hamqth.rs`) rather than assuming either was a fit.
-  - **eQSL**: a QSL-*confirmation* service, the same role LoTW/Club Log already play for Jimmy's "still need" award data -- a two-step authenticated fetch requiring an eQSL account username+password, with careful password redaction (Nexus never lets a `reqwest::Error`'s `Display` echo the credential-bearing URL). Genuinely useful to *some* operators (eQSL confirmations are common, especially outside strict DXCC chasing), but Jimmy already has two confirmation-capable services (LoTW via TQSL, Club Log) covering the primary DXCC-credit path most award chasers rely on -- this is an incremental nicety, not a gap blocking current award accuracy. Adding it means the same shape of work as any of Jimmy's existing four services individually: new DPAPI-encrypted credential storage, Options UI, a dedicated upload/reconcile client, tests.
-  - **HamQTH**: a callbook *lookup* service (name/QTH/bio), the same role QRZ already plays -- Nexus's own doc comment calls it "the free-account fallback for QRZ." Jimmy's `LookupManager` already covers this need via FCC ULS (free, US) + Club Log (free, DXCC/country) + QRZ (paid, full callbook); HamQTH's only incremental value is free full-callbook data for non-US calls when QRZ isn't configured -- a narrower gap than eQSL's, and one Jimmy already degrades gracefully around today (no lookup for that specific case, not a broken feature).
-  - **Neither is uniquely tied to FT8/FT4 operation** the way POTA/SOTA chasing is -- both are general logbook/confirmation conveniences that would apply identically to any mode. Given both require full new credentialed-service surface area (the same discipline QRZ/Club Log/LoTW/HRDLog each already received on their own), **deferred as future scope**, not forced into this pass.
+**2. eQSL and HamQTH -- implemented, scoped deliberately (revised after a closer operator review):**
+An initial pass of this comparison deferred both as unrelated new features. On review, both are
+squarely in-scope: they're logbook/logging services in the same family as Jimmy's existing QRZ/
+Club Log/LoTW/HRDLog integrations, not a separate feature area. Re-inspected Nexus's actual
+transports (`propagation/src/live/eqsl.rs`, `hamqth.rs`, `tempo_core::eqsl`, `tempo_core::hamqth`)
+for what each genuinely implements, then followed the same ownership split already used
+everywhere else in this comparison: **Nexus/EngineHost owns the external service's own API
+plumbing** where Nexus already does it well; **Jimmy owns the local logbook, operator settings,
+enable/disable policy, and workflow.**
+  - **eQSL upload -- implemented.** Nexus's `propagation::live::eqsl::post_form` (HTTPS-only, no
+    redirect-following, credential-redacted errors -- verified via Nexus's own unit test proving
+    no password leakage) plus `tempo_core::eqsl::build_upload_body`/`classify_upload` do the real
+    work; EngineHost exposes it as `EQSL_UPLOAD` (`external_data.rs::eqsl_upload`), and Jimmy's
+    `ExternalDataClient.UploadEqsl` calls it. Wired into `LiveQsoUploadOrchestrator` alongside
+    QRZ/Club Log/HRDLog -- same enable/real-time-toggle shape, same "never blocks local logging"
+    guarantee, own `eqsl_uploaded_at` tracking column (`LogbookDb` schema v7). No app-level
+    credential: the operator supplies their own eQSL.cc username/password (eQSL has no API-key
+    model the way QRZ/Club Log do), configured in Options > Logbook Sync > eQSL.cc Upload.
+  - **eQSL download/reconciliation -- plumbing exists, reconciliation NOT implemented.**
+    `ExternalDataClient.DownloadEqsl` / EngineHost's `EQSL_DOWNLOAD` (`external_data.rs::
+    eqsl_download`, wrapping Nexus's `propagation::live::eqsl::fetch_inbox`) can already fetch
+    the raw ADIF InBox. What's missing is the Jimmy-side reconciliation step -- matching returned
+    records against `LogbookDb` and marking confirmations, the same job `LogbookAutoSync.cs`
+    already does for QRZ/Club Log downloads via `AdifImporter.Import(..., source: "QRZ"/
+    "CLUBLOG", ...)`. Not done this pass: needs `"EQSL"` added to `LogbookDb.KnownSources`, a
+    `LogbookAutoSync`-style entry point, and (per the operator's explicit instruction) must not
+    be described as supported until it actually reconciles -- claiming download/sync from upload
+    support alone would be exactly the overclaim this comparison was asked to avoid. **Deferred,
+    with a clear seam**, not attempted half-built.
+  - **HamQTH lookup -- implemented, deliberately narrow scope.** Nexus's `propagation::live::
+    hamqth::fetch` + `tempo_core::hamqth` (combined login+lookup per call, matching QRZ's own
+    lookup DTO shape) are exposed as `HAMQTH_LOOKUP` / `ExternalDataClient.LookupHamQth`. Rather
+    than adding HamQTH into `LookupManager`'s always-on automatic provider chain (FCC ULS > Club
+    Log > QRZ > LoTW) -- which would change lookup precedence and background-request behavior for
+    every operator, not just those who configure HamQTH, and needs its own deliberate design pass
+    -- it's wired as an **on-demand supplement inside `LookupInfoDlg`** (the existing "Lookup
+    Selected Station" dialog): after QRZ/offline data populates what it can, a HamQTH lookup fills
+    only the fields still blank, never overriding an already-known answer. Configured in
+    Options > Lookup Data > HamQTH Callsign Lookup, using the operator's own HamQTH.com login (no
+    app-level credential, matching eQSL).
+  - **Neither required a second network client.** Both reuse Nexus's already-mature, already-
+    tested transport rather than duplicating eQSL/HamQTH HTTP logic in C# -- the explicit
+    preference stated by the operator.
 
 **3. Diagnostic/application logging vs. QSO logbook.** Kept explicitly separate per the operator's request. Jimmy's `SupportReportBuilder.cs` (766 lines, already redacts credential-shaped keywords before building a support report) is diagnostic-only and has no overlap with QSO data. Nexus's own diagnostics (`crates/tempo-core/src/diagnostics.rs`) were not compared in depth -- no evidence surfaced during this pass that Jimmy's diagnostic logging has a gap worth closing, and application/crash diagnostics carry none of the QSO-data risk that would make this urgent for a release-candidate pass.
 
-**Decision: Jimmy's logbook/upload stack stays fully authoritative. No migration, no cutover.** This isn't a default-to-caution non-answer -- the comparison found Jimmy's implementation is the correct owner for its own data model and operator workflow, not merely "too risky to check." The one real gap (eQSL/HamQTH) is additive, not a replacement, and deferred as new scope rather than rushed.
+**Decision: Jimmy's logbook/upload stack stays fully authoritative; eQSL and HamQTH are additive integrations on top of it, not a replacement or migration.** eQSL upload and HamQTH lookup are genuinely usable now, credentials-through-Options included. eQSL download/reconciliation remains open, documented above rather than silently dropped.
+
+## Nexus-backed facts beyond FT8/FT4: POTA, SOTA, space weather
+
+Per operator request: take advantage of useful Nexus information beyond the basic FT8/FT4 engine
+-- POTA, SOTA, and propagation/space-weather facts -- without copying Nexus's own visual UI.
+Ownership split follows the same pattern as everything else in this document: **Nexus supplies
+the facts, Jimmy applies its own operator intelligence and presents them accessibly.**
+
+- **Nexus's `propagation` crate promoted from dev-only to a real runtime dependency** (with its
+  `live` feature) -- previously only used by Jimmy's own shadow-comparison test tooling. Its
+  `pota`/`live::pota` modules parse and fetch real POTA/SOTA activator spots; `model::SpaceWx` /
+  `live::swpc` fetch real space-weather data (SFI/SSN/Kp/A-index/X-ray flux) from NOAA SWPC.
+  Verified against the real public APIs, not mocked (31 POTA spots, 5 SOTA spots, real SFI=122/
+  Kp=1.33 returned in a manual `#[ignore]`'d live-check test -- `EngineHost/tests/
+  external_data_live_check.rs`, deliberately excluded from the default CI suite since it depends
+  on external network availability, not code correctness).
+- **EngineHost's `external_data.rs`**: a background-refreshed cache (`SharedCache`, POTA/SOTA
+  every 90s, space weather every 10 min), exposed to Jimmy over the same control-port protocol
+  every other Direct command uses (`OTA_SPOTS`, `SPACE_WX` -- fast, cache-only reads). Graceful
+  degradation: if one feed (POTA or SOTA) fails, the cache keeps serving the other plus the last
+  good data rather than going blank.
+- **`ExternalDataClient.cs`**: standalone C# client (no WinForms/Controller reference, same
+  standalone-class discipline as `LiveQsoUploadOrchestrator`) for all of this session's new
+  EngineHost commands, including the eQSL/HamQTH ones above.
+- **`OtaSpotAnnotator.cs`**: applies Jimmy's own existing worked-before (`LogbookDb
+  .HasWorkedBefore`) and needed-for-award (mirrors `AwardMatcher.Match`'s per-`GroupBy` switch,
+  counting every match instead of just the first) logic to a spotted callsign. Deliberately does
+  **not** touch `AwardMatcher`/`RuleEngine`/`Awards` -- POTA/SOTA is not folded into the awards
+  engine's own design, exactly as instructed; this is a new, additive, read-only consumer of data
+  those systems already expose publicly.
+- **`OtaSpotsWindow.cs`**: the accessible presentation. A plain `ListView` (View=Details) --
+  natively keyboard-navigable, no custom accessibility plumbing needed -- with columns Program /
+  Reference / Activator / Freq-Mode / Age / Status ("worked before, needed for N awards"),
+  matching the requested presentation style ("K1ABC -- POTA K-1234 -- 20m FT8 -- spotted 2 min
+  ago -- needed for 2 awards") via each row's tooltip/accessible text. Non-modal singleton window,
+  following `LogbookWindow`'s exact established pattern (own `LogbookDb` instance, `Show()` not
+  `ShowDialog()`, no `Owner`, cleanup via `FormClosed` + `Controller_FormClosing`). Opened via a
+  new button next to Logbook and a new `Alt+G` hotkey (`HotkeyAction.OpenOtaSpots`), both routed
+  through the existing `HotkeyConfig`/`OptionsDlg` hotkey editor like every other shortcut.
+  Deliberately plain -- no custom dashboard rendering -- so JAWS/NVDA read it the same as any
+  other list already in the app.
+
+**Deferred, documented, not attempted this pass: POTA/SOTA notifications.** The operator asked
+for optional, non-chatty notifications when a worth-chasing spot appears. `OtaSpotsWindow` is
+pull-only (operator opens it, sees current facts) and satisfies the core accessibility
+requirement without this. A push notification needs: a background poll independent of the window
+being open (today, nothing fetches OTA data unless the window is open), and per-spot dedup state
+so the same activator/reference doesn't re-announce every refresh cycle. Jimmy already has a
+complete, well-tested notification framework for exactly this shape of problem
+(`Notify/NotificationEventType.cs`, `NotificationCenter`, `NotificationPolicy` with
+Timing/DeferWhileTransmitting/SuppressUnchanged) -- the clean path is a new
+`NotificationEventType.OtaSpotWorthChasing` following that framework's existing "one new type,
+zero INI migration needed" design, published from a small Controller-owned poll loop, defaulting
+to a conservative timing (e.g. deferred, not Immediate) so it can never compete with FT8/FT4
+Tx-period timing. Establishing this now, without a working background poll and dedup story built
+and tested to the same standard as the rest of this pass, would be exactly the kind of rushed
+half-feature the operator's own instructions warn against -- recorded here as the next concrete
+step instead.
 
 ## TX-safety / recovery audit
 
@@ -201,7 +297,8 @@ shape `LiveQsoUploadOrchestrator` had already proven (a standalone class with no
 Controller reference). The bounded-restart decision was previously pure counting/clock logic
 inlined in a WinForms code-behind file, untestable without constructing a `Form`; it now has 15
 dedicated automated tests proving the rolling-window behavior (budget exhaustion, window
-rollover) that had zero direct test coverage before. Full suite: 883/883 passing.
+rollover) that had zero direct test coverage before. Full suite: 890/890 passing as of this pass
+(includes `OtaSpotAnnotatorTests` added alongside the POTA/SOTA work above).
 
 Not a large-scale restructuring of the ~28,800-line top-level `WSJTX_Controller/*.cs` -- one
 coherent, low-risk, high-value slice, matching the instruction to work in slices rather than
@@ -237,7 +334,12 @@ future pass.
   tightening).
 - Explicit Direct-contract version/capability negotiation (see above for why this is a
   deliberate, low-risk deferral, not an oversight).
-- eQSL / HamQTH integration (see "Logbook / logging comparison" above).
+- eQSL download/reconciliation (upload and HamQTH lookup are implemented -- see "Logbook /
+  logging comparison" above for exactly what's done vs. open).
+- HamQTH as a full `LookupManager` provider-chain member (currently on-demand only in the Lookup
+  Selected Station dialog -- see above).
+- POTA/SOTA "worth chasing" notifications (see "Nexus-backed facts beyond FT8/FT4" above for the
+  concrete design seam left for this).
 
 Each of these is a substantial, independently-scoped piece of work; attempting them without the
 same proof-before-cutover rigor used elsewhere in this pass (isolated change, full test suite,
