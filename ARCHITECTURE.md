@@ -151,53 +151,125 @@ Requested specifically: don't assume Jimmy's logbook is untouchable just because
 - **Local logging never blocks on an external service.** `LiveQsoUploadOrchestrator` runs uploads on a background `Task`, independent of the synchronous local SQLite write, with a circuit breaker for Club Log specifically (matching Club Log's own documented API requirement: stop retrying after a failure until the operator fixes something). A QRZ/Club Log/HRDLog outage cannot prevent or delay safe local logging. This class is also a good, already-proven precedent for the modularization work below -- it was already extracted from `WsjtxClient` with no WinForms/Controller reference at all.
 - **Credentials.** Jimmy encrypts stored credentials at rest via Windows DPAPI (`CredentialProtector.cs`), scoped to the current Windows user. Nexus's `lotw.rs` authenticates via the LoTW *website* password over an HTTPS query string; Jimmy's LoTW integration instead uses TQSL (`TqslUploadClient.cs`), ARRL's own official certificate-based signing tool -- arguably the more standard and secure of the two approaches, not a gap to close.
 
-**2. eQSL and HamQTH -- implemented, scoped deliberately (revised after a closer operator review):**
-An initial pass of this comparison deferred both as unrelated new features. On review, both are
-squarely in-scope: they're logbook/logging services in the same family as Jimmy's existing QRZ/
-Club Log/LoTW/HRDLog integrations, not a separate feature area. Re-inspected Nexus's actual
-transports (`propagation/src/live/eqsl.rs`, `hamqth.rs`, `tempo_core::eqsl`, `tempo_core::hamqth`)
-for what each genuinely implements, then followed the same ownership split already used
-everywhere else in this comparison: **Nexus/EngineHost owns the external service's own API
+**2. eQSL and HamQTH -- full capability inventory, then implemented against what Nexus actually
+provides.** These are logbook/logging services in the same family as Jimmy's existing QRZ/Club
+Log/LoTW/HRDLog integrations. Rather than assuming what Nexus's `eqsl.rs`/`hamqth.rs` support,
+read the pinned checkout's actual code (`tempo_core::eqsl`, `propagation::live::eqsl`,
+`tempo_core::hamqth`, `propagation::live::hamqth`) end to end, cross-checked against Nexus's own
+`docs/manual/Logbook-and-Awards.md`, to separate four things that are easy to conflate: what the
+external service supports, what Nexus implements, what Nexus implements but didn't yet expose
+through EngineHost, and what neither side has. Ownership split follows the same rule as
+everywhere else in this document: **Nexus/EngineHost owns the external service's own API
 plumbing** where Nexus already does it well; **Jimmy owns the local logbook, operator settings,
-enable/disable policy, and workflow.**
-  - **eQSL upload -- implemented.** Nexus's `propagation::live::eqsl::post_form` (HTTPS-only, no
-    redirect-following, credential-redacted errors -- verified via Nexus's own unit test proving
-    no password leakage) plus `tempo_core::eqsl::build_upload_body`/`classify_upload` do the real
-    work; EngineHost exposes it as `EQSL_UPLOAD` (`external_data.rs::eqsl_upload`), and Jimmy's
-    `ExternalDataClient.UploadEqsl` calls it. Wired into `LiveQsoUploadOrchestrator` alongside
-    QRZ/Club Log/HRDLog -- same enable/real-time-toggle shape, same "never blocks local logging"
-    guarantee, own `eqsl_uploaded_at` tracking column (`LogbookDb` schema v7). No app-level
-    credential: the operator supplies their own eQSL.cc username/password (eQSL has no API-key
-    model the way QRZ/Club Log do), configured in Options > Logbook Sync > eQSL.cc Upload.
-  - **eQSL download/reconciliation -- plumbing exists, reconciliation NOT implemented.**
-    `ExternalDataClient.DownloadEqsl` / EngineHost's `EQSL_DOWNLOAD` (`external_data.rs::
-    eqsl_download`, wrapping Nexus's `propagation::live::eqsl::fetch_inbox`) can already fetch
-    the raw ADIF InBox. What's missing is the Jimmy-side reconciliation step -- matching returned
-    records against `LogbookDb` and marking confirmations, the same job `LogbookAutoSync.cs`
-    already does for QRZ/Club Log downloads via `AdifImporter.Import(..., source: "QRZ"/
-    "CLUBLOG", ...)`. Not done this pass: needs `"EQSL"` added to `LogbookDb.KnownSources`, a
-    `LogbookAutoSync`-style entry point, and (per the operator's explicit instruction) must not
-    be described as supported until it actually reconciles -- claiming download/sync from upload
-    support alone would be exactly the overclaim this comparison was asked to avoid. **Deferred,
-    with a clear seam**, not attempted half-built.
-  - **HamQTH lookup -- implemented, deliberately narrow scope.** Nexus's `propagation::live::
-    hamqth::fetch` + `tempo_core::hamqth` (combined login+lookup per call, matching QRZ's own
-    lookup DTO shape) are exposed as `HAMQTH_LOOKUP` / `ExternalDataClient.LookupHamQth`. Rather
-    than adding HamQTH into `LookupManager`'s always-on automatic provider chain (FCC ULS > Club
-    Log > QRZ > LoTW) -- which would change lookup precedence and background-request behavior for
-    every operator, not just those who configure HamQTH, and needs its own deliberate design pass
-    -- it's wired as an **on-demand supplement inside `LookupInfoDlg`** (the existing "Lookup
-    Selected Station" dialog): after QRZ/offline data populates what it can, a HamQTH lookup fills
-    only the fields still blank, never overriding an already-known answer. Configured in
-    Options > Lookup Data > HamQTH Callsign Lookup, using the operator's own HamQTH.com login (no
-    app-level credential, matching eQSL).
-  - **Neither required a second network client.** Both reuse Nexus's already-mature, already-
-    tested transport rather than duplicating eQSL/HamQTH HTTP logic in C# -- the explicit
-    preference stated by the operator.
+policy, and reconciliation with its own richer local records.**
+
+**eQSL capability map:**
+
+| Capability | eQSL.cc supports it | Nexus implements it | Jimmy Test uses it |
+|---|---|---|---|
+| Authentication (account username/password) | yes | yes (`EqslQuery`, per-request, no session) | yes |
+| Individual QSO upload (ADIF) | yes | yes (`build_upload_body`, one record per call) | yes -- real-time, `LiveQsoUploadOrchestrator` |
+| InBox / incoming-confirmation download | yes | yes (`fetch_inbox`, 2-step, incremental `RcvdSince` cursor) | yes -- `EqslReconciler` (see below) |
+| OutBox / operator's own sent-log download | yes (eQSL.cc website) | **no** | no -- nothing to expose |
+| Confirmation/status info | yes | yes (`EQSL_QSL_RCVD` per record; `classify_upload`'s 5-way outcome) | yes -- `eqsl_qsl_rcvd` column, informational |
+| Retry / transient-error handling | -- | yes ("system is down" -> no stamp, clean retry) | yes -- surfaced as an error, never auto-marks confirmed |
+| Duplicate handling | yes | yes ("duplicate" marker -> `Duplicate`, benign) | yes -- treated as already-sent, not a failure |
+| Update / delete a QSL | yes (eQSL.cc website) | **no** | no -- nothing to expose |
+
+**eQSL, what's actually wired up:** Upload uses `propagation::live::eqsl::post_form` +
+`tempo_core::eqsl::build_upload_body`/`classify_upload` via `EQSL_UPLOAD`
+(`external_data.rs::eqsl_upload`) -> `ExternalDataClient.UploadEqsl`, alongside QRZ/Club
+Log/HRDLog in `LiveQsoUploadOrchestrator` -- own `eqsl_uploaded_at` tracking column (schema v7).
+Download+reconciliation uses `fetch_inbox` via `EQSL_DOWNLOAD` (`external_data.rs::eqsl_download`
+-- this pass also fixed a real gap: it validated `is_eqsl_adif` but not `is_complete_eqsl_body`,
+so a truncated-but-HTTP-200 response could have been treated as complete) -> new
+`EqslReconciler`/`LogbookDb.TryMarkEqslConfirmed` (schema v8, `eqsl_qsl_rcvd` column). This is
+deliberately **not** the same upsert-or-create path `AdifImporter.Import` uses for QRZ/LoTW/Club
+Log downloads (which treats the download as the operator's own full logbook and can create a
+local row for anything missing) -- an eQSL InBox record is someone else's confirmation report
+about a QSO, not a request to add one, so the reconciler only ever MATCHES existing rows
+(callsign + band + date within +/-1 day, mode as a tie-breaker) and leaves anything ambiguous or
+unmatched alone. `eqsl_qsl_rcvd` is informational only, kept out of `RuleConfirmation`'s
+award-counting SQL entirely -- matches Nexus's own documented `confirmed=true` but
+`award_confirmed=false` treatment of eQSL (eQSL is not an ARRL-recognized DXCC/WAS confirmation
+source). No app-level credential: the operator supplies their own eQSL.cc login. Both directions
+fail closed -- an eQSL error never blocks the QSO being saved locally or disrupts FT8/FT4
+operation. eQSL OutBox download and update/delete are not built, because Nexus doesn't expose
+them; writing a second eQSL client for those would be exactly the duplicate-implementation risk
+this comparison exists to avoid.
+
+**HamQTH capability map:**
+
+| Capability | HamQTH.com supports it | Nexus implements it | Jimmy Test uses it |
+|---|---|---|---|
+| Authentication / session (~1h session id) | yes | yes (`HamQthLogin`/`HamQthSession`) | yes -- re-logs in per call, no session caching (see below) |
+| Callsign lookup | yes | yes (`parse_callsign`) | yes -- real alternative primary provider |
+| Returned fields | call/name/qth/grid/us_state/country/adif/cq/itu/picture/lat/lon/us_county | all of the above **except `us_county`** (parsed struct omits it) | call/name/qth/grid/state/country/**dxcc/cq_zone/itu_zone** (this pass added the numeric fields -- previously fetched by Nexus, then discarded before reaching Jimmy Test) |
+| DXCC/ADIF numeric entity ID | yes (`<adif>`) | yes | yes -- see the DXCC-opportunity finding below |
+| QSO upload / log download / sync | HamQTH.com has its own web logbook | **no** | no |
+| Confirmation info | n/a for HamQTH the lookup service | **no** | no |
+| Recent activity / spots | HamQTH.com has a DX cluster feature | **no** | no |
+
+**HamQTH, what's actually wired up:** promoted from a QRZ-only "supplement whatever's blank"
+add-on to a **real alternative primary online lookup provider**, comparable to QRZ. New
+`HamQthProvider` mirrors `QrzProvider`'s shape exactly (own file cache, `Configure`/
+`NeedsLookup`/`LookupAsync`/`GetCachedAt`/`TestAsync`) behind a new `IOnlineLookupProvider`
+interface both now implement, so `LookupManager`'s existing automatic-lookup/policy/queue
+machinery (built once for QRZ) routes through whichever one is selected
+(`LookupManager.PrimaryProvider`) instead of hardcoding QRZ. Options > Lookup Data > "Callsign
+Lookup Provider" picks QRZ or HamQTH; only the selected one makes a live network lookup per
+callsign (the operator's explicit instruction: don't spend two live lookups to combine data) --
+QRZ's own behavior is completely unchanged when it stays selected, the default for every existing
+install. Both providers can still be independently enabled to passively contribute already-cached
+data into `Build()`'s merge regardless of which is primary (no network cost -- same read-only
+reuse every other provider already does). `HAMQTH_TEST` (login only, no lookup spent) backs a new
+Options "Test Login" button, mirroring QRZ's own.
+
+**QRZ vs HamQTH, what Jimmy Test actually gets from each:**
+
+| | QRZ (via Jimmy's `QrzProvider`) | HamQTH (via `HamQthProvider`) |
+|---|---|---|
+| Name, Grid, State, Country | yes | yes |
+| CQ Zone, ITU Zone | yes | yes |
+| Numeric DXCC/ADIF entity | **not captured** (`QrzCacheEntry` has no field for it, even though QRZ's XML returns one) | yes |
+| License class | yes | not returned by HamQTH |
+| QSL Manager, Email | yes | not returned by HamQTH |
+| County | yes (`<county>`) | not exposed (Nexus's parser drops `us_county`) |
+| Lat/Lon, photo URL | not captured (QRZ's XML has `<geoloc>`, `QrzCacheEntry` doesn't store it) | parsed by Nexus, not surfaced in Jimmy's UI (no display slot -- documented below, not built) |
+| Full data without a paid subscription | **no** -- free QRZ accounts return fewer fields | **yes** -- HamQTH's full data needs only a free account |
+| Auth/session cost per lookup | 1 round trip after the first (23h cached session key) | 2 round trips every time (no session caching -- see below) |
+| Rate courtesy | 150ms delay + single-slot semaphore | same (added for parity, no documented HamQTH limit found) |
+
+Neither is strictly better: QRZ's paid tier can return more (license class, QSL manager, email);
+HamQTH gives fuller data for free but costs an extra round trip per lookup (Jimmy's
+`HamQthProvider` deliberately doesn't cache HamQTH's session id -- simpler and more robust for an
+occasional operator-driven/queue-supplement lookup than threading a ~1h session lifetime through
+a second process, matching the reasoning already recorded for the combined `HAMQTH_LOOKUP`
+command). **Not surfaced by either side, a genuine future opportunity, not built this pass**: a
+map/photo display for lat/lon and profile pictures -- neither `QrzCacheEntry` nor
+`HamQthLookup`'s consumer currently has a UI slot for them, and adding one is a real (if small)
+UI-design decision outside this pass's scope.
+
+**Does HamQTH-through-Nexus change the ClubLogProvider/DXCC decision? No -- proven structurally,
+not merely assumed.** The earlier DXCC shadow comparison rejected Nexus's own `propagation::
+dxcc::resolve()` because it returns only an entity name, not the numeric ADIF ID `AwardTagger`
+needs. HamQTH's `dxcc` field IS numeric -- but it fails the *complete* requirement for the live
+per-decode tagging hot path for two independent, structural reasons, not accuracy: (1) it
+requires a live network round trip per callsign, incompatible with a path that must handle every
+decode, many times per FT8/FT4 cycle, entirely offline; (2) it is the *contacted station's own
+self-reported HamQTH profile address*, not a prefix-to-entity algorithm -- coverage is limited to
+callsigns that happen to have a HamQTH account with an address configured, versus
+`ClubLogProvider`'s near-universal offline prefix resolution. Both reasons hold regardless of
+per-lookup accuracy, so no live comparison against the earlier difficult test cases was needed to
+reach a confident answer. **`ClubLogProvider` stays authoritative for live award-tagging DXCC
+resolution, unchanged.** HamQTH's numeric DXCC is still genuinely useful for the on-demand
+per-station Lookup dialog, where an operator-initiated network round trip is expected -- already
+wired via `HamQthProvider.Contribute()`'s blank-fill into `Build()`, positioned after
+`ClubLog`/`Qrz` in `LookupManager`'s provider order so it only fills what they left blank.
 
 **3. Diagnostic/application logging vs. QSO logbook.** Kept explicitly separate per the operator's request. Jimmy's `SupportReportBuilder.cs` (766 lines, already redacts credential-shaped keywords before building a support report) is diagnostic-only and has no overlap with QSO data. Nexus's own diagnostics (`crates/tempo-core/src/diagnostics.rs`) were not compared in depth -- no evidence surfaced during this pass that Jimmy's diagnostic logging has a gap worth closing, and application/crash diagnostics carry none of the QSO-data risk that would make this urgent for a release-candidate pass.
 
-**Decision: Jimmy's logbook/upload stack stays fully authoritative; eQSL and HamQTH are additive integrations on top of it, not a replacement or migration.** eQSL upload and HamQTH lookup are genuinely usable now, credentials-through-Options included. eQSL download/reconciliation remains open, documented above rather than silently dropped.
+**Decision: Jimmy's logbook/upload stack stays fully authoritative; eQSL and HamQTH are additive integrations on top of it, not a replacement or migration.** Both are now genuinely usable end to end (eQSL upload+download+reconciliation, HamQTH as a real alternative primary lookup provider), built strictly against what Nexus actually implements -- nothing was duplicated in C# that Nexus already does, and nothing was claimed that Nexus doesn't yet support (eQSL OutBox/update/delete, HamQTH upload/download/sync/spots all remain unbuilt because Nexus has no such capability to expose, not because Jimmy Test chose to skip them).
 
 ## Nexus-backed facts beyond FT8/FT4: POTA, SOTA, space weather
 
@@ -297,8 +369,9 @@ shape `LiveQsoUploadOrchestrator` had already proven (a standalone class with no
 Controller reference). The bounded-restart decision was previously pure counting/clock logic
 inlined in a WinForms code-behind file, untestable without constructing a `Form`; it now has 15
 dedicated automated tests proving the rolling-window behavior (budget exhaustion, window
-rollover) that had zero direct test coverage before. Full suite: 890/890 passing as of this pass
-(includes `OtaSpotAnnotatorTests` added alongside the POTA/SOTA work above).
+rollover) that had zero direct test coverage before. Full suite: 908/908 passing as of this pass
+(includes `OtaSpotAnnotatorTests`, `EqslReconcileTests`, and `LookupManagerPrimaryProviderTests`
+added across this and the prior POTA/SOTA/eQSL/HamQTH pass).
 
 Not a large-scale restructuring of the ~28,800-line top-level `WSJTX_Controller/*.cs` -- one
 coherent, low-risk, high-value slice, matching the instruction to work in slices rather than
@@ -334,10 +407,16 @@ future pass.
   tightening).
 - Explicit Direct-contract version/capability negotiation (see above for why this is a
   deliberate, low-risk deferral, not an oversight).
-- eQSL download/reconciliation (upload and HamQTH lookup are implemented -- see "Logbook /
-  logging comparison" above for exactly what's done vs. open).
-- HamQTH as a full `LookupManager` provider-chain member (currently on-demand only in the Lookup
-  Selected Station dialog -- see above).
+- eQSL OutBox (operator's own sent-log) download, and update/delete of a QSL -- Nexus doesn't
+  implement either, so nothing to expose (see the eQSL capability map above). eQSL upload,
+  download, and reconciliation ARE implemented.
+- HamQTH QSO upload/log download/sync/spots -- Nexus doesn't implement any of these for HamQTH
+  (it's lookup-only in Nexus, matching HamQTH's own "free fallback for QRZ" role there). HamQTH
+  callsign lookup IS implemented, as a full alternative primary `LookupManager` provider (not
+  merely on-demand supplement, as an earlier pass had it).
+- A map/photo display for lat/lon and profile-picture fields QRZ/HamQTH both can return -- neither
+  side's lookup DTO currently has anywhere in Jimmy's UI to put them; a real but small UI-design
+  decision, not attempted here (see the QRZ vs HamQTH comparison above).
 - POTA/SOTA "worth chasing" notifications (see "Nexus-backed facts beyond FT8/FT4" above for the
   concrete design seam left for this).
 
