@@ -37,6 +37,12 @@ namespace WSJTX_Controller
         public float Kp { get; set; }
         public float AIndex { get; set; }
         public float XrayLong { get; set; }
+        // NOAA flare-class letter (A/B/C/M/X) and R-scale (0-5 radio-blackout risk), both
+        // Nexus's own existing classifications of XrayLong (SpaceWx::xray_class()/
+        // propagation::model::r_scale() -- see EngineHost's external_data.rs), not a Jimmy
+        // Test interpretation.
+        public string XrayClass { get; set; }
+        public int RScale { get; set; }
     }
 
     public class SpaceWxResult
@@ -104,10 +110,12 @@ namespace WSJTX_Controller
         public string SkimmerMode { get; set; }
     }
 
-    // Mirrors EngineHost's DxSpotsPayload. Configured=false means the operator hasn't set a DX
-    // cluster server address (Options > ... > DX Cluster) -- distinct from Connected=false
-    // (configured but not currently reachable), so the UI can tell "nothing to connect to" from
-    // "trying to connect".
+    // Mirrors EngineHost's DxSpotsPayload. RBN's digital skimmer feed (FT8/FT4/RTTY/PSK) is
+    // ALWAYS on -- no configuration needed, mirroring official Nexus's own default -- so
+    // Configured=false is a normal, complete state (RBN-only) and does NOT mean the tab will be
+    // empty. Configured=true means the operator has ALSO set up an optional human DX-cluster
+    // node (Options > Decode Engine) for SSB/phone and human-typed spots RBN's automated
+    // skimmers don't cover. Connected reflects EITHER source being currently reachable.
     public class DxSpotsResult
     {
         public bool Configured { get; set; }

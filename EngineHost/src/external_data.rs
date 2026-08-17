@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use propagation::live::{eqsl, hamqth, pota, swpc};
-use propagation::model::SpaceWx;
+use propagation::model::{r_scale, SpaceWx};
 use propagation::pota::OtaSpot;
 
 /// How often to refresh POTA/SOTA spots. Both feeds are meant for "who's on right now" --
@@ -154,8 +154,9 @@ impl SharedCache {
     pub fn space_wx_json(&self) -> String {
         let guard = self.space_wx.read().unwrap_or_else(|e| e.into_inner());
         let age_secs = guard.last_ok.map(|t| t.elapsed().as_secs());
+        let wire = guard.value.as_ref().map(SpaceWxWire::from);
         let payload = SpaceWxPayload {
-            value: guard.value.as_ref(),
+            value: wire.as_ref(),
             age_secs,
             last_error: guard.last_error.as_deref(),
         };
@@ -173,13 +174,84 @@ struct SpotsPayload<'a> {
     last_error: Option<&'a str>,
 }
 
+// propagation::model::SpaceWx (#[derive(Serialize)]) has no #[serde(rename_all)], so it
+// serializes its Rust field names verbatim: "a_index", "xray_long". Jimmy Test's C# side
+// (ExternalDataClient.cs) deserializes with JsonNamingPolicy.CamelCase, which expects
+// "aIndex"/"xrayLong" -- System.Text.Json does not throw on an unmatched property, so those
+// two silently kept C#'s default float value (0.0) instead of the real reading, while sfi/kp/
+// ssn (no underscore, already camelCase-equivalent) happened to match and came through fine.
+// Confirmed live in a JAWS pass: SFI/Kp read correctly, A-index/X-ray always read "0.0"/
+// "0.0e+0". Fixed here, on Jimmy Test's own EngineHost side, rather than touching the vendored
+// Nexus SpaceWx type (never hand-edited -- see scripts/prepare-nexus.ps1) -- this wire DTO is
+// exactly the pattern live_feeds.rs's BandReportPayload/RegionReportPayload already use for
+// the same reason.
+//
+// Also surfaces two of Nexus's OWN existing classifications for xray_long (never a Jimmy Test
+// interpretation): SpaceWx::xray_class() (the standard NOAA flare-class letter) and
+// propagation::model::r_scale() (the standard NOAA R-scale radio-blackout risk, 0-5) -- both
+// already computed by Nexus from the same raw value, just not previously surfaced.
+#[derive(serde::Serialize)]
+struct SpaceWxWire {
+    sfi: f32,
+    ssn: Option<f32>,
+    kp: f32,
+    #[serde(rename = "aIndex")]
+    a_index: f32,
+    #[serde(rename = "xrayLong")]
+    xray_long: f32,
+    #[serde(rename = "xrayClass")]
+    xray_class: String,
+    #[serde(rename = "rScale")]
+    r_scale: u8,
+}
+
+impl From<&SpaceWx> for SpaceWxWire {
+    fn from(wx: &SpaceWx) -> Self {
+        Self {
+            sfi: wx.sfi,
+            ssn: wx.ssn,
+            kp: wx.kp,
+            a_index: wx.a_index,
+            xray_long: wx.xray_long,
+            xray_class: wx.xray_class().to_string(),
+            r_scale: r_scale(wx.xray_long),
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct SpaceWxPayload<'a> {
-    value: Option<&'a SpaceWx>,
+    value: Option<&'a SpaceWxWire>,
     #[serde(rename = "ageSecs")]
     age_secs: Option<u64>,
     #[serde(rename = "lastError")]
     last_error: Option<&'a str>,
+}
+
+#[cfg(test)]
+mod space_wx_wire_tests {
+    use super::*;
+
+    #[test]
+    fn wire_field_names_are_camel_case_matching_jimmy_tests_expectations() {
+        let wx = SpaceWx {
+            sfi: 130.5,
+            ssn: Some(45.0),
+            kp: 2.0,
+            a_index: 8.0,
+            xray_long: 1e-6,
+        };
+        let wire = SpaceWxWire::from(&wx);
+        let json = serde_json::to_string(&wire).unwrap();
+        // The exact bug: "a_index"/"xray_long" (Rust default) vs "aIndex"/"xrayLong" (what
+        // Jimmy Test's JsonNamingPolicy.CamelCase actually looks for).
+        assert!(json.contains("\"aIndex\":8.0"), "got: {json}");
+        assert!(json.contains("\"xrayLong\":"), "got: {json}");
+        assert!(!json.contains("a_index"), "must not regress to the snake_case name: {json}");
+        assert!(!json.contains("xray_long"), "must not regress to the snake_case name: {json}");
+        assert!(json.contains("\"xrayClass\":\"C\""), "1e-6 is C-class: {json}");
+        assert!(json.contains("\"rScale\":0"), "1e-6 is below the R1 threshold (1e-5): {json}");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

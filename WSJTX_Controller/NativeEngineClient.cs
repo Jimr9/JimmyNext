@@ -168,11 +168,15 @@ namespace WSJTX_Controller
                 // spotting ran unconditionally regardless of what this checkbox said.
                 if (pskreporter) args += " --pskreporter";
 
-                // DX Spots (Alt+G window): a real DX-cluster/RBN telnet server the operator
-                // chooses -- unlike PSK Reporter's single public broker, there is no universal
-                // default, so this is opt-in only (empty = feed disabled). Startup-CLI-arg-only,
-                // same reasoning as the decode block above -- changing it in Options requires
-                // the usual engine restart.
+                // DX Spots (Alt+G window): an OPTIONAL additional human DX-cluster telnet node
+                // (SSB/phone + human-typed spots). RBN's digital skimmer feed is always on and
+                // needs no CLI arg at all (EngineHost/src/live_feeds.rs wires it unconditionally,
+                // same "wired automatically" default official Nexus's own desktop app uses) --
+                // this arg only adds a second, operator-picked source on top of it, since there
+                // is no single universal default for a human cluster node (an independently-run
+                // federation of nodes) the way there is for RBN. Startup-CLI-arg-only, same
+                // reasoning as the decode block above -- changing it in Options requires the
+                // usual engine restart.
                 if (!string.IsNullOrWhiteSpace(dxClusterAddress))
                     args += $" --dx-cluster \"{dxClusterAddress.Trim()}\"";
 

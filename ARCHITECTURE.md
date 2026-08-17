@@ -380,6 +380,50 @@ DX cluster/RBN spots and a real plain-language band-conditions nowcast, all as t
   telnet crate, no new native/transitive dependencies), matching the risk bar every other Nexus
   reuse in this project was held to.
 
+**Alt+G accessibility/functionality pass (2026-08-17), after a live JAWS test found real bugs.**
+Every bullet above describing the DX Spots tab as opt-in-only / requiring a configured server is
+now the OLD design; what actually shipped:
+
+- **RBN digital skimmer (`telnet.reversebeacon.net:7001`, FT8/FT4/RTTY/PSK) is now always on**,
+  no operator configuration needed -- mirroring official Nexus's own desktop app default exactly
+  (`kd9taw/Nexus src-tauri/src/lib.rs`'s `start_cluster_feeds`/`RBN_DIGITAL_HOST`, "the RBN CW +
+  digital skimmer feeds are wired automatically" per its own `Settings::default` comment). The
+  CW-only port (7000) is deliberately not wired -- Jimmy Test is FT8/FT4-only. The Options >
+  Decode Engine "DX Cluster server" field is now purely an ADDITIVE, optional human-cluster node
+  (SSB/phone + human-typed spots RBN's automated skimmers don't cover) -- leaving it blank still
+  gives a working DX Spots tab. Both sources push into one shared, de-duped `SpotBuffer`
+  (`live_feeds.rs`), each spot tagged `rbn: true`/`false` at the push site, same convention
+  official Nexus uses.
+- **Band Conditions no longer blanks to 0 items whenever the operator has no PSK Reporter
+  reception reports yet.** The previous `spots.is_empty()` branch in `band_conditions_json`
+  discarded `PropAdvisor::advise()`'s own physics-only fallback (MUF/absorption/aurora/greyline
+  prior producing a soft Quiet/Closed gradient per band -- see `advisor.rs`'s own test suite),
+  even though `advise()` already handles an empty spots window correctly. Removed; `advise()` now
+  runs whenever space weather is available, spots or not, and the UI status line says
+  "modeled only, no reception reports yet" when spot count is 0 so the distinction stays honest.
+- **Space Weather's A-index/X-ray always read "0.0"/"0.0e+0"** -- looking like real
+  measurements, not missing data. Root cause: `SPACE_WX`'s response serialized Nexus's own
+  `SpaceWx` type verbatim, whose Rust field names (`a_index`, `xray_long`) don't match what
+  Jimmy Test's `JsonNamingPolicy.CamelCase` deserialization looks for (`aIndex`, `xrayLong`);
+  `System.Text.Json` silently leaves an unmatched property at its default rather than throwing.
+  Fixed with a proper wire DTO on EngineHost's own side (`external_data.rs`'s `SpaceWxWire`,
+  never touching the vendored Nexus type), which also now surfaces Nexus's own existing
+  `xray_class()`/`r_scale()` classifications (standard NOAA flare-class letter and radio-blackout
+  scale) next to the raw reading. Genuinely-missing fields (SSN -- no R12 feed currently wired)
+  now read "Unavailable" instead of an ambiguous "--".
+- **POTA/SOTA row status text collapsed from two clauses to one** -- "not worked before, not
+  currently needed" on nearly every row (the common case) is now just "not worked"; "needed for N
+  awards" replaces rather than appends to the worked/not-worked clause, so it stands out instead
+  of being buried in a compound sentence.
+- **Accessibility repetition removed**: the window title, TabControl, every TabPage, and every
+  ListView/status-label AccessibleName were each independently restating "POTA and SOTA"/"DX
+  cluster and RBN"/etc., so JAWS said the same words three or four times moving from window to
+  tab to list. Brought in line with `LogbookWindow.cs`'s own convention (no custom
+  AccessibleName on TabControl/TabPage at all -- standard WinForms tab announcement is already
+  correct; short, non-repeating list/status names like "Spots list"/"Status"). Window title
+  shortened from "POTA / SOTA / DX Spots" (which repeated two of the four tab captions verbatim)
+  to "Spots & Conditions".
+
 **Deferred, documented, not attempted this pass: POTA/SOTA/DX-spot "worth chasing" notifications.**
 The operator asked for optional, non-chatty notifications when a worth-chasing spot appears.
 `OtaSpotsWindow` is pull-only (operator opens it, sees current facts) and satisfies the core

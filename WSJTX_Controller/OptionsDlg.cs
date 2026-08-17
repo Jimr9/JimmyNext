@@ -1847,8 +1847,8 @@ namespace WSJTX_Controller
 
             var dxClusterLabel = new System.Windows.Forms.Label
             {
-                Text = "DX Cluster server (optional, host:port):",
-                AccessibleName = "DX Cluster server label",
+                Text = "Additional human DX Cluster server (optional, host:port):",
+                AccessibleName = "Additional human DX Cluster server label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1857,10 +1857,14 @@ namespace WSJTX_Controller
             decodeEnginePanel.Controls.Add(dxClusterLabel);
             y += 20;
 
-            // Feeds the DX Spots tab of the POTA/SOTA/DX Spots window (Alt+G). Unlike PSK
-            // Reporter's single public broker (Band Conditions tab, always on, no setting
-            // needed), a DX cluster is an independently-run telnet node the operator picks --
-            // there is no universal correct default. Empty = that tab's feed stays disabled.
+            // Feeds the DX Spots tab of the Spots & Conditions window (Alt+G), alongside RBN's
+            // digital skimmer feed (FT8/FT4/RTTY/PSK), which is ALWAYS on and needs no setting
+            // here -- same "wired automatically" default official Nexus's own desktop app uses
+            // (EngineHost/src/live_feeds.rs's own module comment). This field is now purely
+            // additive: an optional human-run DX-cluster node for SSB/phone and human-typed
+            // spots RBN's automated skimmers don't cover -- there's no single universal default
+            // for THAT (DX clusters are an independently-run federation of nodes), so it stays
+            // operator-picked. Leave blank and the DX Spots tab still works (RBN only).
             // Startup-only, like every other control on this tab -- changing it restarts the
             // engine, same as My Call/My Grid/audio device above.
             _dxClusterAddressTextBox = new System.Windows.Forms.TextBox
@@ -1870,8 +1874,12 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(240, 21),
                 TabIndex = 8,
                 Font = font,
-                AccessibleName = "DX Cluster server address",
-                AccessibleDescription = "Optional host:port of a DX-cluster or RBN telnet node, e.g. dxc.nc7j.com:7373. Leave blank to leave the DX Spots tab disabled.",
+                AccessibleName = "Additional human DX Cluster server address",
+                // dxc.wa9pie.net:8000 is a genuine human-node example (Nexus's own default
+                // secondary node) -- the previous example, dxc.nc7j.com:7373, is actually
+                // NC7J's *skimmer* port per Nexus's own settings.rs comment, not a human node,
+                // and would have just duplicated RBN spots Jimmy Test already pulls in.
+                AccessibleDescription = "Optional host:port of a human-run DX-cluster telnet node for SSB/phone spots, e.g. dxc.wa9pie.net:8000. The automated reverse beacon network feed works with this left blank.",
             };
             decodeEnginePanel.Controls.Add(_dxClusterAddressTextBox);
             y += 24;

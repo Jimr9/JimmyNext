@@ -167,6 +167,8 @@ static class JimmyTests
         TxLevelPerBandRestoreTests();
         DirectPathTxLevelBandTrackingTests();
         DebugOutputLogWriteFailureTests();
+        OtaSpotsWindowFormatStatusTests();
+        SpaceWxJsonDeserializationTests();
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
@@ -1738,6 +1740,97 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DebugOutputLogWriteFailureTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── OtaSpotsWindow.FormatStatus: concise POTA/SOTA row status text ─────────────
+    // A live JAWS pass (2026-08-17) found every row saying "not worked before, not currently
+    // needed" -- verbose, and the "needed" half was noise on almost every row. FormatStatus now
+    // collapses to one clause: needed-for-N replaces (not appends to) the worked/not-worked
+    // clause, and "not currently needed" never prints.
+    static void OtaSpotsWindowFormatStatusTests()
+    {
+        Console.WriteLine("\n── OtaSpotsWindow.FormatStatus: concise, silences 'not currently needed' ──");
+        try
+        {
+            Check("null annotation -> empty string, not a crash",
+                OtaSpotsWindow.FormatStatus(null) == "", true);
+
+            var notWorkedNotNeeded = new OtaSpotAnnotation { WorkedBefore = false, NeededForAwardCount = 0 };
+            Check("Not worked, not needed -> just 'not worked' (no 'not currently needed' noise)",
+                OtaSpotsWindow.FormatStatus(notWorkedNotNeeded) == "not worked", true);
+
+            var workedNotNeeded = new OtaSpotAnnotation { WorkedBefore = true, NeededForAwardCount = 0 };
+            Check("Worked before, not needed -> just 'worked'",
+                OtaSpotsWindow.FormatStatus(workedNotNeeded) == "worked", true);
+
+            var neededOne = new OtaSpotAnnotation { WorkedBefore = false, NeededForAwardCount = 1 };
+            Check("Needed for 1 award -> singular, replaces the worked clause entirely",
+                OtaSpotsWindow.FormatStatus(neededOne) == "needed for 1 award", true);
+
+            var neededTwo = new OtaSpotAnnotation { WorkedBefore = false, NeededForAwardCount = 2 };
+            Check("Needed for 2 awards -> plural",
+                OtaSpotsWindow.FormatStatus(neededTwo) == "needed for 2 awards", true);
+
+            // Needed always wins over worked-before, even if (unusually) both are true -- the
+            // "worth attention" fact should stand out, not get buried behind "worked".
+            var workedButStillNeeded = new OtaSpotAnnotation { WorkedBefore = true, NeededForAwardCount = 3 };
+            Check("Worked before AND needed -> needed wins (the actionable fact)",
+                OtaSpotsWindow.FormatStatus(workedButStillNeeded) == "needed for 3 awards", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  OtaSpotsWindowFormatStatusTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── SpaceWx JSON deserialization: aIndex/xrayLong must not silently read as 0.0 ────
+    // Root cause of a live JAWS pass finding A-index/X-ray always "0.0"/"0.0e+0": EngineHost's
+    // SPACE_WX response used to serialize Nexus's own SpaceWx type verbatim, whose Rust field
+    // names ("a_index"/"xray_long") don't match what ExternalDataClient's
+    // JsonNamingPolicy.CamelCase looks for ("aIndex"/"xrayLong") -- System.Text.Json doesn't
+    // throw on an unmatched property, it just leaves the C# property at its default value.
+    // Fixed on EngineHost's own side (external_data.rs's new SpaceWxWire DTO, camelCase-renamed
+    // + xrayClass/rScale added). This test locks in the C# side of the contract: feed it the
+    // EXACT shape EngineHost now emits and confirm every field actually populates.
+    static void SpaceWxJsonDeserializationTests()
+    {
+        Console.WriteLine("\n── SpaceWx JSON: aIndex/xrayLong deserialize from EngineHost's camelCase wire shape ──");
+        try
+        {
+            var options = new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+                PropertyNameCaseInsensitive = true,
+            };
+
+            // Exactly the shape external_data.rs's SpaceWxWire now serializes.
+            string json = "{\"sfi\":130.5,\"ssn\":45.0,\"kp\":2.0,\"aIndex\":8.0,\"xrayLong\":1e-6,\"xrayClass\":\"C\",\"rScale\":0}";
+            var wx = System.Text.Json.JsonSerializer.Deserialize<SpaceWx>(json, options);
+
+            Check("Sfi deserializes (already worked before the fix -- no underscore in the name)",
+                Math.Abs(wx.Sfi - 130.5f) < 0.01f, true);
+            Check("AIndex deserializes to the real value, not the float default (the actual bug)",
+                Math.Abs(wx.AIndex - 8.0f) < 0.01f, true);
+            Check("XrayLong deserializes to the real value, not the float default (the actual bug)",
+                Math.Abs(wx.XrayLong - 1e-6f) < 1e-9f, true);
+            Check("XrayClass (Nexus's own flare-class letter) comes through",
+                wx.XrayClass == "C", true);
+            Check("RScale (Nexus's own NOAA R-scale) comes through",
+                wx.RScale == 0, true);
+
+            // The exact snake_case shape the bug used to produce -- must NOT populate anymore
+            // (regression guard: if someone reverts the Rust rename, this test catches it).
+            string brokenJson = "{\"sfi\":130.5,\"ssn\":45.0,\"kp\":2.0,\"a_index\":8.0,\"xray_long\":1e-6}";
+            var broken = System.Text.Json.JsonSerializer.Deserialize<SpaceWx>(brokenJson, options);
+            Check("Snake_case a_index does NOT match -> stays at the float default (proves the bug is real)",
+                broken.AIndex == 0.0f, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SpaceWxJsonDeserializationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

@@ -67,7 +67,16 @@ namespace WSJTX_Controller
             _activeAwardTags = activeAwardTags;
             _currentBand = currentBand;
 
-            Text = "POTA / SOTA / DX Spots";
+            // Shorter than the tab captions it sits above ("POTA / SOTA", "DX Spots", ...) --
+            // the old title ("POTA / SOTA / DX Spots") repeated two of those captions verbatim,
+            // so JAWS said the same words twice moving from window to tab strip. A live JAWS
+            // pass on this window (2026-08-17) also found the TabControl/TabPage/ListView/
+            // status-label AccessibleNames below all separately restating the same "POTA and
+            // SOTA"/"DX cluster and RBN" phrases -- every one of those custom names was removed
+            // or shortened below to stop the repetition; standard WinForms tab/list accessible
+            // behavior (TabPage.Text as the tab's own name, same as LogbookWindow.cs) does the
+            // rest without fighting JAWS's normal announcements.
+            Text = "Spots & Conditions";
             FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
@@ -77,10 +86,12 @@ namespace WSJTX_Controller
             KeyPreview = true;
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); if (e.KeyCode == Keys.F5) RefreshAll(); };
 
+            // No custom AccessibleName -- TabControl's default accessible behavior (JAWS
+            // announces each TabPage's own Text as you switch) is exactly right here, same
+            // convention as LogbookWindow.cs's own TabControl.
             _tabs = new TabControl
             {
                 Dock = DockStyle.Fill,
-                AccessibleName = "Spots and conditions tabs",
             };
             _tabs.TabPages.Add(BuildPotaSotaTab());
             _tabs.TabPages.Add(BuildBandConditionsTab());
@@ -105,10 +116,12 @@ namespace WSJTX_Controller
 
         // ── Shared helpers ───────────────────────────────────────────────────────
 
-        private static TabPage MakeTabPage(string title, string accessibleName)
+        // No AccessibleName override -- TabPage's default accessible name is its own Text
+        // (the tab caption already read when switching tabs), so a second, longer restatement
+        // here was pure repetition (see the constructor's own comment).
+        private static TabPage MakeTabPage(string title)
         {
-            var page = new TabPage(title) { AccessibleName = accessibleName };
-            return page;
+            return new TabPage(title);
         }
 
         private static Button MakeRefreshButton(EventHandler onClick, string accessibleName)
@@ -124,7 +137,13 @@ namespace WSJTX_Controller
             return btn;
         }
 
-        private static ListView MakeListView(string accessibleName, string accessibleDescription)
+        // accessibleName is deliberately short ("Spots list"/"Bands list") -- the tab already
+        // named the subject when it was switched to (e.g. "POTA / SOTA"), so repeating it here
+        // is the redundancy a live JAWS pass flagged. No AccessibleDescription: JAWS announces
+        // it alongside the name every time focus lands on the list, and the column headers
+        // already explain each field -- a longer one-time description added repetition, not
+        // clarity, for a control the operator revisits constantly.
+        private static ListView MakeListView(string accessibleName)
         {
             return new ListView
             {
@@ -135,7 +154,6 @@ namespace WSJTX_Controller
                 Dock = DockStyle.Fill,
                 TabIndex = 0,
                 AccessibleName = accessibleName,
-                AccessibleDescription = accessibleDescription,
             };
         }
 
@@ -163,18 +181,17 @@ namespace WSJTX_Controller
 
         private TabPage BuildPotaSotaTab()
         {
-            var page = MakeTabPage("POTA / SOTA", "POTA and SOTA activator spots");
-            _potaList = MakeListView("POTA and SOTA spots",
-                "Currently spotted park and summit activators.");
+            var page = MakeTabPage("POTA / SOTA");
+            _potaList = MakeListView("Spots list");
             _potaList.Columns.Add("Program", 70);
             _potaList.Columns.Add("Reference", 90);
             _potaList.Columns.Add("Activator", 100);
             _potaList.Columns.Add("Freq/Mode", 110);
             _potaList.Columns.Add("Age", 70);
-            _potaList.Columns.Add("Status", 220);
+            _potaList.Columns.Add("Status", 150);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _potaStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "POTA and SOTA status", Text = "Loading..." };
+            _potaStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
             var refreshBtn = MakeRefreshButton((s, e) => RefreshPotaSota(), "Refresh POTA and SOTA spots now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_potaStatusLabel);
@@ -205,15 +222,10 @@ namespace WSJTX_Controller
                         var item = new ListViewItem(spot.Program ?? "");
                         item.SubItems.Add(spot.Reference ?? "");
                         item.SubItems.Add(spot.Activator ?? "");
-                        item.SubItems.Add($"{spot.FreqKhz / 1000.0:0.000} MHz {spot.Mode}");
+                        item.SubItems.Add($"{spot.FreqKhz / 1000.0:0.000} {spot.Mode}");
                         item.SubItems.Add(FormatAge(spot.SpotTimeUnix));
                         item.SubItems.Add(FormatStatus(annotation));
-                        // One accessible name per row that reads sensibly as a whole, matching
-                        // the conceptual example from the release-candidate request ("K1ABC --
-                        // POTA K-1234 -- 20m FT8 -- spotted 2 min ago -- needed for 2 awards").
                         item.Name = spot.Activator;
-                        item.ToolTipText = $"{spot.Activator} -- {spot.Program} {spot.Reference} -- " +
-                            $"{spot.FreqKhz / 1000.0:0.000} MHz {spot.Mode} -- spotted {FormatAge(spot.SpotTimeUnix)} -- {FormatStatus(annotation)}";
                         _potaList.Items.Add(item);
                     }
                 }
@@ -231,21 +243,27 @@ namespace WSJTX_Controller
                 _potaStatusLabel.Text = $"{_potaList.Items.Count} spots" + (result?.AgeSecs != null ? $" -- as of {result.AgeSecs}s ago" : "");
         }
 
-        private static string FormatStatus(OtaSpotAnnotation a)
+        // One clause, not two -- a live JAWS pass on this window found every row saying
+        // "not worked before, not currently needed" (dozens of rows deep, almost always both
+        // clauses negative). "Needed" only matters when it's true, so it now REPLACES the
+        // worked/not-worked clause instead of appending to it; the negative "not currently
+        // needed" half is silenced entirely rather than repeated on every row.
+        // internal (not private): JimmyTests exercises this directly (InternalsVisibleTo, see
+        // AssemblyInfo.Testing.cs) to lock in the concise wording without needing a live
+        // EngineHost connection or a real LogbookDb.
+        internal static string FormatStatus(OtaSpotAnnotation a)
         {
             if (a == null) return "";
-            string worked = a.WorkedBefore ? "worked before" : "not worked before";
-            string needed = a.NeededForAwardCount > 0
-                ? $"needed for {a.NeededForAwardCount} award{(a.NeededForAwardCount == 1 ? "" : "s")}"
-                : "not currently needed";
-            return $"{worked}, {needed}";
+            if (a.NeededForAwardCount > 0)
+                return $"needed for {a.NeededForAwardCount} award{(a.NeededForAwardCount == 1 ? "" : "s")}";
+            return a.WorkedBefore ? "worked" : "not worked";
         }
 
         // ── Band Conditions tab ──────────────────────────────────────────────────
 
         private TabPage BuildBandConditionsTab()
         {
-            var page = MakeTabPage("Band Conditions", "Band conditions nowcast");
+            var page = MakeTabPage("Band Conditions");
 
             _condHeadlineBox = new TextBox
             {
@@ -256,12 +274,11 @@ namespace WSJTX_Controller
                 BorderStyle = BorderStyle.None,
                 BackColor = SystemColors.Control,
                 TabStop = true,
-                AccessibleName = "Band conditions headline",
+                AccessibleName = "Headline",
                 Text = "Loading...",
             };
 
-            _condBandsList = MakeListView("Per-band conditions",
-                "One row per band: activity tier, confidence, stations heard, best region, and the reason.");
+            _condBandsList = MakeListView("Bands list");
             _condBandsList.Columns.Add("Band", 60);
             _condBandsList.Columns.Add("Tier", 70);
             _condBandsList.Columns.Add("Confidence", 80);
@@ -270,7 +287,7 @@ namespace WSJTX_Controller
             _condBandsList.Columns.Add("Reason", 260);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _condStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Band conditions status", Text = "Loading..." };
+            _condStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
             var refreshBtn = MakeRefreshButton((s, e) => RefreshBandConditions(), "Refresh band conditions now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_condStatusLabel);
@@ -329,9 +346,17 @@ namespace WSJTX_Controller
                     ? " -- " + string.Join("; ", result.Banners)
                     : "";
                 string connected = result != null && result.Connected ? "connected" : "not connected";
+                // Bands are always populated now (EngineHost's PropAdvisor falls back to a
+                // physics-only model when there are no PSK Reporter reception reports yet --
+                // see live_feeds.rs's band_conditions_json), so 0 reports no longer means an
+                // empty tab. Call that out explicitly rather than leaving the operator to guess
+                // whether the ladder below is observed or modeled.
+                string modeledOnly = (result?.SpotCount ?? 0) == 0
+                    ? " -- modeled only, no reception reports yet"
+                    : "";
                 _condStatusLabel.Text = $"{result?.SpotCount ?? 0} reception reports, {connected}" +
                     (result?.LastEventAgeSecs != null ? $", last report {FormatAgeSecs(result.LastEventAgeSecs)}" : "") +
-                    banners;
+                    modeledOnly + banners;
             }
         }
 
@@ -339,9 +364,8 @@ namespace WSJTX_Controller
 
         private TabPage BuildDxSpotsTab()
         {
-            var page = MakeTabPage("DX Spots", "DX cluster and RBN skimmer spots");
-            _dxList = MakeListView("DX cluster and RBN spots",
-                "Recent spots from the configured DX cluster or RBN skimmer node.");
+            var page = MakeTabPage("DX Spots");
+            _dxList = MakeListView("Spots list");
             _dxList.Columns.Add("DX Call", 90);
             _dxList.Columns.Add("Frequency", 90);
             _dxList.Columns.Add("Mode", 70);
@@ -350,7 +374,7 @@ namespace WSJTX_Controller
             _dxList.Columns.Add("Comment", 200);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _dxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "DX spots status", Text = "Loading..." };
+            _dxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
             var refreshBtn = MakeRefreshButton((s, e) => RefreshDxSpots(), "Refresh DX spots now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_dxStatusLabel);
@@ -393,9 +417,14 @@ namespace WSJTX_Controller
             {
                 _dxStatusLabel.Text = $"{_dxList.Items.Count} spots (stale) -- {error}";
             }
-            else if (result != null && !result.Configured)
+            // The reverse beacon network (RBN) digital skimmer feed is always on and needs no
+            // configuration -- this used to read "No DX cluster server configured", which was
+            // both wrong (spots show up with nothing configured) and left the operator staring
+            // at an empty list with no idea it would ever fill in. "Connected" not yet being
+            // true here just means the RBN session hasn't come up yet.
+            else if (result != null && !result.Connected && _dxList.Items.Count == 0)
             {
-                _dxStatusLabel.Text = "No DX cluster server configured (Options > Decode Engine).";
+                _dxStatusLabel.Text = "Connecting to the reverse beacon network...";
             }
             else if (result != null && !result.Connected)
             {
@@ -407,8 +436,16 @@ namespace WSJTX_Controller
             }
             else
             {
+                // Configured=false is a normal, complete state now (RBN-only, see
+                // DxSpotsResult's own comment) -- surfaced as a one-line opt-in tip, not an
+                // error, since adding a human cluster node only ADDS coverage (SSB/phone) it
+                // doesn't unlock something otherwise broken.
+                string tip = (result != null && !result.Configured)
+                    ? " -- add a DX cluster server in Options > Decode Engine for SSB/phone spots too"
+                    : "";
                 _dxStatusLabel.Text = $"{_dxList.Items.Count} spots" +
-                    (result?.LastEventAgeSecs != null ? $" -- last spot {FormatAgeSecs(result.LastEventAgeSecs)}" : "");
+                    (result?.LastEventAgeSecs != null ? $" -- last spot {FormatAgeSecs(result.LastEventAgeSecs)}" : "") +
+                    tip;
             }
         }
 
@@ -416,7 +453,7 @@ namespace WSJTX_Controller
 
         private TabPage BuildSpaceWeatherTab()
         {
-            var page = MakeTabPage("Space Weather", "Current space weather");
+            var page = MakeTabPage("Space Weather");
             var panel = new Panel { Dock = DockStyle.Fill };
 
             int lx = 16, vx = 180, y = 16, rh = 26, fw = 200, tabIndex = 0;
@@ -427,7 +464,7 @@ namespace WSJTX_Controller
             _wxXrayValue = AddWxRow(panel, "X-ray flux (long):", ref y, lx, vx, fw, rh, ref tabIndex);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _wxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Space weather status", Text = "Loading..." };
+            _wxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
             var refreshBtn = MakeRefreshButton((s, e) => RefreshSpaceWeather(), "Refresh space weather now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_wxStatusLabel);
@@ -457,22 +494,42 @@ namespace WSJTX_Controller
             return val;
         }
 
+        // Root cause of a live JAWS pass finding A-index/X-ray always reading "0.0"/"0.0e+0"
+        // (looking like real-but-wrong measurements, not missing data): EngineHost's SPACE_WX
+        // response used Nexus's own SpaceWx type verbatim, whose #[derive(Serialize)] emits
+        // its Rust field names ("a_index"/"xray_long") rather than the camelCase
+        // ("aIndex"/"xrayLong") JsonNamingPolicy.CamelCase looks for below -- System.Text.Json
+        // doesn't throw on an unmatched property, it just leaves AIndex/XrayLong at C#'s
+        // default float value (0.0), while Sfi/Kp/Ssn (no underscore, already camelCase-
+        // equivalent) happened to match and came through correctly. Fixed on EngineHost's own
+        // side (external_data.rs's new SpaceWxWire DTO) -- this method needed no change for
+        // that part, but see below for what DID change: honest "Unavailable" text instead of a
+        // misleading "--", and Nexus's own flare classification surfaced alongside X-ray.
         private void RefreshSpaceWeather()
         {
             var result = _client.GetSpaceWx(out string error);
             if (error != null || result?.Value == null)
             {
-                _wxSfiValue.Text = _wxSsnValue.Text = _wxKpValue.Text = _wxAValue.Text = _wxXrayValue.Text = "--";
+                _wxSfiValue.Text = _wxSsnValue.Text = _wxKpValue.Text = _wxAValue.Text = _wxXrayValue.Text = "Unavailable";
                 _wxStatusLabel.Text = error ?? result?.LastError ?? "No data yet.";
                 return;
             }
 
             var wx = result.Value;
             _wxSfiValue.Text = wx.Sfi.ToString("0.0");
-            _wxSsnValue.Text = wx.Ssn.HasValue ? wx.Ssn.Value.ToString("0.0") : "--";
+            // Ssn is genuinely optional in Nexus's own model (no R12 feed currently wired --
+            // "consumers derive it from SFI" per SpaceWx's own doc comment) -- "Unavailable" is
+            // accurate here, not a zero standing in for a missing reading.
+            _wxSsnValue.Text = wx.Ssn.HasValue ? wx.Ssn.Value.ToString("0.0") : "Unavailable";
             _wxKpValue.Text = wx.Kp.ToString("0.0");
             _wxAValue.Text = wx.AIndex.ToString("0.0");
-            _wxXrayValue.Text = wx.XrayLong.ToString("0.0e+0") + " W/m²";
+            // NOAA flare-class letter + R-scale (radio-blackout risk, 0-5) are Nexus's own
+            // existing classifications of this same raw reading (SpaceWx::xray_class()/
+            // propagation::model::r_scale()), not a Jimmy Test interpretation -- surfaced
+            // alongside the raw value since a bare "1.0e-7 W/m²" means little to most operators
+            // on its own.
+            string flareClass = string.IsNullOrEmpty(wx.XrayClass) ? "" : $" ({wx.XrayClass}-class, R{wx.RScale})";
+            _wxXrayValue.Text = wx.XrayLong.ToString("0.0e+0") + " W/m²" + flareClass;
 
             _wxStatusLabel.Text = result.LastError != null
                 ? $"Feed warning: {result.LastError}"
