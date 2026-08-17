@@ -26,9 +26,22 @@ namespace WSJTX_Controller
                 }
                 catch (Exception e)
                 {
-#if DEBUG
-                    Console.WriteLine(e);
-#endif
+                    // Previously silently swallowed (only ever visible in a DEBUG console) --
+                    // diagLog stayed true and logSw stayed open, so EVERY subsequent DebugOutput
+                    // call (there are hundreds of call sites) kept retrying the same broken
+                    // stream and re-catching the same exception, forever, with zero visibility
+                    // to the operator in a Release build. Same class of bug SetLogFileState's
+                    // own "couldn't open" catch was fixed for (above, 2026-08-08, "log is blank"
+                    // report despite logging being on by default) -- this is its "couldn't WRITE
+                    // to an already-open log" counterpart, missed at the time. Stop retrying and
+                    // tell the operator once, matching that precedent exactly: null out logSw so
+                    // the guard above skips every future call, and disable diagLog so the Options
+                    // checkbox correctly shows "off" next time it's opened (LogModeChanged/
+                    // OptionsDlg.cs both just read diagLog fresh, no separate state to desync).
+                    logSw = null;
+                    diagLog = false;
+                    Notify.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Debug log",
+                        $"log write failed, logging stopped: {e.Message}"));
                 }
             }
 
@@ -39,6 +52,12 @@ namespace WSJTX_Controller
             }
 #endif
         }
+
+        // Test-only hook (JimmyTests, see InternalsVisibleTo in AssemblyInfo.Testing.cs) --
+        // lets a test put logSw into a genuinely-broken state (e.g. a disposed StreamWriter) to
+        // exercise DebugOutput's own write-failure circuit breaker without real file I/O.
+        internal void TestSetLogWriter(StreamWriter sw) => logSw = sw;
+        internal bool TestLogWriterIsNull => logSw == null;
 
         private string CurrentStatus()
         {

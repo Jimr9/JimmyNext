@@ -108,7 +108,20 @@ namespace WSJTX_Controller
             catch (Exception err)
             {
 #if DEBUG
+                // This class's sockets are only ever opened by ConnectNativeEngine
+                // (WsjtxClient.Protocol.cs), itself only reachable via
+                // TestModeGuard.IsTestMode -- and run_replay_tests.bat always runs the DEBUG
+                // build (see that script's own JIMMY_EXE path), so this branch is exactly the
+                // one place this callback is ever genuinely exercised. Logged here for a
+                // developer diagnosing a replay-test failure, not swallowed.
                 Console.WriteLine($"Exception: ReceiveCallback() {err}");
+#else
+                // Release/production never reaches this callback at all (see above) -- no
+                // Notify/status-reporting reference exists on this class to route it to even if
+                // it did (deliberately: "zero business-logic dependency", this class's own
+                // header comment). Nothing meaningful to do with err here; discard explicitly
+                // rather than leave an unused-variable warning unexplained.
+                _ = err;
 #endif
                 return;
             }

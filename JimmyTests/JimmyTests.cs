@@ -166,6 +166,7 @@ static class JimmyTests
         AudioTuningHotkeyTests();
         TxLevelPerBandRestoreTests();
         DirectPathTxLevelBandTrackingTests();
+        DebugOutputLogWriteFailureTests();
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
@@ -1678,6 +1679,65 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DirectPathTxLevelBandTrackingTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── DebugOutput: log-write-failure circuit breaker, 2026-08-17 ─────────────────────────
+    // Found while investigating an unused-variable warning in Release: DebugOutput's own catch
+    // block silently swallowed a logSw.WriteLine failure in Release builds (only ever visible
+    // via a DEBUG-only Console.WriteLine) -- diagLog stayed true and logSw stayed open, so
+    // EVERY subsequent call (there are hundreds of DebugOutput call sites throughout the app)
+    // kept retrying the same broken stream and re-swallowing the same exception, forever, with
+    // zero operator visibility in a real Release build. This is the exact same class of bug
+    // SetLogFileState's own "couldn't open the log file" catch was already fixed for (2026-08-08,
+    // a real "log is blank" tester report) -- this is its "couldn't WRITE to an already-open
+    // log" counterpart, which had been missed. Proves the fix's circuit breaker actually trips
+    // and stays tripped, using a genuinely-broken StreamWriter (a disposed one), not just that
+    // the code compiles.
+    static void DebugOutputLogWriteFailureTests()
+    {
+        Console.WriteLine("\n── DebugOutput: log write failure stops retrying, doesn't throw ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // A StreamWriter over an already-disposed MemoryStream throws ObjectDisposedException
+            // on the next WriteLine -- but only if it actually touches the underlying stream:
+            // StreamWriter buffers internally by default, so a plain WriteLine with no flush
+            // silently no-ops here without AutoFlush (caught live writing this test -- the first
+            // draft asserted nothing because of exactly this). AutoFlush=true matches
+            // SetLogFileState's own real logSw setup, so this is the same configuration
+            // production actually uses, not a synthetic-only difference.
+            var ms = new System.IO.MemoryStream();
+            var brokenWriter = new StreamWriter(ms) { AutoFlush = true };
+            ms.Dispose();
+            wc.TestSetLogWriter(brokenWriter);
+
+            wc.diagLog = true;
+            wc.DebugOutput("first message -- write fails here");
+
+            Check("Log write failure disables diagLog (the Options checkbox will show 'off' next open)",
+                wc.diagLog, false);
+            Check("...and nulls out the broken writer",
+                wc.TestLogWriterIsNull, true);
+
+            // Second call must be a harmless no-op -- proves the circuit breaker actually stops
+            // future attempts instead of retrying the same broken stream every time.
+            bool threw = false;
+            try { wc.DebugOutput("second message -- must not retry or throw"); }
+            catch { threw = true; }
+            Check("A second DebugOutput call after the failure does not throw (no retry storm)",
+                threw, false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DebugOutputLogWriteFailureTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
