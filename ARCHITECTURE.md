@@ -53,7 +53,7 @@ that script before building EngineHost if `.nexus-src` doesn't exist.
 |---|---|---|
 | `Awards/` | 14 | Configurable award/rule system: `RuleEngine`, `RuleDefinition`, `AwardMatcher`/`AwardTagger`. Operator-configured, not Nexus's concern (Nexus may supply facts like DXCC entity; Jimmy decides what those facts mean for an award). |
 | `Classification/` | 3 | **(verified)** `ClassificationEngine` computes "is this new/DX/what country" from Jimmy's own `LogbookDb` + `LookupManager`, replacing WSJT-X's wire-supplied classification fields (`ClassificationCutover` is a rollback valve from that migration, not Nexus-related). Correctly Jimmy-owned: this is exactly the operator-intelligence layer over raw facts the target architecture calls for. |
-| `Logbook/` | 15 | The QSO database and ADIF/sync logic. Data-sensitive -- evaluated, not touched, per the operator's explicit instruction to be conservative here. |
+| `Logbook/` | 15 | The QSO database and ADIF/sync logic. Data-sensitive -- evaluated (see "Logbook/logging comparison" below), not migrated. |
 | `Lookup/` | 10 | `LookupManager` + provider abstraction (`QrzProvider`, `ClubLogProvider`, `LoTWProvider`, `FccUlsProvider`) for callsign -> country/continent/bio enrichment. **See "Nexus capability review" below** -- this is the one area where a real, well-scoped Nexus-adoption opportunity was found. |
 | `Notify/` | 10 | Notification policy, templates, timing, dedup. Operator-facing decisions; stays Jimmy-owned per the target architecture. |
 | `Radio/` | 1 | `RigctldClient` -- see "Radio/CAT/PTT ownership" above. |
@@ -125,7 +125,25 @@ the structural blocker above.
 
 **5. Not appropriate for Jimmy:**
 - Nexus's own Tauri/React UI (`ui/`) -- Jimmy's accessible WinForms UI is the whole point; not a candidate for reuse in any form.
-- Nexus's own logbook (`crates/tempo-core/src/logbook.rs`) -- Jimmy's logbook is data-sensitive, already correctly evaluated as staying Jimmy-owned per the operator's explicit conservatism instruction on logbook/user-data.
+
+## Logbook / logging comparison
+
+Requested specifically: don't assume Jimmy's logbook is untouchable just because it's data-sensitive, but don't move data for architectural purity either. Compared actual capabilities on both sides.
+
+**What's there.** Jimmy: `WSJTX_Controller/Logbook/` (SQLite via `LogbookDb.cs`, ~5,900 lines across ADIF import/export/parse/record-building, plus dedicated upload clients for QRZ, Club Log, LoTW via TQSL, and HRDLog.net) plus `LiveQsoUploadOrchestrator.cs` (real-time upload) and `LogbookAutoSync.cs` (batch sync). Nexus: `crates/tempo-core/src/logbook.rs` (4,008 lines) plus dedicated modules for `clublog.rs`, `lotw.rs`/`lotw_upload.rs`, `hrdlog.rs`, `eqsl.rs`, `hamqth.rs` -- also a mature, multi-service system, built for Nexus's own desktop app.
+
+**1. Already correctly owned by the right side, verified by reading the code:**
+- **Local QSO storage.** Jimmy's `LogbookDb` is a real SQLite database with a `dedup_key` UNIQUE constraint and `ON CONFLICT(dedup_key) DO UPDATE` -- proper dedup/correction semantics, not a flat ADIF file. It's also the data source `ClassificationEngine.HasWorkedBefore()` and the whole award system query directly. Nexus's logbook is ADIF-file-based, for a separate app with its own separate awards/needs model (`propagation::dxped::LogNeeds`). These are two independently-evolved systems serving two different applications' operator workflows, not a duplicate-vs-original relationship -- migrating would mean rebuilding Jimmy's award/classification query layer against a different data model for no functional gain. **Jimmy stays authoritative.**
+- **Who writes the log.** Already correctly divided, confirmed in EngineHost's own `RadioConfig` construction: `auto_log: false` with the comment *"Jimmy owns logbook writes; the native engine must never double-log."* Nexus supplies the QSO facts (via the snapshot); Jimmy alone decides when and what to write. No change needed -- this is the target architecture already in place.
+- **Local logging never blocks on an external service.** `LiveQsoUploadOrchestrator` runs uploads on a background `Task`, independent of the synchronous local SQLite write, with a circuit breaker for Club Log specifically (matching Club Log's own documented API requirement: stop retrying after a failure until the operator fixes something). A QRZ/Club Log/HRDLog outage cannot prevent or delay safe local logging. This class is also a good, already-proven precedent for the modularization work below -- it was already extracted from `WsjtxClient` with no WinForms/Controller reference at all.
+- **Credentials.** Jimmy encrypts stored credentials at rest via Windows DPAPI (`CredentialProtector.cs`), scoped to the current Windows user. Nexus's `lotw.rs` authenticates via the LoTW *website* password over an HTTPS query string; Jimmy's LoTW integration instead uses TQSL (`TqslUploadClient.cs`), ARRL's own official certificate-based signing tool -- arguably the more standard and secure of the two approaches, not a gap to close.
+
+**2. Genuine capability Jimmy doesn't have, real but not adopted this pass:**
+- **eQSL and HamQTH.** Nexus has working integrations (`eqsl.rs`, `hamqth.rs`); Jimmy has neither. This is an actual feature gap, not an architecture question -- adding it means a new credentialed external service end to end (settings UI, credential storage, upload client, retry/circuit-breaking, tests), the same shape of work Jimmy's existing four services each already received individually. Not safe to add for the first time, this late in an already large release pass, without the same care. Recorded as a real candidate for a future, dedicated pass -- not because it's hard, but because it's new, untested surface area, and rushing exactly this kind of thing is what the operator's conservatism instruction on data-adjacent work exists to prevent.
+
+**3. Diagnostic/application logging vs. QSO logbook.** Kept explicitly separate per the operator's request. Jimmy's `SupportReportBuilder.cs` (766 lines, already redacts credential-shaped keywords before building a support report) is diagnostic-only and has no overlap with QSO data. Nexus's own diagnostics (`crates/tempo-core/src/diagnostics.rs`) were not compared in depth -- no evidence surfaced during this pass that Jimmy's diagnostic logging has a gap worth closing, and application/crash diagnostics carry none of the QSO-data risk that would make this urgent for a release-candidate pass.
+
+**Decision: Jimmy's logbook/upload stack stays fully authoritative. No migration, no cutover.** This isn't a default-to-caution non-answer -- the comparison found Jimmy's implementation is the correct owner for its own data model and operator workflow, not merely "too risky to check." The one real gap (eQSL/HamQTH) is additive, not a replacement, and deferred as new scope rather than rushed.
 
 ## Not yet done (scope for a future pass, not attempted here)
 

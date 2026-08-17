@@ -265,9 +265,24 @@ namespace WSJTX_Controller
                 // enough lines accumulate (heartbeats every 10s, decodes, TX_SCHEDULE/TX_CONTROL
                 // lines), and its synchronous, explicitly-flushed println! calls (see its own
                 // `log!` macro) BLOCK on a full pipe -- silently hanging the entire engine,
-                // including the timed PTT_OFF release Stage 4's transmit scheduling depends on.
-                // NativeTxPttListener's own watchdog is still the real backstop if that ever
-                // happens, but a hung, silently-dead engine host must never go unnoticed.
+                // including the timed PTT_OFF release the TX scheduler depends on.
+                //
+                // (Corrected 2026-08-17: this comment used to cite "NativeTxPttListener's own
+                // watchdog" as the backstop for that scenario; that class was already retired by
+                // the time this comment was written -- Self-sufficiency Phase 5 moved PTT
+                // in-process into jimmy-engine-host.exe itself, superseding it, and the reference
+                // was never updated. The real backstops today, verified by reading the actual
+                // code rather than trusting the old comment: (1) Nexus's own TX watchdog/abort
+                // inside the radio loop (tempo-audio/src/service.rs) is independent of this
+                // process's stdout pipe; (2) if jimmy-engine-host.exe itself dies -- crash, or a
+                // hard Kill() from NativeEngineClient.Stop() -- rigctld.exe (its own spawned
+                // child) cannot be left orphaned holding the radio: RigctldProc binds it to a
+                // Windows Job Object with KILL_ON_JOB_CLOSE (tempo-audio/src/rigctld_proc.rs),
+                // an OS-level guarantee that survives even a forceful parent termination; (3) on
+                // Jimmy's own side, OnNativeEngineUnexpectedExit (Controller.cs) is what actually
+                // notices a hang/crash via Process.Exited and drives the bounded auto-restart
+                // (5 attempts per 5-minute window) -- a hung, silently-dead engine host does not
+                // go unnoticed because THAT mechanism catches it, not a per-process watchdog.
                 _process.BeginOutputReadLine();
                 _process.BeginErrorReadLine();
                 return true;
