@@ -37,6 +37,7 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-ninja
             mingw-w64-ucrt-x86_64-fftw
+            mingw-w64-ucrt-x86_64-pkgconf
 
       - name: Prepare pinned + patched Nexus
         run: powershell -ExecutionPolicy Bypass -File scripts\prepare-nexus.ps1
@@ -54,6 +55,15 @@ jobs:
         run: |
           $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
           $env:LIBRARY_PATH = "C:\msys64\ucrt64\lib;$env:LIBRARY_PATH"
+          # windows-latest runners carry their own pre-installed MinGW (C:\mingw64) that CMake's
+          # plain find_program search picked up ahead of the MSYS2 UCRT64 one on the prior run,
+          # despite the PATH prepend above -- forcing CC/CXX/FC explicitly removes the ambiguity
+          # rather than depending on search-order behavior that didn't hold. Matters here
+          # specifically because pkg-config will resolve fftw3f from the MSYS2 UCRT64 install;
+          # linking that against a DIFFERENT MinGW distribution's runtime risks an ABI mismatch.
+          $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
+          $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
+          $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
           cd EngineHost
           cargo build --release
 
@@ -61,6 +71,9 @@ jobs:
         run: |
           $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
           $env:LIBRARY_PATH = "C:\msys64\ucrt64\lib;$env:LIBRARY_PATH"
+          $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
+          $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
+          $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
           cd EngineHost
           cargo test --release
 
