@@ -39,6 +39,22 @@ jobs:
             mingw-w64-ucrt-x86_64-fftw
             mingw-w64-ucrt-x86_64-pkgconf
 
+      # Diagnostic: the prior CI run's CC/CXX/FC override to C:\msys64\ucrt64\bin\gfortran.exe
+      # failed with "could not find the compiler specified" -- meaning either the package didn't
+      # land under that path or the action installs somewhere else on this runner. Confirming
+      # what's actually there before guessing again.
+      - name: List what MSYS2 UCRT64 actually installed
+        run: |
+          Write-Host "C:\msys64 exists: $(Test-Path 'C:\msys64')"
+          if (Test-Path 'C:\msys64\ucrt64\bin') {
+            Get-ChildItem 'C:\msys64\ucrt64\bin' -Filter "*gcc*" | Select-Object -ExpandProperty Name
+            Get-ChildItem 'C:\msys64\ucrt64\bin' -Filter "*gfortran*" | Select-Object -ExpandProperty Name
+            Get-ChildItem 'C:\msys64\ucrt64\bin' -Filter "*pkg*" | Select-Object -ExpandProperty Name
+          } else {
+            Write-Host "C:\msys64\ucrt64\bin does not exist"
+          }
+          Write-Host "PATH: $env:PATH"
+
       - name: Prepare pinned + patched Nexus
         run: powershell -ExecutionPolicy Bypass -File scripts\prepare-nexus.ps1
 
@@ -61,9 +77,13 @@ jobs:
           # rather than depending on search-order behavior that didn't hold. Matters here
           # specifically because pkg-config will resolve fftw3f from the MSYS2 UCRT64 install;
           # linking that against a DIFFERENT MinGW distribution's runtime risks an ABI mismatch.
-          $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
-          $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
-          $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
+          if (Test-Path 'C:\msys64\ucrt64\bin\gfortran.exe') {
+            $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
+            $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
+            $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
+          } else {
+            Write-Host "C:\msys64\ucrt64\bin\gfortran.exe not found -- leaving CC/CXX/FC unset, falling back to PATH search"
+          }
           cd EngineHost
           cargo build --release
 
@@ -71,9 +91,11 @@ jobs:
         run: |
           $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
           $env:LIBRARY_PATH = "C:\msys64\ucrt64\lib;$env:LIBRARY_PATH"
-          $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
-          $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
-          $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
+          if (Test-Path 'C:\msys64\ucrt64\bin\gfortran.exe') {
+            $env:CC = "C:\msys64\ucrt64\bin\gcc.exe"
+            $env:CXX = "C:\msys64\ucrt64\bin\g++.exe"
+            $env:FC = "C:\msys64\ucrt64\bin\gfortran.exe"
+          }
           cd EngineHost
           cargo test --release
 
