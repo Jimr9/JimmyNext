@@ -96,7 +96,7 @@ namespace WSJTX_Controller
                 _okButton.Enabled = false;
                 _cancelButton.Enabled = false;
                 LookupRecord rec = null;
-                try { rec = await _lookupManager.Qrz.LookupAsync(callsign); }
+                try { rec = await _lookupManager.LookupPrimaryAsync(callsign); }
                 catch { /* best-effort -- treat like "not found" below */ }
                 _okButton.Enabled = true;
                 _cancelButton.Enabled = true;

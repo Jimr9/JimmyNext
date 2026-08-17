@@ -120,6 +120,10 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox        _hamQthEnabledCb;
         private System.Windows.Forms.TextBox         _hamQthUsernameTb;
         private System.Windows.Forms.TextBox         _hamQthPasswordTb;
+        private System.Windows.Forms.NumericUpDown   _hamQthCacheDaysNum;
+        private System.Windows.Forms.Button          _hamQthTestBtn;
+        private System.Windows.Forms.TextBox         _hamQthStatusLbl;
+        private System.Windows.Forms.ComboBox        _callsignLookupProviderCb;
 
         private sealed class SoundRow
         {
@@ -4551,7 +4555,7 @@ namespace WSJTX_Controller
             int pw = 630;
 
             // ── General ──────────────────────────────────────────────────────────
-            var genBox = MakeGroupBox("General", 5, 5, pw, 48, font);
+            var genBox = MakeGroupBox("General", 5, 5, pw, 74, font);
             lookupPanel.Controls.Add(genBox);
 
             _useLookupDataCb = new System.Windows.Forms.CheckBox
@@ -4566,12 +4570,26 @@ namespace WSJTX_Controller
             };
             genBox.Controls.Add(_useLookupDataCb);
 
+            genBox.Controls.Add(MakeLabel("Callsign Lookup Provider (primary automatic provider):", 10, 46, font));
+            _callsignLookupProviderCb = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle  = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location       = new System.Drawing.Point(300, 43),
+                Size           = new System.Drawing.Size(100, 21),
+                TabIndex       = 1,
+                Font           = font,
+                AccessibleName = "Primary callsign lookup provider",
+            };
+            _callsignLookupProviderCb.Items.AddRange(new object[] { "QRZ", "HamQTH" });
+            _callsignLookupProviderCb.SelectedIndex = (int)ctrl.callsignLookupProvider;
+            genBox.Controls.Add(_callsignLookupProviderCb);
+
             var serviceList = new System.Windows.Forms.ListBox
             {
-                Location       = new System.Drawing.Point(5, 58),
-                Size           = new System.Drawing.Size(160, 305),
+                Location       = new System.Drawing.Point(5, 84),
+                Size           = new System.Drawing.Size(160, 279),
                 Font           = font,
-                TabIndex       = 1,
+                TabIndex       = 2,
                 AccessibleName = "Lookup data service list",
             };
             lookupPanel.Controls.Add(serviceList);
@@ -4581,7 +4599,7 @@ namespace WSJTX_Controller
 
             // ── QRZ Callsign Lookup ──────────────────────────────────────────────
             tabIdx = 2;
-            var qrzBox = MakeGroupBox("QRZ Callsign Lookup", 175, 58, pw, 230, font);
+            var qrzBox = MakeGroupBox("QRZ Callsign Lookup", 175, 84, pw, 230, font);
             panels.Add(qrzBox);
             serviceList.Items.Add("QRZ Callsign Lookup");
 
@@ -4714,7 +4732,7 @@ namespace WSJTX_Controller
             if (string.IsNullOrEmpty(uploadLotwKeyText)) uploadLotwKeyText = "(unassigned hotkey)";
 
             tabIdx = 2;
-            var lotwBox = MakeGroupBox("LoTW User Activity  (public download — no account required)", 175, 58, pw, 160, font);
+            var lotwBox = MakeGroupBox("LoTW User Activity  (public download — no account required)", 175, 84, pw, 160, font);
             panels.Add(lotwBox);
             serviceList.Items.Add("LoTW User Activity");
 
@@ -4811,7 +4829,7 @@ namespace WSJTX_Controller
             // doesn't carry -- see ClubLogProvider.cs), which is what actually
             // resolves a decoded callsign to the right entity.
             tabIdx = 2;
-            var clBox = MakeGroupBox("Country & Prefix Data (automatic — no account needed)", 175, 58, pw, 76, font);
+            var clBox = MakeGroupBox("Country & Prefix Data (automatic — no account needed)", 175, 84, pw, 76, font);
             panels.Add(clBox);
             serviceList.Items.Add("Country & Prefix Data");
 
@@ -4862,7 +4880,7 @@ namespace WSJTX_Controller
             // priority over QRZ's (see LookupManager's provider order) since it's
             // the FCC's own authoritative registration data.
             tabIdx = 2;
-            var fccBox = MakeGroupBox("FCC ULS US State Lookup (optional -- ~170MB download, no account needed)", 175, 58, pw, 130, font);
+            var fccBox = MakeGroupBox("FCC ULS US State Lookup (optional -- ~170MB download, no account needed)", 175, 84, pw, 130, font);
             panels.Add(fccBox);
             serviceList.Items.Add("FCC ULS");
 
@@ -4927,15 +4945,17 @@ namespace WSJTX_Controller
                 10, 116, font));
 
             // ── HamQTH Callsign Lookup ───────────────────────────────────────────
-            // Uploaded via EngineHost/Nexus's own HamQTH transport (propagation::live::hamqth) --
+            // Reached via EngineHost/Nexus's own HamQTH transport (propagation::live::hamqth) --
             // login+lookup combined per call, no session caching (see ExternalDataClient.
-            // LookupHamQth). Not yet wired into LookupManager's own provider chain (that would
-            // change lookup precedence/behavior for every existing operator and needs its own
-            // deliberate design pass) -- see ARCHITECTURE.md. For now this is a standalone,
-            // on-demand credential panel; a future pass can register it as an additional
-            // ILookupProvider once the precedence question is settled.
+            // LookupHamQth). A real alternative to QRZ: HamQthProvider gives it the same
+            // cache/policy shape as QrzProvider (own file cache, NeedsLookup/LookupAsync), and
+            // the "Callsign Lookup Provider" selector above (General box) chooses which ONE is
+            // the primary automatic provider -- see LookupManager.PrimaryProvider. Enabling
+            // HamQTH here (independent of that selector) lets its cached data passively
+            // supplement Build()'s merge and lets it BE selected as primary; it does not by
+            // itself make live lookups run.
             tabIdx = 2;
-            var hamQthBox = MakeGroupBox("HamQTH Callsign Lookup", 175, 58, pw, 110, font);
+            var hamQthBox = MakeGroupBox("HamQTH Callsign Lookup", 175, 84, pw, 230, font);
             panels.Add(hamQthBox);
             serviceList.Items.Add("HamQTH");
 
@@ -4976,11 +4996,86 @@ namespace WSJTX_Controller
             };
             hamQthBox.Controls.Add(_hamQthPasswordTb);
 
+            hamQthBox.Controls.Add(MakeLabel("Cache (days):", 10, 94, font));
+            _hamQthCacheDaysNum = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum        = 1,
+                Maximum        = 365,
+                Value          = Math.Max(1, Math.Min(365, ctrl.hamQthCacheDays)),
+                Location       = new System.Drawing.Point(100, 91),
+                Size           = new System.Drawing.Size(60, 20),
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "HamQTH cache lifetime in days",
+            };
+            hamQthBox.Controls.Add(_hamQthCacheDaysNum);
+
+            _hamQthTestBtn = new System.Windows.Forms.Button
+            {
+                Text           = "Test Login",
+                Location       = new System.Drawing.Point(10, 119),
+                Size           = new System.Drawing.Size(90, 24),
+                TabIndex       = tabIdx++,
+                Font           = font,
+                AccessibleName = "Test HamQTH login credentials",
+            };
+            _hamQthTestBtn.Click += HamQthTestBtn_Click;
+            hamQthBox.Controls.Add(_hamQthTestBtn);
+
+            _hamQthStatusLbl = new System.Windows.Forms.TextBox
+            {
+                Text           = HamQthStatusText(),
+                Location       = new System.Drawing.Point(110, 123),
+                Size           = new System.Drawing.Size(500, 18),
+                Font           = font,
+                ReadOnly       = true,
+                BorderStyle    = System.Windows.Forms.BorderStyle.None,
+                BackColor      = System.Drawing.SystemColors.Control,
+                TabStop        = true,
+                TabIndex       = tabIdx++,
+                AccessibleName = "HamQTH login status",
+            };
+            hamQthBox.Controls.Add(_hamQthStatusLbl);
+
             hamQthBox.Controls.Add(MakeLabel(
-                "Uses your normal HamQTH.com login. Currently used only from the Lookup Selected Station",
-                10, 94, font));
+                "Uses your normal HamQTH.com login -- a free account is sufficient (unlike QRZ, whose",
+                10, 148, font));
+            hamQthBox.Controls.Add(MakeLabel(
+                "fuller data needs a paid XML subscription). Select HamQTH above to make it the primary",
+                10, 164, font));
+            hamQthBox.Controls.Add(MakeLabel(
+                "automatic provider, or leave QRZ selected and enable HamQTH here just to supplement it.",
+                10, 180, font));
 
             WireServiceList(serviceList, lookupPanel, panels);
+        }
+
+        private string HamQthStatusText() =>
+            string.IsNullOrEmpty(ctrl.lookupManager?.HamQth?.LastError)
+                ? (ctrl.lookupManager != null && ctrl.lookupManager.HamQth.IsEnabled ? "Not tested yet." : "Not configured.")
+                : "Error: " + ctrl.lookupManager.HamQth.LastError;
+
+        private async void HamQthTestBtn_Click(object sender, EventArgs e)
+        {
+            if (ctrl.lookupManager == null) return;
+            ctrl.lookupManager.HamQth.Configure(
+                true,
+                _hamQthUsernameTb?.Text ?? "",
+                _hamQthPasswordTb?.Text ?? "",
+                (int)(_hamQthCacheDaysNum?.Value ?? 7));
+            _hamQthTestBtn.Enabled = false;
+            _hamQthStatusLbl.Text  = "Testing login…";
+
+            bool loginOk = await ctrl.lookupManager.TestHamQthAsync();
+
+            if (!IsDisposed)
+            {
+                _hamQthStatusLbl.Text = loginOk
+                    ? "Login successful!"
+                    : $"Login error: {ctrl.lookupManager.HamQth.LastError}";
+                _hamQthTestBtn.Enabled = true;
+                _hamQthStatusLbl.Focus();
+            }
         }
 
         // Shows only the panel matching the current list selection, hiding the rest --
@@ -5120,6 +5215,8 @@ namespace WSJTX_Controller
             ctrl.hamQthEnabled           = _hamQthEnabledCb?.Checked           ?? false;
             ctrl.hamQthUsername          = _hamQthUsernameTb?.Text.Trim()      ?? "";
             ctrl.hamQthPassword          = _hamQthPasswordTb?.Text            ?? "";
+            ctrl.hamQthCacheDays         = (int)(_hamQthCacheDaysNum?.Value    ?? 7);
+            ctrl.callsignLookupProvider  = (CallsignLookupProvider)(_callsignLookupProviderCb?.SelectedIndex ?? 0);
         }
 
         // ===== APPEARANCE TAB =====

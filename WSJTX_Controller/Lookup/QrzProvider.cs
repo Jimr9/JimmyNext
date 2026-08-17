@@ -42,7 +42,7 @@ namespace WSJTX_Controller
         }
     }
 
-    public class QrzProvider : ILookupProvider
+    public class QrzProvider : IOnlineLookupProvider
     {
         private readonly string _cacheFile;
         private Dictionary<string, QrzCacheEntry> _cache =

@@ -22,27 +22,18 @@ namespace WSJTX_Controller
 
         private readonly LookupManager _manager;
         private readonly string        _call;
-        private readonly bool          _hamQthEnabled;
-        private readonly string        _hamQthUsername;
-        private readonly string        _hamQthPassword;
-        private bool _canQrz;
+        private bool _canLookup;
 
-        public bool QrzLookupOccurred { get; private set; }
+        // True once a live lookup via the primary provider (QRZ or HamQTH -- whichever is
+        // selected) has actually completed, regardless of which one -- callers (Controller's
+        // lookup hotkey handler) use this only to know whether to refresh caches, not which
+        // provider ran.
+        public bool PrimaryLookupOccurred { get; private set; }
 
-        // hamQthEnabled/Username/Password: a snapshot at open time is fine here (unlike
-        // LogbookWindow's Func<string> credentials, which stay open across a whole session) --
-        // this dialog is short-lived and modal, so settings can't change underneath it.
-        // On-demand only, and only supplements fields QRZ/offline data left blank -- see
-        // ARCHITECTURE.md: HamQTH isn't in LookupManager's own automatic provider chain yet,
-        // this is the deliberately smaller, contained integration for this release-candidate pass.
-        public LookupInfoDlg(string call, LookupManager manager,
-            bool hamQthEnabled = false, string hamQthUsername = null, string hamQthPassword = null)
+        public LookupInfoDlg(string call, LookupManager manager)
         {
             _call    = call?.ToUpperInvariant() ?? "";
             _manager = manager;
-            _hamQthEnabled  = hamQthEnabled;
-            _hamQthUsername = hamQthUsername;
-            _hamQthPassword = hamQthPassword;
 
             Text            = $"Station Lookup — {_call}";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -111,28 +102,27 @@ namespace WSJTX_Controller
 
             // Opening this dialog (via the lookup hotkey) is itself the explicit,
             // user-initiated request that FocusedOnly/UnidentifiedQueue policies are
-            // gated on -- so a needed QRZ lookup fires automatically; there's no
-            // separate button for it any more.
+            // gated on -- so a needed lookup via the selected primary provider fires
+            // automatically; there's no separate button for it any more. Only the ONE
+            // selected primary provider (QRZ or HamQTH) ever runs here -- see
+            // LookupManager.PrimaryProvider's own comment for why running both isn't done.
             Load += async (s, e) =>
             {
-                if (!_canQrz)
+                if (!_canLookup)
                 {
-                    _statusValue.Text = "QRZ lookup disabled.";
+                    _statusValue.Text = $"{_manager?.PrimaryProvider?.SourceName ?? "Online"} lookup disabled.";
                 }
-                else if (_manager.QrzNeedsLookup(_call))
+                else if (_manager.PrimaryNeedsLookup(_call))
                 {
-                    await DoQrzLookupAsync();
+                    await DoPrimaryLookupAsync();
                 }
                 else
                 {
-                    var cachedAt = _manager.QrzCachedAt(_call);
+                    var cachedAt = _manager.PrimaryCachedAt(_call);
                     _statusValue.Text = cachedAt.HasValue
-                        ? $"QRZ data from {FormatAge(cachedAt.Value)}."
+                        ? $"{_manager.PrimaryProvider.SourceName} data from {FormatAge(cachedAt.Value)}."
                         : "Using cached data.";
                 }
-
-                if (_hamQthEnabled && !string.IsNullOrWhiteSpace(_hamQthUsername) && !string.IsNullOrWhiteSpace(_hamQthPassword))
-                    await DoHamQthSupplementAsync();
             };
         }
 
@@ -187,7 +177,7 @@ namespace WSJTX_Controller
                                    : "—";
             _sourcesValue.Text   = info.SourcesText;
 
-            _canQrz = _manager.Qrz.IsEnabled &&
+            _canLookup = _manager.PrimaryProvider.IsEnabled &&
                       (_manager.Policy == QrzLookupPolicy.FocusedOnly ||
                        _manager.Policy == QrzLookupPolicy.UnidentifiedQueue);
         }
@@ -202,72 +192,28 @@ namespace WSJTX_Controller
                 lbl.Text = "—";
         }
 
-        private async Task DoQrzLookupAsync()
+        private async Task DoPrimaryLookupAsync()
         {
             if (_manager == null) return;
-            _statusValue.Text = "Looking up via QRZ…";
-            var result = await _manager.LookupQrzAsync(_call);
+            string providerName = _manager.PrimaryProvider.SourceName;
+            _statusValue.Text = $"Looking up via {providerName}…";
+            var result = await _manager.LookupPrimaryAsync(_call);
             if (IsDisposed) return;
             if (result != null)
             {
-                QrzLookupOccurred = true;
-                _statusValue.Text = "QRZ lookup complete.";
+                PrimaryLookupOccurred = true;
+                _statusValue.Text = $"{providerName} lookup complete.";
                 PopulateFromCache();
             }
             else
             {
-                _statusValue.Text = $"QRZ: {_manager.Qrz.LastError ?? "No data returned."}";
+                _statusValue.Text = $"{providerName}: {_manager.PrimaryProvider.LastError ?? "No data returned."}";
             }
 
             // Move focus to the status field so JAWS/NVDA announce the async result —
             // the label never regains focus on its own, so silently updating .Text
             // would otherwise go unnoticed by screen-reader users.
             _statusValue.Focus();
-        }
-
-        // On-demand HamQTH lookup, run after QRZ/offline data has already populated what it
-        // can -- only fills fields still showing "—", never overwrites an already-known
-        // answer from Jimmy's own offline/QRZ data. ExternalDataClient's call is synchronous
-        // (a bounded blocking TCP round-trip to EngineHost), so it's wrapped in Task.Run to
-        // keep this modal dialog's UI thread responsive while it runs.
-        private async Task DoHamQthSupplementAsync()
-        {
-            var client = new ExternalDataClient();
-            var (result, error) = await Task.Run(() =>
-            {
-                var r = client.LookupHamQth(_hamQthUsername, _hamQthPassword, _call, out string err);
-                return (r, err);
-            });
-            if (IsDisposed) return;
-
-            string suffix;
-            if (error != null)
-            {
-                suffix = $" HamQTH: {error}";
-            }
-            else if (result == null)
-            {
-                suffix = " HamQTH: no data returned.";
-            }
-            else
-            {
-                int filled = 0;
-                filled += FillIfBlank(_nameValue, result.Name);
-                filled += FillIfBlank(_gridValue, result.Grid);
-                filled += FillIfBlank(_stateValue, result.State);
-                filled += FillIfBlank(_countryValue, result.Country);
-                suffix = filled > 0 ? $" HamQTH: supplemented {filled} field{(filled == 1 ? "" : "s")}." : " HamQTH: no additional fields.";
-            }
-            _statusValue.Text += suffix;
-            _statusValue.Focus();
-        }
-
-        private static int FillIfBlank(TextBox box, string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return 0;
-            if (box.Text != "—" && !string.IsNullOrWhiteSpace(box.Text)) return 0;
-            box.Text = value;
-            return 1;
         }
 
         // Concise, screen-reader-friendly age phrase (cachedAtUtc is always UTC --

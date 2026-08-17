@@ -227,6 +227,14 @@ pub fn eqsl_download(args: &EqslDownloadArgs) -> Result<String, String> {
     if !tempo_core::eqsl::is_eqsl_adif(&body) {
         return Err("eQSL: response was not a recognizable ADIF InBox".to_string());
     }
+    // A truncated-but-HTTP-200 body (partial final record) must never reach Jimmy Test as if
+    // it were a complete download -- Jimmy's own reconciliation would otherwise treat a missing
+    // trailing record as "not confirmed" rather than "not yet received", and (if it also
+    // advances a since_unix watermark from this response) could permanently skip the record on
+    // every later sync too. See tempo_core::eqsl::is_complete_eqsl_body's own doc comment.
+    if !tempo_core::eqsl::is_complete_eqsl_body(&body) {
+        return Err("eQSL: download appears truncated -- try again".to_string());
+    }
     Ok(body)
 }
 
@@ -241,6 +249,13 @@ pub struct HamQthLookupArgs {
     pub callsign: String,
 }
 
+// Full shape of tempo_core::hamqth::HamQthLookup -- previously this DTO dropped dxcc/cq_zone/
+// itu_zone (obtained the data, then discarded it before it ever reached Jimmy Test). dxcc is
+// the numeric ADIF/DXCC entity ID from HamQTH's own <adif> element (the operator's self-reported
+// profile address, resolved by HamQTH -- NOT a prefix-algorithm resolution the way
+// ClubLogProvider is). image/lat/lon are left out: nothing in Jimmy Test's accessible lookup
+// dialog currently has a slot for a photo or a map, and adding one is out of scope here -- see
+// ARCHITECTURE.md if a future pass wants them.
 #[derive(serde::Serialize)]
 pub struct HamQthLookupResult {
     pub call: String,
@@ -249,19 +264,13 @@ pub struct HamQthLookupResult {
     pub grid: Option<String>,
     pub state: Option<String>,
     pub country: Option<String>,
+    pub dxcc: Option<u32>,
+    pub cq_zone: Option<u32>,
+    pub itu_zone: Option<u32>,
 }
 
 pub fn hamqth_lookup(args: &HamQthLookupArgs) -> Result<HamQthLookupResult, String> {
-    let login = tempo_core::hamqth::HamQthLogin {
-        username: args.username.clone(),
-        password: args.password.clone(),
-    };
-    let login_url = tempo_core::hamqth::build_login_url(&login);
-    let login_xml = hamqth::fetch(&login_url)?;
-    let session = tempo_core::hamqth::parse_session(&login_xml);
-    let session_id = session
-        .session_id
-        .ok_or_else(|| "HamQTH: login failed -- check username/password".to_string())?;
+    let session_id = hamqth_login(&args.username, &args.password)?;
 
     let lookup_url = tempo_core::hamqth::build_lookup_url(&session_id, &args.callsign, tempo_core::hamqth::HAMQTH_PRG);
     let lookup_xml = hamqth::fetch(&lookup_url)?;
@@ -274,6 +283,35 @@ pub fn hamqth_lookup(args: &HamQthLookupArgs) -> Result<HamQthLookupResult, Stri
         grid: parsed.grid,
         state: parsed.state,
         country: parsed.country,
+        dxcc: parsed.dxcc,
+        cq_zone: parsed.cq_zone,
+        itu_zone: parsed.itu_zone,
     })
+}
+
+/// HAMQTH_TEST wire args -- login only, no lookup. Mirrors QrzProvider's own TestAsync (Jimmy
+/// Test side): proves the username/password are accepted without spending a lookup on an
+/// arbitrary callsign.
+#[derive(serde::Deserialize)]
+pub struct HamQthTestArgs {
+    pub username: String,
+    pub password: String,
+}
+
+pub fn hamqth_test(args: &HamQthTestArgs) -> Result<(), String> {
+    hamqth_login(&args.username, &args.password).map(|_| ())
+}
+
+fn hamqth_login(username: &str, password: &str) -> Result<String, String> {
+    let login = tempo_core::hamqth::HamQthLogin {
+        username: username.to_string(),
+        password: password.to_string(),
+    };
+    let login_url = tempo_core::hamqth::build_login_url(&login);
+    let login_xml = hamqth::fetch(&login_url)?;
+    let session = tempo_core::hamqth::parse_session(&login_xml);
+    session
+        .session_id
+        .ok_or_else(|| "HamQTH: login failed -- check username/password".to_string())
 }
 

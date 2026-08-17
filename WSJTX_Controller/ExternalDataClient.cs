@@ -54,6 +54,9 @@ namespace WSJTX_Controller
         public string Grid { get; set; }
         public string State { get; set; }
         public string Country { get; set; }
+        public int? Dxcc { get; set; }
+        public int? CqZone { get; set; }
+        public int? ItuZone { get; set; }
     }
 
     // Standalone client for the Nexus-backed facts EngineHost exposes beyond the FT8/FT4 engine
@@ -159,6 +162,16 @@ namespace WSJTX_Controller
                 error = $"Could not parse HamQTH lookup result: {ex.Message}";
                 return null;
             }
+        }
+
+        // Login only, no lookup spent -- mirrors QrzProvider.TestAsync's own "prove the
+        // credentials work" shape, used by the Options dialog's Test Login button.
+        public bool TestHamQth(string username, string password, out string error)
+        {
+            var args = new { username, password };
+            string json = JsonSerializer.Serialize(args, JsonOptions);
+            ParseOkOrError(SendCommand("HAMQTH_TEST " + json, SlowTimeoutMs), out error);
+            return error == null;
         }
 
         // "OK <payload>" -> payload (trimmed leading space); "ERR <message>" -> error set,

@@ -10,9 +10,22 @@ namespace WSJTX_Controller
 {
     public enum QrzLookupPolicy
     {
-        Disabled         = 0,  // Default — never make automatic QRZ requests
-        FocusedOnly      = 1,  // QRZ used only when user explicitly opens Lookup dialog
-        UnidentifiedQueue = 2, // QRZ supplements offline data for queued stations it cannot identify
+        Disabled         = 0,  // Default — never make automatic primary-provider requests
+        FocusedOnly      = 1,  // Primary provider used only when user explicitly opens Lookup dialog
+        UnidentifiedQueue = 2, // Primary provider supplements offline data for queued stations it cannot identify
+    }
+
+    // Which online service is the PRIMARY automatic callsign lookup provider -- the one
+    // FocusedOnly/UnidentifiedQueue policy and the Lookup dialog's on-open auto-lookup use.
+    // Only one is ever primary at a time (operator instruction: don't spend two live network
+    // lookups per callsign merely to combine data). Both providers can still independently have
+    // their own IsEnabled/credentials configured and still passively CONTRIBUTE already-cached
+    // data to Build()'s merge either way -- see LookupManager's constructor comment -- this
+    // setting controls only which one gets to make a NEW live network lookup automatically.
+    public enum CallsignLookupProvider
+    {
+        Qrz    = 0, // default -- matches every existing installation's behavior unchanged
+        HamQth = 1,
     }
 
     public class LookupManager
@@ -20,11 +33,20 @@ namespace WSJTX_Controller
         private bool            _useLookupData;
         private QrzLookupPolicy _policy  = QrzLookupPolicy.Disabled;
         private int             _qrzMinIntervalSeconds = 10;
+        private CallsignLookupProvider _primaryProviderChoice = CallsignLookupProvider.Qrz;
 
         public QrzProvider     Qrz     { get; }
+        public HamQthProvider  HamQth  { get; }
         public LoTWProvider    LoTW    { get; }
         public ClubLogProvider ClubLog { get; }
         public FccUlsProvider  FccUls  { get; }
+
+        // The provider FocusedOnly/UnidentifiedQueue policy and the Lookup dialog's on-open
+        // auto-lookup actually drive -- selected by _primaryProviderChoice. Exposed as
+        // IOnlineLookupProvider so callers (LookupInfoDlg, ManualCallDlg) never need a
+        // provider-specific branch.
+        public IOnlineLookupProvider PrimaryProvider =>
+            _primaryProviderChoice == CallsignLookupProvider.HamQth ? (IOnlineLookupProvider)HamQth : Qrz;
 
         // Every ILookupProvider that can contribute to a Build(call), in
         // priority order (earlier providers' fields win -- also the precedence
@@ -83,6 +105,7 @@ namespace WSJTX_Controller
             var root = DataRoot;
             Directory.CreateDirectory(Path.Combine(root, "Temp"));
             Qrz     = new QrzProvider(root);
+            HamQth  = new HamQthProvider(root);
             LoTW    = new LoTWProvider(root);
             ClubLog = new ClubLogProvider(root);
             FccUls  = new FccUlsProvider(root);
@@ -107,6 +130,13 @@ namespace WSJTX_Controller
             // one (the authoritative FCC-registered value), regardless of position.
             _providers.Add(ClubLog);
             _providers.Add(Qrz);
+            // HamQth after Qrz: Nexus's own doc comment calls HamQTH "the free-account
+            // fallback for QRZ" (tempo_core::hamqth) -- same idea here. This only fills
+            // fields QRZ (and ClubLog, for Dxcc/CqZone/ItuZone) left blank; if HamQTH is
+            // selected as PrimaryProvider instead of QRZ, this is still where its passively-
+            // cached results get merged into Build() -- see PrimaryProvider's own comment for
+            // why passive contribution and "the" primary provider are different concerns.
+            _providers.Add(HamQth);
             _providers.Add(FccUls);
             _providers.Add(LoTW);
         }
@@ -120,13 +150,18 @@ namespace WSJTX_Controller
             string          clubLogAppKey,   int    clubLogDays,
             bool            fccUlsEnabled    = false,
             QrzLookupPolicy policy           = QrzLookupPolicy.Disabled,
-            int             qrzMinIntervalSeconds = 10)
+            int             qrzMinIntervalSeconds = 10,
+            CallsignLookupProvider primaryProvider = CallsignLookupProvider.Qrz,
+            bool            hamQthEnabled    = false, string hamQthUser = null, string hamQthPass = null,
+            int             hamQthCacheDays  = 7)
         {
             _useLookupData         = useLookupData;
             _policy                = policy;
             _qrzMinIntervalSeconds = Math.Max(5, qrzMinIntervalSeconds);
+            _primaryProviderChoice = primaryProvider;
 
             Qrz.Configure(qrzEnabled,     qrzUser,     qrzPass,     qrzCacheDays);
+            HamQth.Configure(hamQthEnabled, hamQthUser, hamQthPass, hamQthCacheDays);
             LoTW.Configure(lotwEnabled);
             FccUls.Configure(fccUlsEnabled);
 
@@ -141,6 +176,7 @@ namespace WSJTX_Controller
 
             if (lotwEnabled)   LoTW.Load();
             if (qrzEnabled)    Qrz.PurgeOldEntries();
+            if (hamQthEnabled) HamQth.PurgeOldEntries();
             if (fccUlsEnabled) FccUls.Load();
 
             StartAutoTimer();
@@ -199,28 +235,36 @@ namespace WSJTX_Controller
         // request to see whatever's cached, not an automatic feature.
         public LookupRecord GetInfoForDialog(string call) => Build(call);
 
-        // ── QRZ async ────────────────────────────────────────────────────────────
+        // ── Primary provider async (whichever of QRZ/HamQTH is selected) ─────────
+        // Renamed from the earlier QRZ-only Lookup/Needs/CachedAt/Test methods now that
+        // HamQTH is a real alternative -- see CallsignLookupProvider/PrimaryProvider above.
+        // QRZ's own behavior is completely unchanged when it's the selected provider
+        // (the default, matching every pre-existing installation).
 
-        public Task<LookupRecord> LookupQrzAsync(string call) =>
-            _useLookupData && Qrz.IsEnabled
-                ? Qrz.LookupAsync(call)
+        public Task<LookupRecord> LookupPrimaryAsync(string call) =>
+            _useLookupData && PrimaryProvider.IsEnabled
+                ? PrimaryProvider.LookupAsync(call)
                 : Task.FromResult<LookupRecord>(null);
 
-        public bool QrzNeedsLookup(string call) =>
-            _useLookupData && Qrz.NeedsLookup(call);
+        public bool PrimaryNeedsLookup(string call) =>
+            _useLookupData && PrimaryProvider.NeedsLookup(call);
 
-        public DateTime? QrzCachedAt(string call) =>
-            _useLookupData ? Qrz.GetCachedAt(call) : null;
+        public DateTime? PrimaryCachedAt(string call) =>
+            _useLookupData ? PrimaryProvider.GetCachedAt(call) : null;
 
+        // Per-service "Test Login" buttons in Options test a SPECIFIC provider's
+        // credentials, regardless of which one is currently primary -- these stay
+        // provider-specific rather than routed through PrimaryProvider.
         public Task<bool> TestQrzAsync() => Qrz.TestAsync();
+        public Task<bool> TestHamQthAsync() => HamQth.TestAsync();
 
-        // ── Automatic QRZ queue (UnidentifiedQueue policy) ───────────────────────
+        // ── Automatic primary-provider queue (UnidentifiedQueue policy) ──────────
 
         public bool CanAutoQueue(string call) =>
             _useLookupData &&
             _policy == QrzLookupPolicy.UnidentifiedQueue &&
-            Qrz.IsEnabled &&
-            Qrz.NeedsLookup(call);
+            PrimaryProvider.IsEnabled &&
+            PrimaryProvider.NeedsLookup(call);
 
         public void QueueAutoLookup(string call)
         {
@@ -236,7 +280,7 @@ namespace WSJTX_Controller
         private void StartAutoTimer()
         {
             StopAutoTimer();
-            if (_policy != QrzLookupPolicy.UnidentifiedQueue || !Qrz.IsEnabled) return;
+            if (_policy != QrzLookupPolicy.UnidentifiedQueue || !PrimaryProvider.IsEnabled) return;
             _autoTimer = new System.Timers.Timer(_qrzMinIntervalSeconds * 1000.0);
             _autoTimer.Elapsed += AutoTimerElapsed;
             _autoTimer.AutoReset = true;
@@ -258,7 +302,7 @@ namespace WSJTX_Controller
                 if (!_autoQueue.TryDequeue(out call)) return;
                 lock (_queuedLock) _queued.Remove(call);
                 if (!CanAutoQueue(call)) return;
-                var result = await Qrz.LookupAsync(call).ConfigureAwait(false);
+                var result = await PrimaryProvider.LookupAsync(call).ConfigureAwait(false);
                 if (result != null) OnLookupCompleted?.Invoke();
             }
             catch { }

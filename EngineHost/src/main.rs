@@ -898,6 +898,28 @@ fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>, external_cache: Arc
                 }
             }
             continue;
+        } else if let Some(json) = line.strip_prefix("HAMQTH_TEST ") {
+            match serde_json::from_str::<external_data::HamQthTestArgs>(json) {
+                Ok(args) => {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        match external_data::hamqth_test(&args) {
+                            Ok(()) => {
+                                let _ = writeln!(stream, "OK");
+                            }
+                            Err(e) => {
+                                let _ = writeln!(stream, "ERR {e}");
+                            }
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad HAMQTH_TEST args: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            }
+            continue;
         } else {
             let _ = writeln!(stream, "ERR unknown command");
         }

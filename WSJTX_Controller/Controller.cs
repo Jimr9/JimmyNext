@@ -163,9 +163,7 @@ namespace WSJTX_Controller
         // eQSL / HamQTH (release-candidate pass: exposed through EngineHost, reusing Nexus's own
         // mature transports -- see EngineHost/src/external_data.rs). Same credential shape as
         // Club Log above (account username + DPAPI-protected password); the operator supplies
-        // their own account, never a shared application credential. INI-only for this release
-        // (same convention as ClassificationCutover's own rollback valve) -- not yet exposed as
-        // Options UI controls, see ARCHITECTURE.md for why and what's deferred.
+        // their own account, never a shared application credential.
         public bool   eqslUploadEnabled      = false;
         public bool   eqslUploadRealtime     = false;
         public string eqslUsername           = "";
@@ -173,6 +171,11 @@ namespace WSJTX_Controller
         public bool   hamQthEnabled          = false;
         public string hamQthUsername         = "";
         public string hamQthPassword         = "";
+        public int    hamQthCacheDays        = 7;
+        // Which online service is the PRIMARY automatic callsign lookup provider -- see
+        // LookupManager.CallsignLookupProvider's own comment. Default Qrz matches every
+        // existing installation's behavior unchanged.
+        public CallsignLookupProvider callsignLookupProvider = CallsignLookupProvider.Qrz;
 
         // Automatic logbook download/sync (opt-in, default off so existing users aren't
         // suddenly downloading full logbooks on their next update without asking). Runs
@@ -717,6 +720,9 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("hamQthEnabled"))      hamQthEnabled      = iniFile.Read("hamQthEnabled")  == "True";
                 if (iniFile.KeyExists("hamQthUsername"))     hamQthUsername     = iniFile.Read("hamQthUsername") ?? "";
                 if (iniFile.KeyExists("hamQthPassword"))     hamQthPassword     = CredentialProtector.Unprotect(iniFile.Read("hamQthPassword"));
+                if (iniFile.KeyExists("hamQthCacheDays"))    int.TryParse(iniFile.Read("hamQthCacheDays"), out hamQthCacheDays);
+                if (iniFile.KeyExists("callsignLookupProvider"))
+                    Enum.TryParse(iniFile.Read("callsignLookupProvider"), out callsignLookupProvider);
                 if (iniFile.KeyExists("tqslStationLocation"))    tqslStationLocation   = iniFile.Read("tqslStationLocation")    ?? "";
                 if (iniFile.KeyExists("qrzLogbookAutoSyncEnabled"))     qrzLogbookAutoSyncEnabled     = iniFile.Read("qrzLogbookAutoSyncEnabled")     == "True";
                 int qrzld; if (iniFile.KeyExists("qrzLogbookRefreshDays") && int.TryParse(iniFile.Read("qrzLogbookRefreshDays"), out qrzld) && qrzld >= 1) qrzLogbookRefreshDays = qrzld;
@@ -868,7 +874,9 @@ namespace WSJTX_Controller
                 lotwEnabled, lotwRefreshDays,
                 ClubLogAppKey.Resolve(), clubLogRefreshDays,
                 fccUlsEnabled,
-                qrzLookupPolicy, qrzMinIntervalSeconds);
+                qrzLookupPolicy, qrzMinIntervalSeconds,
+                callsignLookupProvider,
+                hamQthEnabled, hamQthUsername, hamQthPassword, hamQthCacheDays);
             wsjtxClient.lookupManager     = lookupManager;
             wsjtxClient.lotwBoostEnabled  = lotwBoostEnabled;
             BackfillMissingStates();
@@ -1242,6 +1250,8 @@ namespace WSJTX_Controller
                 iniFile.Write("hamQthEnabled",           hamQthEnabled.ToString());
                 iniFile.Write("hamQthUsername",          hamQthUsername           ?? "");
                 iniFile.Write("hamQthPassword",          CredentialProtector.Protect(hamQthPassword));
+                iniFile.Write("hamQthCacheDays",         hamQthCacheDays.ToString());
+                iniFile.Write("callsignLookupProvider",  callsignLookupProvider.ToString());
                 iniFile.Write("tqslStationLocation",     tqslStationLocation      ?? "");
                 iniFile.Write("qrzLogbookAutoSyncEnabled",     qrzLogbookAutoSyncEnabled.ToString());
                 iniFile.Write("qrzLogbookRefreshDays",         qrzLogbookRefreshDays.ToString());
@@ -1947,6 +1957,7 @@ namespace WSJTX_Controller
                 _logbookWindow = new LogbookWindow(iniFile,
                     () => qrzLogbookApiKey, () => lotwLogbookUser, () => lotwLogbookPass,
                     () => clubLogUploadEmail, () => clubLogUploadPassword, () => clubLogUploadCallsign,
+                    () => eqslUsername, () => eqslPassword,
                     onImportComplete: () => BeginInvoke(new Action(() =>
                         { PruneStaleActiveAwardRuleIds(); LoadHrcCache(); RefreshStillNeedCache(); })),
                     initialActiveAwardRuleIds: activeAwardRuleIds,
@@ -2051,7 +2062,9 @@ namespace WSJTX_Controller
                 lotwEnabled, lotwRefreshDays,
                 ClubLogAppKey.Resolve(), clubLogRefreshDays,
                 fccUlsEnabled,
-                qrzLookupPolicy, qrzMinIntervalSeconds);
+                qrzLookupPolicy, qrzMinIntervalSeconds,
+                callsignLookupProvider,
+                hamQthEnabled, hamQthUsername, hamQthPassword, hamQthCacheDays);
             lookupManager?.StartBackgroundRefreshIfNeeded(lotwRefreshDays, clubLogRefreshDays, fccUlsRefreshDays);
             wsjtxClient.SortCallsPublic();  // re-rank if LoTW boost changed
         }
@@ -2108,10 +2121,10 @@ namespace WSJTX_Controller
                 }
             }
             if (string.IsNullOrEmpty(call)) return;
-            using (var dlg = new LookupInfoDlg(call, lookupManager, hamQthEnabled, hamQthUsername, hamQthPassword))
+            using (var dlg = new LookupInfoDlg(call, lookupManager))
             {
                 dlg.ShowDialog(this);
-                if (dlg.QrzLookupOccurred)
+                if (dlg.PrimaryLookupOccurred)
                     wsjtxClient?.DebugChanged();
             }
         }
