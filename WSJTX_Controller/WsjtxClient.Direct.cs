@@ -608,7 +608,19 @@ namespace WSJTX_Controller
 
         // Double-click-to-reply equivalent -- calls Engine::call_station_ctx directly via the
         // REPLY control command. Fire-and-forget from the UI's perspective, matching the UDP
-        // path's own ReplyMessage send (no synchronous confirmation there either).
+        // path's own ReplyMessage send (no synchronous confirmation there either) -- NOT changed
+        // to retry or block here, same reasoning as DirectSendHaltTx/DirectSetTxEnabled below.
+        //
+        // What IS checked: call_station_ctx has exactly one real failure case (Engine's own
+        // comment: "No recent decode from <call> -- wait for their next transmission, then click
+        // again") -- it fires when Jimmy asks the engine to reply to a specific decoded line that
+        // has since aged out of the engine's own decode history with no fallback slot either.
+        // Nexus's own design guarantees a refusal here changes NOTHING engine-side (no QSO
+        // starts, TX is not armed for this station) -- but before this fix, EngineHost's REPLY
+        // handler discarded that Result and always answered "OK" regardless (found 2026-08-17
+        // while investigating a real Rust compiler warning, not assumed) -- and even with that
+        // fixed engine-side, this call still silently dropped the reply, matching-only on
+        // "no response at all" cases the way the two DebugOutput-only helpers below do.
         public void DirectSendReply(string dxcall, string dxgrid, string replyMsg, int? replySnr, double? dxFreqHz)
         {
             var args = new DirectReplyArgs
@@ -620,7 +632,9 @@ namespace WSJTX_Controller
                 DxFreqHz = dxFreqHz.HasValue ? (float?)dxFreqHz.Value : null,
             };
             string json = JsonSerializer.Serialize(args, DirectJsonOptions);
-            DirectSendCommand("REPLY " + json);
+            string resp = DirectSendCommand("REPLY " + json);
+            if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
+                DebugOutput($"{Time()} [DIRECT] REPLY to '{dxcall}' did not return OK (response: {(resp ?? "<no response>")})");
         }
 
         // Fire-and-forget by design (see DirectSendCommand's own comment on the bounded

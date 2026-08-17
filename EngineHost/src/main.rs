@@ -666,6 +666,17 @@ fn parse_args() -> Args {
 ///                                          at slot start and can't be live-adjusted mid-over (see
 ///                                          SET_TX_LEVEL's own comment) -- Tune's chunked
 ///                                          generation has no such limitation.
+/// Formats the REPLY command's wire response from `Engine::call_station_ctx`'s own `Result` --
+/// pulled out as a small pure function so this has direct test coverage without needing a live
+/// Engine/TCP round trip. `Ok(())` -> "OK"; `Err(e)` -> "ERR {e}", matching every other fallible
+/// command in `run_control_server`'s dispatch.
+fn reply_wire_response(result: Result<(), String>) -> String {
+    match result {
+        Ok(()) => "OK".to_string(),
+        Err(e) => format!("ERR {e}"),
+    }
+}
+
 fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>, external_cache: Arc<external_data::SharedCache>) {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
@@ -714,14 +725,23 @@ fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>, external_cache: Arc
         } else if let Some(json) = line.strip_prefix("REPLY ") {
             match serde_json::from_str::<ReplyArgs>(json) {
                 Ok(a) => {
-                    engine.lock().unwrap_or_else(|e| e.into_inner()).call_station_ctx(
+                    // call_station_ctx has exactly one Err path (Engine::call_station_ctx,
+                    // tempo-app/src/engine.rs): "No recent decode from <call>" when reply_msg
+                    // is Some but no matching/fallback decode slot exists. Its own comment is
+                    // explicit that this is a real refusal, not a warning -- "REFUSE BEFORE ANY
+                    // STATE CHANGES ... bail must mean nothing happened": no QSO starts, TX is
+                    // not armed for this station. Previously this Result was discarded and OK
+                    // was written unconditionally, so a refused reply was indistinguishable from
+                    // a real one on Jimmy Test's side. Propagate the real outcome instead --
+                    // same shape every other fallible command in this match already uses.
+                    let result = engine.lock().unwrap_or_else(|e| e.into_inner()).call_station_ctx(
                         &a.dxcall,
                         a.dxgrid.as_deref(),
                         a.reply_msg.as_deref(),
                         a.reply_snr,
                         a.dx_freq_hz,
                     );
-                    let _ = writeln!(stream, "OK");
+                    let _ = writeln!(stream, "{}", reply_wire_response(result));
                 }
                 Err(e) => {
                     let _ = writeln!(stream, "ERR bad REPLY args: {e}");
@@ -1155,5 +1175,27 @@ fn main() {
             eprintln!("FATAL: run_radio panicked on its dedicated thread");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression coverage for the REPLY handler fix: previously call_station_ctx's Result was
+    // discarded and "OK" was written unconditionally, so a refusal (Engine's own "No recent
+    // decode from <call>" -- fired when reply_msg is Some but no decode context can be found,
+    // and guaranteed to leave engine state untouched) was indistinguishable from a real success
+    // on Jimmy Test's side. These two cases are exactly what reply_wire_response now decides.
+
+    #[test]
+    fn reply_wire_response_ok_reports_ok() {
+        assert_eq!(reply_wire_response(Ok(())), "OK");
+    }
+
+    #[test]
+    fn reply_wire_response_err_reports_err_with_the_real_message() {
+        let msg = "No recent decode from W1AW -- wait for their next transmission, then click again.";
+        assert_eq!(reply_wire_response(Err(msg.to_string())), format!("ERR {msg}"));
     }
 }
