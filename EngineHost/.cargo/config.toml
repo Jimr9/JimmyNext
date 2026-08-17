@@ -1,0 +1,12 @@
+# tempo-fast-sys's build.rs links the native libtempo build (gfortran/fftw3f/stdc++/quadmath)
+# the way MinGW/GNU expects -- cargo:rustc-link-lib=dylib=gfortran and friends, resolved as
+# .dll.a import libraries a MinGW `ld` understands. The default Windows Rust toolchain on most
+# machines (including a fresh CI runner) is MSVC-hosted (x86_64-pc-windows-msvc), whose `link.exe`
+# has no idea what to do with those names ("LNK1181: cannot open input file 'gfortran.lib'") --
+# this was invisible on every local dev build only because this machine's own rustup default
+# already happened to be GNU-hosted. Pinning it here removes that hidden dependency on whichever
+# toolchain a given machine's rustup defaults to. Requires `rustup target add
+# x86_64-pc-windows-gnu` once per machine/CI runner, and a MinGW-family `gcc`/`ld` on PATH (the
+# MSYS2 UCRT64 install this repo already needs for the native build itself provides it).
+[build]
+target = "x86_64-pc-windows-gnu"

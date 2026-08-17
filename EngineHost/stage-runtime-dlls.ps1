@@ -16,8 +16,8 @@
     not found." -- confirmed live, 2026-08-06.
 
     Windows' DLL search order checks the executable's OWN directory before PATH, so staging
-    these DLLs directly into EngineHost\target\release\ (next to jimmy-engine-host.exe)
-    fixes this with no PATH changes needed anywhere, for a dev build.
+    these DLLs directly into EngineHost\target\x86_64-pc-windows-gnu\release\ (next to
+    jimmy-engine-host.exe) fixes this with no PATH changes needed anywhere, for a dev build.
 
     Phase 5: jimmy-engine-host.exe now also launches its OWN bundled rigctld directly (Nexus's
     tempo_audio::service::run_radio owns this, not Jimmy's C# side anymore). Nexus's own
@@ -29,7 +29,8 @@
     and nothing in the process's own stdout said why). Stages the whole bundled hamlib folder
     (rigctld.exe + its own DLL dependencies: libhamlib-4, libusb-1.0, plus its own copies of
     libgcc_s_seh-1/libwinpthread-1 which happen to match the MSYS2 ones below) into
-    target\release\hamlib\ to match resolve_rigctld()'s first search candidate exactly.
+    target\x86_64-pc-windows-gnu\release\hamlib\ to match resolve_rigctld()'s first search
+    candidate exactly.
 
     A real release build additionally needs the same DLLs AND the hamlib folder staged into
     WSJTX_Controller\Resources\EngineHost\ (the bundled-release location
@@ -52,7 +53,9 @@
 $ErrorActionPreference = "Stop"
 
 $Msys2Bin = "C:\msys64\ucrt64\bin"
-$Dest = Join-Path $PSScriptRoot "target\release"
+# .cargo\config.toml pins the build target to x86_64-pc-windows-gnu explicitly, so cargo always
+# builds under target\<triple>\release\, never plain target\release\.
+$Dest = Join-Path $PSScriptRoot "target\x86_64-pc-windows-gnu\release"
 
 $Dlls = @(
     "libgfortran-5.dll",

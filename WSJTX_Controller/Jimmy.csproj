@@ -98,13 +98,18 @@
          that's NativeEngineClient.LocateExe()'s primary lookup path, so a genuinely
          standalone/installed copy can find it too, not just a dev build run from inside a
          full git checkout (LocateExe()'s OTHER fallback, walking up to a sibling
-         EngineHost\target\release\ folder, only ever resolves there; confirmed live,
-         2026-08-07, missing entirely, and silently breaking Native mode with no crash,
-         just a dead engine and a dead radio connection, on a real tester's standalone
+         EngineHost\target\x86_64-pc-windows-gnu\release\ folder, only ever resolves there;
+         confirmed live, 2026-08-07, missing entirely, and silently breaking Native mode with no
+         crash, just a dead engine and a dead radio connection, on a real tester's standalone
          install). Absent (repo cloned but the Rust side never built) is a harmless no-op in
          MSBuild, same convention as the hamlib Include above; Jimmy still builds fine
-         without it, just can't use Native mode. -->
-    <None Include="..\EngineHost\target\release\jimmy-engine-host.exe;&#xD;&#xA;                    ..\EngineHost\target\release\libfftw3f-3.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libgcc_s_seh-1.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libgfortran-5.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libquadmath-0.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libstdc++-6.dll;&#xD;&#xA;                    ..\EngineHost\target\release\libwinpthread-1.dll">
+         without it, just can't use Native mode.
+
+         Path includes the x86_64-pc-windows-gnu triple segment because EngineHost\.cargo\
+         config.toml pins that target explicitly (native libtempo linking needs MinGW, not
+         MSVC); cargo therefore never uses the plain target\release\ path, even on a host
+         where that triple is also the default. -->
+    <None Include="..\EngineHost\target\x86_64-pc-windows-gnu\release\jimmy-engine-host.exe;&#xD;&#xA;                    ..\EngineHost\target\x86_64-pc-windows-gnu\release\libfftw3f-3.dll;&#xD;&#xA;                    ..\EngineHost\target\x86_64-pc-windows-gnu\release\libgcc_s_seh-1.dll;&#xD;&#xA;                    ..\EngineHost\target\x86_64-pc-windows-gnu\release\libgfortran-5.dll;&#xD;&#xA;                    ..\EngineHost\target\x86_64-pc-windows-gnu\release\libquadmath-0.dll;&#xD;&#xA;                    ..\EngineHost\target\x86_64-pc-windows-gnu\release\libstdc++-6.dll;&#xD;&#xA;                    ..\EngineHost\target\x86_64-pc-windows-gnu\release\libwinpthread-1.dll">
       <Link>Resources\EngineHost\%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

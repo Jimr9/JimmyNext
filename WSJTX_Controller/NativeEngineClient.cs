@@ -66,7 +66,11 @@ namespace WSJTX_Controller
             {
                 // exeDir is WSJTX_Controller\bin\<Config>\<TFM> -- the repo root is 4 levels up.
                 string repoRoot = Path.GetFullPath(Path.Combine(exeDir, "..", "..", "..", ".."));
-                string devBuild = Path.Combine(repoRoot, "EngineHost", "target", "release", "jimmy-engine-host.exe");
+                // EngineHost/.cargo/config.toml pins the build target to x86_64-pc-windows-gnu
+                // explicitly (native libtempo linking needs the MinGW toolchain, not MSVC's) --
+                // cargo therefore always builds under target\<triple>\release\, never plain
+                // target\release\, even though that triple matches every dev machine's host.
+                string devBuild = Path.Combine(repoRoot, "EngineHost", "target", "x86_64-pc-windows-gnu", "release", "jimmy-engine-host.exe");
                 if (File.Exists(devBuild)) return devBuild;
             }
             catch

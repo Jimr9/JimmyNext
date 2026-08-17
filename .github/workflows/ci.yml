@@ -61,6 +61,17 @@ jobs:
             throw "EngineHost/Cargo.toml has a dependency path pointing at an absolute developer-specific location -- see EngineHost/nexus-compat/README.md"
           }
 
+      # EngineHost/.cargo/config.toml pins the build target to x86_64-pc-windows-gnu explicitly
+      # (tempo-fast-sys's native link step needs MinGW gfortran/fftw3f, which MSVC's link.exe
+      # cannot resolve -- confirmed by a run that got all the way through compiling every crate
+      # and failed only at the final link, LNK1181 "cannot open input file 'gfortran.lib'"). This
+      # runner's default toolchain is MSVC-hosted, so the GNU target needs installing explicitly;
+      # every local dev build on this repo never needed this because that machine's own rustup
+      # default already happens to be GNU-hosted.
+      - name: Add the GNU Rust target
+        shell: msys2 {0}
+        run: rustup target add x86_64-pc-windows-gnu
+
       - name: Build EngineHost (release)
         shell: msys2 {0}
         run: |
@@ -87,14 +98,15 @@ jobs:
       - name: Stage EngineHost runtime DLLs
         shell: msys2 {0}
         run: |
-          cp "$MINGW_PREFIX"/bin/libgfortran-5.dll EngineHost/target/release/
-          cp "$MINGW_PREFIX"/bin/libstdc++-6.dll EngineHost/target/release/
-          cp "$MINGW_PREFIX"/bin/libfftw3f-3.dll EngineHost/target/release/
-          cp "$MINGW_PREFIX"/bin/libquadmath-0.dll EngineHost/target/release/
-          cp "$MINGW_PREFIX"/bin/libgcc_s_seh-1.dll EngineHost/target/release/
-          cp "$MINGW_PREFIX"/bin/libwinpthread-1.dll EngineHost/target/release/
-          mkdir -p EngineHost/target/release/hamlib
-          cp WSJTX_Controller/Resources/hamlib/* EngineHost/target/release/hamlib/
+          DEST=EngineHost/target/x86_64-pc-windows-gnu/release
+          cp "$MINGW_PREFIX"/bin/libgfortran-5.dll "$DEST"/
+          cp "$MINGW_PREFIX"/bin/libstdc++-6.dll "$DEST"/
+          cp "$MINGW_PREFIX"/bin/libfftw3f-3.dll "$DEST"/
+          cp "$MINGW_PREFIX"/bin/libquadmath-0.dll "$DEST"/
+          cp "$MINGW_PREFIX"/bin/libgcc_s_seh-1.dll "$DEST"/
+          cp "$MINGW_PREFIX"/bin/libwinpthread-1.dll "$DEST"/
+          mkdir -p "$DEST"/hamlib
+          cp WSJTX_Controller/Resources/hamlib/* "$DEST"/hamlib/
 
       - name: Build Jimmy Test (Debug, isolated identity)
         run: dotnet build "WSJTX_Controller\Jimmy.csproj" -c Debug -p:AssemblyName="Jimmy Test" -v:minimal
