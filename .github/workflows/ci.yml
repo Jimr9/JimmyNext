@@ -108,8 +108,23 @@ jobs:
           mkdir -p "$DEST"/hamlib
           cp WSJTX_Controller/Resources/hamlib/* "$DEST"/hamlib/
 
+      # Jimmy.csproj's own JimmyClubLogKeyCheck target fails any build fast if
+      # $(ClubLogKeyFile) (default: a private path outside the repo, never source control) is
+      # missing or empty -- correct behavior for a real dev/release build, but CI has and should
+      # have no access to the real key (CLAUDE.md: never expose credentials in CI). A placeholder
+      # satisfies the check without needing any real secret -- CI never makes live Club Log calls
+      # (no test here does live network I/O), so a non-functional value is fine. Overridden via
+      # the ClubLogKeyFile MSBuild property rather than writing to the real default path, so nothing
+      # about a real local dev build changes.
+      - name: Create placeholder Club Log key for CI
+        run: |
+          $lines = @("placeholder") * 8 + @("CI-PLACEHOLDER-NOT-A-REAL-KEY")
+          $path = Join-Path $env:RUNNER_TEMP "clublog_key_placeholder.txt"
+          Set-Content -Path $path -Value $lines
+          echo "CLUBLOG_KEY_FILE=$path" >> $env:GITHUB_ENV
+
       - name: Build Jimmy Test (Debug, isolated identity)
-        run: dotnet build "WSJTX_Controller\Jimmy.csproj" -c Debug -p:AssemblyName="Jimmy Test" -v:minimal
+        run: dotnet build "WSJTX_Controller\Jimmy.csproj" -c Debug -p:AssemblyName="Jimmy Test" -p:ClubLogKeyFile="$env:CLUBLOG_KEY_FILE" -v:minimal
 
       - name: Build JimmyTests
         run: dotnet build "JimmyTests\JimmyTests.csproj" -c Debug -v:minimal
@@ -120,7 +135,7 @@ jobs:
       - name: Publish self-contained Jimmy Test + build installer MSI
         run: |
           cd Setup_WiX
-          dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Test" -p:SelfContained=true -r win-x64 -o PublishOutputTest
+          dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Test" -p:ClubLogKeyFile="$env:CLUBLOG_KEY_FILE" -p:SelfContained=true -r win-x64 -o PublishOutputTest
           dotnet tool install --global wix --version 5.0.2
           wix extension add WixToolset.Firewall.wixext/5.0.2 WixToolset.UI.wixext/5.0.2
           wix build JimmyTest.wxs -ext WixToolset.Firewall.wixext -ext WixToolset.UI.wixext -arch x64 -o JimmyTest.msi
