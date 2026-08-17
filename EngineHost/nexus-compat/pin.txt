@@ -3,7 +3,8 @@
 # Nexus is a third-party dependency (https://github.com/kd9taw/Nexus). Jimmy is a CONSUMER
 # only -- we do not own it, do not modify the official project, and do not submit changes to
 # it. See README.md in this directory for how the compatibility patches below relate to this
-# pin, and CHECKING.md for what to do when this pin is updated.
+# pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
+# is updated.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
 NEXUS_TAG=v1.6.0
