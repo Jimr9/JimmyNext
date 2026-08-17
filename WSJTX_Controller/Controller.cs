@@ -188,6 +188,8 @@ namespace WSJTX_Controller
 
         private LogbookWindow _logbookWindow;
         private System.Windows.Forms.Button logbookButton;
+        private OtaSpotsWindow _otaSpotsWindow;
+        private System.Windows.Forms.Button otaSpotsButton;
         public System.Windows.Forms.Button callCqOptionsButton;
 
         // Ids of the Rule Definitions checked for live FT8 tagging in the Logbook window's
@@ -908,6 +910,20 @@ namespace WSJTX_Controller
             this.Controls.Add(logbookButton);
             logbookButton.BringToFront();
 
+            // POTA/SOTA spots button — below logbookButton at y=361, same footprint.
+            otaSpotsButton = new System.Windows.Forms.Button
+            {
+                Text           = "POTA / SOTA Spots",
+                AccessibleName = "POTA and SOTA spots, " + FormatKeysForAccessibleName(HotkeyAction.OpenOtaSpots),
+                Location       = new System.Drawing.Point(10, 361),
+                Size           = new System.Drawing.Size(492, 24),
+                Anchor         = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right,
+                TabIndex       = 52,
+            };
+            otaSpotsButton.Click += (s2, e2) => OpenOtaSpotsWindow();
+            this.Controls.Add(otaSpotsButton);
+            otaSpotsButton.BringToFront();
+
             // Weak-signal floor controls — hidden here, reparented into
             // Options > Receive / Auto Reply > Block List while that dialog is open.
             ignoreWeakSnrCheckBox = new CheckBox
@@ -1252,6 +1268,7 @@ namespace WSJTX_Controller
             optionsDlg?.Close();
             if (helpDlg != null) helpDlg.Close();
             _logbookWindow?.Close();
+            _otaSpotsWindow?.Close();
         }
 
         public void SaveHotkeyConfig()
@@ -1274,6 +1291,8 @@ namespace WSJTX_Controller
             modeHelpLabel.AccessibleName   = "Help, "                         + FormatKeysForAccessibleName(HotkeyAction.Help);
             if (logbookButton != null)
                 logbookButton.AccessibleName = "Logbook, " + FormatKeysForAccessibleName(HotkeyAction.OpenLogbook);
+            if (otaSpotsButton != null)
+                otaSpotsButton.AccessibleName = "POTA and SOTA spots, " + FormatKeysForAccessibleName(HotkeyAction.OpenOtaSpots);
         }
 
         private string FormatKeysForAccessibleName(HotkeyAction action)
@@ -1344,6 +1363,14 @@ namespace WSJTX_Controller
             {
                 OpenLogbookWindow();
                 _logbookWindow?.OpenAddQsoDialog();
+                return true;
+            }
+
+            // Same reasoning as OpenLogbook above -- POTA/SOTA spots come from EngineHost's
+            // own background cache, independent of WSJT-X's connection state.
+            if (keyData == hotkeyConfig[HotkeyAction.OpenOtaSpots] && hotkeyConfig[HotkeyAction.OpenOtaSpots] != Keys.None)
+            {
+                OpenOtaSpotsWindow();
                 return true;
             }
 
@@ -1951,6 +1978,34 @@ namespace WSJTX_Controller
                 MessageBox.Show(
                     ex.GetType().Name + ": " + ex.Message + "\r\n\r\n" + ex.StackTrace,
                     "Logbook Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        public void OpenOtaSpotsWindow()
+        {
+            if (_otaSpotsWindow != null && !_otaSpotsWindow.IsDisposed)
+            {
+                _otaSpotsWindow.Activate();
+                return;
+            }
+            try
+            {
+                _otaSpotsWindow = new OtaSpotsWindow(lookupManager,
+                    () => wsjtxClient?.activeAwardTags, () => wsjtxClient?.CurrentBandStr);
+                // Deliberately no Owner assignment -- see the matching comment on
+                // _logbookWindow's Show() call above; Controller_FormClosing already closes
+                // this explicitly via _otaSpotsWindow?.Close().
+                _otaSpotsWindow.FormClosed += (s, e) => _otaSpotsWindow = null;
+                _otaSpotsWindow.Show();
+            }
+            catch (Exception ex)
+            {
+                _otaSpotsWindow = null;
+                MessageBox.Show(
+                    ex.GetType().Name + ": " + ex.Message + "\r\n\r\n" + ex.StackTrace,
+                    "POTA / SOTA Spots Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
@@ -2972,6 +3027,7 @@ namespace WSJTX_Controller
                 $"{nl}{K(HotkeyAction.LookupStation)}: Look up selected station (shows callsign, country, state, LoTW status, and more)." +
                 $"{nl}{K(HotkeyAction.OpenLogbook)}: Open the Ham Radio Center logbook." +
                 $"{nl}{K(HotkeyAction.AddManualQso)}: Add a manually-logged QSO (e.g. worked outside WSJT-X)." +
+                $"{nl}{K(HotkeyAction.OpenOtaSpots)}: Open the POTA / SOTA spots list." +
 
                 $"{nl}{nl}Radio configuration keys:" +
                 $"{nl}{K(HotkeyAction.TuneMode)}: Toggle Tune mode, to determine correct audio output level to radio ({K(HotkeyAction.AudioUp)} and {K(HotkeyAction.AudioDown)} keys to adjust, {K(HotkeyAction.Prompts)} for fast or complete updates)." +

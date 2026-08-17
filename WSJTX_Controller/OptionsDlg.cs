@@ -3852,6 +3852,7 @@ namespace WSJTX_Controller
                 HotkeyAction.LookupStation,
                 HotkeyAction.OpenLogbook,
                 HotkeyAction.AddManualQso,
+                HotkeyAction.OpenOtaSpots,
                 HotkeyAction.ResetWindowSize,
             };
 
