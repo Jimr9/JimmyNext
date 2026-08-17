@@ -725,6 +725,7 @@ dependencies = [
  "tempo-app",
  "tempo-audio",
  "tempo-core",
+ "tempo-net",
 ]
 
 [[package]]

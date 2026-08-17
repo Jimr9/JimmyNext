@@ -318,6 +318,7 @@ mod crashlog {
 use std::sync::{Arc, Mutex};
 
 mod external_data;
+mod live_feeds;
 
 use tempo_app::engine::Engine;
 use tempo_app::settings::Settings;
@@ -439,6 +440,12 @@ struct Args {
     /// "Single decode" checkbox is inert for FT8/FT4 (verified 3.0.2 -- only JT65/Q65/FST4 read
     /// it). Startup-only, same reasoning as decode_flow_hz above.
     single_decode: Option<bool>,
+    /// `host:port` of an operator-chosen DX-cluster/RBN telnet node (tempo_net::cluster). `None`
+    /// (default) disables the DX Spots feed entirely -- unlike PSK Reporter's one public broker,
+    /// DX clusters are an independently-run federation with no single correct default, so this
+    /// must be the operator's own choice. Startup-only, same reasoning as decode_flow_hz above --
+    /// changing it in Options requires the usual engine restart.
+    dx_cluster_addr: Option<String>,
 }
 
 fn parse_args() -> Args {
@@ -469,6 +476,7 @@ fn parse_args() -> Args {
     let mut ap_decode: Option<bool> = None;
     let mut ap_cq_only: Option<bool> = None;
     let mut single_decode: Option<bool> = None;
+    let mut dx_cluster_addr: Option<String> = None;
 
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -548,6 +556,9 @@ fn parse_args() -> Args {
                     single_decode = Some(v.trim() == "1");
                 }
             }
+            "--dx-cluster" => {
+                dx_cluster_addr = it.next().filter(|v| !v.trim().is_empty());
+            }
             other => eprintln!("jimmy-engine-host: ignoring unrecognized argument '{other}'"),
         }
     }
@@ -579,6 +590,7 @@ fn parse_args() -> Args {
         ap_decode,
         ap_cq_only,
         single_decode,
+        dx_cluster_addr,
     }
 }
 
@@ -677,7 +689,12 @@ fn reply_wire_response(result: Result<(), String>) -> String {
     }
 }
 
-fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>, external_cache: Arc<external_data::SharedCache>) {
+fn run_control_server(
+    port: u16,
+    engine: Arc<Mutex<Engine>>,
+    external_cache: Arc<external_data::SharedCache>,
+    live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
+) {
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
 
@@ -835,6 +852,15 @@ fn run_control_server(port: u16, engine: Arc<Mutex<Engine>>, external_cache: Arc
             let _ = writeln!(stream, "{}", external_cache.spots_json());
         } else if line == "SPACE_WX" {
             let _ = writeln!(stream, "{}", external_cache.space_wx_json());
+        } else if line == "BAND_CONDITIONS" {
+            // Cache-only read (the rolling PSK Reporter window) + one PropAdvisor pass over up to
+            // 13 bands -- cheap enough to run inline on this accept loop, same as SNAPSHOT/
+            // OTA_SPOTS/SPACE_WX, not a network call.
+            let wx = external_cache.current_space_wx();
+            let _ = writeln!(stream, "{}", live_feeds_cache.band_conditions_json(wx.as_ref()));
+        } else if line == "DX_SPOTS" {
+            // Cache-only read of the DX-cluster/RBN telnet buffer -- always fast.
+            let _ = writeln!(stream, "{}", live_feeds_cache.dx_spots_json());
         } else if let Some(json) = line.strip_prefix("EQSL_UPLOAD ") {
             // Credential-bearing, real network I/O (eQSL can take up to ~60s -- it builds the
             // file server-side). MUST NOT run inline: this accept loop is single-threaded, and
@@ -1109,6 +1135,16 @@ fn main() {
     let external_cache = external_data::SharedCache::new();
     external_cache.spawn_refresh_thread();
 
+    // Band conditions (always -- mycall/mygrid are already known) + DX spots (only if the
+    // operator configured a cluster server): see live_feeds.rs's own header comment. Same
+    // "independent of the engine/radio loop" isolation as external_cache above.
+    let live_feeds_cache = live_feeds::LiveFeedsCache::new(
+        &args.mycall,
+        &args.mygrid,
+        args.dx_cluster_addr.as_deref(),
+    );
+    live_feeds_cache.spawn_feed_threads(args.dx_cluster_addr.as_deref());
+
     // Own thread, not the one run_radio blocks on: see run_control_server's own doc comment.
     // Spawned here (after engine exists), not earlier alongside control_port's own read above,
     // specifically so it can share this same Arc<Mutex<Engine>> -- the whole point of the
@@ -1116,7 +1152,10 @@ fn main() {
     {
         let control_engine = engine.clone();
         let control_cache = external_cache.clone();
-        std::thread::spawn(move || run_control_server(control_port, control_engine, control_cache));
+        let control_live_feeds = live_feeds_cache.clone();
+        std::thread::spawn(move || {
+            run_control_server(control_port, control_engine, control_cache, control_live_feeds)
+        });
     }
 
     let cfg = RadioConfig {

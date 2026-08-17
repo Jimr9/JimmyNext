@@ -144,6 +144,13 @@ impl SharedCache {
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
 
+    /// The current cached space-weather value (if any fetch has ever succeeded), for
+    /// live_feeds.rs's band-conditions advisory -- reuses this cache's own refresh loop rather
+    /// than fetching a second time. SpaceWx is Copy, so this is a cheap by-value read.
+    pub fn current_space_wx(&self) -> Option<SpaceWx> {
+        self.space_wx.read().unwrap_or_else(|e| e.into_inner()).value
+    }
+
     pub fn space_wx_json(&self) -> String {
         let guard = self.space_wx.read().unwrap_or_else(|e| e.into_inner());
         let age_secs = guard.last_ok.map(|t| t.elapsed().as_secs());

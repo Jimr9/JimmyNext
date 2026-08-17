@@ -58,6 +58,11 @@ serde = { version = "1", features = ["derive"] }
 # them (see main.rs's own comment on the ota_spots module). No credentials, no auth on any of
 # these three feeds.
 propagation = { path = ".nexus-src/crates/propagation", features = ["live"] }
+# DX cluster/RBN telnet client (tempo_net::cluster) + the hand-rolled, dependency-free MQTT
+# client (tempo_net::mqtt) that feeds PropAdvisor's plain-language band-conditions nowcast.
+# Pure std (TcpStream only) -- no new native/transitive dependencies, unlike a real MQTT crate
+# would pull in; matches the low-risk bar every other Nexus reuse in this file was held to.
+tempo-net = { path = ".nexus-src/crates/tempo-net" }
 
 [dev-dependencies]
 # Not needed by main.rs itself (Engine calls the native FT8 encoder/decoder internally) -- only
