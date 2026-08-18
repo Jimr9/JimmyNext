@@ -56,19 +56,32 @@ contract `WsjtxClient.Direct.cs` deserializes, reusing `JimmyReplay.py`'s own `J
 and `UdpLoop` (`WsjtxClient.Protocol.cs`) are deleted outright -- nothing calls either one
 anymore, in production or in test mode.
 
-**What's left, and why it's still there, not because it's still needed:** `WsjtxClient.Protocol.cs`'s
-message dispatcher (Heartbeat/Status/Decode/QsoLogged/LoggedAdif handling) and
-`Protocol/WsjtxProtocolAdapter.cs` are now **provably unreachable** -- nothing left ever opens
-`udpClient` or starts a `BeginReceive` loop -- but were deliberately NOT purged in this pass:
-doing so would mean tracing and removing a large, deeply-commented block plus its downstream
-callers (`WsjtxClient.Uploads.cs`'s `HandleLiveQsoLogged`/`HandleLiveAdifLogged`), a strictly
-bigger and riskier change than "replace the test harness," and every file still compiles and
-every test still passes with it left in place, inert. `WsjtxUdpLib`'s message classes
-(`DecodeMessage`, `StatusMessage`, etc.) were never at risk either way -- `WsjtxClient.Direct.cs`
-actively builds and consumes the exact same DTOs from the Direct control port, so they remain
-real, load-bearing shared types, not dead code. Both files' own comments now say exactly this
-(provably unreachable, deliberately not yet purged, not a live alternate transport) rather than
-leaving it to be inferred.
+**UPDATE, 2026-08-18 (actual UDP transport removal):** the "provably unreachable but deliberately
+not purged" state described above lasted one further pass, not permanently. `WsjtxClient.Protocol.cs`'s
+message dispatcher, `Protocol/WsjtxProtocolAdapter.cs`, `Controller.cs`'s `ResolveUdpListenAddress`
+and its IP/multicast settings plumbing, and the NegoState-era handshake machinery are all deleted
+outright now, not just unreachable. `WsjtxClient.Uploads.cs`'s `HandleLiveQsoLogged`/
+`HandleLiveAdifLogged` were traced line-by-line against Direct's own `RequestLog()` path first --
+every real piece of their logic (dedup, Club Log enrichment, log import, completion sound,
+still-need cache refresh) was already independently implemented there, so nothing needed porting;
+they were deleted too. The one piece with no Direct equivalent (auto-resuming CQ mode after a
+logged QSO, via `OnQsoLogged`) has no live path forward under Direct's control protocol and is a
+real, separate, documented feature gap -- not silently dropped, not hacked back in.
+`WsjtxUdpLib`'s message DTOs (`DecodeMessage`, `StatusMessage`, etc.) remain -- `WsjtxClient.Direct.cs`
+actively builds and consumes the exact same types from the Direct control port -- plus six now-
+orphaned-but-harmless message classes (`EnableTxMessage`, `ReplyMessage`, `HaltTxMessage`,
+`ConfigureMessage`, `QsoLoggedMessage`, `LoggedAdifMessage`) kept as inert, accurate data classes
+per standing instruction not to delete shared DTOs.
+
+**One piece of the classic WSJT-X UDP surface was deliberately kept, by operator decision, not
+oversight:** `NativeEngineClient.Launch()` still passes `--jimmy-addr` to `jimmy-engine-host.exe`,
+which makes Nexus's `run_radio` broadcast standard WSJT-X UDP (decodes/status) even though Jimmy
+itself no longer listens for it -- Direct's control port replaced that as Jimmy's own transport
+back on 2026-08-12. This is the same wire format third-party tools (JTAlert, GridTracker) expect
+if an operator runs one alongside Jimmy for their own logging/mapping. Investigated and flagged as
+an open question 2026-08-18; the operator's decision was to keep it. See `NativeEngineClient.cs`'s
+own comment at the `--jimmy-addr` call site -- do not treat this as leftover dead code in some
+future pass without re-checking that decision first.
 
 **EngineHost is genuinely thin.** `EngineHost/Cargo.toml`'s own header comment documents that
 it used to hand-roll its own decode/TX-scheduling/PTT loop and was migrated ("Self-sufficiency

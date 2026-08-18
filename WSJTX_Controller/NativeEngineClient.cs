@@ -140,6 +140,15 @@ namespace WSJTX_Controller
                     return false;
                 }
 
+                // --jimmy-addr: kept deliberately during the 2026-08-18 UDP-transport cleanup, even
+                // though Jimmy itself no longer listens on it -- ConnectDirectEngine's Direct control
+                // port replaced it as Jimmy's own transport back on 2026-08-12. This flag still makes
+                // Nexus's run_radio broadcast standard WSJT-X UDP (decodes/status) to jimmyPort, which
+                // is the same wire format third-party tools (JTAlert, GridTracker) expect if an
+                // operator runs one of those alongside Jimmy for their own logging/mapping -- a real,
+                // separate use case from Jimmy's own engine transport, confirmed via operator decision
+                // (2026-08-18) not to remove. Do not treat this as leftover dead code in a future pass
+                // without re-checking that decision first.
                 var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
                 if (!string.IsNullOrWhiteSpace(audioDevice))
                     args += $" --device \"{audioDevice}\"";
