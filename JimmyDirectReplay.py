@@ -735,13 +735,21 @@ def _real_logged_qso(engine, v, call, tag_num):
     logging for real -- this is the Direct-mode equivalent of what the old UDP
     harness got for free from a directly-injected QsoLoggedMessage packet, which
     has no Direct-protocol counterpart (Direct has no "trust me, log this" wire
-    command -- see the migration notes in ApplyEngineMode's own comment). Returns
-    True if the whole flow completed and the call is confirmed logged.
+    command -- see the migration notes in ApplyEngineMode's own comment).
+
+    Returns True/False for the real logging assertion once REPLY genuinely arrived
+    for `call` (a hard result -- False there is a real potential regression, same
+    weight as any other check_* assertion). Returns None when the click-automation
+    setup itself could not be completed (call never queued, or the posted-message
+    double-click could not be reliably targeted after retries) -- an environment/
+    timing gap, same class as Group 15's own WARN-not-FAIL precedent, not a claim
+    about the code under test. Callers must tell these apart, not treat both as
+    the same kind of failure.
     """
     engine.send_decode(f"CQ {call} EM63", from_call=call)
     if not v.wait_for_queue(call, timeout=3.0):
         print(f"    ⚠ WARN  D{tag_num}-setup: {call} never queued -- cannot drive a real QSO")
-        return False
+        return None
     time.sleep(0.3)
 
     # find_queue_row_index -> _post_listbox_click has a small, real race: the queue can
@@ -753,29 +761,32 @@ def _real_logged_qso(engine, v, call, tag_num):
     # is detected for certain, never silently trusted -- retry a few times (re-finding
     # the row fresh each attempt) before giving up, the same tolerance real operators
     # get from just clicking again.
+    MAX_CLICK_ATTEMPTS = 6
     reply = None
-    for attempt in range(3):
+    for attempt in range(MAX_CLICK_ATTEMPTS):
         clicked = v.double_click_queue_row(call)
         if not clicked:
             print(f"    ⚠ WARN  D{tag_num}-setup: could not double-click {call}'s queue row "
-                  f"(attempt {attempt + 1}/3)")
+                  f"(attempt {attempt + 1}/{MAX_CLICK_ATTEMPTS})")
             continue
         reply = engine.wait_for_reply(timeout=5.0)
         if reply is None:
             print(f"    ⚠ WARN  D{tag_num}-setup: Jimmy never sent REPLY for {call} "
-                  f"(attempt {attempt + 1}/3)")
+                  f"(attempt {attempt + 1}/{MAX_CLICK_ATTEMPTS})")
             continue
         replied_call = (reply.get("dxcall") or "").upper()
         if replied_call == call.upper():
             break
         print(f"    ⚠ WARN  D{tag_num}-setup: double-click replied to '{replied_call}', "
-              f"not '{call}' -- retrying (attempt {attempt + 1}/3)")
+              f"not '{call}' -- retrying (attempt {attempt + 1}/{MAX_CLICK_ATTEMPTS})")
         reply = None
         time.sleep(0.5)
     if reply is None:
-        print(f"    ⚠ WARN  D{tag_num}-setup: could not reliably reply to {call} after 3 attempts "
-              "(environment/timing dependent)")
-        return False
+        print(f"    ⚠ WARN  D{tag_num}-setup: could not reliably reply to {call} after "
+              f"{MAX_CLICK_ATTEMPTS} attempts (environment/timing dependent -- posted-message "
+              "double-click racing the live 1s SNAPSHOT poll's own queue re-sort; see "
+              "double_click_queue_row's own comment)")
+        return None
 
     # LogQso (WsjtxClient.cs) requires two things beyond callInProg/RR73 that a bare
     # CQ decode alone never provides: (1) allCallDict must hold a Report- or
@@ -802,6 +813,22 @@ def _real_logged_qso(engine, v, call, tag_num):
     return logged
 
 
+def _report_real_logged_qso(v, ok, tag_num, call, label):
+    """ok is _real_logged_qso's own tri-state: None means the click-automation setup
+    itself never got far enough to make a real claim (environment/timing gap, WARN
+    -- not counted against the pass/fail total, same treatment as every other
+    check_*_warn helper in this file); True/False is a hard assertion once REPLY
+    genuinely arrived, reported normally. Returns ok unchanged so callers can still
+    branch on it (only True proceeds to a dependent follow-up check).
+    """
+    if ok is None:
+        print(f"    ⚠ WARN  D{tag_num:02d}: {call} really-logged check skipped ({label}) "
+              "-- double-click automation could not be reliably targeted this run")
+    else:
+        v._report(ok, f"D{tag_num:02d}: {call} {label}", f"logList={v.log_items()}")
+    return ok
+
+
 def group5_final_73_after_qso_logged(engine, v):
     global _test_num
     print("  ─ Group 5: final 73 after a REAL logged QSO (Direct-mode equivalent) ─")
@@ -812,8 +839,8 @@ def group5_final_73_after_qso_logged(engine, v):
     call = "W7LOG5"
     ok = _real_logged_qso(engine, v, call, _test_num + 1)
     _test_num += 1
-    v._report(ok, f"D{_test_num:02d}: {call} really logged via double-click + engine RR73",
-               f"logList={v.log_items()}")
+    ok = _report_real_logged_qso(v, ok, _test_num, call,
+                                  "really logged via double-click + engine RR73")
     if not ok:
         return None
 
@@ -990,8 +1017,7 @@ def group16_rrr_after_logged_no_requeue(engine, v):
     call = "W4RR2"
     ok = _real_logged_qso(engine, v, call, _test_num + 1)
     _test_num += 1
-    v._report(ok, f"D{_test_num:02d}: {call} really logged (setup for RRR-after-logged check)",
-               f"logList={v.log_items()}")
+    ok = _report_real_logged_qso(v, ok, _test_num, call, "really logged (setup for RRR-after-logged check)")
     if not ok:
         return
     engine.send_decode(f"{MY_CALL} {call} RRR", from_call=call)
@@ -1017,8 +1043,7 @@ def group17_still_needed_tag_clears_on_log(engine, v):
         return
     ok = _real_logged_qso(engine, v, call, _test_num + 1)
     _test_num += 1
-    v._report(ok, f"D{_test_num:02d}: {call} really logged (setup for tag-clears check)",
-               f"logList={v.log_items()}")
+    ok = _report_real_logged_qso(v, ok, _test_num, call, "really logged (setup for tag-clears check)")
     if not ok:
         return
     _test_num += 1

@@ -388,10 +388,16 @@ namespace WSJTX_Controller
         // ipAddrStr (Properties.Settings.Default.ipAddress for a production-identity first run,
         // or the saved "ipAddress" .ini key otherwise) -- null when nothing is configured yet,
         // which is the normal, expected state for a fresh Jimmy Test install (see Form_Load's
-        // own call site comment for the full architectural reasoning: this value is exclusively
-        // consumed by the UDP receive-socket path, WsjtxClient.Protocol.cs's UdpLoop, itself only
-        // reachable under TestModeGuard.IsTestMode -- production Direct/EngineHost mode never
-        // reads it at all). Extracted as its own pure function (2026-08-19, alongside the
+        // own call site comment for the full architectural reasoning: this value was exclusively
+        // consumed by the UDP receive-socket path, WsjtxClient.Protocol.cs's ConnectNativeEngine/
+        // UdpLoop -- both removed in the 2026-08-18 UDP-to-Direct test-harness migration once
+        // nothing called either one anymore, in production or in test mode. Still passed into
+        // WsjtxClient's own constructor below and stored in its `ipAddress` field, which is now
+        // provably unread by anything reachable -- kept, not purged, same "provably unreachable
+        // but not yet cleaned up" status as the rest of that dead transport, and this method's
+        // own regression test (a real fresh-install crash fix) stays valid either way: parsing a
+        // possibly-null/malformed ipAddrStr safely is still a real concern regardless of what,
+        // if anything, ends up reading the result. Extracted as its own pure function (2026-08-19, alongside the
         // release-blocker fix this exists for) so the exact "no ipAddrStr configured yet" case
         // that used to crash Form_Load (IPAddress.Parse(null) -> ArgumentNullException) has a
         // direct, deterministic regression test without needing a live Form_Load/WinForms
@@ -1649,10 +1655,14 @@ namespace WSJTX_Controller
             return base.ProcessCmdKey(ref msg, keyData); // Let other keys be processed normally
         }
 
+        // UdpLoop() (the classic WSJT-X UDP transport's own per-tick pump) was removed
+        // 2026-08-18 along with ConnectNativeEngine -- see WsjtxClient.Protocol.cs's own
+        // top-of-file banner comment. Direct mode (WsjtxClient.Direct.cs) polls on its own
+        // System.Windows.Forms.Timer (_directPollTimer), not this one; mainLoopTimer_Tick
+        // itself is left wired (Controller.Designer.cs) in case a future need for a fast
+        // (10ms) UI-thread tick arises, but has nothing left to do every tick today.
         private void mainLoopTimer_Tick(object sender, EventArgs e)
         {
-            if (mainLoopTimer == null) return;
-            wsjtxClient.UdpLoop();
         }
 
         private void statusMsgTimer_Tick(object sender, EventArgs e)
@@ -2711,11 +2721,14 @@ namespace WSJTX_Controller
         // changes take effect immediately, no restart needed, matching ApplyRadioSettings'
         // own "Done when" shape).
         //
-        // ConnectNativeEngine opens Jimmy's own UDP listener directly at a fixed, known
-        // loopback address -- no "detect a separately-running real WSJT-X" dance of any kind
-        // (that legacy path used to flat-out crash the engine host and, separately, could
-        // freeze the whole window; both confirmed live, 2026-08-07/08, and removed for good
-        // along with the rest of the WSJT-X-external/Andy-fork compatibility code).
+        // ConnectDirectEngine (WsjtxClient.Direct.cs) connects straight to the engine host's
+        // known local control port -- no "detect a separately-running real WSJT-X" dance of
+        // any kind (that legacy path used to flat-out crash the engine host and, separately,
+        // could freeze the whole window; both confirmed live, 2026-08-07/08, and removed for
+        // good along with the rest of the WSJT-X-external/Andy-fork compatibility code, and
+        // then the classic-UDP transport itself, ConnectNativeEngine/UdpLoop, was removed
+        // entirely in the 2026-08-18 UDP-to-Direct test-harness migration once nothing --
+        // production or test mode -- called it anymore).
         //
         // TestModeGuard.IsTestMode connects over the exact same Direct control-port protocol
         // production uses (JimmyDirectReplay.py's fake control-port server stands in for the
@@ -4622,10 +4635,11 @@ namespace WSJTX_Controller
                 // restored to its normal narrow, right-pinned spot when back in simple mode.
                 //
                 // logListX must stay strictly greater than callListBox's own X (it's never
-                // moved and stays the leftmost control in this row): JimmyReplay.py identifies
-                // callListBox/logListBox by sorting same-row ListBoxes left-to-right, with no
-                // visibility check, so if this ever sorted before callListBox the test harness
-                // would silently swap which list it thinks is which.
+                // moved and stays the leftmost control in this row): JimmyDirectReplay.py's
+                // JimmyVerifier (carried over unchanged from the retired JimmyReplay.py)
+                // identifies callListBox/logListBox by sorting same-row ListBoxes left-to-right,
+                // with no visibility check, so if this ever sorted before callListBox the test
+                // harness would silently swap which list it thinks is which.
                 int logListX = callListBox.Location.X + 1;
                 loggedLabel.Location = new Point(logListX, 6);
                 logListBox.Location  = new Point(logListX, 24);

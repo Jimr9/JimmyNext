@@ -19,11 +19,14 @@ namespace WSJTX_Controller
     // Heartbeat, no NegoState machine, nothing to race.
     //
     // UDP-to-Direct parity pass, 2026-08-12: this is now the sole production transport --
-    // Controller.ApplyEngineMode() uses it unconditionally outside TestModeGuard.IsTestMode.
-    // WsjtxClient's UDP path (ConnectNativeEngine / WsjtxClient.Protocol.cs) still exists, kept
-    // alive specifically so JimmyReplay.py's replay-test suite (which only speaks the standard
-    // WSJT-X UDP protocol) keeps working, but is no longer reachable from any live operator
-    // session.
+    // Controller.ApplyEngineMode() uses it unconditionally, in production AND in test mode
+    // alike (as of the 2026-08-18 UDP-to-Direct test-harness migration -- see that method's
+    // own comment). WsjtxClient's classic UDP path (ConnectNativeEngine / WsjtxClient.
+    // Protocol.cs) was removed entirely in that same pass once JimmyDirectReplay.py replaced
+    // JimmyReplay.py as the replay-test harness and nothing called it anymore, in production
+    // or in test mode -- this class is now the ONLY way Jimmy ever talks to the engine host
+    // (real or, under TestModeGuard.IsTestMode, JimmyDirectReplay.py's fake control-port
+    // server standing in for it).
     //
     // Maximum reuse by design: every decode/status arriving here gets turned into the exact same
     // DecodeMessage/StatusMessage objects the UDP path already builds from wire bytes, then fed

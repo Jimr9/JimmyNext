@@ -55,7 +55,7 @@ jimmy_icon_preview.png
 netfol_48x48.png
 dl.JPG
 
-# Python bytecode cache (JimmyReplay.py)
+# Python bytecode cache (JimmyDirectReplay.py)
 __pycache__/
 *.pyc
 

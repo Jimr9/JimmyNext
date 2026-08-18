@@ -1,7 +1,7 @@
 JIMMY TESTING GUIDE
 ===================
 Plain text. Screen-reader compatible.
-Last updated: 2026-06-28
+Last updated: 2026-08-18
 
 
 CONTENTS
@@ -26,11 +26,20 @@ Suite 1: Parser Unit Tests (JimmyTests)
   Tests the message classification logic that Jimmy uses to decide
   what to do with every decode received from WSJT-X.
 
-Suite 2: Replay Integration Tests (JimmyReplay)
-  Requires Jimmy to be running (but NOT WSJT-X).
-  Simulates WSJT-X over UDP and verifies Jimmy's queue and status
-  text respond correctly to known message sequences.
+Suite 2: Replay Integration Tests (JimmyDirectReplay)
+  Requires Jimmy to be running (WSJT-X is irrelevant -- Jimmy talks
+  to a fake engine host, not to WSJT-X, in either mode).
+  Simulates jimmy-engine-host.exe over Jimmy's own Direct control
+  port and verifies Jimmy's queue and status text respond correctly
+  to known decode/status sequences, exactly the way production
+  Jimmy talks to the real native engine.
   No radio. No transmissions. No real QSOs are affected.
+  (Renamed 2026-08-18: JimmyReplay.py simulated a standard WSJT-X
+  UDP peer, the classic protocol Jimmy's own production code no
+  longer uses at all. JimmyDirectReplay.py replaces it, speaking
+  the same Direct control-port protocol production Jimmy speaks to
+  the real engine host, so replay tests exercise the real transport
+  instead of a retired one.)
 
 
 2. PREREQUISITES
@@ -55,10 +64,13 @@ Suite 1 (parser tests) is entirely offline. It links against the
 Jimmy assembly and calls static classifier methods directly.
 No network traffic. No radio. Nothing external is involved.
 
-Suite 2 (replay tests) sends UDP packets to Jimmy on localhost
-(127.0.0.1 port 2237). WSJT-X is not running, so Jimmy has no
-connection to a real radio. No CAT commands are sent. No PTT is
-keyed. No frequencies change. The test traffic is synthetic and
+Suite 2 (replay tests) runs a fake control-port server on localhost
+(127.0.0.1 port 58239, the same port the real jimmy-engine-host.exe
+would listen on) that Jimmy connects to instead of a real engine.
+Jimmy never spawns the real jimmy-engine-host.exe in test mode
+(TestModeGuard.IsTestMode), so no real audio device, COM port, or
+radio is ever touched. No CAT commands are sent. No PTT is keyed.
+No frequencies change. The test traffic is synthetic and
 self-contained on your computer.
 
 To be completely safe:
@@ -94,45 +106,61 @@ All output appears in the console window.
 
 5. SUITE 2: REPLAY INTEGRATION TESTS
 --------------------------------------
-File: JimmyReplay.py
+File: JimmyDirectReplay.py
 Runner script: run_replay_tests.bat
 
-What it tests (current groups):
+What it tests (current groups -- see JimmyDirectReplay.py itself for
+the full, authoritative list; each group function has its own
+docstring with the exact regression it guards):
 
-  Group 1 (T01-T06): Full QSO exchange directed at me.
-    K4YT sends grid, report, roger-report, RRR, RR73, then 73.
-    Verifies K4YT is queued at each step and the signoff path fires.
+  Group 1: Full QSO exchange directed at me.
+    K4YT sends grid, report, roger-report, RRR, RR73.
+    Verifies K4YT is queued at each step.
 
-  Group 2 (T07-T08): CQ messages.
-    Plain CQ and directed POTA CQ from K4YT.
-    Verifies K4YT is added to the call queue.
+  Group 2: CQ messages (plain and POTA-directed).
 
-  Group 3 (T09-T10): WSJT-X 3.0 AP suffix.
-    Messages with "a35" and "a1" suffixes.
-    Verifies Jimmy strips the suffix and classifies correctly.
+  Group 3: WSJT-X 3.0 AP suffix stripping (long and short forms).
 
-  Group 4 (T11-T12): Contest and Field Day exchanges.
-    FD exchange directed to me: accepted and queued.
-    Contest exchange between other stations: rejected.
+  Group 4: Contest and Field Day exchanges (directed vs. between
+    other stations).
 
-  Group 5 (T13-T14): Fix #3 - final 73 after a logged QSO.
-    Logs K4YT via QsoLoggedMessage, then sends a final 73.
-    Verifies status says "final 73" and K4YT is NOT re-queued.
+  Group 5-6: A REAL logged QSO, driven end to end -- the replay
+    script double-clicks a queued call's row (posted Win32 mouse
+    messages, no real mouse/keyboard input) to trigger Jimmy's own
+    real double-click-to-reply path, then feeds the fake engine's
+    own simulated report/RR73 exchange back through Jimmy's real
+    SNAPSHOT poll loop, exercising the actual production logging
+    code path (not a shortcut). Verifies "final 73" status wording
+    and that a station re-calling after being logged is re-queued.
 
-  Group 6 (T15): Fix #4 - re-call after a prior logged QSO.
-    K4YT (already in logListBox from Group 5) calls again.
-    Verifies K4YT IS re-queued (old guard that blocked this is gone).
+  Group 7-13: /H (Fox/Hound-suffix) handling, SOTA-directed CQ
+    admission, short AP suffixes, T/R period gating under Advanced
+    Call Layout, Fox/Hound detection, and HRC/Still-Need filter
+    plumbing baselines.
+
+  Group 15-19: Grid-reply queuing, RRR-after-logged non-requeue
+    (using the same real double-click-driven logging as Group 5-6),
+    Still-Needed award tag clearing on a real logged QSO, and the
+    weak-signal-floor admission/removal checks.
+
+  (Group 14, the old UDP-only LoggedAdifMessage-fallback test, was
+  retired 2026-08-18 -- Direct mode has no ADIF-broadcast wire
+  message and no lossy-UDP-packet failure mode to guard against, so
+  its premise does not translate; see JimmyDirectReplay.py's own
+  group14_retired_note() for the full reasoning.)
 
 How to run:
-  1. Close WSJT-X.
-  2. Start Jimmy (Debug build).
-  3. Set Jimmy mode to CQ.
-  4. Enable Advanced Call Layout in Options.
-  5. Double-click run_replay_tests.bat
+  1. Start Jimmy (Debug build). (WSJT-X does not need to be closed
+     for Direct mode itself, but keep it closed anyway -- habit
+     worth keeping, and some setups still check for it.)
+  2. Set Jimmy mode to CQ.
+  3. Enable Advanced Call Layout in Options.
+  4. Double-click run_replay_tests.bat
      or type: run_replay_tests
 
-Jimmy does not need to be connected to WSJT-X. The replay script
-acts as a simulated WSJT-X and completes the handshake itself.
+The replay script starts a fake control-port server BEFORE checking
+for Jimmy, so Jimmy's very first poll (about 1 second after Direct
+mode connects) typically succeeds immediately.
 
 If Jimmy is not running, the script still executes but skips all
 UI assertions and prints "(Verifier was not available)".
@@ -189,55 +217,87 @@ parser tests.
 
 8. HOW TO ADD A NEW REPLAY TEST
 ---------------------------------
-Replay tests live in JimmyReplay.py.
+Replay tests live in JimmyDirectReplay.py.
 Tests are organized as group functions (group1, group2, ...).
-The test number tag (T01, T02, ...) is assigned automatically
+The test number tag (D01, D02, ...) is assigned automatically
 by a global counter, so tests always number sequentially.
 
 Step 1: Define a new group function at the bottom of the group
   functions section (just before run_tests()).
 
   Example:
-    def group7_my_new_scenario(sock, v):
-        """T16: My new regression test."""
-        print("  - Group 7: My new scenario -")
+    def group20_my_new_scenario(engine, v):
+        print("  - Group 20: My new scenario -")
 
-        send(sock,
-             "Label shown in output",
+        step("Label shown in output",
              "What this message tests",
-             build_enqueue(f"{MY_CALL} {THEIR_CALL} -05"),
-             verify_fn=lambda: (
-                 v.check_queue_contains(THEIR_CALL,
-                     f"T16: {THEIR_CALL} in queue after new message"),
-             ) if v.available else None)
+             lambda: engine.send_decode(f"{MY_CALL} {THEIR_CALL} -05",
+                                         from_call=THEIR_CALL),
+             verify_fn=lambda: v.check_queue_contains(THEIR_CALL,
+                 f"D: {THEIR_CALL} in queue after new message"))
 
-Step 2: Call your group from run_tests(), just before the
-  "To add a new replay test group" comment block:
-    group7_my_new_scenario(sock, v)
+Step 2: Call your group from run_tests(), just before the closing
+  print() calls:
+    group20_my_new_scenario(engine, v)
 
 Step 3: Run run_replay_tests.bat with Jimmy running to confirm PASS.
 
-Available send() parameters:
-  sock        - the UDP socket (always pass the sock parameter)
+Available step() parameters:
   label       - short label printed in the test header line
   description - longer description printed below the label
-  payload     - UDP bytes (use build_enqueue, build_qso_logged, etc.)
+  action      - a zero-argument callable that drives the fake engine
+                (engine.send_decode, engine.set_transmitting, etc.)
   verify_fn   - optional lambda that calls v.check_* methods
-  delay       - seconds to wait after sending (default 1.5)
+  settle      - seconds to wait after action() before verifying
+                (default 1.2)
 
-Available verify assertions:
+FakeEngine methods (drive the simulated engine host):
+  engine.send_decode(message, from_call=..., snr=..., dt_sec=..., freq_hz=...)
+    Injects one decode into the next SNAPSHOT response and advances
+    the simulated slot counter (matches AppSnapshot.recentDecodes'
+    real "replaced each slot" semantics).
+  engine.send_decodes(list_of_row_dicts)
+    Same, for more than one decode in the same slot.
+  engine.set_transmitting(bool) / engine.set_qso_txnow(text)
+    Directly control the next SNAPSHOT's radio.transmitting /
+    qso.txNow fields.
+  engine.complete_qso_now(dxcall, final="RR73")
+    Simulates the engine reporting a completed exchange with dxcall
+    in one step.
+  engine.wait_for_reply(timeout=5.0)
+    Blocks until Jimmy sends a real REPLY command (e.g. from a
+    double-click), returning the parsed {dxcall, dxgrid, replyMsg,
+    replySnr, dxFreqHz} dict, or None on timeout.
+
+Available verify assertions (same names/shapes as the old harness):
   v.check_queue_contains(fragment, label)
   v.check_queue_not_contains(fragment, label)
   v.check_status_contains(fragment, label)
-  v.check_status_not_contains(fragment, label)
   v.check_log_contains(fragment, label)
   v.check_active(label)
+  v.check_queue_contains_warn / check_queue_not_contains_warn /
+  v.check_queue_row_contains_warn / check_status_contains_warn
+    (soft checks: WARN not FAIL when a config-dependent precondition
+    isn't met -- see any existing group using them for the pattern)
+
+If your new test needs a REAL logged QSO (not just a queued call),
+use the shared _real_logged_qso(engine, v, call, tag_num) helper --
+it drives a real double-click-to-reply, then a real report/RR73
+exchange through the fake engine, exercising Jimmy's actual
+DirectApplyStatus/LogQso code path end to end. It returns True/False
+once a real REPLY arrived (a hard assertion), or None if the
+double-click automation itself could not be reliably targeted this
+run (an environment/timing gap -- report as WARN via the
+_report_real_logged_qso helper, not a hard FAIL).
 
 Note on group dependencies:
-  Groups 5 and 6 are intentionally sequential (Group 5 logs K4YT;
-  Group 6 tests what happens when K4YT calls again). New groups
-  should be independent when possible. Document any dependency in
-  the group function's docstring.
+  Groups 5 and 6 are intentionally sequential (Group 5 logs a call;
+  Group 6 tests what happens when that call calls again). New groups
+  should be independent when possible and use their own unique test
+  callsigns (never reuse THEIR_CALL/K4YT or another group's call) so
+  a group can be re-run or reordered without picking up stale state
+  from an earlier group. Document any real dependency in the group
+  function's docstring.
 
 
 9. BEST PRACTICES FOR REGRESSION TESTING
@@ -253,9 +313,10 @@ For parser bugs (wrong classification of a message):
   5. Leave the test in place permanently.
 
 For behavior bugs (Jimmy queues/drops/sounds wrong):
-  1. Identify the message sequence that triggered the bug.
-  2. Add a new replay group in JimmyReplay.py that sends those
-     messages and asserts the correct outcome.
+  1. Identify the decode/status sequence that triggered the bug.
+  2. Add a new replay group in JimmyDirectReplay.py that drives the
+     fake engine through that sequence and asserts the correct
+     outcome.
   3. Fix Jimmy.
   4. Run the replay test with Jimmy running and confirm PASS.
   5. Leave the group in place as a regression guard.
@@ -267,8 +328,10 @@ Keep tests small and focused:
 
 Naming conventions:
   Parser groups:  FooBarTests() in JimmyTests.cs
-  Replay groups:  group7_short_description(sock, v) in JimmyReplay.py
-  Test labels:    Start with the tag "T16: " for traceability.
+  Replay groups:  group20_short_description(engine, v) in
+                   JimmyDirectReplay.py
+  Test labels:    Start with the tag "D: " (or a fixed "D##:" once
+                   you know the assigned number) for traceability.
 
 
 END OF TESTING GUIDE

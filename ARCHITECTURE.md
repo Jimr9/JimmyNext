@@ -40,17 +40,35 @@ were found stale and corrected during a focused audit (2026-08-17) -- that escap
 longer exists; jimmy-engine-host.exe not being reachable is now a hard error, not a fallback
 trigger.
 
-The classic UDP protocol code (`WsjtxClient.Protocol.cs`, `Protocol/WsjtxProtocolAdapter.cs`,
-`WsjtxUdpLib`'s message classes) was **not deleted** -- it is genuinely load-bearing test
-infrastructure, not vestigial production code. `run_replay_tests.bat` sets
-`TestModeGuard.IsTestMode`, which routes `ApplyEngineMode()` to `ConnectNativeEngine()`
-(`WsjtxClient.Protocol.cs`) instead, opening a real UDP socket that `JimmyReplay.py` sends real
-packets to against a real running `Jimmy Test.exe` process -- an end-to-end replay harness, not
-an in-process mock. Deleting this would break that harness for no production benefit. Instead,
-every entry point (`WsjtxClient.Protocol.cs`'s own top-of-file banner comment,
-`ConnectNativeEngine`, `UdpLoop`, `WsjtxProtocolAdapter`'s class comment) now says explicitly
-"test/replay-only in current production" rather than leaving that to be inferred or -- worse --
-misread as a live alternate transport.
+**UPDATE, 2026-08-18 (UDP-to-Direct test-harness migration):** the paragraph above described the
+classic UDP protocol code as "genuinely load-bearing test infrastructure" -- true at the time,
+no longer true now. `run_replay_tests.bat`'s `TestModeGuard.IsTestMode` used to route
+`ApplyEngineMode()` to `ConnectNativeEngine()` (`WsjtxClient.Protocol.cs`) specifically because
+`JimmyReplay.py` only spoke the classic WSJT-X UDP protocol. That was the actual reason UDP
+code survived the earlier Direct-only production cutover -- not a real remaining need for the
+transport itself. `TestModeGuard.IsTestMode` now calls the exact same `ConnectDirectEngine()`
+production uses; test mode differs from production only in never spawning the real
+`jimmy-engine-host.exe` process (`ApplyEngineMode()`'s own early return). `JimmyReplay.py` is
+deleted; `JimmyDirectReplay.py` replaces it -- a fake Direct control-port TCP server
+(`127.0.0.1:58239`) standing in for `jimmy-engine-host.exe`, verified against the real JSON
+contract `WsjtxClient.Direct.cs` deserializes, reusing `JimmyReplay.py`'s own `JimmyVerifier`
+(Win32 UI reader) unchanged since it never depended on the wire format at all. `ConnectNativeEngine`
+and `UdpLoop` (`WsjtxClient.Protocol.cs`) are deleted outright -- nothing calls either one
+anymore, in production or in test mode.
+
+**What's left, and why it's still there, not because it's still needed:** `WsjtxClient.Protocol.cs`'s
+message dispatcher (Heartbeat/Status/Decode/QsoLogged/LoggedAdif handling) and
+`Protocol/WsjtxProtocolAdapter.cs` are now **provably unreachable** -- nothing left ever opens
+`udpClient` or starts a `BeginReceive` loop -- but were deliberately NOT purged in this pass:
+doing so would mean tracing and removing a large, deeply-commented block plus its downstream
+callers (`WsjtxClient.Uploads.cs`'s `HandleLiveQsoLogged`/`HandleLiveAdifLogged`), a strictly
+bigger and riskier change than "replace the test harness," and every file still compiles and
+every test still passes with it left in place, inert. `WsjtxUdpLib`'s message classes
+(`DecodeMessage`, `StatusMessage`, etc.) were never at risk either way -- `WsjtxClient.Direct.cs`
+actively builds and consumes the exact same DTOs from the Direct control port, so they remain
+real, load-bearing shared types, not dead code. Both files' own comments now say exactly this
+(provably unreachable, deliberately not yet purged, not a live alternate transport) rather than
+leaving it to be inferred.
 
 **EngineHost is genuinely thin.** `EngineHost/Cargo.toml`'s own header comment documents that
 it used to hand-roll its own decode/TX-scheduling/PTT loop and was migrated ("Self-sufficiency

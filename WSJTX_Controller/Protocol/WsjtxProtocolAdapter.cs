@@ -16,12 +16,15 @@ namespace WSJTX_Controller
         public IPEndPoint e;
     }
 
-    // Test/replay-only in current production (see WsjtxClient.Protocol.cs's own top-of-file
-    // banner comment): the sockets this owns are opened only via ConnectNativeEngine, which
-    // Controller.ApplyEngineMode() calls only under TestModeGuard.IsTestMode. Real production
-    // always uses Direct (WsjtxClient.Direct.cs) and never opens a UDP socket at all. Kept
-    // because run_replay_tests.bat's JimmyReplay.py genuinely depends on this socket mechanics
-    // working end to end against a real running Jimmy Test.exe.
+    // Provably unreachable in current production AND test mode (see WsjtxClient.Protocol.cs's
+    // own top-of-file banner comment, 2026-08-18 UDP-to-Direct test-harness migration): the
+    // sockets this owns were opened only via ConnectNativeEngine, which is now deleted -- both
+    // production and TestModeGuard.IsTestMode call ConnectDirectEngine() (WsjtxClient.Direct.cs)
+    // instead, which never touches this class at all. NOT deleted itself: WsjtxClient.cs's own
+    // udpClient2 fallback branches (EnableTx/DisableTx/HaltTx/ReplyTo) still reference
+    // ReceiveSocket/SendSocket/Close via WsjtxClient's own udpClient/udpClient2 properties, so
+    // this class is inert but not literally dead code -- same "left for a future dedicated
+    // cleanup pass" status as those branches, not an oversight.
     //
     // Migration Stage A3 (Jimmy_Master_Migration_Roadmap.md / Architecture Blueprint):
     // Protocol Adapter boundary for WsjtxClient.Protocol.cs's socket ownership, zero
@@ -108,12 +111,12 @@ namespace WSJTX_Controller
             catch (Exception err)
             {
 #if DEBUG
-                // This class's sockets are only ever opened by ConnectNativeEngine
-                // (WsjtxClient.Protocol.cs), itself only reachable via
-                // TestModeGuard.IsTestMode -- and run_replay_tests.bat always runs the DEBUG
-                // build (see that script's own JIMMY_EXE path), so this branch is exactly the
-                // one place this callback is ever genuinely exercised. Logged here for a
-                // developer diagnosing a replay-test failure, not swallowed.
+                // This class's sockets were only ever opened by ConnectNativeEngine
+                // (WsjtxClient.Protocol.cs) -- removed 2026-08-18, so this callback can no
+                // longer fire at all (nothing left ever starts a BeginReceive). Left logging
+                // here, unchanged, in case a future caller resurrects this class's own
+                // TryOpenReceiveSocket path -- see this class's own header comment for why the
+                // class itself wasn't deleted.
                 Console.WriteLine($"Exception: ReceiveCallback() {err}");
 #else
                 // Release/production never reaches this callback at all (see above) -- no

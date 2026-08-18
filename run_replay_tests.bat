@@ -5,7 +5,7 @@ rem -- Safety: never let replay testing touch the real logbook or real online
 rem    services. This script is the ONLY supported way to run replay tests --
 rem    it always forces an isolated test database and always checks for a
 rem    real WSJT-X before doing anything else. Do not bypass it by starting
-rem    Jimmy Test.exe manually and running JimmyReplay.py directly.
+rem    Jimmy Test.exe manually and running JimmyDirectReplay.py directly.
 rem
 rem    Launches "Jimmy Test.exe", not "Jimmy.exe" -- 2026-08-10: JIMMY_TEST_DB_PATH below
 rem    already isolated the logbook/diag-log/radio control, but the .ini file itself was
@@ -14,6 +14,17 @@ rem    at all) -- a plain "Jimmy.exe" build reads/writes the REAL production Jim
 rem    regardless of this env var. build.bat now compiles with -p:AssemblyName="Jimmy Test"
 rem    for exactly this reason (mirrors Setup_WiX\JimmyTest.wxs's own publish-time override)
 rem    -- everything below must reference that same renamed exe.
+rem
+rem    UDP-to-Direct test-harness migration, 2026-08-18: this script used to run
+rem    JimmyReplay.py, which sent real WSJT-X-protocol UDP packets to Jimmy's own UDP
+rem    listener (only ever opened under TestModeGuard.IsTestMode). Test mode now uses the
+rem    same Direct control-port transport production does (Controller.ApplyEngineMode()),
+rem    so JimmyReplay.py and its UDP wire-format sender were retired; JimmyDirectReplay.py
+rem    replaces it -- a fake control-port TCP server (127.0.0.1:58239) standing in for
+rem    jimmy-engine-host.exe, verifying Jimmy's real UI the same way JimmyReplay.py always
+rem    did (JimmyVerifier, carried over unchanged). No change to this script's own safety
+rem    checks below (real-WSJT-X guard, isolated JIMMY_TEST_DB_PATH, graceful cleanup) --
+rem    the transport swap is entirely inside the Python script.
 
 tasklist /FI "IMAGENAME eq wsjtx.exe" 2>NUL | find /I "wsjtx.exe" >NUL
 if %ERRORLEVEL%==0 (
@@ -81,7 +92,7 @@ if not %ERRORLEVEL%==0 (
     echo close it and re-run this script so it can launch a safe instance.
 )
 
-python "%~dp0JimmyReplay.py"
+python "%~dp0JimmyDirectReplay.py"
 
 rem -- Cleanup: only close the test-mode Jimmy instance THIS run launched
 rem    (tracked by PID above) -- never touches an instance that was already

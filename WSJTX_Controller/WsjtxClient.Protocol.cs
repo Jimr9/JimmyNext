@@ -16,17 +16,35 @@ using WsjtxUdpLib.Messages.Out;
 namespace WSJTX_Controller
 {
     // ═══════════════════════════════════════════════════════════════════════════════════
-    // TEST/REPLAY-ONLY IN CURRENT PRODUCTION. Jimmy Next's sole production transport is
-    // Jimmy Test -> Direct (control port) -> EngineHost -> Nexus (WsjtxClient.Direct.cs).
-    // Controller.Form_Load's ApplyEngineMode() call always launches the native engine host
-    // and always connects to it via ConnectDirectEngine() outside TestModeGuard.IsTestMode
-    // -- there is no remaining operator choice or code path that reaches this file's
-    // classic WSJT-X UDP protocol handling in a real session. It is exercised ONLY when
-    // TestModeGuard.IsTestMode is true, by run_replay_tests.bat's JimmyReplay.py driving a
-    // real Jimmy Test.exe process over real UDP packets, simulating a standard WSJT-X peer
-    // -- genuinely load-bearing test infrastructure, not dead code, kept exactly because
-    // that harness (and the message-parsing library it exercises, WsjtxUdpLib) still needs
-    // it to work. See ConnectNativeEngine's own comment below for the entry point.
+    // UDP-TO-DIRECT TEST-HARNESS MIGRATION, 2026-08-18: this file's classic WSJT-X UDP
+    // transport is now PROVABLY UNREACHABLE, in production and in test mode alike. Jimmy
+    // Next's sole transport is Jimmy Test -> Direct (control port) -> EngineHost -> Nexus
+    // (WsjtxClient.Direct.cs); Controller.ApplyEngineMode() calls ConnectDirectEngine()
+    // unconditionally now, including under TestModeGuard.IsTestMode (see that method's own
+    // comment) -- there is no remaining caller of ConnectNativeEngine or UdpLoop anywhere in
+    // this codebase, so nothing ever opens udpClient or starts a BeginReceive loop, and the
+    // message dispatcher below this banner (HeartbeatMessage/StatusMessage/DecodeMessage/
+    // QsoLoggedMessage/LoggedAdifMessage handling) can never run. JimmyReplay.py (the only
+    // thing that ever drove this path) is deleted; its replacement, JimmyDirectReplay.py,
+    // speaks the Direct control-port protocol instead (a fake control-port TCP server
+    // standing in for jimmy-engine-host.exe), exercising WsjtxClient.Direct.cs the same way
+    // production does.
+    //
+    // NOT deleted in this pass: purging this file's dead dispatcher fully would mean tracing
+    // and removing a large, deeply-commented block (HeartbeatMessage/StatusMessage/Decode/
+    // QsoLogged/LoggedAdif handling, plus WsjtxClient.Uploads.cs's HandleLiveQsoLogged/
+    // HandleLiveAdifLogged, whose only caller is inside that same dead dispatcher) --
+    // strictly larger and riskier than this pass's scope (UDP-to-Direct *test harness*
+    // migration), and every other production file in this codebase still compiles and
+    // passes its own tests with it left in place, inert. `WsjtxProtocolAdapter` (Protocol/
+    // WsjtxProtocolAdapter.cs) is NOT fully dead either: WsjtxClient.cs's own udpClient2
+    // fallback branches (EnableTx/DisableTx/HaltTx/ReplyTo, `else if (udpClient2 != null)`)
+    // still reference it, even though udpClient2 can now never be non-null -- same "provably
+    // unreachable but not yet purged" status, left for a future dedicated cleanup pass, not
+    // an oversight. ConnectNativeEngine and UdpLoop themselves ARE removed below (their own
+    // exclusive private state went with them) since those were this pass's explicit target
+    // -- the one remaining caller of either, Controller.cs's mainLoopTimer_Tick, no longer
+    // calls UdpLoop() either.
     // ═══════════════════════════════════════════════════════════════════════════════════
     public partial class WsjtxClient
     {
@@ -34,134 +52,11 @@ namespace WSJTX_Controller
         // WsjtxProtocolAdapter.cs) -- it had zero true WsjtxClient-instance dependency
         // beyond the socket-receive state that now lives there. Kept here as a thin
         // wrapper since asyncCallback = new AsyncCallback(ReceiveCallback) below needs a
-        // method matching AsyncCallback's signature.
+        // method matching AsyncCallback's signature. Provably unreachable now (nothing
+        // left assigns asyncCallback or calls BeginReceive -- see this file's own
+        // top-of-file banner comment) but left in place along with the rest of the dead
+        // dispatcher below, not deleted piecemeal.
         public void ReceiveCallback(IAsyncResult ar) => _protocolAdapter.ReceiveCallback(ar);
-
-        // Retries ConnectNativeEngine on a cooldown (not every 10ms tick) while stuck in WAIT
-        // -- only reachable if the UDP listener genuinely failed to open (e.g. a port
-        // conflict); a normal connect never leaves NegoState at WAIT in the first place.
-        private DateTime _lastNativeConnectRetry = DateTime.MinValue;
-        private static readonly TimeSpan NativeConnectRetryCooldown = TimeSpan.FromSeconds(5);
-
-        public void UdpLoop()
-        {
-            // Called once per mainLoopTimer tick unconditionally (Controller.cs) regardless of
-            // transport -- the _directConnected guard immediately below is what makes it a no-op
-            // in real production (see this file's own top-of-file banner comment). Kept as an
-            // unconditional call site, not itself gated by TestModeGuard.IsTestMode, so replay
-            // tests don't need Controller.cs to know which mode is active.
-            //
-            // Structural mutual-exclusivity fix, 2026-08-10: this whole method must be a no-op
-            // whenever Direct mode (WsjtxClient.Direct.cs) is the active transport to the engine.
-            // Before this check existed, the two pipelines could both end up live at once: this
-            // method's own guard below only ever checked WsjtxMessage.NegoState, a single SHARED
-            // flag both pipelines read AND write -- Direct mode's own first successful poll sets
-            // NegoState to RECD (needed for unrelated things elsewhere that gate on it), which
-            // ALSO satisfied this method's "not still waiting" condition, letting it fall through
-            // to udpClient.BeginReceive(...) if udpClient happened to be non-null for any reason
-            // (e.g. left over from an earlier UDP-mode session before Direct was selected).
-            // Root-caused live, 2026-08-10, from a real QSO where Tx got disabled mid-contact by
-            // safety logic (WsjtxClient.cs's ProcessTxEnd/consecTxCount) that only exists in the
-            // UDP-only status-message handler below -- it could only have fired if this loop was
-            // actually receiving and processing real messages while nominally in Direct mode.
-            // _directConnected is Direct mode's own authoritative flag (unlike NegoState, never
-            // written by the UDP side), so gating on it here, first, makes the two transports
-            // structurally exclusive regardless of NegoState's shared value or udpClient's state.
-            if (_directConnected) return;
-
-            if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT)
-            {
-                if (_nativeEngineAddr != null && DateTime.UtcNow - _lastNativeConnectRetry >= NativeConnectRetryCooldown)
-                {
-                    _lastNativeConnectRetry = DateTime.UtcNow;
-                    ConnectNativeEngine(_nativeEngineAddr, _nativeEnginePort);
-                }
-                return;
-            }
-
-            if (wsjtxClosing)
-            {
-                DebugOutput($"{nl}{Time()} native engine connection closing");
-                ResetNego();
-                CloseAllUdp();
-                wsjtxClosing = false;
-                // Wave 1 of the notification architecture (WSJTX_Controller/Notify/):
-                // default template "WSJT-X closed", Important priority -- byte-identical
-                // to the direct ShowMessage call this replaces.
-                Notify.Publish(new ConnectionClosedEvent());
-            }
-
-            //timer expires at 11-12 msec minimum (due to OS limitations)
-            if (messageRecd)
-            {
-                if (datagram != null) Update();
-                messageRecd = false;
-                recvStarted = false;
-            }
-            // Receive a UDP datagram
-            if (!recvStarted)
-            {
-                if (udpClient == null || WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT) return;
-                udpClient.BeginReceive(asyncCallback, udpSt);
-                recvStarted = true;
-            }
-        }
-
-        // ONLY called from Controller.ApplyEngineMode()'s TestModeGuard.IsTestMode branch --
-        // real production always calls ConnectDirectEngine() (WsjtxClient.Direct.cs) instead.
-        // Kept and still genuinely exercised: it's what a replay-test run's real Jimmy Test.exe
-        // process uses to open the real UDP socket JimmyReplay.py sends packets to (see this
-        // file's own top-of-file banner comment) -- not a dead alternate production path.
-        //
-        // Jimmy Native's own connection path -- deliberately bypasses CheckWsjtxRunning()
-        // entirely rather than reusing it. That method exists to detect and reconnect to a
-        // SEPARATE, already-running real WSJT-X.exe: it reads WSJT-X's own ini file for its
-        // configured UDP server address (irrelevant here, and can be flat wrong -- e.g.
-        // multicast -- if a real WSJT-X install coexists on the same PC), unconditionally
-        // blocks the UI thread for a flat Thread.Sleep(3000), and on failure pops a modal
-        // MessageBox.Show with WSJT-X-specific instructions that make no sense in Native
-        // mode. Confirmed live, 2026-08-07/08: this whole path -- not anything in
-        // NativeEngineClient.Launch itself -- was the actual cause of Jimmy's window going
-        // fully unresponsive (busy cursor, no keyboard/mouse response) the instant Native
-        // mode was enabled, since ApplyEngineMode() creates the same WSJT-X.lock file
-        // CheckWsjtxRunning() uses as its "a WSJT-X is running" signal, guaranteeing this
-        // path fires via mainLoopTimer's very next tick. Native mode already knows its own
-        // UDP endpoint exactly -- NativeEngineClient.Launch was told to send to
-        // 127.0.0.1:<jimmyPort> via --jimmy-addr -- so there is nothing to detect: just open
-        // that exact socket directly and move straight to normal heartbeat negotiation.
-        private IPAddress _nativeEngineAddr;
-        private int _nativeEnginePort;
-
-        public void ConnectNativeEngine(IPAddress addr, int nativeEnginePort)
-        {
-            _nativeEngineAddr = addr;
-            _nativeEnginePort = nativeEnginePort;
-
-            ResetNego();
-            CloseAllUdp();
-            ipAddress = addr;
-            port = nativeEnginePort;
-            multicast = false;
-
-            if (!_protocolAdapter.TryOpenReceiveSocket(out Exception openErr))
-            {
-                DebugOutput($"{spacer}unable to open native engine udpClient:{openErr}");
-                Notify.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine",
-                    $"couldn't open the UDP listener on {addr}:{nativeEnginePort}: {openErr.Message}"));
-                return;         //stays in NegoState.WAIT; UdpLoop's WAIT branch retries this
-                                 //same call on a cooldown until it succeeds
-            }
-
-            DebugOutput($"{spacer}opened udpClient:{udpClient} (native engine, {addr}:{nativeEnginePort})");
-            udpSt = new UdpState { e = endPoint, u = udpClient };
-            asyncCallback = new AsyncCallback(ReceiveCallback);
-            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.INITIAL;
-            DebugOutput($"{spacer}NegoState:{WsjtxMessage.NegoState}");
-
-            suspendComm = false;
-            ctrl.initialConnFaultTimer.Interval = 3 * heartbeatInterval * 1000;
-            ctrl.initialConnFaultTimer.Start();
-        }
 
         // Root-caused live, 2026-08-11: usePskReporter never actually sent anything anywhere
         // before this, in either transport -- it only ever flipped a local bool for the status
