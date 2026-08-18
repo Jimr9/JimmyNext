@@ -22,9 +22,11 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use propagation::live::{eqsl, hamqth, pota, swpc};
+use propagation::geo::maidenhead_to_latlon;
+use propagation::live::{eqsl, hamqth, pota, swpc, swpc_scales};
 use propagation::model::{r_scale, SpaceWx};
 use propagation::pota::OtaSpot;
+use propagation::{representative_muf, NoaaScalesView};
 
 /// How often to refresh POTA/SOTA spots. Both feeds are meant for "who's on right now" --
 /// frequent enough to be useful for chasing, not so frequent it hammers a free public API.
@@ -32,15 +34,22 @@ const SPOT_REFRESH: Duration = Duration::from_secs(90);
 /// Space weather changes on the order of hours, not minutes -- SFI/Kp are reported hourly by
 /// NOAA SWPC. No value in polling faster than this.
 const SPACE_WX_REFRESH: Duration = Duration::from_secs(600);
+/// NOAA's R/S/G scales update on roughly the same cadence as the raw SFI/Kp/X-ray feed above --
+/// no value polling faster.
+const NOAA_SCALES_REFRESH: Duration = Duration::from_secs(600);
 /// SOTAwatch's `/spots/<n>/all` returns the last N by count, not by recency (see OtaSpot's own
 /// doc comment) -- ask for enough that a quiet day doesn't starve the feed, matching Nexus's
 /// own default expectation.
 const SOTA_SPOT_COUNT: u32 = 50;
 
-#[derive(Default)]
 pub struct SharedCache {
     spots: RwLock<CachedSpots>,
     space_wx: RwLock<CachedSpaceWx>,
+    scales: RwLock<CachedScales>,
+    // Resolved once at construction (mirrors LiveFeedsCache's own me_latlon derivation in
+    // live_feeds.rs) for the representative-MUF calculation below -- None when the grid doesn't
+    // parse, in which case mufNow is simply omitted rather than guessed.
+    me_latlon: Option<(f64, f64)>,
 }
 
 #[derive(Default)]
@@ -57,9 +66,21 @@ struct CachedSpaceWx {
     last_error: Option<String>,
 }
 
+#[derive(Default)]
+struct CachedScales {
+    value: Option<NoaaScalesView>,
+    last_ok: Option<Instant>,
+    last_error: Option<String>,
+}
+
 impl SharedCache {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+    pub fn new(mygrid: &str) -> Arc<Self> {
+        Arc::new(Self {
+            spots: RwLock::new(CachedSpots::default()),
+            space_wx: RwLock::new(CachedSpaceWx::default()),
+            scales: RwLock::new(CachedScales::default()),
+            me_latlon: maidenhead_to_latlon(mygrid.trim()),
+        })
     }
 
     /// Starts the background refresh loop on a dedicated thread. Never panics the process on a
@@ -76,6 +97,11 @@ impl SharedCache {
         std::thread::spawn(move || loop {
             cache.refresh_space_wx();
             std::thread::sleep(SPACE_WX_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            cache.refresh_scales();
+            std::thread::sleep(NOAA_SCALES_REFRESH);
         });
     }
 
@@ -132,6 +158,25 @@ impl SharedCache {
         }
     }
 
+    /// NOAA's own R/S/G scales (radio blackout / solar radiation storm / geomagnetic storm,
+    /// each 0-5) -- a SEPARATE SWPC product from fetch_space_wx's raw SFI/Kp/X-ray, fetched
+    /// independently so one product's outage never blanks the other (same discipline as
+    /// refresh_spots's two-independent-feeds comment).
+    fn refresh_scales(&self) {
+        match swpc_scales::fetch_noaa_scales() {
+            Ok(scales) => {
+                let mut guard = self.scales.write().unwrap_or_else(|e| e.into_inner());
+                guard.value = Some(scales);
+                guard.last_ok = Some(Instant::now());
+                guard.last_error = None;
+            }
+            Err(e) => {
+                let mut guard = self.scales.write().unwrap_or_else(|e| e.into_inner());
+                guard.last_error = Some(e);
+            }
+        }
+    }
+
     /// Current cached spots as JSON, plus staleness info the UI can show ("as of 3 min ago").
     pub fn spots_json(&self) -> String {
         let guard = self.spots.read().unwrap_or_else(|e| e.into_inner());
@@ -155,13 +200,45 @@ impl SharedCache {
         let guard = self.space_wx.read().unwrap_or_else(|e| e.into_inner());
         let age_secs = guard.last_ok.map(|t| t.elapsed().as_secs());
         let wire = guard.value.as_ref().map(SpaceWxWire::from);
+
+        // Representative MUF: Nexus's own predict::representative_muf -- the ring-max
+        // controlling MUF over 8 evenly-spaced long-haul (~9000 km) directions from the
+        // operator's own grid, using the SAME SpaceWx this response already carries. NOT a
+        // specific DX path; it answers "what's the highest classical F2 MUF reachable in SOME
+        // typical long-haul direction from here right now" (see SpaceWxPayload's own doc
+        // comment for the full explanation). Needs both a resolvable grid and a real SpaceWx
+        // reading -- omitted (None) rather than guessed when either is missing.
+        let muf_now = match (self.me_latlon, guard.value.as_ref()) {
+            (Some(me), Some(wx)) => Some(representative_muf(me, now_unix(), wx)),
+            _ => None,
+        };
+
+        let scales_guard = self.scales.read().unwrap_or_else(|e| e.into_inner());
+        let scales_age_secs = scales_guard.last_ok.map(|t| t.elapsed().as_secs());
+        let scales = scales_guard.value.as_ref().map(|s| NoaaScalesWire {
+            g_scale: s.g,
+            g_scale_tomorrow: s.g_tomorrow,
+            s_scale: s.s,
+        });
+
         let payload = SpaceWxPayload {
             value: wire.as_ref(),
             age_secs,
             last_error: guard.last_error.as_deref(),
+            muf_now,
+            scales,
+            scales_age_secs,
+            scales_last_error: scales_guard.last_error.as_deref(),
         };
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 
@@ -219,6 +296,30 @@ impl From<&SpaceWx> for SpaceWxWire {
     }
 }
 
+// NOAA's own G (geomagnetic storm) and S (solar radiation storm) scales, each 0-5, from
+// propagation::live::swpc_scales::fetch_noaa_scales() -- a SEPARATE SWPC product
+// (products/noaa-scales.json) from the raw SFI/Kp/X-ray feed above, fetched independently.
+// R (radio blackout) is deliberately NOT re-surfaced here: NOAA defines R purely as a function
+// of GOES long X-ray flux (R1=M1, R2=M5, R3=X1, R4=X10, R5=X20) -- exactly what
+// propagation::model::r_scale(xray_long) (already in SpaceWxWire.rScale) computes from the same
+// raw reading this response already carries, so re-fetching NOAA's own copy of the same number
+// would be a second source for the same fact, not new information. G and S are different
+// physical quantities (Kp-derived and >=10 MeV proton-flux-derived respectively) Jimmy Test has
+// no other source for, which is the actual point of this second fetch.
+#[derive(serde::Serialize)]
+struct NoaaScalesWire {
+    #[serde(rename = "gScale")]
+    g_scale: u8,
+    #[serde(rename = "gScaleTomorrow")]
+    g_scale_tomorrow: u8,
+    #[serde(rename = "sScale")]
+    s_scale: u8,
+}
+
+/// mufNow: see space_wx_json's own comment for exactly what it represents (ring-max, NOT a
+/// specific path). scales/scalesAgeSecs/scalesLastError mirror value/ageSecs/lastError's own
+/// shape but for the separate NOAA R/S/G product, since it can succeed or fail independently of
+/// the raw SFI/Kp/X-ray fetch (see refresh_scales's own comment).
 #[derive(serde::Serialize)]
 struct SpaceWxPayload<'a> {
     value: Option<&'a SpaceWxWire>,
@@ -226,6 +327,13 @@ struct SpaceWxPayload<'a> {
     age_secs: Option<u64>,
     #[serde(rename = "lastError")]
     last_error: Option<&'a str>,
+    #[serde(rename = "mufNow")]
+    muf_now: Option<f32>,
+    scales: Option<NoaaScalesWire>,
+    #[serde(rename = "scalesAgeSecs")]
+    scales_age_secs: Option<u64>,
+    #[serde(rename = "scalesLastError")]
+    scales_last_error: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -251,6 +359,71 @@ mod space_wx_wire_tests {
         assert!(!json.contains("xray_long"), "must not regress to the snake_case name: {json}");
         assert!(json.contains("\"xrayClass\":\"C\""), "1e-6 is C-class: {json}");
         assert!(json.contains("\"rScale\":0"), "1e-6 is below the R1 threshold (1e-5): {json}");
+    }
+
+    #[test]
+    fn space_wx_json_includes_representative_muf_when_grid_and_wx_are_both_known() {
+        let cache = SharedCache::new("EN52");
+        {
+            let mut guard = cache.space_wx.write().unwrap();
+            guard.value = Some(SpaceWx {
+                sfi: 150.0,
+                ssn: None,
+                kp: 2.0,
+                a_index: 8.0,
+                xray_long: 1e-7,
+            });
+            guard.last_ok = Some(Instant::now());
+        }
+        let json = cache.space_wx_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            v["mufNow"].as_f64().unwrap_or(0.0) > 0.0,
+            "a resolvable grid + real SpaceWx must produce a positive representative MUF: {json}"
+        );
+    }
+
+    #[test]
+    fn space_wx_json_omits_muf_when_grid_does_not_parse() {
+        // No fabricated MUF when the operator's grid isn't set/valid -- None, not a 0 that
+        // could misread as "MUF is zero" (the same "missing vs misleading zero" bug class this
+        // whole tab was already fixed for once).
+        let cache = SharedCache::new("not a grid");
+        {
+            let mut guard = cache.space_wx.write().unwrap();
+            guard.value = Some(SpaceWx::default());
+            guard.last_ok = Some(Instant::now());
+        }
+        let json = cache.space_wx_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["mufNow"].is_null(), "got: {json}");
+    }
+
+    #[test]
+    fn space_wx_json_includes_noaa_scales_but_not_a_redundant_r() {
+        let cache = SharedCache::new("EN52");
+        {
+            let mut guard = cache.scales.write().unwrap();
+            guard.value = Some(NoaaScalesView {
+                r: 1,
+                s: 0,
+                g: 1,
+                g_tomorrow: 2,
+                as_of: None,
+            });
+            guard.last_ok = Some(Instant::now());
+        }
+        let json = cache.space_wx_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["scales"]["gScale"], 1, "got: {json}");
+        assert_eq!(v["scales"]["gScaleTomorrow"], 2, "got: {json}");
+        assert_eq!(v["scales"]["sScale"], 0, "got: {json}");
+        // R deliberately not re-surfaced here -- see NoaaScalesWire's own comment on why it
+        // would just be a second source for the same number SpaceWxWire.rScale already carries.
+        assert!(
+            v["scales"].get("rScale").is_none() && v["scales"].get("r").is_none(),
+            "R must not be duplicated from the NOAA scales fetch: {json}"
+        );
     }
 }
 

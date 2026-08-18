@@ -424,6 +424,60 @@ now the OLD design; what actually shipped:
   shortened from "POTA / SOTA / DX Spots" (which repeated two of the four tab captions verbatim)
   to "Spots & Conditions".
 
+**Alt+G follow-up pass (2026-08-17b): a second live JAWS finding, plus a Nexus-data audit.**
+
+- **Tab bleed-over bug, root-caused and fixed**: JAWS was heard announcing DX Spots' status text
+  ("500 spots -- last spot 0s ago -- add a DX cluster server...") while the operator sat on the
+  Space Weather tab. Verified NOT a parenting bug (every control is `Controls.Add`ed to its own
+  `TabPage` only, confirmed by direct read; no shared/reused control instances; WinForms
+  `TabControl` does set `Visible = false` on every non-selected page). Root cause: the periodic
+  refresh called `RefreshAll()`, which updated **every** tab's `Label.Text` on every tick
+  regardless of which page was actually selected -- and a `Label.Text` assignment fires that
+  control's own accessibility name-change notification whether or not its page is currently
+  visible, which JAWS can surface anyway. Fixed the normal WinForms way: a new
+  `RefreshActiveTab()` dispatches only to the currently selected tab's own refresh method,
+  wired to the timer tick, `F5`, initial `Load`, and `TabControl.SelectedIndexChanged` (so
+  switching tabs gets an immediate fresh read). EngineHost's own background feed threads (PSK
+  Reporter MQTT, RBN) are unaffected -- they keep running and keep their cache warm regardless of
+  which tab the UI is currently polling.
+- **Nexus propagation data audit** (per an explicit request not to duplicate or invent anything):
+  read through `predict.rs`, `likelihood.rs`, `swpc_scales.rs`, and `pca.rs` for genuinely useful,
+  already-computed values Jimmy Test wasn't surfacing.
+  - **MUF exists**: `propagation::representative_muf` (used internally by
+    `predict::modeled_now`, which `advisor.rs` already calls for Band Conditions' physics prior,
+    but never itself surfaced in any payload). It is the **ring-max controlling MUF** -- the
+    classical foF2 x obliquity model (`likelihood.rs`'s `PathModel::muf`), evaluated over 8
+    evenly-spaced ~9000 km directions from the operator's own grid, taking the maximum. **Not** a
+    specific DX path's MUF, and not an observed reading -- a physics-only "best case somewhere
+    long-haul, right now" ceiling. Added to `SPACE_WX`'s response as `mufNow` (`EngineHost/src/
+    external_data.rs`'s `SharedCache`, now grid-aware via a `mygrid` constructor arg), shown on
+    the Space Weather tab as "Representative MUF (best long-haul): NN.N MHz". Deliberately NOT
+    touched: Band Conditions' own evidence/scoring model (`advisor.rs`, `live_feeds.rs`) --
+    exposing the raw MUF number on the Space Weather tab doesn't touch how bands get
+    scored/tiered/ranked there.
+  - **NOAA's own G (geomagnetic storm) and S (solar radiation storm) scales exist and were
+    completely unused**: `propagation::live::swpc_scales::fetch_noaa_scales()`, a real,
+    fully-implemented fetcher (`products/noaa-scales.json`) EngineHost had simply never called.
+    Added as a second, independently-refreshed cache in `SharedCache` (own age/error, since it's
+    a separate SWPC product from the SFI/Kp/X-ray feed), folded into the same `SPACE_WX`
+    response as a `scales` object. R (radio blackout) is deliberately **not** re-fetched from
+    this product: NOAA defines R purely as a function of GOES X-ray flux, which the existing
+    `rScale`/`xrayClass` fields already carry from the exact same raw reading -- fetching NOAA's
+    own copy of the identical number would be a second source for the same fact, not new
+    information.
+  - **Investigated but NOT added**: a standalone "absorption" number (D-layer absorption is a
+    private intermediate inside `PathModel::score`, never exposed on its own -- exposing one
+    would mean writing new extraction code, not surfacing something Nexus already hands out);
+    polar-cap absorption (`pca.rs`, a real Sauer & Wilkinson 2008 model, but proton-event-
+    triggered, path/latitude-specific, and would need a new proton-flux fetch plus per-path
+    geometry -- disproportionate to a global Space Weather tab); SWPC alert bulletins
+    (`AlertView` -- real, human-readable NOAA watches/warnings, but free-text and
+    variable-length, a poor fit for the existing fixed label/value row layout without more
+    design work); a "most usable band right now" recommendation from `predict::band_outlook_ring`
+    (a real, purely-physics-based band ranking that is architecturally more principled than
+    Band Conditions' current hardcoded-40m headline fallback -- but touching that headline is
+    exactly the "evidence/scoring model" this pass was told to leave alone).
+
 **Deferred, documented, not attempted this pass: POTA/SOTA/DX-spot "worth chasing" notifications.**
 The operator asked for optional, non-chatty notifications when a worth-chasing spot appears.
 `OtaSpotsWindow` is pull-only (operator opens it, sees current facts) and satisfies the core

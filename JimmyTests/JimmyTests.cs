@@ -171,6 +171,8 @@ static class JimmyTests
         DebugOutputLogWriteFailureTests();
         OtaSpotsWindowFormatStatusTests();
         SpaceWxJsonDeserializationTests();
+        FormatNoaaScaleTests();
+        SpaceWxMufAndScalesJsonDeserializationTests();
         ClubLogPrefixTableTests();
         StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
@@ -1983,6 +1985,79 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  SpaceWxJsonDeserializationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── OtaSpotsWindow.FormatNoaaScale: standard NOAA R/S/G descriptor words ──────
+    static void FormatNoaaScaleTests()
+    {
+        Console.WriteLine("\n── OtaSpotsWindow.FormatNoaaScale: standard NOAA scale words ──");
+        try
+        {
+            Check("G0 -> Quiet (G has no official NOAA word at 0; Jimmy Test's own concise label)",
+                OtaSpotsWindow.FormatNoaaScale('G', 0) == "G0 - Quiet", true);
+            Check("S0 -> None (S's own concise label at 0, distinct wording from G0)",
+                OtaSpotsWindow.FormatNoaaScale('S', 0) == "S0 - None", true);
+            Check("G1 -> Minor (NOAA's own standard word)",
+                OtaSpotsWindow.FormatNoaaScale('G', 1) == "G1 - Minor", true);
+            Check("G3 -> Strong",
+                OtaSpotsWindow.FormatNoaaScale('G', 3) == "G3 - Strong", true);
+            Check("S5 -> Extreme",
+                OtaSpotsWindow.FormatNoaaScale('S', 5) == "S5 - Extreme", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  FormatNoaaScaleTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── SpaceWxResult JSON: MufNow/Scales deserialize from EngineHost's wire shape ──
+    // Investigated 2026-08-17: Nexus already computes a representative MUF (predict::
+    // representative_muf) and NOAA's own G/S storm scales (live::swpc_scales::fetch_noaa_scales)
+    // but EngineHost wasn't surfacing either. Locks in the C# side of the new SPACE_WX shape
+    // (external_data.rs's SpaceWxPayload: mufNow, scales{gScale,gScaleTomorrow,sScale},
+    // scalesAgeSecs, scalesLastError).
+    static void SpaceWxMufAndScalesJsonDeserializationTests()
+    {
+        Console.WriteLine("\n── SpaceWxResult JSON: mufNow/scales deserialize from EngineHost's wire shape ──");
+        try
+        {
+            var options = new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase,
+                PropertyNameCaseInsensitive = true,
+            };
+
+            string json = "{\"value\":{\"sfi\":130.5,\"ssn\":null,\"kp\":2.0,\"aIndex\":8.0,\"xrayLong\":1e-7," +
+                "\"xrayClass\":\"B\",\"rScale\":0},\"ageSecs\":12,\"lastError\":null," +
+                "\"mufNow\":18.4,\"scales\":{\"gScale\":1,\"gScaleTomorrow\":2,\"sScale\":0}," +
+                "\"scalesAgeSecs\":30,\"scalesLastError\":null}";
+            var result = System.Text.Json.JsonSerializer.Deserialize<SpaceWxResult>(json, options);
+
+            Check("MufNow deserializes to the real value",
+                result.MufNow.HasValue && Math.Abs(result.MufNow.Value - 18.4f) < 0.01f, true);
+            Check("Scales.GScale deserializes",
+                result.Scales != null && result.Scales.GScale == 1, true);
+            Check("Scales.GScaleTomorrow deserializes",
+                result.Scales != null && result.Scales.GScaleTomorrow == 2, true);
+            Check("Scales.SScale deserializes",
+                result.Scales != null && result.Scales.SScale == 0, true);
+
+            // A response with no scales fetched yet (server startup) must not crash or fabricate
+            // a Scales object -- Scales stays null, distinguishable from "fetched and all zero".
+            string noScalesYet = "{\"value\":null,\"ageSecs\":null,\"lastError\":\"no data yet\"," +
+                "\"mufNow\":null,\"scales\":null,\"scalesAgeSecs\":null,\"scalesLastError\":\"not fetched yet\"}";
+            var noScales = System.Text.Json.JsonSerializer.Deserialize<SpaceWxResult>(noScalesYet, options);
+            Check("Scales stays null (not a fabricated all-zero object) when never fetched",
+                noScales.Scales == null, true);
+            Check("MufNow stays null (not a fabricated 0.0) when the grid isn't resolvable",
+                noScales.MufNow.HasValue, false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SpaceWxMufAndScalesJsonDeserializationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

@@ -1132,7 +1132,7 @@ fn main() {
     // POTA/SOTA spots + space weather: background-refreshed, credential-free, cached in memory
     // (see external_data.rs's own header comment). Independent of the engine/radio loop
     // entirely -- a POTA/SWPC outage can never affect decode/TX.
-    let external_cache = external_data::SharedCache::new();
+    let external_cache = external_data::SharedCache::new(&args.mygrid);
     external_cache.spawn_refresh_thread();
 
     // Band conditions (always -- mycall/mygrid are already known) + DX spots (only if the

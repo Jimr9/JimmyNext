@@ -57,6 +57,7 @@ namespace WSJTX_Controller
 
         // ── Space Weather tab ────────────────────────────────────────────────────
         private TextBox _wxSfiValue, _wxSsnValue, _wxKpValue, _wxAValue, _wxXrayValue;
+        private TextBox _wxMufValue, _wxGScaleValue, _wxSScaleValue;
         private Label _wxStatusLabel;
 
         public OtaSpotsWindow(LookupManager lookupManager,
@@ -84,7 +85,7 @@ namespace WSJTX_Controller
             Size = new Size(820, 460);
             Font = new Font("Microsoft Sans Serif", 9F);
             KeyPreview = true;
-            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); if (e.KeyCode == Keys.F5) RefreshAll(); };
+            KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); if (e.KeyCode == Keys.F5) RefreshActiveTab(); };
 
             // No custom AccessibleName -- TabControl's default accessible behavior (JAWS
             // announces each TabPage's own Text as you switch) is exactly right here, same
@@ -97,21 +98,44 @@ namespace WSJTX_Controller
             _tabs.TabPages.Add(BuildBandConditionsTab());
             _tabs.TabPages.Add(BuildDxSpotsTab());
             _tabs.TabPages.Add(BuildSpaceWeatherTab());
+            // Refresh only the tab the operator just switched to (see RefreshActiveTab's own
+            // comment for why -- root cause of a live JAWS pass hearing DX Spots status text
+            // while sitting on the Space Weather tab).
+            _tabs.SelectedIndexChanged += (s, e) => RefreshActiveTab();
             Controls.Add(_tabs);
 
             _refreshTimer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
-            _refreshTimer.Tick += (s, e) => RefreshAll();
+            _refreshTimer.Tick += (s, e) => RefreshActiveTab();
 
-            Load += (s, e) => { RefreshAll(); _refreshTimer.Start(); };
+            Load += (s, e) => { RefreshActiveTab(); _refreshTimer.Start(); };
             FormClosed += (s, e) => { _refreshTimer.Stop(); _logbookDb?.Dispose(); };
         }
 
-        private void RefreshAll()
+        // Root cause of a live JAWS pass hearing "500 spots -- last spot 0s ago -- add a DX
+        // cluster server..." (DX Spots' own status text) while sitting on the Space Weather
+        // tab: the periodic refresh used to call RefreshAll(), which updates EVERY tab's
+        // Label.Text on every tick regardless of which TabPage is actually selected/visible.
+        // Each control is correctly parented to its own TabPage only (verified -- no shared/
+        // reused controls, no cross-tab Controls.Add, nothing overlapping) and WinForms
+        // TabControl does set Visible=false on every non-selected page, so this was never a
+        // parenting or focus bug. But assigning Label.Text still fires that Label's own
+        // accessibility name-change notification whether or not its page is currently visible,
+        // and JAWS can surface that notification regardless of visibility -- a background timer
+        // silently narrating a hidden tab's data. The fix is the normal WinForms one: only ever
+        // touch the controls on the currently selected page. Each individual tab still gets a
+        // fresh read every RefreshIntervalMs (15s) while the operator is actually looking at
+        // it, and immediately on switching to it -- EngineHost's own background feed threads
+        // (PSK Reporter MQTT, RBN) keep running and keep their cache warm regardless, so nothing
+        // goes stale server-side just because the UI stopped polling a tab nobody's looking at.
+        private void RefreshActiveTab()
         {
-            RefreshPotaSota();
-            RefreshBandConditions();
-            RefreshDxSpots();
-            RefreshSpaceWeather();
+            switch (_tabs.SelectedIndex)
+            {
+                case 0: RefreshPotaSota(); break;
+                case 1: RefreshBandConditions(); break;
+                case 2: RefreshDxSpots(); break;
+                case 3: RefreshSpaceWeather(); break;
+            }
         }
 
         // ── Shared helpers ───────────────────────────────────────────────────────
@@ -462,6 +486,15 @@ namespace WSJTX_Controller
             _wxKpValue = AddWxRow(panel, "Planetary K-index (Kp):", ref y, lx, vx, fw, rh, ref tabIndex);
             _wxAValue = AddWxRow(panel, "Planetary A-index:", ref y, lx, vx, fw, rh, ref tabIndex);
             _wxXrayValue = AddWxRow(panel, "X-ray flux (long):", ref y, lx, vx, fw, rh, ref tabIndex);
+            // Three additions Nexus already computes/fetches but Jimmy Test wasn't surfacing
+            // (investigated 2026-08-17 -- see RefreshSpaceWeather's own comment for exactly what
+            // each one is and isn't): a representative long-haul MUF, and NOAA's own G
+            // (geomagnetic storm) and S (solar radiation storm) scales. NOAA's R (radio
+            // blackout) scale is deliberately not duplicated -- X-ray flux above already carries
+            // it (same NOAA definition, same raw reading).
+            _wxMufValue = AddWxRow(panel, "Representative MUF (best long-haul):", ref y, lx, vx, fw, rh, ref tabIndex);
+            _wxGScaleValue = AddWxRow(panel, "Geomagnetic storm (G-scale):", ref y, lx, vx, fw, rh, ref tabIndex);
+            _wxSScaleValue = AddWxRow(panel, "Solar radiation storm (S-scale):", ref y, lx, vx, fw, rh, ref tabIndex);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _wxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
@@ -511,6 +544,7 @@ namespace WSJTX_Controller
             if (error != null || result?.Value == null)
             {
                 _wxSfiValue.Text = _wxSsnValue.Text = _wxKpValue.Text = _wxAValue.Text = _wxXrayValue.Text = "Unavailable";
+                _wxMufValue.Text = _wxGScaleValue.Text = _wxSScaleValue.Text = "Unavailable";
                 _wxStatusLabel.Text = error ?? result?.LastError ?? "No data yet.";
                 return;
             }
@@ -531,9 +565,60 @@ namespace WSJTX_Controller
             string flareClass = string.IsNullOrEmpty(wx.XrayClass) ? "" : $" ({wx.XrayClass}-class, R{wx.RScale})";
             _wxXrayValue.Text = wx.XrayLong.ToString("0.0e+0") + " W/m²" + flareClass;
 
+            // Nexus's own representative MUF: the ring-max controlling MUF over 8 evenly-spaced
+            // long-haul (~9000 km) directions from the operator's own grid -- NOT a specific DX
+            // path, and NOT an observed reading; it's a classical foF2 x obliquity model driven
+            // by the same SFI above (propagation::predict::representative_muf, investigated
+            // 2026-08-17). The row LABEL ("best long-haul") carries that caveat, so the value
+            // itself stays a plain number -- kept concise for JAWS rather than repeating the
+            // caveat on every read. Null (not zero) when the operator's grid isn't set/valid.
+            _wxMufValue.Text = result.MufNow.HasValue
+                ? $"{result.MufNow.Value:0.0} MHz"
+                : "Unavailable (My Grid not set)";
+
+            // NOAA's own G/S scales (a separate SWPC product, fetched independently -- see
+            // NoaaScales's own comment for why R isn't duplicated here). Scales==null on a fetch
+            // that hasn't succeeded yet is reported plainly, not as a numeric 0 that would read
+            // as a real "all quiet" measurement.
+            if (result.Scales != null)
+            {
+                _wxGScaleValue.Text = FormatNoaaScale('G', result.Scales.GScale) +
+                    (result.Scales.GScaleTomorrow != result.Scales.GScale
+                        ? $" -- tomorrow {FormatNoaaScale('G', result.Scales.GScaleTomorrow)}"
+                        : "");
+                _wxSScaleValue.Text = FormatNoaaScale('S', result.Scales.SScale);
+            }
+            else
+            {
+                _wxGScaleValue.Text = _wxSScaleValue.Text = result.ScalesLastError != null
+                    ? "Unavailable"
+                    : "Loading...";
+            }
+
             _wxStatusLabel.Text = result.LastError != null
                 ? $"Feed warning: {result.LastError}"
                 : (result.AgeSecs != null ? $"As of {FormatAgeSecs(result.AgeSecs)}" : "");
+        }
+
+        // NOAA's own standard descriptor words for its 0-5 R/S/G scales (public, standard across
+        // all three -- e.g. https://www.swpc.noaa.gov/noaa-scales-explanation), reused as-is
+        // rather than invented: level 0 has no official NOAA word (it's simply "none of the
+        // above"), shown here as "Quiet"/"None" per scale for a concise, honest label.
+        // internal (not private): JimmyTests exercises this directly, same convention as
+        // FormatStatus above (InternalsVisibleTo, see AssemblyInfo.Testing.cs).
+        internal static string FormatNoaaScale(char scale, int level)
+        {
+            string word;
+            switch (level)
+            {
+                case 1: word = "Minor"; break;
+                case 2: word = "Moderate"; break;
+                case 3: word = "Strong"; break;
+                case 4: word = "Severe"; break;
+                case 5: word = "Extreme"; break;
+                default: word = scale == 'G' ? "Quiet" : "None"; break;
+            }
+            return $"{scale}{level} - {word}";
         }
     }
 }

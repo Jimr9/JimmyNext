@@ -45,11 +45,31 @@ namespace WSJTX_Controller
         public int RScale { get; set; }
     }
 
+    // NOAA's own G (geomagnetic storm) and S (solar radiation storm) scales, each 0-5, from
+    // EngineHost's own separate propagation::live::swpc_scales fetch -- a different SWPC
+    // product from Value's own SFI/Kp/X-ray, so it has its own age/error rather than sharing
+    // SpaceWxResult's. R is deliberately not included: NOAA defines it purely as a function of
+    // X-ray flux, which Value.RScale already carries from the same raw reading -- see
+    // EngineHost's NoaaScalesWire for the full reasoning.
+    public class NoaaScales
+    {
+        public int GScale { get; set; }
+        public int GScaleTomorrow { get; set; }
+        public int SScale { get; set; }
+    }
+
     public class SpaceWxResult
     {
         public SpaceWx Value { get; set; }
         public long? AgeSecs { get; set; }
         public string LastError { get; set; }
+        // Nexus's own representative MUF (ring-max over 8 long-haul directions from the
+        // operator's grid, ~9000 km, current SpaceWx) -- NOT a specific DX path. Null when the
+        // operator's grid doesn't resolve or no SpaceWx reading is available yet.
+        public float? MufNow { get; set; }
+        public NoaaScales Scales { get; set; }
+        public long? ScalesAgeSecs { get; set; }
+        public string ScalesLastError { get; set; }
     }
 
     // Mirrors EngineHost's RegionReportPayload (live_feeds.rs) -- the strongest region on a
