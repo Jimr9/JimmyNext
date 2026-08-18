@@ -166,6 +166,8 @@ static class JimmyTests
         AudioTuningHotkeyTests();
         TxLevelPerBandRestoreTests();
         DirectPathTxLevelBandTrackingTests();
+        DirectPathPendingBandIdxClearedOnConfirmationTests();
+        SelectFrequencyHotkeyModeStaysPutTests();
         DebugOutputLogWriteFailureTests();
         OtaSpotsWindowFormatStatusTests();
         SpaceWxJsonDeserializationTests();
@@ -1681,6 +1683,156 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DirectPathTxLevelBandTrackingTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── _pendingBandIdx: cleared on Direct-path confirmation, 2026-08-17 ────────────────────
+    // Root-caused from a "radio clicks twice on a band-change hotkey" report: WsjtxClient.
+    // Protocol.cs's classic UDP StatusMessage handler always clears _pendingBandIdx the moment
+    // a real confirmed bandIdx arrives ("drop any optimistic guess"), but that mirroring was
+    // never carried over when Direct.cs's own bandIdx assignment was added (2026-08-10) -- so on
+    // the ONLY production transport, _pendingBandIdx stuck at whatever Jimmy last REQUESTED,
+    // forever, regardless of what the radio actually confirmed afterward. BandUp/BandDown prefer
+    // _pendingBandIdx over the real bandIdx by design (so repeated presses before a CAT
+    // round-trip lands keep advancing), so a stale value computes the WRONG next band once it
+    // has drifted from reality -- demonstrated below via a manual/external band change (a real
+    // confirmed snapshot for a band Jimmy never requested), exactly the shape of drift a long
+    // session could accumulate.
+    static void DirectPathPendingBandIdxClearedOnConfirmationTests()
+    {
+        Console.WriteLine("\n── _pendingBandIdx: real confirmation clears the stale optimistic guess (Direct pipeline) ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            var snap20m = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
+            Check("Initial confirmed snapshot on 20m -> bandIdx resolves to index 5",
+                wc.TestBandIdx == 5, true);
+            Check("...and _pendingBandIdx starts clear (nothing requested yet)",
+                wc.TestPendingBandIdx == null, true);
+
+            bool downOk = wc.BandDown();
+            Check("BandDown() from 20m succeeds", downOk, true);
+            Check("...and requests 30m (index 4) as the optimistic pending target",
+                wc.TestPendingBandIdx == 4, true);
+
+            var snap30m = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 10.136, ""transmitting"": false, ""tuning"": false, ""slot"": 3001 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap30m);
+            Check("Real confirmation arrives matching the request -> bandIdx follows (30m, index 4)",
+                wc.TestBandIdx == 4, true);
+            // THE FIX: without it, _pendingBandIdx stayed at 4 forever from here on, even
+            // though it had already served its purpose (the real bandIdx now agrees).
+            Check("...and _pendingBandIdx is cleared back to null -- THE FIX (was permanently stuck under Direct before this)",
+                wc.TestPendingBandIdx == null, true);
+
+            // Now simulate a band change Jimmy itself never requested -- the operator manually
+            // spins the VFO to 60m (index 2), or any other external change. A real confirmed
+            // snapshot for this must still update bandIdx AND clear any (here, already-clear)
+            // pending guess, so the NEXT hotkey press computes from reality, not a stale target.
+            var snap60mManual = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 5.357, ""transmitting"": false, ""tuning"": false, ""slot"": 3002 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap60mManual);
+            Check("External/manual confirmation to 60m (index 2, never requested via BandUp/BandDown) -> bandIdx follows reality",
+                wc.TestBandIdx == 2, true);
+            Check("...and _pendingBandIdx has nothing stale left to clear (stays null)",
+                wc.TestPendingBandIdx == null, true);
+
+            // The actual bug this fix prevents: BandDown() from the REAL current band (60m) must
+            // target 80m (index 1) -- the operator's actual next-lower band. Before the fix,
+            // _pendingBandIdx would still have read 4 (30m, the last thing Jimmy itself
+            // requested, several steps back) instead of null, so this would have silently
+            // computed 40m (index 3) instead -- retuning the radio to a band the operator never
+            // asked for and never stood on.
+            bool downFromManual = wc.BandDown();
+            Check("BandDown() from the real (manually-confirmed) 60m succeeds", downFromManual, true);
+            Check("...and correctly targets 80m (index 1) -- NOT 40m (index 3), the stale-pending-index bug's wrong answer",
+                wc.TestPendingBandIdx == 1, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectPathPendingBandIdxClearedOnConfirmationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── SelectFrequencyHotkey: a band hotkey never switches mode, 2026-08-18 ────────────────
+    // Root-caused live: Options > Frequencies auto-creates one FT8 and one FT4 row per band,
+    // sorted ascending by frequency. 40m is the ONLY band where FT4's built-in calling
+    // frequency (7047) is lower than FT8's (7074), so it's the one band where the FT4 row
+    // lists first -- every other band correctly lists FT8 first. An operator assigning "one
+    // hotkey per band" down the list landed their 40m hotkey on the FT4 row by exactly this
+    // quirk, and pressing it while on FT8 silently switched tier to FT4 (SetOperatingMode ->
+    // DirectSetTier -> the engine's own tier-switch retune) AND separately sent Jimmy's own
+    // explicit frequency command for the same target -- two genuine CAT frequency writes from
+    // two different connections, for one keypress (confirmed via a live Hamlib -vvvv trace).
+    // SelectFrequencyHotkey now redirects a MISMATCHED-mode hotkey through SelectBand (already
+    // correct, previously unreferenced by any hotkey) instead of ever calling
+    // SetOperatingMode -- so the SAME hotkey works correctly in either mode, and never
+    // silently changes which mode the operator is in.
+    static void SelectFrequencyHotkeyModeStaysPutTests()
+    {
+        Console.WriteLine("\n── SelectFrequencyHotkey: a band hotkey never switches mode ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetMode("FT8");
+
+            // Start confirmed on 20m (index 5) so the 40m jump below is a real cross-band move,
+            // not masked by SelectBand's own "already on this band" no-op guard.
+            var snap20m = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
+            wc.TestSetMode("FT8"); // TestApplyDirectSnapshot doesn't touch mode; belt and suspenders
+            Check("Setup: confirmed on 20m (index 5), FT8", wc.TestBandIdx == 5, true);
+
+            // THE BUG SCENARIO: on FT8, but the 40m hotkey is bound to the auto-created FT4 row
+            // (exactly the 40m-only sort-order trap).
+            var mismatchedEntry = new FrequencyEntry { Mode = "FT4", FreqKHz = 7047, Hotkey = System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.D7 };
+            bool ok = wc.SelectFrequencyHotkey(3, mismatchedEntry);
+            Check("SelectFrequencyHotkey succeeds (a real cross-band move happened)", ok, true);
+            Check("Mode-mismatched hotkey -> band 40m (index 3) is targeted",
+                wc.TestPendingBandIdx == 3, true);
+            Check("...but mode stays FT8 -- THE FIX (used to silently switch to FT4)",
+                wc.CurrentMode == "FT8", true);
+
+            // A hotkey whose OWN entry already matches the current mode still behaves exactly
+            // like the original targeted jump -- multiple same-mode entries per band (e.g. an
+            // alternate spot frequency) remain reachable by their own hotkey.
+            var matchedEntry = new FrequencyEntry { Mode = "FT8", FreqKHz = 14074, Hotkey = System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.D5 };
+            bool ok2 = wc.SelectFrequencyHotkey(5, matchedEntry);
+            Check("Mode-matched hotkey succeeds", ok2, true);
+            Check("...targets its own band (20m, index 5)", wc.TestPendingBandIdx == 5, true);
+            Check("...and mode is still FT8 (never needed switching)", wc.CurrentMode == "FT8", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SelectFrequencyHotkeyModeStaysPutTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

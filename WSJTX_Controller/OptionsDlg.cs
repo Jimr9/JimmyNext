@@ -2177,7 +2177,15 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Selected entry hotkey",
-                AccessibleDescription = "Press a key combination to jump straight to this frequency, switching mode if needed. Empty means no hotkey.",
+                // Rewritten 2026-08-18 (root-caused live): used to say "switching mode if
+                // needed", which was true right up until it caused a real bug -- pressing a
+                // hotkey attached to the wrong mode's row for a band (easy to do on 40m, the
+                // one band where the FT4 row sorts before FT8 in this list) silently switched
+                // the operator's mode. A hotkey no longer ever switches mode: it means "go to
+                // this band", and always resolves to whichever row matches whatever mode you're
+                // already in (WsjtxClient.SelectFrequencyHotkey). One hotkey per band is enough
+                // for FT8 and FT4 both -- assign it to either row.
+                AccessibleDescription = "Press a key combination to jump to this band, staying in your current mode (FT8 or FT4) -- one hotkey covers both, whichever row you assign it to. Empty means no hotkey.",
             };
             _freqHotkeyCaptureBox.KeyCaptured += (s, ev) => OnFreqKeyCaptured(ev.Keys);
             frequenciesPanel.Controls.Add(_freqHotkeyCaptureBox);

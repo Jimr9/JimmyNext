@@ -1415,12 +1415,15 @@ namespace WSJTX_Controller
             // Options > Frequencies: each frequency row can carry its own direct-jump hotkey
             // (replaces the old fixed HotkeyAction.Band160m..Band6m, one per band only, removed
             // entirely). Data-driven, not enum-based, so this scans instead of a fixed if-chain.
+            // SelectFrequencyHotkey (not the raw SelectFrequency call this used to be), so a
+            // hotkey never silently switches the operator's mode -- see its own comment
+            // (WsjtxClient.BandAudio.cs) for the live-reproduced bug this fixes.
             for (int bi = 0; bi < Frequencies.Bands.Length; bi++)
             {
                 foreach (var entry in Frequencies.Bands[bi])
                 {
                     if (entry.Hotkey != Keys.None && keyData == entry.Hotkey)
-                        return wsjtxClient.SelectFrequency(bi, entry.Mode, entry.FreqKHz);
+                        return wsjtxClient.SelectFrequencyHotkey(bi, entry);
                 }
             }
 

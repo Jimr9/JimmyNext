@@ -147,6 +147,35 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // The actual Controller.ProcessCmdKey entry point for an Options > Frequencies
+        // per-entry hotkey (2026-08-18, root-caused live): a hotkey now means "go to this
+        // BAND", never "switch mode out from under the operator" -- one hotkey works for both
+        // FT8 and FT4, always landing on whichever this band's entry matches the CURRENT mode
+        // (SelectBand's own bandToFreq lookup, already correct, previously unreferenced by any
+        // hotkey). Only when the pressed hotkey's OWN entry already matches the current mode
+        // does this behave exactly like SelectFrequency's original targeted jump -- preserving
+        // multiple same-mode entries per band (e.g. an alternate spot frequency) as genuine
+        // direct-jump extras, still reachable by their own hotkey, still able to differ from
+        // that band's primary/first entry.
+        //
+        // Root cause this exists for: Options > Frequencies auto-creates one FT8 and one FT4
+        // row per band, sorted ascending by frequency. 40m is the ONLY band where FT4's
+        // built-in calling frequency (7047) is LOWER than FT8's (7074), so it is the one band
+        // where the FT4 row lists FIRST -- every other band correctly lists FT8 first. An
+        // operator assigning "one hotkey per band" down the list, reasonably assuming "first
+        // row = FT8" (true for the other 10 bands), landed their 40m hotkey on the FT4 row by
+        // exactly this quirk. Pressing it while on FT8 then did what SelectFrequency's old
+        // unconditional behavior always did: silently switched tier to FT4 (SetOperatingMode ->
+        // DirectSetTier -> the ENGINE's own tier-switch retune) AND separately sent Jimmy's own
+        // explicit frequency command for the same target -- two genuine CAT frequency writes,
+        // from two different connections, for one keypress. Confirmed live, 2026-08-18, via a
+        // Hamlib -vvvv trace capture cross-referenced with the operator's own hotkey audit.
+        public bool SelectFrequencyHotkey(int targetIdx, FrequencyEntry entry)
+        {
+            if (entry.Mode == mode) return SelectFrequency(targetIdx, entry.Mode, entry.FreqKHz);
+            return SelectBand(targetIdx);
+        }
+
         // Self-sufficiency plan, Phase 5: band changes retune the radio directly over rigctld --
         // the engine's own poll loop picks up the new dial on its next tick (see
         // RigctldClient.SetFrequency's own comment) exactly like a knob-QSY would. Under

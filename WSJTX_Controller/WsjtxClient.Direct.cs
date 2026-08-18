@@ -290,6 +290,20 @@ namespace WSJTX_Controller
             // FreqToBandStr) stayed permanently null in Direct mode regardless of the real dial
             // frequency, so startup always announced "Unknown band selected" no matter what.
             bandIdx = FreqToBandIdx(newDialFrequency / 1e6);
+            // Found 2026-08-17 investigating a "radio clicks twice on a band-change hotkey"
+            // report: the UDP path clears _pendingBandIdx the moment a real confirmed bandIdx
+            // arrives (WsjtxClient.Protocol.cs, "real confirmation arrived -- drop any
+            // optimistic guess"), but that mirroring was never carried over here when bandIdx's
+            // own assignment was added above -- Direct mode (the ONLY production transport) has
+            // been leaving _pendingBandIdx set forever after the first band change. BandUp/
+            // BandDown prefer _pendingBandIdx over the real bandIdx (see its own field comment
+            // in WsjtxClient.cs -- intentional, so repeated presses before a CAT round-trip
+            // lands keep advancing), so a stale pending value that has drifted from the real
+            // confirmed band computes the WRONG target on the next press. Does not by itself
+            // explain two commands from one press (that would need a second call site actually
+            // sending a second SetFrequency -- see RigctldClient's own new [RIG-CMD] logging for
+            // that), but it is a real correctness bug on its own and worth fixing regardless.
+            _pendingBandIdx = null;
 
             // Options > Radio "Remember F11/F12 audio level per band" -- only on a genuine
             // confirmed band change (newBand, set just above), not every poll tick. See
@@ -806,6 +820,10 @@ namespace WSJTX_Controller
         // consumes and resets it via ShowStatus() within the same call TestApplyDirectSnapshot
         // makes, so reading it afterward would race that reset rather than test anything real.)
         internal int? TestBandIdx => bandIdx;
+        // internal (not private): JimmyTests proves the 2026-08-17 _pendingBandIdx fix directly
+        // -- a real confirmed snapshot for a DIFFERENT band than the one just optimistically
+        // requested must clear this back to null, not leave it stuck on the stale guess.
+        internal int? TestPendingBandIdx => _pendingBandIdx;
     }
 
     // JSON shapes matching AppSnapshot/RadioStatus/DecodeRow's own camelCase serde output
