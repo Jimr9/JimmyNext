@@ -605,7 +605,11 @@ fn parse_args() -> Args {
 /// rather than racing it.
 ///
 /// One-line-command text protocol, deliberately minimal, one connection per request (matching
-/// the existing LIST_DEVICES shape rather than inventing a second style):
+/// the existing LIST_DEVICES shape rather than inventing a second style). The accept loop is
+/// single-threaded and serial by design (commands run in the order their connections arrive,
+/// HALT_TX included) -- see `read_one_control_line`'s own doc comment for the bounded read
+/// timeout/length that keeps one stalled or incomplete connection from blocking every command
+/// behind it:
 ///   LIST_DEVICES / LIST_OUTPUT_DEVICES  -- unchanged: one device name per line, then EOF.
 ///   SNAPSHOT                            -- one line: engine.snapshot() as JSON (AppSnapshot,
 ///                                          already Serialize for Nexus's own Tauri IPC -- same
@@ -689,13 +693,56 @@ fn reply_wire_response(result: Result<(), String>) -> String {
     }
 }
 
+/// Bounds how long `read_one_control_line` will wait for an accepted connection's command line
+/// to arrive, and how many bytes it will buffer while waiting -- see that function's own doc
+/// comment for why. Generous relative to Jimmy's own client-side round-trip budget
+/// (RigctldClient.NetworkTimeoutMs = 3000ms; WsjtxClient.Direct.cs's own DirectSendCommand totals
+/// ~4000ms of connect+read budget): a well-behaved local client's command line arrives within
+/// milliseconds of connecting, so this only ever matters for a stalled, incomplete, or oversized
+/// connection.
+const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_CONTROL_LINE_BYTES: u64 = 8192;
+
+/// Reads exactly one command line from an already-accepted control-port connection, bounded by
+/// both a read timeout and a maximum line length. Found live (Codex release audit, 2026-08-19):
+/// `run_control_server` below is single-threaded and fully serial by design -- every command
+/// waits for the one ahead of it to finish, HALT_TX included. Before this, receiving that FIRST
+/// line had no timeout and no length bound at all (`TcpStream::read_line` can block
+/// indefinitely), so a client that connected and never sent a newline -- or never sent a complete
+/// line -- stalled this thread forever, blocking every later command behind it with no way to
+/// recover short of restarting the process. Returns None on any failure: couldn't set the
+/// timeout, couldn't clone the stream, the read itself timed out (a real Err from read_line --
+/// distinct from a clean EOF), or a line that never reached a terminating newline within
+/// max_bytes. That last case needs an explicit check: `BufRead::read_line` treats hitting EOF
+/// without a newline as a *successful* partial read (`Ok(n)`), not an error -- so a
+/// `Read::take(max_bytes)`-wrapped stream that runs out of budget mid-line would otherwise hand
+/// back a silently truncated fragment instead of signaling "this didn't fit", which is exactly
+/// the "buffer without limit" failure mode this exists to close off. Callers already treat
+/// "nothing usable was read" as a single case (drop this connection, move on to the next), so
+/// none of this changes that handling, only bounds how long/how much it costs to reach it. Takes
+/// timeout/max_bytes as parameters (rather than reading the consts directly) so this is directly
+/// testable at a much shorter timeout without touching the real server's own budget.
+fn read_one_control_line(
+    stream: &std::net::TcpStream,
+    timeout: std::time::Duration,
+    max_bytes: u64,
+) -> Option<String> {
+    use std::io::{BufRead, BufReader, Read};
+    stream.set_read_timeout(Some(timeout)).ok()?;
+    let cloned = stream.try_clone().ok()?;
+    let mut reader = BufReader::new(cloned.take(max_bytes));
+    let mut line = String::new();
+    reader.read_line(&mut line).ok()?;
+    if line.ends_with('\n') { Some(line) } else { None }
+}
+
 fn run_control_server(
     port: u16,
     engine: Arc<Mutex<Engine>>,
     external_cache: Arc<external_data::SharedCache>,
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
 ) {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::Write;
     use std::net::TcpListener;
 
     let listener = match TcpListener::bind(("127.0.0.1", port)) {
@@ -710,14 +757,10 @@ fn run_control_server(
             Ok(s) => s,
             Err(_) => continue,
         };
-        let mut reader = match stream.try_clone() {
-            Ok(s) => BufReader::new(s),
-            Err(_) => continue,
+        let line = match read_one_control_line(&stream, CONTROL_READ_TIMEOUT, MAX_CONTROL_LINE_BYTES) {
+            Some(l) => l,
+            None => continue,
         };
-        let mut line = String::new();
-        if reader.read_line(&mut line).is_err() {
-            continue;
-        }
         let line = line.trim();
 
         if line == "LIST_DEVICES" || line == "LIST_OUTPUT_DEVICES" {
@@ -1236,5 +1279,69 @@ mod tests {
     fn reply_wire_response_err_reports_err_with_the_real_message() {
         let msg = "No recent decode from W1AW -- wait for their next transmission, then click again.";
         assert_eq!(reply_wire_response(Err(msg.to_string())), format!("ERR {msg}"));
+    }
+
+    // Regression coverage for the control-port blocking fix (Codex release audit, 2026-08-19):
+    // read_one_control_line is the exact piece run_control_server's accept loop now uses instead
+    // of a raw, unbounded read_line -- these prove the two properties that actually matter
+    // (bounded wait on a silent connection; unaffected behavior on a normal one) without needing
+    // a live Engine/audio stack, same reasoning as reply_wire_response's own extraction above.
+
+    #[test]
+    fn read_one_control_line_times_out_instead_of_blocking_forever() {
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _client = TcpStream::connect(addr).unwrap(); // connects, sends nothing, no newline ever
+        let (server_side, _) = listener.accept().unwrap();
+
+        let start = std::time::Instant::now();
+        let result = read_one_control_line(&server_side, std::time::Duration::from_millis(200), 8192);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none(), "no newline was ever sent -- must time out, not fabricate a line");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "must bound the wait to roughly the requested timeout, not block indefinitely: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn read_one_control_line_returns_the_real_line_when_sent_promptly() {
+        use std::io::Write as _;
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+
+        client.write_all(b"SNAPSHOT\n").unwrap();
+        let result = read_one_control_line(&server_side, std::time::Duration::from_secs(2), 8192);
+
+        assert_eq!(result.as_deref(), Some("SNAPSHOT\n"), "a normal, promptly-sent command line must be read unchanged");
+    }
+
+    #[test]
+    fn read_one_control_line_gives_up_on_an_oversized_line_instead_of_buffering_forever() {
+        use std::io::Write as _;
+        use std::net::{TcpListener, TcpStream};
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(addr).unwrap();
+        let (server_side, _) = listener.accept().unwrap();
+
+        // Well over the bound, and deliberately never newline-terminated -- a real oversized/
+        // malformed client wouldn't stop to be polite either.
+        let junk = vec![b'x'; 200];
+        client.write_all(&junk).unwrap();
+
+        // Bounded to 64 bytes here (not the real 8192) so this test doesn't need to push tens of
+        // KB over a loopback socket to prove the same property.
+        let result = read_one_control_line(&server_side, std::time::Duration::from_millis(200), 64);
+
+        // Hitting the byte bound without a newline is treated the same as any other "nothing
+        // usable" case (None) -- the caller's existing `continue` already handles that safely
+        // (see run_control_server: an unrecognized/absent line just drops that connection).
+        assert!(result.is_none(), "an oversized line with no newline must give up, not buffer without limit");
     }
 }
