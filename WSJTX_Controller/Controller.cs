@@ -384,6 +384,27 @@ namespace WSJTX_Controller
             }
         }
 
+        // Resolves the classic WSJT-X/UDP transport's listen address from whatever was read for
+        // ipAddrStr (Properties.Settings.Default.ipAddress for a production-identity first run,
+        // or the saved "ipAddress" .ini key otherwise) -- null when nothing is configured yet,
+        // which is the normal, expected state for a fresh Jimmy Test install (see Form_Load's
+        // own call site comment for the full architectural reasoning: this value is exclusively
+        // consumed by the UDP receive-socket path, WsjtxClient.Protocol.cs's UdpLoop, itself only
+        // reachable under TestModeGuard.IsTestMode -- production Direct/EngineHost mode never
+        // reads it at all). Extracted as its own pure function (2026-08-19, alongside the
+        // release-blocker fix this exists for) so the exact "no ipAddrStr configured yet" case
+        // that used to crash Form_Load (IPAddress.Parse(null) -> ArgumentNullException) has a
+        // direct, deterministic regression test without needing a live Form_Load/WinForms
+        // lifecycle. internal (not private): JimmyTests reaches it via InternalsVisibleTo
+        // (AssemblyInfo.Testing.cs), matching every other small pure-logic extraction in this
+        // codebase (e.g. WsjtxClient.BandAudio.cs's ShouldRestoreTxLevel).
+        internal static IPAddress ResolveUdpListenAddress(string ipAddrStr)
+        {
+            if (string.IsNullOrWhiteSpace(ipAddrStr)) return null;
+            IPAddress.TryParse(ipAddrStr, out IPAddress result);
+            return result;
+        }
+
         private void Form_Load(object sender, EventArgs e)
         {
             //use .ini file for settings (avoid .Net config file mess)
@@ -815,8 +836,17 @@ namespace WSJTX_Controller
             this.Controls.Add(callCqOptionsButton);
             callCqOptionsButton.BringToFront();
 
-            //start the UDP message server
-            wsjtxClient = new WsjtxClient(this, IPAddress.Parse(ipAddrStr), port, multicast, debug, diagLog, txMode);
+            // Found live (release blocker, 2026-08-19): a genuine fresh install of a non-
+            // production identity (Jimmy Test) has no .ini file yet, so the branch above that
+            // populates ipAddrStr only ever runs for isProductionIdentity -- ipAddrStr stayed
+            // null the whole time, and the old unconditional IPAddress.Parse(ipAddrStr) here
+            // threw ArgumentNullException, crashing startup before wsjtxClient was ever assigned
+            // (see Controller_FormClosing's own comment for the resulting second crash on
+            // close). See ResolveUdpListenAddress's own comment (above, right before this
+            // method) for why null is the correct, honest result here rather than an invented
+            // fallback IP -- production Direct mode never reads this value at all.
+            //start the UDP message server (classic WSJT-X/replay-test transport only)
+            wsjtxClient = new WsjtxClient(this, ResolveUdpListenAddress(ipAddrStr), port, multicast, debug, diagLog, txMode);
             if (parsedCallWaitingRowOrder != null)
             {
                 wsjtxClient.callWaitingRowOrderFields = parsedCallWaitingRowOrder;
@@ -1107,7 +1137,20 @@ namespace WSJTX_Controller
 
         private void Controller_FormClosing(object sender, FormClosingEventArgs e)
         {
-            if (iniFile != null)
+            // Found live (release blocker, 2026-08-19): this whole block reads wsjtxClient.*
+            // extensively, but wsjtxClient is only ever assigned once Form_Load reaches its own
+            // WsjtxClient construction -- a startup that failed before that point (e.g. the
+            // IPAddress.Parse crash this same investigation found) left it null, and the
+            // original `if (iniFile != null)` guard alone didn't cover that: iniFile is created
+            // much earlier in Form_Load, so it was already non-null, and every wsjtxClient.*
+            // read below threw NullReferenceException the moment the operator tried to close the
+            // window after a failed startup. formLoaded is the existing, already-established
+            // "did Form_Load actually finish" flag (set true only at its very end, well after
+            // wsjtxClient's construction -- see its own declaration comment) that many other
+            // handlers in this class already guard on; reusing it here is the correct fix, not
+            // just a null-check bolted onto this one symptom -- a session that never finished
+            // starting has nothing real to persist anyway.
+            if (iniFile != null && formLoaded)
             {
                 iniFile.Write("debug", wsjtxClient.debug.ToString());
                 // Save the Normal-state bounds even if currently maximized/minimized, so
@@ -1342,7 +1385,12 @@ namespace WSJTX_Controller
             rigctldClient?.Dispose();   // also stops any bundled rigctld this session launched
             nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path)
             nativeEngineClient = null;
-            wsjtxClient.Closing();
+            // CloseComm() runs unconditionally from Controller_FormClosing (outside its own
+            // `iniFile != null && formLoaded` guard) -- a startup that failed before wsjtxClient
+            // was ever constructed left this null too, and this was the second, still-unguarded
+            // NullReferenceException risk on the same failed-startup-then-close path (found
+            // alongside Controller_FormClosing's own fix, 2026-08-19).
+            wsjtxClient?.Closing();
         }
 
         private void Controller_FormClosed(object sender, FormClosedEventArgs e)

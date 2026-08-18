@@ -133,6 +133,7 @@ static class JimmyTests
         EqslReconcileTests();
         LookupManagerPrimaryProviderTests();
         FindPreservedSelectionIndexTests();
+        ResolveUdpListenAddressTests();
         ResolveDispatchIndexTests();
         SpotWatchCallsRoundTripTests();
         BandAppliesToLiveTagTests();
@@ -167,6 +168,7 @@ static class JimmyTests
         SetOperatingModeFailureDoesNotChangeLocalModeTests();
         TxLevelPerBandRestoreTests();
         DirectPathTxLevelBandTrackingTests();
+        DirectPathTxEnabledReconciliationTests();
         DirectPathPendingBandIdxClearedOnConfirmationTests();
         RetuneBandFailureDoesNotLeakPendingBandIdxTests();
         SelectFrequencyHotkeyModeStaysPutTests();
@@ -1757,6 +1759,61 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DirectPathTxLevelBandTrackingTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Direct-path: txEnabled reconciled from the engine's own snapshot, 2026-08-19 ────────
+    // Release-blocker follow-up, root-caused live: the engine can disable its own tx_enabled
+    // independently (its own QSO-sequencer/retry logic -- confirmed live via a real SNAPSHOT
+    // query showing the engine's real txEnabled already false while Jimmy's own field still
+    // read true, with no HALT_TX ever sent). Before this fix, Jimmy's own `txEnabled` was ONLY
+    // ever written locally by EnableTx()/DisableTx() at the moment JIMMY commands a change --
+    // Direct mode had no way to learn the engine changed its mind on its own, which is exactly
+    // what left a real operator's callInProg stuck forever: DiscardCall()'s own "give up" check
+    // (WsjtxClient.cs) requires `(txMode==LISTEN && !txEnabled) || txMode==CALL_CQ` to actually
+    // take effect, and EnableMode() (Alt+E)'s own resume logic requires `!txEnabled` too -- both
+    // silently no-op while Jimmy's stale belief says Tx is still enabled.
+    static void DirectPathTxEnabledReconciliationTests()
+    {
+        Console.WriteLine("\n── Direct-path: txEnabled reconciled from the engine's own snapshot ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            var snapEnabled = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 5000, ""txEnabled"": true },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapEnabled);
+            Check("A snapshot reporting the engine's txEnabled=true updates Jimmy's own belief",
+                wc.TestTxEnabled, true);
+
+            // THE FIX: a later snapshot reporting the engine turned itself off, with nothing on
+            // Jimmy's own side having called DisableTx() -- must still be reflected.
+            var snapDisabled = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 5001, ""txEnabled"": false },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapDisabled);
+            Check("A later snapshot reporting the engine disabled txEnabled on its own updates Jimmy's belief -- THE FIX",
+                wc.TestTxEnabled, false);
+
+            // And it tracks back the other way too -- not a one-way latch.
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapEnabled);
+            Check("A snapshot reporting txEnabled=true again updates it back -- reconciliation is bidirectional",
+                wc.TestTxEnabled, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectPathTxEnabledReconciliationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
@@ -5788,6 +5845,30 @@ static class JimmyTests
         var liveNewReordered = new List<string> { "KF8CXC", "WM3PEN", "N8BB", "VK9DX" };
         idx = Controller.FindPreservedSelectionIndex(liveOld, 2, liveNewReordered);
         Check("WM3PEN/N8BB regression: follows WM3PEN to its new index 1, not N8BB's index 2", idx == 1 && liveNewReordered[idx] == "WM3PEN", true);
+    }
+
+    // ── Controller.ResolveUdpListenAddress: fresh-install startup crash, 2026-08-19 ─────────
+    // Release-blocker regression: a genuine fresh install of a non-production identity (Jimmy
+    // Test) has no .ini file yet, so ipAddrStr stays null (Properties.Settings.Default is only
+    // ever read for isProductionIdentity). Form_Load used to call IPAddress.Parse(ipAddrStr)
+    // unconditionally, which threw ArgumentNullException and crashed startup before wsjtxClient
+    // was ever assigned. Null is the correct, honest result here, not an invented default IP --
+    // this value is exclusively the classic WSJT-X/UDP transport's listen address; production
+    // Direct/EngineHost mode never reads it.
+    static void ResolveUdpListenAddressTests()
+    {
+        Console.WriteLine("\n── Controller.ResolveUdpListenAddress ──");
+
+        Check("null ipAddrStr (genuine fresh install) -> null, not a crash",
+            Controller.ResolveUdpListenAddress(null) == null, true);
+        Check("empty ipAddrStr -> null",
+            Controller.ResolveUdpListenAddress("") == null, true);
+        Check("whitespace-only ipAddrStr -> null",
+            Controller.ResolveUdpListenAddress("   ") == null, true);
+        Check("a real configured address parses normally",
+            Controller.ResolveUdpListenAddress("127.0.0.1")?.ToString() == "127.0.0.1", true);
+        Check("an unparseable saved value -> null, not a crash (matches the null-safe ini-save guard)",
+            Controller.ResolveUdpListenAddress("not an ip address") == null, true);
     }
 
     // ── WsjtxClient.ResolveDispatchIndex: Enter/Space/dbl-click dispatch-side re-lookup ──

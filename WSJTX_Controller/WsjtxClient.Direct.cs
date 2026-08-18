@@ -385,6 +385,20 @@ namespace WSJTX_Controller
                 }
             }
 
+            // Found live (release blocker follow-up, 2026-08-19): Jimmy's own `txEnabled` field
+            // was NEVER reconciled from the engine's real state in Direct mode -- only ever
+            // written locally by EnableTx()/DisableTx() at the moment JIMMY commands a change.
+            // The engine can disable its own tx_enabled independently (its own QSO-sequencer/
+            // retry logic, confirmed live: no HALT_TX was ever sent, yet a live SNAPSHOT query
+            // showed the engine's real txEnabled already false while Jimmy's own field still
+            // read true). That silent drift is what made DiscardCall()'s "give up" check log
+            // "not in effect" and leave callInProg stuck forever -- see DirectRadioStatus.
+            // TxEnabled's own comment for the full chain. Reconciled here, same level-triggered
+            // pattern as transmitting/tuning above (DirectApplyDecodes' own discard check runs
+            // immediately after this method in the same poll tick, so this is always fresh by
+            // the time that check reads it).
+            txEnabled = radio.TxEnabled;
+
             // Queue-age expiry (TrimCallQueue) and the retry-limit/discard-give-up counter used
             // to live here, gated on "transmitting just started" -- moved to DirectApplyDecodes'
             // own new-slot detection instead. Root-caused live, 2026-08-11: that gate can never
@@ -848,6 +862,10 @@ namespace WSJTX_Controller
         // -- a real confirmed snapshot for a DIFFERENT band than the one just optimistically
         // requested must clear this back to null, not leave it stuck on the stale guess.
         internal int? TestPendingBandIdx => _pendingBandIdx;
+        // internal (not private): JimmyTests proves the 2026-08-19 txEnabled-reconciliation fix
+        // directly -- a real snapshot reporting the engine's own txEnabled must update Jimmy's
+        // local belief, not leave it stuck on whatever EnableTx()/DisableTx() last wrote.
+        internal bool TestTxEnabled => txEnabled;
     }
 
     // JSON shapes matching AppSnapshot/RadioStatus/DecodeRow's own camelCase serde output
@@ -916,6 +934,21 @@ namespace WSJTX_Controller
         // completeness (a real, separate engine field) but NOT what Alt+Q's receive-time report
         // uses; see RxLevel above for that.
         public int? SmeterDb { get; set; }
+        // Added 2026-08-19 (release-blocker follow-up): the engine's own authoritative belief
+        // about whether it will currently transmit -- tempo-app/src/dto.rs's RadioStatus.
+        // tx_enabled. Confirmed live to be the real cause of a stuck-forever callInProg: the
+        // engine can disable its own tx_enabled independently (its own retry/QSO-sequencer
+        // logic, unrelated to anything Jimmy explicitly commanded -- no HALT_TX was ever sent),
+        // but before this field existed, Jimmy's own `txEnabled` (WsjtxClient.cs) was ONLY ever
+        // written locally by EnableTx()/DisableTx() at the moment JIMMY commands a change --
+        // Direct mode had no way to learn the engine changed its mind on its own. That silent
+        // drift (Jimmy still believing txEnabled=true while the engine's real state was already
+        // false) is what made DiscardCall()'s own "give up" check -- gated on
+        // `(txMode==LISTEN && !txEnabled) || txMode==CALL_CQ` -- log "not in effect" and leave
+        // callInProg stuck, and separately made EnableMode() (Alt+E)'s own `!txEnabled` guard
+        // refuse to do anything, since Jimmy's stale belief said Tx was already enabled. See
+        // DirectApplyStatus's own reconciliation of this field for the fix.
+        public bool TxEnabled { get; set; }
     }
 
     internal class DirectDecodeRow
