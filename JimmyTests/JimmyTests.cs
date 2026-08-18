@@ -164,9 +164,11 @@ static class JimmyTests
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
+        SetOperatingModeFailureDoesNotChangeLocalModeTests();
         TxLevelPerBandRestoreTests();
         DirectPathTxLevelBandTrackingTests();
         DirectPathPendingBandIdxClearedOnConfirmationTests();
+        RetuneBandFailureDoesNotLeakPendingBandIdxTests();
         SelectFrequencyHotkeyModeStaysPutTests();
         DebugOutputLogWriteFailureTests();
         OtaSpotsWindowFormatStatusTests();
@@ -183,6 +185,7 @@ static class JimmyTests
         NotificationSettingsRoundTripTests();
         NotificationDedupThrottleTests();
         NotificationCenterPublishTests();
+        UiaAlertNotificationDeliveryTests();
         NotificationTemplateComponentParserTests();
         NotificationVariableRegistryTests();
         NotificationDefaultsAllTemplatesValidTests();
@@ -1499,6 +1502,39 @@ static class JimmyTests
     static DirectSnapshot ParseDirectSnapshot(string json) =>
         System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(json, WsjtxClient.DirectJsonOptions);
 
+    // Minimal stub rigctld: binds an ephemeral loopback port, accepts ONE connection on a
+    // background thread, and replies "RPRT 0" (Hamlib's own success code) to every line it
+    // reads until the connection closes. Real enough to exercise RigctldClient.SetFrequency's
+    // SUCCESS path (a genuine accept + wire round-trip) without needing an actual Hamlib/rigctld
+    // process or physical radio -- used by the RetuneBand failure/success regression test below.
+    // Caller must Stop() the returned listener when done (releases the port and unblocks the
+    // background thread's AcceptTcpClient if nothing ever connected).
+    static System.Net.Sockets.TcpListener StartStubRigctld(out int port)
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        var t = new System.Threading.Thread(() =>
+        {
+            try
+            {
+                using (var client = listener.AcceptTcpClient())
+                using (var stream = client.GetStream())
+                using (var reader = new System.IO.StreamReader(stream))
+                using (var writer = new System.IO.StreamWriter(stream) { AutoFlush = true, NewLine = "\n" })
+                {
+                    string line;
+                    while ((line = reader.ReadLine()) != null)
+                        writer.WriteLine("RPRT 0");
+                }
+            }
+            catch { /* listener.Stop() during teardown races this thread -- harmless */ }
+        });
+        t.IsBackground = true;
+        t.Start();
+        return listener;
+    }
+
     // ── Alt+Q / Tune / F11-F12 fix, 2026-08-10 ──────────────────────────────────────────────
     // Covers the parts of that fix that are deterministic and testable without a live
     // jimmy-engine-host.exe process: DirectApplyStatus wiring the engine's own `tuning` flag
@@ -1577,6 +1613,42 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  AudioTuningHotkeyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── SetOperatingMode: a failed tier switch must not change local mode, 2026-08-19 ───────
+    // Codex release audit: SetOperatingMode used to call DirectSetTier, discard whether the
+    // engine confirmed it, and set `mode` unconditionally right after. An unreachable engine, a
+    // dropped connection, a timed-out read, or an explicit ERR reply all left Jimmy believing it
+    // was on the new mode while the engine -- and the real FT8/FT4 decode/TX cycle on the air --
+    // silently stayed on the old one. Same bug class, same no-real-engine test strategy, as
+    // AudioTuningHotkeyTests' own ToggleTuningProcess coverage above: no engine host exists in
+    // this test, so DirectSetTier's SET_TIER command is guaranteed to fail to connect -- exactly
+    // what a failed Alt+M hits live.
+    static void SetOperatingModeFailureDoesNotChangeLocalModeTests()
+    {
+        Console.WriteLine("\n── SetOperatingMode: a failed tier switch does not change local mode ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetMode("FT8");
+            wc.TestSetDirectConnected(true);
+
+            bool ok = wc.SetOperatingMode("FT4");
+            Check("SetOperatingMode still returns true (hotkey stays 'handled') even though the engine never confirmed",
+                ok, true);
+            Check("...but local mode was NOT changed to FT4 -- THE FIX (used to flip unconditionally)",
+                wc.CurrentMode == "FT8", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SetOperatingModeFailureDoesNotChangeLocalModeTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
@@ -1704,6 +1776,14 @@ static class JimmyTests
     static void DirectPathPendingBandIdxClearedOnConfirmationTests()
     {
         Console.WriteLine("\n── _pendingBandIdx: real confirmation clears the stale optimistic guess (Direct pipeline) ──");
+        // Real (stub) HamlibRigctld setup -- since the RetuneBand failure-handling fix (Codex
+        // release audit, 2026-08-19), _pendingBandIdx is only ever set once a CAT command is
+        // actually attempted, so the BandDown() calls below need a real accept + wire round-trip
+        // to set it at all (previously they set it even under the default WsjtxCat mode with no
+        // rigctldClient at all, which was really an artifact of the leak that fix closed). One
+        // stub connection covers every BandDown() call in this test -- RigctldClient stays
+        // connected across commands.
+        var rigListener = StartStubRigctld(out int port);
         try
         {
             var ctrl = new Controller();
@@ -1711,6 +1791,8 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
             var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
 
             var snap20m = ParseDirectSnapshot(@"{
@@ -1773,6 +1855,75 @@ static class JimmyTests
             Console.WriteLine($"  FAIL  DirectPathPendingBandIdxClearedOnConfirmationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
+        finally
+        {
+            rigListener.Stop();
+        }
+    }
+
+    // ── RetuneBand: a failed SetFrequency is not reported as success, 2026-08-19 ────────────
+    // Codex release audit: RetuneBand used to set _pendingBandIdx, call RigctldClient.
+    // SetFrequency, discard its bool result, and return true unconditionally -- so a rejected
+    // command, a dropped connection, or a timeout (SetFrequency returns false for all three)
+    // was reported as a successful band change, and _pendingBandIdx was left pointing at a band
+    // the radio was never actually retuned to. Since BandUp/BandDown prefer _pendingBandIdx over
+    // the last CONFIRMED bandIdx, a stale pending value from a failed retune would make the NEXT
+    // BandUp/BandDown compute from a band that only ever existed as an unconfirmed request --
+    // the failure-path twin of the confirmation-path bug DirectPathPendingBandIdxCleared...
+    // above already covers. Exercises SetFrequency's real failure mode (connection refused --
+    // nothing listens on the port used below) and real success mode (StartStubRigctld) rather
+    // than mocking RigctldClient, matching this suite's existing convention.
+    static void RetuneBandFailureDoesNotLeakPendingBandIdxTests()
+    {
+        Console.WriteLine("\n── RetuneBand: a failed SetFrequency does not claim success or leak _pendingBandIdx ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+
+            var snap20m = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
+            Check("Setup: confirmed on 20m (index 5)", wc.TestBandIdx == 5, true);
+
+            // FAILURE case: nothing listens on port 1 -- SetFrequency genuinely fails to connect
+            // (real connection-refused, not a mock).
+            ctrl.rigctldClient = new RigctldClient("127.0.0.1", 1);
+            bool downFailed = wc.BandDown();
+            Check("BandDown() still returns true (hotkey stays 'handled') even though the retune failed",
+                downFailed, true);
+            Check("...but _pendingBandIdx was NOT left pointing at the unconfirmed target -- THE FIX",
+                wc.TestPendingBandIdx == null, true);
+
+            // SUCCESS case, right after a failure: a real accept + wire round-trip via the stub
+            // must still work normally -- "successful behavior remains unchanged".
+            var rigListener = StartStubRigctld(out int port);
+            try
+            {
+                ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
+                bool downOk = wc.BandDown();
+                Check("BandDown() succeeds against a real (stub) rigctld", downOk, true);
+                Check("...and _pendingBandIdx correctly targets 30m (index 4) -- successful behavior unchanged",
+                    wc.TestPendingBandIdx == 4, true);
+            }
+            finally
+            {
+                rigListener.Stop();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RetuneBandFailureDoesNotLeakPendingBandIdxTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
     }
 
     // ── SelectFrequencyHotkey: a band hotkey never switches mode, 2026-08-18 ────────────────
@@ -1792,6 +1943,13 @@ static class JimmyTests
     static void SelectFrequencyHotkeyModeStaysPutTests()
     {
         Console.WriteLine("\n── SelectFrequencyHotkey: a band hotkey never switches mode ──");
+        // Real (stub) HamlibRigctld setup, not left at the default WsjtxCat mode -- since the
+        // RetuneBand failure-handling fix (Codex release audit, 2026-08-19), _pendingBandIdx is
+        // only ever set once a CAT command is actually attempted, so this test needs a real
+        // accept + wire round-trip for its TestPendingBandIdx assertions below to mean anything
+        // (previously they held even under WsjtxCat/no rigctldClient at all, which was really an
+        // artifact of the leak this fix closed, not a deliberate check of anything).
+        var rigListener = StartStubRigctld(out int port);
         try
         {
             var ctrl = new Controller();
@@ -1799,6 +1957,8 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
             var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
             wc.TestSetMode("FT8");
 
@@ -1825,7 +1985,9 @@ static class JimmyTests
 
             // A hotkey whose OWN entry already matches the current mode still behaves exactly
             // like the original targeted jump -- multiple same-mode entries per band (e.g. an
-            // alternate spot frequency) remain reachable by their own hotkey.
+            // alternate spot frequency) remain reachable by their own hotkey. Reuses the same
+            // stub connection (RigctldClient stays connected across commands -- EnsureConnected
+            // is a no-op once IsConnected), so this second real retune succeeds too.
             var matchedEntry = new FrequencyEntry { Mode = "FT8", FreqKHz = 14074, Hotkey = System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.D5 };
             bool ok2 = wc.SelectFrequencyHotkey(5, matchedEntry);
             Check("Mode-matched hotkey succeeds", ok2, true);
@@ -1836,6 +1998,10 @@ static class JimmyTests
         {
             Console.WriteLine($"  FAIL  SelectFrequencyHotkeyModeStaysPutTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
+        }
+        finally
+        {
+            rigListener.Stop();
         }
     }
 
@@ -4717,6 +4883,74 @@ static class JimmyTests
         }
     }
 
+    // Test-only IJimmyStatusView: lets UiaAlertNotificationDeliveryTests drive WouldAnnounce and
+    // observe RaiseAccessibleAlert without a real Form/statusText/screen reader -- this is
+    // exactly the boundary "do not attempt to unit-test JAWS or NVDA speech" draws: everything
+    // on Jimmy's own side of that boundary (the gating logic) is real and tested; the actual
+    // UIA call and whatever an AT does with it is not (see the manual test checklist instead).
+    private class FakeStatusView : IJimmyStatusView
+    {
+        public bool WouldAnnounceValue;
+        public string LastAccessibleAlert;
+        public int AccessibleAlertCount;
+
+        public void RenderStatus(string headingText, string statusText, System.Drawing.Color foreColor, System.Drawing.Color backColor) { }
+        public void ShowMessage(string text, bool sound) { }
+        public bool WouldAnnounce => WouldAnnounceValue;
+        public void RaiseAccessibleAlert(string text)
+        {
+            LastAccessibleAlert = text;
+            AccessibleAlertCount++;
+        }
+    }
+
+    // ── UiaAlertNotificationDelivery: off-focus accessibility alert gating, 2026-08-19 ──────
+    // The decorator's own policy logic in isolation -- important+enabled+not-already-announcing
+    // is the ENTIRE gate (see UiaAlertNotificationDelivery's own comment: no second, separately
+    // maintained list of "which events count", no duplicate-suppression state of its own beyond
+    // the WouldAnnounce check). Proves: the inner delivery (status field) always fires regardless
+    // of any of this; a Normal-priority announcement never raises a UIA alert; the feature being
+    // off (default) suppresses it even for an Important one; and the one duplicate-avoidance
+    // check (WouldAnnounce) actually gates it.
+    static void UiaAlertNotificationDeliveryTests()
+    {
+        Console.WriteLine("\n── UiaAlertNotificationDelivery: off-focus accessibility alert gating ──");
+        try
+        {
+            var inner = new FakeNotificationDelivery();
+            var statusView = new FakeStatusView();
+            bool enabled = true;
+            var decorator = new UiaAlertNotificationDelivery(inner, statusView, () => enabled);
+
+            statusView.WouldAnnounceValue = false;
+            decorator.Announce("Normal message", false);
+            Check("Inner delivery always receives the announcement (status field preserved)", inner.AnnounceCount == 1, true);
+            Check("Not important -> no accessible alert raised", statusView.AccessibleAlertCount == 0, true);
+
+            decorator.Announce("Important message", true);
+            Check("Important + enabled + focus elsewhere -> raises the accessible alert", statusView.AccessibleAlertCount == 1, true);
+            CheckStr("...with the same text ShowMessage would have shown", statusView.LastAccessibleAlert, "Important message");
+
+            enabled = false;
+            decorator.Announce("Important message 2", true);
+            Check("Important but the General-tab option is off (default) -> no accessible alert", statusView.AccessibleAlertCount == 1, true);
+            enabled = true;
+
+            statusView.WouldAnnounceValue = true;
+            decorator.Announce("Important message 3", true);
+            Check("Important + enabled but statusText would already announce it -> no duplicate", statusView.AccessibleAlertCount == 1, true);
+            statusView.WouldAnnounceValue = false;
+
+            Check("Inner delivery received every one of the 4 Announce calls regardless of the above",
+                inner.AnnounceCount == 4, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  UiaAlertNotificationDeliveryTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
     static void NotificationCenterPublishTests()
     {
         Console.WriteLine("\n── NotificationCenter: Publish end-to-end ──");
@@ -4846,6 +5080,7 @@ static class JimmyTests
             [NotificationEventType.ConnectionClosed] = new ConnectionClosedEvent(),
             [NotificationEventType.ConnectionLost] = new ConnectionLostEvent("heartbeat timeout"),
             [NotificationEventType.ErrorWarning] = new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "CAT link lost"),
+            [NotificationEventType.RadioCatRecovered] = new RadioCatRecoveredEvent(),
         };
         foreach (var kv in sampleEvents)
         {
@@ -5339,7 +5574,15 @@ static class JimmyTests
         // the expected, correct outcome here (the clock really was bad, is now genuinely
         // measured as fine); what this proves is that the reading behind it wasn't contaminated.
         int beforeSwitch = delivery.AnnounceCount;
-        wc.SetOperatingMode("FT4");
+        // TestSetMode + TestClearTimeOffsetState, not the real SetOperatingMode -- this test's
+        // own point is CalcAvgTimeOffset's clearing behavior, not SetOperatingMode/DirectSetTier's
+        // wire round-trip (no live engine host exists in this harness, so DirectSetTier is
+        // guaranteed to fail -- see WsjtxClient.Protocol.cs's own failure-handling fix,
+        // 2026-08-19 -- and would also publish its own ErrorWarningEvent through `delivery`,
+        // throwing off this test's own AnnounceCount arithmetic). Same reasoning TestSetMode's
+        // own comment already documents for this exact test.
+        wc.TestSetMode("FT4");
+        wc.TestClearTimeOffsetState();
         PublishDt(1.20);
         PublishDt(1.20);
         Check("Mode switch clears stale samples: a boundary-acceptable FT4 reading is recognized as acceptable, not dragged over threshold by the prior mode's stale bad sample",

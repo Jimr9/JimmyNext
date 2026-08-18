@@ -707,9 +707,19 @@ namespace WSJTX_Controller
         // comment for why classic UDP/CAT mode never needed this (WSJT-X's UDP API has no
         // outbound mode-change command; Jimmy only ever observed WSJT-X's own self-reported
         // mode). newTier must be "FT8" or "FT4".
-        public void DirectSetTier(string newTier)
+        //
+        // Returns success (unlike a fire-and-forget DirectSetXxx helper) -- found live (Codex
+        // release audit, 2026-08-19): this used to be void, discarding whether the engine ever
+        // confirmed the tier switch, while SetOperatingMode changed Jimmy's own `mode` field
+        // unconditionally right after calling it. An unreachable engine, a dropped connection, a
+        // timed-out read, or an explicit ERR reply all left Jimmy believing it was on the new
+        // mode while the engine -- and the actual FT8/FT4 decode/TX cycle on the air -- silently
+        // stayed on the old one. Same bug class DirectSetTuning was already fixed for (2026-08-10,
+        // see its own comment); this is that fix applied to Alt+M.
+        public bool DirectSetTier(string newTier)
         {
-            DirectSendCommand("SET_TIER " + newTier);
+            string resp = DirectSendCommand("SET_TIER " + newTier);
+            return resp != null && resp.StartsWith("OK");
         }
 
         // One command, one short-lived TCP connection, matching the control server's own
@@ -796,6 +806,20 @@ namespace WSJTX_Controller
         // process this test harness deliberately never starts. This lets the clock-sync
         // notification's own FT4 test exercise a real "FT4" Mode token without one.
         internal void TestSetMode(string m) => mode = m;
+
+        // Test-only: mirrors the timeOffsets/timeOffset/_rawDecodeHistory clearing
+        // SetOperatingMode's own successful tier-switch branch performs, for the same reason
+        // TestSetMode exists (no live engine host in this test harness, so DirectSetTier can
+        // never actually confirm a switch -- see the failure-handling fix in
+        // WsjtxClient.Protocol.cs's SetOperatingMode, 2026-08-19). Lets a mode-switch clock-sync
+        // test drive the post-switch STATE directly (TestSetMode + this) without needing
+        // SetOperatingMode's own wire round-trip to succeed.
+        internal void TestClearTimeOffsetState()
+        {
+            timeOffsets.Clear();
+            timeOffset = 0;
+            _rawDecodeHistory.Clear();
+        }
 
         // Test-only hooks for the UDP-to-Direct Tx-hold safety-net/connection-loss parity pass,
         // 2026-08-12 -- same InternalsVisibleTo pattern as the hooks above. autoFreqPauseMode/

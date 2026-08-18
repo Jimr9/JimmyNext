@@ -85,6 +85,14 @@ namespace WSJTX_Controller
         public bool keepListPositionDuringRefresh = false;
         public bool moveFocusToStatusOnCallSelect = false;
         public bool checkForUpdatesOnStartup = false;
+        // Added 2026-08-19: gates UiaAlertNotificationDelivery (WSJTX_Controller/Notify/
+        // NotificationDelivery.cs) -- when true, an Important-priority notification may also
+        // announce via UI Automation's Notification event (RaiseAccessibleAlert) even while
+        // keyboard focus is elsewhere, without moving focus, self-voicing, or calling JAWS/NVDA
+        // directly. Off by default: live JAWS and NVDA testing is required before this should
+        // ever default to on -- see the General tab's own AccessibleDescription for this
+        // checkbox, and ApplyGeneralSettings' own wiring.
+        public bool announceImportantAlertsWhenFocusElsewhere = false;
 
         // Sound settings: enabled flags and file paths for each sound event
         // CallAdded/CallingMe/Logged enabled state is controlled by existing checkboxes
@@ -661,6 +669,7 @@ namespace WSJTX_Controller
                 keepListPositionDuringRefresh = iniFile.Read("keepListPositionDuringRefresh") == "True";
                 moveFocusToStatusOnCallSelect = iniFile.Read("moveFocusToStatusOnCallSelect") == "True";
                 checkForUpdatesOnStartup = iniFile.Read("checkForUpdatesOnStartup") == "True";
+                announceImportantAlertsWhenFocusElsewhere = iniFile.Read("announceImportantAlertsWhenFocusElsewhere") == "True";
 
                 // Sound settings: migrate old enabled keys for backward compat
                 // Enabled state for CallAdded/CallingMe/Logged already read above from playCallAdded/playMyCall/playLogged
@@ -1194,6 +1203,7 @@ namespace WSJTX_Controller
                 iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
                 iniFile.Write("moveFocusToStatusOnCallSelect", moveFocusToStatusOnCallSelect.ToString());
                 iniFile.Write("checkForUpdatesOnStartup", checkForUpdatesOnStartup.ToString());
+                iniFile.Write("announceImportantAlertsWhenFocusElsewhere", announceImportantAlertsWhenFocusElsewhere.ToString());
                 // Sound settings
                 iniFile.Write("soundFile_CallAdded",        soundFile_CallAdded   ?? "");
                 iniFile.Write("soundFile_CallingMe",        soundFile_CallingMe   ?? "");
@@ -2281,6 +2291,34 @@ namespace WSJTX_Controller
 
         public void ShowMessage(string text, bool sound) => ShowMsg(text, sound);
 
+        // See IJimmyStatusView.WouldAnnounce's own comment. Mirrors ShowMsg's internal
+        // `announced` check exactly (statusText.Focused && Form.ActiveForm == this) -- the two
+        // must never drift apart, since this exists specifically to answer "would ShowMsg's own
+        // path already say this out loud?"
+        public bool WouldAnnounce => statusText.Focused && Form.ActiveForm == this;
+
+        // See IJimmyStatusView.RaiseAccessibleAlert's own comment. AutomationNotificationKind.
+        // Other / AutomationNotificationProcessing.ImportantMostRecent are a reasonable starting
+        // point (interrupts any currently-queued same-source notification with this one), not a
+        // value confirmed against real JAWS/NVDA behavior yet -- see the "Announce important
+        // notifications when focus is elsewhere" General-tab option's own comment for why this
+        // stays off by default until that live testing happens.
+        public void RaiseAccessibleAlert(string text)
+        {
+            try
+            {
+                statusText.AccessibilityObject.RaiseAutomationNotification(
+                    System.Windows.Forms.Automation.AutomationNotificationKind.Other,
+                    System.Windows.Forms.Automation.AutomationNotificationProcessing.ImportantMostRecent,
+                    text);
+            }
+            catch
+            {
+                // Best-effort only -- an AT/OS combination that doesn't support UIA notifications
+                // must never crash Jimmy or fall back to focus movement/self-voicing.
+            }
+        }
+
         // Finds where the previously-selected row (identified by oldKeys[oldSelectedIndex])
         // landed in the new list, by identity rather than raw position. Returns -1 (no
         // selection) if oldSelectedIndex was invalid or that key is no longer present --
@@ -2539,6 +2577,19 @@ namespace WSJTX_Controller
         // message loop, so this avoids that race entirely. The delay gives the engine's own CAT
         // probe (a documented 700ms internal sleep, plus a real serial round-trip) time to finish
         // before this reads/writes it.
+        // Found live (release blocker, 2026-08-19): a radio that's off/unreachable doesn't fail
+        // these rigctld round-trips instantly -- Hamlib itself retries its own serial read for
+        // each command before giving up. This whole sequence is ~10 sequential round-trips
+        // (PollOnce's own 6, plus SetSplit/GetMode/SetMode x2), and used to run synchronously on
+        // the UI thread (kickTimer.Tick always fires there) -- with the radio off, that could
+        // stall the entire application for many seconds right at startup, before the operator
+        // could interact with anything at all. Moved onto a background thread, matching the
+        // EXACT pattern ApplyEngineMode already uses for NativeEngineClient.Launch (see its own
+        // comment: "Process.Start()... well known to be able to block... Marshal to the UI
+        // thread explicitly"). Nothing in this body touches a WinForms control directly (only
+        // DebugOutput, which writes to a file -- see _radioOpInFlight's own comment for the one
+        // caveat), so no BeginInvoke is needed inside it; only the shared busy-guard is touched
+        // back on the UI thread via BeginInvoke, matching the poll timer's own convention.
         private void ScheduleRigConnectKick(RigctldClient client)
         {
             var kickTimer = new System.Windows.Forms.Timer { Interval = 1500 };
@@ -2551,45 +2602,58 @@ namespace WSJTX_Controller
                     wsjtxClient?.DebugOutput("[RIG-KICK] skipped -- superseded by a newer ApplyRadioSettings() call");
                     return;
                 }
-                try
+                if (_radioOpInFlight)
                 {
-                    var status = client.PollOnce();
-                    wsjtxClient?.DebugOutput($"[RIG-KICK] poll ok:{status.Ok} freq:{status.FrequencyHz} err:'{status.LastError}'");
-                    // The frequency nudge that used to live here (set freq+1Hz, then back) was
-                    // removed 2026-08-07: confirmed live that the radio's voice announce is
-                    // actually triggered by the MODE command below, not a frequency write at
-                    // all -- the frequency nudge never did anything real, and the announce
-                    // attributed to it earlier was really the mode nudge firing right after it.
-                    bool okSplit = client.SetSplit(Radio.SplitMode == RadioSplitMode.Rig);
-                    wsjtxClient?.DebugOutput($"[RIG-KICK] split={Radio.SplitMode}: ok:{okSplit}");
+                    wsjtxClient?.DebugOutput("[RIG-KICK] skipped -- a radio poll is already in flight, self-heals next tick");
+                    return;
+                }
+                _radioOpInFlight = true;
+                System.Threading.Tasks.Task.Run(() =>
+                {
+                    try
+                    {
+                        var status = client.PollOnce();
+                        wsjtxClient?.DebugOutput($"[RIG-KICK] poll ok:{status.Ok} freq:{status.FrequencyHz} err:'{status.LastError}'");
+                        // The frequency nudge that used to live here (set freq+1Hz, then back) was
+                        // removed 2026-08-07: confirmed live that the radio's voice announce is
+                        // actually triggered by the MODE command below, not a frequency write at
+                        // all -- the frequency nudge never did anything real, and the announce
+                        // attributed to it earlier was really the mode nudge firing right after it.
+                        bool okSplit = client.SetSplit(Radio.SplitMode == RadioSplitMode.Rig);
+                        wsjtxClient?.DebugOutput($"[RIG-KICK] split={Radio.SplitMode}: ok:{okSplit}");
 
-                    // The engine's own retune loop only re-sends set_mode when its belief differs
-                    // from the target, so if that belief was ever seeded as "already correct"
-                    // (e.g. from a stale prior session) without a real CAT command reaching the
-                    // physical radio, the rig could stay stuck on whatever mode it was actually
-                    // last in. Nudge to a mode FT8/FT4 operation would never actually want (FM)
-                    // and back to whatever's currently read, forcing two genuinely different
-                    // set_mode calls the rig can't collapse into a no-op. Confirmed live,
-                    // 2026-08-07: this genuinely reaches the radio (it's what triggers the real
-                    // voice announce, not the frequency write) -- kept for that reason, though on
-                    // its own it did NOT fix the separate mic-vs-USB-audio transmit issue, which
-                    // is a different bug still under investigation (audio playback path, not
-                    // mode-setting).
-                    if (client.GetMode(out string curMode, out int curPassband) && !string.IsNullOrWhiteSpace(curMode))
-                    {
-                        bool okModeNudge = client.SetMode("FM", 0);
-                        bool okModeRestore = client.SetMode(curMode, curPassband);
-                        wsjtxClient?.DebugOutput($"[RIG-KICK] mode nudge FM->{curMode}: nudge_ok:{okModeNudge} restore_ok:{okModeRestore}");
+                        // The engine's own retune loop only re-sends set_mode when its belief differs
+                        // from the target, so if that belief was ever seeded as "already correct"
+                        // (e.g. from a stale prior session) without a real CAT command reaching the
+                        // physical radio, the rig could stay stuck on whatever mode it was actually
+                        // last in. Nudge to a mode FT8/FT4 operation would never actually want (FM)
+                        // and back to whatever's currently read, forcing two genuinely different
+                        // set_mode calls the rig can't collapse into a no-op. Confirmed live,
+                        // 2026-08-07: this genuinely reaches the radio (it's what triggers the real
+                        // voice announce, not the frequency write) -- kept for that reason, though on
+                        // its own it did NOT fix the separate mic-vs-USB-audio transmit issue, which
+                        // is a different bug still under investigation (audio playback path, not
+                        // mode-setting).
+                        if (client.GetMode(out string curMode, out int curPassband) && !string.IsNullOrWhiteSpace(curMode))
+                        {
+                            bool okModeNudge = client.SetMode("FM", 0);
+                            bool okModeRestore = client.SetMode(curMode, curPassband);
+                            wsjtxClient?.DebugOutput($"[RIG-KICK] mode nudge FM->{curMode}: nudge_ok:{okModeNudge} restore_ok:{okModeRestore}");
+                        }
+                        else
+                        {
+                            wsjtxClient?.DebugOutput("[RIG-KICK] mode nudge skipped -- could not read current mode");
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        wsjtxClient?.DebugOutput("[RIG-KICK] mode nudge skipped -- could not read current mode");
+                        wsjtxClient?.DebugOutput($"[RIG-KICK] EXCEPTION: {ex.Message}");
                     }
-                }
-                catch (Exception ex)
-                {
-                    wsjtxClient?.DebugOutput($"[RIG-KICK] EXCEPTION: {ex.Message}");
-                }
+                    finally
+                    {
+                        BeginInvoke(new Action(() => { _radioOpInFlight = false; }));
+                    }
+                });
             };
             kickTimer.Start();
         }
@@ -2674,7 +2738,14 @@ namespace WSJTX_Controller
                     dxClusterAddress);
                 if (!ok && nativeEngineClient == client)
                 {
-                    BeginInvoke(new Action(() => ShowMessage($"Native engine: {client.LastError}", false)));
+                    // Promoted from a raw ShowMessage (2026-08-19, notification-system-
+                    // consistency pass) to the existing "Native engine" ErrorWarningEvent
+                    // convention (same Source string already used by WsjtxClient.Protocol.cs's
+                    // own engine-related errors) -- Error severity forces Important (a beep, and
+                    // now also eligible for the off-focus UIA announcement), matching this
+                    // event's own weight: TX/decode cannot work at all until this is resolved.
+                    BeginInvoke(new Action(() =>
+                        wsjtx?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine", client.LastError))));
                 }
             });
         }
@@ -2703,7 +2774,15 @@ namespace WSJTX_Controller
 
             if (!_nativeEngineRestartPolicy.RecordAttemptAndShouldRestart(out int attemptNumber))
             {
-                ShowMessage("Native engine host stopped unexpectedly -- gave up auto-restarting after repeated crashes. Check Options > Decode Engine and try again.", true);
+                // Promoted (2026-08-19, notification-system-consistency pass): the terminal
+                // "gave up" moment -- distinct from the per-attempt "restarting (N/M)..."
+                // message just below, which stays a routine status line (an automatic recovery
+                // is already in progress at that point; nothing yet needs the operator's
+                // attention). This one genuinely does: auto-recovery has stopped, and the
+                // operator must act. Same "Native engine" ErrorWarningEvent convention as the
+                // launch-failure path above.
+                wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine",
+                    "stopped unexpectedly -- gave up auto-restarting after repeated crashes. Check Options > Decode Engine and try again."));
                 return;
             }
 
@@ -2723,6 +2802,17 @@ namespace WSJTX_Controller
         // for its own sake elsewhere.
         private bool? _lastRadioPollOk = null;
 
+        // Shared by radioPollTimer_Tick and ScheduleRigConnectKick's callback -- both talk to
+        // the SAME RigctldClient instance (rigctld is a multi-client daemon, but RigctldClient's
+        // own class comment is explicit that IT is "not thread-safe by design... not called
+        // concurrently from a background Task"). Set true right before either one starts its
+        // background rigctld round-trip, cleared back on the UI thread (via BeginInvoke) once
+        // it's done; the OTHER one just skips its own turn if this is already true rather than
+        // risking two threads calling into the same client instance at once -- "self-heals next
+        // tick", same tolerance every other skipped/superseded radio operation in this class
+        // already documents.
+        private volatile bool _radioOpInFlight;
+
         // Quiet background update, same "no sound, no forced announcement" spirit as
         // spotWatchAgeTimer_Tick above -- Alt+Q (ReportPowerSwr) always does its own fresh,
         // synchronous PollOnce() rather than relying on this cached value, so this timer only
@@ -2736,19 +2826,60 @@ namespace WSJTX_Controller
         // silently wasn't happening. Announce state CHANGES only (not every tick, which would
         // be constant, unusable chatter) via the same accessible status-bar mechanism used
         // throughout Jimmy (ShowMessage -> statusText, forced to announce when focused).
+        //
+        // Found live (release blocker, 2026-08-19): PollOnce() is 6 sequential rigctld round-
+        // trips, and this Tick handler used to call it directly -- System.Windows.Forms.Timer.
+        // Tick always fires on the UI thread. A radio that's off/unreachable doesn't fail these
+        // instantly (Hamlib retries its own serial read per command before giving up), so with
+        // the radio off this blocked the ENTIRE application for a meaningful fraction of a
+        // second on EVERY poll (default interval 1000ms) -- in practice, close to continuously,
+        // since the next tick was already due by the time one blocking call finished. The whole
+        // rest of Jimmy (Options, typing, list navigation, everything) shares this one UI
+        // thread, so this alone was enough to make the application feel unusable whenever the
+        // radio was off -- not a hang, but input left waiting behind an almost-constantly-busy
+        // message loop. PollOnce() itself is unchanged; only WHERE it runs moved, matching the
+        // same Task.Run+BeginInvoke pattern ApplyEngineMode already uses for the same reason
+        // (launching the engine host). _radioOpInFlight (its own comment above) keeps this from
+        // ever overlapping ScheduleRigConnectKick's own background rigctld calls on the same
+        // client instance.
         private void radioPollTimer_Tick(object sender, EventArgs e)
         {
             if (rigctldClient == null) return;
-            lastRadioStatus = rigctldClient.PollOnce();
+            if (_radioOpInFlight) return;   // a poll or the startup kick is already running -- self-heals next tick
+            var client = rigctldClient;
+            _radioOpInFlight = true;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                RadioStatus status;
+                try { status = client.PollOnce(); }
+                catch (Exception ex) { status = new RadioStatus { Ok = false, LastError = ex.Message }; }
+                BeginInvoke(new Action(() =>
+                {
+                    _radioOpInFlight = false;
+                    if (client != rigctldClient) return;   // superseded by a newer ApplyRadioSettings() call
+                    ApplyRadioPollResult(status);
+                }));
+            });
+        }
+
+        // The result-application half of radioPollTimer_Tick, unchanged from what used to run
+        // inline there -- split out only so the polling half above can run off the UI thread
+        // while this half (which touches statusText via Notify/HaltTx) still runs on it.
+        private void ApplyRadioPollResult(RadioStatus status)
+        {
+            lastRadioStatus = status;
 
             if (_lastRadioPollOk != lastRadioStatus.Ok)
             {
                 if (lastRadioStatus.Ok)
                 {
                     // Only announce a RECOVERY, not the very first successful poll of a
-                    // session (that's just normal startup, not news).
+                    // session (that's just normal startup, not news). Promoted (2026-08-19,
+                    // notification-system-consistency pass) to its own dedicated
+                    // RadioCatRecoveredEvent -- see its own comment for why this isn't an
+                    // ErrorWarningEvent.
                     if (_lastRadioPollOk == false)
-                        ShowMessage("Radio CAT link OK", false);
+                        wsjtxClient?.Notify?.Publish(new RadioCatRecoveredEvent());
                 }
                 else
                 {
@@ -2772,7 +2903,12 @@ namespace WSJTX_Controller
             if (swrOver && !_swrOverThreshold)
             {
                 wsjtxClient?.HaltTx();
-                ShowMessage($"Tx halted: SWR {lastRadioStatus.Swr.Value:F1} exceeds threshold {Radio.SwrHaltThreshold:F1}", true);
+                // Promoted (2026-08-19, notification-system-consistency pass) to the same
+                // "headline: reason" ErrorWarningEvent shape as "Radio CAT link lost" above --
+                // a real TX-safety event, Error severity forces Important (beep + eligible for
+                // the off-focus UIA announcement), matching this feature's own safety intent.
+                wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Tx halted (high SWR)",
+                    $"SWR {lastRadioStatus.Swr.Value:F1} exceeds threshold {Radio.SwrHaltThreshold:F1}"));
             }
             _swrOverThreshold = swrOver;
         }

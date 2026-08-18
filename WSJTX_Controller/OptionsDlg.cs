@@ -152,6 +152,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox pskReporterCheckBox;
         private System.Windows.Forms.CheckBox moveFocusToStatusCheckBox;
         private System.Windows.Forms.CheckBox checkForUpdatesCheckBox;
+        private System.Windows.Forms.CheckBox announceImportantAlertsCheckBox;
 
         // Appearance tab
         private System.Windows.Forms.ComboBox appearanceThemeCombo;
@@ -335,6 +336,24 @@ namespace WSJTX_Controller
                 Font                  = font,
             };
             generalPanel.Controls.Add(checkForUpdatesCheckBox);
+
+            // Added 2026-08-19 (accessibility-notification feature): gates
+            // UiaAlertNotificationDelivery (WSJTX_Controller/Notify/NotificationDelivery.cs).
+            // Off by default -- must stay off until live JAWS and NVDA testing confirms the
+            // announcement, timing, and interruption behavior actually work well; see
+            // Controller.RaiseAccessibleAlert's own comment for the exact UIA call this makes.
+            announceImportantAlertsCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text                  = "Announce important notifications when focus is elsewhere",
+                AccessibleName        = "Announce important notifications when focus is elsewhere",
+                AccessibleDescription = "When an important notification occurs (for example: engine failure, radio CAT link lost, high SWR shutting off transmit, a failed band or mode change) and keyboard focus is not on the status field, announce it through Windows UI Automation without moving focus. Does not change ordinary status messages. Off by default -- requires JAWS/NVDA testing before relying on it.",
+                AutoSize              = true,
+                Location              = new System.Drawing.Point(10, 140),
+                TabIndex              = 5,
+                Checked               = ctrl.announceImportantAlertsWhenFocusElsewhere,
+                Font                  = font,
+            };
+            generalPanel.Controls.Add(announceImportantAlertsCheckBox);
         }
 
         private void ApplyGeneralSettings()
@@ -347,6 +366,7 @@ namespace WSJTX_Controller
 
             ctrl.moveFocusToStatusOnCallSelect = moveFocusToStatusCheckBox?.Checked ?? false;
             ctrl.checkForUpdatesOnStartup = checkForUpdatesCheckBox?.Checked ?? false;
+            ctrl.announceImportantAlertsWhenFocusElsewhere = announceImportantAlertsCheckBox?.Checked ?? false;
 
             int maxAge = (int)(_maxCallQueueAgeNumeric?.Value ?? 16);
             ctrl.maxCallQueueAgePeriods = Math.Max(4, Math.Min(200, maxAge));
@@ -2496,15 +2516,19 @@ namespace WSJTX_Controller
             _pendingNotifyPolicies = new Dictionary<NotificationEventType, NotificationPolicy>();
             foreach (var kv in ctrl.Notifications.Policies) _pendingNotifyPolicies[kv.Key] = kv.Value.Clone();
             // Stable, deliberate order (not Enum.GetValues' declaration order) -- groups the
-            // three currently-live types together, first, since they're the ones an operator is
+            // currently-live types together, first, since they're the ones an operator is
             // most likely to actually hear today; the four parked types follow. Both groups are
             // fully configurable either way (see NotificationEvents.cs's own comment on why
             // configurability and "is anything publishing this yet" are separate questions).
+            // RadioCatRecovered added 2026-08-19 (notification-system-consistency pass) --
+            // recovery companion to ErrorWarning's "Radio CAT link lost", so it's placed
+            // immediately after it.
             _notifyTypeOrder = new List<NotificationEventType>
             {
                 NotificationEventType.ConnectionLost,
                 NotificationEventType.ConnectionClosed,
                 NotificationEventType.ErrorWarning,
+                NotificationEventType.RadioCatRecovered,
                 NotificationEventType.ClockOutOfSync,
                 NotificationEventType.ClockSynced,
                 NotificationEventType.QsoStarted,

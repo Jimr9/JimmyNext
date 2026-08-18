@@ -271,6 +271,21 @@ namespace WSJTX_Controller
         };
     }
 
+    // Recovery companion to ErrorWarningEvent's "Radio CAT link lost" (Controller.cs's own
+    // radioPollTimer_Tick -- same transition-gated call site, opposite edge: only announces
+    // when _lastRadioPollOk transitions false -> true, never on the first-ever successful poll
+    // of a session). Its own dedicated type rather than reusing ErrorWarningEvent -- this isn't
+    // an error/warning at all (ErrorSeverity has no "recovered" value, and forcing good news
+    // through an error-shaped "{Source}: {Detail}" template would read oddly). DedupKey null:
+    // only ever one meaningfully-pending CAT-link condition at a time, matching
+    // ConnectionLost/ClockSynced's own null-DedupKey convention.
+    public sealed class RadioCatRecoveredEvent : INotificationEvent
+    {
+        public NotificationEventType EventType => NotificationEventType.RadioCatRecovered;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => EmptyTokens.Instance;
+    }
+
     // Shared empty-token-dictionary singleton for events with nothing to substitute --
     // avoids allocating a fresh empty Dictionary on every ToTokens() call for these.
     internal static class EmptyTokens

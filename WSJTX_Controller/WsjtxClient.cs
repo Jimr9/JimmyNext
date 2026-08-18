@@ -631,7 +631,9 @@ namespace WSJTX_Controller
             _awardTagger = new AwardTagger(this);
             _callQueueStore = new CallQueueStore(this);
             Sounds = new NotificationSounds(() => ctrl.soundsEnabled);
-            Notify = new NotificationCenter(ctrl.Notifications, new StatusViewNotificationDelivery(StatusView));
+            Notify = new NotificationCenter(ctrl.Notifications,
+                new UiaAlertNotificationDelivery(new StatusViewNotificationDelivery(StatusView), StatusView,
+                    () => ctrl.announceImportantAlertsWhenFocusElsewhere));
             LiveQsoUploader = new LiveQsoUploadOrchestrator(
                 credentials: () => new LiveUploadCredentials
                 {

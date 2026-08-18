@@ -102,6 +102,10 @@ namespace WSJTX_Controller
             {
                 new NotificationVariable("Mode", "FT8 or FT4."),
             },
+            [NotificationEventType.RadioCatRecovered] = new List<NotificationVariable>
+            {
+                // Carries no data of its own -- {Time} (added by every type) is all it offers.
+            },
         };
 
         public static IReadOnlyList<NotificationVariable> For(NotificationEventType type)

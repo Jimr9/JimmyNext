@@ -15,5 +15,6 @@ namespace WSJTX_Controller
         ErrorWarning,
         ClockOutOfSync,
         ClockSynced,
+        RadioCatRecovered,
     }
 }

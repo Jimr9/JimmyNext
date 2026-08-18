@@ -194,7 +194,24 @@ namespace WSJTX_Controller
             if (_directConnected && newModeValue != mode)
             {
                 string tier = newModeValue == "FT4" ? "FT4" : "FT8";
-                DirectSetTier(tier);
+                // Found live (Codex release audit, 2026-08-19): `mode` used to be set right after
+                // calling DirectSetTier regardless of whether the engine ever confirmed the
+                // switch. Only commit Jimmy's own local FT8/FT4 state once the engine has
+                // actually accepted it -- otherwise a failed Alt+M (engine unreachable, connection
+                // dropped, timed out, or an explicit ERR reply) would leave Jimmy believing it's
+                // on the new mode while the engine -- and the real decode/TX cycle on the air --
+                // silently stayed on the old one. See DirectSetTier's own comment for the full
+                // reasoning; same bug class already fixed once for Tune (DirectSetTuning,
+                // 2026-08-10).
+                if (!DirectSetTier(tier))
+                {
+                    // Routed through NotificationCenter (2026-08-19, notification-system-
+                    // consistency pass) instead of a raw StatusView.ShowMessage -- same
+                    // "headline: reason" ErrorWarningEvent shape as the band-change-failure
+                    // conversion (WsjtxClient.BandAudio.cs). Error severity forces Important.
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Mode change to {tier} failed", "engine did not confirm"));
+                    return true;
+                }
                 mode = tier;
                 newMode = true;
                 // A tier switch changes the T/R period (FT8 15s / FT4 7.5s) -- everything queued

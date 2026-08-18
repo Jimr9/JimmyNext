@@ -188,17 +188,50 @@ namespace WSJTX_Controller
 
         // SelectFrequency's own entry point: an explicit target frequency, not necessarily the
         // band's primary/first entry bandToFreq(targetIdx) would resolve to.
+        //
+        // Found live (Codex release audit, 2026-08-19): this used to set _pendingBandIdx, call
+        // SetFrequency, discard its bool result, and return true unconditionally -- so a rejected
+        // command, a dropped connection, or a timeout (SetFrequency returns false for all three;
+        // see its own comment) was reported to the operator as a successful band change anyway,
+        // and _pendingBandIdx was left pointing at a band the radio was never actually retuned
+        // to. Since BandUp/BandDown prefer _pendingBandIdx over the last CONFIRMED bandIdx (by
+        // design, so repeated presses before a CAT round-trip lands keep advancing), a stale
+        // pending value from a failed retune would make the NEXT BandUp/BandDown compute from a
+        // band that only existed as an unconfirmed request -- the same class of bug
+        // _pendingBandIdx's confirmation-path fix (2026-08-17) already closed for the SUCCESS
+        // side; this is that fix's failure-path twin. _pendingBandIdx is now only set once we're
+        // actually attempting a CAT command (not on the earlier "wrong radio mode" rejection,
+        // which never attempts one at all), and is cleared back to null on failure so the next
+        // BandUp/BandDown falls back to bandIdx -- the last state the radio actually confirmed.
         private bool RetuneBand(int targetIdx, uint freqHz, string caller)
         {
-            _pendingBandIdx = targetIdx;
             DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst}");
             if (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld || ctrl.rigctldClient == null)
             {
                 StatusView.ShowMessage("Band change needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
                 return false;
             }
-            ctrl.rigctldClient.SetFrequency(freqHz);
-            return true;
+
+            _pendingBandIdx = targetIdx;
+            if (ctrl.rigctldClient.SetFrequency(freqHz))
+                return true;
+
+            // Covers rejection (rigctld replied with an explicit RPRT error), timeout, and
+            // disconnect alike -- RigctldClient.SetFrequency returns false for all three (its
+            // SendCommand closes the connection and records LastError on any exception, including
+            // a timed-out read; LooksLikeError treats a null reply -- disconnected/no response --
+            // the same as an explicit RPRT error). LastError is null for a clean rejection reply
+            // (no message beyond "RPRT -1" to report), hence the fallback text.
+            _pendingBandIdx = null;
+            // Routed through NotificationCenter (2026-08-19, notification-system-consistency
+            // pass) instead of a raw StatusView.ShowMessage -- same "headline: reason"
+            // ErrorWarningEvent shape as Controller.cs's "Radio CAT link lost". Error severity
+            // forces Important (beep + eligible for the off-focus UIA announcement); the inner
+            // StatusViewNotificationDelivery still updates statusText exactly as before (see
+            // NotificationCenter.Deliver/UiaAlertNotificationDelivery).
+            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Band change to {bands[targetIdx]}m failed",
+                ctrl.rigctldClient.LastError ?? "rigctld rejected the frequency change"));
+            return false;
         }
 
         private void ShowBandChangePending(int targetIdx, string detail = null)

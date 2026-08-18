@@ -149,6 +149,21 @@ namespace WSJTX_Controller
                 Timing = NotificationTiming.Immediate,
                 DeferWhileTransmitting = false,
             },
+
+            // Added 2026-08-19 (notification-system-consistency pass): recovery companion to
+            // the "Radio CAT link lost" ErrorWarningEvent (Controller.cs's radioPollTimer_Tick),
+            // which was already wired. Normal priority (not Important) -- a recovery is
+            // reassuring news, not something that needs to interrupt/beep the way the loss
+            // itself does, matching ClockSynced's own Normal-priority precedent for its
+            // recovery counterpart.
+            [NotificationEventType.RadioCatRecovered] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                RepeatSeconds = 0,
+                ThrottleMilliseconds = 0,
+                Template = "Radio CAT link is back",
+            },
         };
 
         // Human-readable name shown in the configurable-notifications UI's first list --
@@ -165,6 +180,7 @@ namespace WSJTX_Controller
             [NotificationEventType.ErrorWarning] = "Error or warning",
             [NotificationEventType.ClockOutOfSync] = "Computer clock out of sync",
             [NotificationEventType.ClockSynced] = "Computer clock back in sync",
+            [NotificationEventType.RadioCatRecovered] = "Radio CAT link recovered",
         };
     }
 }

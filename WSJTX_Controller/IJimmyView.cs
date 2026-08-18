@@ -22,6 +22,23 @@ namespace WSJTX_Controller
 
         // Wraps the existing (currently no-op) Controller.ShowMsg.
         void ShowMessage(string text, bool sound);
+
+        // Added 2026-08-19 for the off-focus accessibility-alert feature (UiaAlertNotification
+        // Delivery, WSJTX_Controller/Notify/NotificationDelivery.cs). Whether announcing RIGHT
+        // NOW via ShowMessage would actually be heard -- statusText focused AND this is the
+        // active form, mirroring Controller.ShowMsg's own internal `announced` check exactly.
+        // Lets a delivery layer outside Controller ask "will the normal path already say this?"
+        // before raising a second, redundant announcement through a different channel for the
+        // same event.
+        bool WouldAnnounce { get; }
+
+        // Announces text via UI Automation's Notification event (System.Windows.Forms.
+        // AccessibleObject.RaiseAutomationNotification) without moving keyboard focus and
+        // without touching statusText's own displayed text -- see UiaAlertNotificationDelivery's
+        // own comment for the full design and why this exists. Must never throw (an AT that
+        // doesn't support UIA notifications, or any other failure here, is a silent no-op, never
+        // a crash or a fallback to anything that WOULD move focus/self-voice).
+        void RaiseAccessibleAlert(string text);
     }
 
     public interface IJimmyQueueView
