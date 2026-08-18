@@ -2717,35 +2717,38 @@ namespace WSJTX_Controller
         // freeze the whole window; both confirmed live, 2026-08-07/08, and removed for good
         // along with the rest of the WSJT-X-external/Andy-fork compatibility code).
         //
-        // TestModeGuard.IsTestMode still opens this same real listener (so JimmyReplay.py's
-        // simulated peer -- standing in for the engine host -- connects exactly the way a
-        // real one would) but never spawns the actual jimmy-engine-host.exe process, so a
-        // replay-test session can never open a real audio device, a real COM port, or key a
-        // real radio.
+        // TestModeGuard.IsTestMode connects over the exact same Direct control-port protocol
+        // production uses (JimmyDirectReplay.py's fake control-port server stands in for the
+        // real jimmy-engine-host.exe, answering SNAPSHOT/REPLY/etc. on 127.0.0.1:<ControlPort>)
+        // but this method still never spawns the actual jimmy-engine-host.exe process (see the
+        // early return below), so a replay-test session can never open a real audio device, a
+        // real COM port, or key a real radio.
         public void ApplyEngineMode()
         {
+            // Still needed below for the real engine host's own --jimmy-addr argument (Launch()
+            // passes it unconditionally; Nexus's run_radio sends legacy WSJT-X-protocol UDP
+            // packets there regardless of transport mode -- Jimmy's own Direct-mode client simply
+            // never listens for them in production, exactly as ARCHITECTURE.md documents). Not
+            // related to the TestModeGuard.IsTestMode branch below at all -- kept exactly as
+            // before, just no longer read by anything in the test-mode branch itself.
             int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
-            // UDP-to-Direct parity/cleanup pass, 2026-08-12: Direct is now unconditional in
-            // production -- the "talk over classic WSJT-X UDP instead" choice was retired (see
-            // NativeEngineSettings' own comment on why it was never a real fallback). The engine
-            // host process itself is launched exactly the same way either way (below); this only
-            // ever changes how Jimmy talks to it once it's up. TestModeGuard.IsTestMode always
-            // uses the UDP path regardless -- JimmyReplay.py simulates a standard
-            // WSJT-X-protocol peer, not the Direct control channel, and its own named regression
-            // tests (QsoLoggedMessage/LoggedAdifMessage fallback, TxHaltClk/TxEnableClk
-            // Wait-and-Reply cooperation, etc.) specifically exercise that UDP-side handling --
-            // kept alive here, test-mode-only, rather than removed, so that whole suite keeps
-            // passing unchanged.
-            if (!TestModeGuard.IsTestMode)
-            {
-                wsjtxClient?.DisconnectDirectEngine();
-                wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid);
-            }
-            else
-            {
-                wsjtxClient?.DisconnectDirectEngine();
-                wsjtxClient?.ConnectNativeEngine(IPAddress.Parse("127.0.0.1"), jimmyPort);
-            }
+            // UDP-to-Direct test-harness migration, 2026-08-18: TestModeGuard.IsTestMode used to
+            // force the classic WSJT-X UDP path here unconditionally (ConnectNativeEngine),
+            // because JimmyReplay.py only spoke that standard protocol, not the Direct control
+            // channel. That was the last piece of load-bearing UDP infrastructure in this
+            // codebase -- production itself has been Direct-only since the 2026-08-12 parity
+            // pass (see WsjtxClient.Direct.cs's own header comment). Closing that gap the right
+            // way means test mode uses the SAME transport production does, not a parallel one
+            // that only proves the (now-dead) UDP path still parses bytes correctly. Test mode
+            // and production now differ in exactly one way: test mode never launches the real
+            // engine host (the early "if (TestModeGuard.IsTestMode) return;" below), so
+            // JimmyDirectReplay.py's fake control-port server is what Jimmy actually talks to
+            // instead of jimmy-engine-host.exe -- everything downstream of ConnectDirectEngine
+            // (classification, awards, call-queue ranking, notifications, band tracking) runs
+            // completely unchanged, because it never knew UDP vs Direct in the first place, let
+            // alone real-engine vs fake-engine-for-testing.
+            wsjtxClient?.DisconnectDirectEngine();
+            wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid);
 
             nativeEngineClient?.Dispose();
             nativeEngineClient = null;
