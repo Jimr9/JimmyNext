@@ -530,6 +530,25 @@ namespace WSJTX_Controller
             DebugOutput($"{Time()} restored tx level {savedLevel:0.00} for band index {bandIdx}");
         }
 
+        // UDP transport cleanup audit finding, 2026-08-18, NOT fixed here (a real behavior gap,
+        // not transport plumbing -- out of this cleanup pass's scope): CalcBestOffset's own
+        // comment above documents three callers ("the pre-negotiation decode-end path, the
+        // normal post-negotiation decode-end path, and DecodesCompleted's own end-of-cycle
+        // path") -- ALL THREE lived exclusively inside the classic UDP dispatcher (removed this
+        // same pass) or DecodesCompleted (removed this same pass, itself only ever reachable
+        // from that same dispatcher). That means CalcBestOffset/AudioOffsetFromTxPeriod/
+        // CalcTimerAdj have had NO live caller at all since the 2026-08-12 Direct-only
+        // production cutover -- predating this cleanup pass, not introduced by it. Practical
+        // effect: "Use best Tx frequency" (ctrl.freqCheckBox) analysis -- both the passive
+        // background version and the explicit Alt+ hotkey / "run recommended analysis?" prompt
+        // (StartSlotAnalysis) -- never actually completes under Direct mode; the operator-
+        // visible symptom is masked by SlotAnalysisWatchdog_Tick's own timeout fallback
+        // ("Transmit slot analysis timed out; starting CQ anyway"), which is presumably why this
+        // wasn't caught sooner: the feature degrades to "just starts CQing" instead of hanging.
+        // Left in place, unreferenced, rather than deleted -- unlike ProcessTxStart/ProcessTxEnd/
+        // DecodesCompleted (also removed this pass), Direct mode has NO existing replacement
+        // implementation of this specific analysis to fall back on, so deleting the only
+        // reference implementation would make a future real fix harder to write, not easier.
         private bool CalcBestOffset(List<int> offsetList, Periods decodePeriod, bool clearList)
         {
             DebugOutput($"{Time()} CalcBestOffset, decodePeriod:{decodePeriod} clearList:{clearList} offsetList.Count:{offsetList.Count()} skipFirstDecodeSeries:{skipFirstDecodeSeries}");

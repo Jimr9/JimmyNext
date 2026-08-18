@@ -1166,7 +1166,9 @@ namespace WSJTX_Controller
                 ctrl.label5.Text = $"En but: {wsjtxTxEnableButton.ToString().Substring(0, 1)}";
 
                 ctrl.label6.Text = $"dec: {period.ToString().Substring(0, 1)}";
-                ctrl.label32.Text = $"pdt: {postDecodeTimer.Enabled.ToString().Substring(0, 1)}";
+                // label32 used to show postDecodeTimer.Enabled -- that timer was removed
+                // 2026-08-18 along with the rest of the dead UDP decode-cycle machinery it
+                // belonged to (see WsjtxClient.cs's own comment at DecodesCompleted's removal).
 
                 ctrl.label7.ForeColor = txEnabled ? Color.White : Color.Black;
                 ctrl.label7.BackColor = txEnabled ? Color.Red : Color.LightGray;

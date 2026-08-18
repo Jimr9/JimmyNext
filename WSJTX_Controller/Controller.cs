@@ -384,32 +384,18 @@ namespace WSJTX_Controller
             }
         }
 
-        // Resolves the classic WSJT-X/UDP transport's listen address from whatever was read for
-        // ipAddrStr (Properties.Settings.Default.ipAddress for a production-identity first run,
-        // or the saved "ipAddress" .ini key otherwise) -- null when nothing is configured yet,
-        // which is the normal, expected state for a fresh Jimmy Test install (see Form_Load's
-        // own call site comment for the full architectural reasoning: this value was exclusively
-        // consumed by the UDP receive-socket path, WsjtxClient.Protocol.cs's ConnectNativeEngine/
-        // UdpLoop -- both removed in the 2026-08-18 UDP-to-Direct test-harness migration once
-        // nothing called either one anymore, in production or in test mode. Still passed into
-        // WsjtxClient's own constructor below and stored in its `ipAddress` field, which is now
-        // provably unread by anything reachable -- kept, not purged, same "provably unreachable
-        // but not yet cleaned up" status as the rest of that dead transport, and this method's
-        // own regression test (a real fresh-install crash fix) stays valid either way: parsing a
-        // possibly-null/malformed ipAddrStr safely is still a real concern regardless of what,
-        // if anything, ends up reading the result. Extracted as its own pure function (2026-08-19, alongside the
-        // release-blocker fix this exists for) so the exact "no ipAddrStr configured yet" case
-        // that used to crash Form_Load (IPAddress.Parse(null) -> ArgumentNullException) has a
-        // direct, deterministic regression test without needing a live Form_Load/WinForms
-        // lifecycle. internal (not private): JimmyTests reaches it via InternalsVisibleTo
-        // (AssemblyInfo.Testing.cs), matching every other small pure-logic extraction in this
-        // codebase (e.g. WsjtxClient.BandAudio.cs's ShouldRestoreTxLevel).
-        internal static IPAddress ResolveUdpListenAddress(string ipAddrStr)
-        {
-            if (string.IsNullOrWhiteSpace(ipAddrStr)) return null;
-            IPAddress.TryParse(ipAddrStr, out IPAddress result);
-            return result;
-        }
+        // ResolveUdpListenAddress (and the ipAddrStr/ipAddress/multicast settings it resolved --
+        // Properties.Settings.Default.ipAddress/multicast, the "ipAddress"/"multicast" .ini
+        // keys) were removed 2026-08-18: this was the classic WSJT-X/UDP transport's own listen
+        // address, exclusively consumed by WsjtxClient.Protocol.cs's ConnectNativeEngine/UdpLoop
+        // (removed in the prior UDP-to-Direct test-harness migration pass) and by
+        // WsjtxProtocolAdapter (removed this same pass) -- nothing parses or reads an IP address
+        // for Jimmy's own transport at all anymore, in production or in test mode, so the real
+        // fresh-install crash this used to guard against (IPAddress.Parse(null) throwing
+        // ArgumentNullException when nothing was configured yet) is now structurally impossible
+        // rather than merely handled: there is no more IPAddress.Parse call anywhere on this
+        // data path to crash. Its own regression test (JimmyTests.cs's
+        // ResolveUdpListenAddressTests) was removed alongside it for the same reason.
 
         private void Form_Load(object sender, EventArgs e)
         {
@@ -461,10 +447,7 @@ namespace WSJTX_Controller
                 MessageBox.Show("Unable to create settings file: " + pathFileNameExt + $"{nl}Continuing with default settings...", friendlyName, MessageBoxButtons.OK);
             }
 
-            string ipAddrStr = null;
-            IPAddress ipAddress = null;
             int port = 0;
-            bool multicast = true;
             bool debug = false;
             bool diagLog = false;
             WsjtxClient.TxModes txMode = WsjtxClient.TxModes.CALL_CQ;
@@ -499,9 +482,7 @@ namespace WSJTX_Controller
                         this.Location = Properties.Settings.Default.windowPos;
                     if (Properties.Settings.Default.windowHt != 0)
                         this.Height = Properties.Settings.Default.windowHt;
-                    ipAddrStr = Properties.Settings.Default.ipAddress;
                     port = Properties.Settings.Default.port;
-                    multicast = Properties.Settings.Default.multicast;
                     timeoutNumUpDown.Value = Properties.Settings.Default.timeout;
                     directedTextBox.Text = Properties.Settings.Default.directeds;
                     callDirCqCheckBox.Checked = Properties.Settings.Default.useDirected;
@@ -575,11 +556,11 @@ namespace WSJTX_Controller
                 if (iniFile.Read("windowState") == "Maximized")
                     this.WindowState = FormWindowState.Maximized;
 
-                ipAddrStr = iniFile.Read("ipAddress");
-                multicast = iniFile.Read("multicast") == "True";
+                // ipAddrStr/ipAddress/multicast (the classic UDP transport's own listen address)
+                // reads removed 2026-08-18 -- see ResolveUdpListenAddress's own removal comment
+                // above. port's own parsing/fallback behavior is otherwise unchanged.
                 try
                 {
-                    ipAddress = IPAddress.Parse(ipAddrStr);
                     port = int.Parse(iniFile.Read("port"));
                 }
                 catch (Exception)
@@ -589,9 +570,7 @@ namespace WSJTX_Controller
                     // Every other identity (Jimmy Test included) falls back to WSJT-X's own
                     // standard UDP defaults instead (matching App.config's own default values),
                     // never another install's possibly-different saved settings.
-                    ipAddrStr = isProductionIdentity ? Properties.Settings.Default.ipAddress : "127.0.0.1";
                     port = isProductionIdentity ? Properties.Settings.Default.port : 2237;
-                    multicast = isProductionIdentity && Properties.Settings.Default.multicast;
                 }
 
                 int.TryParse(iniFile.Read("timeout"), out i);
@@ -842,17 +821,11 @@ namespace WSJTX_Controller
             this.Controls.Add(callCqOptionsButton);
             callCqOptionsButton.BringToFront();
 
-            // Found live (release blocker, 2026-08-19): a genuine fresh install of a non-
-            // production identity (Jimmy Test) has no .ini file yet, so the branch above that
-            // populates ipAddrStr only ever runs for isProductionIdentity -- ipAddrStr stayed
-            // null the whole time, and the old unconditional IPAddress.Parse(ipAddrStr) here
-            // threw ArgumentNullException, crashing startup before wsjtxClient was ever assigned
-            // (see Controller_FormClosing's own comment for the resulting second crash on
-            // close). See ResolveUdpListenAddress's own comment (above, right before this
-            // method) for why null is the correct, honest result here rather than an invented
-            // fallback IP -- production Direct mode never reads this value at all.
-            //start the UDP message server (classic WSJT-X/replay-test transport only)
-            wsjtxClient = new WsjtxClient(this, ResolveUdpListenAddress(ipAddrStr), port, multicast, debug, diagLog, txMode);
+            // WsjtxClient's constructor used to also take the classic UDP transport's own
+            // ipAddress/multicast settings (see ResolveUdpListenAddress's own removal comment
+            // above for the fresh-install-crash history this area of code has) -- dropped
+            // 2026-08-18 along with WsjtxProtocolAdapter and the rest of that transport.
+            wsjtxClient = new WsjtxClient(this, port, debug, diagLog, txMode);
             if (parsedCallWaitingRowOrder != null)
             {
                 wsjtxClient.callWaitingRowOrderFields = parsedCallWaitingRowOrder;
@@ -1169,9 +1142,14 @@ namespace WSJTX_Controller
                 iniFile.Write("windowWd", normalBounds.Width.ToString());
                 iniFile.Write("windowHt", normalBounds.Height.ToString());
                 iniFile.Write("windowState", this.WindowState.ToString());
-                if (wsjtxClient.ipAddress != null) iniFile.Write("ipAddress", wsjtxClient.ipAddress.ToString());   //string
+                // ipAddress/multicast (the classic UDP receive-socket's own identity) are no
+                // longer written 2026-08-18 -- WsjtxClient no longer has anything to read them
+                // back into (WsjtxProtocolAdapter and the whole classic UDP transport are
+                // removed). port is still written: it's still genuinely read at startup to
+                // build the real engine host's own --jimmy-addr argument (Controller.
+                // ApplyEngineMode's jimmyPort, NativeEngineClient.Launch) -- see that call
+                // site's own comment for why that specific piece was NOT touched in this pass.
                 if (wsjtxClient.port != 0) iniFile.Write("port", wsjtxClient.port.ToString());
-                iniFile.Write("multicast", wsjtxClient.multicast.ToString());
                 iniFile.Write("timeout", ((int)timeoutNumUpDown.Value).ToString());
                 iniFile.Write("ignoreWeakSnr", ignoreWeakSnrCheckBox.Checked.ToString());
                 iniFile.Write("minSnr", ((int)minSnrNumUpDown.Value).ToString());

@@ -487,32 +487,11 @@ namespace WSJTX_Controller
                 DebugOutput($"{Time()} >>>>>Sent REPLY (direct) for manual call to '{callsign}'");
                 DirectSetTxEnabled(true);
             }
-            else if (udpClient2 != null)
-            {
-                try
-                {
-                    var cmsg = new ConfigureMessage
-                    {
-                        SchemaVersion    = WsjtxMessage.NegotiatedSchemaVersion,
-                        Id               = WsjtxMessage.UniqueId,
-                        DXCall           = callsign,
-                        DXGrid           = "",
-                        GenerateMessages = true,
-                    };
-                    ba = cmsg.GetBytes();
-                    udpClient2.Send(ba, ba.Length);
-                    DebugOutput($"{Time()} >>>>>Sent 'Configure' for manual call to '{callsign}'");
-                }
-                catch (Exception ex)
-                {
-                    DebugOutput($"{Time()} ManualEnqueueCall failed: {ex.Message}");
-                    return false;
-                }
-
-                EnableTx();
-            }
             else
             {
+                // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard
+                // ConfigureMessage send (gated on udpClient2 being open) is removed -- Direct is
+                // the only transport left, in production and in test mode alike.
                 return false;
             }
 

@@ -10,117 +10,28 @@ namespace WSJTX_Controller
 {
     public partial class WsjtxClient
     {
-        // Shared "a QSO was just logged" UI feedback and CQ-resume, called from whichever of
-        // QsoLoggedMessage/LoggedAdifMessage claims the Id first (see _liveLoggedQsoIds).
-        private void OnQsoLogged(string dxCall)
-        {
-            if (dxCall != null && !logList.Contains(dxCall))
-            {
-                logList.Add(dxCall);
-                loggedCall = dxCall;
-                lCall = dxCall;
-                ShowLogged();
-                Sounds.PlaySoundEvent(ctrl.loggedCheckBox.Checked, ctrl.soundFile_Logged);
-                StatusView.ShowMessage($"Logged QSO with {dxCall}", false);
-                DebugOutput($"{spacer}OnQsoLogged: added '{dxCall}' to logList");
-                // Same reasoning as RequestLog(): without this, an award's "still needed" tag
-                // stays stale for the rest of the session on this band, which can also let the
-                // already-worked exception keep re-admitting this same call into the queue.
-                ctrl.RefreshStillNeedCache();
-            }
-            if (txMode == TxModes.CALL_CQ &&
-                dxCall != null &&
-                string.Equals(dxCall, callInProg, StringComparison.OrdinalIgnoreCase))
-            {
-                DebugOutput($"{spacer}OnQsoLogged: CQ mode QSO complete, resuming CQ");
-                _callQueueStore.RemoveCall(dxCall);
-                CancelQso();
-                cqPaused = false;
-                SetupCq(true);
-            }
-        }
-
-        // Builds the ADIF-style field dictionary and record text from a QsoLoggedMessage,
-        // claims the QSO by its dedup key (see ClaimLiveLoggedQso), and if not already
-        // handled via the LoggedAdifMessage fallback, fires the UI feedback and hands off
-        // to the shared import/upload tail (see ImportLiveLoggedQso).
-        private void HandleLiveQsoLogged(QsoLoggedMessage qMsg)
-        {
-            double freqMhz = qMsg.TxFrequency / 1_000_000.0;
-            string freqMhzStr = freqMhz.ToString("0.000000", System.Globalization.CultureInfo.InvariantCulture);
-            string band = AdifImporter.NormalizeBand("", freqMhzStr);
-            string qsoDate = qMsg.DateTimeOn.ToString("yyyyMMdd");
-            string timeOn  = qMsg.DateTimeOn.ToString("HHmmss");
-            string timeOff = qMsg.DateTimeOff.ToString("HHmmss");
-
-            string dedupKey = AdifImporter.BuildDedupKey(qMsg.DxCall ?? "", band, qMsg.Mode ?? "", qsoDate, timeOn);
-            if (!ClaimLiveLoggedQso(dedupKey)) return;
-
-            OnQsoLogged(qMsg.DxCall);
-
-            var fields = new Dictionary<string, string>
-            {
-                ["CALL"]             = qMsg.DxCall ?? "",
-                ["BAND"]             = band,
-                ["FREQ"]             = freqMhzStr,
-                ["MODE"]             = qMsg.Mode ?? "",
-                ["QSO_DATE"]         = qsoDate,
-                ["TIME_ON"]          = timeOn,
-                ["TIME_OFF"]         = timeOff,
-                ["RST_SENT"]         = qMsg.ReportSent ?? "",
-                ["RST_RCVD"]         = qMsg.ReportReceived ?? "",
-                ["GRIDSQUARE"]       = qMsg.DxGrid ?? "",
-                ["NAME"]             = qMsg.Name ?? "",
-                ["COMMENT"]          = qMsg.Comments ?? "",
-                ["TX_PWR"]           = qMsg.TxPower ?? "",
-                ["OPERATOR"]         = qMsg.OperatorCall ?? "",
-                ["STATION_CALLSIGN"] = qMsg.MyCall ?? "",
-                ["MY_GRIDSQUARE"]    = qMsg.MyGrid ?? "",
-                ["STX_STRING"]       = qMsg.ExchangeSent ?? "",
-                ["SRX_STRING"]       = qMsg.ExchangeReceived ?? "",
-            };
-            EnrichWithClubLogGeoData(fields, qMsg.DxCall);
-
-            string adifRecord = AdifRecordBuilder.Build(
-                qMsg.DxCall ?? "", band, (long)qMsg.TxFrequency, qMsg.Mode ?? "",
-                qsoDate, timeOn, timeOff, qMsg.ReportSent ?? "", qMsg.ReportReceived ?? "",
-                qMsg.DxGrid ?? "", qMsg.Name ?? "", qMsg.Comments ?? "", qMsg.TxPower ?? "",
-                qMsg.OperatorCall ?? "", qMsg.MyCall ?? "", qMsg.MyGrid ?? "",
-                qMsg.ExchangeSent ?? "", qMsg.ExchangeReceived ?? "");
-
-            ImportLiveLoggedQso(qMsg.DxCall, fields, adifRecord, dedupKey);
-        }
-
-        // Fallback trigger for the same event QsoLoggedMessage normally handles -- WSJT-X
-        // sends both messages for every logged QSO, so if one is ever dropped in transit
-        // the other still gets the QSO into Jimmy's log/awards (see _liveLoggedQsoKeys).
-        private void HandleLiveAdifLogged(LoggedAdifMessage aMsg)
-        {
-            Dictionary<string, string> fields;
-            try
-            {
-                fields = AdifParser.Parse(aMsg.AdifText).FirstOrDefault();
-            }
-            catch (Exception ex)
-            {
-                DebugOutput($"{Time()} HandleLiveAdifLogged: could not parse ADIF text: {ex.Message}");
-                return;
-            }
-            if (fields == null) return;
-
-            string dxCall  = fields.TryGetValue("CALL", out var callVal) ? callVal : null;
-            string band    = fields.TryGetValue("BAND", out var bandVal) ? bandVal : "";
-            string mode    = fields.TryGetValue("MODE", out var modeVal) ? modeVal : "";
-            string qsoDate = fields.TryGetValue("QSO_DATE", out var dateVal) ? dateVal : "";
-            string timeOn  = fields.TryGetValue("TIME_ON", out var timeVal) ? timeVal : "";
-            EnrichWithClubLogGeoData(fields, dxCall);
-
-            string dedupKey = AdifImporter.BuildDedupKey(dxCall ?? "", band, mode, qsoDate, timeOn);
-            if (!ClaimLiveLoggedQso(dedupKey)) return;
-
-            OnQsoLogged(dxCall);
-            ImportLiveLoggedQso(dxCall, fields, aMsg.AdifText, dedupKey);
-        }
+        // UDP-transport cleanup, 2026-08-18: HandleLiveQsoLogged/HandleLiveAdifLogged (WSJT-X's
+        // own QsoLoggedMessage/LoggedAdifMessage wire messages -- "trust me, I just logged this
+        // QSO") and their shared OnQsoLogged UI-feedback helper were removed here. Direct mode has
+        // no equivalent inbound command at all -- and never needed one: DirectApplyStatus's own
+        // curTxMsg/callInProg/Is73orRR73 detection (WsjtxClient.Direct.cs) calls LogQso() ->
+        // RequestLog() (below) directly, which ALREADY independently implements every real piece
+        // of what OnQsoLogged used to do for the UDP path -- ClaimLiveLoggedQso dedup,
+        // EnrichWithClubLogGeoData, ImportLiveLoggedQso (all three still shared, still called from
+        // RequestLog, unchanged below), logList.Add/ShowLogged, the completion sound, and
+        // RefreshStillNeedCache -- verified by reading RequestLog's own body, not assumed. Genuine
+        // audit finding, not silently dropped: OnQsoLogged's one piece of logic RequestLog does
+        // NOT already have an equivalent for was its CQ-mode auto-resume call
+        // (_callQueueStore.RemoveCall + CancelQso + SetupCq(true) to re-arm calling CQ after a
+        // completed QSO) -- investigated and confirmed this would be dead code even if ported: it
+        // worked by setting curCmd/qsoState, which the classic UDP dispatcher's own (now also
+        // removed) decode-cycle machinery translated into an actual outbound "resume CQing"
+        // command -- Direct's control protocol has no such outbound command at all (SNAPSHOT/
+        // REPLY/HALT_TX/SET_TX_ENABLED/... none of them mean "start calling CQ"), so porting the
+        // call site alone would not restore any real behavior. Direct-mode CQ-mode auto-continue
+        // after a completed QSO is a genuine, separate, pre-existing feature gap -- flagged here
+        // for the record, not silently reintroduced as inert glue code, and not something this
+        // transport-cleanup pass is the right place to design a fix for.
 
         // Fills COUNTRY/DXCC/CONT/CQZ from the callsign's DXCC prefix (Club Log's country
         // database, downloaded automatically at startup and available offline) when the
@@ -411,24 +322,11 @@ namespace WSJTX_Controller
             }
         }
 
-        private void DeleteLotwCsv()
-        {
-            string pgmNameWsjtx = "WSJT-X";
-            string pathWsjtx = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{pgmNameWsjtx}";
-            string pathFileNameExt = pathWsjtx + "\\" + "lotw-user-activity.csv";
-
-            try
-            {
-                if (File.Exists(pathFileNameExt))
-                {
-                    File.Delete(pathFileNameExt);
-                    DebugOutput($"{Time()} DeleteLotwCsv, deleted {pathFileNameExt}");
-                }
-            }
-            catch (Exception)
-            {
-                DebugOutput($"{Time()} DeleteLotwCsv, unable to delete {pathFileNameExt}");
-            }
-        }
+        // DeleteLotwCsv() (a workaround tied to a specific real-WSJT-X revision/testVer reported
+        // in its own Heartbeat) was removed 2026-08-18 along with the dead UDP dispatcher that was
+        // its only caller -- jimmy-engine-host never reports a WSJT-X revision/testVer at all
+        // (those fields were only ever populated by parsing a real WSJT-X Heartbeat's version
+        // string), so the gate this was behind could never have been true under Direct mode
+        // regardless.
     }
 }

@@ -133,7 +133,6 @@ static class JimmyTests
         EqslReconcileTests();
         LookupManagerPrimaryProviderTests();
         FindPreservedSelectionIndexTests();
-        ResolveUdpListenAddressTests();
         ResolveDispatchIndexTests();
         SpotWatchCallsRoundTripTests();
         BandAppliesToLiveTagTests();
@@ -1282,7 +1281,7 @@ static class JimmyTests
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
 
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             var lookupManager = new LookupManager();
             lookupManager.RegisterProviderFirst(new TestFixtureLookupProvider());
@@ -1557,7 +1556,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             // DirectApplyStatus must set the class-level `tuning` field from radio.tuning, the
             // same way it already did for `transmitting` -- without this, AudioLevel()'s new
@@ -1638,7 +1637,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             wc.TestSetMode("FT8");
             wc.TestSetDirectConnected(true);
 
@@ -1719,7 +1718,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             ctrl.Radio.RememberTxLevelPerBand = true;
             ctrl.Radio.TxLevelByBand[5] = 0.70;   // 20m, saved earlier
@@ -1784,7 +1783,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             var snapEnabled = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -1850,7 +1849,7 @@ static class JimmyTests
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
             ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             var snap20m = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -1941,7 +1940,7 @@ static class JimmyTests
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             var snap20m = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -2016,7 +2015,7 @@ static class JimmyTests
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
             ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             wc.TestSetMode("FT8");
 
             // Start confirmed on 20m (index 5) so the 40m jump below is a real cross-band move,
@@ -2084,7 +2083,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             // A StreamWriter over an already-disposed MemoryStream throws ObjectDisposedException
             // on the next WriteLine -- but only if it actually touches the underlying stream:
@@ -2319,7 +2318,7 @@ static class JimmyTests
         ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
         ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
         ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
         // cmdPrompts defaults to true, so the constructor's own first render already exercises
         // the Prompt-Mode-ON case.
@@ -2378,7 +2377,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             using (var dlg = new OptionsDlg(wc, ctrl))
             {
@@ -5400,7 +5399,7 @@ static class JimmyTests
         ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
         ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
         ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
         ctrl.anyMsgRadioButton.Checked = true;
         ctrl.replyDxCheckBox.Checked = true;
         ctrl.replyLocalCheckBox.Checked = true;
@@ -5486,7 +5485,7 @@ static class JimmyTests
         // ── Boundary precision, isolated from the above sequence's ongoing state ──
         var boundarySettings = new NotificationSettings();
         var boundaryDelivery = new FakeNotificationDelivery();
-        var boundaryWc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        var boundaryWc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
         boundaryWc.Notify = new NotificationCenter(boundarySettings, boundaryDelivery);
         ulong bSlot = 6000;
         void PublishBoundaryDt(double dt)
@@ -5519,7 +5518,7 @@ static class JimmyTests
         ft4Settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 0;   // see the main settings object's own comment above
         ft4Settings.Policies[NotificationEventType.ClockSynced].RepeatSeconds = 0;
         var ft4Delivery = new FakeNotificationDelivery();
-        var ft4Wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        var ft4Wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
         ft4Wc.Notify = new NotificationCenter(ft4Settings, ft4Delivery);
         ft4Wc.TestSetMode("FT4");
         ulong ft4Slot = 7000;
@@ -5568,7 +5567,7 @@ static class JimmyTests
         ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
         ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
         ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
         ctrl.anyMsgRadioButton.Checked = true;
         ctrl.replyDxCheckBox.Checked = true;
         ctrl.replyLocalCheckBox.Checked = true;
@@ -5663,7 +5662,7 @@ static class JimmyTests
         ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
         ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
         ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
         ctrl.anyMsgRadioButton.Checked = true;
         ctrl.replyDxCheckBox.Checked = true;
         ctrl.replyLocalCheckBox.Checked = true;
@@ -5758,7 +5757,7 @@ static class JimmyTests
         ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
         ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
         ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-        var wc = new WsjtxClient(ctrl, System.Net.IPAddress.Loopback, 2237, false, false, false, WsjtxClient.TxModes.LISTEN);
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
         var settings = new NotificationSettings();
         settings.Policies[NotificationEventType.ConnectionLost].RepeatSeconds = 0;
@@ -5847,29 +5846,13 @@ static class JimmyTests
         Check("WM3PEN/N8BB regression: follows WM3PEN to its new index 1, not N8BB's index 2", idx == 1 && liveNewReordered[idx] == "WM3PEN", true);
     }
 
-    // ── Controller.ResolveUdpListenAddress: fresh-install startup crash, 2026-08-19 ─────────
-    // Release-blocker regression: a genuine fresh install of a non-production identity (Jimmy
-    // Test) has no .ini file yet, so ipAddrStr stays null (Properties.Settings.Default is only
-    // ever read for isProductionIdentity). Form_Load used to call IPAddress.Parse(ipAddrStr)
-    // unconditionally, which threw ArgumentNullException and crashed startup before wsjtxClient
-    // was ever assigned. Null is the correct, honest result here, not an invented default IP --
-    // this value is exclusively the classic WSJT-X/UDP transport's listen address; production
-    // Direct/EngineHost mode never reads it.
-    static void ResolveUdpListenAddressTests()
-    {
-        Console.WriteLine("\n── Controller.ResolveUdpListenAddress ──");
-
-        Check("null ipAddrStr (genuine fresh install) -> null, not a crash",
-            Controller.ResolveUdpListenAddress(null) == null, true);
-        Check("empty ipAddrStr -> null",
-            Controller.ResolveUdpListenAddress("") == null, true);
-        Check("whitespace-only ipAddrStr -> null",
-            Controller.ResolveUdpListenAddress("   ") == null, true);
-        Check("a real configured address parses normally",
-            Controller.ResolveUdpListenAddress("127.0.0.1")?.ToString() == "127.0.0.1", true);
-        Check("an unparseable saved value -> null, not a crash (matches the null-safe ini-save guard)",
-            Controller.ResolveUdpListenAddress("not an ip address") == null, true);
-    }
+    // Controller.ResolveUdpListenAddress and its regression coverage here were removed
+    // 2026-08-18 along with the rest of the classic WSJT-X/UDP transport (WsjtxProtocolAdapter,
+    // ConnectNativeEngine/UdpLoop) -- see Controller.cs's own comment at that removal site. The
+    // real fresh-install crash this used to guard against (IPAddress.Parse(null) throwing
+    // ArgumentNullException) is now structurally impossible rather than merely handled: nothing
+    // parses an IP address for Jimmy's own transport at all anymore, in production or in test
+    // mode, so there is no more call site left for this regression to protect.
 
     // ── WsjtxClient.ResolveDispatchIndex: Enter/Space/dbl-click dispatch-side re-lookup ──
     // Regression coverage for the dispatch-side half of the WM3PEN/N8BB class of bug

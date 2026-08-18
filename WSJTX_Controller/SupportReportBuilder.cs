@@ -289,9 +289,12 @@ namespace WSJTX_Controller
             sb.AppendLine($"WSJT-X program name:  {diag.PgmName ?? "Unknown"}");
             sb.AppendLine($"WSJT-X version:       {diag.PgmVer ?? "Unknown"}");
             sb.AppendLine($"WSJT-X revision:      {WsjtxClient.wsjtxRevision}");
-            sb.AppendLine($"UDP IP address:       {diag.IpAddress?.ToString() ?? "Unknown"}");
-            sb.AppendLine($"UDP port:             {diag.Port}");
-            sb.AppendLine($"UDP multicast:        {diag.Multicast}");
+            // UDP IP address / UDP multicast lines removed 2026-08-18: both were the classic
+            // WSJT-X/UDP transport's own listen-address configuration, which no longer exists
+            // (WsjtxProtocolAdapter and the rest of that transport are deleted). Port is kept --
+            // it's still genuinely used, now to build the real engine host's own --jimmy-addr
+            // argument, not a UDP listen port.
+            sb.AppendLine($"Engine announce port: {diag.Port}");
         }
 
         private static void BuildOperatingSection(StringBuilder sb, Controller ctrl, WsjtxDiagData diag)

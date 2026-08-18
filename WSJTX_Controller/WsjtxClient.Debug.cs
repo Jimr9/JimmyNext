@@ -193,9 +193,7 @@ namespace WSJTX_Controller
                     Connecting      = WsjtxConnecting(),
                     PgmName         = pgmName,
                     PgmVer          = pgmVer,
-                    IpAddress       = ipAddress,
                     Port            = port,
-                    Multicast       = multicast,
                     DiagLog         = diagLog,
                     UsePskReporter  = usePskReporter,
                     TxMode          = txMode,
@@ -229,9 +227,7 @@ namespace WSJTX_Controller
         public bool Connecting;
         public string PgmName;
         public string PgmVer;
-        public System.Net.IPAddress IpAddress;
         public int Port;
-        public bool Multicast;
         public bool DiagLog;
         public bool UsePskReporter;
         public WsjtxClient.TxModes TxMode;

@@ -70,19 +70,19 @@ namespace WSJTX_Controller
         private bool _directLossAnnounced;
 
         // Starts polling the engine host's control port directly. Call once the engine host
-        // process is known to be starting (mirrors ConnectNativeEngine's role in the UDP path,
-        // but there is no socket to "open" here -- every request is its own short-lived TCP
-        // connection, matching the control server's existing one-connection-per-command shape).
+        // process is known to be starting -- there is no socket to "open" here at all, every
+        // request is its own short-lived TCP connection, matching the control server's own
+        // one-connection-per-command shape.
+        //
+        // UDP transport cleanup, 2026-08-18: this used to open with a defensive CloseAllUdp()
+        // call ("tear down any UDP socket left over from a PRIOR UDP-mode session before Direct
+        // mode starts"), back when ConnectNativeEngine/UdpLoop (WsjtxClient.Protocol.cs) could
+        // still open a real UDP socket under TestModeGuard.IsTestMode. Both are deleted now (the
+        // Direct-based replay harness, JimmyDirectReplay.py, replaced the UDP one), along with
+        // WsjtxProtocolAdapter and CloseAllUdp itself -- there is no longer any UDP socket this
+        // method could ever need to tear down, in production or in test mode.
         public void ConnectDirectEngine(string myCallIn, string myGridIn)
         {
-            // Belt-and-suspenders alongside UdpLoop()'s own _directConnected guard
-            // (WsjtxClient.Protocol.cs): tear down any UDP socket left over from a PRIOR
-            // UDP-mode session before Direct mode starts, so udpClient is genuinely null, not
-            // just logically ignored. Root-caused live, 2026-08-10 -- see UdpLoop()'s own
-            // comment for the full story on why both transports could otherwise end up live at
-            // once. Safe to call even when nothing is open (CloseAllUdp is a no-op then).
-            CloseAllUdp();
-
             myCall = string.IsNullOrWhiteSpace(myCallIn) ? null : myCallIn.Trim().ToUpperInvariant();
             myGrid = myGridIn;
             _directSeenDecodeSignatures.Clear();

@@ -1,4 +1,4 @@
-﻿//to-do
+//to-do
 //- 
 //
 //NOTE CAREFULLY: Several message classes require the use of a slightly modified WSJT-X program.
@@ -36,13 +36,6 @@ namespace WSJTX_Controller
         public IJimmyLogView LogView;
         public bool altListPaused = false;
 
-        // Stage A3 (migration roadmap): socket state now owned by WsjtxProtocolAdapter
-        // (Protocol/WsjtxProtocolAdapter.cs). These stay as delegating properties, not
-        // fields, with their original names/visibility, so every existing call site
-        // across WsjtxClient's other partial-class files and external classes
-        // (Controller/OptionsDlg read these; only WsjtxClient itself ever assigns
-        // them) keeps working completely unchanged.
-        private readonly WsjtxProtocolAdapter _protocolAdapter = new WsjtxProtocolAdapter();
         // Stage A6 (migration roadmap): cuts the queue/ranking/display/award consumers
         // over to ClassificationEngine's computed output. LogbookDb() (parameterless)
         // already respects JIMMY_TEST_DB_PATH (see LogbookDb.cs), so this is safe under
@@ -62,10 +55,15 @@ namespace WSJTX_Controller
         private readonly LogbookDb _logbookDb = new LogbookDb();
         private ClassificationEngine _classificationEngine;
         private ClassificationEngine Classifier => _classificationEngine ?? (_classificationEngine = new ClassificationEngine(_logbookDb, lookupManager));
-        public UdpClient udpClient { get => _protocolAdapter.ReceiveSocket; set => _protocolAdapter.ReceiveSocket = value; }
-        public int port { get => _protocolAdapter.Port; set => _protocolAdapter.Port = value; }
-        public IPAddress ipAddress { get => _protocolAdapter.IpAddress; set => _protocolAdapter.IpAddress = value; }
-        public bool multicast { get => _protocolAdapter.Multicast; set => _protocolAdapter.Multicast = value; }
+        // udpClient/ipAddress/multicast (the classic UDP receive-socket's own identity) and
+        // WsjtxProtocolAdapter itself were removed 2026-08-18 -- nothing left ever opens a UDP
+        // socket, in production or in test mode. `port` stays: it is still genuinely read
+        // (Controller.ApplyEngineMode's own jimmyPort) to build the real engine host's
+        // --jimmy-addr argument -- see NativeEngineClient.Launch's own comment on why that
+        // outbound WSJT-X-protocol announce itself was NOT touched in this pass (a separate,
+        // Rust/EngineHost-side question flagged for the project owner, not a C#-side transport
+        // question).
+        public int port;
         public bool debug;
         public string pgmName;
         public string pgmVer;
@@ -127,7 +125,6 @@ namespace WSJTX_Controller
         internal const int OppositePeriodAlertCooldownSecs  = 45;
         internal const int AwardAlertCooldownSecs           = 30;
         private bool txEnabled = false;
-        private bool txEnabledConf = false;
         private bool wsjtxTxEnableButton = false;
         private bool transmitting = false;
         // Tracks `transmitting` across ShowStatus() calls specifically (not the same as
@@ -139,7 +136,6 @@ namespace WSJTX_Controller
         private bool _wasTransmittingLastShowStatus = false;
         private bool decoding = false;
         private WsjtxMessage.QsoStates qsoState = WsjtxMessage.QsoStates.CALLING;
-        private WsjtxMessage.QsoStates qsoStateConf = WsjtxMessage.QsoStates.CALLING;
         private string mode = "";
         private bool modeSupported = true;
         internal bool txFirst = false;
@@ -175,7 +171,6 @@ namespace WSJTX_Controller
         private string replyCmd = null;     //no "reply to" cmd sent to WSJT-X yet, will not be a CQ
         private string curCmd = null;       //cmd last issed, can be CQ
         private EnqueueDecodeMessage replyDecode = null;
-        private string configuration = null;
         public string callInProg = null;
         // The callsign callInProg is heard actually working (a report/roger-report/73/RR73
         // addressed to someone else), and a short verb describing that stage ("working" or
@@ -188,18 +183,9 @@ namespace WSJTX_Controller
         private bool restartQueue = false;
 
         private WsjtxMessage.QsoStates lastQsoState = WsjtxMessage.QsoStates.INVALID;
-        private UdpClient udpClient2 { get => _protocolAdapter.SendSocket; set => _protocolAdapter.SendSocket = value; }
-        private IPEndPoint endPoint { get => _protocolAdapter.EndPoint; set => _protocolAdapter.EndPoint = value; }
-        private bool? lastXmitting = null;
-        private bool? lastTxWatchdog = null;
         private string dxCall = null;
-        private string lastMode = null;
         private ulong? lastDialFrequency = null;
-        private bool? lastTxFirst = null;
-        private bool? lastDecoding = null;
-        private int? lastSpecOp = null;
         private string lastTxMsg = null;
-        private bool? lastTxEnabled = null;
         private string lastCallInProgDebug = null;
         private bool? lastTxTimeoutDebug = null;
         private string lastReplyCmdDebug = null;
@@ -211,7 +197,6 @@ namespace WSJTX_Controller
         private bool lastRestartQueueDebug = false;
         private bool lastTxFirstDebug = false;
 
-        private string lastDxCall = null;
         private int xmitCycleCount = 0;
         private bool txTimeout = false;
         private bool newDirCq = false;
@@ -221,27 +206,19 @@ namespace WSJTX_Controller
         private string txMsg = null;            //msg for the most-recent Tx
         internal List<string> logList = new List<string>();      //calls logged for current mode/band for this session
 
-        // WSJT-X sends both QsoLoggedMessage and LoggedAdifMessage for every logged QSO.
-        // Either one alone is enough to record the QSO and refresh awards (see
-        // HandleLiveQsoLogged/HandleLiveAdifLogged) -- this set makes sure that when both
-        // normally arrive, the second one is a no-op instead of double-processing. Keyed by
-        // the same callsign/band/mode/date/time dedup key LogbookDb already uses (NOT the
-        // protocol's "Id" field -- that's WSJT-X's fixed per-instance identifier, the same
-        // value on every message, not a per-QSO key).
+        // Dedup guard for a QSO logged via Direct mode's own real completion detection
+        // (DirectApplyStatus's curTxMsg/callInProg/Is73orRR73 -> LogQso -> RequestLog,
+        // WsjtxClient.Direct.cs/WsjtxClient.cs) -- RequestLog's own repeated-poll-tick calls
+        // (Qso.TxNow can keep reporting the same completed exchange for several seconds) must
+        // only actually write the database/trigger uploads once per real QSO. Keyed by the same
+        // callsign/band/mode/date/time dedup key LogbookDb already uses. Until 2026-08-18 this
+        // also deduped between WSJT-X's own QsoLoggedMessage/LoggedAdifMessage wire messages
+        // (HandleLiveQsoLogged/HandleLiveAdifLogged, WsjtxClient.Uploads.cs) -- both removed
+        // along with the rest of the classic UDP transport; this set's only remaining purpose is
+        // the one above.
         private readonly HashSet<string> _liveLoggedQsoKeys = new HashSet<string>();
         private bool ClaimLiveLoggedQso(string dedupKey) =>
             string.IsNullOrEmpty(dedupKey) || _liveLoggedQsoKeys.Add(dedupKey);
-
-        private AsyncCallback asyncCallback { get => _protocolAdapter.AsyncCallback; set => _protocolAdapter.AsyncCallback = value; }
-        private UdpState udpSt { get => _protocolAdapter.UdpSt; set => _protocolAdapter.UdpSt = value; }
-        // messageRecd/datagram/fromEp/recvStarted were "private static" here -- a
-        // historical artifact with no observable effect in this single-instance app
-        // (only one WsjtxClient, hence only one WsjtxProtocolAdapter, is ever
-        // constructed). Now plain instance state on the adapter, behavior-identical.
-        private bool messageRecd { get => _protocolAdapter.MessageRecd; set => _protocolAdapter.MessageRecd = value; }
-        private byte[] datagram { get => _protocolAdapter.Datagram; set => _protocolAdapter.Datagram = value; }
-        private IPEndPoint fromEp { get => _protocolAdapter.FromEp; set => _protocolAdapter.FromEp = value; }
-        private bool recvStarted { get => _protocolAdapter.RecvStarted; set => _protocolAdapter.RecvStarted = value; }
         private static uint defaultAudioOffset = 1500;
         private string failReason = "Failure reason: Unknown";
         public static int wsjtxRevision;
@@ -249,31 +226,25 @@ namespace WSJTX_Controller
         public static int lastWsjtx270RcRevision = 185;
 
         public const int maxQueueLines = 8, maxQueueWidth = 19, maxLogWidth = 9;
-        private byte[] ba;
-        private EnableTxMessage emsg;
         private WsjtxMessage msg = new UnknownMessage();
         private Random rnd = new Random();
         DateTime firstDecodeTime;
         internal const string spacer = "           *";
         private const int freqChangeThreshold = 200;
         private bool skipFirstDecodeSeries = true;
-        private System.Windows.Forms.Timer postDecodeTimer = new System.Windows.Forms.Timer();
         // Batches the "N available stations" announcement while decodes are still arriving
         // for the current period -- see ShowStatus()'s own comment for why. Interval is set
-        // fresh (from ctrl.statusBatchDelayMs) each time it's (re)started, not fixed like
-        // postDecodeTimer's, since this one's delay is INI-configurable.
+        // fresh (from ctrl.statusBatchDelayMs) each time it's (re)started.
         private System.Windows.Forms.Timer statusAnnounceTimer = new System.Windows.Forms.Timer();
         private string _pendingStatusHeading = null;
         private string _pendingStatusText = null;
         private Color _pendingStatusForeColor;
         private Color _pendingStatusBackColor;
-        private System.Windows.Forms.Timer processDecodeTimer = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer processDecodeTimer2 = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer statusTimer = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer statusTimer2 = new System.Windows.Forms.Timer();
         public System.Windows.Forms.Timer dialogTimer2 = new System.Windows.Forms.Timer();
         public System.Windows.Forms.Timer dialogTimer3 = new System.Windows.Forms.Timer();
-        public System.Windows.Forms.Timer heartbeatRecdTimer = new System.Windows.Forms.Timer();
         private bool _requireOffsetForActive = false;   // true after a band change; keeps CheckActive from firing before WSJT-X settles
         // Test-mode isolation gap found live, 2026-08-07: this path backs both the plain-text
         // diagnostic log (WsjtxClient.Debug.cs's SetLogFileState) and pota.txt (PotaLogTracker)
@@ -315,7 +286,6 @@ namespace WSJTX_Controller
         private int maxTxRepeat = 4;
         private bool _manualCallInProg = false;
         // holdTxRepeat removed — manual Hold now always uses holdMaxTxRepeat.
-        private string curVerBld = null;
         private int consecCqCount = 0;
         private int lastConsecCqCountDebug = 0;
         private const int maxConsecCqCount = 8;
@@ -341,12 +311,9 @@ namespace WSJTX_Controller
         private readonly PotaLogTracker _potaLog;
         private readonly AwardTagger _awardTagger;
         private readonly CallQueueStore _callQueueStore;
-        bool wsjtxClosing = false;
-        const int heartbeatInterval = 15;           //expected recv interval, sec
         string toCallTxStart = null;
         DateTime txBeginTime = DateTime.MaxValue;
         bool shortTx = false;
-        bool txInterrupted = false;
         bool metricUnits = false;
         private int decodeNum = 0;
         private const int maxCheckTxRepeat = 2;
@@ -387,13 +354,9 @@ namespace WSJTX_Controller
         private bool? lastDecodeEvenPeriod = null;
         private string uploadResult = null;
         private string tuneResult = null;
-        private string lastStatusTxMsg = null;
         private string timedOutCall = null;
         private string curTxMsg = null;
         private bool newSelection = false;
-        private int wsjtxResultCode = 0;
-        private string statusDetail = null;
-        private int lastWsjtxResultCode = 0;
         private int decodeCount = 0;
         private int consecNoDecodes = 0;
         private int maxNoDecodes = 4;
@@ -621,7 +584,7 @@ namespace WSJTX_Controller
             PWR_SWR_SINGLE_RPT
         }
 
-        public WsjtxClient(Controller c, IPAddress reqIpAddress, int reqPort, bool reqMulticast, bool reqDebug, bool reqLog, WsjtxClient.TxModes tMode)
+        public WsjtxClient(Controller c, int reqPort, bool reqDebug, bool reqLog, WsjtxClient.TxModes tMode)
         {
             ctrl = c;           //used for accessing/updating UI
             StatusView = c;
@@ -662,9 +625,7 @@ namespace WSJTX_Controller
                 debugLog: msg => DebugOutput($"{Time()} {msg}"),
                 showStatus: (msg, sound) => ctrl.BeginInvoke(new Action(() => ctrl.ShowUploadStatus(msg, sound))),
                 resolveUsState: call => lookupManager?.Build(call)?.State);
-            ipAddress = reqIpAddress;
             port = reqPort;
-            multicast = reqMulticast;
             txMode = tMode;
             //major.minor.build.private
             string allVer = FileVersionInfo.GetVersionInfo(Assembly.GetExecutingAssembly().Location).FileVersion;
@@ -700,8 +661,6 @@ namespace WSJTX_Controller
             ShowQueue();
             if (ctrl.advancedCallLayout) ShowAdvancedQueue(null);
             ShowLogged();
-            messageRecd = false;
-            recvStarted = false;
 
             ctrl.verLabel.Text = $"by KB0UZT v{fileVer}";
             ctrl.verLabel2.Text = "Check for update";
@@ -709,17 +668,9 @@ namespace WSJTX_Controller
             UpdateModeSelection();
             UpdateModeVisible();
 
-            emsg = new EnableTxMessage();
-            emsg.Id = WsjtxMessage.UniqueId;
-
             firstDecodeTime = DateTime.MinValue;
 
-            postDecodeTimer.Interval = 4000;
-            postDecodeTimer.Tick += new System.EventHandler(ProcessPostDecodeTimerTick);
-
             statusAnnounceTimer.Tick += new System.EventHandler(StatusAnnounceTimerTick);
-
-            processDecodeTimer.Tick += new System.EventHandler(ProcessDecodeTimerTick);
 
             processDecodeTimer2.Tick += new System.EventHandler(ProcessDecodeTimer2Tick);
 
@@ -735,9 +686,6 @@ namespace WSJTX_Controller
             dialogTimer3.Interval = 20;
 
             _potaLog.Read();
-
-            heartbeatRecdTimer.Interval = 4 * heartbeatInterval * 1000;            //heartbeats every 15 sec
-            heartbeatRecdTimer.Tick += new System.EventHandler(HeartbeatNotRecd);
 
             UpdateMaxTxRepeat();
 
@@ -1482,40 +1430,11 @@ namespace WSJTX_Controller
             return false;
         }
 
-        private void StartProcessDecodeTimer()
-        {
-            DateTime dtNow = DateTime.UtcNow;
-            int diffMsec = ((dtNow.Second * 1000) + dtNow.Millisecond) % (int)trPeriod;
-            int cycleTimerAdj = CalcTimerAdj();
-            processDecodeTimer.Interval = (2 * (int)trPeriod) - diffMsec - cycleTimerAdj;
-            processDecodeTimer.Start();
-            DebugOutput($"{Time()} processDecodeTimer start: interval:{processDecodeTimer.Interval} msec");
-        }
-
-        private bool CheckMyCall(StatusMessage smsg)
-        {
-            if (smsg.DeCall == null || smsg.DeGrid == null || smsg.DeGrid.Length < 4)
-            {
-                heartbeatRecdTimer.Stop();
-                suspendComm = true;
-                ctrl.BringToFront();
-                MessageBox.Show($"Call sign and Grid are not entered in WSJT-X.{nl}{nl}Enter these in WSJT-X:{nl}- Select 'File | Settings' then the 'General' tab.{nl}{nl}(Grid must be at least 4 characters){nl}{nl}{pgmName} will try again when you close this dialog.", pgmName, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                ResetOpMode();
-                ShowStatus();
-                suspendComm = false;
-                return false;
-            }
-
-            if (myCall == null)
-            {
-                myCall = smsg.DeCall;
-                myGrid = smsg.DeGrid;
-                DebugOutput($"{spacer}CheckMyCall myCall:{myCall} myGrid:{myGrid}");
-            }
-
-            UpdateDebug();
-            return true;
-        }
+        // StartProcessDecodeTimer() and CheckMyCall(StatusMessage) were removed 2026-08-18:
+        // StartProcessDecodeTimer's only caller was the dead ProcessTxStart (removed above);
+        // CheckMyCall's only callers were inside the dead classic UDP dispatcher
+        // (WsjtxClient.Protocol.cs) -- Direct mode learns myCall/myGrid from ConnectDirectEngine's
+        // own parameters instead (WsjtxClient.Direct.cs), never from a parsed StatusMessage.
 
         private void CheckNextXmit()
         {
@@ -1629,120 +1548,17 @@ namespace WSJTX_Controller
             }
         }
 
-        private void ProcessDecodes()
-        {
-            //always called shortly before the tx period begins
-            // UDP path's own "a receive period just completed" transition -- see
-            // NotificationCenter.OnPeriodBoundary's own comment for why this specific,
-            // already-proven-reliable call site (not a new timer) is the right one.
-            Notify?.OnPeriodBoundary();
-            cancelledCall = null;
-            UpdateMaxTxRepeat();
-            // Count of consecutive rx periods since a message from discardCall was last received --
-            // deliberately NOT padded with a "+2" grace buffer (removed 2026-08-11, user request): the
-            // discard counter already resets to 0 on ANY message from that station addressed to us
-            // (see the `deCall == discardCall` reset below), whatever QSO stage we're in, so a
-            // genuinely progressing exchange never approaches this limit regardless of padding --
-            // the padding only made the configured "repeat limit" number inaccurate (a limit of 1
-            // silently meant 3 real periods of tolerated silence), not actually needed for QSO
-            // completion.
-            int maxDiscardCount = maxTxRepeat;
-            DebugOutput($"{nl}{Time()} ProcessDecodes: restartQueue:{restartQueue} txTimeout:{txTimeout} txEnabled:{txEnabled}{nl}{spacer}txMode:{txMode} cqPaused:{cqPaused} txEnabled:{txEnabled}");
-            DebugOutput($"{spacer}cancelledCall:{cancelledCall} autoFreqPauseMode:{autoFreqPauseMode} callInProg:'{callInProg}' discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount}");
-            DebugOutput($"{spacer}maxDiscardCount:{maxDiscardCount} maxTxRepeat:{maxTxRepeat}");
-            DebugOutputStatus();
-
-            if (_callQueueStore.TrimCallQueue())
-            {
-                DebugOutput(_callQueueStore.CallQueueString());
-            }
-
-            if (debug)
-            {
-                DebugOutput(_callQueueStore.AllCallDictString());
-                DebugOutput(_callQueueStore.SentCallListString());
-                DebugOutput(_callQueueStore.LogListString());
-                DebugOutput(_potaLog.DictString());
-                DebugOutput(_callQueueStore.TimeoutCallDictString());
-                //DebugOutput(_callQueueStore.ReportListString());
-                DebugOutput(_callQueueStore.UnwantedCqListString());
-            }
-
-            if (discardCall != null && discardCall == callInProg && ++discardCallCycleCount >= maxDiscardCount) DiscardCall();
-
-            if (restartQueue) 
-            {
-                txTimeout = true;       //important to only set this now, not during decode phase, since decodes can happen after Tx-starts
-                SetCallInProg(null);    //not calling anyone (set this as late as possible to pick up possible reply to last Tx)
-                DebugOutput($"{spacer}qsoState:{qsoState} txTimeout:{txTimeout} callInProg:'{CallPriorityString(callInProg)}'");
-                UpdateDebug();
-            }
-
-            //check for call in progress with tx disabled
-            if (!cqPaused && !txEnabled && callInProg != null && autoFreqPauseMode == autoFreqPauseModes.DISABLED)
-            {
-                DebugOutput($"{spacer}call in progress with tx disabled");
-                //LogBeep();
-                //EnableTx();
-            }
-
-            //check for auto freq update disabled while CQ mode previously in progress
-            if (!cqPaused && !txEnabled && txMode == TxModes.CALL_CQ && autoFreqPauseMode == autoFreqPauseModes.DISABLED)
-            {
-                DebugOutput($"{spacer}auto freq update disabled while CQ mode previously in progress");
-            }
-
-            if ((((txTimeout || !txEnabled) && txMode == TxModes.LISTEN) || (!cqPaused && txMode == TxModes.CALL_CQ)) && callInProg != null && callQueue.Contains(callInProg))
-            {
-                DebugOutput($"{spacer}resume '{discardCall}' after timeout");
-                DisableAutoFreqPause();
-                CancelDiscardCall();            //no more retries
-                timedOutCall = null;
-                EnqueueDecodeMessage dummy;
-                int idx = _callQueueStore.FindCall(callInProg, out dummy);
-                if (idx >= 0)
-                {
-                    ReplyTo(idx);
-                    replyFromInProg = true;
-                    DebugOutput($"{spacer}resumed {callInProg}, replyFromInProg:{replyFromInProg} xmitCycleCount:{xmitCycleCount} timedOutCall:'{timedOutCall}'");
-                    ShowStatus();
-                }
-            }
-            //check for disable Tx in listen mode
-            //or call timed out
-            //or inhibit reply to 73/RR73
-            //or process auto freq update enabled / in progress
-            else if (!cqPaused && (autoFreqPauseMode != autoFreqPauseModes.DISABLED || txTimeout))
-            {
-                DebugOutput($"{spacer}check auto freq/disable tx");
-                CheckNextXmit();        //can result in tx disabled)
-            }
-            else if (newDirCq)
-            {
-                CheckNextXmit();
-            }
-            else
-            {
-                UpdateWsjtxOptions();
-            }
-            var dtNow = DateTime.UtcNow;
-            bool even = IsEvenPeriod((dtNow.Minute * 60) + dtNow.Second - 3);       //might be in start of transmit period when all decodes done
-            EnqueueDecodeMessage dmsg;
-            if (ctrl.soundsEnabled && even != txFirst && ctrl.callAddedCheckBox.Checked && callQueue.Count > 0 && _callQueueStore.PeekCall(0, out dmsg) != null)
-            {
-                if (dmsg.Quality >= (int)EnqueueDecodeMessage.Qualities.MEDIUM)
-                {
-                    Sounds.Play("chime.wav");
-                }
-                else
-                {
-                    DebugOutput($"{spacer}low quality msg:{dmsg.Message}");
-                }
-            }
-            decodesProcessed = true;
-            DebugOutput($"{Time()} ProcessDecodes done, decodesProcessed:{decodesProcessed}");
-            UpdateDebug();
-        }
+        // ProcessDecodes() -- the classic UDP dispatcher's own "receive period just ended" driver
+        // (queue-age expiry, discard-count tracking, CheckNextXmit dispatch, the "resume after
+        // timeout" ReplyTo(idx) auto-select, and the callAddedCheckBox chime) -- was removed
+        // 2026-08-18. Only ever called from ProcessDecodeTimerTick, itself only ever started from
+        // the now-deleted dispatcher. Direct mode's own per-period-boundary equivalent (queue-age
+        // expiry, discard tracking, the Tx-hold safety net's recovery half) lives in
+        // DirectApplyDecodes' own new-slot detection instead (WsjtxClient.Direct.cs) -- already
+        // there. The "resume after timeout" auto-select has no Direct-mode equivalent because
+        // Direct mode's whole call-selection model is operator-driven (double-click/Enter/Alt+N,
+        // by accessible-app design, not an auto-CQ-answering bot) -- see WsjtxClient.Uploads.cs's
+        // own comment on OnQsoLogged's removal for the fuller version of this same finding.
 
         // Schedules the "N available stations" summary ShowStatus() held back while this
         // period's decode window was still open (see ShowStatus()'s own comment). Computed
@@ -1775,359 +1591,14 @@ namespace WSJTX_Controller
             statusAnnounceTimer.Start();
         }
 
-        //check for time to log (best done at Tx-start to avoid any logging/dequeueing timing problem if done at Tx end)
-        private void ProcessTxStart()
-        {
-            // UDP path's own real transmitting-flag transition -- see
-            // NotificationCenter.OnTransmittingChanged's own comment.
-            Notify?.OnTransmittingChanged(true);
-            if (!ctrl.keepTransmitListDuringTx)
-            {
-                if (txFirst)   // TX1 transmitting → clear TX1
-                {
-                    _tx1SnapshotRows.Clear();
-                    _tx1SnapshotCalls.Clear();
-                    _tx1SnapshotCategories.Clear();
-                    ctrl.advTx1ListBox.AccessibleName = "TX1 available stations, 0 calls";
-                    UpdateListIfChanged(ctrl.advTx1ListBox, new List<string> { "No available stations" });
-                }
-                else           // TX2 transmitting → clear TX2
-                {
-                    _tx2SnapshotRows.Clear();
-                    _tx2SnapshotCalls.Clear();
-                    _tx2SnapshotCategories.Clear();
-                    ctrl.advTx2ListBox.AccessibleName = "TX2 available stations, 0 calls";
-                    UpdateListIfChanged(ctrl.advTx2ListBox, new List<string> { "No available stations" });
-                }
-            }
-
-            string toCall = WsjtxMessage.ToCall(txMsg);
-
-            // Removed 2026-08-10: this used to also Notify.Publish(TxMessageChangedEvent(...))
-            // ("Sending X to Y") here, as a standalone announcement separate from txStr in
-            // WsjtxClient.Display.cs's ShowStatus() (the ongoing "Transmitting, ..., sending X"
-            // status readout). The two were meant to be complementary, not duplicates (see the
-            // old loggedCall audit comment, 2026-08-07) -- but confirmed live, 2026-08-10, that
-            // txStr already says everything the separate announcement did, so the second one was
-            // pure redundant competition for the screen reader's attention, not new information.
-
-            curTxMsg = txMsg;       //the message displayed
-            if (txMsg == "TUNE") tuning = true;
-            lastStatusTxMsg = txMsg;     //status update for interrupted Tx not required
-            string lastToCall = WsjtxMessage.ToCall(lastTxMsg);
-            DebugOutput($"{nl}{Time()} WSJT-X event, Tx start: toCall:'{toCall}' lastToCall:'{lastToCall}' decodesProcessed:{decodesProcessed} processDecodeTimer interval:{processDecodeTimer.Interval} msec tuning:{tuning}");
-            var dtNow = DateTime.UtcNow;
-            SetTxStartInfo(dtNow, toCall);
-
-            curTxPayload = null;
-
-            if (toCall == null)
-            {
-                //WSJT-X replied to invalid message, process next msg
-                txTimeout = true;
-                SetCallInProg(null);       //call is expired now
-                return;
-            }
-
-            DebugOutput($"{Time()} Tx start done: txMsg:'{txMsg}' lastTxMsg:'{lastTxMsg}' toCall:'{toCall}' lastToCall:'{lastToCall}'");
-            UpdateCallInProg();
-            _callQueueStore.RemoveCall(toCall);
-            UpdateDebug();      //unconditional
-        }
-
-        //check for QSO end or timeout (and possibly logging (if txMsg changed between Tx start and Tx end)
-        private void ProcessTxEnd()
-        {
-            // UDP path's own real transmitting-flag transition -- see
-            // NotificationCenter.OnTransmittingChanged's own comment.
-            Notify?.OnTransmittingChanged(false);
-            string toCall = WsjtxMessage.ToCall(txMsg);
-            string lastToCall = WsjtxMessage.ToCall(lastTxMsg);
-            string deCall = WsjtxMessage.DeCall(replyCmd);
-            string cmdToCall = WsjtxMessage.ToCall(curCmd);
-            bool isCq = WsjtxMessage.IsCQ(txMsg);
-            DateTime txEndTime = DateTime.UtcNow;
-            shortTx = false;
-            double? txTime = null;
-
-            if (txMsg == "TUNE") tuning = false;
-            DebugOutput($"{nl}{Time()} WSJT-X event, Tx end: toCall:'{toCall}' lastToCall:'{lastToCall}' deCall:'{deCall}' cmdToCall:'{cmdToCall}' tuning:{tuning}");
-            DebugOutput($"{spacer}toCallTxStart:{toCallTxStart} decodesProcessed:{decodesProcessed} txEndTime:{txEndTime.ToString("HHmmss.fff")} maxTxRepeat:{maxTxRepeat}");
-
-            if (toCall == null)
-            {
-                if (txMsg == "TUNE")
-                {
-                    DisableTx(false);
-                    HaltTx();          //****this syncs txEnable state with WSJT-X****
-                    return;
-                }
-
-                //WSJT-X replied to invalid message, process next msg
-                txTimeout = true;
-                SetCallInProg(null);
-                return;
-            }
-
-            if (toCall == discardCall)
-            {
-                discardCallCycleCount = 0;
-                DebugOutput($"{spacer}discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount}");
-            }
-
-            UpdateCallInProg();
-            DebugOutputStatus();
-
-            //toCallTxStart = null is a special case: intentional interruption
-            //allow interruption if tx time was long enough
-            txInterrupted = (toCallTxStart != null && toCall != toCallTxStart);
-            if ((mode == "FT8" || mode == "FT4") && txBeginTime != DateTime.MaxValue)
-            {
-                //FT8: 12.64 sec, FT4: 4.48 sec tx time normally
-                int shortTxMsec = (mode == "FT8" ? 11000 : 3500);       //how short tx can be and still be assumed a valid tx
-                txTime = (txEndTime - txBeginTime).TotalMilliseconds;
-                shortTx = (txTime < shortTxMsec);
-            }
-
-            DebugOutput($"{spacer}txTime:{txTime}");
-
-            if (shortTx || txInterrupted)           //tx was invalid
-            {
-                DebugOutput($"{spacer}shortTx:{shortTx} txInterrupted:{txInterrupted} tx originally to '{toCallTxStart}'");
-            }
-            else
-            {
-                // Check for max Tx count during Tx hold. Deliberately gated on holdCheckBox
-                // alone now -- previously also fired for "|| txMode == TxModes.LISTEN", which
-                // meant EVERY ordinary S&P reply (not just Hold) counted toward this 12-transmit
-                // cap, since replying to any specific station always runs in Listen mode.
-                // Root-caused live, 2026-08-10: this disabled Tx entirely mid-QSO with a station
-                // that was progressing completely normally, just over more than 12 cycles -- the
-                // safety net couldn't tell "stuck, no response" apart from "a real, working
-                // exchange that's simply taking a while". Ordinary replies already have their
-                // own, separate, correctly-scoped give-up mechanism (the main window's "Limit to
-                // N repeated Tx" / holdMaxTxRepeat, maxTxRepeat/xmitCycleCount above) -- this
-                // auto-freq-pause safety net is for the Hold scenario specifically (operator has
-                // explicitly chosen to keep trying one station longer than normal), not every
-                // routine reply.
-                if (ctrl.freqCheckBox.Checked && autoFreqPauseMode == autoFreqPauseModes.DISABLED && ctrl.holdCheckBox.Checked)
-                {
-                    consecTxCount++;
-                    if (consecTxCount >= maxConsecTxCount)
-                    {
-                        if (autoFreqPauseMode == autoFreqPauseModes.DISABLED)
-                        {
-                            DisableTx(true);
-                            autoFreqPauseMode = autoFreqPauseModes.ENABLED;
-                            UpdateCallInProg();
-                            DebugOutput($"{spacer}auto freq update started (consec Tx), autoFreqPauseMode:{autoFreqPauseMode}");
-                        }
-                        else
-                        {
-                            consecTxCount = 0;
-                        }
-                    }
-                }
-                else
-                {
-                    consecTxCount = 0;
-                }
-                DebugOutput($"{spacer}autoFreqPauseMode:{autoFreqPauseMode} consecTxCount:{consecTxCount}");
-
-                //could have clicked on "CQ" button in WSJT-X
-                if (isCq)
-                {
-                    DebugOutput($"{spacer}possible CQ button, callInProg:'{CallPriorityString(callInProg)}'");
-
-                    if (txMode == TxModes.LISTEN)
-                    {
-                        txTimeout = true;
-                        if (discardCall == null) SetCallInProg(null);       //call expires now
-                        DebugOutput($"{spacer}txTimeout:{txTimeout} txMode:{txMode}");
-                    }
-
-                    //check for consecutive CQs sent
-                    if (ctrl.freqCheckBox.Checked && autoFreqPauseMode == autoFreqPauseModes.DISABLED && txMode == TxModes.CALL_CQ)
-                    {
-                        if (++consecCqCount >= maxConsecCqCount)
-                        {
-                            if (autoFreqPauseMode == autoFreqPauseModes.DISABLED)
-                            {
-                                DisableTx(true);
-                                autoFreqPauseMode = autoFreqPauseModes.ENABLED;
-                                UpdateCallInProg();
-                                DebugOutput($"{spacer}auto freq update started (CQs)");
-                            }
-                            else
-                            {
-                                consecCqCount = 0;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        consecCqCount = 0;
-                    }
-                    DebugOutput($"{spacer}toCall:{toCall} autoFreqPauseMode:{autoFreqPauseMode} consecCqCount:{consecCqCount} consecTimeoutCount:{consecTimeoutCount}");
-                }
-                else    //toCall not CQ
-                {
-                    consecCqCount = 0;
-                    DebugOutput($"{spacer}consecCqCount:{consecCqCount} consecTimeoutCount:{consecTimeoutCount}");
-                }
-
-                if (debug)
-                {
-                    DebugOutput($"{spacer}logEarlyCheckBox:{ctrl.logEarlyCheckBox.Checked} IsRogers:{WsjtxMessage.IsRogers(txMsg)} RecdReport:{RecdReport(toCall)} RecdRogerReport:{RecdRogerReport(toCall)}{nl}{spacer}sentReportList.Contains:{sentReportList.Contains(toCall)} logList.Contains:{logList.Contains(toCall)} sentCallList.Contains:{sentCallList.Contains(toCall)}");
-                }
-
-                if (!logList.Contains(toCall))          //toCall not logged yet this mode/band for this session
-                {
-                    //check for time to log early; NOTE: doing this at Tx end because WSJT-X may have changed Tx msgs (between Tx start and Tx end) due to late-decode for the current call
-                    //  option enabled                   just sent RRR                and prev. recd Report  or prev. recd RogerReport   and prev. sent any report
-                    if (IsLogEarly(toCall) && WsjtxMessage.IsRogers(txMsg) && (RecdReport(toCall) || RecdRogerReport(toCall)) && sentReportList.Contains(toCall))
-                    {
-                        DebugOutput($"{spacer}early logging: toCall:'{toCall}'");
-                        LogQso(toCall);
-                    }
-                    //check for QSO completed, trigger next call in the queue
-                    if (WsjtxMessage.Is73orRR73(txMsg))
-                    {
-                        txTimeout = true;
-                        tCall = toCall;
-                        xmitCycleCount = 0;
-                        SetCallInProg(null);
-                        DebugOutput($"{spacer}reset(2): (is 73 or RR73) xmitCycleCount:{xmitCycleCount} txTimeout:{txTimeout}{nl}           callInProg:'{CallPriorityString(callInProg)}' tCall:'{tCall}'");
-
-                        //NOTE: doing this at Tx end because WSJT-X may have changed Tx msgs (between Tx start and Tx end) due to late-decode for the current call
-                        // prev. recd Report    or prev. recd RogerReport   and prev. sent any report
-                        if ((RecdReport(toCall) || RecdRogerReport(toCall)) && sentReportList.Contains(toCall))
-                        {
-                            DebugOutput($"{spacer}normal logging: toCall:'{toCall}'");
-                            LogQso(toCall);
-                        }
-                    }
-                }
-                else    //logList contains toCall
-                {
-                    if (WsjtxMessage.Is73orRR73(txMsg))
-                    {
-                        txTimeout = true;      //timeout to Tx the next call in the queue
-                        tCall = toCall;
-                        xmitCycleCount = 0;
-                        SetCallInProg(null);
-                        DebugOutput($"{spacer}reset(6): (is 73 or RR73) xmitCycleCount:{xmitCycleCount} txTimeout:{txTimeout}{nl}           callInProg:'{CallPriorityString(callInProg)}' tCall:'{tCall}'");
-                    }
-                }
-
-                //count tx cycles: check for changed Tx call in WSJT-X
-                UpdateMaxTxRepeat();
-                if (maxTxRepeat > 1 && !IsSameMessage(lastTxMsg, txMsg))
-                {
-                    if (xmitCycleCount >= 0)
-                    {
-                        //check  for "to" call changed since last xmit end
-                        // !restartQueue = didn't just add this call to queue during late-decode that overlapped Tx start
-                        if (!restartQueue && toCall != lastToCall && callQueue.Contains(toCall))
-                        {
-                            _callQueueStore.RemoveCall(toCall);         //manually switched to Txing a call that was also in the queue
-                        }
-
-                        if (ctrl.holdCheckBox.Checked && toCall == lastToCall)      //overall xmit limit during hold
-                        {
-                            xmitCycleCount++;
-                        }
-                        else
-                        {
-                            xmitCycleCount = 0;
-                        }
-                        DebugOutput($"{spacer}reset(1) (different msg) xmitCycleCount:{xmitCycleCount} txMsg:'{txMsg}' lastTxMsg:'{lastTxMsg}' holdCheckBox.Checked:{ctrl.holdCheckBox.Checked}");
-                    }
-                    lastTxMsg = txMsg;
-                }
-                else        //same "to" call as last xmit or maxTxRepeat = 1, count xmit cycles
-                {
-                    if (!isCq)        //don't count CQ (or non-std) calls
-                    {
-                        xmitCycleCount++;           //count xmits to same call sign at end of xmit cycle
-                        DebugOutput($"{spacer}(same msg, or maxTxRepeat = 1) xmitCycleCount:{xmitCycleCount} txMsg:'{txMsg}' lastTxMsg:'{lastTxMsg}'");
-                        DebugOutput($"{spacer}holdCheckBox.Checked:{ctrl.holdCheckBox.Checked} holdMaxTxRepeat:{holdMaxTxRepeat}");
-
-                        if ((!ctrl.holdCheckBox.Checked && xmitCycleCount >= maxTxRepeat - 1) || (ctrl.holdCheckBox.Checked && xmitCycleCount >= holdMaxTxRepeat - 1))  //n msgs = n-1 diffs
-                        {
-                            xmitCycleCount = 0;
-                            txTimeout = true;
-                            if (discardCall == null) SetCallInProg(null);       //call expires now
-                            timedOutCall = toCall;
-                            tCall = toCall;        //call to remove from queue, will be null if non-std msg
-                            lastTxMsg = null;
-                            ctrl.holdCheckBox.Checked = false;
-
-                            //this caller might call indefinitely, so count call attempts
-                            AddTimeoutCall(toCall);
-                            DebugOutput($"{spacer}reset(3) (timeout) xmitCycleCount:{xmitCycleCount} txTimeout:{txTimeout} tCall:'{tCall}' callInProg:'{CallPriorityString(callInProg)}' holdCheckBox.Checked:{ctrl.holdCheckBox.Checked}");
-                        }
-                    }
-                    else
-                    {
-                        //same CQ or non-std call
-                        xmitCycleCount = 0;
-                        DebugOutput($"{spacer}reset(4) (no action, CQ or non-std) xmitCycleCount:{xmitCycleCount}");
-                    }
-                }
-
-                if (txTimeout)      //CQ or reply timed out
-                {
-                    DebugOutput($"{spacer}'{tCall}' timed out or completed");
-                    _callQueueStore.RemoveCall(tCall);
-
-                    if (!isCq) consecCqCount = 0;
-                    //auto freq update when too many timed out replies
-                    DebugOutput($"{spacer}ctrl.freqCheckBox.Checked:{ctrl.freqCheckBox.Checked} autoFreqPauseMode:{autoFreqPauseMode} txMode:{txMode} toCall:{toCall} mode:'{mode}'");
-                    if (ctrl.freqCheckBox.Checked && autoFreqPauseMode == autoFreqPauseModes.DISABLED && txMode == TxModes.CALL_CQ && toCall != "CQ")
-                    {
-                        consecTimeoutCount += maxTxRepeat;
-                        if (consecTimeoutCount >= maxConsecTimeoutCount)
-                        {
-                            if (autoFreqPauseMode == autoFreqPauseModes.DISABLED)
-                            {
-                                DisableTx(true);
-                                autoFreqPauseMode = autoFreqPauseModes.ENABLED;
-                                UpdateCallInProg();
-                                DebugOutput($"{spacer}auto freq update started (no QSOs)");
-                            }
-                            else
-                            {
-                                consecTimeoutCount = 0;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        consecTimeoutCount = 0;
-                    }
-                    DebugOutput($"{spacer}txTimeout:{txTimeout} autoFreqPauseMode:{autoFreqPauseMode} consecTimeoutCount:{consecTimeoutCount} callQueue.Count:{callQueue.Count} consecCqCount:{consecCqCount}");
-                }
-
-                //check for time to process new directed CQ
-                if (txMode == TxModes.CALL_CQ && (toCall == "CQ" || qsoState == WsjtxMessage.QsoStates.CALLING) && (ctrl.callCqDxCheckBox.Checked || (ctrl.callDirCqCheckBox.Checked && ctrl.directedTextBox.Text.Trim().Length > 0)))
-                {
-                    xmitCycleCount = 0;
-                    newDirCq = true;
-                    DebugOutput($"{spacer}reset(5) (new directed CQ) xmitCycleCount:{xmitCycleCount} newDirCq:{newDirCq}");
-                }
-            }
-
-            ShowStatus();           //**before** adding to sentReportList and sentCallList
-
-            //save all call signs a report msg was (completely/partially) sent to
-            if (!isCq && !sentCallList.Contains(toCall)) sentCallList.Add(toCall);
-            if ((WsjtxMessage.IsReport(txMsg) || WsjtxMessage.IsRogerReport(txMsg)) && !sentReportList.Contains(toCall)) sentReportList.Add(toCall);
-
-            txBeginTime = DateTime.MaxValue;
-            DebugOutput($"{Time()} Tx end done, lastTxMsg:'{lastTxMsg}' txEnabled:{txEnabled} cqPaused:{cqPaused}");
-            UpdateDebug();      //unconditional
-        }
+        // ProcessTxStart()/ProcessTxEnd() -- the classic UDP dispatcher's own transmitting-
+        // transition handlers (Tx-hold safety net, consecutive-CQ/timeout tracking, early/normal
+        // QSO logging via LogQso below, xmit-cycle counting) -- were removed 2026-08-18. Only ever
+        // called from the now-deleted dispatcher; Direct mode has had its own independent,
+        // already-verified equivalent for every one of these since the 2026-08-12 UDP-to-Direct
+        // parity pass (DirectApplyStatus/DirectApplyDecodes, WsjtxClient.Direct.cs -- Tx-hold
+        // safety net, transmitting-edge Notify.OnTransmittingChanged, and its own curTxMsg/
+        // callInProg/Is73orRR73 -> LogQso detection), not something this removal needs to add.
 
         //log a QSO (early or normal timing in QSO progress)
         private void LogQso(string call)
@@ -2198,21 +1669,16 @@ namespace WSJTX_Controller
         private void ResetOpMode()
         {
             StopDecodeTimers();
-            postDecodeTimer.Stop();
             statusAnnounceTimer.Stop();
             _pendingStatusText = null;
             decodeCycle = 0;
             decodeCount = 0;
             consecNoDecodes = 0;
-            DebugOutput($"{Time()} ResetOpMode, postDecodeTimer stop, decodeCycle:{decodeCycle}");
+            DebugOutput($"{Time()} ResetOpMode, decodeCycle:{decodeCycle}");
             ClearCalls(true);
             cqPaused = true;
             if (WsjtxMessage.NegoState != WsjtxMessage.NegoStates.WAIT) HaltTx();
             opMode = OpModes.IDLE;
-            lastMode = null;
-            lastSpecOp = null;
-            lastDecoding = null;
-            lastXmitting = null;
             bandIdx = null;
             decodesProcessed = false;
             myCall = null;
@@ -2275,24 +1741,10 @@ namespace WSJTX_Controller
             if (opMode > OpModes.IDLE) HaltTx();
             ResetOpMode();
             ShowStatus();
-            heartbeatRecdTimer.Stop();
-            DebugOutput($"{spacer}heartbeatRecdTimer stop");
-
-            try
-            {
-                if (udpClient2 != null)
-                {
-                    udpClient2.Close();
-                    udpClient2 = null;
-                    DebugOutput($"{spacer}closed udpClient2:{udpClient2}");
-                }
-            }
-            catch (Exception e)         //udpClient might be disposed already
-            {
-                DebugOutput($"{spacer}error at Closing, error:{e.ToString()}");
-            }
-
-            CloseAllUdp();
+            // UDP transport cleanup, 2026-08-18: heartbeatRecdTimer.Stop() and the udpClient2/
+            // CloseAllUdp teardown that used to run here are removed -- both were dead (nothing
+            // left ever starts heartbeatRecdTimer or opens udpClient2) even before this pass, and
+            // WsjtxProtocolAdapter (CloseAllUdp's own implementation) is deleted entirely now.
 
             _potaLog.Close();
 
@@ -2734,7 +2186,7 @@ namespace WSJTX_Controller
                     DebugOutput($"{spacer}reply to {call}, txTimeout:{txTimeout} holdCheckBox.Checked{ctrl.holdCheckBox.Checked} operatorSelected:{operatorSelected} _manualCallInProg:{_manualCallInProg}");
                     ReplyTo(idx);
                     StartDiscardCall(call);
-                    if (!transmitting)                  //if transmtting, 
+                    if (!transmitting)                  //if transmtting,
                     {
                         if (evenCall == evenPeriod)
                         {
@@ -2746,10 +2198,9 @@ namespace WSJTX_Controller
                             StartStatusTimer();            //will actually be transmitting
                         }
                     }
-                    else
-                    {
-                        lastStatusTxMsg = null;         //will be updated when interrupted Tx detected
-                    }
+                    // else branch (lastStatusTxMsg reset) removed 2026-08-18: lastStatusTxMsg
+                    // was only ever read by the now-deleted classic UDP dispatcher's own
+                    // "txMsg changed" detection -- nothing reads it anymore.
 
                     DisableAutoFreqPause();
                     ClearCallTimeout(call);
@@ -2907,24 +2358,22 @@ namespace WSJTX_Controller
         {
             try
             {
-                // UDP-to-Direct parity pass, 2026-08-12: this used to only ever flip the local
-                // txEnabled/wsjtxTxEnableButton fields, gated on udpClient2 being open -- which
-                // is never true under Direct mode, so every EnableTx() call (including the
-                // queue-reply path, ReplyTo()) was a silent no-op there. Mirrors HaltTx()'s
-                // existing _directConnected branch.
+                // UDP transport cleanup, 2026-08-18: the classic UDP path's own EnableTxMessage
+                // send (gated on udpClient2 being open) is removed -- Direct is the only transport
+                // left, in production and in test mode alike, so _directConnected is always true
+                // by the time this is reachable. The "not connected yet" guard stays (a hotkey or
+                // queue-reply action could still fire in the brief window before the first
+                // ConnectDirectEngine call completes, or after a disconnect) -- same shape as
+                // HaltTx's own guard below.
                 if (_directConnected)
                 {
                     DirectSetTxEnabled(true);
                     DebugOutput($"{Time()} EnableTx (direct)");
                 }
-                else if (emsg == null || udpClient2 == null)
-                {
-                    DebugOutput($"{Time()} EnableTx skipped, udpClient2:{udpClient2} emsg:{emsg}");
-                    return;
-                }
                 else
                 {
-                    DebugOutput($"{Time()} EnableTx, txEnabled:{txEnabled} processDecodeTimer.Enabled:{processDecodeTimer.Enabled}");
+                    DebugOutput($"{Time()} EnableTx skipped, not connected");
+                    return;
                 }
 
                 txEnabled = true;
@@ -2942,21 +2391,20 @@ namespace WSJTX_Controller
 
         private void DisableTx(bool buttonState)
         {
-            DebugOutput($"{Time()} DisableTx, txEnabled:{txEnabled} processDecodeTimer.Enabled:{processDecodeTimer.Enabled}");
+            DebugOutput($"{Time()} DisableTx, txEnabled:{txEnabled}");
             StopDecodeTimers();
 
             try
             {
-                // Same UDP-to-Direct parity fix as EnableTx() above -- mirrors HaltTx()'s
-                // existing _directConnected branch.
+                // Same UDP transport cleanup as EnableTx() above.
                 if (_directConnected)
                 {
                     DirectSetTxEnabled(false);
                     DebugOutput($"{Time()} DisableTx (direct)");
                 }
-                else if (emsg == null || udpClient2 == null)
+                else
                 {
-                    DebugOutput($"{Time()} DisableTx skipped, udpClient2:{udpClient2} emsg:{emsg}");
+                    DebugOutput($"{Time()} DisableTx skipped, not connected");
                     return;
                 }
 
@@ -2982,10 +2430,11 @@ namespace WSJTX_Controller
         {
             StopDecodeTimers();
             tuning = false;
-            // Self-sufficiency plan Phase 6: direct mode has no udpClient2 at all (there is no
-            // heartbeat/negotiation handshake to have opened it) -- route through the control
-            // port's own HALT_TX command instead. AutoOnly is explicitly false either way: an
-            // emergency stop must halt regardless of whether the pending Tx was auto-generated.
+            // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard HaltTx
+            // message (msg type 8, gated on udpClient2 being open) is removed -- route through
+            // the control port's own HALT_TX command instead. AutoOnly is explicitly false
+            // either way: an emergency stop must halt regardless of whether the pending Tx was
+            // auto-generated.
             if (_directConnected)
             {
                 DirectSendHaltTx();
@@ -2994,29 +2443,9 @@ namespace WSJTX_Controller
                 wsjtxTxEnableButton = false;
                 UpdateDblClkTip();
             }
-            else if (udpClient2 != null)
-            {
-                // The standard HaltTx message (msg type 8) -- also Jimmy's Escape-key
-                // emergency-stop path (HaltAndDisableTx, "TX halts regardless of which mode
-                // Jimmy is in"). AutoOnly is explicitly false -- an emergency stop must halt
-                // regardless of whether the pending Tx was auto-generated or not.
-                var hmsg = new HaltTxMessage
-                {
-                    SchemaVersion = (uint)WsjtxMessage.NegotiatedSchemaVersion,
-                    Id = WsjtxMessage.UniqueId,
-                    AutoOnly = false,
-                };
-                ba = hmsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent standard HaltTx (msg type 8)");
-
-                txEnabled = false;
-                wsjtxTxEnableButton = false;
-                UpdateDblClkTip();
-            }
             else
             {
-                DebugOutput($"{Time()} HaltTx skipped, udpClient2:{udpClient2}");
+                DebugOutput($"{Time()} HaltTx skipped, not connected");
                 return;
             }
         }
@@ -3086,11 +2515,6 @@ namespace WSJTX_Controller
             ShowStatus();
         }
 
-        private void ProcessPostDecodeTimerTick(object sender, EventArgs e)
-        {
-            DecodesCompleted();
-        }
-
         private void StatusAnnounceTimerTick(object sender, EventArgs e)
         {
             statusAnnounceTimer.Stop();
@@ -3099,14 +2523,6 @@ namespace WSJTX_Controller
             _pendingStatusText = null;
         }
 
-        private void ProcessDecodeTimerTick(object sender, EventArgs e)
-        {
-            processDecodeTimer.Stop();
-            //DebugOutput($"{nl}{Time()} processDecodeTimer stop");
-            statusTimer.Interval = 2000;        //allow enough time so transmit (if needed) has started
-            if (!tuning) statusTimer.Start();
-            ProcessDecodes();
-        }
         private void ProcessDecodeTimer2Tick(object sender, EventArgs e)
         {
             processDecodeTimer2.Stop();
@@ -3120,64 +2536,23 @@ namespace WSJTX_Controller
             DebugOutput($"{spacer}txTimeout:{txTimeout} txMode:{txMode} qsoState:{qsoState}");
         }
 
-        //the last decode pass has completed, ready to detect first decode pass
-        private void DecodesCompleted()
-        {
-            postDecodeTimer.Stop();
-            DebugOutput($"{nl}{Time()} DecodesCompleted, postDecodeTimer stop, decodeNum:{decodeNum} skipFirstDecodeSeries:{skipFirstDecodeSeries} NegoState:{WsjtxMessage.NegoState}");
-            decodeNum++;
-            decodeCycle = 0;
-            DebugOutput($"{spacer}decodeCycle:{decodeCycle}");
-
-            if (skipFirstDecodeSeries)
-            {
-                skipFirstDecodeSeries = false;
-                oddOffset = 0;
-                evenOffset = 0;
-                audioOffsets.Clear();
-                if (cachedOddOffset > 0) oddOffset = cachedOddOffset;
-                if (cachedEvenOffset > 0) evenOffset = cachedEvenOffset;
-            }
-            else
-            {
-                //final calculation of best offset -- completion announcement itself now lives
-                //inside CalcBestOffset (see its own comment), since this is only one of three
-                //call sites and not reliably the one that first observes completion.
-                if (CalcBestOffset(audioOffsets, period, true))       //calc for period when decodes started
-                {
-                    ctrl.freqCheckBox.Text = "Use best Tx frequency";
-                    ctrl.freqCheckBox.ForeColor = Color.Black;
-                }
-                CalcAvgTimeOffset(true);
-            }
-
-            if (WsjtxMessage.NegoState != WsjtxMessage.NegoStates.RECD)
-                return;
-
-            if (ctrl.freqCheckBox.Checked)
-            {
-                if (!transmitting)
-                {
-                    if (!CheckActive())
-                    {
-                        //set/show frequency offset for Tx period
-                        uint decodesCompletedOffset = AudioOffsetFromTxPeriod();
-                        DebugOutput($"{Time()} [BAND-AUDIT] DecodesCompleted offset calc: bandIdx:{bandIdx} offset:{decodesCompletedOffset}");
-                        if (settingChanged)
-                        {
-                            ctrl.WsjtxSettingConfirmed();
-                            settingChanged = false;
-                        }
-                    }
-                }
-            }
-            UpdateDebug();
-
-            if (_callQueueStore.TrimAllCallDict())
-            {
-                DebugOutput(_callQueueStore.AllCallDictString());
-            }
-        }
+        // DecodesCompleted() (postDecodeTimer's own Tick target) was removed 2026-08-18 along
+        // with the rest of the dead UDP decode-cycle-timing machinery -- postDecodeTimer.Start()
+        // was only ever called from the now-deleted classic UDP dispatcher, so this could never
+        // fire (confirmed true even before this cleanup pass: production has been Direct-only
+        // since 2026-08-12, and nothing in WsjtxClient.Direct.cs ever started this timer either).
+        // Direct mode's own equivalent per-period-boundary work (queue-age expiry via
+        // TrimCallQueue, CalcAvgTimeOffset(true)) lives in DirectApplyDecodes' own new-slot
+        // detection instead (WsjtxClient.Direct.cs) -- already there, not something this removal
+        // needs to add. One real, pre-existing gap found while confirming this, NOT introduced by
+        // this removal and NOT fixed here (a real behavior change belongs in its own reviewed
+        // change, not a transport-cleanup pass): CallQueueStore.TrimAllCallDict() -- the
+        // allCallDict/sentReportList age-trim DecodesCompleted used to also run -- has had no
+        // caller at all since the same Direct-only cutover, so allCallDict/sentReportList have
+        // been growing unbounded for the lifetime of every Direct-mode session, not just this
+        // build. Flagged for a future pass; TrimAllCallDict() itself is left in CallQueueStore.cs,
+        // unreferenced, rather than deleted, so restoring the periodic trim is a one-line wire-up
+        // whenever that gets prioritized.
 
         private void CheckCallQueuePeriod(bool tmpTxFirst)
         {
@@ -3374,11 +2749,6 @@ namespace WSJTX_Controller
 
         private void StopDecodeTimers()
         {
-            if (processDecodeTimer.Enabled)
-            {
-                processDecodeTimer.Stop();       //no xmit cycle now
-                DebugOutput($"{Time()} processDecodeTimer stop");
-            }
             if (processDecodeTimer2.Enabled)
             {
                 processDecodeTimer2.Stop();
@@ -3392,22 +2762,6 @@ namespace WSJTX_Controller
             if (!ctrl.logEarlyCheckBox.Checked) return false;
             return Priority(deCall) > (int)CallPriority.NEW_COUNTRY_ON_BAND;
         }
-
-        /*private bool SendUdp(byte[] ba)
-        {
-            if (udpClient2 == null) return false;
-
-            try
-            {
-                udpClient2.Send(ba, ba.Length);
-            }
-            catch (Exception e)
-            {
-                DebugOutput($"{Time()} sendUdp error:{e.ToString()}");
-                return false;
-            }
-            return true;
-        }*/
 
         private DialogResult Confirm(string s)
         {
@@ -3436,14 +2790,6 @@ namespace WSJTX_Controller
             DebugOutput($"{spacer}qsoState:{qsoState} (was {lastQsoState} replyCmd:'{replyCmd}') newDirCq:{newDirCq}");
 
             if (enableTx) EnableTx();             //sets WSJT-X "Enable Tx" button state
-        }
-
-        private void SetPeriodState()
-        {
-            DateTime dtNow = DateTime.UtcNow;
-            DebugOutput($"{Time()} SetPeriodState, dtNow:{dtNow.ToString("HHmmss.fff")} trPeriod:{trPeriod}");
-            period = IsEvenPeriod((dtNow.Minute * 60) + dtNow.Second) ? Periods.EVEN : Periods.ODD;       //determine this period
-            DebugOutput($"{spacer}period:{period}");
         }
 
         private void LogBeep()
@@ -3514,13 +2860,18 @@ namespace WSJTX_Controller
             }
 
             //send Reply message
-            // Self-sufficiency plan Phase 6: direct mode has no udpClient2 (no heartbeat/
-            // negotiation handshake to have opened it) -- route through the control port's own
-            // REPLY command (Engine::call_station_ctx directly) instead. replyMsg is the exact
-            // decoded text, same as the standard-protocol Message field below; call_station_ctx
-            // resolves SNR/slot context from its own decode_history by matching that text
-            // (see EngineHost/src/main.rs's ReplyArgs), so passing it through verbatim is the
+            // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard
+            // ReplyMessage send (msg type 4, gated on udpClient2 being open) is removed --
+            // route through the control port's own REPLY command (Engine::call_station_ctx
+            // directly) instead. replyMsg is the exact decoded text, same as the standard-
+            // protocol Message field the removed branch used; call_station_ctx resolves
+            // SNR/slot context from its own decode_history by matching that text (see
+            // EngineHost/src/main.rs's ReplyArgs), so passing it through verbatim is the
             // correct, minimal mapping rather than trying to duplicate that lookup here.
+            // Not-connected guard added here for the first time (the removed branch used to
+            // unconditionally call udpClient2.Send, a real NullReferenceException risk if this
+            // was ever reached before _directConnected went true) -- same shape as EnableTx/
+            // DisableTx/HaltTx's own guards.
             if (_directConnected)
             {
                 DirectSendReply(nCall, null, dmsg.Message, dmsg.Snr, null);
@@ -3528,19 +2879,8 @@ namespace WSJTX_Controller
             }
             else
             {
-                var rmsg = new ReplyMessage();
-                rmsg.SchemaVersion = WsjtxMessage.NegotiatedSchemaVersion;
-                rmsg.Id = WsjtxMessage.UniqueId;
-                rmsg.SinceMidnight = dmsg.SinceMidnight;
-                rmsg.Snr = dmsg.Snr;
-                rmsg.DeltaTime = dmsg.DeltaTime;
-                rmsg.DeltaFrequency = dmsg.DeltaFrequency;
-                rmsg.Mode = dmsg.Mode;
-                rmsg.Message = dmsg.Message;
-                rmsg.UseStdReply = dmsg.UseStdReply;
-                ba = rmsg.GetBytes();
-                udpClient2.Send(ba, ba.Length);
-                DebugOutput($"{Time()} >>>>>Sent 'Reply To Msg' cmd:{nl}{rmsg} lastTxMsg:'{lastTxMsg}'{nl}{spacer}replyCmd:'{replyCmd}'");
+                DebugOutput($"{Time()} ReplyTo skipped, not connected");
+                return;
             }
             replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress
             replyDecode = dmsg.DeepCopy();      //save the decode the reply cmd derived from
