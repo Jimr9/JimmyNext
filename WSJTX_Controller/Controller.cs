@@ -350,7 +350,11 @@ namespace WSJTX_Controller
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 
-        private bool IsJimmyForegrounded() => GetForegroundWindow() == this.Handle;
+        // internal (not private): WsjtxClient.ToggleTxFirst reuses this for the same
+        // SendKeys-must-not-target-the-wrong-window guard other status-announce call sites use
+        // (see ShowMsg/RenderStatus's own comments, 2026-08-19 release-blocker follow-up) --
+        // one P/Invoke wrapper, not a duplicate.
+        internal bool IsJimmyForegrounded() => GetForegroundWindow() == this.Handle;
 
         // In Debug builds, AllocConsole() (below, in Form_Load) creates -- and, when hidden,
         // briefly activates -- a console window before this form is ever shown. That spends
@@ -1041,10 +1045,26 @@ namespace WSJTX_Controller
                 {
                     statusText.Focus();
                 }
-                // Focusing a textbox that already shows the same text doesn't trigger a fresh
-                // screen-reader announcement; moving the caret does. See RenderStatus for the
-                // same pattern used on every routine status update.
-                SendKeys.Send("{UP}");
+                // Hardened 2026-08-19 (release-blocker follow-up): this SendKeys.Send used to be
+                // unconditional here -- it ran every single launch regardless of whether
+                // ForceForeground() actually succeeded. ForceForeground can fail to make this the
+                // real OS foreground window (AttachThreadInput/SetForegroundWindow have no
+                // universal guarantee -- security software, a different foreground owner, or
+                // other machine-specific conditions can all defeat it) -- confirmed live that it
+                // DOES normally succeed on at least one real launch, but "normally" is not "always
+                // guaranteed", and this is the one SendKeys call that fires on every single
+                // startup, config valid or not, which is exactly why this was already suspected
+                // (see this method's own comment above) as the likely explanation for reports of
+                // Jimmy becoming keyboard-unreachable from a genuinely fresh launch, predating
+                // this whole investigation. Only send the forced re-announce keystroke once real
+                // OS-level foreground is actually confirmed -- if it isn't, skip the forced nudge
+                // rather than risk SendKeys's journal-hook mechanism targeting the wrong window;
+                // the status text is still set correctly and a screen reader picks it up normally
+                // the next time the operator focuses/tabs into the window or a later real status
+                // update fires ShowMsg again (which now carries the identical real-foreground
+                // guard -- see ShowMsg's own comment).
+                if (GetForegroundWindow() == this.Handle)
+                    SendKeys.Send("{UP}");
             }));
 
             if (checkForUpdatesOnStartup)
@@ -2209,7 +2229,25 @@ namespace WSJTX_Controller
             // ShowStatus() will naturally overwrite this text on the next status rebuild
             // (see ToggleTxFirst for the same accepted pattern), which is fine: by then
             // the screen reader has already started speaking this message.
-            bool announced = statusText.Focused && Form.ActiveForm == this;
+            // Hardened 2026-08-19 (release-blocker follow-up): announced now also requires real
+            // OS-level foreground state (GetForegroundWindow() == this.Handle), not just the two
+            // WinForms-internal tracking properties. Root-caused live: on a genuine first-run
+            // launch, Controller.ApplyEngineMode()'s new config-check message (see its own
+            // comment) fires synchronously from inside Form_Load, before the window has
+            // necessarily become the REAL OS foreground window -- confirmed via live
+            // instrumentation that statusText.Focused/Form.ActiveForm and the real
+            // GetForegroundWindow() result can disagree at that exact point (this specific
+            // session's own test happened to read the WinForms-internal pair as already false,
+            // skipping SendKeys that time, but nothing guaranteed that on every machine/timing --
+            // this closes the gap structurally rather than relying on a race). See Form_Load's
+            // own end-of-method comment (the ORIGINAL, pre-existing "SendKeys fired too early
+            // leaves keyboard input going nowhere" finding, 2026-07-10) for the exact failure
+            // class this guards against: SendKeys.Send's journal-hook mechanism targets whatever
+            // window Windows currently considers the real foreground, and firing it while that's
+            // NOT this window can leave real keyboard input going to the wrong place for the rest
+            // of the session. This is the single choke point every ShowMsg caller shares, so
+            // hardening it here protects all of them, not just the one call site that surfaced it.
+            bool announced = statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
             // [ANNOUNCE] tag: enable the UDP diag log (Options/Setup) to get a millisecond-
             // timestamped record of every real screen-reader announcement -- added 2026-08-07
             // to pin down live reports of announcements landing partway into the next period,
@@ -2295,10 +2333,14 @@ namespace WSJTX_Controller
             this.statusText.Text = statusText;
             this.statusText.SelectionStart = 0;
             this.statusText.SelectionLength = 0;
-            // Guard: only send if Tilly is actually the active application.
-            // SendKeys.Send uses SendInput(), which delivers to the foreground window;
-            // without this guard a timer tick during focus-loss can send to Notepad.
-            bool announced = this.statusText.Focused && Form.ActiveForm == this;
+            // Guard: only send if Jimmy is actually the active application.
+            // SendKeys.Send uses SendInput(), which delivers to the real OS foreground window;
+            // without this guard a timer tick during focus-loss can send to Notepad. Hardened
+            // 2026-08-19 (release-blocker follow-up, same fix as ShowMsg's identical guard --
+            // see its own comment for the full root-cause writeup): the two WinForms-internal
+            // properties alone are not sufficient evidence of real OS foreground state, so this
+            // now also requires GetForegroundWindow() == this.Handle.
+            bool announced = this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
             // Added 2026-08-10: suppress the screen-reader nudge for a near-immediate repeat
             // of the exact same text -- root-caused live from a real QSO with W4MAA, where a
             // decode arriving milliseconds after a transmit-start event triggered a SECOND

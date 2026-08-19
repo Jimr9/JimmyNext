@@ -2027,7 +2027,9 @@ namespace WSJTX_Controller
             ctrl.statusText.SelectionLength = 0;
             // Force NVDA/JAWS to announce this pending status immediately, same guard and
             // reasoning as Controller.RenderStatus (only send to the foreground window).
-            if (ctrl.statusText.Focused && Form.ActiveForm == ctrl)
+            // Hardened 2026-08-19 (release-blocker follow-up) to also require real OS-level
+            // foreground state -- see Controller.ShowMsg's own comment for the full writeup.
+            if (ctrl.statusText.Focused && Form.ActiveForm == ctrl && ctrl.IsJimmyForegrounded())
                 SendKeys.Send("{UP}");
             return true;
         }
