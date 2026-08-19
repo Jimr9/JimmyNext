@@ -235,6 +235,36 @@ namespace WSJTX_Controller
         // request to see whatever's cached, not an automatic feature.
         public LookupRecord GetInfoForDialog(string call) => Build(call);
 
+        // Offline-only merge: contributes from every registered provider EXCEPT the
+        // four account-backed ones (QRZ/LoTW/FccUls/HamQth), regardless of the "Use
+        // Lookup Data" master switch. In real use this means only ClubLog's bundled
+        // Big CTY country data (always loaded -- see Initialize's unconditional
+        // ClubLog.Configure/Load, and the "Club Log country data is Jimmy
+        // infrastructure, not a user-facing lookup feature" comment there); a
+        // caller-registered provider (RegisterProvider/RegisterProviderFirst, e.g.
+        // tests' TestFixtureLookupProvider standing in for real cached data) also
+        // still contributes. Used by ClassificationEngine/AwardTagger's built-in,
+        // always-on DXCC/CqZone/Country/Continent classification (New DXCC, DXCC
+        // Unconfirmed, Zone Needed, country, continent) -- NOT by the optional
+        // rule-based Awards/Still Need system, which stays gated by Enabled exactly
+        // as before, since QRZ/LoTW/FccUls/HamQth must never leak into classification
+        // while the operator has "Use Lookup Data" unchecked.
+        public LookupRecord BuildOffline(string call)
+        {
+            var record = new LookupRecord { Callsign = string.IsNullOrEmpty(call) ? call : call.ToUpperInvariant() };
+            if (string.IsNullOrEmpty(call)) return record;
+
+            foreach (var provider in _providers)
+            {
+                if (ReferenceEquals(provider, Qrz) || ReferenceEquals(provider, HamQth) ||
+                    ReferenceEquals(provider, LoTW) || ReferenceEquals(provider, FccUls))
+                    continue;
+                if (provider.IsEnabled) provider.Contribute(record, call);
+            }
+
+            return record;
+        }
+
         // ── Primary provider async (whichever of QRZ/HamQTH is selected) ─────────
         // Renamed from the earlier QRZ-only Lookup/Needs/CachedAt/Test methods now that
         // HamQTH is a real alternative -- see CallsignLookupProvider/PrimaryProvider above.

@@ -76,9 +76,15 @@ namespace WSJTX_Controller
             // station is actually operating from.
             bool isPossibleFoxHound = !string.IsNullOrEmpty(decodedMessage) && WsjtxMessage.IsFoxHound(decodedMessage);
 
-            LookupRecord rec = (!isPossibleFoxHound && _lookupManager != null && _lookupManager.Enabled)
-                ? _lookupManager.Build(call)
-                : null;
+            // Country/Continent/Dxcc must resolve from Jimmy's own offline Club Log/Big
+            // CTY data regardless of the "Use Lookup Data" master switch -- that switch
+            // only gates the optional, account-backed providers (QRZ/LoTW/FccUls/HamQth).
+            // When Enabled (useLookupData on, some provider actually configured), Build()
+            // keeps its full existing merge order/behavior unchanged; otherwise fall back
+            // to BuildOffline() so ClubLog still contributes instead of nothing at all.
+            LookupRecord rec = null;
+            if (!isPossibleFoxHound && _lookupManager != null)
+                rec = _lookupManager.Enabled ? _lookupManager.Build(call) : _lookupManager.BuildOffline(call);
             // Found via live A6 field testing 2026-07-16: lookup providers return their
             // own raw country strings (QRZ: "United States", Club Log: "UNITED STATES OF
             // AMERICA"), not WSJT-X's normalized set -- the wire-supplied Country setter

@@ -70,7 +70,18 @@
   <ItemGroup>
     <!-- Starter Rule Definition library, seeded into %LocalAppData%\Jimmy\Data\RuleDefinitions
          on first run. Any file dropped under this folder is picked up automatically. -->
-    <None Include="RuleDefinitions\**\*.*">
+    <None Include="RuleDefinitions\**\*.*" Exclude="RuleDefinitions\_ReplayTestAward.ini">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <!-- _ReplayTestAward.ini is a JimmyDirectReplay.py test fixture only (its own file
+         comment: "used by JimmyReplay.py Group 17... Not a real award"). Must never ship
+         in a real end-user "Jimmy" install/publish, where RuleLoader's SeedIfMissing would
+         copy it straight into a real operator's Rule Definition/Awards UI as a fake entry.
+         Included only when building/publishing as "Jimmy Test" (the replay harness's own
+         AssemblyName, see build.bat and JimmyTest.wxs), so the harness's documented Group 17
+         workflow ("check 'Replay Test Award' in the Still Need tab") keeps working exactly
+         as before. -->
+    <None Include="RuleDefinitions\_ReplayTestAward.ini" Condition="'$(AssemblyName)' == 'Jimmy Test'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

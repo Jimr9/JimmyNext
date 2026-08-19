@@ -157,12 +157,17 @@ namespace WSJTX_Controller
             return !string.IsNullOrEmpty(state) && _wc.hrcUnconfirmedStates.Contains(state);
         }
 
+        // Dxcc/CqZone come from Jimmy's own offline Club Log/Big CTY data, same as
+        // ClassificationEngine's Country/Continent/Dxcc resolution -- must not depend on
+        // the "Use Lookup Data" master switch (that switch only gates the optional,
+        // account-backed providers). Build() when Enabled (unchanged), BuildOffline()
+        // otherwise so ClubLog still resolves the entity instead of nothing at all.
         public bool IsHrcDxccUnconfirmed(EnqueueDecodeMessage d)
         {
             if (_wc.hrcUnconfirmedDxcc.Count == 0 || _wc.activeAwardTags.ContainsKey("DXCC")) return false;
             string call = d.DeCall();
-            if (string.IsNullOrEmpty(call) || !_wc.lookupManager.Enabled) return false;
-            var rec = _wc.lookupManager.Build(call);
+            if (string.IsNullOrEmpty(call)) return false;
+            var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : _wc.lookupManager.BuildOffline(call);
             return rec.Dxcc > 0 && _wc.hrcUnconfirmedDxcc.Contains(rec.Dxcc);
         }
 
@@ -170,8 +175,8 @@ namespace WSJTX_Controller
         {
             if (_wc.hrcNeededZones.Count == 0 || _wc.activeAwardTags.ContainsKey("WAZ")) return false;
             string call = d.DeCall();
-            if (string.IsNullOrEmpty(call) || !_wc.lookupManager.Enabled) return false;
-            var rec = _wc.lookupManager.Build(call);
+            if (string.IsNullOrEmpty(call)) return false;
+            var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : _wc.lookupManager.BuildOffline(call);
             return rec.CqZone > 0 && _wc.hrcNeededZones.Contains(rec.CqZone);
         }
 

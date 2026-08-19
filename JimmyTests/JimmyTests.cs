@@ -134,6 +134,7 @@ static class JimmyTests
         OtaSpotAnnotatorTests();
         EqslReconcileTests();
         LookupManagerPrimaryProviderTests();
+        LookupManagerOfflineClassificationTests();
         FindPreservedSelectionIndexTests();
         ResolveDispatchIndexTests();
         SpotWatchCallsRoundTripTests();
@@ -702,6 +703,71 @@ static class JimmyTests
         finally
         {
             manager.Dispose();
+        }
+    }
+
+    // ── LookupManager.BuildOffline / ClassificationEngine offline classification ──
+    // Regression test for the fresh-install bug: with "Use Lookup Data" OFF, Country/
+    // Continent/DXCC classification (New DXCC, DXCC Unconfirmed, Zone Needed, country,
+    // continent) must still resolve from Jimmy's own offline Club Log/Big CTY data --
+    // that setting only gates the optional account-backed providers (QRZ/LoTW/FccUls/
+    // HamQth). Root cause was ClassificationEngine/AwardTagger gating their entire
+    // LookupManager.Build(call) call behind LookupManager.Enabled (useLookupData &&
+    // some provider IsEnabled), which meant NO lookup data at all -- not even
+    // ClubLog's -- reached classification whenever useLookupData was false. Uses
+    // TestFixtureLookupProvider (deterministic, no real ClubLog network/cache needed)
+    // standing in for ClubLog, same technique A6ClassificationParityTests uses.
+    static void LookupManagerOfflineClassificationTests()
+    {
+        Console.WriteLine("\n── LookupManager.BuildOffline / offline classification (useLookupData=false) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_OfflineClassification_" + Guid.NewGuid().ToString("N") + ".db");
+        var manager = new LookupManager();
+        try
+        {
+            manager.RegisterProviderFirst(new TestFixtureLookupProvider());
+            manager.Initialize(
+                useLookupData: false,
+                qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 7,
+                lotwEnabled: false, lotwDays: 30,
+                clubLogAppKey: null, clubLogDays: 30,
+                fccUlsEnabled: false);
+
+            Check("useLookupData=false: LookupManager.Enabled is false (master switch honored)",
+                manager.Enabled, false);
+
+            var offlineRec = manager.BuildOffline("K4YT");
+            CheckStr("BuildOffline still resolves Country despite Enabled=false", offlineRec.Country, "USA");
+            CheckStr("BuildOffline still resolves Continent despite Enabled=false", offlineRec.Continent, "NA");
+            Check("BuildOffline still resolves Dxcc despite Enabled=false", offlineRec.Dxcc == 291, true);
+
+            using (var db = new LogbookDb(tmpDb))
+            {
+                var engine = new ClassificationEngine(db, manager);
+
+                var classified = engine.Classify("K4YT", "20m");
+                CheckStr("Classify: Country resolves with useLookupData off", classified.Country, "USA");
+                CheckStr("Classify: Continent resolves with useLookupData off", classified.Continent, "NA");
+                Check("Classify: IsNewCountry true (never worked) with useLookupData off",
+                    classified.IsNewCountry, true);
+                Check("Classify: IsNewCountryOnBand true (never worked) with useLookupData off",
+                    classified.IsNewCountryOnBand, true);
+
+                InsertQso(db, "K4YT", "TN", dxcc: 291, zone: 4, band: "20m");
+                var afterWorked = engine.Classify("K4YT", "20m");
+                Check("Classify: IsNewCountry false once DXCC 291 worked, still useLookupData off",
+                    afterWorked.IsNewCountry, false);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  LookupManagerOfflineClassificationTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            manager.Dispose();
+            try { File.Delete(tmpDb); } catch { }
         }
     }
 
