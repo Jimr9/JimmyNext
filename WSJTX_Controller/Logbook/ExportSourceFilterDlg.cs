@@ -39,7 +39,7 @@ namespace WSJTX_Controller
                 Location       = new Point(12, 30),
                 Size           = new Size(216, 140),
                 TabIndex       = 1,
-                AccessibleName = "Logging services to include in export, checked services are included",
+                AccessibleName = "Logging services to include",
                 CheckOnClick   = true,
             };
             foreach (var source in QsoRecord.KnownSources)

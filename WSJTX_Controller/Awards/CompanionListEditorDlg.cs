@@ -136,7 +136,7 @@ namespace WSJTX_Controller
 
             var closeBtn = new Button { Text = "Close", Location = new Point(694, 404), Size = new Size(90, 26),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Right, DialogResult = DialogResult.Cancel,
-                AccessibleName = "Close Companion List Editor" };
+                AccessibleName = "Close" };
             Controls.Add(closeBtn);
             CancelButton = closeBtn;
         }

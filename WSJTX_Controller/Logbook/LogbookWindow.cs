@@ -258,7 +258,6 @@ namespace WSJTX_Controller
                 Dock           = DockStyle.Fill,
                 Font           = font,
                 TabIndex       = 1,
-                AccessibleName = "",
             };
 
             BuildMyLogPage(font, hfont);
@@ -339,7 +338,7 @@ namespace WSJTX_Controller
             _dashRecentLv.Columns.Add("Mode",      60);
             _dashRecentLv.Columns.Add("Country",  130);
             _dashRecentLv.Columns.Add("Confirmed", 80);
-            _dashRecentLv.AccessibleName = "Recent QSOs list";
+            _dashRecentLv.AccessibleName = "Recent QSOs";
             // MakeListView()'s shared default TabIndex (10) collides with this page's own
             // auto-numbered stat fields -- every other page using MakeListView() overrides it,
             // this one didn't, so Tab order landed the list between WAS and DXCC instead of
@@ -474,7 +473,7 @@ namespace WSJTX_Controller
             _srcHistoryLv.Columns.Add("Corrected",        70);
             _srcHistoryLv.Columns.Add("Total",            55);
             _srcHistoryLv.Columns.Add("Errors",          170);
-            _srcHistoryLv.AccessibleName = "Import history list";
+            _srcHistoryLv.AccessibleName = "Import history";
             _syncPanel.Controls.Add(_srcHistoryLv);
         }
 
@@ -531,7 +530,7 @@ namespace WSJTX_Controller
             _awardsLv.Anchor   = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             _awardsLv.Size     = new Size(700, 350);
             _awardsLv.TabIndex = 3;
-            _awardsLv.AccessibleName = "Award detail list";
+            _awardsLv.AccessibleName = "Award details";
             _awardsPanel.Controls.Add(_awardsLv);
 
             var manageBtn = new Button
@@ -554,7 +553,6 @@ namespace WSJTX_Controller
                 Size           = new Size(90, 24),
                 TabIndex       = 5,
                 AccessibleName = "Refresh award progress",
-                AccessibleDescription = "Re-checks award progress against QSOs logged since this page was last shown.",
             };
             refreshBtn.Click += (s, e) => PopulateAwards();
             _awardsPanel.Controls.Add(refreshBtn);
@@ -604,7 +602,7 @@ namespace WSJTX_Controller
                 Size           = new Size(300, 100),
                 TabIndex       = 1,
                 CheckOnClick   = true,
-                AccessibleName = "Still Need awards, checked awards are actively tracked",
+                AccessibleName = "Still Needed awards",
             };
             // Items are populated from RuleLibrary.Definitions in PopulateNeededAwardsList() --
             // dropping a new .ini file into RuleDefinitions adds it here with no code change.
@@ -640,7 +638,7 @@ namespace WSJTX_Controller
                 Location       = new Point(402, 7),
                 Size           = new Size(90, 21),
                 TabIndex       = 2,
-                AccessibleName = "Band filter for Needed list",
+                AccessibleName = "Band filter",
             };
             _neededBandCb.Items.AddRange(AllBands);
             _neededBandCb.SelectedIndex = 0;
@@ -660,7 +658,7 @@ namespace WSJTX_Controller
                 BackColor      = SystemColors.Control,
                 TabStop        = true,
                 TabIndex       = 3,
-                AccessibleName = "Count of needed entries",
+                AccessibleName = "Needed entries",
             };
             _stillNeedPanel.Controls.Add(_neededCountLbl);
 
@@ -672,7 +670,6 @@ namespace WSJTX_Controller
                 Size           = new Size(100, 23),
                 TabIndex       = 4,
                 AccessibleName = "Refresh needed list",
-                AccessibleDescription = "Re-checks the needed list against QSOs logged since this page was last shown.",
             };
             neededRefreshBtn.Click += (s, e) => PopulateNeeded();
             _stillNeedPanel.Controls.Add(neededRefreshBtn);
@@ -682,7 +679,7 @@ namespace WSJTX_Controller
             _neededLv.Anchor   = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
             _neededLv.Size     = new Size(700, 301);
             _neededLv.TabIndex = 5;
-            _neededLv.AccessibleName = "Needed items list";
+            _neededLv.AccessibleName = "Needed items";
             _stillNeedPanel.Controls.Add(_neededLv);
         }
 
@@ -746,7 +743,7 @@ namespace WSJTX_Controller
             _searchLv.Columns.Add("Country",  120);
             _searchLv.Columns.Add("Confirmed", 80);
             _searchLv.Columns.Add("Source",    60);
-            _searchLv.AccessibleName = "Search results list";
+            _searchLv.AccessibleName = "Search results";
             _lookupPanel.Controls.Add(_searchLv);
 
             _searchClearBtn = new Button
@@ -887,7 +884,7 @@ namespace WSJTX_Controller
             _editLv.MultiSelect = true;
             _editLv.TabIndex    = 8;
             RebuildEditLogColumns();
-            _editLv.AccessibleName = "Edit Log results list";
+            _editLv.AccessibleName = "Edit Log results";
             _editLv.SelectedIndexChanged += (s, e) => UpdateEditLogButtons();
             _editLogPanel.Controls.Add(_editLv);
 

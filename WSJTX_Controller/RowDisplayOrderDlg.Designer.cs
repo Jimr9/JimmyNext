@@ -68,7 +68,6 @@ namespace WSJTX_Controller
             this.callWaitingInstructionsLabel.Location = new Point(8, 8);
             this.callWaitingInstructionsLabel.Size = new Size(314, 13);
             this.callWaitingInstructionsLabel.Text = "Checked fields are shown; use Move Up/Move Down to change display order.";
-            this.callWaitingInstructionsLabel.AccessibleName = "Stations available row editor instructions";
             //
             // callWaitingListBox
             //
@@ -77,8 +76,7 @@ namespace WSJTX_Controller
             this.callWaitingListBox.Size = new Size(336, 190);
             this.callWaitingListBox.TabIndex = 0;
             this.callWaitingListBox.CheckOnClick = true;
-            this.callWaitingListBox.AccessibleName = "Stations Available Row Fields List Box";
-            this.callWaitingListBox.AccessibleDescription = "List of possible fields for stations available rows. Check fields to show them and uncheck fields to hide them. Select an item and use Move Up or Move Down to reorder.";
+            this.callWaitingListBox.AccessibleName = "Stations Available Row Fields";
             this.callWaitingListBox.SelectedIndexChanged += new EventHandler(this.CallWaitingListBox_SelectedIndexChanged);
             //
             // callWaitingMoveUpButton
@@ -129,7 +127,6 @@ namespace WSJTX_Controller
             this.rawDecodeInstructionsLabel.Location = new Point(8, 8);
             this.rawDecodeInstructionsLabel.Size = new Size(314, 13);
             this.rawDecodeInstructionsLabel.Text = "Checked fields are shown; use Move Up/Move Down to change display order.";
-            this.rawDecodeInstructionsLabel.AccessibleName = "Raw Decodes row editor instructions";
             //
             // rawDecodeListBox
             //
@@ -138,8 +135,7 @@ namespace WSJTX_Controller
             this.rawDecodeListBox.Size = new Size(336, 190);
             this.rawDecodeListBox.TabIndex = 0;
             this.rawDecodeListBox.CheckOnClick = true;
-            this.rawDecodeListBox.AccessibleName = "Raw Decodes Row Fields List Box";
-            this.rawDecodeListBox.AccessibleDescription = "List of possible fields for Raw Decodes rows. Check fields to show them and uncheck fields to hide them. Select an item and use Move Up or Move Down to reorder. Put Call Sign first so first-letter navigation in the Raw Decodes list works.";
+            this.rawDecodeListBox.AccessibleName = "Raw Decodes Row Fields";
             this.rawDecodeListBox.SelectedIndexChanged += new EventHandler(this.RawDecodeListBox_SelectedIndexChanged);
             //
             // rawDecodeMoveUpButton
@@ -190,7 +186,6 @@ namespace WSJTX_Controller
             this.spotWatchInstructionsLabel.Location = new Point(8, 8);
             this.spotWatchInstructionsLabel.Size = new Size(314, 13);
             this.spotWatchInstructionsLabel.Text = "Checked fields are shown; use Move Up/Move Down to change display order.";
-            this.spotWatchInstructionsLabel.AccessibleName = "Spot Watch row editor instructions";
             //
             // spotWatchListBox
             //
@@ -199,8 +194,7 @@ namespace WSJTX_Controller
             this.spotWatchListBox.Size = new Size(336, 190);
             this.spotWatchListBox.TabIndex = 0;
             this.spotWatchListBox.CheckOnClick = true;
-            this.spotWatchListBox.AccessibleName = "Spot Watch Row Fields List Box";
-            this.spotWatchListBox.AccessibleDescription = "List of possible fields for Spot Watch rows. Check fields to show them and uncheck fields to hide them. Select an item and use Move Up or Move Down to reorder.";
+            this.spotWatchListBox.AccessibleName = "Spot Watch Row Fields";
             this.spotWatchListBox.SelectedIndexChanged += new EventHandler(this.SpotWatchListBox_SelectedIndexChanged);
             //
             // spotWatchMoveUpButton
@@ -253,7 +247,6 @@ namespace WSJTX_Controller
             this.tabControl.Location = new Point(12, 12);
             this.tabControl.Size = new Size(360, 290);
             this.tabControl.TabIndex = 0;
-            this.tabControl.AccessibleName = "";
 
             //
             // okButton
@@ -264,7 +257,6 @@ namespace WSJTX_Controller
             this.okButton.Text = "OK";
             this.okButton.UseVisualStyleBackColor = true;
             this.okButton.AccessibleName = "OK";
-            this.okButton.AccessibleDescription = "Save the selected order for both tabs and close the editor.";
             this.okButton.Click += new EventHandler(this.OkButton_Click);
             //
             // cancelButton
@@ -275,7 +267,6 @@ namespace WSJTX_Controller
             this.cancelButton.Text = "Cancel";
             this.cancelButton.UseVisualStyleBackColor = true;
             this.cancelButton.AccessibleName = "Cancel";
-            this.cancelButton.AccessibleDescription = "Close the editor without saving changes.";
             this.cancelButton.DialogResult = DialogResult.Cancel;
             //
             // RowDisplayOrderDlg

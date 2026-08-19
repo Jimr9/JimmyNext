@@ -53,7 +53,7 @@ namespace WSJTX_Controller
             var callGroupBox = new GroupBox
             {
                 Text           = "Call:",
-                AccessibleName = "What kind of CQ to call",
+                AccessibleName = "CQ type",
                 Location       = new Point(12, 12),
                 Size           = new Size(396, 92),
                 TabStop        = false,
@@ -91,7 +91,7 @@ namespace WSJTX_Controller
             {
                 Location       = new Point(140, 62),
                 Size           = new Size(110, 20),
-                AccessibleName = "Directed CQ codes, separated by spaces",
+                AccessibleName = "Directed CQ codes",
                 Text           = currentDirText == IniPlaceholder ? "" : currentDirText,
                 Enabled        = ctrl.callDirCqCheckBox.Checked,
                 TabIndex       = 3,
@@ -137,7 +137,7 @@ namespace WSJTX_Controller
                 Location       = new Point(200, 145),
                 Size           = new Size(200, 21),
                 DropDownStyle  = ComboBoxStyle.DropDownList,
-                AccessibleName = "Which transmit slot to use",
+                AccessibleName = "Transmit slot",
                 TabIndex       = 5,
             };
             _slotComboBox.Items.Add("TX1 (Even)");
@@ -152,7 +152,7 @@ namespace WSJTX_Controller
                 Text           = $"Find open slot ({slotKeyText})",
                 Location       = new Point(12, 182),
                 Size           = new Size(240, 26),
-                AccessibleName = $"Find open transmit slot, {slotKeyText}",
+                AccessibleName = "Find open transmit slot",
                 TabIndex       = 6,
             };
             _findSlotButton.Click += FindSlotButton_Click;

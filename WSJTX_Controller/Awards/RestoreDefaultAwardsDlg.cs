@@ -47,7 +47,7 @@ namespace WSJTX_Controller
                 Location       = new Point(12, 84),
                 Size           = new Size(396, 190),
                 TabIndex       = 1,
-                AccessibleName = "Custom awards found, checked awards are kept",
+                AccessibleName = "Custom awards to keep",
                 CheckOnClick   = true,
             };
             foreach (var d in customDefs)

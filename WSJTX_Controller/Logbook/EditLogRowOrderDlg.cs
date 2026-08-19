@@ -59,7 +59,7 @@ namespace WSJTX_Controller
                 Location       = new Point(12, 30),
                 Size           = new Size(200, 210),
                 TabIndex       = 1,
-                AccessibleName = "Edit Log columns, checked columns are shown",
+                AccessibleName = "Edit Log columns",
                 CheckOnClick   = true,
             };
             _listBox.SelectedIndexChanged += (s, e) => UpdateMoveButtons();

@@ -97,7 +97,7 @@ namespace WSJTX_Controller
                 Text = "Cancel", Location = new Point(486, 460), Size = new Size(80, 26),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Right,
                 DialogResult = DialogResult.Cancel,
-                AccessibleName = "Cancel without saving",
+                AccessibleName = "Cancel",
             };
             Controls.Add(cancelBtn);
             CancelButton = cancelBtn;

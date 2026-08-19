@@ -949,7 +949,7 @@ namespace WSJTX_Controller
             if (!force && lastCallListTxFirst == txFirst) return;
             lastCallListTxFirst = txFirst;
             string rxLabel = txFirst ? "RX2" : "RX1";
-            ctrl.callListBox.AccessibleName = $"{rxLabel} Stations Available List Box";
+            ctrl.callListBox.AccessibleName = $"{rxLabel} Stations Available";
 
             // Update advanced list labels to reflect the active transmit side.
             // txFirst=true  → user transmits on TX1 (even); TX2 is the receive side → label TX2 as RX2.

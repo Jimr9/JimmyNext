@@ -278,7 +278,6 @@ namespace WSJTX_Controller
             {
                 Text                  = "PSK Reporter Enabled",
                 AccessibleName        = "PSK Reporter enabled",
-                AccessibleDescription = "Send spots to PSK Reporter. Same as the PSK Reporter hotkey.",
                 AutoSize              = true,
                 Location              = new System.Drawing.Point(10, 38),
                 TabIndex              = 1,
@@ -291,7 +290,6 @@ namespace WSJTX_Controller
             {
                 Text                  = "Move focus to status after selecting a call",
                 AccessibleName        = "Move focus to status after selecting a call",
-                AccessibleDescription = "After pressing Enter or Space to select a call in any call list (simple or advanced), move keyboard focus to the status line and re-announce it. Off by default.",
                 AutoSize              = true,
                 Location              = new System.Drawing.Point(10, 62),
                 TabIndex              = 2,
@@ -313,7 +311,6 @@ namespace WSJTX_Controller
             _maxCallQueueAgeNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName        = "Max call-queue age in periods",
-                AccessibleDescription = "How many TX/RX periods an auto-queued call may go unheard before being dropped from the waiting list. 16 periods is about 4 minutes on FT8, 2 minutes on FT4. Manually-selected calls and New DXCC entries are never dropped by this.",
                 Location              = new System.Drawing.Point(210, 87),
                 Size                  = new System.Drawing.Size(70, 20),
                 TabIndex              = 3,
@@ -328,7 +325,6 @@ namespace WSJTX_Controller
             {
                 Text                  = "Check for updates on startup",
                 AccessibleName        = "Check for updates on startup",
-                AccessibleDescription = "On startup, check GitHub for a newer Jimmy release. If one is found, ask whether to download and install it. Off by default.",
                 AutoSize              = true,
                 Location              = new System.Drawing.Point(10, 115),
                 TabIndex              = 4,
@@ -346,7 +342,6 @@ namespace WSJTX_Controller
             {
                 Text                  = "Announce important notifications when focus is elsewhere",
                 AccessibleName        = "Announce important notifications when focus is elsewhere",
-                AccessibleDescription = "When an important notification occurs (for example: engine failure, radio CAT link lost, high SWR shutting off transmit, a failed band or mode change) and keyboard focus is not on the status field, announce it through Windows UI Automation without moving focus. Does not change ordinary status messages. Off by default -- requires JAWS/NVDA testing before relying on it.",
                 AutoSize              = true,
                 Location              = new System.Drawing.Point(10, 140),
                 TabIndex              = 5,
@@ -505,7 +500,6 @@ namespace WSJTX_Controller
             _maxQueuedCallsNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Max queued calls",
-                AccessibleDescription = "Maximum number of calls held in the waiting queue across TX1 and TX2 combined. Increase to see more callers in the advanced TX1/TX2 lists.",
                 Location = new System.Drawing.Point(195, 133),
                 Size = new System.Drawing.Size(70, 20),
                 TabIndex = 6,
@@ -525,7 +519,6 @@ namespace WSJTX_Controller
             {
                 Text = "Keep list position during refresh",
                 AccessibleName = "Keep list position during refresh",
-                AccessibleDescription = "Keeps the selected row when lists refresh. Uncheck for quieter screen-reader behavior.",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 8, y),
                 TabIndex = 23,
@@ -685,7 +678,6 @@ namespace WSJTX_Controller
                                  "Examples: W1AW/0, VP8SGI, 3Y0K\r\n" +
                                  "Matching calls receive the \"Always Wanted Calls\" category. Case-insensitive. Duplicates are ignored.",
                 TabStop        = false,
-                AccessibleName = "Wanted Calls instructions",
                 Font           = font,
             };
             wantedCallsPanel.Controls.Add(instrBox);
@@ -695,7 +687,6 @@ namespace WSJTX_Controller
             var editLabel = new System.Windows.Forms.Label
             {
                 Text           = "Wanted callsigns:",
-                AccessibleName = "Wanted callsigns label",
                 AutoSize       = true,
                 Location       = new System.Drawing.Point(left, y),
                 Font           = font,
@@ -713,7 +704,6 @@ namespace WSJTX_Controller
                 Size           = new System.Drawing.Size(w, 220),
                 TabIndex       = 0,
                 AccessibleName = "Wanted callsigns",
-                AccessibleDescription = "Enter callsigns to always prioritize. One per line, or comma or space separated. Case-insensitive.",
                 Font           = font,
             };
             // Populate from current wanted calls (sorted for readability)
@@ -733,7 +723,6 @@ namespace WSJTX_Controller
                 TabIndex       = 1,
                 Font           = font,
                 AccessibleName = "Alert when wanted call is heard anywhere",
-                AccessibleDescription = "When checked, plays the Wanted Call Heard Anywhere sound whenever a callsign from your Wanted Calls list appears in any decode, even if they are working someone else or not eligible for your queue.",
             };
             wantedCallsPanel.Controls.Add(_wantedCallAnywhereCheckBox);
         }
@@ -780,7 +769,6 @@ namespace WSJTX_Controller
                                  "Examples: K2A, W1AW/13\r\n" +
                                  "Separate from Wanted Calls -- adding a call here has no effect on call-queue priority.",
                 TabStop        = false,
-                AccessibleName = "Spot Watch instructions",
                 Font           = font,
             };
             spotWatchPanel.Controls.Add(instrBox);
@@ -790,7 +778,6 @@ namespace WSJTX_Controller
             var editLabel = new System.Windows.Forms.Label
             {
                 Text           = "Watched callsigns:",
-                AccessibleName = "Watched callsigns label",
                 AutoSize       = true,
                 Location       = new System.Drawing.Point(left, y),
                 Font           = font,
@@ -808,7 +795,6 @@ namespace WSJTX_Controller
                 Size           = new System.Drawing.Size(w, 220),
                 TabIndex       = 0,
                 AccessibleName = "Watched callsigns",
-                AccessibleDescription = "Enter callsigns to watch for last-spotted reports. One per line, or comma or space separated. Case-insensitive.",
                 Font           = font,
             };
             // Populate from current spot watch list (sorted for readability)
@@ -828,7 +814,6 @@ namespace WSJTX_Controller
                 TabIndex       = 1,
                 Font           = font,
                 AccessibleName = "Show Spot Watch list in main window",
-                AccessibleDescription = "When checked, adds a Spot Watch list to the main window showing last-spotted info for each watched callsign.",
             };
             spotWatchPanel.Controls.Add(_showSpotWatchCheckBox);
             y += 24;
@@ -842,7 +827,6 @@ namespace WSJTX_Controller
             var sortLabel = new System.Windows.Forms.Label
             {
                 Text           = "Sort by:",
-                AccessibleName = "Spot Watch sort order label",
                 AutoSize       = true,
                 Location       = new System.Drawing.Point(left, y + 3),
                 Font           = font,
@@ -858,7 +842,6 @@ namespace WSJTX_Controller
                 TabIndex       = 2,
                 Font           = font,
                 AccessibleName = "Spot Watch sort order",
-                AccessibleDescription = "Choose how the Spot Watch list is ordered: by callsign, by even/odd transmit period, or by signal report.",
             };
             _spotWatchSortCb.Items.AddRange(new object[] { "Callsign (A-Z)", "Even/Odd Period", "SNR (Strongest First)" });
             int sortIdx = (ctrl.spotWatchSortKey ?? "callsign").ToLowerInvariant() == "evenodd" ? 1
@@ -1006,7 +989,6 @@ namespace WSJTX_Controller
                                  "whatever the native engine itself broadcasts, no separate radio connection. Hamlib " +
                                  "rigctld adds a real S-meter and connects to the radio directly.",
                 TabStop        = false,
-                AccessibleName = "Radio tab instructions",
                 Font           = font,
             };
             radioPanel.Controls.Add(instrBox);
@@ -1021,7 +1003,6 @@ namespace WSJTX_Controller
                 TabIndex = 0,
                 Font = font,
                 AccessibleName = "Receive Only",
-                AccessibleDescription = "Radio state (frequency, mode, transmitting) comes read-only from the native engine's own status reports. No S-meter/power/SWR, no PTT.",
             };
             radioPanel.Controls.Add(_radioWsjtxCatRb);
             y += 24;
@@ -1035,7 +1016,6 @@ namespace WSJTX_Controller
                 TabIndex = 1,
                 Font = font,
                 AccessibleName = "Use Hamlib rigctld",
-                AccessibleDescription = "Jimmy launches its own bundled rigctld against the rig model and COM port below (or connects to an external rigctld if configured) and drives CAT/PTT directly.",
             };
             radioPanel.Controls.Add(_radioHamlibRb);
             y += 32;
@@ -1043,7 +1023,6 @@ namespace WSJTX_Controller
             var rigModelLabel = new System.Windows.Forms.Label
             {
                 Text = "Rig model:",
-                AccessibleName = "Rig model label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1060,7 +1039,6 @@ namespace WSJTX_Controller
                 TabIndex = 2,
                 Font = font,
                 AccessibleName = "Rig model",
-                AccessibleDescription = "The radio model Jimmy's bundled rigctld talks to. Type the first letters of a manufacturer or model to jump to it, e.g. \"Kenwood\".",
             };
             // Live list from the bundled rigctl.exe itself (Resources\hamlib\rigctl.exe --list)
             // -- always matches whichever Hamlib version actually ships with Jimmy, never a
@@ -1103,7 +1081,6 @@ namespace WSJTX_Controller
             var comPortLabel = new System.Windows.Forms.Label
             {
                 Text = "COM port:",
-                AccessibleName = "COM port label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1129,7 +1106,6 @@ namespace WSJTX_Controller
                 TabIndex = 3,
                 Font = font,
                 AccessibleName = "COM port",
-                AccessibleDescription = "Serial port the radio is connected to. Only used when launching Jimmy's own bundled rigctld. Lists ports currently detected on this PC.",
             };
             _radioComPortTextBox.Items.Add("");   // blank = not configured
             var detectedPorts = new System.Collections.Generic.List<string>(System.IO.Ports.SerialPort.GetPortNames());
@@ -1155,7 +1131,6 @@ namespace WSJTX_Controller
             var baudRateLabel = new System.Windows.Forms.Label
             {
                 Text = "Baud rate (blank = Hamlib's default for this rig):",
-                AccessibleName = "Baud rate label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1176,7 +1151,6 @@ namespace WSJTX_Controller
                 TabIndex = 4,
                 Font = font,
                 AccessibleName = "Baud rate",
-                AccessibleDescription = "Serial baud rate for CAT control -- must match the rig's own CAT baud rate menu setting, or rigctld cannot talk to it at all. Leave blank to use Hamlib's built-in default for this rig model.",
             };
             // Standard RS-232 rates, same set real WSJT-X's own Radio tab offers.
             _radioBaudRateTextBox.Items.Add("");   // blank = Hamlib's own default
@@ -1198,7 +1172,6 @@ namespace WSJTX_Controller
                 TabIndex = 5,
                 Font = font,
                 AccessibleName = "Use external rigctld",
-                AccessibleDescription = "When checked, Jimmy connects to a rigctld you are already running elsewhere, using the host and port below, instead of launching its own bundled copy.",
             };
             _radioUseExternalCheckBox.CheckedChanged += (s, e) => UpdateRadioHostPortEnabled();
             radioPanel.Controls.Add(_radioUseExternalCheckBox);
@@ -1207,7 +1180,6 @@ namespace WSJTX_Controller
             var hostLabel = new System.Windows.Forms.Label
             {
                 Text = "Host:",
-                AccessibleName = "rigctld host label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1223,14 +1195,12 @@ namespace WSJTX_Controller
                 TabIndex = 6,
                 Font = font,
                 AccessibleName = "rigctld host",
-                AccessibleDescription = "Hostname or IP address of the external rigctld instance.",
             };
             radioPanel.Controls.Add(_radioHostTextBox);
 
             var portLabel = new System.Windows.Forms.Label
             {
                 Text = "Port:",
-                AccessibleName = "rigctld port label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 175, y + 3),
                 Font = font,
@@ -1246,7 +1216,6 @@ namespace WSJTX_Controller
                 TabIndex = 7,
                 Font = font,
                 AccessibleName = "rigctld port",
-                AccessibleDescription = "TCP port of the external rigctld instance. Hamlib's default is 4532.",
             };
             radioPanel.Controls.Add(_radioPortTextBox);
             y += 32;
@@ -1260,7 +1229,6 @@ namespace WSJTX_Controller
                 TabIndex = 8,
                 Font = font,
                 AccessibleName = "Use rigctld for PTT",
-                AccessibleDescription = "Off by default. A bigger change than read-only telemetry -- only turn this on if you want Jimmy, not WSJT-X, keying the radio.",
             };
             radioPanel.Controls.Add(_radioPttEnabledCheckBox);
 
@@ -1272,7 +1240,6 @@ namespace WSJTX_Controller
             var pttMethodLabel = new System.Windows.Forms.Label
             {
                 Text = "PTT method:",
-                AccessibleName = "PTT method label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 400, y + 3),
                 Font = font,
@@ -1288,7 +1255,6 @@ namespace WSJTX_Controller
                 TabIndex = 9,
                 Font = font,
                 AccessibleName = "PTT method",
-                AccessibleDescription = "How PTT is actually keyed once 'Use rigctld for PTT' above is checked: Cat (rigctld's own CAT command -- the common case), Vox (the radio keys itself off transmit audio -- Jimmy sends no PTT command at all), Serial RTS or Serial DTR (a serial control line on the same port as CAT). Ignored, forced to Vox, when 'Use rigctld for PTT' is unchecked.",
             };
             foreach (PttMethod m in Enum.GetValues(typeof(PttMethod)))
                 _radioPttMethodCombo.Items.Add(m.ToString());
@@ -1302,7 +1268,6 @@ namespace WSJTX_Controller
             var pttSerialPortLabel = new System.Windows.Forms.Label
             {
                 Text = "PTT port (blank = same as CAT):",
-                AccessibleName = "PTT port label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1317,7 +1282,6 @@ namespace WSJTX_Controller
                 TabIndex = 10,
                 Font = font,
                 AccessibleName = "PTT port",
-                AccessibleDescription = "Separate serial port for RTS/DTR PTT keying when it differs from the CAT serial port above -- an SO2R controller routing keying on its own COM port. Blank (default) keys on the same port as CAT.",
             };
             _radioPttSerialPortCombo.Items.Add("");
             foreach (var p in detectedPorts)
@@ -1350,19 +1314,16 @@ namespace WSJTX_Controller
             {
                 Text = "None", Location = new System.Drawing.Point(10, 18), AutoSize = true,
                 TabIndex = 0, Font = font, Checked = ctrl.Radio.TxMode == RadioTxMode.None,
-                AccessibleDescription = "Never send the radio a mode command at all, for any operating mode -- the operator's own manual rig setting stands.",
             };
             _radioModeUsbRb = new System.Windows.Forms.RadioButton
             {
                 Text = "USB", Location = new System.Drawing.Point(130, 18), AutoSize = true,
                 TabIndex = 1, Font = font, Checked = ctrl.Radio.TxMode == RadioTxMode.Usb,
-                AccessibleDescription = "Command plain USB instead of the Data/Pkt submode. Only try this if Data/Pkt mode isn't actually routing transmit audio to the radio correctly on your setup.",
             };
             _radioModeDataPktRb = new System.Windows.Forms.RadioButton
             {
                 Text = "Data/Pkt", Location = new System.Drawing.Point(240, 18), AutoSize = true,
                 TabIndex = 2, Font = font, Checked = ctrl.Radio.TxMode == RadioTxMode.DataPkt,
-                AccessibleDescription = "Default and recommended for most rigs, including a normal rear-panel USB or ACC digital audio interface. Commands the rig's DATA submode over CAT for every FT8/FT4 transmission.",
             };
             _radioModeGroupBox.Controls.Add(_radioModeNoneRb);
             _radioModeGroupBox.Controls.Add(_radioModeUsbRb);
@@ -1387,7 +1348,6 @@ namespace WSJTX_Controller
                 TabIndex = 17,
                 Font = font,
                 AccessibleName = "Transmit Audio Source Data not Mic",
-                AccessibleDescription = "Off by default (Mic), matching WSJT-X's own default. Matches WSJT-X's own Radio tab 'Transmit Audio Source' choice: Mic (default here, off) vs Data (checked). Only try this if your interface is wired to the rig's rear DATA/ACC port and the rig still transmits mic audio instead of the FT8 tone during a real transmission.",
             };
             radioPanel.Controls.Add(_radioPttDataSourceCheckBox);
             y += 32;
@@ -1414,19 +1374,16 @@ namespace WSJTX_Controller
             {
                 Text = "None", Location = new System.Drawing.Point(10, 18), AutoSize = true,
                 TabIndex = 0, Font = font, Checked = ctrl.Radio.SplitMode == RadioSplitMode.None,
-                AccessibleDescription = "Receive and transmit on the same frequency -- how ordinary FT8/FT4 works.",
             };
             _radioSplitRigRb = new System.Windows.Forms.RadioButton
             {
                 Text = "Rig", Location = new System.Drawing.Point(130, 18), AutoSize = true,
                 TabIndex = 1, Font = font, Checked = ctrl.Radio.SplitMode == RadioSplitMode.Rig,
-                AccessibleDescription = "True hardware split via CAT -- receive on VFO A, transmit on VFO B.",
             };
             _radioSplitFakeItRb = new System.Windows.Forms.RadioButton
             {
                 Text = "Fake It", Location = new System.Drawing.Point(240, 18), AutoSize = true,
                 TabIndex = 2, Font = font, Checked = ctrl.Radio.SplitMode == RadioSplitMode.FakeIt,
-                AccessibleDescription = "Software-emulated split -- no true rig split needed. The engine retunes the single VFO right before each transmission and restores it after.",
             };
             _radioSplitGroupBox.Controls.Add(_radioSplitNoneRb);
             _radioSplitGroupBox.Controls.Add(_radioSplitRigRb);
@@ -1437,7 +1394,6 @@ namespace WSJTX_Controller
             var pollIntervalLabel = new System.Windows.Forms.Label
             {
                 Text = "Poll interval (s):",
-                AccessibleName = "Poll interval label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 290, y + 3),
                 Font = font,
@@ -1455,7 +1411,6 @@ namespace WSJTX_Controller
                 TabIndex = 19,
                 Font = font,
                 AccessibleName = "Poll interval seconds",
-                AccessibleDescription = "How often Jimmy polls the radio for S-meter/power/SWR, in seconds, while 'Read and display PWR and SWR' below is checked.",
             };
             radioPanel.Controls.Add(_radioPollIntervalUpDown);
             y += 32;
@@ -1469,7 +1424,6 @@ namespace WSJTX_Controller
                 TabIndex = 20,
                 Font = font,
                 AccessibleName = "Read and display PWR and SWR",
-                AccessibleDescription = "Off by default. Turns on the periodic S-meter/power/SWR poll (Poll interval above) that Alt+Q's on-demand check also uses. Must be checked for 'Halt Tx when SWR' below to have anything to check.",
             };
             _radioReadDisplayPwrSwrCheckBox.CheckedChanged += (s, e) => UpdateSwrHaltEnabled();
             radioPanel.Controls.Add(_radioReadDisplayPwrSwrCheckBox);
@@ -1483,7 +1437,6 @@ namespace WSJTX_Controller
                 TabIndex = 21,
                 Font = font,
                 AccessibleName = "Halt Tx when SWR exceeds threshold",
-                AccessibleDescription = "Off by default. Matches WSJT-X's own Radio tab safety feature: automatically halts transmission if a poll (see 'Read and display PWR and SWR' above, which this requires) reports SWR above the threshold to the right.",
             };
             radioPanel.Controls.Add(_radioHaltTxOnHighSwrCheckBox);
 
@@ -1499,7 +1452,6 @@ namespace WSJTX_Controller
                 TabIndex = 22,
                 Font = font,
                 AccessibleName = "SWR halt threshold",
-                AccessibleDescription = "SWR value above which Tx is automatically halted, when 'Halt Tx when SWR' to the left is checked. WSJT-X's own default is 2.5.",
             };
             radioPanel.Controls.Add(_radioSwrHaltThresholdUpDown);
             y += 32;
@@ -1519,7 +1471,6 @@ namespace WSJTX_Controller
                 TabIndex = 23,
                 Font = font,
                 AccessibleName = "Set power once at startup",
-                AccessibleDescription = "Off by default. Works around a Hamlib bug on some rigs (Kenwood CAT) where the radio's power can drop unexpectedly the first time Jimmy starts. When checked, Jimmy commands the Watts value below to the rig exactly once at startup, then leaves power alone -- changing it by hand on the rig afterward, including when you change bands, sticks.",
             };
             _radioStartupPowerEnabledCheckBox.CheckedChanged += (s, e) => UpdateStartupPowerEnabled();
             radioPanel.Controls.Add(_radioStartupPowerEnabledCheckBox);
@@ -1527,7 +1478,6 @@ namespace WSJTX_Controller
             var startupPowerWattsLabel = new System.Windows.Forms.Label
             {
                 Text = "Watts:",
-                AccessibleName = "Startup power watts label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 290, y + 3),
                 Font = font,
@@ -1545,14 +1495,12 @@ namespace WSJTX_Controller
                 TabIndex = 24,
                 Font = font,
                 AccessibleName = "Startup power watts",
-                AccessibleDescription = "Power to command at startup, in watts, when 'Set power once at startup' is checked.",
             };
             radioPanel.Controls.Add(_radioStartupPowerWattsUpDown);
 
             var startupPowerMaxWattsLabel = new System.Windows.Forms.Label
             {
                 Text = "Rig max watts:",
-                AccessibleName = "Rig maximum watts label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 410, y + 3),
                 Font = font,
@@ -1570,7 +1518,6 @@ namespace WSJTX_Controller
                 TabIndex = 25,
                 Font = font,
                 AccessibleName = "Rig maximum watts",
-                AccessibleDescription = "Your rig's full-power rating in watts (for example, 100). Jimmy uses this together with the Watts value to compute the fraction it commands to the rig.",
             };
             radioPanel.Controls.Add(_radioStartupPowerMaxWattsUpDown);
             y += 32;
@@ -1578,7 +1525,6 @@ namespace WSJTX_Controller
             var audioStepLabel = new System.Windows.Forms.Label
             {
                 Text = "F11/F12 audio level step (%):",
-                AccessibleName = "F11 F12 audio level step percent label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1596,7 +1542,6 @@ namespace WSJTX_Controller
                 TabIndex = 26,
                 Font = font,
                 AccessibleName = "F11 F12 audio level step percent",
-                AccessibleDescription = "How much F11 and F12 change the transmit audio level per press, as a percentage. Default 5.",
             };
             radioPanel.Controls.Add(_radioAudioStepUpDown);
             y += 32;
@@ -1610,7 +1555,6 @@ namespace WSJTX_Controller
                 Font = font,
                 TabIndex = 27,
                 AccessibleName = "Remember F11 F12 audio level per band",
-                AccessibleDescription = "When checked, each F11/F12 adjustment is saved for the current band and restored automatically when you return to it. When unchecked, the level carries over as-is across bands, same as before.",
             };
             radioPanel.Controls.Add(_radioRememberTxLevelPerBandCheckBox);
             y += 32;
@@ -1623,7 +1567,6 @@ namespace WSJTX_Controller
                 TabIndex = 28,
                 Font = font,
                 AccessibleName = "Test radio connection",
-                AccessibleDescription = "Launches (or connects to) rigctld with the settings above and reports whether it answered.",
             };
             _radioTestButton.Click += RadioTestButton_Click;
             radioPanel.Controls.Add(_radioTestButton);
@@ -1687,7 +1630,6 @@ namespace WSJTX_Controller
                        "set to Hamlib rigctld with PTT enabled; otherwise it stays receive-only with nowhere " +
                        "to key PTT.",
                 TabStop = false,
-                AccessibleName = "Decode Engine instructions",
                 Font = font,
             };
             decodeEnginePanel.Controls.Add(engineInstrBox);
@@ -1696,7 +1638,6 @@ namespace WSJTX_Controller
             var myCallLabel = new System.Windows.Forms.Label
             {
                 Text = "My Call:",
-                AccessibleName = "My Call label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1712,14 +1653,12 @@ namespace WSJTX_Controller
                 TabIndex = 2,
                 Font = font,
                 AccessibleName = "My Call",
-                AccessibleDescription = "Your callsign. Required for Jimmy Native -- the engine needs it before it can report its own status.",
             };
             decodeEnginePanel.Controls.Add(_engineMyCallTextBox);
 
             var myGridLabel = new System.Windows.Forms.Label
             {
                 Text = "My Grid:",
-                AccessibleName = "My Grid label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 180, y + 3),
                 Font = font,
@@ -1735,7 +1674,6 @@ namespace WSJTX_Controller
                 TabIndex = 3,
                 Font = font,
                 AccessibleName = "My Grid",
-                AccessibleDescription = "Your Maidenhead grid square. Required for Jimmy Native.",
             };
             decodeEnginePanel.Controls.Add(_engineMyGridTextBox);
             y += 32;
@@ -1743,7 +1681,6 @@ namespace WSJTX_Controller
             var audioDeviceLabel = new System.Windows.Forms.Label
             {
                 Text = "Audio input device:",
-                AccessibleName = "Audio input device label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1760,7 +1697,6 @@ namespace WSJTX_Controller
                 TabIndex = 4,
                 Font = font,
                 AccessibleName = "Audio input device",
-                AccessibleDescription = "Sound card input Jimmy Native captures from. Leave blank for the system default. Populated from the real devices this computer sees.",
             };
             _engineAudioDeviceCombo.Items.Add("");   // blank = system default
             bool engineSessionActive = ctrl.nativeEngineClient != null && ctrl.nativeEngineClient.Running;
@@ -1773,7 +1709,6 @@ namespace WSJTX_Controller
             var audioInputLevelLabel = new System.Windows.Forms.Label
             {
                 Text = "Input level (%):",
-                AccessibleName = "Audio input level label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1798,7 +1733,6 @@ namespace WSJTX_Controller
                 TabIndex = 5,
                 Font = font,
                 AccessibleName = "Audio input level percent",
-                AccessibleDescription = "Windows' own output volume for the engine's capture stream on the device above -- the same control the Windows Volume Mixer has for jimmy-engine-host.exe, applied immediately. Only available while the native engine is running and has opened this device.",
                 Enabled = false,
             };
             decodeEnginePanel.Controls.Add(_engineAudioInputLevelUpDown);
@@ -1808,7 +1742,6 @@ namespace WSJTX_Controller
             var audioOutputDeviceLabel = new System.Windows.Forms.Label
             {
                 Text = "Audio output device (TX):",
-                AccessibleName = "Audio output device label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1825,7 +1758,6 @@ namespace WSJTX_Controller
                 TabIndex = 6,
                 Font = font,
                 AccessibleName = "Audio output device",
-                AccessibleDescription = "Sound card output Jimmy Native transmits to -- normally the radio's own audio interface, NOT your PC speakers. Leave blank for the system default. Populated from the real devices this computer sees.",
             };
             _engineAudioOutputDeviceCombo.Items.Add("");   // blank = system default
             foreach (var dev in NativeEngineClient.ListOutputAudioDevices(engineSessionActive))
@@ -1837,7 +1769,6 @@ namespace WSJTX_Controller
             var audioOutputLevelLabel = new System.Windows.Forms.Label
             {
                 Text = "Output level (%):",
-                AccessibleName = "Audio output level label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1858,7 +1789,6 @@ namespace WSJTX_Controller
                 TabIndex = 7,
                 Font = font,
                 AccessibleName = "Audio output level percent",
-                AccessibleDescription = "Windows' own output volume for the engine's transmit stream on the device above -- the same control the Windows Volume Mixer has for jimmy-engine-host.exe, applied immediately. This is the level that actually reaches the radio. Only available while the native engine is running and has opened this device.",
                 Enabled = false,
             };
             decodeEnginePanel.Controls.Add(_engineAudioOutputLevelUpDown);
@@ -1868,7 +1798,6 @@ namespace WSJTX_Controller
             var dxClusterLabel = new System.Windows.Forms.Label
             {
                 Text = "Additional human DX Cluster server (optional, host:port):",
-                AccessibleName = "Additional human DX Cluster server label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1899,7 +1828,6 @@ namespace WSJTX_Controller
                 // secondary node) -- the previous example, dxc.nc7j.com:7373, is actually
                 // NC7J's *skimmer* port per Nexus's own settings.rs comment, not a human node,
                 // and would have just duplicated RBN spots Jimmy Test already pulls in.
-                AccessibleDescription = "Optional host:port of a human-run DX-cluster telnet node for SSB/phone spots, e.g. dxc.wa9pie.net:8000. The automated reverse beacon network feed works with this left blank.",
             };
             decodeEnginePanel.Controls.Add(_dxClusterAddressTextBox);
             y += 24;
@@ -1964,7 +1892,6 @@ namespace WSJTX_Controller
                        "takes effect immediately; the rest take effect the next time the engine restarts " +
                        "(changing them here, or changing decode engine/radio settings, restarts it).",
                 TabStop = false,
-                AccessibleName = "Decode instructions",
                 Font = font,
             };
             decodePanel.Controls.Add(instrBox);
@@ -1973,7 +1900,6 @@ namespace WSJTX_Controller
             var depthLabel = new System.Windows.Forms.Label
             {
                 Text = "Decode depth:",
-                AccessibleName = "Decode depth label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -1989,7 +1915,6 @@ namespace WSJTX_Controller
                 TabIndex = 0,
                 Font = font,
                 AccessibleName = "Decode depth",
-                AccessibleDescription = "WSJT-X's Fast/Normal/Deep. Deep catches weaker signals but uses more CPU; Fast trades sensitivity for speed. Takes effect immediately, no engine restart needed.",
             };
             _decodeDepthCombo.Items.AddRange(new object[] { "Fast", "Normal", "Deep" });
             _decodeDepthCombo.SelectedIndex = Math.Max(0, Math.Min(2, ctrl.Decode.DecodeDepth - 1));
@@ -1999,7 +1924,6 @@ namespace WSJTX_Controller
             var flowLabel = new System.Windows.Forms.Label
             {
                 Text = "F Low (Hz):",
-                AccessibleName = "F Low label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -2017,14 +1941,12 @@ namespace WSJTX_Controller
                 TabIndex = 1,
                 Font = font,
                 AccessibleName = "Decode F Low Hz",
-                AccessibleDescription = "Decoder passband low edge in Hz -- signals below this are not searched. WSJT-X default 200.",
             };
             decodePanel.Controls.Add(_decodeFLowUpDown);
 
             var fhighLabel = new System.Windows.Forms.Label
             {
                 Text = "F High (Hz):",
-                AccessibleName = "F High label",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left + 190, y + 3),
                 Font = font,
@@ -2042,7 +1964,6 @@ namespace WSJTX_Controller
                 TabIndex = 2,
                 Font = font,
                 AccessibleName = "Decode F High Hz",
-                AccessibleDescription = "Decoder passband high edge in Hz. WSJT-X default 2900; raise toward 4000 to catch stations calling high on a crowded band.",
             };
             decodePanel.Controls.Add(_decodeFHighUpDown);
             y += 32;
@@ -2050,23 +1971,17 @@ namespace WSJTX_Controller
             _decodeApDecodeCheckBox = MakeCheck(decodePanel,
                 "Enable AP", "Enable AP",
                 left, y, 3, ctrl.Decode.ApDecode, font);
-            _decodeApDecodeCheckBox.AccessibleDescription =
-                "WSJT-X's Decode menu 'Enable AP' -- a-priori decoding. FT8 only. On by default; off means the decoder tries no hypothesis-assisted passes.";
             _decodeApDecodeCheckBox.CheckedChanged += (s, e) => UpdateApCqOnlyEnabled();
             y += 24;
 
             _decodeApCqOnlyCheckBox = MakeCheck(decodePanel,
                 "AP for CQ only (expert)", "AP for CQ only, expert",
                 left, y, 4, ctrl.Decode.ApCqOnly, font);
-            _decodeApCqOnlyCheckBox.AccessibleDescription =
-                "Restricts AP to the CQ hypothesis only, requires Enable AP above. WSJT-X flips this automatically after 5 idle minutes; here it's an explicit choice. Off by default.";
             y += 24;
 
             _decodeSingleDecodeCheckBox = MakeCheck(decodePanel,
                 "Single decode", "Single decode",
                 left, y, 5, ctrl.Decode.SingleDecode, font);
-            _decodeSingleDecodeCheckBox.AccessibleDescription =
-                "Narrows the FT8/FT4 search to your RX offset plus or minus 25 Hz. Note: stock WSJT-X's own Single decode checkbox does nothing for FT8/FT4 -- this one actually works. Off by default (full passband).";
             y += 32;
 
             UpdateApCqOnlyEnabled();
@@ -2112,7 +2027,6 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(640, 34),
                 Text = "Choose a frequency, then tab to the field you want to change, or the shortcut field to assign a hotkey.",
                 TabStop = false,
-                AccessibleName = "Frequencies usage instructions",
                 Font = font,
             };
             frequenciesPanel.Controls.Add(instrBox);
@@ -2141,7 +2055,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Frequencies",
-                AccessibleDescription = "Every band's FT8 and FT4 calling frequencies. The first entry for each mode in a band is what Band Up/Down tunes to.",
             };
             // NOT populated here: BuildFreqList() ends by calling LoadSelectedFreqEntry(),
             // which reads _freqValueUpDown/_freqHotkeyCaptureBox/_freqClearHotkeyButton/
@@ -2171,7 +2084,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Selected frequency kHz",
-                AccessibleDescription = "Frequency in kHz for the entry currently selected in the list.",
             };
             _freqValueUpDown.Leave += (s, e) => CommitFreqValue();
             frequenciesPanel.Controls.Add(_freqValueUpDown);
@@ -2205,7 +2117,6 @@ namespace WSJTX_Controller
                 // this band", and always resolves to whichever row matches whatever mode you're
                 // already in (WsjtxClient.SelectFrequencyHotkey). One hotkey per band is enough
                 // for FT8 and FT4 both -- assign it to either row.
-                AccessibleDescription = "Press a key combination to jump to this band, staying in your current mode (FT8 or FT4) -- one hotkey covers both, whichever row you assign it to. Empty means no hotkey.",
             };
             _freqHotkeyCaptureBox.KeyCaptured += (s, ev) => OnFreqKeyCaptured(ev.Keys);
             frequenciesPanel.Controls.Add(_freqHotkeyCaptureBox);
@@ -2230,7 +2141,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Add frequency",
-                AccessibleDescription = "Adds a copy of the selected entry to the same band -- edit the Frequency field afterward to the new value.",
             };
             _freqAddButton.Click += FreqAddButton_Click;
             frequenciesPanel.Controls.Add(_freqAddButton);
@@ -2243,7 +2153,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Remove frequency",
-                AccessibleDescription = "Removes the selected entry. A band's last FT8 or last FT4 entry cannot be removed.",
             };
             _freqRemoveButton.Click += FreqRemoveButton_Click;
             frequenciesPanel.Controls.Add(_freqRemoveButton);
@@ -2256,7 +2165,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Restore all frequencies to defaults",
-                AccessibleDescription = "Removes every custom frequency and hotkey on every band, back to Jimmy's single built-in calling frequency per band.",
             };
             restoreButton.Click += (s, e) =>
             {
@@ -2505,7 +2413,6 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(660, 34),
                 Text = "Check a notification to enable it. Choose one to edit what it says and, further down, when and how it announces.",
                 TabStop = false,
-                AccessibleName = "Notifications usage instructions",
                 Font = font,
             };
             notificationsPanel.Controls.Add(instrBox);
@@ -2545,7 +2452,6 @@ namespace WSJTX_Controller
                 Font = font,
                 CheckOnClick = true,
                 AccessibleName = "Notifications",
-                AccessibleDescription = "Every configurable notification. Check to enable.",
             };
             foreach (var type in _notifyTypeOrder)
                 _notifyTypesListBox.Items.Add(NotificationDefaults.DisplayNames[type], _pendingNotifyPolicies[type].Enabled);
@@ -2576,7 +2482,6 @@ namespace WSJTX_Controller
                 Font = font,
                 CheckOnClick = true,
                 AccessibleName = "Template variables",
-                AccessibleDescription = "Variables this notification can include. Check to add to the template, uncheck to remove. Order matches the template's own left-to-right order.",
             };
             _notifyVarsListBox.ItemCheck += (s, e) => NotifyVarCheckChanged(e);
             notificationsPanel.Controls.Add(_notifyVarsListBox);
@@ -2621,7 +2526,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Template text",
-                AccessibleDescription = "The exact wording spoken, including {Variable} placeholders and any literal text you type.",
             };
             _notifyTemplateTextBox.Leave += (s, e) => CommitNotifyTemplateText();
             notificationsPanel.Controls.Add(_notifyTemplateTextBox);
@@ -2689,7 +2593,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Defer while transmitting",
-                AccessibleDescription = "When checked, this notification never interrupts an active transmission -- it waits until the current one ends.",
             };
             _notifyDeferWhileTxCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
             advancedGroup.Controls.Add(_notifyDeferWhileTxCheckBox);
@@ -2702,7 +2605,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Suppress unchanged repeats",
-                AccessibleDescription = "When checked, this notification stays silent if the exact same wording was already just announced.",
             };
             _notifySuppressUnchangedCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
             advancedGroup.Controls.Add(_notifySuppressUnchangedCheckBox);
@@ -2771,8 +2673,7 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(110, 21),
                 TabIndex = tabIdx++,
                 Font = font,
-                AccessibleName = "Priority",
-                AccessibleDescription = "Important notifications also play the audible alert tone.",
+                AccessibleName = "Play alert tone",
             };
             _notifyPriorityComboBox.Items.Add("Normal");
             _notifyPriorityComboBox.Items.Add("Important");
@@ -2787,7 +2688,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Reset this notification to default",
-                AccessibleDescription = "Restores the selected notification's template, timing, and repeat settings to Jimmy's built-in defaults.",
             };
             resetThisButton.Click += ResetThisNotification_Click;
             notificationsPanel.Controls.Add(resetThisButton);
@@ -2800,7 +2700,6 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++,
                 Font = font,
                 AccessibleName = "Reset all notification settings to defaults",
-                AccessibleDescription = "Restores every notification's template, timing, and repeat settings to Jimmy's built-in defaults. Enabled/disabled state is reset too.",
             };
             resetAllButton.Click += ResetAllNotifications_Click;
             notificationsPanel.Controls.Add(resetAllButton);
@@ -3356,7 +3255,6 @@ namespace WSJTX_Controller
                 Size           = new System.Drawing.Size(648, 32),
                 Text           = "Enable or disable each sound event and choose a WAV file. Leave the path empty to disable a sound.",
                 TabStop        = false,
-                AccessibleName = "Sounds tab instructions",
                 Font           = font,
             };
             soundsPanel.Controls.Add(instrBox);
@@ -3850,7 +3748,6 @@ namespace WSJTX_Controller
                 Size           = new Size(640, 34),
                 Text           = "Choose an action, then tab to the shortcut field and press the new shortcut.",
                 TabStop        = false,
-                AccessibleName = "Hotkeys usage instructions",
             };
             hotkeysPanel.Controls.Add(instrBox);
 
@@ -4192,7 +4089,7 @@ namespace WSJTX_Controller
                 Size           = new System.Drawing.Size(160, 340),
                 Font           = font,
                 TabIndex       = 0,
-                AccessibleName = "Logbook service list",
+                AccessibleName = "Logbook services",
             };
             logbookSyncPanel.Controls.Add(serviceList);
 
@@ -4369,7 +4266,6 @@ namespace WSJTX_Controller
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "TQSL Station Location name",
-                AccessibleDescription = $"The Station Location name as configured inside TQSL -- not a Jimmy credential. Required for {uploadLotwKeyText} to sign and upload via TQSL.",
             };
             lotwLogbookBox.Controls.Add(_tqslStationLocationTb);
             lotwLogbookBox.Controls.Add(MakeLabel(
@@ -4665,7 +4561,7 @@ namespace WSJTX_Controller
                 Size           = new System.Drawing.Size(160, 279),
                 Font           = font,
                 TabIndex       = 2,
-                AccessibleName = "Lookup data service list",
+                AccessibleName = "Lookup data services",
             };
             lookupPanel.Controls.Add(serviceList);
 
@@ -5328,7 +5224,6 @@ namespace WSJTX_Controller
                 TabIndex = 0,
                 Font = font,
                 AccessibleName = "Appearance theme",
-                AccessibleDescription = "Choose a preset color theme for the station lists, or pick individual colors below.",
             };
             appearanceThemeCombo.Items.AddRange(new object[] { "Default", "Dark", "High Contrast" });
             appearanceThemeCombo.SelectedIndex = AppearanceThemeIndexForColors(_appearanceBackColor, _appearanceForeColor, _appearanceAltRowColor);
@@ -5344,7 +5239,6 @@ namespace WSJTX_Controller
                 TabIndex = 1,
                 Font = font,
                 AccessibleName = "List background color",
-                AccessibleDescription = "Choose the background color for the station lists.",
             };
             appearanceBackColorButton.Click += AppearanceBackColorButton_Click;
             appearancePanel.Controls.Add(appearanceBackColorButton);
@@ -5358,7 +5252,6 @@ namespace WSJTX_Controller
                 TabIndex = 2,
                 Font = font,
                 AccessibleName = "List text color",
-                AccessibleDescription = "Choose the text color for the station lists.",
             };
             appearanceForeColorButton.Click += AppearanceForeColorButton_Click;
             appearancePanel.Controls.Add(appearanceForeColorButton);
@@ -5372,7 +5265,6 @@ namespace WSJTX_Controller
                 TabIndex = 3,
                 Font = font,
                 AccessibleName = "Alternating row color",
-                AccessibleDescription = "Choose the color used for every other row in the station lists.",
             };
             appearanceAltRowColorButton.Click += AppearanceAltRowColorButton_Click;
             appearancePanel.Controls.Add(appearanceAltRowColorButton);
@@ -5398,7 +5290,6 @@ namespace WSJTX_Controller
                 Value = Math.Max(8, Math.Min(18, ctrl.Settings.ListFontSize)),
                 Font = font,
                 AccessibleName = "List font size",
-                AccessibleDescription = "Font size used in the station lists, from 8 to 18 points.",
             };
             appearancePanel.Controls.Add(appearanceFontSizeNumeric);
             y += 36;
@@ -5411,7 +5302,6 @@ namespace WSJTX_Controller
                 TabIndex = 5,
                 Font = font,
                 AccessibleName = "Restore appearance defaults",
-                AccessibleDescription = "Resets list colors and font size back to the original Jimmy defaults.",
             };
             restoreDefaultsButton.Click += AppearanceRestoreDefaultsButton_Click;
             appearancePanel.Controls.Add(restoreDefaultsButton);
@@ -5436,7 +5326,6 @@ namespace WSJTX_Controller
                 TabIndex = 6,
                 Font = font,
                 AccessibleName = "Alert category",
-                AccessibleDescription = "Choose which alert category's colors to edit below.",
             };
             foreach (var cat in JimmySettings.AlertCategories)
                 alertCategoryCombo.Items.Add(JimmySettings.AlertCategoryLabels[cat]);
@@ -5452,7 +5341,6 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(220, 24),
                 TabIndex = 7,
                 Font = font,
-                AccessibleDescription = "Choose the text color used for the selected alert category.",
             };
             alertForeColorButton.Click += AlertForeColorButton_Click;
             appearancePanel.Controls.Add(alertForeColorButton);
@@ -5465,7 +5353,6 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(220, 24),
                 TabIndex = 8,
                 Font = font,
-                AccessibleDescription = "Choose the background color used for the selected alert category.",
             };
             alertBackColorButton.Click += AlertBackColorButton_Click;
             appearancePanel.Controls.Add(alertBackColorButton);
@@ -5478,7 +5365,6 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(220, 24),
                 TabIndex = 9,
                 Font = font,
-                AccessibleDescription = "Removes the custom colors for the selected alert category, so it uses the normal list colors again.",
             };
             alertClearColorButton.Click += AlertClearColorButton_Click;
             appearancePanel.Controls.Add(alertClearColorButton);

@@ -389,8 +389,6 @@ namespace WSJTX_Controller
             //
             // subtitleLabel
             //
-            this.subtitleLabel.AccessibleDescription = "";
-            this.subtitleLabel.AccessibleName = "Setup wizard instructions";
             this.subtitleLabel.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.subtitleLabel.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Bold);
             this.subtitleLabel.Location = new System.Drawing.Point(10, 10);
@@ -403,7 +401,6 @@ namespace WSJTX_Controller
             //
             // modeLabel
             //
-            this.modeLabel.AccessibleName = "Operating mode question";
             this.modeLabel.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.modeLabel.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
             this.modeLabel.Location = new System.Drawing.Point(10, 40);
@@ -440,7 +437,6 @@ namespace WSJTX_Controller
             //
             // label12
             //
-            this.label12.AccessibleName = "CQ type question";
             this.label12.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label12.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
             this.label12.Location = new System.Drawing.Point(10, 76);
@@ -477,7 +473,6 @@ namespace WSJTX_Controller
             //
             // label2
             //
-            this.label2.AccessibleName = "Reply target question";
             this.label2.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label2.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
             this.label2.Location = new System.Drawing.Point(10, 112);
@@ -512,7 +507,6 @@ namespace WSJTX_Controller
             //
             // label4
             //
-            this.label4.AccessibleName = "POTA role question";
             this.label4.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label4.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
             this.label4.Location = new System.Drawing.Point(10, 148);
@@ -549,7 +543,6 @@ namespace WSJTX_Controller
             //
             // label5
             //
-            this.label5.AccessibleName = "Reply order question";
             this.label5.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label5.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
             this.label5.Location = new System.Drawing.Point(10, 184);
@@ -588,7 +581,6 @@ namespace WSJTX_Controller
             //
             // label9
             //
-            this.label9.AccessibleName = "Ready to start message";
             this.label9.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label9.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Bold);
             this.label9.Location = new System.Drawing.Point(10, 326);

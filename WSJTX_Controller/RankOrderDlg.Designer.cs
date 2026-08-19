@@ -78,7 +78,6 @@ namespace WSJTX_Controller
             this.tabControl.SelectedIndex = 0;
             this.tabControl.Size          = new Size(406, 306);
             this.tabControl.TabIndex      = 0;
-            this.tabControl.AccessibleName = "";
 
             // ══ TAB 1 – PRIORITIES & FILTERS ═══════════════════════════════════
             this.callingPrioritiesTabPage.Controls.Add(this.callingCheckedListBox);
@@ -186,7 +185,6 @@ namespace WSJTX_Controller
             this.beamStaticLabel.Name           = "beamStaticLabel";
             this.beamStaticLabel.TabStop        = false;
             this.beamStaticLabel.Text           = "Beam preference:";
-            this.beamStaticLabel.AccessibleName = "Beam preference label";
 
             // Beam combo – TabIndex 3
             this.beamComboBox.DropDownStyle     = ComboBoxStyle.DropDownList;

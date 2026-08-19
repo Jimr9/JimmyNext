@@ -109,7 +109,7 @@ namespace WSJTX_Controller
             {
                 Location = new Point(10, 30), Size = new Size(300, 300),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left,
-                TabIndex = 1, AccessibleName = "Starting point for the new Rule Definition",
+                TabIndex = 1, AccessibleName = "Start from",
             };
             foreach (var p in _presets) _presetLb.Items.Add(p.Label);
             _presetLb.SelectedIndexChanged += (s, e) => UpdateSelection();
@@ -120,7 +120,7 @@ namespace WSJTX_Controller
             _copyFromCb = new ComboBox
             {
                 Location = new Point(320, 50), Size = new Size(210, 21), DropDownStyle = ComboBoxStyle.DropDownList,
-                TabIndex = 2, AccessibleName = "Existing Rule Definition to copy", Visible = false,
+                TabIndex = 2, AccessibleName = "Copy from", Visible = false,
             };
             foreach (var d in _existingDefs) _copyFromCb.Items.Add(d.Name);
             if (_copyFromCb.Items.Count > 0) _copyFromCb.SelectedIndex = 0;
@@ -138,7 +138,7 @@ namespace WSJTX_Controller
             {
                 Text = "&Next >", Location = new Point(360, 390), Size = new Size(90, 26),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left, TabIndex = 3,
-                AccessibleName = "Next: fill in Rule Definition fields",
+                AccessibleName = "Next",
             };
             _nextBtn.Click += (s, e) => NextClicked();
             Controls.Add(_nextBtn);
@@ -148,7 +148,7 @@ namespace WSJTX_Controller
             {
                 Text = "Cancel", Location = new Point(456, 390), Size = new Size(90, 26),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left, TabIndex = 4,
-                DialogResult = DialogResult.Cancel, AccessibleName = "Cancel the New Rule Wizard",
+                DialogResult = DialogResult.Cancel, AccessibleName = "Cancel",
             };
             Controls.Add(cancelBtn);
             CancelButton = cancelBtn;

@@ -611,10 +611,9 @@
             this.exceptTextBox.Enter += new System.EventHandler(this.exceptTextBox_Enter);
             this.exceptTextBox.KeyPress += new System.Windows.Forms.KeyPressEventHandler(this.exceptTextBox_KeyPress);
             this.exceptTextBox.Leave += new System.EventHandler(this.exceptTextBox_Leave);
-            // 
+            //
             // label1
-            // 
-            this.label1.AccessibleName = " ";
+            //
             this.label1.AutoSize = true;
             this.label1.Font = new System.Drawing.Font("Microsoft Sans Serif", 6.75F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.label1.Location = new System.Drawing.Point(230, 713);
@@ -1122,7 +1121,7 @@
             //
             // optionsButton
             //
-            this.optionsButton.AccessibleName = "Options, Alt O";
+            this.optionsButton.AccessibleName = "Options";
             this.optionsButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
             this.optionsButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.optionsButton.Location = new System.Drawing.Point(10, 249);
@@ -1136,7 +1135,7 @@
             //
             // rowOrderButton
             //
-            this.rowOrderButton.AccessibleName = "Row Display Order, Alt I";
+            this.rowOrderButton.AccessibleName = "Row Display Order";
             this.rowOrderButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
             this.rowOrderButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.rowOrderButton.Location = new System.Drawing.Point(10, 277);
@@ -1150,7 +1149,7 @@
             //
             // sortOrderButton
             //
-            this.sortOrderButton.AccessibleName = "Stations Available Sort Order, Alt S Button";
+            this.sortOrderButton.AccessibleName = "Stations Available Sort Order";
             this.sortOrderButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right)));
             this.sortOrderButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.sortOrderButton.Location = new System.Drawing.Point(10, 305);
@@ -1241,7 +1240,7 @@
             //
             // cqIntentCqOnlyButton
             //
-            this.cqIntentCqOnlyButton.AccessibleName = "CQ only, press Alt C to start";
+            this.cqIntentCqOnlyButton.AccessibleName = "CQ only";
             this.cqIntentCqOnlyButton.AutoSize = true;
             this.cqIntentCqOnlyButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.cqIntentCqOnlyButton.Location = new System.Drawing.Point(110, 20);
@@ -1254,7 +1253,7 @@
             //
             // cqIntentCqDxOnlyButton
             //
-            this.cqIntentCqDxOnlyButton.AccessibleName = "CQ DX only, press Alt C to start";
+            this.cqIntentCqDxOnlyButton.AccessibleName = "CQ DX only";
             this.cqIntentCqDxOnlyButton.AutoSize = true;
             this.cqIntentCqDxOnlyButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.cqIntentCqDxOnlyButton.Location = new System.Drawing.Point(15, 42);
@@ -1267,7 +1266,7 @@
             //
             // cqIntentCqAndDxButton
             //
-            this.cqIntentCqAndDxButton.AccessibleName = "CQ and CQ DX, press Alt C to start";
+            this.cqIntentCqAndDxButton.AccessibleName = "CQ and CQ DX";
             this.cqIntentCqAndDxButton.AutoSize = true;
             this.cqIntentCqAndDxButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.cqIntentCqAndDxButton.Location = new System.Drawing.Point(110, 42);
@@ -1347,7 +1346,6 @@
             // showUsStateCheckBox
             //
             this.showUsStateCheckBox.AccessibleName = "Show U.S. state instead of USA";
-            this.showUsStateCheckBox.AccessibleDescription = "When checked, shows the U.S. state abbreviation in the available stations list instead of USA.";
             this.showUsStateCheckBox.AutoSize = true;
             this.showUsStateCheckBox.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.showUsStateCheckBox.Location = new System.Drawing.Point(21, 455);

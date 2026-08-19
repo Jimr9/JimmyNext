@@ -68,7 +68,7 @@ namespace WSJTX_Controller
                 Size           = new Size(260, 20),
                 Anchor         = AnchorStyles.Top | AnchorStyles.Left,
                 TabIndex       = tab++,
-                AccessibleName = "Search Rule Definitions by name, ID, sponsor, or category",
+                AccessibleName = "Search Rule Definitions",
             };
             _searchTb.TextChanged += (s, e) => ApplyFilter();
             Controls.Add(_searchTb);
@@ -83,7 +83,7 @@ namespace WSJTX_Controller
                 Size            = new Size(500, 330),
                 Anchor          = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 TabIndex        = tab++,
-                AccessibleName  = "Rule Definitions list",
+                AccessibleName  = "Rule Definitions",
             };
             _listView.Columns.Add("Name", 190);
             _listView.Columns.Add("Sponsor", 90);
@@ -176,7 +176,7 @@ namespace WSJTX_Controller
                 Anchor         = AnchorStyles.Bottom | AnchorStyles.Right,
                 TabIndex       = tab++,
                 DialogResult   = DialogResult.Cancel,
-                AccessibleName = "Close Rule Definition Manager",
+                AccessibleName = "Close",
             };
             Controls.Add(closeBtn);
             CancelButton = closeBtn;
