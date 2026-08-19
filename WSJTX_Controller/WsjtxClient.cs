@@ -320,6 +320,16 @@ namespace WSJTX_Controller
         private int decodeCycle = 0;
         private bool decodesProcessed = false;
         internal bool debugDetail = false;
+        // Governs TrimAllCallDict (CallQueueStore.cs) -- how long allCallDict (the internal
+        // per-callsign "everything heard from this station" history feeding LogQso/Country
+        // lookups) keeps an entry with no activity. Checked 2026-08-18: this has been a plain
+        // hardcoded constant since Jimmy's very first commit, never read from or written to any
+        // .ini setting or Options control. Deliberately NOT the same knob as Controller.
+        // maxCallQueueAgePeriods (Options > General "Max call-queue age (periods)") -- that one
+        // is period-count-based, operator-configurable, and governs TrimCallQueue's pruning of
+        // the visible operator-facing call queue (callQueue/callDict), an entirely different
+        // data structure for an entirely different concern (queue staleness for the operator to
+        // act on, vs. how long Jimmy privately remembers a station for its own logging lookups).
         internal int maxDecodeAgeMinutes = 15;
         public TxModes txMode;
         public bool usePskReporter = true;
@@ -2542,17 +2552,10 @@ namespace WSJTX_Controller
         // fire (confirmed true even before this cleanup pass: production has been Direct-only
         // since 2026-08-12, and nothing in WsjtxClient.Direct.cs ever started this timer either).
         // Direct mode's own equivalent per-period-boundary work (queue-age expiry via
-        // TrimCallQueue, CalcAvgTimeOffset(true)) lives in DirectApplyDecodes' own new-slot
-        // detection instead (WsjtxClient.Direct.cs) -- already there, not something this removal
-        // needs to add. One real, pre-existing gap found while confirming this, NOT introduced by
-        // this removal and NOT fixed here (a real behavior change belongs in its own reviewed
-        // change, not a transport-cleanup pass): CallQueueStore.TrimAllCallDict() -- the
-        // allCallDict/sentReportList age-trim DecodesCompleted used to also run -- has had no
-        // caller at all since the same Direct-only cutover, so allCallDict/sentReportList have
-        // been growing unbounded for the lifetime of every Direct-mode session, not just this
-        // build. Flagged for a future pass; TrimAllCallDict() itself is left in CallQueueStore.cs,
-        // unreferenced, rather than deleted, so restoring the periodic trim is a one-line wire-up
-        // whenever that gets prioritized.
+        // TrimCallQueue, CalcAvgTimeOffset(true), and -- restored 2026-08-18 --
+        // CallQueueStore.TrimAllCallDict's allCallDict aging, previously flagged here as an
+        // unreferenced-since-the-cutover gap) lives in DirectApplyDecodes' own new-slot detection
+        // instead (WsjtxClient.Direct.cs).
 
         private void CheckCallQueuePeriod(bool tmpTxFirst)
         {

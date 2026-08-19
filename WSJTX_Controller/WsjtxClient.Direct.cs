@@ -534,6 +534,18 @@ namespace WSJTX_Controller
                 // clears ready for the next one.
                 CalcAvgTimeOffset(true);
 
+                // 2026-08-18 investigation + fix: TrimAllCallDict()'s only caller was
+                // DecodesCompleted(), itself only ever reachable from the UDP-only "WSJT-X event,
+                // Decode start" handler (WsjtxClient.Protocol.cs) -- removed with the rest of the
+                // UDP dispatcher, with nothing under Direct mode ever replacing it. Restored here
+                // at the same real per-period boundary as CalcAvgTimeOffset(true) just above, not
+                // by resurrecting postDecodeTimer/the dispatcher. See CallQueueStore.
+                // TrimAllCallDict's own comment; this is deliberately separate from TrimCallQueue
+                // just below (different data structure, different concern, different -- and never
+                // shared -- age setting: see maxDecodeAgeMinutes's own comment).
+                if (_callQueueStore.TrimAllCallDict())
+                    DebugOutput(_callQueueStore.AllCallDictString());
+
                 // Queue-age expiry + the retry-limit/discard-give-up counter -- moved here
                 // 2026-08-11 from DirectApplyStatus's own "transmitting just started" gate,
                 // which could never fire in Listen mode. A new slot is a genuine per-period
