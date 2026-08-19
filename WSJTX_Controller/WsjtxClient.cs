@@ -2552,10 +2552,10 @@ namespace WSJTX_Controller
         // fire (confirmed true even before this cleanup pass: production has been Direct-only
         // since 2026-08-12, and nothing in WsjtxClient.Direct.cs ever started this timer either).
         // Direct mode's own equivalent per-period-boundary work (queue-age expiry via
-        // TrimCallQueue, CalcAvgTimeOffset(true), and -- restored 2026-08-18 --
-        // CallQueueStore.TrimAllCallDict's allCallDict aging, previously flagged here as an
-        // unreferenced-since-the-cutover gap) lives in DirectApplyDecodes' own new-slot detection
-        // instead (WsjtxClient.Direct.cs).
+        // TrimCallQueue, CalcAvgTimeOffset(true), and -- restored 2026-08-18 -- CalcBestOffset's
+        // "Use best Tx frequency" analysis and CallQueueStore.TrimAllCallDict's allCallDict aging,
+        // both previously flagged here as unreferenced-since-the-cutover gaps) lives in
+        // DirectApplyDecodes' own new-slot detection instead (WsjtxClient.Direct.cs).
 
         private void CheckCallQueuePeriod(bool tmpTxFirst)
         {
@@ -2778,6 +2778,14 @@ namespace WSJTX_Controller
         private void SetupCq(bool enableTx)
         {
             //set/show frequency offset for period after decodes started
+            // Restored 2026-08-18 -- see DirectSetTxOffset's own comment (WsjtxClient.Direct.cs).
+            // Only sends when there's a real, checkbox-gated offset to send: AudioOffsetFromTxPeriod
+            // already returns 0 if "Use best Tx frequency" is off or the period isn't known yet.
+            if (_directConnected)
+            {
+                uint cqOffset = AudioOffsetFromTxPeriod();
+                if (cqOffset > 0) DirectSetTxOffset(cqOffset);
+            }
             if (settingChanged)
             {
                 ctrl.WsjtxSettingConfirmed();
@@ -2877,6 +2885,11 @@ namespace WSJTX_Controller
             // DisableTx/HaltTx's own guards.
             if (_directConnected)
             {
+                // Restored 2026-08-18 -- see DirectSetTxOffset's own comment (WsjtxClient.Direct.cs).
+                // AudioOffsetFromMsg picks the offset for the period opposite dmsg's own (i.e. the
+                // period Jimmy will actually transmit the reply on), returns 0 if not applicable.
+                uint replyOffset = AudioOffsetFromMsg(dmsg);
+                if (replyOffset > 0) DirectSetTxOffset(replyOffset);
                 DirectSendReply(nCall, null, dmsg.Message, dmsg.Snr, null);
                 DebugOutput($"{Time()} >>>>>Sent Reply (direct) nCall:'{nCall}' msg:'{dmsg.Message}'");
             }

@@ -530,25 +530,24 @@ namespace WSJTX_Controller
             DebugOutput($"{Time()} restored tx level {savedLevel:0.00} for band index {bandIdx}");
         }
 
-        // UDP transport cleanup audit finding, 2026-08-18, NOT fixed here (a real behavior gap,
-        // not transport plumbing -- out of this cleanup pass's scope): CalcBestOffset's own
-        // comment above documents three callers ("the pre-negotiation decode-end path, the
-        // normal post-negotiation decode-end path, and DecodesCompleted's own end-of-cycle
-        // path") -- ALL THREE lived exclusively inside the classic UDP dispatcher (removed this
-        // same pass) or DecodesCompleted (removed this same pass, itself only ever reachable
-        // from that same dispatcher). That means CalcBestOffset/AudioOffsetFromTxPeriod/
-        // CalcTimerAdj have had NO live caller at all since the 2026-08-12 Direct-only
-        // production cutover -- predating this cleanup pass, not introduced by it. Practical
-        // effect: "Use best Tx frequency" (ctrl.freqCheckBox) analysis -- both the passive
-        // background version and the explicit Alt+ hotkey / "run recommended analysis?" prompt
-        // (StartSlotAnalysis) -- never actually completes under Direct mode; the operator-
-        // visible symptom is masked by SlotAnalysisWatchdog_Tick's own timeout fallback
-        // ("Transmit slot analysis timed out; starting CQ anyway"), which is presumably why this
-        // wasn't caught sooner: the feature degrades to "just starts CQing" instead of hanging.
-        // Left in place, unreferenced, rather than deleted -- unlike ProcessTxStart/ProcessTxEnd/
-        // DecodesCompleted (also removed this pass), Direct mode has NO existing replacement
-        // implementation of this specific analysis to fall back on, so deleting the only
-        // reference implementation would make a future real fix harder to write, not easier.
+        // 2026-08-18 investigation + restoration: this had NO live caller at all since the
+        // 2026-08-12 Direct-only production cutover -- its only trigger, DecodesCompleted(), lived
+        // exclusively inside the classic UDP dispatcher (both removed together in the later UDP
+        // cleanup pass, but already unreachable well before that). Restored via DirectApplyDecodes'
+        // own per-period-boundary block (WsjtxClient.Direct.cs) -- same real event, not a revived
+        // timer. The APPLY half was restored too: SetupCq now sends AudioOffsetFromTxPeriod() via
+        // DirectSetTxOffset before calling CQ, and ReplyTo sends AudioOffsetFromMsg(dmsg) the same
+        // way before replying -- both through the new SET_TX_OFFSET control command (Engine::
+        // set_tx_offset), which is NOT the REPLY command's dxFreqHz field: that one makes Jimmy's RX
+        // (and TX, unless Hold Tx Freq is on) follow a specific DX station's own decoded frequency
+        // (WSJT-X's classic double-click-to-work behavior); this is the unrelated "pick a quiet gap
+        // in the passband for my own transmission" analysis, same as it always was.
+        //
+        // CalcTimerAdj (below) is NOT restored -- its only caller was StartProcessDecodeTimer's own
+        // dispatcher-cycle-timing (deciding exactly when to fire a decode-completion timer relative
+        // to trPeriod), a concept with no analog in Direct mode's independent snapshot-polling
+        // interval. Left in place, unreferenced, same reasoning as before: a real fix would need
+        // Direct's own polling cadence redesigned around it, out of scope here.
         private bool CalcBestOffset(List<int> offsetList, Periods decodePeriod, bool clearList)
         {
             DebugOutput($"{Time()} CalcBestOffset, decodePeriod:{decodePeriod} clearList:{clearList} offsetList.Count:{offsetList.Count()} skipFirstDecodeSeries:{skipFirstDecodeSeries}");

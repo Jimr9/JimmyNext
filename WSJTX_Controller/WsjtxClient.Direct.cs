@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
@@ -534,6 +535,49 @@ namespace WSJTX_Controller
                 // clears ready for the next one.
                 CalcAvgTimeOffset(true);
 
+                // "Use best Tx frequency" restoration, 2026-08-18 investigation + fix: CalcBestOffset
+                // (WsjtxClient.BandAudio.cs) had zero live callers since the classic dispatcher died --
+                // its only trigger was DecodesCompleted(), itself only ever reachable from the
+                // UDP-only "WSJT-X event, Decode start" handler (WsjtxClient.Protocol.cs), which also
+                // called SetPeriodState() to set the `period` field CalcBestOffset gates on. Both were
+                // removed with the rest of the UDP dispatcher; nothing under Direct mode ever replaced
+                // either. Restored here at the same real per-period boundary as CalcAvgTimeOffset(true)
+                // just above, not by resurrecting postDecodeTimer/the dispatcher.
+                //
+                // lastDecodeEvenPeriod already tracks which period the slot that just ended belongs to
+                // (set in ProcessDecodeMsg from that decode's own SinceMidnight, the same real event
+                // that populates audioOffsets below it) -- same "trust the decode's own period over the
+                // current wall clock" reasoning WsjtxClient.Display.cs's ShowAdvancedQueue already uses
+                // for the identical problem, reused here rather than re-deriving from DateTime.UtcNow.
+                // It also stands in for SetPeriodState()'s old job of keeping the `period` gate itself
+                // non-UNK once periods are known.
+                Periods justEndedPeriod = lastDecodeEvenPeriod == true ? Periods.EVEN
+                    : lastDecodeEvenPeriod == false ? Periods.ODD
+                    : Periods.UNK;
+                if (justEndedPeriod != Periods.UNK) period = justEndedPeriod;
+
+                // Mirrors DecodesCompleted's own skipFirstDecodeSeries branch exactly: the first
+                // cycle after ClearAudioOffsets() (band change, StartSlotAnalysis restart, etc.) has
+                // an incomplete/mixed audioOffsets list, so it falls back to any previously-cached
+                // offsets instead of computing a bogus fresh result from partial data.
+                if (skipFirstDecodeSeries)
+                {
+                    skipFirstDecodeSeries = false;
+                    oddOffset = 0;
+                    evenOffset = 0;
+                    audioOffsets.Clear();
+                    if (cachedOddOffset > 0) oddOffset = cachedOddOffset;
+                    if (cachedEvenOffset > 0) evenOffset = cachedEvenOffset;
+                }
+                else if (justEndedPeriod != Periods.UNK)
+                {
+                    if (CalcBestOffset(audioOffsets, justEndedPeriod, true))
+                    {
+                        ctrl.freqCheckBox.Text = "Use best Tx frequency";
+                        ctrl.freqCheckBox.ForeColor = Color.Black;
+                    }
+                }
+
                 // 2026-08-18 investigation + fix: TrimAllCallDict()'s only caller was
                 // DecodesCompleted(), itself only ever reachable from the UDP-only "WSJT-X event,
                 // Decode start" handler (WsjtxClient.Protocol.cs) -- removed with the rest of the
@@ -730,6 +774,22 @@ namespace WSJTX_Controller
         public void DirectSetDecodeDepth(int depth)
         {
             DirectSendCommand("SET_DECODE_DEPTH " + depth);
+        }
+
+        // "Use best Tx frequency" apply step, restored 2026-08-18 -- see CalcBestOffset's own
+        // comment (WsjtxClient.BandAudio.cs) for the full investigation/restoration history.
+        // Called from SetupCq (before calling CQ) and ReplyTo (before replying), same two real
+        // moments the old Andy-WM8Q-fork OptReq command used to fire from, before that whole
+        // compatibility layer was removed (8b79743) for crashing the native engine. Reaches
+        // Engine::set_tx_offset via the new SET_TX_OFFSET control command -- deliberately NOT
+        // REPLY's dxFreqHz field, which has different semantics (follow a specific DX station's
+        // own frequency, not pick a quiet gap for Jimmy's own transmission). Fire-and-forget, same
+        // as DirectSetDecodeDepth/DirectSetPskReporter above -- a dropped SET_TX_OFFSET just means
+        // this particular Tx uses whatever offset the engine already had, not a safety concern.
+        public void DirectSetTxOffset(double hz)
+        {
+            if (hz <= 0) return;
+            DirectSendCommand("SET_TX_OFFSET " + hz.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         // Alt+M (Toggle Mode) equivalent for direct-engine mode -- see SetOperatingMode's own

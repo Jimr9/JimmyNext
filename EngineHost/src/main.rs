@@ -682,6 +682,22 @@ fn parse_args() -> Args {
 ///                                          at slot start and can't be live-adjusted mid-over (see
 ///                                          SET_TX_LEVEL's own comment) -- Tune's chunked
 ///                                          generation has no such limitation.
+///   SET_TX_OFFSET <hz>                   -- calls Engine::set_tx_offset(f32). Responds "OK" or
+///                                          "ERR <message>". Jimmy's "Use best Tx frequency"
+///                                          restoration (2026-08-18): Jimmy analyzes recent decodes
+///                                          to find the widest quiet gap in the passband, then sends
+///                                          that Hz value here right before calling CQ or replying,
+///                                          so its own transmission lands in the gap instead of on
+///                                          top of another station. set_tx_offset already existed in
+///                                          Engine (clamped 200-4000 Hz, "read by the next poll_tx")
+///                                          and is unrelated to REPLY's dx_freq_hz field just above
+///                                          -- that one moves RX (and TX, unless Hold Tx Freq is on)
+///                                          onto a SPECIFIC DX station's own decoded frequency
+///                                          (WSJT-X's classic double-click-to-work behavior);
+///                                          this one sets Jimmy's own outbound audio tone
+///                                          independent of any particular station. No Nexus source
+///                                          touched -- this just exposes an existing Engine method,
+///                                          matching every other command above.
 /// Formats the REPLY command's wire response from `Engine::call_station_ctx`'s own `Result` --
 /// pulled out as a small pure function so this has direct test coverage without needing a live
 /// Engine/TCP round trip. `Ok(())` -> "OK"; `Err(e)` -> "ERR {e}", matching every other fallible
@@ -874,6 +890,16 @@ fn run_control_server(
         } else if let Some(v) = line.strip_prefix("SET_TUNING ") {
             engine.lock().unwrap_or_else(|e| e.into_inner()).set_tune(v.trim() == "1");
             let _ = writeln!(stream, "OK");
+        } else if let Some(v) = line.strip_prefix("SET_TX_OFFSET ") {
+            match v.trim().parse::<f32>() {
+                Ok(hz) => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_tx_offset(hz);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad SET_TX_OFFSET value: {e}");
+                }
+            }
         } else if let Some(v) = line.strip_prefix("SET_DECODE_DEPTH ") {
             // WSJT-X "Fast/Normal/Deep" (1/2/3), Jimmy's Decode tab -- the one decode-tab
             // setting with a live setter (Engine::set_decode_depth), so this can change
