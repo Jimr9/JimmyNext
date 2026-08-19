@@ -130,6 +130,7 @@ static class JimmyTests
         JimmySettingsDefaultsTests();
         EngineRestartPolicyTests();
         NativeEngineClientGridValidationTests();
+        NativeEngineClientDescribeConfigProblemTests();
         OtaSpotAnnotatorTests();
         EqslReconcileTests();
         LookupManagerPrimaryProviderTests();
@@ -4746,6 +4747,39 @@ static class JimmyTests
         Check("Subsquare letter past 'X' (Y is out of range) -> invalid", NativeEngineClient.IsValidGridFormat("FN42yy"), false);
         Check("Subsquare position not letters -> invalid", NativeEngineClient.IsValidGridFormat("FN4212"), false);
         Check("Garbage input entirely -> invalid", NativeEngineClient.IsValidGridFormat("ABC123"), false);
+    }
+
+    // ── NativeEngineClient.DescribeConfigProblem (fresh-install release blocker, 2026-08-19:
+    //    single source of truth Controller.ApplyEngineMode's pre-check and Launch()'s own safety
+    //    net both use, so a genuinely unconfigured install gets a calm, plain-language, no-
+    //    "native engine"-jargon message instead of the old Error-severity ErrorWarningEvent) ──
+
+    static void NativeEngineClientDescribeConfigProblemTests()
+    {
+        Console.WriteLine("\n── NativeEngineClient.DescribeConfigProblem: plain-language config gate ──");
+
+        Check("Valid call+grid -> no problem (null)", NativeEngineClient.DescribeConfigProblem("KB0UZT", "FN42") == null, true);
+        Check("Valid call+grid, 6-char grid -> no problem (null)", NativeEngineClient.DescribeConfigProblem("KB0UZT", "FN42ab") == null, true);
+
+        Check("Empty call -> the exact required plain-language wording",
+            NativeEngineClient.DescribeConfigProblem("", "FN42") == "Set your callsign and grid in Options to begin operating.", true);
+        Check("Empty grid -> the same plain-language wording",
+            NativeEngineClient.DescribeConfigProblem("KB0UZT", "") == "Set your callsign and grid in Options to begin operating.", true);
+        Check("Both blank (fresh-install defaults) -> the same plain-language wording",
+            NativeEngineClient.DescribeConfigProblem("", "") == "Set your callsign and grid in Options to begin operating.", true);
+        Check("Whitespace-only call/grid -> treated the same as empty",
+            NativeEngineClient.DescribeConfigProblem("   ", "   ") == "Set your callsign and grid in Options to begin operating.", true);
+
+        Check("Malformed grid -> a plain-language message naming the bad value",
+            NativeEngineClient.DescribeConfigProblem("KB0UZT", "ABC123") == "'ABC123' isn't a valid grid square (e.g. FN42 or FN42ab) -- fix it in Options to begin operating.", true);
+
+        // No call site (Launch's LastError, Controller.ApplyEngineMode's status message) should
+        // ever be able to say "native engine" for this specific, normal, expected first-run
+        // condition -- the operator should never need to know that concept exists.
+        Check("Missing-config message never mentions 'native engine'",
+            !NativeEngineClient.DescribeConfigProblem("", "").ToLowerInvariant().Contains("native engine"), true);
+        Check("Malformed-grid message never mentions 'native engine'",
+            !NativeEngineClient.DescribeConfigProblem("KB0UZT", "ABC123").ToLowerInvariant().Contains("native engine"), true);
     }
 
     // ── OtaSpotAnnotator (POTA/SOTA spot -> Jimmy's own worked-before/needed-award facts) ──

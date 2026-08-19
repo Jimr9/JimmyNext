@@ -98,6 +98,35 @@ namespace WSJTX_Controller
             bool IsSubsquareLetter(char c) { char u = char.ToUpperInvariant(c); return u >= 'A' && u <= 'X'; }
         }
 
+        // 2026-08-19 fresh-install usability fix (release blocker): single source of truth for
+        // "is My Call/My Grid usable yet" -- used by BOTH Launch()'s own safety-net guard and
+        // Controller.ApplyEngineMode's pre-check (called there BEFORE attempting Launch() at
+        // all), so the two can never drift on what counts as "not configured". Returns a plain,
+        // user-facing sentence with no "native engine"/implementation jargon (the operator should
+        // never need to know this concept exists) -- null means configuration is valid. This is
+        // deliberately a normal, expected, first-run condition, not an error: a fresh install
+        // (or My Call/My Grid cleared) is not a malfunction.
+        internal static string DescribeConfigProblem(string mycall, string mygrid)
+        {
+            if (string.IsNullOrWhiteSpace(mycall) || string.IsNullOrWhiteSpace(mygrid))
+                return "Set your callsign and grid in Options to begin operating.";
+            // 2026-08-18 fresh-install audit: OptionsDlg's own FormatGridSquare is explicitly
+            // cosmetic-only ("not this dialog's job to validate grid syntax" -- normalizes case,
+            // returns malformed input unchanged), and the engine side degrades a malformed grid
+            // silently rather than refusing to start (propagation::geo::maidenhead_to_latlon /
+            // tempo-app's own maidenhead_center both return None for it, never panic -- confirmed
+            // by reading both). So a typo'd grid ("ABC", "N", six random characters) previously
+            // launched successfully with no indication anything was wrong, silently losing
+            // distance/bearing-to-DX and grid-based propagation estimates for the whole session.
+            // Real Maidenhead locators are 4 or 6 chars: 2 field letters (A-R), 2 square digits,
+            // optionally 2 subsquare letters (A-X) -- same bounds propagation::geo enforces, kept
+            // in sync here so Jimmy refuses exactly what the engine would have silently accepted-
+            // but-ignored, not a stricter or looser rule.
+            if (!IsValidGridFormat(mygrid.Trim()))
+                return $"'{mygrid}' isn't a valid grid square (e.g. FN42 or FN42ab) -- fix it in Options to begin operating.";
+            return null;
+        }
+
         // Launches the engine host against the given callsign/grid/audio device (empty device =
         // system default input) reporting to Jimmy's own UDP listener on 127.0.0.1:<jimmyPort>.
         // `outputDevice`: where TX audio actually plays (empty = system default output). Never
@@ -152,26 +181,18 @@ namespace WSJTX_Controller
                     LastError = "jimmy-engine-host.exe not found. Build EngineHost first (cargo build --release).";
                     return false;
                 }
-                if (string.IsNullOrWhiteSpace(mycall) || string.IsNullOrWhiteSpace(mygrid))
+                // 2026-08-19 fresh-install usability fix: mycall/mygrid validity used to be
+                // checked here only, inline -- Controller.ApplyEngineMode() now checks the exact
+                // same condition (DescribeConfigProblem) BEFORE ever getting this far, so a
+                // genuinely unconfigured install never reaches Launch() at all (no wasted
+                // background Task/Process lookup, and a calmer, non-"Error"-severity status
+                // message). This check stays here too -- as a real safety net, not the primary
+                // gate -- since Launch() is public and must never spawn the real engine process
+                // against invalid config no matter what calls it or in what order.
+                string configProblem = DescribeConfigProblem(mycall, mygrid);
+                if (configProblem != null)
                 {
-                    LastError = "My Call / My Grid not configured -- set them before using the native engine.";
-                    return false;
-                }
-                // 2026-08-18 fresh-install audit: OptionsDlg's own FormatGridSquare is explicitly
-                // cosmetic-only ("not this dialog's job to validate grid syntax" -- normalizes case,
-                // returns malformed input unchanged), and the engine side degrades a malformed grid
-                // silently rather than refusing to start (propagation::geo::maidenhead_to_latlon /
-                // tempo-app's own maidenhead_center both return None for it, never panic -- confirmed
-                // by reading both). So a typo'd grid ("ABC", "N", six random characters) previously
-                // launched successfully with no indication anything was wrong, silently losing
-                // distance/bearing-to-DX and grid-based propagation estimates for the whole session.
-                // Real Maidenhead locators are 4 or 6 chars: 2 field letters (A-R), 2 square digits,
-                // optionally 2 subsquare letters (A-X) -- same bounds propagation::geo enforces, kept
-                // in sync here so Jimmy refuses exactly what the engine would have silently accepted-
-                // but-ignored, not a stricter or looser rule.
-                if (!IsValidGridFormat(mygrid.Trim()))
-                {
-                    LastError = $"My Grid '{mygrid}' is not a valid Maidenhead locator (e.g. FN42 or FN42ab) -- fix it in Options before using the native engine.";
+                    LastError = configProblem;
                     return false;
                 }
 

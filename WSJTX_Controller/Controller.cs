@@ -2745,6 +2745,30 @@ namespace WSJTX_Controller
             nativeEngineClient = null;
             if (TestModeGuard.IsTestMode) return;
 
+            // 2026-08-19 fresh-install usability fix (release blocker): a genuine "not
+            // configured yet" state, checked and handled BEFORE ever attempting Launch() --
+            // not a reactive failure caught after the fact. Previously this method always
+            // built a NativeEngineClient and started the background Launch() Task regardless
+            // of whether My Call/My Grid were even set, which then failed via LastError and
+            // surfaced through the "Native engine" ErrorWarningEvent (Error severity, forces
+            // an audible cue) -- correct behavior, but framed exactly like a real malfunction
+            // (exe missing, launch exception) instead of the normal, expected, first-run
+            // condition it actually is, and worded around "the native engine", a concept the
+            // operator should never need to know exists. ConnectDirectEngine() above still runs
+            // unconditionally (test-mode's own fake control-port server needs that same Direct
+            // state-tracking reset regardless of My Call/My Grid), and nativeEngineClient is
+            // already null from just above, so engine-dependent functions correctly stay
+            // unavailable -- everything else (Options, menus, the rest of the UI) is untouched.
+            // The moment My Call/My Grid are saved as valid, OptionsDlg's own engineIdentityChanged
+            // check already calls ApplyEngineMode() again (no restart needed) -- this re-evaluates
+            // the same check and proceeds to Launch() normally below.
+            string configProblem = NativeEngineClient.DescribeConfigProblem(NativeEngine.MyCall, NativeEngine.MyGrid);
+            if (configProblem != null)
+            {
+                ShowMsg(configProblem, true);
+                return;
+            }
+
             // Self-sufficiency plan Phase 5: no control-channel listener to stand up anymore --
             // the native engine host builds its own Rig directly (from the CLI args
             // NativeEngineClient.Launch derives from `Radio` below) whenever Radio.Mode ==
