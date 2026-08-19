@@ -80,6 +80,24 @@ namespace WSJTX_Controller
             return null;
         }
 
+        // Standard Maidenhead locator shape check -- 4 or 6 chars, field letters A-R, square
+        // digits 0-9, optional subsquare letters A-X. Same bounds as propagation::geo::
+        // maidenhead_to_latlon / tempo-app's own maidenhead_center (EngineHost's vendored Nexus
+        // source), kept in sync deliberately -- see Launch()'s own comment on why this exists.
+        // Case-insensitive (Launch's caller already normalizes to uppercase, but this doesn't
+        // assume that).
+        internal static bool IsValidGridFormat(string grid)
+        {
+            if (grid == null || (grid.Length != 4 && grid.Length != 6)) return false;
+            if (!IsFieldLetter(grid[0]) || !IsFieldLetter(grid[1])) return false;
+            if (!char.IsDigit(grid[2]) || !char.IsDigit(grid[3])) return false;
+            if (grid.Length == 6 && (!IsSubsquareLetter(grid[4]) || !IsSubsquareLetter(grid[5]))) return false;
+            return true;
+
+            bool IsFieldLetter(char c) { char u = char.ToUpperInvariant(c); return u >= 'A' && u <= 'R'; }
+            bool IsSubsquareLetter(char c) { char u = char.ToUpperInvariant(c); return u >= 'A' && u <= 'X'; }
+        }
+
         // Launches the engine host against the given callsign/grid/audio device (empty device =
         // system default input) reporting to Jimmy's own UDP listener on 127.0.0.1:<jimmyPort>.
         // `outputDevice`: where TX audio actually plays (empty = system default output). Never
@@ -137,6 +155,23 @@ namespace WSJTX_Controller
                 if (string.IsNullOrWhiteSpace(mycall) || string.IsNullOrWhiteSpace(mygrid))
                 {
                     LastError = "My Call / My Grid not configured -- set them before using the native engine.";
+                    return false;
+                }
+                // 2026-08-18 fresh-install audit: OptionsDlg's own FormatGridSquare is explicitly
+                // cosmetic-only ("not this dialog's job to validate grid syntax" -- normalizes case,
+                // returns malformed input unchanged), and the engine side degrades a malformed grid
+                // silently rather than refusing to start (propagation::geo::maidenhead_to_latlon /
+                // tempo-app's own maidenhead_center both return None for it, never panic -- confirmed
+                // by reading both). So a typo'd grid ("ABC", "N", six random characters) previously
+                // launched successfully with no indication anything was wrong, silently losing
+                // distance/bearing-to-DX and grid-based propagation estimates for the whole session.
+                // Real Maidenhead locators are 4 or 6 chars: 2 field letters (A-R), 2 square digits,
+                // optionally 2 subsquare letters (A-X) -- same bounds propagation::geo enforces, kept
+                // in sync here so Jimmy refuses exactly what the engine would have silently accepted-
+                // but-ignored, not a stricter or looser rule.
+                if (!IsValidGridFormat(mygrid.Trim()))
+                {
+                    LastError = $"My Grid '{mygrid}' is not a valid Maidenhead locator (e.g. FN42 or FN42ab) -- fix it in Options before using the native engine.";
                     return false;
                 }
 

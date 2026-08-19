@@ -129,6 +129,7 @@ static class JimmyTests
         JimmySettingsRoundTripTests();
         JimmySettingsDefaultsTests();
         EngineRestartPolicyTests();
+        NativeEngineClientGridValidationTests();
         OtaSpotAnnotatorTests();
         EqslReconcileTests();
         LookupManagerPrimaryProviderTests();
@@ -4719,6 +4720,32 @@ static class JimmyTests
         bool afterWindow = policy.RecordAttemptAndShouldRestart(out int freshAttemptNumber);
         Check("Attempt after the window elapses -> budget resets, should restart again", afterWindow, true);
         Check("First attempt in the new window reports attemptNumber 1", freshAttemptNumber == 1, true);
+    }
+
+    // ── NativeEngineClient.IsValidGridFormat (fresh-install audit, 2026-08-18: a malformed but
+    //    non-empty grid used to launch the engine silently -- see NativeEngineClient.Launch's own
+    //    comment) ──
+
+    static void NativeEngineClientGridValidationTests()
+    {
+        Console.WriteLine("\n── NativeEngineClient.IsValidGridFormat: Maidenhead locator shape check ──");
+
+        Check("4-char locator, standard case (field upper, square digits) -> valid", NativeEngineClient.IsValidGridFormat("FN42"), true);
+        Check("6-char locator, standard case (subsquare lower) -> valid", NativeEngineClient.IsValidGridFormat("FN42ab"), true);
+        Check("4-char locator, all lowercase -> valid (case-insensitive)", NativeEngineClient.IsValidGridFormat("fn42"), true);
+        Check("6-char locator, all uppercase -> valid (case-insensitive)", NativeEngineClient.IsValidGridFormat("FN42AB"), true);
+        Check("Field letters at the top of the real A-R range (RR99) -> valid", NativeEngineClient.IsValidGridFormat("RR99"), true);
+        Check("Subsquare letters at the top of the real A-X range -> valid", NativeEngineClient.IsValidGridFormat("FN42xx"), true);
+
+        Check("Empty string -> invalid", NativeEngineClient.IsValidGridFormat(""), false);
+        Check("null -> invalid", NativeEngineClient.IsValidGridFormat(null), false);
+        Check("Too short (3 chars) -> invalid", NativeEngineClient.IsValidGridFormat("FN4"), false);
+        Check("Too long (5 chars) -> invalid", NativeEngineClient.IsValidGridFormat("FN42a"), false);
+        Check("Field letter past 'R' (S is out of range) -> invalid", NativeEngineClient.IsValidGridFormat("SN42"), false);
+        Check("Square position not digits -> invalid", NativeEngineClient.IsValidGridFormat("FNAB"), false);
+        Check("Subsquare letter past 'X' (Y is out of range) -> invalid", NativeEngineClient.IsValidGridFormat("FN42yy"), false);
+        Check("Subsquare position not letters -> invalid", NativeEngineClient.IsValidGridFormat("FN4212"), false);
+        Check("Garbage input entirely -> invalid", NativeEngineClient.IsValidGridFormat("ABC123"), false);
     }
 
     // ── OtaSpotAnnotator (POTA/SOTA spot -> Jimmy's own worked-before/needed-award facts) ──
