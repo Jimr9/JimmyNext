@@ -4761,17 +4761,17 @@ static class JimmyTests
         Check("Valid call+grid -> no problem (null)", NativeEngineClient.DescribeConfigProblem("KB0UZT", "FN42") == null, true);
         Check("Valid call+grid, 6-char grid -> no problem (null)", NativeEngineClient.DescribeConfigProblem("KB0UZT", "FN42ab") == null, true);
 
-        Check("Empty call -> the exact required plain-language wording",
-            NativeEngineClient.DescribeConfigProblem("", "FN42") == "Set your callsign and grid in Options to begin operating.", true);
+        Check("Empty call -> the exact required plain-language wording, naming the Decode Engine tab",
+            NativeEngineClient.DescribeConfigProblem("", "FN42") == "Set your callsign and grid on the Decode Engine tab in Options to begin operating.", true);
         Check("Empty grid -> the same plain-language wording",
-            NativeEngineClient.DescribeConfigProblem("KB0UZT", "") == "Set your callsign and grid in Options to begin operating.", true);
+            NativeEngineClient.DescribeConfigProblem("KB0UZT", "") == "Set your callsign and grid on the Decode Engine tab in Options to begin operating.", true);
         Check("Both blank (fresh-install defaults) -> the same plain-language wording",
-            NativeEngineClient.DescribeConfigProblem("", "") == "Set your callsign and grid in Options to begin operating.", true);
+            NativeEngineClient.DescribeConfigProblem("", "") == "Set your callsign and grid on the Decode Engine tab in Options to begin operating.", true);
         Check("Whitespace-only call/grid -> treated the same as empty",
-            NativeEngineClient.DescribeConfigProblem("   ", "   ") == "Set your callsign and grid in Options to begin operating.", true);
+            NativeEngineClient.DescribeConfigProblem("   ", "   ") == "Set your callsign and grid on the Decode Engine tab in Options to begin operating.", true);
 
-        Check("Malformed grid -> a plain-language message naming the bad value",
-            NativeEngineClient.DescribeConfigProblem("KB0UZT", "ABC123") == "'ABC123' isn't a valid grid square (e.g. FN42 or FN42ab) -- fix it in Options to begin operating.", true);
+        Check("Malformed grid -> a plain-language message naming the bad value and the Decode Engine tab",
+            NativeEngineClient.DescribeConfigProblem("KB0UZT", "ABC123") == "'ABC123' isn't a valid grid square (e.g. FN42 or FN42ab) -- fix it on the Decode Engine tab in Options to begin operating.", true);
 
         // No call site (Launch's LastError, Controller.ApplyEngineMode's status message) should
         // ever be able to say "native engine" for this specific, normal, expected first-run
@@ -4780,6 +4780,14 @@ static class JimmyTests
             !NativeEngineClient.DescribeConfigProblem("", "").ToLowerInvariant().Contains("native engine"), true);
         Check("Malformed-grid message never mentions 'native engine'",
             !NativeEngineClient.DescribeConfigProblem("KB0UZT", "ABC123").ToLowerInvariant().Contains("native engine"), true);
+
+        // Project owner feedback, 2026-08-19: names the destination area, never a hotkey/input
+        // method -- Options is also reachable by mouse, so "press Alt+O" would be both jargon-
+        // adjacent and simply wrong for someone not using that specific hotkey.
+        Check("Missing-config message names the Decode Engine tab, not a hotkey",
+            NativeEngineClient.DescribeConfigProblem("", "").Contains("Decode Engine")
+                && !NativeEngineClient.DescribeConfigProblem("", "").ToLowerInvariant().Contains("alt+o")
+                && !NativeEngineClient.DescribeConfigProblem("", "").ToLowerInvariant().Contains("press "), true);
     }
 
     // ── OtaSpotAnnotator (POTA/SOTA spot -> Jimmy's own worked-before/needed-award facts) ──

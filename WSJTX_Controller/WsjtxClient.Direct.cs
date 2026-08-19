@@ -41,6 +41,21 @@ namespace WSJTX_Controller
         private ulong _directLastSlotSeen;
         private readonly HashSet<string> _directSeenDecodeSignatures = new HashSet<string>();
 
+        // Release-blocker follow-up, 2026-08-19: guards against two overlapping SNAPSHOT polls
+        // running at once now that DirectPollTick's network I/O moved off the UI thread (see its
+        // own comment) -- the old fully-synchronous version got this for free (a Timer.Tick
+        // handler can't be re-entered while still running), so making it async needs to
+        // re-establish that same "never more than one poll in flight" invariant explicitly.
+        private bool _directPollInFlight;
+
+        // Incremented on every ConnectDirectEngine() call. A background poll captures this value
+        // when it starts; if a NEW connection (reconnect, or the engine auto-restarting) happens
+        // while that poll's network I/O is still in flight, its eventual continuation compares
+        // its captured value against the current one and discards a stale result instead of
+        // acting on behalf of a connection that no longer exists -- see DirectPollTick's own
+        // comment for the full reasoning.
+        private int _directConnectionEpoch;
+
         // Has DirectApplyStatus ever actually rendered a status once this connection came up?
         // Forces the very first poll's status through regardless of the transmitting/newBand
         // gate below (see that gate's own comment).
@@ -86,6 +101,8 @@ namespace WSJTX_Controller
         {
             myCall = string.IsNullOrWhiteSpace(myCallIn) ? null : myCallIn.Trim().ToUpperInvariant();
             myGrid = myGridIn;
+            _directConnectionEpoch++;
+            _directPollInFlight = false;
             _directSeenDecodeSignatures.Clear();
             _directLastSlotSeen = 0;
             _directFirstStatusShown = false;
@@ -137,57 +154,114 @@ namespace WSJTX_Controller
             _directConnected = false;
         }
 
+        // Release-blocker follow-up, 2026-08-19: root-caused live (temporary instrumentation,
+        // since removed) a genuine, sustained keyboard/focus lockup reported on a real fresh
+        // install -- NOT a hotkey-recognition bug (ProcessCmdKey correctly saw every posted key,
+        // no exception anywhere in the key-handling path) and NOT a foreground/focus problem
+        // (GetForegroundWindow()/GetGUIThreadInfo both showed real, stable foreground and focus
+        // throughout the stuck window, measured independently of Jimmy's own state). The actual
+        // cause: DirectSendCommand's `connectTask.Wait(1000)` (below) is a genuinely BLOCKING
+        // wait, and this method used to call it synchronously, directly on the UI thread, from
+        // a System.Windows.Forms.Timer.Tick handler (Timer.Tick always fires on the UI thread).
+        // DirectSendCommand's own comment assumed "on loopback, 'nothing listening' refuses the
+        // connection almost instantly" -- measured directly (a standalone TcpClient.ConnectAsync
+        // against this exact closed port, same code path): that assumption is WRONG on at least
+        // some real Windows machines -- the actual connection-refused resolution took ~2 seconds,
+        // well past the 1000ms wait budget, so `Wait(1000)` never once saw the real result within
+        // budget and always burned the FULL second. Since DirectPollIntervalMs is also 1000ms,
+        // the timer fired again almost immediately after each blocking wait ended, leaving the UI
+        // thread blocked nearly continuously -- for as long as the engine was never actually
+        // running and listening on the control port, which is exactly the "not configured yet"
+        // first-run state (and any other state where the engine isn't up). A UI thread that's
+        // blocked ~100% of the time still paints its last frame and still answers an occasional
+        // WM_NULL ping between blocks (so Process.Responding can still read true), but has almost
+        // no time left to pump real keyboard/mouse/WM_CLOSE messages -- exactly the reported
+        // symptom (arrow keys not advancing, Tab not moving focus, Alt+F4 not closing) with no
+        // exception, no crash, and no foreground/focus anomaly to find, because there wasn't one.
+        //
+        // Fix: do the actual network I/O (DirectSendCommand + JSON parse) on a background Task,
+        // never on the UI thread, however long it genuinely takes -- then marshal only the
+        // (already-computed) result back via BeginInvoke to do the real state updates/UI work,
+        // matching the exact pattern Controller.ApplyEngineMode already uses for Launch(). This
+        // is now the ONLY place SNAPSHOT is polled automatically/unconditionally (every other
+        // DirectSendCommand caller is a one-off, operator-triggered command, e.g. a button press
+        // or hotkey, where a bounded synchronous wait is an accepted, already-documented
+        // tradeoff, not a repeating every-second UI-thread stall) -- so this is the one call site
+        // that actually needed to change.
+        //
+        // _directPollInFlight guards against a second poll starting while a slow one is still
+        // out (the old synchronous version got this for free; Timer.Tick can't re-enter itself).
+        // _directConnectionEpoch guards against a stale poll's result being applied after a
+        // reconnect happened while it was still in flight.
         private void DirectPollTick()
         {
-            if (!_directConnected) return;
-            DirectSnapshot snap;
-            try
+            if (!_directConnected || _directPollInFlight) return;
+            _directPollInFlight = true;
+            int epoch = _directConnectionEpoch;
+
+            System.Threading.Tasks.Task.Run(() =>
             {
-                string json = DirectSendCommand("SNAPSHOT");
-                if (json == null || json.Length == 0 || json.StartsWith("ERR"))
+                DirectSnapshot snap = null;
+                string failMessage = null;
+                try
                 {
-                    DirectHandlePollFailure();
-                    return;
+                    string json = DirectSendCommand("SNAPSHOT");
+                    if (json == null || json.Length == 0 || json.StartsWith("ERR"))
+                        failMessage = "empty or ERR response";
+                    else
+                    {
+                        snap = JsonSerializer.Deserialize<DirectSnapshot>(json, DirectJsonOptions);
+                        if (snap == null) failMessage = "null snapshot";
+                    }
                 }
-                snap = JsonSerializer.Deserialize<DirectSnapshot>(json, DirectJsonOptions);
-            }
-            catch (Exception ex)
-            {
-                // Best-effort, matches the UDP path's own tolerance for a transient miss --
-                // the engine host restarting (auto-restart on crash) just means the next
-                // poll's connection attempt fails until it's back up, not a fatal error here.
-                DebugOutput($"{Time()} [DIRECT] SNAPSHOT poll failed: {ex.Message}");
-                DirectHandlePollFailure();
-                return;
-            }
-            if (snap == null)
-            {
-                DirectHandlePollFailure();
-                return;
-            }
+                catch (Exception ex)
+                {
+                    // Best-effort, matches the UDP path's own tolerance for a transient miss --
+                    // the engine host restarting (auto-restart on crash) just means the next
+                    // poll's connection attempt fails until it's back up, not a fatal error here.
+                    failMessage = ex.Message;
+                }
 
-            // A real snapshot came back -- whatever failure streak was building is over.
-            _directConsecutivePollFailures = 0;
-            _directLossAnnounced = false;
+                ctrl.BeginInvoke(new Action(() =>
+                {
+                    _directPollInFlight = false;
+                    // Superseded by a disconnect or a fresh reconnect while this poll was still
+                    // running -- this result belongs to a connection that's no longer current;
+                    // the new/absent connection's own state is authoritative now, not this.
+                    if (!_directConnected || epoch != _directConnectionEpoch) return;
 
-            // First successful poll = "connected" as far as every OTHER piece of Jimmy's own
-            // status/UI code is concerned -- most of it gates on NegoState, not on anything
-            // specific to this class (found live, 2026-08-08, testing this for the first time:
-            // status kept announcing "Waiting for WSJT-X" on a one-second loop even while real
-            // decodes were actively populating the call queue, because nothing here had ever
-            // told NegoState we were done). Set once we've actually proven the engine host is
-            // reachable and answering -- not unconditionally in ConnectDirectEngine -- so a
-            // brief window before its control port comes up still shows as "not yet connected"
-            // rather than claiming success before it's true.
-            if (WsjtxMessage.NegoState != WsjtxMessage.NegoStates.RECD)
-            {
-                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
-                ctrl.initialConnFaultTimer?.Stop();
-                DebugOutput($"{Time()} [DIRECT] first snapshot received -- NegoState -> RECD");
-            }
+                    if (failMessage != null)
+                    {
+                        DebugOutput($"{Time()} [DIRECT] SNAPSHOT poll failed: {failMessage}");
+                        DirectHandlePollFailure();
+                        return;
+                    }
 
-            DirectApplyStatus(snap);
-            DirectApplyDecodes(snap);
+                    // A real snapshot came back -- whatever failure streak was building is over.
+                    _directConsecutivePollFailures = 0;
+                    _directLossAnnounced = false;
+
+                    // First successful poll = "connected" as far as every OTHER piece of Jimmy's
+                    // own status/UI code is concerned -- most of it gates on NegoState, not on
+                    // anything specific to this class (found live, 2026-08-08, testing this for
+                    // the first time: status kept announcing "Waiting for WSJT-X" on a one-second
+                    // loop even while real decodes were actively populating the call queue,
+                    // because nothing here had ever told NegoState we were done). Set once we've
+                    // actually proven the engine host is reachable and answering -- not
+                    // unconditionally in ConnectDirectEngine -- so a brief window before its
+                    // control port comes up still shows as "not yet connected" rather than
+                    // claiming success before it's true.
+                    if (WsjtxMessage.NegoState != WsjtxMessage.NegoStates.RECD)
+                    {
+                        WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                        ctrl.initialConnFaultTimer?.Stop();
+                        DebugOutput($"{Time()} [DIRECT] first snapshot received -- NegoState -> RECD");
+                    }
+
+                    DirectApplyStatus(snap);
+                    DirectApplyDecodes(snap);
+                }));
+            });
         }
 
         // Companion to the failure-tracking fields declared above -- see their own comment.

@@ -108,8 +108,15 @@ namespace WSJTX_Controller
         // (or My Call/My Grid cleared) is not a malfunction.
         internal static string DescribeConfigProblem(string mycall, string mygrid)
         {
+            // Wording, 2026-08-19 (release-blocker follow-up, project owner feedback): names the
+            // specific Options category ("Decode Engine" -- OptionsDlg.Designer.cs's own
+            // _categoryListBox label, where the My Call/My Grid fields actually live) rather than
+            // a generic "in Options", so a screen-reader user knows exactly where to go without
+            // guessing which of the 17 categories to open. Deliberately NOT a hotkey instruction
+            // (e.g. "press Alt+O") -- names the destination, not a specific input method, since
+            // Options is also reachable by mouse/other means.
             if (string.IsNullOrWhiteSpace(mycall) || string.IsNullOrWhiteSpace(mygrid))
-                return "Set your callsign and grid in Options to begin operating.";
+                return "Set your callsign and grid on the Decode Engine tab in Options to begin operating.";
             // 2026-08-18 fresh-install audit: OptionsDlg's own FormatGridSquare is explicitly
             // cosmetic-only ("not this dialog's job to validate grid syntax" -- normalizes case,
             // returns malformed input unchanged), and the engine side degrades a malformed grid
@@ -123,7 +130,7 @@ namespace WSJTX_Controller
             // in sync here so Jimmy refuses exactly what the engine would have silently accepted-
             // but-ignored, not a stricter or looser rule.
             if (!IsValidGridFormat(mygrid.Trim()))
-                return $"'{mygrid}' isn't a valid grid square (e.g. FN42 or FN42ab) -- fix it in Options to begin operating.";
+                return $"'{mygrid}' isn't a valid grid square (e.g. FN42 or FN42ab) -- fix it on the Decode Engine tab in Options to begin operating.";
             return null;
         }
 
