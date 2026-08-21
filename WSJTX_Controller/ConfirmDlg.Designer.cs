@@ -61,7 +61,18 @@
             this.textBox.Name = "textBox";
             this.textBox.Size = new System.Drawing.Size(190, 17);
             this.textBox.TabIndex = 0;
-            this.textBox.TabStop = false;
+            // Release-audit finding, 2026-08-20 (release blocker): was TabStop = false with no
+            // AccessibleName and the dialog's own caption never set anywhere -- a JAWS/NVDA user
+            // had no way to hear the actual confirmation question (only "Yes button" on open,
+            // since ConfirmDlg_Load used to focus yesButton first) before answering a sometimes-
+            // destructive Yes/No prompt (e.g. "Delete N QSO(s) from Jimmy's local logbook?").
+            // Fixed the same proven way HelpDlg.cs already does for the identical "readonly
+            // multiline TextBox holds the real text" pattern: focusable, and focused on open
+            // (ConfirmDlg.cs's ConfirmDlg_Load) -- standard control semantics, no custom
+            // screen-reader hack. AcceptButton/CancelButton below (not focus) still make Enter/
+            // Escape answer Yes/No regardless of where focus actually is.
+            this.textBox.TabStop = true;
+            this.textBox.AccessibleName = "Confirmation message";
             // 
             // panel1
             // 
@@ -99,6 +110,16 @@
             this.BackColor = System.Drawing.SystemColors.Window;
             this.ClientSize = new System.Drawing.Size(274, 104);
             this.ControlBox = false;
+            // Release-audit finding, 2026-08-20: no CancelButton was ever wired -- ControlBox is
+            // false (no [X]), and a focused Button only responds to Enter/Space on its own, not
+            // Escape, so a keyboard user had no way to answer "No" via the conventional Escape
+            // key at all; they had to Tab to the No button and press Enter/Space. AcceptButton/
+            // CancelButton are the standard WinForms mechanism for this -- they work regardless
+            // of which control currently has focus, which is also what lets textBox above safely
+            // hold initial focus (for the message to be announced) without breaking the
+            // press-Enter-for-Yes shortcut keyboard/sighted users already rely on.
+            this.AcceptButton = this.yesButton;
+            this.CancelButton = this.nobutton;
             this.Controls.Add(this.yesButton);
             this.Controls.Add(this.panel1);
             this.Controls.Add(this.nobutton);

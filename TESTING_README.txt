@@ -172,7 +172,13 @@ Parser tests (Suite 1):
   PASS  - The classifier returned the expected value.
   FAIL  - The classifier returned the wrong value. The label and
           both expected and actual values are printed.
-  Final line shows "ALL TESTS PASSED" or "SOME TESTS FAILED".
+  SKIP  - A test's environment precondition wasn't met (e.g. the engine
+          control port was already in use by another running Jimmy/engine
+          host on this machine) -- not a known defect, but its assertions
+          did not run.
+  Final line shows "ALL TESTS PASSED", "TESTS PASSED, BUT N TEST(S) WERE
+  SKIPPED" (re-run with no other Jimmy/engine-host session active to get a
+  real, unqualified pass), or "SOME TESTS FAILED".
   A failing parser test means a regression in message classification.
 
 Replay tests (Suite 2):

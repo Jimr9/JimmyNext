@@ -18,7 +18,7 @@
       the production install's real settings/logbook database.
 
   Product  : Jimmy Test (WSJT-X Controller, test/beta build)
-  Version  : 2.0.25
+  Version  : 2.0.28
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy Test\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
@@ -27,12 +27,11 @@
     dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Test" -p:SelfContained=true -r win-x64 -o PublishOutputTest
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
-     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
-     xmlns:fw="http://wixtoolset.org/schemas/v4/wxs/firewall">
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <Package
     Name="Jimmy Test"
-    Version="2.0.25"
+    Version="2.0.28"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"
@@ -80,8 +79,6 @@
       <ComponentGroupRef Id="ResourcesEngineHostHamlibComponents" />
       <ComponentRef Id="DesktopShortcutComp" />
       <ComponentRef Id="StartMenuShortcutComp" />
-      <ComponentRef Id="RigctldFirewallComp" />
-      <ComponentRef Id="EngineHostFirewallComp" />
     </Feature>
 
     <!-- Pre-warm Windows Defender's scan of jimmy-engine-host.exe during install, not the
@@ -260,49 +257,49 @@
 
   </Fragment>
 
-  <!-- ── Firewall exceptions ────────────────────────────────────────────────
-       Confirmed live, 2026-08-07: a fresh standalone install prompts Windows
-       Security's "Allow/Cancel" the first time rigctld.exe (or the Native
-       engine host, which also speaks the rigctld protocol when it owns the
-       radio directly) tries to listen for a connection, confusing for a
-       tester with no context for what's asking, and Cancel leaves radio
-       control silently non-functional. These add both programs to the
-       Windows Firewall allow-list at install time so the prompt never
-       appears at all. Scoped by Program (not a specific port): both
-       programs' listening port is user-configurable in Options, and
-       Program-based exceptions cover whatever port each one actually uses,
-       the same way manually clicking "Allow" in the security prompt would.
-       Scope="localSubnet", not "any": Jimmy's own sockets are hardcoded to
-       127.0.0.1 only (see RigctldClient.cs's own comments), so there is
-       never a legitimate reason for either program to accept a connection
-       from beyond the local machine/subnet. -->
-  <Fragment>
-    <Component Id="RigctldFirewallComp" Directory="INSTALLFOLDER">
-      <RegistryValue Root="HKCU"
-                     Key="Software\KB0UZT\Jimmy Test"
-                     Name="RigctldFirewallException"
-                     Type="integer"
-                     Value="1"
-                     KeyPath="yes" />
-      <fw:FirewallException Id="RigctldFirewallException"
-                             Name="Jimmy Test - Hamlib rigctld"
-                             Program="[INSTALLFOLDER]Resources\hamlib\rigctld.exe"
-                             Scope="localSubnet" />
-    </Component>
+  <!-- Firewall exceptions, REMOVED 2026-08-21. Originally added 2026-08-07:
+       a fresh standalone install prompted Windows Security's "Allow/Cancel"
+       the first time rigctld.exe (or the Native engine host, which also
+       speaks the rigctld protocol when it owns the radio directly) tried
+       to listen for a connection, confusing for a tester with no context
+       for what's asking, with Cancel leaving radio control silently
+       non-functional. That happened because, at the time, both programs
+       could bind their listening socket to the wildcard address (Hamlib
+       rigctld's own documented default when no -T is given), which is
+       exactly the condition that makes Windows Firewall prompt for a new
+       inbound rule in the first place: a listener Windows can see is
+       reachable from beyond the loopback interface.
 
-    <Component Id="EngineHostFirewallComp" Directory="INSTALLFOLDER">
-      <RegistryValue Root="HKCU"
-                     Key="Software\KB0UZT\Jimmy Test"
-                     Name="EngineHostFirewallException"
-                     Type="integer"
-                     Value="1"
-                     KeyPath="yes" />
-      <fw:FirewallException Id="EngineHostFirewallException"
-                             Name="Jimmy Test - Native engine host"
-                             Program="[INSTALLFOLDER]Resources\EngineHost\jimmy-engine-host.exe"
-                             Scope="localSubnet" />
-    </Component>
-  </Fragment>
+       Re-verified 2026-08-21, with the UDP transport now fully gone and
+       Direct/Nexus the sole architecture: every listener either program
+       can ever open in the actual packaged build is loopback-only
+       (127.0.0.1), confirmed at the real spawn/bind call sites, not
+       inferred.
+         * jimmy-engine-host.exe's own control port: TcpListener::bind(
+           ("127.0.0.1", port)) (EngineHost/src/main.rs).
+         * every rigctld.exe EngineHost itself spawns: forced via -T
+           127.0.0.1 in the pinned vendored Nexus's own rigctld_args()
+           (EngineHost/.nexus-src/crates/tempo-audio/src/rigctld_proc.rs,
+           issue #53, Nexus's own fix for this exact wildcard-default
+           problem).
+         * the one remaining gap, Jimmy's own fallback rigctld launch
+           (RigctldClient.LaunchBundled, the Radio Test button's "nothing
+           is already listening" path), did not pass -T and so still
+           relied on Hamlib's unsafe wildcard default; fixed in the same
+           pass that removed this Fragment (RigctldClient.cs now also
+           forces -T 127.0.0.1), closing the one code path that could
+           still have triggered a real prompt.
+       A socket bound specifically to 127.0.0.1 never becomes reachable
+       from outside the machine, and Windows Firewall does not filter
+       loopback traffic at all, so there is nothing left for these
+       exceptions to pre-allow. No current feature needs LAN reachability
+       to either program either: "external rigctld" (Options > Radio) is
+       Jimmy connecting OUT to an operator-specified host, an outbound
+       connection that has never needed an inbound allow-rule. Removed
+       rather than left in place: an unnecessary Program-scoped Windows
+       Firewall rule is still a real, user-visible attack-surface/trust
+       question for anyone who inspects what an installer adds, not a
+       harmless no-op. -->
 
   <!-- ── UI customizations ─────────────────────────────────────────────── -->
   <!--

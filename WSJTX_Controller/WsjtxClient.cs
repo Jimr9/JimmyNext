@@ -216,9 +216,55 @@ namespace WSJTX_Controller
         // (HandleLiveQsoLogged/HandleLiveAdifLogged, WsjtxClient.Uploads.cs) -- both removed
         // along with the rest of the classic UDP transport; this set's only remaining purpose is
         // the one above.
-        private readonly HashSet<string> _liveLoggedQsoKeys = new HashSet<string>();
-        private bool ClaimLiveLoggedQso(string dedupKey) =>
-            string.IsNullOrEmpty(dedupKey) || _liveLoggedQsoKeys.Add(dedupKey);
+        // Codex Audit 03 release blocker #2 fix, 2026-08-21: was a plain HashSet<string>, whose
+        // Add() claimed a dedupKey permanently the FIRST time RequestLog saw it, win or lose --
+        // a failed local write left the key claimed forever, so the very next poll tick's retry
+        // (Qso.TxNow repeats the same completed exchange for several seconds, see this class's
+        // own comment above -- this is the NORMAL, expected re-entry path, not a rare race) found
+        // ClaimLiveLoggedQso already returning false, skipped RequestLog's whole write block
+        // entirely, left localWriteFailed at its default false, and fell straight into the
+        // success branch: the logged sound, logList/loggedCall, and Still Need refresh all fired
+        // for a QSO that had never actually been written to SQLite. Root-caused directly against
+        // a real repeated-poll trace, not merely inferred from the audit. Now a dictionary: false
+        // means "claimed, write attempted but not yet confirmed committed" (a transient state
+        // that should never actually be observed outside the one synchronous call that sets it,
+        // since ReleaseFailedLiveLoggedQsoClaim below removes it again immediately on failure --
+        // kept explicit rather than folded into "absent" so a stray read mid-refactor fails loud
+        // instead of silently behaving like "committed"); true means durably written. Only a
+        // COMMITTED key blocks a future claim (the correct "already logged, do not repeat the
+        // DB write" case) -- a released, failed key is indistinguishable from "never seen" to
+        // ClaimLiveLoggedQso, so the very next retry can genuinely retry the write instead of
+        // silently short-circuiting into false success.
+        private readonly Dictionary<string, bool> _liveLoggedQsoKeys = new Dictionary<string, bool>();
+
+        private bool ClaimLiveLoggedQso(string dedupKey)
+        {
+            if (string.IsNullOrEmpty(dedupKey)) return true;
+            if (_liveLoggedQsoKeys.TryGetValue(dedupKey, out bool committed) && committed)
+                return false; // already durably logged -- a repeat trigger, not a failure to retry
+            _liveLoggedQsoKeys[dedupKey] = false; // claim (or re-claim after a prior failed attempt)
+            return true;
+        }
+
+        // Called only when a local write this call site owned actually failed -- releases the
+        // claim so the next repeated-poll-tick retry (or any other later trigger) can genuinely
+        // attempt the write again, rather than ClaimLiveLoggedQso permanently blocking every
+        // future attempt for a QSO that was never actually saved.
+        private void ReleaseFailedLiveLoggedQsoClaim(string dedupKey)
+        {
+            if (string.IsNullOrEmpty(dedupKey)) return;
+            _liveLoggedQsoKeys.Remove(dedupKey);
+        }
+
+        // Called only once the local write actually succeeds -- marks this dedupKey durably
+        // committed so a later repeat trigger for the same QSO is correctly recognized as
+        // "already logged" (ClaimLiveLoggedQso returns false) instead of attempting a duplicate
+        // insert or replaying success UI on top of an already-successful one.
+        private void MarkLiveLoggedQsoCommitted(string dedupKey)
+        {
+            if (string.IsNullOrEmpty(dedupKey)) return;
+            _liveLoggedQsoKeys[dedupKey] = true;
+        }
         private static uint defaultAudioOffset = 1500;
         private string failReason = "Failure reason: Unknown";
         public static int wsjtxRevision;
@@ -948,8 +994,17 @@ namespace WSJTX_Controller
         {
             if (!force && lastCallListTxFirst == txFirst) return;
             lastCallListTxFirst = txFirst;
-            string rxLabel = txFirst ? "RX2" : "RX1";
-            ctrl.callListBox.AccessibleName = $"{rxLabel} Stations Available";
+            // Live-testing finding, 2026-08-21: this used to label callListBox "RX1"/"RX2"
+            // Stations Available regardless of mode -- but callListBox is the BEGINNER/simple-
+            // layout list only (Advanced Call Layout replaces it with the separate TX1/TX2
+            // lists just below, which legitimately do need the RX/TX side distinction). A
+            // beginner-mode operator never sees a TX1/TX2 split at all, so labeling their one
+            // and only list with RX-side terminology that has no counterpart on screen was
+            // actively confusing, not just redundant -- matches the "Focus Available Stations
+            // List" hotkey's own plain DisplayName (HotkeyConfig.cs).
+            ctrl.callListBox.AccessibleName = ctrl.advancedCallLayout
+                ? $"{(txFirst ? "RX2" : "RX1")} Stations Available"
+                : "Stations Available";
 
             // Update advanced list labels to reflect the active transmit side.
             // txFirst=true  → user transmits on TX1 (even); TX2 is the receive side → label TX2 as RX2.
@@ -1748,7 +1803,34 @@ namespace WSJTX_Controller
         public void Closing()
         {
             DebugOutput($"{nl}{nl}{DateTime.UtcNow.ToString("yyyy-MM-dd HHmmss")} UTC ###################### Program closing...");
-            if (opMode > OpModes.IDLE) HaltTx();
+            // Codex Audit 04 finding 1, 2026-08-21: Controller.cs's CloseComm() now calls this
+            // method BEFORE disposing nativeEngineClient (previously reversed -- the engine
+            // process was already dead by the time HaltTx()'s own HALT_TX reached the dispatcher,
+            // so a graceful halt/tune-off/TX-release could never actually land). Blocking,
+            // bounded wait (2s) for a real response while the engine is still alive to answer;
+            // times out and proceeds regardless if it doesn't -- process termination (CloseComm()
+            // killing the engine right after this returns) remains the last-resort backstop, same
+            // as it already was.
+            if (opMode > OpModes.IDLE)
+            {
+                StopDecodeTimers();
+                tuning = false;
+                if (_directConnected)
+                {
+                    bool halted = HaltTxAndWaitForShutdown(TimeSpan.FromSeconds(2));
+                    DebugOutput($"{Time()} [DIRECT] shutdown halt {(halted ? "confirmed" : "did not confirm within 2s -- proceeding to terminate the engine regardless")}");
+                    txEnabled = false;
+                    wsjtxTxEnableButton = false;
+                }
+            }
+            // Codex Audit 03 finding 3, 2026-08-21: stops the SNAPSHOT poll timer (the main
+            // source of new Direct-command enqueues, e.g. SetupCq's post-QSO CALL_CQ auto-resume)
+            // and permanently closes the write queue -- the shutdown halt just above already
+            // purges any pending TX-arm command via its own HALT_TX enqueue (see
+            // PurgePendingTxArmCommands_NoLock, WsjtxClient.Direct.cs); this closes the window for
+            // every OTHER queued write, and any new one attempted after this point, reaching an
+            // engine process that CloseComm() (Controller.cs) is about to kill outright.
+            ShutdownDirectCommandQueue();
             ResetOpMode();
             ShowStatus();
             // UDP transport cleanup, 2026-08-18: heartbeatRecdTimer.Stop() and the udpClient2/
@@ -1901,6 +1983,16 @@ namespace WSJTX_Controller
             // ClaimLiveLoggedQso still dedupes against a QsoLoggedMessage/LoggedAdifMessage
             // confirmation if one arrives too.
             string liveDedupKey = AdifImporter.BuildDedupKey(call, band, mode, qsoDateOn, qsoTimeOn);
+            // Codex Audit 02/03: tracks whether THIS path actually owned (and failed) the local
+            // logbook write -- stays false if ClaimLiveLoggedQso returned false because the key
+            // is already durably COMMITTED (a different trigger, e.g. a confirmed
+            // QsoLoggedMessage/LoggedAdifMessage, already logged this QSO; the UI-feedback below
+            // still fires normally in that case). Only set true when THIS call was responsible
+            // for the write and it failed -- and on failure, the claim is released immediately
+            // (ReleaseFailedLiveLoggedQsoClaim) so the next repeated-poll-tick retry can actually
+            // retry the write instead of finding it permanently claimed. See ClaimLiveLoggedQso's
+            // own comment for the release-blocker regression this closes.
+            bool localWriteFailed = false;
             if (ClaimLiveLoggedQso(liveDedupKey))
             {
                 var liveFields = new Dictionary<string, string>
@@ -1919,10 +2011,29 @@ namespace WSJTX_Controller
                     ["MY_GRIDSQUARE"]    = myGrid,
                 };
                 EnrichWithClubLogGeoData(liveFields, call);
-                ImportLiveLoggedQso(call, liveFields, adifRecord, liveDedupKey);
+                localWriteFailed = !ImportLiveLoggedQso(call, liveFields, adifRecord, liveDedupKey);
+                if (localWriteFailed) ReleaseFailedLiveLoggedQsoClaim(liveDedupKey);
+                else MarkLiveLoggedQsoCommitted(liveDedupKey);
             }
 
-            Sounds.PlaySoundEvent(ctrl.loggedCheckBox.Checked, ctrl.soundFile_Logged);
+            // Codex Audit 02 release blocker, 2026-08-21: a failed local logbook write must be
+            // visible to the operator, not just DebugOutput (ImportLiveLoggedQso's own comment) --
+            // and must not claim false "logged" success. The over-the-air QSO itself already
+            // happened regardless of whether the LOCAL RECORD of it saved (73/RR73 was already
+            // exchanged by the time this method runs), so the real-QSO-completion bookkeeping
+            // below (call-in-progress tracking, the TX-hold safety counters) still runs either
+            // way -- only the pieces that specifically claim "this is now in Jimmy's own logbook"
+            // (the logged sound, today's logged-calls list, the status-line "call logged" text,
+            // the Still Need cache refresh) are gated on localWriteFailed.
+            if (localWriteFailed)
+            {
+                Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"QSO with {call} NOT saved",
+                    "local logbook write failed -- this contact is not yet recorded; check Debug output and available disk space"));
+            }
+            else
+            {
+                Sounds.PlaySoundEvent(ctrl.loggedCheckBox.Checked, ctrl.soundFile_Logged);
+            }
             // Removed 2026-08-10: this used to also Notify.Publish(QsoCompletedEvent(...))
             // here ("Logged QSO with {call}"), as a standalone announcement independent of
             // ShowStatus()'s own status line. loggedCall (set just below) is read by
@@ -1930,15 +2041,23 @@ namespace WSJTX_Controller
             // the SAME sentence as the rest of the QSO status -- confirmed live, 2026-08-10,
             // that having both meant this standalone announcement could land on top of /cut
             // off the status line's own real-time "received RR73" text for the same QSO.
-            if (isPota) _potaLog.Add(call, DateTime.Now, band, mode);         //local date/time
+            // Codex Audit 03 finding, 2026-08-21: gated on !localWriteFailed alongside the other
+            // "this QSO is now on record" pieces below -- a POTA/SOTA hunter log entry existing
+            // for a contact SQLite never actually stored would itself be a false-success signal
+            // (the same class of problem this whole block exists to prevent), not a separate
+            // over-the-air-event exception like the TX-hold counters below.
+            if (isPota && !localWriteFailed) _potaLog.Add(call, DateTime.Now, band, mode);         //local date/time
             consecCqCount = 0;
             consecTimeoutCount = 0;
             consecTxCount = 0;
             DebugOutput($"{spacer}QSO logged: call'{call}' consecCqCount:0 consecTimeoutCount:0 consecTxCount:0");
             UpdateCallInProg();
-            logList.Add(call);
-            ShowLogged();
-            loggedCall = call;
+            if (!localWriteFailed)
+            {
+                logList.Add(call);
+                ShowLogged();
+                loggedCall = call;
+            }
             lCall = call;
             CancelDiscardCall();
             // Without this, an award's "still needed" tag (e.g. a state for WAS) stays stale
@@ -1946,7 +2065,8 @@ namespace WSJTX_Controller
             // logged QSO, only a band change or restart. A stale "still needed" tag also lets
             // the already-worked exception (meant for repeatable special events like 13
             // Colonies) keep re-admitting this same, already-logged call into the queue.
-            ctrl.RefreshStillNeedCache();
+            // Skipped on a failed write -- nothing actually changed for this call to refresh.
+            if (!localWriteFailed) ctrl.RefreshStillNeedCache();
             UpdateDebug();
         }
 
@@ -2794,15 +2914,40 @@ namespace WSJTX_Controller
                 settingChanged = false;
             }
 
-            string cqMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
-            qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
-            replyCmd = null;        //invalidate last reply cmd since not replying
-            replyDecode = null;
-            curCmd = cqMsg;
-            newDirCq = false;           //if set, was processed here
-            DebugOutput($"{spacer}qsoState:{qsoState} (was {lastQsoState} replyCmd:'{replyCmd}') newDirCq:{newDirCq}");
+            if (!_directConnected)
+            {
+                // Nothing to accept the command -- nothing to commit locally either, same as
+                // every other "_directConnected" guard's own behavior (EnableTx/DisableTx/HaltTx).
+                newDirCq = false;
+                return;
+            }
 
-            if (enableTx) EnableTx();             //sets WSJT-X "Enable Tx" button state
+            // Captured once (was previously called a second time inside the string
+            // interpolation below) so the SAME randomly-picked directed-CQ token both appears in
+            // the locally-tracked curCmd text AND is the one actually transmitted by
+            // DirectSendCq below -- calling NextDirCq() twice could hand each purpose a
+            // different random pick.
+            string dirCq = NextDirCq();
+            string cqMsg = $"CQ{dirCq} {myCall} {myGrid}";
+            newDirCq = false;           //if set, was processed here
+
+            // Codex Audit 04 finding 2, 2026-08-21: qsoState/replyCmd/curCmd used to commit here,
+            // synchronously, before CALL_CQ was even sent -- an EngineHost refusal, timeout, or
+            // lost response could leave Jimmy displaying/ranking a QSO that never actually
+            // started. Now committed only from DirectSendCq's own completion callback, once the
+            // engine has genuinely accepted the command (and, per finding 3, only if a Halt
+            // hasn't superseded it while in flight -- see DirectSendCq's own comment,
+            // WsjtxClient.Direct.cs). EnableTx() moves here too, for the same reason.
+            DirectSendCq(dirCq.Trim(), ok =>
+            {
+                if (!ok) return;
+                qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
+                replyCmd = null;        //invalidate last reply cmd since not replying
+                replyDecode = null;
+                curCmd = cqMsg;
+                DebugOutput($"{spacer}qsoState:{qsoState} (was {lastQsoState} replyCmd:'{replyCmd}') newDirCq:{newDirCq}");
+                if (enableTx) EnableTx();             //sets WSJT-X "Enable Tx" button state
+            });
         }
 
         private void LogBeep()
@@ -2885,37 +3030,49 @@ namespace WSJTX_Controller
             // unconditionally call udpClient2.Send, a real NullReferenceException risk if this
             // was ever reached before _directConnected went true) -- same shape as EnableTx/
             // DisableTx/HaltTx's own guards.
-            if (_directConnected)
-            {
-                // Restored 2026-08-18 -- see DirectSetTxOffset's own comment (WsjtxClient.Direct.cs).
-                // AudioOffsetFromMsg picks the offset for the period opposite dmsg's own (i.e. the
-                // period Jimmy will actually transmit the reply on), returns 0 if not applicable.
-                uint replyOffset = AudioOffsetFromMsg(dmsg);
-                if (replyOffset > 0) DirectSetTxOffset(replyOffset);
-                DirectSendReply(nCall, null, dmsg.Message, dmsg.Snr, null);
-                DebugOutput($"{Time()} >>>>>Sent Reply (direct) nCall:'{nCall}' msg:'{dmsg.Message}'");
-            }
-            else
+            if (!_directConnected)
             {
                 DebugOutput($"{Time()} ReplyTo skipped, not connected");
                 return;
             }
-            replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress
-            replyDecode = dmsg.DeepCopy();      //save the decode the reply cmd derived from
-            curCmd = dmsg.Message;
-            SetCallInProg(nCall);
-            //toCallTxStart = null to flag intentional interruption
-            if (transmitting) SetTxStartInfo(DateTime.UtcNow, null);  //because tx-start event already happened
 
-            EnableTx();             //also sets WSJT-X "Tx Enable" button state
+            // Restored 2026-08-18 -- see DirectSetTxOffset's own comment (WsjtxClient.Direct.cs).
+            // AudioOffsetFromMsg picks the offset for the period opposite dmsg's own (i.e. the
+            // period Jimmy will actually transmit the reply on), returns 0 if not applicable.
+            uint replyOffset = AudioOffsetFromMsg(dmsg);
+            if (replyOffset > 0) DirectSetTxOffset(replyOffset);
 
-            cqPaused = false;
-            restartQueue = false;           //get ready for next decode phase
-            txTimeout = false;              //ready for next timeout
-            tCall = null;
-            xmitCycleCount = 0;
-            timedOutCall = null;
-            UpdateDebug();
+            // Codex Audit 04 finding 2, 2026-08-21: replyCmd/curCmd/callInProg/EnableTx used to
+            // commit here, synchronously, before REPLY was even sent -- an EngineHost refusal,
+            // timeout, or lost response could leave Jimmy displaying/ranking a QSO that never
+            // actually started, with the station already dequeued (GetCall, above). Now committed
+            // only from DirectSendReply's own completion callback, once the engine has genuinely
+            // accepted the reply (and, per finding 3, only if a Halt hasn't superseded it while in
+            // flight -- see DirectSendReply's own comment, WsjtxClient.Direct.cs). The dequeue
+            // itself is NOT rolled back on failure -- see this method's own earlier comment on why
+            // an automatic queue-state rollback is a separate, riskier change needing real-radio
+            // verification this pass doesn't have.
+            DirectSendReply(nCall, null, dmsg.Message, dmsg.Snr, null, ok =>
+            {
+                if (!ok) return;
+                replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress
+                replyDecode = dmsg.DeepCopy();      //save the decode the reply cmd derived from
+                curCmd = dmsg.Message;
+                SetCallInProg(nCall);
+                //toCallTxStart = null to flag intentional interruption
+                if (transmitting) SetTxStartInfo(DateTime.UtcNow, null);  //because tx-start event already happened
+
+                EnableTx();             //also sets WSJT-X "Tx Enable" button state
+
+                cqPaused = false;
+                restartQueue = false;           //get ready for next decode phase
+                txTimeout = false;              //ready for next timeout
+                tCall = null;
+                xmitCycleCount = 0;
+                timedOutCall = null;
+                UpdateDebug();
+            });
+            DebugOutput($"{Time()} >>>>>Sent Reply (direct) nCall:'{nCall}' msg:'{dmsg.Message}'");
         }
 
         private void SetRank(EnqueueDecodeMessage d) =>

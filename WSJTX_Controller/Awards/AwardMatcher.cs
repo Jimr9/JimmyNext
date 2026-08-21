@@ -36,7 +36,11 @@ namespace WSJTX_Controller
                         break;
 
                     case RuleGroupBy.State:
-                        match = !string.IsNullOrEmpty(state) && tag.Set.Contains(state);
+                        // UsGridStateMap.StateSetContains, not a plain Contains(state) -- state
+                        // can be a compound border-straddling grid.dat value like "MN-WI", which
+                        // must match if EITHER component state is in this award's still-needed
+                        // set (see that method's own comment). Release-audit finding, 2026-08-20.
+                        match = UsGridStateMap.StateSetContains(state, tag.Set);
                         break;
 
                     case RuleGroupBy.CqZone:

@@ -29,10 +29,19 @@ namespace WSJTX_Controller
 
         private void ConfirmDlg_Load(object sender, EventArgs e)
         {
+            // Release-audit finding, 2026-08-20 (release blocker): this dialog's own caption was
+            // never set anywhere (every call site only ever sets the message body via `text`),
+            // and focus used to land on yesButton first -- a JAWS/NVDA user heard only "Yes
+            // button" with no indication of what they were being asked. AcceptButton/
+            // CancelButton (ConfirmDlg.Designer.cs) still make Enter/Escape answer Yes/No
+            // regardless of focus, so it's safe to focus the actual question text instead.
+            Text = "Confirm";
             panel1.BackgroundImage = Bitmap.FromHicon(SystemIcons.Question.Handle);
             panel1.BackgroundImageLayout = System.Windows.Forms.ImageLayout.Center;
             textBox.Text = text;
-            yesButton.Focus();
+            textBox.SelectionStart = 0;
+            textBox.SelectionLength = 0;
+            textBox.Focus();
             var pt = Owner.Location;
             pt.Offset(new Point((int)((Owner.Width - Width) / 2), (int)(Owner.Height / 5)));
             Location = pt;

@@ -64,6 +64,20 @@ namespace WSJTX_Controller
         // explicitly warns it does.
         private volatile bool _clubLogRealtimeBroken;
 
+        // Codex Audit 02 finding, 2026-08-21 ("improve shutdown handling for outstanding optional
+        // remote-upload work"): the real-time QRZ/Club Log/HRDLog/eQSL upload below is a genuine
+        // fire-and-forget Task.Run -- nothing has ever awaited or tracked it, so closing Jimmy
+        // (or a forced/Windows shutdown) moments after a QSO completed could tear the process down
+        // mid-upload, silently dropping a real-time upload attempt that was seconds from finishing,
+        // with no chance to notice or retry. Tracked here so Controller_FormClosing can give
+        // outstanding uploads a short, bounded grace period to actually finish (see
+        // WaitForPendingUploads below) instead of exiting instantly regardless -- bounded, not a
+        // block on the local logbook write (already synchronous/durable, see ImportLiveLoggedQso's
+        // own comment) and never indefinite, so a genuinely hung upload still can't delay shutdown
+        // forever.
+        private readonly object _pendingUploadsLock = new object();
+        private readonly List<Task> _pendingUploads = new List<Task>();
+
         public LiveQsoUploadOrchestrator(Func<LiveUploadCredentials> credentials, Action notifyImported,
             Action<string> debugLog, Action<string, bool> showStatus, Func<string, string> resolveUsState)
         {
@@ -79,7 +93,26 @@ namespace WSJTX_Controller
         // without requiring a full Jimmy restart.
         public void ResetClubLogRealtimeBreaker() => _clubLogRealtimeBroken = false;
 
-        public void ImportLiveLoggedQso(string dxCall, Dictionary<string, string> fields, string adifRecord, string dedupKey)
+        // Codex Audit 02 finding, 2026-08-21: called from Controller_FormClosing. Best-effort and
+        // strictly bounded -- returns promptly (true) when nothing is outstanding, otherwise waits
+        // up to `timeout` for whatever real-time uploads are still in flight. Returns false if the
+        // timeout elapsed with uploads still pending (Controller_FormClosing proceeds with closing
+        // either way; this only gives already-close-to-finishing uploads a real chance, it never
+        // blocks shutdown indefinitely for a hung network call).
+        public bool WaitForPendingUploads(TimeSpan timeout)
+        {
+            Task[] snapshot;
+            lock (_pendingUploadsLock) { snapshot = _pendingUploads.ToArray(); }
+            if (snapshot.Length == 0) return true;
+            return Task.WaitAll(snapshot, timeout);
+        }
+
+        // Codex Audit 02 release blocker, 2026-08-21: returns whether the local DB write below
+        // actually succeeded -- the caller (WsjtxClient.cs's RequestLog) must not claim "QSO
+        // logged" success (loggedCall/logList/the logged sound/ShowStatus's "call logged" text)
+        // on a failed local write, and must surface the failure to the operator instead of only
+        // logging it to DebugOutput. See the false-branch below and the caller's own comment.
+        public bool ImportLiveLoggedQso(string dxCall, Dictionary<string, string> fields, string adifRecord, string dedupKey)
         {
             // Added 2026-08-10, real incident: capture the target database path HERE, on the
             // calling thread, synchronously -- NOT inside the background task below. LogbookDb's
@@ -98,26 +131,85 @@ namespace WSJTX_Controller
             // at the moment the QSO was actually logged, which is also the semantically correct
             // behavior for production use, not just a test workaround.
             string dbPath = LogbookDb.DbPath;
-            Task.Run(async () =>
+
+            // Release-audit finding, 2026-08-20 (release blocker): the durable local database
+            // write used to happen as the FIRST statement inside the fire-and-forget Task.Run
+            // below, coupled to the same task as the slow, optional network uploads. Nothing
+            // awaits that task and nothing drains it on shutdown (Controller_FormClosing holds
+            // no handle to it) -- closing Jimmy, a crash, or a forced/Windows shutdown immediately
+            // after a QSO completed could leave it visible in the session UI (logList/ShowLogged
+            // already ran synchronously in RequestLog before this method was even called) but
+            // permanently absent from Jimmy's own logbook, Still Need, and every pending-upload
+            // queue, with no warning and no retry -- the record may simply never have reached the
+            // database. Fixed by moving the durable write here, synchronously, on the calling
+            // thread (already the UI thread -- see DirectApplyStatus/RequestLog), BEFORE this
+            // method returns. A local SQLite insert is a few milliseconds; CLAUDE.md's own
+            // "reliability over new features"/"never knowingly lose a valid QSO" rules make that
+            // an easy trade against upload calls that can legitimately take seconds. Only the
+            // genuinely slow, optional, best-effort network uploads remain deferred below.
+            // Guarded the same way the old all-in-one-task version was ("all exceptions are
+            // caught and logged, never allowed to propagate") -- this now runs synchronously,
+            // on the caller's own thread/stack (the UI thread, via DirectApplyStatus/RequestLog),
+            // so an unguarded throw here would propagate out as an unhandled exception on that
+            // call stack instead of being swallowed inside a background Task the way it used to
+            // be. A write failure (locked file, disk full) still means the QSO didn't durably
+            // log -- same real outcome as before -- it just must not also crash Jimmy.
+            try
+            {
+                using (var db = new LogbookDb(dbPath))
+                {
+                    // resolveUsState is the same lookupManager-backed callback every other US
+                    // state lookup in the app already uses (queue display, raw decodes row, HRC
+                    // award check, the Rule Definitions engine, and the Logbook window's own
+                    // ADIF import) -- without it, a live-logged QSO's state only ever came from
+                    // the grid square, which is blank when no grid was heard and an unusable
+                    // compound string like "OR-ID" when the grid straddles a state border, so the
+                    // QSO silently never counted toward a State-grouped award.
+                    AdifImporter.Import(db, new[] { fields }, "WSJTX", null, _resolveUsState);
+                }
+            }
+            catch (Exception ex)
+            {
+                _debugLog($"ImportLiveLoggedQso local-DB write error for {dxCall}: {ex.Message}");
+                // Codex Audit 02 release blocker, 2026-08-21: a failed local write must not also
+                // attempt remote uploads -- dedupKey/MarkUploaded below would target a row that
+                // was never actually inserted, so a "successful" remote upload could leave the
+                // record present at QRZ/Club Log/etc. but permanently absent from Jimmy's own
+                // logbook, Still Need, and every pending-upload queue, with nothing to reconcile
+                // it later. The caller surfaces this failure to the operator (see its own comment).
+                return false;
+            }
+
+            // Deliberately its own try/catch, separate from the durable write above (found while
+            // fixing the release blocker above, 2026-08-21): notifyImported does its own
+            // ctrl.BeginInvoke marshaling, which throws if the control's handle doesn't exist yet
+            // (e.g. a console test harness with no real message loop) -- that is a best-effort
+            // UI-refresh concern, completely unrelated to whether the write above actually
+            // succeeded, and must never be reported to the caller as a local-DB write failure.
+            try
+            {
+                // Keep award tracking current for this new QSO without requiring a restart:
+                // refresh the live-tag "still needed" cache used during operation, and the
+                // Logbook window's Awards/Still Need page if open. Safe to call synchronously/
+                // from the UI thread -- this callback already does its own ctrl.BeginInvoke
+                // marshaling (see its construction in WsjtxClient.cs), the same pattern used
+                // everywhere else in this codebase when a UI-thread caller still wants to defer
+                // to the next message-loop turn rather than because it might be on some other
+                // thread.
+                _notifyImported();
+            }
+            catch (Exception ex)
+            {
+                _debugLog($"ImportLiveLoggedQso notifyImported callback error for {dxCall}: {ex.Message}");
+            }
+
+            Task uploadTask = null;
+            uploadTask = Task.Run(async () =>
             {
                 try
                 {
                     using (var db = new LogbookDb(dbPath))
                     {
-                        // resolveUsState is the same lookupManager-backed callback every other US
-                        // state lookup in the app already uses (queue display, raw decodes row,
-                        // HRC award check, the Rule Definitions engine, and the Logbook window's
-                        // own ADIF import) -- without it, a live-logged QSO's state only ever came
-                        // from the grid square, which is blank when no grid was heard and an
-                        // unusable compound string like "OR-ID" when the grid straddles a state
-                        // border, so the QSO silently never counted toward a State-grouped award.
-                        AdifImporter.Import(db, new[] { fields }, "WSJTX", null, _resolveUsState);
-
-                        // Keep award tracking current for this new QSO without requiring a
-                        // restart: refresh the live-tag "still needed" cache used during
-                        // operation, and the Logbook window's Awards/Still Need page if open.
-                        _notifyImported();
-
                         var creds = _credentials();
                         bool needQrz = creds.QrzUploadEnabled && creds.QrzUploadRealtime &&
                                        !string.IsNullOrWhiteSpace(creds.QrzLogbookApiKey);
@@ -208,6 +300,15 @@ namespace WSJTX_Controller
                     _debugLog($"ImportLiveLoggedQso error: {ex.Message}");
                 }
             });
+            lock (_pendingUploadsLock) { _pendingUploads.Add(uploadTask); }
+            // Removed on the task's OWN continuation once it finishes -- WaitForPendingUploads
+            // above only cares about uploads that are genuinely still running right now, so the
+            // tracked list must not grow unbounded across a long session.
+            uploadTask.ContinueWith(_ =>
+            {
+                lock (_pendingUploadsLock) { _pendingUploads.Remove(uploadTask); }
+            }, TaskScheduler.Default);
+            return true;
         }
     }
 }

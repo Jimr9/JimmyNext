@@ -271,10 +271,10 @@ namespace WSJTX_Controller
         };
     }
 
-    // Recovery companion to ErrorWarningEvent's "Radio CAT link lost" (Controller.cs's own
-    // radioPollTimer_Tick -- same transition-gated call site, opposite edge: only announces
-    // when _lastRadioPollOk transitions false -> true, never on the first-ever successful poll
-    // of a session). Its own dedicated type rather than reusing ErrorWarningEvent -- this isn't
+    // Recovery companion to ErrorWarningEvent's "Radio CAT link lost" (WsjtxClient.Direct.cs's
+    // DirectApplyStatus -- same transition-gated check, opposite edge: only announces when
+    // _lastCatOk transitions false -> true, never on the first-ever reading of a session). Its
+    // own dedicated type rather than reusing ErrorWarningEvent -- this isn't
     // an error/warning at all (ErrorSeverity has no "recovered" value, and forcing good news
     // through an error-shaped "{Source}: {Detail}" template would read oddly). DedupKey null:
     // only ever one meaningfully-pending CAT-link condition at a time, matching

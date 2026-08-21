@@ -1,0 +1,59 @@
+diff --git a/src/service.rs b/src/service.rs
+index ca36fbf..1a44d86 100644
+--- a/src/service.rs
++++ b/src/service.rs
+@@ -733,6 +733,14 @@ pub struct RadioConfig {
+     /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X Radio tab "Mode: None" — see
+     /// `Settings::dont_set_mode`'s doc comment.
+     pub dont_set_mode: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): when true, the radio loop's own
++    /// routine telemetry poll never issues an RFPOWER level read at all — see the read site
++    /// (search `disable_rfpower_probe` in this file) for the actual gate. Off by default
++    /// (unchanged upstream behavior); Jimmy always sets this on, because reading RFPOWER on a
++    /// freshly-spawned rigctld process is known to trip a destructive calibration-sweep bug in
++    /// Hamlib's Kenwood backend (Hamlib/Hamlib#1595) on its first touch of that process, and
++    /// Jimmy's own policy is that a read must never be able to change anything on the radio.
++    pub disable_rfpower_probe: bool,
+ }
+
+ impl Default for RadioConfig {
+@@ -767,6 +775,7 @@ impl Default for RadioConfig {
+             rx_gain: 1.0,
+             ptt_data_source: false,
+             dont_set_mode: false,
++            disable_rfpower_probe: false,
+         }
+     }
+ }
+@@ -2254,6 +2263,10 @@ struct RadioLoop {
+     level_supported: [Option<bool>; 4],
+     /// Consecutive get-miss counters per extended level — same tolerance as `smeter_misses`.
+     level_misses: [u8; 4],
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): mirrors `RadioConfig::
++    /// disable_rfpower_probe` for this loop's whole lifetime — see the read site (search
++    /// `disable_rfpower_probe` in this file) for what it gates.
++    disable_rfpower_probe: bool,
+     /// Whether we last surfaced the "monitor refused — would transmit into the TX
+     /// device" note on the audio-error line, so we clear only our OWN message.
+     /// The monitor block currently OWNS the audio-error line (it wrote either
+@@ -2387,6 +2400,7 @@ impl RadioLoop {
+             meter_feed: cfg.meter_feed.clone(),
+             level_supported: [None; 4],
+             level_misses: [0; 4],
++            disable_rfpower_probe: cfg.disable_rfpower_probe,
+
+             clock_offset_ms: 0,
+             decode: DecodeWorker::spawn(),
+@@ -3995,7 +4009,11 @@ impl RadioLoop {
+                         // one — the K4 via QK4 Remote — doesn't time out and drop+reconnect the CAT
+                         // socket every poll. Only AFTER the dial probe answered, so a half-open link
+                         // can't eat a SECOND 2.5 s timeout on the same dead poll.
+-                        if self.level_supported[LVL_RFPOWER] != Some(false) {
++                        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): disable_rfpower_probe
++                        // gates this out entirely when set -- Jimmy always sets it, because an
++                        // RFPOWER read on a freshly-spawned rigctld can trip a destructive
++                        // calibration-sweep bug in Hamlib's Kenwood backend (Hamlib/Hamlib#1595).
++                        if !self.disable_rfpower_probe && self.level_supported[LVL_RFPOWER] != Some(false) {
+                             let ok = match rig.read_level("RFPOWER") {
+                                 Ok(frac) => {
+                                     {

@@ -23,6 +23,39 @@ static class JimmyTests
 
     static int passed;
     static int failed;
+    static int skipped;
+
+    // Release-audit finding, 2026-08-20: StartStubEngineHost's three callers used to just
+    // Console.WriteLine("  SKIP  ...") and `return;` directly, with no counter -- test.bat's
+    // final "ALL TESTS PASSED" banner was indistinguishable from a run where these tests'
+    // real assertions silently never executed at all (e.g. because a real Jimmy/engine-host
+    // session already owned the control port on the developer's machine). A skip is still not
+    // a FAIL (the code isn't known broken -- this is an environment collision, not a defect),
+    // but it must never blend into an unqualified "all clean" signal either. See Main()'s own
+    // final summary for how this is surfaced.
+    static void Skip(string label, string reason)
+    {
+        Console.WriteLine($"  SKIP  {label}: {reason}");
+        skipped++;
+    }
+
+    // Release-audit finding, 2026-08-21: RetuneBand/ToggleTuningProcess/SetOperatingMode's
+    // DirectSendCommand call moved off the UI thread onto a background Task, with only the
+    // resulting state update marshaled back via ctrl.BeginInvoke -- tests that call a real
+    // production entry point (BandUp/BandDown/SelectBand/SelectFrequency) now need to pump this
+    // process's own WinForms message queue for that BeginInvoke continuation to actually run,
+    // the same way it would inside Jimmy's real Application.Run() loop. Bounded by timeoutMs so
+    // a genuine bug (the awaited state never actually lands) fails the assertion below instead
+    // of hanging the test run forever.
+    static void PumpUntil(Func<bool> condition, int timeoutMs = 3000)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        while (!condition() && sw.ElapsedMilliseconds < timeoutMs)
+        {
+            System.Windows.Forms.Application.DoEvents();
+            System.Threading.Thread.Sleep(5);
+        }
+    }
 
     static void Check(string label, bool actual, bool expected)
     {
@@ -76,6 +109,21 @@ static class JimmyTests
     [STAThread]
     static void Main(string[] args)
     {
+        // Found chasing intermittent PumpUntil timeouts in the Direct-dispatcher tests, 2026-08-21:
+        // ~1000 tests in one process, many constructing their own WsjtxClient, means a great many
+        // short-lived background Tasks (each Direct dispatcher's own worker, WaitAsync-based since
+        // the earlier thread-pinning fix -- see WsjtxClient.Direct.cs's own comment) get scheduled
+        // in bursts. The CLR thread pool only grows by about one thread per ~500ms-1s when demand
+        // outpaces supply, so a late test's very first EnqueueDirectCommand can occasionally wait
+        // behind that growth-rate limit rather than any real slowness in the code being tested --
+        // confirmed by the failure being purely intermittent and disappearing whenever the suite
+        // isn't under this much simultaneous load. SetMinThreads pre-warms the pool once, up front,
+        // so it never needs to grow mid-run for a burst like this again. A generous but bounded
+        // floor (test-process-only; production Jimmy never runs anywhere near this many
+        // concurrent WsjtxClient instances) -- this fixes the actual root cause, not just a wider
+        // per-test timeout.
+        System.Threading.ThreadPool.SetMinThreads(64, 64);
+
         if (args.Length > 0 && args[0] == "--verify-clublog")
         {
             VerifyClubLogEquivalence();
@@ -153,7 +201,9 @@ static class JimmyTests
         RigctldClientListRigModelsTests();
         OptionsDlgExtractRigModelIdTests();
         TqslParseFinalStatusTests();
+        TqslClassifyFinalStatusTests();
         ResolveUsStateTests();
+        StateSetContainsTests();
         AdifImporterLiveLoggedStateFallbackTests();
         DxSpotWatcherIsEvenPeriodTests();
         FccUlsProviderParseLineTests();
@@ -200,13 +250,24 @@ static class JimmyTests
         ClockSyncDirectPathStateHygieneTests();
         DirectTxHoldSafetyNetTests();
         DirectPollFailureNotificationTests();
+        HaltPurgesQueuedTxArmCommandTests();
+        FailedQsoWriteDoesNotFalselyAnnounceSuccessTests();
+        DirectInitialConnectAlwaysRestoresLastExactDialTests();
+        BeginnerModeOnlyAccessibilityTests();
 
         Console.WriteLine();
-        Console.WriteLine($"=== {passed} passed, {failed} failed ===");
+        Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
         if (failed > 0)
         {
             Console.WriteLine("SOME TESTS FAILED");
             Environment.Exit(1);
+        }
+        else if (skipped > 0)
+        {
+            // Deliberately NOT "ALL TESTS PASSED" -- see Skip()'s own comment. Exit code stays
+            // 0 (a skip is an environment collision, not a known defect), but the banner itself
+            // must never read as an unqualified clean run when real assertions didn't execute.
+            Console.WriteLine($"TESTS PASSED, BUT {skipped} TEST(S) WERE SKIPPED -- see SKIP lines above");
         }
         else
         {
@@ -1571,33 +1632,58 @@ static class JimmyTests
     static DirectSnapshot ParseDirectSnapshot(string json) =>
         System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(json, WsjtxClient.DirectJsonOptions);
 
-    // Minimal stub rigctld: binds an ephemeral loopback port, accepts ONE connection on a
-    // background thread, and replies "RPRT 0" (Hamlib's own success code) to every line it
-    // reads until the connection closes. Real enough to exercise RigctldClient.SetFrequency's
-    // SUCCESS path (a genuine accept + wire round-trip) without needing an actual Hamlib/rigctld
-    // process or physical radio -- used by the RetuneBand failure/success regression test below.
-    // Caller must Stop() the returned listener when done (releases the port and unblocks the
-    // background thread's AcceptTcpClient if nothing ever connected).
-    static System.Net.Sockets.TcpListener StartStubRigctld(out int port)
+    // Minimal stub engine host: binds the REAL fixed control port (NativeEngineClient.
+    // ControlPort) -- unlike RigctldClient, DirectSendCommand's target host/port is not
+    // injectable, so exercising DirectSetFrequency's SUCCESS path needs a listener on the
+    // literal port jimmy-engine-host.exe would use. Accepts connections in a loop on a
+    // background thread (one connection per command, matching jimmy-engine-host's own
+    // run_control_server -- DirectSendCommand opens a fresh TcpClient per call, unlike
+    // RigctldClient's one persistent connection) and replies "OK" to whatever line it reads.
+    // Returns null instead of throwing if the port is already bound (e.g. a real engine host
+    // already running on this machine) -- callers should skip their success-path assertions
+    // rather than fail the whole suite over a collision with the developer's own live session.
+    // Caller must Stop() a non-null returned listener when done.
+    //
+    // onCommandReceived (release-audit finding, 2026-08-20, "real validation/coverage for the
+    // SET_FREQUENCY Direct contract"): every caller used to only prove "a wire round-trip
+    // happened and got OK back", never that the actual JSON payload DirectSetFrequency sent was
+    // correct -- a field-name/unit mismatch between WsjtxClient.Direct.cs's DirectSetFrequencyArgs
+    // and EngineHost/src/main.rs's SetFrequencyArgs would have passed every one of these tests
+    // while silently mistuning the radio in the field. Optional so existing callers that only
+    // care about the success path (not the payload) don't need to change.
+    static System.Net.Sockets.TcpListener StartStubEngineHost(Action<string> onCommandReceived = null)
     {
-        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
-        listener.Start();
-        port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        System.Net.Sockets.TcpListener listener;
+        try
+        {
+            listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
+            listener.Start();
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return null;
+        }
         var t = new System.Threading.Thread(() =>
         {
             try
             {
-                using (var client = listener.AcceptTcpClient())
-                using (var stream = client.GetStream())
-                using (var reader = new System.IO.StreamReader(stream))
-                using (var writer = new System.IO.StreamWriter(stream) { AutoFlush = true, NewLine = "\n" })
+                while (true)
                 {
-                    string line;
-                    while ((line = reader.ReadLine()) != null)
-                        writer.WriteLine("RPRT 0");
+                    using (var client = listener.AcceptTcpClient())
+                    using (var stream = client.GetStream())
+                    using (var reader = new System.IO.StreamReader(stream))
+                    using (var writer = new System.IO.StreamWriter(stream) { AutoFlush = true, NewLine = "\n" })
+                    {
+                        string line = reader.ReadLine();
+                        if (line != null)
+                        {
+                            onCommandReceived?.Invoke(line);
+                            writer.WriteLine("OK");
+                        }
+                    }
                 }
             }
-            catch { /* listener.Stop() during teardown races this thread -- harmless */ }
+            catch { /* listener.Stop() during teardown breaks AcceptTcpClient -- harmless */ }
         });
         t.IsBackground = true;
         t.Start();
@@ -1900,23 +1986,33 @@ static class JimmyTests
     static void DirectPathPendingBandIdxClearedOnConfirmationTests()
     {
         Console.WriteLine("\n── _pendingBandIdx: real confirmation clears the stale optimistic guess (Direct pipeline) ──");
-        // Real (stub) HamlibRigctld setup -- since the RetuneBand failure-handling fix (Codex
-        // release audit, 2026-08-19), _pendingBandIdx is only ever set once a CAT command is
-        // actually attempted, so the BandDown() calls below need a real accept + wire round-trip
-        // to set it at all (previously they set it even under the default WsjtxCat mode with no
-        // rigctldClient at all, which was really an artifact of the leak that fix closed). One
-        // stub connection covers every BandDown() call in this test -- RigctldClient stays
-        // connected across commands.
-        var rigListener = StartStubRigctld(out int port);
+        // Band retunes now go through DirectSetFrequency (SET_FREQUENCY on the engine's own
+        // control port), not RigctldClient.SetFrequency -- since the RetuneBand failure-handling
+        // fix (Codex release audit, 2026-08-19), _pendingBandIdx is only ever set once that
+        // command is actually attempted, so the BandDown() calls below need a real accept + wire
+        // round-trip against a stub engine host to set it at all. RetuneBand's gate is now just
+        // RadioControlMode.HamlibRigctld (2026-08-20: ctrl.rigctldClient itself is retired --
+        // it had no remaining functional consumer once AudioLevel()'s AF-gain fallback and the
+        // old rigctld-based polling were both gone), so no dummy client is needed here anymore.
+        // Captures the raw SET_FREQUENCY line the stub actually receives, so the assertions
+        // below can check the real JSON payload's hz/band/mode fields, not just that a wire
+        // round-trip happened and came back OK.
+        var lastCommand = new string[1];
+        var engineListener = StartStubEngineHost(line => lastCommand[0] = line);
+        if (engineListener == null)
+        {
+            Skip("DirectPathPendingBandIdxClearedOnConfirmationTests", "engine control port already in use on this machine");
+            return;
+        }
         try
         {
             var ctrl = new Controller();
+            var _ = ctrl.Handle; // force handle creation -- RetuneBand's ctrl.BeginInvoke below needs it
             ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
-            ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
             var snap20m = ParseDirectSnapshot(@"{
@@ -1934,6 +2030,38 @@ static class JimmyTests
             Check("BandDown() from 20m succeeds", downOk, true);
             Check("...and requests 30m (index 4) as the optimistic pending target",
                 wc.TestPendingBandIdx == 4, true);
+
+            // Release-audit finding, 2026-08-20: prove the actual SET_FREQUENCY wire payload is
+            // correct, not just that a round-trip happened and came back OK -- a field-name/unit
+            // mismatch between DirectSetFrequencyArgs (WsjtxClient.Direct.cs) and SetFrequencyArgs
+            // (EngineHost/src/main.rs) would otherwise pass every existing test in this file while
+            // silently mistuning the radio.
+            //
+            // Release-audit finding, 2026-08-21: RetuneBand's actual DirectSetFrequency call now
+            // runs on a background Task (see its own comment) -- wait for the stub to actually
+            // receive it rather than checking immediately after BandDown() returns.
+            PumpUntil(() => lastCommand[0] != null);
+            const string prefix = "SET_FREQUENCY ";
+            string cmd = lastCommand[0];
+            Check("BandDown() actually sent a SET_FREQUENCY command",
+                cmd != null && cmd.StartsWith(prefix), true);
+            if (cmd != null && cmd.StartsWith(prefix))
+            {
+                using (var doc = System.Text.Json.JsonDocument.Parse(cmd.Substring(prefix.Length)))
+                {
+                    var root = doc.RootElement;
+                    double hz = root.GetProperty("hz").GetDouble();
+                    string band = root.GetProperty("band").GetString();
+                    string sentMode = root.GetProperty("mode").GetString();
+                    CheckStr("...requesting band '30m'", band, "30m");
+                    CheckStr("...requesting mode 'USB' (FT8/FT4 default)", sentMode, "USB");
+                    // 30m's own primary/CQ frequency is 10.136 MHz (matches snap30m below) --
+                    // loose tolerance, this is checking the right BAND was requested, not
+                    // re-deriving bands[4]'s exact table value here.
+                    Check("...requesting a frequency actually within 30m (10.100-10.150 MHz)",
+                        hz >= 10_100_000 && hz <= 10_150_000, true);
+                }
+            }
 
             var snap30m = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -1981,7 +2109,97 @@ static class JimmyTests
         }
         finally
         {
-            rigListener.Stop();
+            engineListener.Stop();
+        }
+    }
+
+    // ── DirectInitialConnect: startup ALWAYS restores the last exact confirmed FT8/FT4 dial ──
+    // Release-audit finding, 2026-08-21, operator directive ("always force it, no setting"):
+    // the original 2026-08-20 startup fallback only corrected a totally UNRECOGNIZED band --
+    // a radio already reporting a recognized-but-different band (even a non-digital CW/phone
+    // frequency, or simply a different ham band than last session) was left alone. This test
+    // proves the broadened behavior: even though the very first snapshot reports a perfectly
+    // valid, recognized band (15m), Jimmy must still retune back to the operator's own last
+    // CONFIRMED exact dial from a prior session (20m/14.074) rather than accepting 15m as
+    // "good enough".
+    static void DirectInitialConnectAlwaysRestoresLastExactDialTests()
+    {
+        Console.WriteLine("\n── DirectInitialConnect: always restore last exact confirmed dial, even over a recognized band -- THE FIX ──");
+        var lastCommand = new string[1];
+        var engineListener = StartStubEngineHost(line => lastCommand[0] = line);
+        if (engineListener == null)
+        {
+            Skip("DirectInitialConnectAlwaysRestoresLastExactDialTests", "engine control port already in use on this machine");
+            return;
+        }
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle; // force handle creation -- RetuneBand's ctrl.BeginInvoke below needs it
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            // Prior session: confirmed on 20m/14.074 MHz, FT8 -- persisted, exactly as
+            // DirectApplyStatus's own "persist whenever a real band is confirmed" write would
+            // have left it.
+            ctrl.Radio.LastDialFrequencyHz = 14074000;
+            ctrl.Radio.LastTier = "FT8";
+            ctrl.Radio.LastBandIdx = 5; // 20m
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // First snapshot this session reports 21.074 MHz -- 15m, a perfectly valid,
+            // RECOGNIZED band, just not the one the operator was actually on last time.
+            var snap15m = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 21.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap15m);
+            Check("First snapshot resolves to a real, recognized band (15m, index 7) -- not 'unknown'",
+                wc.TestBandIdx == 7, true);
+
+            // THE FIX: despite 15m being perfectly recognized, Jimmy must still send a real
+            // SET_FREQUENCY restoring 20m/14.074 -- the last thing the operator actually
+            // confirmed, not wherever the radio happened to power up.
+            //
+            // 8000ms, not PumpUntil's own 3000ms default -- found intermittently timing out at
+            // 3000ms during a full-suite run (2026-08-21): this is the single test in the whole
+            // suite that most depends on the ordered Direct-command dispatcher's own background
+            // Task actually getting scheduled promptly, and a full ~1000-test run in one process
+            // leaves a lot of real sockets/threads/timers active by the time this one runs, which
+            // can occasionally add a second or two of pure OS/CLR scheduling jitter before the
+            // dispatcher's Task.Run even starts -- not a logic bug (the command IS always sent
+            // correctly; every one of many other DirectInitialConnect/dispatcher tests confirms
+            // that), just an occasionally-too-tight margin for a real network round-trip inside a
+            // large concurrent test process.
+            PumpUntil(() => lastCommand[0] != null, timeoutMs: 8000);
+            const string prefix = "SET_FREQUENCY ";
+            string cmd = lastCommand[0];
+            Check("Startup sent a SET_FREQUENCY command despite the current band already being recognized -- THE FIX",
+                cmd != null && cmd.StartsWith(prefix), true);
+            if (cmd != null && cmd.StartsWith(prefix))
+            {
+                using (var doc = System.Text.Json.JsonDocument.Parse(cmd.Substring(prefix.Length)))
+                {
+                    var root = doc.RootElement;
+                    double hz = root.GetProperty("hz").GetDouble();
+                    string band = root.GetProperty("band").GetString();
+                    CheckStr("...restoring band '20m' (the last CONFIRMED band, not the current 15m)", band, "20m");
+                    Check("...restoring the exact confirmed dial, 14.074 MHz (within 1 Hz)",
+                        Math.Abs(hz - 14074000) < 1.0, true);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectInitialConnectAlwaysRestoresLastExactDialTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            engineListener.Stop();
         }
     }
 
@@ -1994,15 +2212,18 @@ static class JimmyTests
     // the last CONFIRMED bandIdx, a stale pending value from a failed retune would make the NEXT
     // BandUp/BandDown compute from a band that only ever existed as an unconfirmed request --
     // the failure-path twin of the confirmation-path bug DirectPathPendingBandIdxCleared...
-    // above already covers. Exercises SetFrequency's real failure mode (connection refused --
-    // nothing listens on the port used below) and real success mode (StartStubRigctld) rather
-    // than mocking RigctldClient, matching this suite's existing convention.
+    // above already covers. RetuneBand now calls DirectSetFrequency (SET_FREQUENCY on the
+    // engine's own control port) instead of RigctldClient.SetFrequency, so this exercises
+    // DirectSendCommand's real failure mode (connection refused -- nothing listens on the
+    // engine control port at that point) and real success mode (StartStubEngineHost) rather
+    // than mocking anything, matching this suite's existing convention.
     static void RetuneBandFailureDoesNotLeakPendingBandIdxTests()
     {
         Console.WriteLine("\n── RetuneBand: a failed SetFrequency does not claim success or leak _pendingBandIdx ──");
         try
         {
             var ctrl = new Controller();
+            var _ = ctrl.Handle; // force handle creation -- RetuneBand's ctrl.BeginInvoke below needs it
             ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
@@ -2018,29 +2239,39 @@ static class JimmyTests
             wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap20m);
             Check("Setup: confirmed on 20m (index 5)", wc.TestBandIdx == 5, true);
 
-            // FAILURE case: nothing listens on port 1 -- SetFrequency genuinely fails to connect
-            // (real connection-refused, not a mock).
-            ctrl.rigctldClient = new RigctldClient("127.0.0.1", 1);
+            // FAILURE case: nothing listens on the engine control port yet -- DirectSetFrequency
+            // genuinely fails to connect (real connection-refused, not a mock). RetuneBand's gate
+            // is just RadioControlMode.HamlibRigctld (already set above); no client instance is
+            // needed to satisfy it, since ctrl.rigctldClient itself is retired.
             bool downFailed = wc.BandDown();
             Check("BandDown() still returns true (hotkey stays 'handled') even though the retune failed",
                 downFailed, true);
+            // Release-audit finding, 2026-08-21: RetuneBand's actual DirectSetFrequency call (and
+            // therefore its failure-path _pendingBandIdx clear) now runs on a background Task --
+            // wait for it to actually land rather than checking immediately after BandDown()
+            // returns (which only proves the SYNCHRONOUS optimistic-set half, not the fix itself).
+            PumpUntil(() => wc.TestPendingBandIdx == null);
             Check("...but _pendingBandIdx was NOT left pointing at the unconfirmed target -- THE FIX",
                 wc.TestPendingBandIdx == null, true);
 
-            // SUCCESS case, right after a failure: a real accept + wire round-trip via the stub
-            // must still work normally -- "successful behavior remains unchanged".
-            var rigListener = StartStubRigctld(out int port);
+            // SUCCESS case, right after a failure: a real accept + wire round-trip against a stub
+            // engine host must still work normally -- "successful behavior remains unchanged".
+            var engineListener = StartStubEngineHost();
+            if (engineListener == null)
+            {
+                Skip("RetuneBandFailureDoesNotLeakPendingBandIdxTests success case", "engine control port already in use on this machine");
+                return;
+            }
             try
             {
-                ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
                 bool downOk = wc.BandDown();
-                Check("BandDown() succeeds against a real (stub) rigctld", downOk, true);
+                Check("BandDown() succeeds against a real (stub) engine host", downOk, true);
                 Check("...and _pendingBandIdx correctly targets 30m (index 4) -- successful behavior unchanged",
                     wc.TestPendingBandIdx == 4, true);
             }
             finally
             {
-                rigListener.Stop();
+                engineListener.Stop();
             }
         }
         catch (Exception ex)
@@ -2067,13 +2298,18 @@ static class JimmyTests
     static void SelectFrequencyHotkeyModeStaysPutTests()
     {
         Console.WriteLine("\n── SelectFrequencyHotkey: a band hotkey never switches mode ──");
-        // Real (stub) HamlibRigctld setup, not left at the default WsjtxCat mode -- since the
+        // Real (stub) engine-host setup, not left at the default WsjtxCat mode -- since the
         // RetuneBand failure-handling fix (Codex release audit, 2026-08-19), _pendingBandIdx is
-        // only ever set once a CAT command is actually attempted, so this test needs a real
-        // accept + wire round-trip for its TestPendingBandIdx assertions below to mean anything
-        // (previously they held even under WsjtxCat/no rigctldClient at all, which was really an
-        // artifact of the leak this fix closed, not a deliberate check of anything).
-        var rigListener = StartStubRigctld(out int port);
+        // only ever set once RetuneBand's DirectSetFrequency call is actually attempted, so this
+        // test needs a real accept + wire round-trip for its TestPendingBandIdx assertions below
+        // to mean anything. RetuneBand's gate is just RadioControlMode.HamlibRigctld (set below);
+        // ctrl.rigctldClient itself is retired, so no client instance is needed to satisfy it.
+        var engineListener = StartStubEngineHost();
+        if (engineListener == null)
+        {
+            Skip("SelectFrequencyHotkeyModeStaysPutTests", "engine control port already in use on this machine");
+            return;
+        }
         try
         {
             var ctrl = new Controller();
@@ -2082,7 +2318,6 @@ static class JimmyTests
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
-            ctrl.rigctldClient = new RigctldClient("127.0.0.1", port);
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             wc.TestSetMode("FT8");
 
@@ -2109,9 +2344,9 @@ static class JimmyTests
 
             // A hotkey whose OWN entry already matches the current mode still behaves exactly
             // like the original targeted jump -- multiple same-mode entries per band (e.g. an
-            // alternate spot frequency) remain reachable by their own hotkey. Reuses the same
-            // stub connection (RigctldClient stays connected across commands -- EnsureConnected
-            // is a no-op once IsConnected), so this second real retune succeeds too.
+            // alternate spot frequency) remain reachable by their own hotkey. The stub engine
+            // host accepts one connection per command (DirectSendCommand dials fresh each time),
+            // so this second real retune succeeds too.
             var matchedEntry = new FrequencyEntry { Mode = "FT8", FreqKHz = 14074, Hotkey = System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.D5 };
             bool ok2 = wc.SelectFrequencyHotkey(5, matchedEntry);
             Check("Mode-matched hotkey succeeds", ok2, true);
@@ -2125,7 +2360,7 @@ static class JimmyTests
         }
         finally
         {
-            rigListener.Stop();
+            engineListener.Stop();
         }
     }
 
@@ -2386,6 +2621,13 @@ static class JimmyTests
         ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
         ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
         ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        // Live-testing finding, 2026-08-21: Command Prompts is now beginner-mode-only
+        // (TogglePrompts refuses while ctrl.advancedCallLayout is true -- see its own comment).
+        // JimmySettings.AdvancedCallLayout's own raw field default is true (a pre-existing,
+        // deliberate migration default for upgrades with no saved value yet -- LoadFromIni is
+        // what actually resolves a fresh/no-ini install to false); this test never loads a real
+        // ini, so it must set beginner mode explicitly to exercise Alt+P at all.
+        ctrl.advancedCallLayout = false;
         var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
 
         // cmdPrompts defaults to true, so the constructor's own first render already exercises
@@ -2412,6 +2654,68 @@ static class JimmyTests
         // Alt+K by default.
         Check("The announced Alt+K shortcut is genuinely HotkeyAction.Help's current default binding",
             HotkeyConfig.Defaults[HotkeyAction.Help] == (System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.K), true);
+    }
+
+    // ── Live-testing findings, 2026-08-21: beginner-mode-only accessibility fixes ──────────
+    // Command Prompts (Alt+P), the hotkey-suffixed button names it now gates
+    // (Controller.RefreshHotkeyAccessibleNames), and callListBox's own RX1/RX2 labeling
+    // (WsjtxClient.UpdateCallListAccessibleName) are all beginner-mode (Advanced Call Layout
+    // OFF) concepts -- none of them should have any effect while Advanced Call Layout is on.
+    static void BeginnerModeOnlyAccessibilityTests()
+    {
+        Console.WriteLine("\n── Beginner-mode-only accessibility fixes (Command Prompts / hotkey names / list labels) ──");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.advancedCallLayout = true;
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        // RefreshHotkeyAccessibleNames reads ctrl.wsjtxClient (Controller's own field) to decide
+        // whether to show hotkey suffixes, and returns immediately if ctrl.hotkeyConfig is null
+        // (its own "have hotkeys loaded yet" gate) -- real Form_Load assigns both at startup;
+        // this test's bare `new Controller()` needs the same explicit setup other tests don't
+        // need (they never touch RefreshHotkeyAccessibleNames).
+        ctrl.wsjtxClient = wc;
+        ctrl.hotkeyConfig = new HotkeyConfig();
+
+        // TogglePrompts refuses outright while Advanced Call Layout is on.
+        bool wasOn = wc.cmdPrompts;
+        wc.TogglePrompts();
+        Check("TogglePrompts is a no-op while Advanced Call Layout is on -- cmdPrompts unchanged",
+            wc.cmdPrompts == wasOn, true);
+        CheckStr("...and explains why, rather than silently doing nothing",
+            ctrl.statusText.Text, "Command prompts only apply outside Advanced Call Layout.");
+
+        // Switch to beginner mode -- TogglePrompts works normally again.
+        ctrl.advancedCallLayout = false;
+        wc.TogglePrompts();
+        Check("TogglePrompts works normally once Advanced Call Layout is off",
+            wc.cmdPrompts != wasOn, true);
+
+        // RefreshHotkeyAccessibleNames: hotkey suffix only appears when cmdPrompts is on, and
+        // never for an action with no hotkey assigned (OpenLogbook defaults to Keys.None).
+        wc.cmdPrompts = true;
+        ctrl.RefreshHotkeyAccessibleNames();
+        Check("Prompts ON: Options button's name includes its real hotkey",
+            ctrl.optionsButton.AccessibleName.Contains(HotkeyConfig.FormatKeysForHelp(HotkeyConfig.Defaults[HotkeyAction.Options])), true);
+
+        wc.cmdPrompts = false;
+        ctrl.RefreshHotkeyAccessibleNames();
+        CheckStr("Prompts OFF: Options button's name reverts to plain (no hotkey suffix)",
+            ctrl.optionsButton.AccessibleName, "Options");
+
+        // UpdateCallListAccessibleName: callListBox never gets RX1/RX2 labeling outside
+        // Advanced Call Layout -- that side-labeling concept has no counterpart in beginner mode.
+        ctrl.advancedCallLayout = false;
+        wc.UpdateCallListAccessibleName(force: true);
+        CheckStr("Beginner mode: callListBox's name is plain, no RX1/RX2 side label",
+            ctrl.callListBox.AccessibleName, "Stations Available");
+
+        ctrl.advancedCallLayout = true;
+        wc.UpdateCallListAccessibleName(force: true);
+        Check("Advanced mode: callListBox's name DOES carry the RX1/RX2 side label",
+            ctrl.callListBox.AccessibleName.StartsWith("RX"), true);
     }
 
     static void OptionsDlgConstructionTests()
@@ -3032,7 +3336,12 @@ static class JimmyTests
             "Resubmitting these QSOs will cause them to be reported as already uploaded.\n" +
             "06:05:56 PM: Final Status: Some QSOs were already uploaded or out of date range (9)\n";
         var p = TqslUploadClient.ParseFinalStatus(partial);
-        Check("partial-upload code parsed (treated as success, not a failure)", p.Code == 9, true);
+        // Release-audit finding, 2026-08-20: UploadPendingAsync no longer marks QSOs uploaded
+        // on this code (8/9/14 all conflate "already uploaded" with "out of date range" in
+        // TQSL's own status text -- see that method's own comment) -- this label used to say
+        // "treated as success, not a failure", which described the OLD caller behavior
+        // (blanket-marked the whole batch). This test only covers the parser itself, unchanged.
+        Check("partial-upload code parsed (caller now treats this as 'ambiguous, not marked, will retry')", p.Code == 9, true);
         Check("partial-upload description parsed", p.Description == "Some QSOs were already uploaded or out of date range", true);
 
         string success =
@@ -3047,6 +3356,34 @@ static class JimmyTests
         var none = TqslUploadClient.ParseFinalStatus("no status line here at all");
         Check("missing status line yields null code (must be treated as failure, not assumed success)", none.Code == null, true);
         Check("empty stderr yields null code", TqslUploadClient.ParseFinalStatus("").Code == null, true);
+    }
+
+    // ── TqslUploadClient.ClassifyFinalStatus ────────────────────────────────────
+    // Release-audit finding, 2026-08-20 (release blocker): codes 8/9/14 used to be
+    // blanket-treated the same as 0 (mark the whole pending batch uploaded) -- verified
+    // directly against TQSL 2.8's own installed documentation that 8/9/14 all conflate
+    // "already uploaded" (safe) with "out of date range" (never actually uploaded, so NOT
+    // safe to mark) in one aggregate code, with no per-record breakdown available.
+    static void TqslClassifyFinalStatusTests()
+    {
+        Console.WriteLine("\n── TqslUploadClient.ClassifyFinalStatus (TQSL exit-code -> mark decision) ──");
+        Check("code 0 (full success) -> mark all uploaded",
+              TqslUploadClient.ClassifyFinalStatus(0) == TqslUploadClient.FinalStatusOutcome.MarkAllUploaded, true);
+        // THE FIX: these three used to also return MarkAllUploaded.
+        Check("code 8 (no QSOs processed, already-uploaded-or-out-of-range) -> ambiguous, leave unmarked -- THE FIX",
+              TqslUploadClient.ClassifyFinalStatus(8) == TqslUploadClient.FinalStatusOutcome.AmbiguousLeaveUnmarked, true);
+        Check("code 9 (some processed, some ignored as already-uploaded-or-out-of-range) -> ambiguous, leave unmarked -- THE FIX",
+              TqslUploadClient.ClassifyFinalStatus(9) == TqslUploadClient.FinalStatusOutcome.AmbiguousLeaveUnmarked, true);
+        Check("code 14 (some QSOs already uploaded) -> ambiguous, leave unmarked -- THE FIX",
+              TqslUploadClient.ClassifyFinalStatus(14) == TqslUploadClient.FinalStatusOutcome.AmbiguousLeaveUnmarked, true);
+        Check("code 1 (cancelled by user) -> real failure",
+              TqslUploadClient.ClassifyFinalStatus(1) == TqslUploadClient.FinalStatusOutcome.Failure, true);
+        Check("code 2 (rejected by LoTW) -> real failure",
+              TqslUploadClient.ClassifyFinalStatus(2) == TqslUploadClient.FinalStatusOutcome.Failure, true);
+        Check("code 11 (LoTW connection error) -> real failure",
+              TqslUploadClient.ClassifyFinalStatus(11) == TqslUploadClient.FinalStatusOutcome.Failure, true);
+        Check("null code (no parseable status line) -> real failure, never assumed success",
+              TqslUploadClient.ClassifyFinalStatus(null) == TqslUploadClient.FinalStatusOutcome.Failure, true);
     }
 
     // ── WsjtxClient.ResolveUsState ───────────────────────────────────────────────
@@ -3064,6 +3401,35 @@ static class JimmyTests
         Check("both null -> null", WsjtxClient.ResolveUsState(null, null) == null, true);
         Check("QRZ present, grid null -> QRZ wins",
               WsjtxClient.ResolveUsState("CT", null) == "CT", true);
+    }
+
+    // ── UsGridStateMap.StateSetContains ─────────────────────────────────────────
+    // Release-audit finding, 2026-08-20: award-matching set-membership checks (AwardTagger.
+    // IsHrcWasNeeded/IsHrcWasUnconfirmed, AwardMatcher's RuleGroupBy.State branch) used to do a
+    // plain exact-string HashSet.Contains(state) against ResolveUsState's own output, which can
+    // be a compound border-straddling grid.dat value like "MN-WI" -- silently never matching a
+    // set containing "MN" or "WI" individually, hiding a still-needed station from the queue.
+    static void StateSetContainsTests()
+    {
+        Console.WriteLine("\n── UsGridStateMap.StateSetContains (compound border-state grid matching) ──");
+        var needed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "MN", "OH", "TX" };
+
+        Check("plain single-state exact match",
+              UsGridStateMap.StateSetContains("MN", needed), true);
+        Check("plain single-state non-match",
+              UsGridStateMap.StateSetContains("CA", needed), false);
+        // THE FIX: a compound value must match if EITHER component state is in the set --
+        // a naive Contains("MN-WI") against this same set would have returned false.
+        Check("compound 'MN-WI' matches because MN is needed -- THE FIX",
+              UsGridStateMap.StateSetContains("MN-WI", needed), true);
+        Check("compound 'WI-MN' (component order reversed) also matches",
+              UsGridStateMap.StateSetContains("WI-MN", needed), true);
+        Check("compound value matches when neither component is needed -> false",
+              UsGridStateMap.StateSetContains("WI-IA", needed), false);
+        Check("null state -> false", UsGridStateMap.StateSetContains(null, needed), false);
+        Check("empty state -> false", UsGridStateMap.StateSetContains("", needed), false);
+        Check("null set -> false", UsGridStateMap.StateSetContains("MN", null), false);
+        Check("empty set -> false", UsGridStateMap.StateSetContains("MN", new HashSet<string>()), false);
     }
 
     // ── AdifImporter.Import: live-logged QSO state resolution ──────────────────
@@ -5874,6 +6240,139 @@ static class JimmyTests
         }
         Check("Hold mode off -> ordinary Tx cycles never count toward the safety net",
             wc.TestConsecTxCount == 0 && wc.TestAutoFreqPauseDisabled, true);
+    }
+
+    // ── Codex Audit 03 release blocker #1 regression test: HALT purges a queued CALL_CQ ──
+    // Checks the queue's own state directly via TestDirectNormalQueueHasTxArmCommand
+    // (WsjtxClient.Direct.cs) instead of a real network round-trip through a stub engine host --
+    // deterministic (no dependency on the background worker actually winning a race against a
+    // real TCP connect, or on this process's shared SNAPSHOT-poll-timer/control-port state across
+    // ~1000 other tests in the same run), and it proves the exact mechanism the fix changed.
+    static void HaltPurgesQueuedTxArmCommandTests()
+    {
+        Console.WriteLine("\n── HALT_TX purges a still-queued CALL_CQ instead of letting it re-arm TX -- THE FIX ──");
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42"); // sets _directConnected = true, required by HaltTx()
+
+            wc.DirectSendCq(null);
+            Check("CALL_CQ is sitting in the normal queue (isTxArm) right after being sent",
+                wc.TestDirectNormalQueueHasTxArmCommand(), true);
+
+            wc.HaltTx();
+            Check("THE FIX: HALT_TX's own enqueue purges the still-queued CALL_CQ before it can re-arm TX",
+                wc.TestDirectNormalQueueHasTxArmCommand(), false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  HaltPurgesQueuedTxArmCommandTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Codex Audit 03 release blocker #2 regression test: a failed QSO write is never
+    // presented as success, and a later retry for the SAME dedup key actually retries ──
+    // Forces a REAL local-DB write failure (JIMMY_TEST_DB_PATH pointed at a directory that does
+    // not exist -- not a mock), then fixes the path and re-triggers RequestLog for the identical
+    // call/band/mode/date/time (same dedup key) a second time. callInProg is re-armed before
+    // that second trigger: DirectApplyStatus's own Is73orRR73 branch calls SetCallInProg(null)
+    // unconditionally right after the first LogQso call, win or lose (see its own comment,
+    // WsjtxClient.Direct.cs) -- found writing this test, this means the identical-snapshot
+    // "natural" repeated-poll re-entry the surrounding code comments describe does NOT actually
+    // re-invoke RequestLog a second time on its own once callInProg is cleared; re-arming it here
+    // stands in for whatever real second trigger (a later retry mechanism, or a second completion
+    // signal for the same QSO) would supply the same call to ClaimLiveLoggedQso again. That
+    // pre-existing UI-flow gap is a separate concern from finding 2 -- this test targets the
+    // dedup-key claim/release fix in isolation, exactly as Codex's own audit asked for.
+    static void FailedQsoWriteDoesNotFalselyAnnounceSuccessTests()
+    {
+        Console.WriteLine("\n── Failed QSO write is not falsely announced as logged, and a retry actually retries -- THE FIX ──");
+        // A path UNDER AN EXISTING FILE, not a missing directory: Directory.CreateDirectory
+        // auto-creates missing parent directories (found live writing this test -- a merely
+        // nonexistent directory doesn't actually force a failure), but it cannot create a
+        // directory where a file already exists, so LogbookDb's own Directory.CreateDirectory
+        // call reliably throws here.
+        string blockerFile = Path.Combine(Path.GetTempPath(), "JimmyTest_Blocker_" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(blockerFile, "blocks a directory from being created at this path");
+        string brokenDbPath = Path.Combine(blockerFile, "test.db");
+        string workingDbPath = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_ClaimRelease_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        try
+        {
+            // WsjtxClient's own constructor opens a SEPARATE, persistent classification LogbookDb
+            // (unprotected -- found live writing this test: it threw straight out of `new
+            // WsjtxClient(...)` when JIMMY_TEST_DB_PATH was already broken at that point). Construct
+            // on a working path first; the broken path is only switched in right before the actual
+            // write attempt below, which is the one this test targets.
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", workingDbPath);
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            const string myCall = "KB0UZT";
+            const string myGrid = "FN42";
+            const string qsoCall = "N3XYZ";
+            wc.callInProg = qsoCall;
+            wc.allCallDict[qsoCall] = new List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = $"{myCall} {qsoCall} R-15",
+                    Snr = -15,
+                    RxDate = DateTime.UtcNow.Date,
+                    SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                },
+            };
+            // LogQso's own precondition (WsjtxClient.cs: "if (!sentReportList.Contains(call))
+            // return -- never reported SNR to the DX station") -- normally set by an earlier
+            // "awaitReport" snapshot (see DirectModePlumbingParityTests' scenario 5); set
+            // directly here since this test only needs the final 73 step.
+            wc.sentReportList.Add(qsoCall);
+
+            var snap73 = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""",
+                ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 2000 },
+                ""recentDecodes"": [],
+                ""qso"": { ""state"": ""done"", ""txNow"": """ + qsoCall + " " + myCall + @" 73"" }
+            }");
+
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", brokenDbPath);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap73);
+            Check("First attempt (broken DB path) does not falsely add the call to today's logged list",
+                wc.logList.Contains(qsoCall), false);
+
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", workingDbPath);
+            // Re-arm callInProg: SetCallInProg(null) already cleared it after the first attempt
+            // above (see this test's own comment) -- this simulates whatever real trigger would
+            // supply the same QSO to RequestLog again for a retry.
+            wc.callInProg = qsoCall;
+            wc.TestApplyDirectSnapshot(myCall, myGrid, snap73);
+            Check("THE FIX: once the DB path is fixed, a later retry for the same dedup key actually retries and succeeds",
+                wc.logList.Contains(qsoCall), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  FailedQsoWriteDoesNotFalselyAnnounceSuccessTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(workingDbPath); } catch { }
+            try { File.Delete(blockerFile); } catch { }
+        }
     }
 
     // ── UDP-to-Direct parity pass, 2026-08-12: connection-loss signal for a hung control port ──

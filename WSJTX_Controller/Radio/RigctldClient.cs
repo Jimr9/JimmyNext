@@ -1,6 +1,5 @@
 using System;
 using System.Diagnostics;
-using System.Globalization;
 using System.IO;
 using System.Net.Sockets;
 using System.Reflection;
@@ -10,21 +9,6 @@ using System.Threading.Tasks;
 
 namespace WSJTX_Controller
 {
-    // One poll's worth of radio state. Fields are nullable -- a rig/backend not supporting a
-    // given query (e.g. SWR on many rigs) is expected, not an error; leave that field null
-    // rather than fail the whole poll.
-    public class RadioStatus
-    {
-        public bool Ok;
-        public string LastError;
-        public ulong? FrequencyHz;
-        public string Mode;
-        public bool? Ptt;
-        public int? SMeterDb;
-        public double? PowerRaw;   // Hamlib's 0.0-1.0 relative scale, NOT calibrated watts
-        public double? Swr;
-    }
-
     // Plain TCP text-protocol client for Hamlib's rigctld (self-sufficiency plan, Phase 1),
     // plus process management for Jimmy's own bundled copy -- mirrors Nexus's approach of
     // bundling and auto-launching rigctld rather than making the operator find and run it
@@ -145,10 +129,9 @@ namespace WSJTX_Controller
             // Defensive: found live, 2026-08-10, auditing against production -- without this,
             // calling LaunchBundled() a second time before StopBundled()/Dispose() on this same
             // instance silently overwrote _bundledProcess below, orphaning the old rigctld.exe
-            // with nothing left able to stop it. Currently only ever avoided in practice by the
-            // one known caller (ApplyRadioSettings) disposing the whole client first every time
-            // -- guarding here makes it safe regardless of caller discipline, matching
-            // StopBundled's own "only ever kills what this client started" contract.
+            // with nothing left able to stop it. Guarding here makes it safe regardless of
+            // caller discipline, matching StopBundled's own "only ever kills what this client
+            // started" contract.
             if (_bundledProcess != null && !_bundledProcess.HasExited)
                 StopBundled();
             try
@@ -168,7 +151,16 @@ namespace WSJTX_Controller
                 var args = $"-m {rigModel}";
                 if (!string.IsNullOrWhiteSpace(comPort)) args += $" -r {comPort}";
                 if (!string.IsNullOrWhiteSpace(baudRate)) args += $" -s {baudRate}";
-                args += $" -t {_port}";
+                // Firewall-rule audit, 2026-08-21: bind LOOPBACK ONLY, explicitly -- Hamlib's own
+                // rigctld defaults to the WILDCARD listen address (all interfaces) when -T isn't
+                // given, exposing raw rig control to the LAN. This is the exact bug Nexus's own
+                // vendored rigctld_proc.rs (EngineHost/.nexus-src/crates/tempo-audio/src/
+                // rigctld_proc.rs, "#53") already fixed for the rigctld EngineHost itself spawns --
+                // this call site (Jimmy's own fallback launch, used by the Radio Test button when
+                // nothing is already answering) was the one remaining place that still relied on
+                // that unsafe default. Found while confirming, for the firewall-exception review,
+                // that every rigctld Jimmy can ever spawn is genuinely loopback-only.
+                args += $" -T 127.0.0.1 -t {_port}";
 
                 _bundledProcess = new Process
                 {
@@ -249,7 +241,7 @@ namespace WSJTX_Controller
         // TcpClient.ReceiveTimeout/SendTimeout below -- every synchronous stream read/write
         // SendCommand does too). Before this existed, NOTHING in this class had a timeout
         // anywhere: TcpClient.Connect() and StreamReader.ReadLine() can both block
-        // indefinitely, and every caller (RadioTestButton_Click, radioPollTimer_Tick) runs
+        // indefinitely, and its caller (OptionsDlg.cs's RadioTestButton_Click) runs
         // synchronously on the UI thread -- an unresponsive/conflicted rigctld (e.g. two
         // instances contending for the same port, confirmed live 2026-08-06: the native
         // engine's own rigctld and the Options > Radio "Test connection" button's separate
@@ -319,159 +311,27 @@ namespace WSJTX_Controller
             }
         }
 
-        // One round-trip per field this session, not batched -- rigctld has no command
-        // batching. Keep PollIntervalMs conservative (RadioSettings default: 1000ms) so this
-        // never competes for latency with the FT8 15-second decode cycle.
-        public RadioStatus PollOnce()
+        // Polls with a plain frequency query ("f", get_freq) every 100ms until rigctld answers
+        // or timeoutMs elapses. Deliberately never sends "l RFPOWER" (or any other level query)
+        // here -- this exists specifically to confirm a rigctld is up and accepting commands
+        // BEFORE anything else touches it, and RFPOWER itself is the one query that can trip
+        // Hamlib bug #1595's destructive calibration sweep on a Kenwood rig's first touch of a
+        // freshly-spawned process (see OptionsDlg.cs's RadioTestButton_Click, the one remaining
+        // caller -- Jimmy's own separate mitigation for the engine host's own RFPOWER telemetry
+        // poll lives in Nexus itself now, nexus-compat's tempo-audio-telemetry.patch). SendCommand/
+        // EnsureConnected already self-heal a failed connect or a broken stream between attempts,
+        // so no explicit Close() is needed in this loop.
+        public bool WaitUntilReady(int timeoutMs)
         {
-            LastError = null;
-            var status = new RadioStatus();
-
-            string freqReply = SendCommand("f");
-            if (!LooksLikeError(freqReply) && ulong.TryParse(freqReply.Trim(), out ulong hz))
-                status.FrequencyHz = hz;
-
-            // get_mode ("m") replies on two lines (mode, then passband) -- read both so the
-            // passband line is never misread as the reply to whichever command comes next.
-            if (EnsureConnected())
+            var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+            do
             {
-                try
-                {
-                    _writer.WriteLine("m");
-                    string modeReply = _reader.ReadLine();
-                    _reader.ReadLine();   // passband -- not currently surfaced, but must be consumed
-                    if (!LooksLikeError(modeReply)) status.Mode = modeReply.Trim();
-                }
-                catch (Exception ex)
-                {
-                    LastError = $"rigctld command 'm' failed: {ex.Message}";
-                    Close();
-                }
-            }
-
-            string pttReply = SendCommand("t");
-            if (!LooksLikeError(pttReply) && int.TryParse(pttReply.Trim(), out int pttVal))
-                status.Ptt = pttVal != 0;
-
-            // S-meter, power, SWR: none of these have a standard-WSJT-X-protocol equivalent
-            // today (Power/SWR only ever came from the WM8Q-only sub-command 18; there has
-            // never been an S-meter anywhere in Jimmy). Degrade silently to null on a rig/
-            // backend that doesn't support a given level -- expected, not a bug.
-            string sMeterReply = SendCommand("l STRENGTH");
-            if (!LooksLikeError(sMeterReply) &&
-                double.TryParse(sMeterReply.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double sMeter))
-                status.SMeterDb = (int)Math.Round(sMeter);
-
-            string powerReply = SendCommand("l RFPOWER");
-            if (!LooksLikeError(powerReply) &&
-                double.TryParse(powerReply.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double power))
-                status.PowerRaw = power;
-
-            string swrReply = SendCommand("l SWR");
-            if (!LooksLikeError(swrReply) &&
-                double.TryParse(swrReply.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double swr))
-                status.Swr = swr;
-
-            status.Ok = LastError == null;
-            status.LastError = LastError;
-            return status;
-        }
-
-        // Opt-in only (RadioSettings.PttEnabled, default off) -- a bigger behavioral change
-        // than read-only telemetry, so it's never used unless explicitly turned on.
-        public bool SetPtt(bool on)
-        {
-            string reply = SendCommand(on ? "T 1" : "T 0");
-            return !LooksLikeError(reply);
-        }
-
-        // Self-sufficiency plan Phase 5: Band Up/Down retuning under JimmyNative +
-        // HamlibRigctld. rigctld is a multi-client daemon, so this rides the SAME connection
-        // (and, when JimmyNative, the SAME physical rigctld the native engine host itself
-        // launched) used for S-meter/SWR/power polling above -- no separate protocol needed.
-        // The engine's own Engine::observe_rig_freq reconciles an externally-changed frequency
-        // on its own next poll tick, so commanding it here does not desync the engine's belief
-        // about the dial.
-        public bool SetFrequency(ulong hz)
-        {
-            string reply = SendCommand($"F {hz}");
-            return !LooksLikeError(reply);
-        }
-
-        // Matches WSJT-X's own Radio tab "Split Operation: Rig" choice -- enables/disables the
-        // radio's own hardware split (TX on VFO B, RX on VFO A) via Hamlib's set_split_vfo.
-        // "None" (the default) calls this with enabled=false, which is a harmless no-op on a
-        // rig that was never in split. Requested by the operator, 2026-08-07, for parity with
-        // WSJT-X's Radio tab -- WSJT-X's third choice, "Fake It" (software-emulated split with
-        // no true rig split at all), has no equivalent here; see RadioSettings.SplitMode's own
-        // comment for why.
-        public bool SetSplit(bool enabled)
-        {
-            string reply = SendCommand(enabled ? "S 1 VFOB" : "S 0 VFOA");
-            return !LooksLikeError(reply);
-        }
-
-        // get_mode ("m") replies on two lines (mode, then passband) -- same shape PollOnce
-        // already reads; duplicated here (not shared) because PollOnce populates a whole
-        // RadioStatus and this needs just the two raw values for the connect-kick below.
-        public bool GetMode(out string mode, out int passband)
-        {
-            mode = null;
-            passband = 0;
-            if (!EnsureConnected()) return false;
-            try
-            {
-                _writer.WriteLine("m");
-                string modeReply = _reader.ReadLine();
-                string passbandReply = _reader.ReadLine();
-                if (LooksLikeError(modeReply)) return false;
-                mode = modeReply.Trim();
-                int.TryParse(passbandReply?.Trim(), out passband);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                LastError = $"rigctld command 'm' failed: {ex.Message}";
-                Close();
-                return false;
-            }
-        }
-
-        // set_mode ("M <mode> <passband>"). Nexus's own retune loop only re-sends a mode
-        // command when its OWN belief of the current mode differs from the target -- if that
-        // belief was ever seeded as "already correct" (e.g. from a stale prior session) without
-        // a real CAT command reaching the physical radio, the rig can be stuck on whatever mode
-        // it was last ACTUALLY in, forever, while every read-back keeps agreeing with the belief
-        // instead of hardware truth. Used by the connect-kick to force a genuine mode round-trip
-        // the same way SetFrequency's own nudge does for frequency.
-        public bool SetMode(string mode, int passband)
-        {
-            string reply = SendCommand($"M {mode} {passband}");
-            return !LooksLikeError(reply);
-        }
-
-        // Hamlib analogue of WSJT-X's software RX-gain slider that F11/F12 drives in WsjtxCat
-        // mode: adjusts the radio's own AF (audio) gain level up/down by a configurable step.
-        // Different mechanism (hardware AF gain via CAT vs. a software multiplier applied before
-        // decode) but the same practical effect on received audio level. `step` (a 0.0-1.0
-        // fraction) comes from the caller -- RadioSettings.AudioStepPercent, the same
-        // operator-facing setting the engine mic-gain path (WsjtxClient.BandAudio.cs) uses, so
-        // both F11/F12 paths always move by the same amount regardless of which one is active.
-        public bool AdjustAudioLevel(bool up, double step, out double newLevel)
-        {
-            newLevel = 0.0;
-            string reply = SendCommand("l AF");
-            if (LooksLikeError(reply) ||
-                !double.TryParse(reply.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out double current))
-            {
-                LastError = "Could not read current AF level from rigctld.";
-                return false;
-            }
-            double next = Math.Max(0.0, Math.Min(1.0, current + (up ? step : -step)));
-            string setReply = SendCommand("L AF " + next.ToString(CultureInfo.InvariantCulture));
-            if (LooksLikeError(setReply)) return false;
-            newLevel = next;
-            return true;
+                string reply = SendCommand("f");
+                if (!LooksLikeError(reply) && ulong.TryParse((reply ?? "").Trim(), out _))
+                    return true;
+                Thread.Sleep(100);
+            } while (DateTime.UtcNow < deadline);
+            return false;
         }
 
         public void Close()

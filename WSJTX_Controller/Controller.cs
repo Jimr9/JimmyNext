@@ -222,15 +222,6 @@ namespace WSJTX_Controller
         // via the PSKReporter MQTT feed. See spotWatchCalls (WsjtxClient) for the watch list.
         private DxSpotWatcher dxSpotWatcher;
 
-        // Self-sufficiency plan, Phase 1: Hamlib rigctld radio-state source. Null whenever
-        // Radio.Mode == WsjtxCat -- only instantiated/launched when the operator opts into
-        // HamlibRigctld. Public so OptionsDlg's own throwaway test client (RadioTestButton_Click)
-        // isn't the only thing that can reach it; kept but not itself made thread-safe (single
-        // owner: radioPollTimer_Tick and on-demand callers like Alt+Q, never concurrently).
-        public RigctldClient rigctldClient;
-        public System.Windows.Forms.Timer radioPollTimer;
-        public RadioStatus lastRadioStatus;
-
         // Self-sufficiency plan, Phase 4g: Jimmy's own native FT8 engine host. Null in a
         // replay-test session (TestModeGuard.IsTestMode) -- ApplyEngineMode() never spawns the
         // real process there.
@@ -321,9 +312,6 @@ namespace WSJTX_Controller
             spotWatchAgeTimer = new System.Windows.Forms.Timer();
             spotWatchAgeTimer.Interval = 60000;
             spotWatchAgeTimer.Tick += new System.EventHandler(spotWatchAgeTimer_Tick);
-            radioPollTimer = new System.Windows.Forms.Timer();
-            radioPollTimer.Interval = Math.Max(200, Radio.PollIntervalMs);
-            radioPollTimer.Tick += new System.EventHandler(radioPollTimer_Tick);
         }
 
 #if DEBUG
@@ -885,18 +873,16 @@ namespace WSJTX_Controller
             dxSpotWatcher.Updated += () => BeginInvoke(new Action(RenderSpotWatchList));
             dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls);
             spotWatchAgeTimer.Start();
-            // Order matters under HamlibRigctld: ApplyEngineMode() launches the engine host,
-            // which owns and spawns the real rigctld; ApplyRadioSettings() only ever CONNECTS
-            // to that rigctld, never launches its own. Running ApplyRadioSettings() first raced
-            // its first poll tick(s) against a rigctld that didn't exist yet -- harmless on its
-            // own (self-heals next tick), but confusing to diagnose alongside everything else
-            // found live, 2026-08-06/07, so fixed while in there. ApplyEngineMode() first gives
-            // the real rigctld a head start.
             ApplyEngineMode();      // Phase 4g: always launches the native engine host
-            ApplyRadioSettings();   // Phase 1: launches/connects rigctld if Radio.Mode was saved as HamlibRigctld
             wsjtxClient.rawPriorityTags = rawPriorityTags;
             wsjtxClient.cmdPrompts = cmdPrompts;
             wsjtxClient.usePskReporter = usePskReporter;
+            // The earlier call (above, right after hotkeyConfig.LoadFromIni) ran before
+            // wsjtxClient existed, so it couldn't yet know a persisted cmdPrompts=true --
+            // re-run now that wsjtxClient.cmdPrompts is actually set, so a session that starts
+            // with command prompts already on shows hotkey-suffixed names from the first paint,
+            // not only after the next hotkey save or Alt+P press.
+            RefreshHotkeyAccessibleNames();
 
             lookupManager = new LookupManager();
             lookupManager.RegisterProvider(dxSpotWatcher);
@@ -964,6 +950,22 @@ namespace WSJTX_Controller
             otaSpotsButton.Click += (s2, e2) => OpenOtaSpotsWindow();
             this.Controls.Add(otaSpotsButton);
             otaSpotsButton.BringToFront();
+
+            // Live JAWS-testing finding, 2026-08-21: logbookButton/otaSpotsButton set their own
+            // plain, unsuffixed AccessibleName above at construction and then NEVER got it
+            // refreshed with their assigned hotkey (F1/Alt+G by default) -- traced to both of
+            // Form_Load's own startup-time RefreshHotkeyAccessibleNames() calls (right after
+            // hotkeyConfig.LoadFromIni, and again after wsjtxClient is constructed) running
+            // BEFORE this point, since these two buttons are created here, later in Form_Load.
+            // callCqOptionsButton (constructed earlier, before the second of those two calls)
+            // never had this problem for exactly that reason -- it happened to already exist by
+            // the time a refresh ran. Every other main-screen button with a hotkey either comes
+            // from InitializeComponent() (exists from before Form_Load even starts) or, like
+            // callCqOptionsButton, is constructed early enough -- this is the one place in
+            // Form_Load where a dynamically-created button's own construction is the LAST thing
+            // that touches its AccessibleName before the form is shown, so it needs its own
+            // explicit refresh call rather than relying on an earlier one it can't reach.
+            RefreshHotkeyAccessibleNames();
 
             // Weak-signal floor controls — hidden here, reparented into
             // Options > Receive / Auto Reply > Block List while that dialog is open.
@@ -1221,12 +1223,13 @@ namespace WSJTX_Controller
                 iniFile.Write("cmdPrompts", wsjtxClient.cmdPrompts.ToString());
                 iniFile.Write("usePskReporter", wsjtxClient.usePskReporter.ToString());
                 iniFile.Write("showUsState", showUsStateCheckBox.Checked.ToString());
-                Settings.SaveToIni(iniFile);
-                Radio.SaveToIni(iniFile);
-                Decode.SaveToIni(iniFile);
-                Frequencies.SaveToIni(iniFile);
-                Notifications.SaveToIni(iniFile);
-                NativeEngine.SaveToIni(iniFile);
+                // Release-audit finding, 2026-08-20: extracted into SaveOptionsRelatedSettings()
+                // (this method's own comment) so OptionsDlg's OK button can also call it right
+                // after applying its Save*Tab() methods, instead of these settings only ever
+                // reaching disk on a clean app shutdown. Still called here too, unconditionally,
+                // for the same reason every other line in this block is (session-level UI state
+                // that Options doesn't separately govern).
+                SaveOptionsRelatedSettings();
                 iniFile.Write("rawShowCq", rawShowCq.ToString());
                 iniFile.Write("rawShowDirected", rawShowDirected.ToString());
                 iniFile.Write("rawShowReports", rawShowReports.ToString());
@@ -1343,6 +1346,18 @@ namespace WSJTX_Controller
                 hotkeyConfig?.SaveToIni(iniFile);
             }
 
+            // Codex Audit 02 finding, 2026-08-21 ("improve shutdown handling for outstanding
+            // optional remote-upload work"): a real-time QRZ/Club Log/HRDLog/eQSL upload from a
+            // QSO logged moments ago could still be in flight right now (LiveQsoUploadOrchestrator
+            // .ImportLiveLoggedQso's own Task.Run, tracked there for exactly this). Must run
+            // BEFORE CloseComm() below, not after: CloseComm() disposes nativeEngineClient, which
+            // kills the EngineHost process an in-flight eQSL upload is still routed through
+            // (ExternalDataClient), so waiting after that point would be pointless for eQSL
+            // specifically. Bounded to 3s -- long enough for a real upload that's genuinely almost
+            // done, short enough that closing Jimmy never feels hung waiting on a dead network
+            // call; either way CloseComm() below still runs unconditionally afterward.
+            wsjtxClient?.LiveQsoUploader?.WaitForPendingUploads(TimeSpan.FromSeconds(3));
+
             CloseComm();
             optionsDlg?.Close();
             if (helpDlg != null) helpDlg.Close();
@@ -1356,29 +1371,85 @@ namespace WSJTX_Controller
             RefreshHotkeyAccessibleNames();
         }
 
-        // Accessibility cleanup, 2026-08-19 (third-party audit): these used to append the
+        // Release-audit finding, 2026-08-20 ("settings persistence should not rely only on
+        // clean shutdown"): Radio/Decode/Frequencies/Notifications/NativeEngine/Settings all
+        // apply live to memory the instant OptionsDlg's OK button runs their own Save*Tab()
+        // methods -- the feature they control genuinely changes right then -- but the actual
+        // INI DISK WRITE for every one of them used to only ever happen inside
+        // Controller_FormClosing. A crash, forced kill, or Windows shutdown any time between an
+        // Options change and the next CLEAN close silently reverted the operator's own change
+        // for the next session, even though it had already been working correctly the whole
+        // time in between. Same "commit a settings category to disk right when its own Save
+        // flow completes, not only on clean shutdown" fix already established for hotkeys
+        // (SaveHotkeyConfig above, called from OptionsDlg.cs's SaveHotkeysTab) -- this just
+        // extends it to every other Options-governed settings object. Called from both
+        // Controller_FormClosing (unconditionally, alongside the rest of that method's own
+        // session-state save) and OptionsDlg's okButton_Click (right after its own Save*Tab()
+        // calls) -- redundant on a normal clean-OK-then-later-clean-close session, which is
+        // fine; an extra INI write of already-correct data is cheap and harmless.
+        public void SaveOptionsRelatedSettings()
+        {
+            if (iniFile == null) return;
+            Settings.SaveToIni(iniFile);
+            Radio.SaveToIni(iniFile);
+            Decode.SaveToIni(iniFile);
+            Frequencies.SaveToIni(iniFile);
+            Notifications.SaveToIni(iniFile);
+            NativeEngine.SaveToIni(iniFile);
+        }
+
+        // Accessibility cleanup, 2026-08-19 (third-party audit): these used to always append the
         // assigned hotkey text to every name (e.g. "Options, Alt O") -- removed per the audit's
         // explicit examples (Options/Row Display Order/Stations Available Sort Order) and applied
         // consistently to the rest of this method's own buttons, since they're all generated by
         // this same pattern and these are custom global hotkeys, not standard WinForms mnemonics
-        // JAWS/NVDA already announce on their own. Every one of these controls stays fully
-        // operable via Tab + Enter/Space with no need to know the hotkey at all -- the shortcut
-        // was a convenience hint, not information needed to identify or operate the control.
-        // logbookButton doesn't exist yet on the first call (Form_Load reads hotkeys before
-        // creating it) -- it sets its own initial AccessibleName at construction, then this keeps
-        // it current after that. hotkeyConfig itself is still needed here only to gate on "have
-        // hotkeys loaded yet" (unchanged from before).
-        private void RefreshHotkeyAccessibleNames()
+        // JAWS/NVDA already announce on their own.
+        //
+        // Live-testing finding, 2026-08-21: that removal traded away real information -- a
+        // keyboard/screen-reader user tabbing to these buttons had no way to learn their
+        // shortcuts at all except by opening Help (Alt+K) separately. Reinstated, but tied to
+        // "Show Command Prompts and Hotkeys" (HotkeyAction.Prompts, Alt+P by default) -- the
+        // SAME setting that already controls whether Jimmy speaks extra command-key hints
+        // elsewhere (WsjtxClient.Display.cs's ShowStatus), so this is one consistent "verbose
+        // mode" rather than a second, unrelated toggle. Off (the audit's own concise default):
+        // plain names, exactly as the audit intended. On: each name gains ", <hotkey>" -- but
+        // ONLY for a button that actually has one assigned; an unassigned/Keys.None control
+        // still shows nothing, matching the audit's own "don't say things that aren't true"
+        // spirit. logbookButton/otaSpotsButton/callCqOptionsButton don't exist yet on Form_Load's
+        // first two calls to this method (hotkeys load, and wsjtxClient's own construction, both
+        // before any of the three are created) -- each sets its own initial, plain AccessibleName
+        // at construction, matching the null-guards below. callCqOptionsButton happened to be
+        // constructed before the SECOND of those two calls, so it was always picked up correctly;
+        // logbookButton/otaSpotsButton are constructed later still and were NOT -- live JAWS-
+        // testing finding, 2026-08-21: F1/Alt+G never appeared on those two buttons because
+        // nothing ever called this method again after they were built. Fixed at the actual
+        // construction site (right after otaSpotsButton.BringToFront(), Form_Load) with one more
+        // explicit call, rather than here -- this method itself was never the bug, it was always
+        // correct once actually called with the buttons in existence.
+        public void RefreshHotkeyAccessibleNames()
         {
             if (hotkeyConfig == null) return;
-            optionsButton.AccessibleName   = "Options";
-            rowOrderButton.AccessibleName  = "Row Display Order";
-            sortOrderButton.AccessibleName = "Stations Available Sort Order";
-            modeHelpLabel.AccessibleName   = "Help";
+            bool showHotkeys = wsjtxClient != null && wsjtxClient.cmdPrompts;
+            optionsButton.AccessibleName   = WithHotkeySuffix("Options", HotkeyAction.Options, showHotkeys);
+            rowOrderButton.AccessibleName  = WithHotkeySuffix("Row Display Order", HotkeyAction.RowOrder, showHotkeys);
+            sortOrderButton.AccessibleName = WithHotkeySuffix("Stations Available Sort Order", HotkeyAction.SortOrder, showHotkeys);
+            modeHelpLabel.AccessibleName   = WithHotkeySuffix("Help", HotkeyAction.Help, showHotkeys);
             if (logbookButton != null)
-                logbookButton.AccessibleName = "Logbook";
+                logbookButton.AccessibleName = WithHotkeySuffix("Logbook", HotkeyAction.OpenLogbook, showHotkeys);
             if (otaSpotsButton != null)
-                otaSpotsButton.AccessibleName = "POTA, SOTA, and DX spots";
+                otaSpotsButton.AccessibleName = WithHotkeySuffix("POTA, SOTA, and DX spots", HotkeyAction.OpenOtaSpots, showHotkeys);
+            if (callCqOptionsButton != null)
+                callCqOptionsButton.AccessibleName = WithHotkeySuffix("Call CQ options", HotkeyAction.CallCqOptions, showHotkeys);
+        }
+
+        // Screen-reader-friendly "Alt, K" format (HotkeyConfig.FormatKeysForHelp), matching the
+        // Help dialog's own hotkey wording -- see RefreshHotkeyAccessibleNames's own comment.
+        private string WithHotkeySuffix(string baseName, HotkeyAction action, bool showHotkeys)
+        {
+            if (!showHotkeys) return baseName;
+            Keys k = hotkeyConfig[action];
+            if (k == Keys.None) return baseName;
+            return $"{baseName}, {HotkeyConfig.FormatKeysForHelp(k)}";
         }
 
         public void CloseComm()
@@ -1387,16 +1458,18 @@ namespace WSJTX_Controller
             mainLoopTimer = null;
             statusMsgTimer.Stop();
             initialConnFaultTimer.Stop();
-            radioPollTimer?.Stop();
-            rigctldClient?.Dispose();   // also stops any bundled rigctld this session launched
-            nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path)
-            nativeEngineClient = null;
-            // CloseComm() runs unconditionally from Controller_FormClosing (outside its own
-            // `iniFile != null && formLoaded` guard) -- a startup that failed before wsjtxClient
-            // was ever constructed left this null too, and this was the second, still-unguarded
-            // NullReferenceException risk on the same failed-startup-then-close path (found
-            // alongside Controller_FormClosing's own fix, 2026-08-19).
+            // Codex Audit 04 finding 1, 2026-08-21: MUST run before nativeEngineClient.Dispose()
+            // below, not after (the order this used to be in) -- wsjtxClient.Closing() is what
+            // sends the graceful shutdown HALT_TX and waits briefly for it to actually land
+            // (WsjtxClient.cs), which has nothing left to reach once the engine process is
+            // already dead. CloseComm() runs unconditionally from Controller_FormClosing (outside
+            // its own `iniFile != null && formLoaded` guard) -- a startup that failed before
+            // wsjtxClient was ever constructed left this null too, and this was the second,
+            // still-unguarded NullReferenceException risk on the same failed-startup-then-close
+            // path (found alongside Controller_FormClosing's own fix, 2026-08-19).
             wsjtxClient?.Closing();
+            nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path); last-resort backstop if the graceful halt above didn't confirm
+            nativeEngineClient = null;
         }
 
         private void Controller_FormClosed(object sender, FormClosedEventArgs e)
@@ -1548,6 +1621,32 @@ namespace WSJTX_Controller
                 // switch, permanently unable to start CQ from Listen mode.
                 if (wsjtxClient.ConnectedToWsjtx())
                 {
+                    // Requested 2026-08-21: warn once per session, before the FIRST Alt+C, that
+                    // the CQ options this is about to call CQ WITH (directed CQ / CQ DX only /
+                    // CQ and CQ DX, etc. -- CallCqDlg) haven't been reviewed yet this session and
+                    // may be carrying over whatever was last saved, possibly from a prior
+                    // session. Asked before the transmit-slot-analysis check below -- deciding
+                    // WHAT to call CQ with logically comes before deciding WHEN/WHERE to
+                    // transmit it. "Yes" opens the dialog and stops here -- CQ does not start
+                    // automatically once it's reviewed; the operator presses Alt+C again (or the
+                    // dialog's own controls) when actually ready. "No" proceeds with whatever is
+                    // already saved, exactly as Alt+C always has, and is remembered for the rest
+                    // of this session so this never asks twice.
+                    if (!_callCqOptionsReviewedThisSession)
+                    {
+                        var optDlg = new ConfirmDlg();
+                        optDlg.text = "Call CQ options (directed CQ, CQ DX only, etc.) have not been reviewed " +
+                            "this session and may not be set the way you want.\nOpen Call CQ options now?";
+                        optDlg.Owner = this;
+                        optDlg.ShowDialog();
+                        if (optDlg.DialogResult == DialogResult.Yes)
+                        {
+                            OpenCallCqDialog();
+                            return true;
+                        }
+                        _callCqOptionsReviewedThisSession = true;
+                    }
+
                     if (wsjtxClient.txMode == WsjtxClient.TxModes.LISTEN && wsjtxClient.AnalysisNeeded)
                     {
                         var confDlg = new ConfirmDlg();
@@ -1565,6 +1664,12 @@ namespace WSJTX_Controller
                     else
                         cqModeButton_Click(null, null);
                 }
+                return true;
+            }
+
+            if (hotkeyConfig[HotkeyAction.CallCqOptions] != Keys.None && keyData == hotkeyConfig[HotkeyAction.CallCqOptions])
+            {
+                OpenCallCqDialog();
                 return true;
             }
 
@@ -2372,10 +2477,25 @@ namespace WSJTX_Controller
         public void ShowMessage(string text, bool sound) => ShowMsg(text, sound);
 
         // See IJimmyStatusView.WouldAnnounce's own comment. Mirrors ShowMsg's internal
-        // `announced` check exactly (statusText.Focused && Form.ActiveForm == this) -- the two
-        // must never drift apart, since this exists specifically to answer "would ShowMsg's own
-        // path already say this out loud?"
-        public bool WouldAnnounce => statusText.Focused && Form.ActiveForm == this;
+        // `announced` check exactly (statusText.Focused && Form.ActiveForm == this &&
+        // GetForegroundWindow() == this.Handle, via IsJimmyForegrounded()) -- the two must never
+        // drift apart, since this exists specifically to answer "would ShowMsg's own path already
+        // say this out loud?"
+        //
+        // Release-audit finding, 2026-08-20 (confirmed bug, high severity): this WAS missing the
+        // GetForegroundWindow() == this.Handle clause -- commit 8e44527 ("Harden every SendKeys
+        // re-announce with a real OS foreground check") added that third condition to ShowMsg's
+        // own `announced` (line 2230 above) but never updated this property to match, despite
+        // this comment already claiming the two "must never drift apart". Effect: exactly when
+        // WinForms-internal focus state says "focused/active" but the real OS foreground window
+        // is something else (the scenario the foreground hardening exists for), ShowMsg's real
+        // `announced` correctly comes back false (stays silent), but this used to still return
+        // true -- UiaAlertNotificationDelivery (NotificationDelivery.cs) then skips raising its
+        // own UIA notification, believing ShowMsg already spoke it. Net result: an Important
+        // notification (connection lost, CAT link lost, high-SWR halt, clock out of sync) was
+        // announced through NEITHER path -- a genuinely lost notification. Only reachable with
+        // "Announce important notifications when focus is elsewhere" enabled (off by default).
+        public bool WouldAnnounce => statusText.Focused && Form.ActiveForm == this && IsJimmyForegrounded();
 
         // See IJimmyStatusView.RaiseAccessibleAlert's own comment. AutomationNotificationKind.
         // Other / AutomationNotificationProcessing.ImportantMostRecent are a reasonable starting
@@ -2583,161 +2703,6 @@ namespace WSJTX_Controller
             RenderSpotWatchList();
         }
 
-        // Self-sufficiency plan, Phase 1: brings the live rigctldClient/radioPollTimer state
-        // into line with Radio's current settings. Called once at startup (after
-        // Radio.LoadFromIni) and again every time OptionsDlg's Radio tab is saved -- switching
-        // modes takes effect immediately, no restart needed, matching the plan's "Done when"
-        // criterion for this phase.
-        public void ApplyRadioSettings()
-        {
-            radioPollTimer.Stop();
-
-            // Safety, not a preference: a replay-test session must never open a real serial
-            // port or talk real CAT to a real radio at all -- confirmed live, 2026-08-07, that
-            // forcing decodeEngineMode alone was NOT enough: Radio.Mode (CAT control) is a
-            // completely independent setting, this method only ever checked whether the
-            // *native engine* owned rigctld, and a real replay-test run genuinely launched
-            // Jimmy's own bundled rigctld and sent real CAT commands -- including the
-            // RIG-KICK mode-nudge sequence -- to the operator's actual TS-590SG. No real radio
-            // interaction is ever a legitimate part of replay testing, so this skips the whole
-            // method outright rather than trying to thread the needle further downstream.
-            if (TestModeGuard.IsTestMode)
-            {
-                rigctldClient?.Dispose();
-                rigctldClient = null;
-                lastRadioStatus = null;
-                return;
-            }
-
-            if (Radio.Mode != RadioControlMode.HamlibRigctld)
-            {
-                rigctldClient?.Dispose();
-                rigctldClient = null;
-                lastRadioStatus = null;
-                return;
-            }
-
-            rigctldClient?.Dispose();
-
-            // Self-sufficiency plan Phase 5: the native engine host always owns rigctld
-            // directly (it builds a real Rig from the SAME rig/COM-port/baud/PTT-method
-            // settings -- see ApplyEngineMode/NativeEngineClient.Launch) -- Jimmy's own
-            // rigctldClient here only ever CONNECTS (read-only S-meter/SWR/power polling, plus
-            // SetFrequency for Band Up/Down) and must NEVER launch a second, competing rigctld
-            // on the same port. rigctld is a multi-client daemon, so a plain connect-only
-            // client shares it fine.
-            rigctldClient = new RigctldClient(
-                Radio.UseExternalRigctld ? Radio.RigctldHost : "127.0.0.1",
-                Radio.RigctldPort);
-
-            ScheduleRigConnectKick(rigctldClient);
-
-            radioPollTimer.Interval = Math.Max(200, Radio.PollIntervalMs);
-            if (Radio.PollEnabled) radioPollTimer.Start();
-        }
-
-        // Self-sufficiency plan Phase 5: Nexus's own engine does a "read-only launch" -- it READS
-        // the rig's current frequency and adopts it as its own belief, but never WRITES it back on
-        // connect (see tempo-audio/src/service.rs's own "READ-ONLY LAUNCH" comment). Real WSJT-X
-        // apparently DOES actively SET the frequency on connect -- confirmed live, 2026-08-07, by
-        // the operator's own Kenwood TS-590SG audibly announcing the frequency under real WSJT-X (a
-        // rig feature that fires on a CAT frequency WRITE, not a read) and never announcing at all
-        // under Jimmy Native. Explicitly re-asserting the SAME frequency the rig already reports (a
-        // same-value round-trip -- this never actually retunes anything) mimics that active-SET
-        // behavior generically, for any rig, without touching Nexus's own engine code.
-        //
-        // Also sends Radio.SplitMode's own live command (rigctld's set_split_vfo) here, once per
-        // connect -- same reasoning as the frequency kick: a one-time assertion right after
-        // connect, not something that needs to ride the engine's own retune loop.
-        //
-        // One-shot System.Windows.Forms.Timer, not a background Task: RigctldClient's own class
-        // comment is explicit that it is "not thread-safe by design... not called concurrently
-        // from a background Task" -- radioPollTimer (started right after this) polls the SAME
-        // client instance, and every WinForms Timer callback runs serialized on the UI thread's
-        // message loop, so this avoids that race entirely. The delay gives the engine's own CAT
-        // probe (a documented 700ms internal sleep, plus a real serial round-trip) time to finish
-        // before this reads/writes it.
-        // Found live (release blocker, 2026-08-19): a radio that's off/unreachable doesn't fail
-        // these rigctld round-trips instantly -- Hamlib itself retries its own serial read for
-        // each command before giving up. This whole sequence is ~10 sequential round-trips
-        // (PollOnce's own 6, plus SetSplit/GetMode/SetMode x2), and used to run synchronously on
-        // the UI thread (kickTimer.Tick always fires there) -- with the radio off, that could
-        // stall the entire application for many seconds right at startup, before the operator
-        // could interact with anything at all. Moved onto a background thread, matching the
-        // EXACT pattern ApplyEngineMode already uses for NativeEngineClient.Launch (see its own
-        // comment: "Process.Start()... well known to be able to block... Marshal to the UI
-        // thread explicitly"). Nothing in this body touches a WinForms control directly (only
-        // DebugOutput, which writes to a file -- see _radioOpInFlight's own comment for the one
-        // caveat), so no BeginInvoke is needed inside it; only the shared busy-guard is touched
-        // back on the UI thread via BeginInvoke, matching the poll timer's own convention.
-        private void ScheduleRigConnectKick(RigctldClient client)
-        {
-            var kickTimer = new System.Windows.Forms.Timer { Interval = 1500 };
-            kickTimer.Tick += (s, e) =>
-            {
-                kickTimer.Stop();
-                kickTimer.Dispose();
-                if (client != rigctldClient)
-                {
-                    wsjtxClient?.DebugOutput("[RIG-KICK] skipped -- superseded by a newer ApplyRadioSettings() call");
-                    return;
-                }
-                if (_radioOpInFlight)
-                {
-                    wsjtxClient?.DebugOutput("[RIG-KICK] skipped -- a radio poll is already in flight, self-heals next tick");
-                    return;
-                }
-                _radioOpInFlight = true;
-                System.Threading.Tasks.Task.Run(() =>
-                {
-                    try
-                    {
-                        var status = client.PollOnce();
-                        wsjtxClient?.DebugOutput($"[RIG-KICK] poll ok:{status.Ok} freq:{status.FrequencyHz} err:'{status.LastError}'");
-                        // The frequency nudge that used to live here (set freq+1Hz, then back) was
-                        // removed 2026-08-07: confirmed live that the radio's voice announce is
-                        // actually triggered by the MODE command below, not a frequency write at
-                        // all -- the frequency nudge never did anything real, and the announce
-                        // attributed to it earlier was really the mode nudge firing right after it.
-                        bool okSplit = client.SetSplit(Radio.SplitMode == RadioSplitMode.Rig);
-                        wsjtxClient?.DebugOutput($"[RIG-KICK] split={Radio.SplitMode}: ok:{okSplit}");
-
-                        // The engine's own retune loop only re-sends set_mode when its belief differs
-                        // from the target, so if that belief was ever seeded as "already correct"
-                        // (e.g. from a stale prior session) without a real CAT command reaching the
-                        // physical radio, the rig could stay stuck on whatever mode it was actually
-                        // last in. Nudge to a mode FT8/FT4 operation would never actually want (FM)
-                        // and back to whatever's currently read, forcing two genuinely different
-                        // set_mode calls the rig can't collapse into a no-op. Confirmed live,
-                        // 2026-08-07: this genuinely reaches the radio (it's what triggers the real
-                        // voice announce, not the frequency write) -- kept for that reason, though on
-                        // its own it did NOT fix the separate mic-vs-USB-audio transmit issue, which
-                        // is a different bug still under investigation (audio playback path, not
-                        // mode-setting).
-                        if (client.GetMode(out string curMode, out int curPassband) && !string.IsNullOrWhiteSpace(curMode))
-                        {
-                            bool okModeNudge = client.SetMode("FM", 0);
-                            bool okModeRestore = client.SetMode(curMode, curPassband);
-                            wsjtxClient?.DebugOutput($"[RIG-KICK] mode nudge FM->{curMode}: nudge_ok:{okModeNudge} restore_ok:{okModeRestore}");
-                        }
-                        else
-                        {
-                            wsjtxClient?.DebugOutput("[RIG-KICK] mode nudge skipped -- could not read current mode");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        wsjtxClient?.DebugOutput($"[RIG-KICK] EXCEPTION: {ex.Message}");
-                    }
-                    finally
-                    {
-                        BeginInvoke(new Action(() => { _radioOpInFlight = false; }));
-                    }
-                });
-            };
-            kickTimer.Start();
-        }
-
         // Native-only: Jimmy always runs its own engine host -- called once at startup and
         // again whenever OptionsDlg's Radio tab is saved (COM port/audio device/rig model
         // changes take effect immediately, no restart needed, matching ApplyRadioSettings'
@@ -2906,124 +2871,6 @@ namespace WSJTX_Controller
             };
             restartTimer.Start();
         }
-
-        // null = no poll completed yet this session; true/false = the CAT link's health as of
-        // the last poll. Used only to detect a CHANGE (see radioPollTimer_Tick) -- never read
-        // for its own sake elsewhere.
-        private bool? _lastRadioPollOk = null;
-
-        // Shared by radioPollTimer_Tick and ScheduleRigConnectKick's callback -- both talk to
-        // the SAME RigctldClient instance (rigctld is a multi-client daemon, but RigctldClient's
-        // own class comment is explicit that IT is "not thread-safe by design... not called
-        // concurrently from a background Task"). Set true right before either one starts its
-        // background rigctld round-trip, cleared back on the UI thread (via BeginInvoke) once
-        // it's done; the OTHER one just skips its own turn if this is already true rather than
-        // risking two threads calling into the same client instance at once -- "self-heals next
-        // tick", same tolerance every other skipped/superseded radio operation in this class
-        // already documents.
-        private volatile bool _radioOpInFlight;
-
-        // Quiet background update, same "no sound, no forced announcement" spirit as
-        // spotWatchAgeTimer_Tick above -- Alt+Q (ReportPowerSwr) always does its own fresh,
-        // synchronous PollOnce() rather than relying on this cached value, so this timer only
-        // needs to keep lastRadioStatus reasonably current for anything that wants to peek at
-        // it without forcing a round-trip.
-        //
-        // CAT health was previously invisible in real time: a failed link (bad COM port, wrong
-        // baud, rig powered off, cable unplugged, or the engine-restart race fixed elsewhere)
-        // silently degraded to receive-only-for-control with nothing telling the operator --
-        // found live, 2026-08-06/07, chasing a real TX session where mode-switching over CAT
-        // silently wasn't happening. Announce state CHANGES only (not every tick, which would
-        // be constant, unusable chatter) via the same accessible status-bar mechanism used
-        // throughout Jimmy (ShowMessage -> statusText, forced to announce when focused).
-        //
-        // Found live (release blocker, 2026-08-19): PollOnce() is 6 sequential rigctld round-
-        // trips, and this Tick handler used to call it directly -- System.Windows.Forms.Timer.
-        // Tick always fires on the UI thread. A radio that's off/unreachable doesn't fail these
-        // instantly (Hamlib retries its own serial read per command before giving up), so with
-        // the radio off this blocked the ENTIRE application for a meaningful fraction of a
-        // second on EVERY poll (default interval 1000ms) -- in practice, close to continuously,
-        // since the next tick was already due by the time one blocking call finished. The whole
-        // rest of Jimmy (Options, typing, list navigation, everything) shares this one UI
-        // thread, so this alone was enough to make the application feel unusable whenever the
-        // radio was off -- not a hang, but input left waiting behind an almost-constantly-busy
-        // message loop. PollOnce() itself is unchanged; only WHERE it runs moved, matching the
-        // same Task.Run+BeginInvoke pattern ApplyEngineMode already uses for the same reason
-        // (launching the engine host). _radioOpInFlight (its own comment above) keeps this from
-        // ever overlapping ScheduleRigConnectKick's own background rigctld calls on the same
-        // client instance.
-        private void radioPollTimer_Tick(object sender, EventArgs e)
-        {
-            if (rigctldClient == null) return;
-            if (_radioOpInFlight) return;   // a poll or the startup kick is already running -- self-heals next tick
-            var client = rigctldClient;
-            _radioOpInFlight = true;
-            System.Threading.Tasks.Task.Run(() =>
-            {
-                RadioStatus status;
-                try { status = client.PollOnce(); }
-                catch (Exception ex) { status = new RadioStatus { Ok = false, LastError = ex.Message }; }
-                BeginInvoke(new Action(() =>
-                {
-                    _radioOpInFlight = false;
-                    if (client != rigctldClient) return;   // superseded by a newer ApplyRadioSettings() call
-                    ApplyRadioPollResult(status);
-                }));
-            });
-        }
-
-        // The result-application half of radioPollTimer_Tick, unchanged from what used to run
-        // inline there -- split out only so the polling half above can run off the UI thread
-        // while this half (which touches statusText via Notify/HaltTx) still runs on it.
-        private void ApplyRadioPollResult(RadioStatus status)
-        {
-            lastRadioStatus = status;
-
-            if (_lastRadioPollOk != lastRadioStatus.Ok)
-            {
-                if (lastRadioStatus.Ok)
-                {
-                    // Only announce a RECOVERY, not the very first successful poll of a
-                    // session (that's just normal startup, not news). Promoted (2026-08-19,
-                    // notification-system-consistency pass) to its own dedicated
-                    // RadioCatRecoveredEvent -- see its own comment for why this isn't an
-                    // ErrorWarningEvent.
-                    if (_lastRadioPollOk == false)
-                        wsjtxClient?.Notify?.Publish(new RadioCatRecoveredEvent());
-                }
-                else
-                {
-                    // Wave 1 of the notification architecture (WSJTX_Controller/Notify/):
-                    // ErrorSeverity.Error always beeps regardless of policy Priority --
-                    // byte-identical to the direct ShowMessage(..., true) call this replaces.
-                    wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Radio CAT link lost", lastRadioStatus.LastError ?? "no response"));
-                }
-                _lastRadioPollOk = lastRadioStatus.Ok;
-            }
-
-            // Matches WSJT-X's own Radio tab "Halt Tx when SWR > 2.5" safety feature -- requested
-            // by the operator, 2026-08-07, for parity. lastRadioStatus.Swr is null on a rig/
-            // backend that doesn't report SWR, treated as "no reading, nothing to act on".
-            // Edge-triggered (_swrOverThreshold tracks the PREVIOUS poll's state) so this fires
-            // HaltTx()/announces once per episode, not every tick while SWR stays high -- the
-            // same "state change, not constant chatter" discipline as the CAT-health announce
-            // above.
-            bool swrOver = Radio.HaltTxOnHighSwr && lastRadioStatus.Ok && lastRadioStatus.Swr.HasValue
-                           && lastRadioStatus.Swr.Value > Radio.SwrHaltThreshold;
-            if (swrOver && !_swrOverThreshold)
-            {
-                wsjtxClient?.HaltTx();
-                // Promoted (2026-08-19, notification-system-consistency pass) to the same
-                // "headline: reason" ErrorWarningEvent shape as "Radio CAT link lost" above --
-                // a real TX-safety event, Error severity forces Important (beep + eligible for
-                // the off-focus UIA announcement), matching this feature's own safety intent.
-                wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Tx halted (high SWR)",
-                    $"SWR {lastRadioStatus.Swr.Value:F1} exceeds threshold {Radio.SwrHaltThreshold:F1}"));
-            }
-            _swrOverThreshold = swrOver;
-        }
-
-        private bool _swrOverThreshold = false;
 
         // Called (via BeginInvoke, already marshalled to the UI thread) whenever
         // DxSpotWatcher's watch list or any watched call's last-seen data changes. One row per
@@ -3284,12 +3131,12 @@ namespace WSJTX_Controller
                 $"{nl}Stations you haven't worked yet are added to the 'Stations calling' list." +
                 $"{nl}Stations calling you directly have priority on this list, and are moved to the top." +
                 $"{nl}{nl}You can leave this window open, for reference, as you run {friendlyName}." +
-                $"{nl}Important: Minimize WSJT-X and stay on the {friendlyName} window full-time!" +
 
                 $"{nl}{nl}Command keys:" +
                 $"{nl}{K(HotkeyAction.RowOrder)}: Open stations available row order editor." +
                 $"{nl}{K(HotkeyAction.Options)}: Review or set options for processing 'QSO's." +
                 $"{nl}{K(HotkeyAction.CallCqMode)}: Start selected CQ mode (CQ only / CQ DX only / CQ and CQ DX). Does nothing in Listen mode." +
+                $"{nl}{K(HotkeyAction.CallCqOptions)}: Open Call CQ options (choose CQ only / CQ DX only / CQ and CQ DX, directed CQ, etc.)." +
                 $"{nl}{K(HotkeyAction.ListenMode)}: Select 'Listen for calls' mode." +
                 $"{nl}{K(HotkeyAction.EnableTx)}: Enable transmit, or re-enable timed out 'QSO'." +
                 $"{nl}{K(HotkeyAction.HaltTx)}: Halt transmit immediately." +
@@ -3299,7 +3146,7 @@ namespace WSJTX_Controller
                 $"{nl}{K(HotkeyAction.AnalyzeSlot)}: Analyze transmit slot (find quietest audio frequency for CQ; requires 'Use best Tx frequency' enabled)." +
                 $"{nl}{K(HotkeyAction.LookupStation)}: Look up selected station (shows callsign, country, state, LoTW status, and more)." +
                 $"{nl}{K(HotkeyAction.OpenLogbook)}: Open the Ham Radio Center logbook." +
-                $"{nl}{K(HotkeyAction.AddManualQso)}: Add a manually-logged QSO (e.g. worked outside WSJT-X)." +
+                $"{nl}{K(HotkeyAction.AddManualQso)}: Add a manually-logged QSO (e.g. worked on another mode or rig)." +
                 $"{nl}{K(HotkeyAction.OpenOtaSpots)}: Open POTA / SOTA spots, DX spots, band conditions, and space weather." +
 
                 $"{nl}{nl}Radio configuration keys:" +
@@ -3485,7 +3332,7 @@ namespace WSJTX_Controller
 
         private void PeriodHelpLabel_Click(object sender, EventArgs e)
         {
-            ShowHelp($"'Tx period' allows you to select which period you want WSJT-X to use for transmit when in 'Listen for calls' mode." +
+            ShowHelp($"'Tx period' allows you to select which period you want {friendlyName} to use for transmit when in 'Listen for calls' mode." +
                 $"{nl}{nl}If you are using multiple transmitters at your station, you may want for all of them to use the same Tx period, to avoid interference." +
                 $"{nl}{nl}Otherwise, the normal selection is 'any'.");
         }
@@ -3688,7 +3535,7 @@ namespace WSJTX_Controller
         {
             if (formLoaded && listenModeButton.Checked && !replyDxCheckBox.Checked && !replyLocalCheckBox.Checked && !replyDirCqCheckBox.Checked)
             {
-                ShowMsg($"Select calls manually in WSJT-X (alt/dbl-click)", true);
+                ShowMsg($"Select calls manually (alt/dbl-click)", true);
             }
         }
 
@@ -3738,13 +3585,32 @@ namespace WSJTX_Controller
 
             if (e.KeyData == hotkeyConfig[HotkeyAction.NavLoggedCount])
             {
+                // Live-testing finding, 2026-08-21: this used to call loggedLabel.Focus() --
+                // Label controls aren't focusable by default (no TabStop), so Focus() silently
+                // failed and keyboard focus fell through to whatever the next real Tab stop
+                // happened to be ("the buttons"), and only ever worked on the very first press
+                // before focus had already drifted away from wherever the operator actually was.
+                // A count is a quick, one-shot fact the operator wants read out without being
+                // relocated -- unlike NavLoggedList (a real list worth navigating INTO), there's
+                // nothing here to interact with afterward. Announces via UI Automation's
+                // Notification event (RaiseAccessibleAlert, same mechanism the off-focus
+                // important-alert feature uses) instead of moving focus at all. loggedLabel.Text
+                // already holds the live "Auto-logged: N" header RenderLoggedList last wrote.
                 if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
-                loggedLabel.Focus();
+                RaiseAccessibleAlert(loggedLabel.Text);
             }
 
             if (e.KeyData == hotkeyConfig[HotkeyAction.NavCallList])
             {
-                if (callListBox.Visible)
+                // Live-testing finding, 2026-08-21: callListBox is the BEGINNER/simple-layout
+                // list only -- Advanced Call Layout replaces it with the TX1/TX2/Raw Decodes
+                // lists (their own NavAdvTx1/NavAdvTx2/NavAdvRaw hotkeys). callListBox.Visible
+                // alone isn't a reliable "beginner mode" gate on its own: it can still be true
+                // even with Advanced Call Layout checked, if the operator hasn't individually
+                // enabled any of the TX1/TX2/Raw sub-displays -- this hotkey must not fire in
+                // that case either, since Advanced Call Layout being on means this window is
+                // conceptually not the operator's current one to navigate to.
+                if (!advancedCallLayout && callListBox.Visible)
                 {
                     if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                     callListBox.Focus();
@@ -3753,8 +3619,13 @@ namespace WSJTX_Controller
 
             if (e.KeyData == hotkeyConfig[HotkeyAction.NavPendingCount])
             {
+                // Live-testing finding, 2026-08-21: same fix as NavLoggedCount just above (see
+                // its own comment) -- replyListLabel.Focus() silently failed (Labels aren't
+                // focusable by default) and only ever appeared to work once, before focus had
+                // already drifted. Announces the live "Stations calling: N" header text without
+                // relocating focus.
                 if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
-                replyListLabel.Focus();
+                RaiseAccessibleAlert(replyListLabel.Text);
             }
 
             if (hotkeyConfig[HotkeyAction.NavAdvTx1] != Keys.None && e.KeyData == hotkeyConfig[HotkeyAction.NavAdvTx1])
@@ -4584,6 +4455,17 @@ namespace WSJTX_Controller
 
         private CallCqDlg _callCqDlg;
 
+        // Requested 2026-08-21: Alt+C (HotkeyAction.CallCqMode) starts calling CQ using
+        // whichever CQ variant (directed CQ / CQ DX only / CQ and CQ DX, etc.) is currently set
+        // in this dialog -- but those settings persist from whatever they were last saved as,
+        // possibly from a previous session, and an operator who never opens this dialog in a
+        // given Jimmy session has no way to know that. False at every process start (never
+        // persisted -- this is a per-SESSION reminder, not a permanent setting); set true the
+        // moment the dialog is actually opened (see OpenCallCqDialog below) or once the operator
+        // has explicitly been asked and chosen to proceed anyway (see the CallCqMode handler in
+        // ProcessCmdKey) -- either way, asked at most once per session.
+        private bool _callCqOptionsReviewedThisSession = false;
+
         // Non-modal (Show(), not ShowDialog()) -- found 2026-07-11: a modal dialog here
         // blocked Alt+Tab back to the main window's status bar entirely, which matters a lot
         // for this one specifically since its own "Find open slot" button kicks off up to a
@@ -4592,6 +4474,7 @@ namespace WSJTX_Controller
         // kept in front of its owner at the Win32 level regardless of modality.
         private void OpenCallCqDialog()
         {
+            _callCqOptionsReviewedThisSession = true;
             if (_callCqDlg != null && !_callCqDlg.IsDisposed)
             {
                 _callCqDlg.Activate();
@@ -4606,7 +4489,7 @@ namespace WSJTX_Controller
         {
             if (!wsjtxClient.ConnectedToWsjtx())
             {
-                MessageBox.Show("WSJT-X is not connected.", friendlyName,
+                MessageBox.Show("The radio engine is not connected.", friendlyName,
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }

@@ -87,7 +87,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            if (RetuneBand(targetIdx, "BandUp")) ShowBandChangePending(targetIdx);
+            RetuneBand(targetIdx, "BandUp");
             return true;
         }
 
@@ -105,7 +105,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            if (RetuneBand(targetIdx, "BandDown")) ShowBandChangePending(targetIdx);
+            RetuneBand(targetIdx, "BandDown");
             return true;
         }
 
@@ -122,7 +122,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            if (RetuneBand(targetIdx, "SelectBand")) ShowBandChangePending(targetIdx);
+            RetuneBand(targetIdx, "SelectBand");
             return true;
         }
 
@@ -142,8 +142,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            if (RetuneBand(targetIdx, (uint)(freqKHz * 1000), "SelectFrequency"))
-                ShowBandChangePending(targetIdx, $"{freqKHz} kHz");
+            RetuneBand(targetIdx, (uint)(freqKHz * 1000), "SelectFrequency", $"{freqKHz} kHz");
             return true;
         }
 
@@ -176,15 +175,13 @@ namespace WSJTX_Controller
             return SelectBand(targetIdx);
         }
 
-        // Self-sufficiency plan, Phase 5: band changes retune the radio directly over rigctld --
-        // the engine's own poll loop picks up the new dial on its next tick (see
-        // RigctldClient.SetFrequency's own comment) exactly like a knob-QSY would. Under
-        // RadioControlMode.WsjtxCat there is no separate CAT connection at all (radio state
-        // comes read-only from the engine's own StatusMessage broadcasts), so there is nothing
-        // to retune -- returns false so callers skip the "Changing to..." status announcement
-        // instead of claiming a band change that never happens.
-        private bool RetuneBand(int targetIdx, string caller) =>
-            RetuneBand(targetIdx, (uint)(bandToFreq(targetIdx) * 1000), caller);
+        // Band changes retune the radio through the engine's own Engine::set_frequency (the
+        // SET_FREQUENCY Direct command), not a second, uncoordinated rigctld write -- see
+        // DirectSetFrequency's own comment (WsjtxClient.Direct.cs). Under RadioControlMode.
+        // WsjtxCat there is no separate CAT connection at all (radio state comes read-only from
+        // the engine's own StatusMessage broadcasts), so there is nothing to retune.
+        private void RetuneBand(int targetIdx, string caller, string detail = null) =>
+            RetuneBand(targetIdx, (uint)(bandToFreq(targetIdx) * 1000), caller, detail);
 
         // SelectFrequency's own entry point: an explicit target frequency, not necessarily the
         // band's primary/first entry bandToFreq(targetIdx) would resolve to.
@@ -203,35 +200,68 @@ namespace WSJTX_Controller
         // actually attempting a CAT command (not on the earlier "wrong radio mode" rejection,
         // which never attempts one at all), and is cleared back to null on failure so the next
         // BandUp/BandDown falls back to bandIdx -- the last state the radio actually confirmed.
-        private bool RetuneBand(int targetIdx, uint freqHz, string caller)
+        //
+        // Release-audit finding, 2026-08-21 (completes the 2026-08-20 partial fix): the actual
+        // DirectSetFrequency call used to run synchronously here, on the UI thread -- every
+        // caller (BandUp/BandDown/SelectBand/SelectFrequency, all direct hotkey/menu handlers)
+        // could block keyboard/screen-reader/repaint responsiveness for DirectSendCommand's full
+        // bounded connect/read wait (up to a few seconds) on every press, worst when the engine
+        // host is starting, hung, or restarting -- exactly the class of bug DirectPollTick was
+        // already fixed for (2026-08-19) and every fire-and-forget DirectSendXxx/DirectSetXxx
+        // command was fixed for (2026-08-20), but this one couldn't get the same trivial
+        // Task.Run-and-discard treatment because callers needed the real success/failure to
+        // decide _pendingBandIdx and the "Changing to..." status text. Now void: the network
+        // call runs on a background Task, and this method itself owns showing the pending-status
+        // text or the failure notification once it completes (moved out of all four callers,
+        // which no longer need to know or care whether the retune succeeded synchronously).
+        // _pendingBandIdx is still set HERE, synchronously, before returning -- preserving the
+        // exact "repeated presses before a CAT round-trip lands keep advancing" behavior the
+        // comment above describes, since that only depends on the field being updated
+        // immediately, not on the network round-trip finishing. The `_pendingBandIdx != targetIdx`
+        // guard in the continuation below is this method's own reconnect-epoch equivalent: if a
+        // NEWER BandUp/BandDown/SelectBand/SelectFrequency press already superseded this one
+        // while it was still in flight, that newer request now owns _pendingBandIdx and the
+        // pending-status text -- this now-stale completion must not clobber either.
+        private void RetuneBand(int targetIdx, uint freqHz, string caller, string detail = null)
         {
             DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst}");
-            if (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld || ctrl.rigctldClient == null)
+            if (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld)
             {
                 StatusView.ShowMessage("Band change needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
-                return false;
+                return;
             }
 
             _pendingBandIdx = targetIdx;
-            if (ctrl.rigctldClient.SetFrequency(freqHz))
-                return true;
+            string bandLabel = $"{bands[targetIdx]}m";
+            // Codex Audit 02 follow-up, 2026-08-21: DirectSetFrequency now routes through the
+            // ordered dispatcher (WsjtxClient.Direct.cs's own class comment) instead of this method
+            // opening its own independent Task.Run -- the dispatcher already marshals onComplete
+            // onto the UI thread, same as ctrl.BeginInvoke did here before.
+            DirectSetFrequency(freqHz, bandLabel, "USB", ok =>
+            {
+                if (_pendingBandIdx != targetIdx) return; // superseded by a newer request
 
-            // Covers rejection (rigctld replied with an explicit RPRT error), timeout, and
-            // disconnect alike -- RigctldClient.SetFrequency returns false for all three (its
-            // SendCommand closes the connection and records LastError on any exception, including
-            // a timed-out read; LooksLikeError treats a null reply -- disconnected/no response --
-            // the same as an explicit RPRT error). LastError is null for a clean rejection reply
-            // (no message beyond "RPRT -1" to report), hence the fallback text.
-            _pendingBandIdx = null;
-            // Routed through NotificationCenter (2026-08-19, notification-system-consistency
-            // pass) instead of a raw StatusView.ShowMessage -- same "headline: reason"
-            // ErrorWarningEvent shape as Controller.cs's "Radio CAT link lost". Error severity
-            // forces Important (beep + eligible for the off-focus UIA announcement); the inner
-            // StatusViewNotificationDelivery still updates statusText exactly as before (see
-            // NotificationCenter.Deliver/UiaAlertNotificationDelivery).
-            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Band change to {bands[targetIdx]}m failed",
-                ctrl.rigctldClient.LastError ?? "rigctld rejected the frequency change"));
-            return false;
+                if (ok)
+                {
+                    ShowBandChangePending(targetIdx, detail);
+                    return;
+                }
+
+                // Covers a rejected/malformed SET_FREQUENCY, an unreachable engine host, or a
+                // timed-out read alike -- DirectSetFrequency returns false for all three (see
+                // its own comment, and DirectSendCommand's on the bounded connect/read pair it
+                // shares with every other Direct command).
+                _pendingBandIdx = null;
+                // Routed through NotificationCenter (2026-08-19, notification-system-
+                // consistency pass) instead of a raw StatusView.ShowMessage -- same
+                // "headline: reason" ErrorWarningEvent shape as Controller.cs's "Radio CAT
+                // link lost". Error severity forces Important (beep + eligible for the
+                // off-focus UIA announcement); the inner StatusViewNotificationDelivery still
+                // updates statusText exactly as before (see NotificationCenter.Deliver/
+                // UiaAlertNotificationDelivery).
+                Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Band change to {bandLabel} failed",
+                    "the engine host rejected or did not confirm the frequency change"));
+            });
         }
 
         private void ShowBandChangePending(int targetIdx, string detail = null)
@@ -242,10 +272,11 @@ namespace WSJTX_Controller
             ctrl.statusText.SelectionStart = 0;
         }
 
-        // Self-sufficiency plan, Phase 1: one fresh, synchronous PollOnce() -- deliberately not
-        // reusing ctrl.lastRadioStatus's background-timer value, since this is an explicit
-        // on-demand "check now" action (Alt+Q), not a passive display. Needs Hamlib rigctld --
-        // under RadioControlMode.WsjtxCat there is no separate CAT connection to poll at all.
+        // Self-sufficiency plan, Phase 1: one fresh, on-demand engine SNAPSHOT query -- this is
+        // an explicit "check now" action (Alt+Q), not a passive display, so it always asks the
+        // engine directly rather than reusing any cached value. Works under either RadioControl
+        // Mode (the engine's own Rig, and therefore its S-meter/power/SWR readings, exist
+        // independently of RadioControlMode -- Jimmy no longer runs any separate CAT session).
         // Added 2026-08-10: restored the transmit/receive split Andy WM8Q's fork's own Alt+Q
         // handler had (WSJT-X mainwindow.cpp, NewTxMsgIdx==18: `if (m_transmitting) Power/SWR
         // else "Audio in: %1 dB", arg(round(m_px))`) -- somewhere along the way this collapsed
@@ -257,6 +288,13 @@ namespace WSJTX_Controller
         // radio's S-meter. Nexus's own equivalent is RadioStatus.rx_level (tempo-app/src/
         // engine.rs's MeterFeed doc comment: "the ballistics-shaped RX input level", updated
         // every 20ms by the rx-dsp thread) -- see RxLevelToDb below for the exact conversion.
+        // Codex Audit 02 finding, 2026-08-21 ("remove the remaining synchronous Direct waits from
+        // UI/hotkey paths ... including Alt+Q/F11/F12"): the SNAPSHOT query below used to run
+        // synchronously on the UI thread via DirectSendCommand -- same class of keyboard/screen-
+        // reader/repaint freeze already fixed for DirectPollTick and every DirectSendXxx/
+        // DirectSetXxx command (2026-08-19/20/21). Now routes through the ordered dispatcher
+        // (WsjtxClient.Direct.cs's own class comment); the rest of this method's logic is
+        // unchanged, just moved into the completion callback, which already runs on the UI thread.
         public bool ReportPowerSwr()
         {
             // sound:false, not true -- this hotkey's own documented purpose includes checking
@@ -276,51 +314,58 @@ namespace WSJTX_Controller
             // both here is what makes Alt+Q report real Power/SWR during Tune, matching the
             // original -- and matching the actual point of Tune (trim F11/F12 while watching
             // ALC/Power/SWR settle).
-            if (transmitting || tuning)
+            // Sourced entirely from the engine's own SNAPSHOT (2026-08-20: retired the
+            // RigctldClient.PollOnce fallback this used to have here -- S-meter/power/SWR now
+            // come from the SAME SNAPSHOT the engine already sends every poll tick, not a
+            // second, concurrent CAT session). One fresh, on-demand query either way, same as
+            // the RX-audio-in path below always was -- not a cached/periodic value, matching
+            // this hotkey's own "check now" purpose.
+            EnqueueDirectCommand("SNAPSHOT", snapJson =>
             {
-                if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
+                DirectRadioStatus radio = null;
+                if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
                 {
-                    var status = ctrl.rigctldClient.PollOnce();
-                    ctrl.lastRadioStatus = status;
-                    StatusView.ShowMessage(FormatRigctldPowerSwr(status), false);
-                    return true;
-                }
-
-                StatusView.ShowMessage("Power/SWR needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", false);
-                return true;
-            }
-
-            // Not transmitting/tuning: the soundcard's own RX audio-in level, straight from the
-            // native engine (same fresh, on-demand SNAPSHOT pattern as AudioLevel() above --
-            // deliberately not a cached/periodic value, matching this hotkey's own "check now"
-            // purpose per this method's original comment).
-            string snapJson = DirectSendCommand("SNAPSHOT");
-            if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
-            {
-                try
-                {
-                    var snap = System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(snapJson, DirectJsonOptions);
-                    if (snap?.Radio != null)
+                    try
                     {
-                        StatusView.ShowMessage($"Audio in: {RxLevelToDb(snap.Radio.RxLevel):0} dB", false);
-                        return true;
+                        var snap = System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(snapJson, DirectJsonOptions);
+                        radio = snap?.Radio;
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugOutput($"{Time()} ReportPowerSwr: engine SNAPSHOT parse failed: {ex.Message}");
                     }
                 }
-                catch (Exception ex)
+                if (radio == null)
                 {
-                    DebugOutput($"{Time()} ReportPowerSwr: engine SNAPSHOT parse failed, falling back to Hamlib rigctld: {ex.Message}");
+                    StatusView.ShowMessage("Power/SWR: engine host unreachable.", false);
+                    return;
                 }
-            }
 
-            if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
-            {
-                var status = ctrl.rigctldClient.PollOnce();
-                ctrl.lastRadioStatus = status;
-                StatusView.ShowMessage(FormatRigctldPowerSwr(status), false);
-                return true;
-            }
+                if (transmitting || tuning)
+                {
+                    var parts = new List<string>();
+                    if (radio.SmeterDb.HasValue) parts.Add($"S-meter {radio.SmeterDb.Value} dB");
+                    // Release-audit finding, 2026-08-20: this used to report radio.RfPower -- the raw
+                    // 0.0-1.0 Hamlib "l RFPOWER" fraction that disable_rfpower_probe (EngineHost/src/
+                    // main.rs, the proven fix for the real 5W-drop hazard, Hamlib/Hamlib#1595)
+                    // deliberately keeps the engine from ever querying at all, so RfPower is always
+                    // null with that gate active -- Alt+Q's power figure silently never appeared
+                    // during transmit/tune even on a rig with real calibrated telemetry available.
+                    // radio.TxPoW (RadioStatus.tx_po_w, calibrated output watts) is a SEPARATE
+                    // reading Nexus's radio loop computes independently of the suppressed RFPOWER
+                    // probe -- safe to read here, never involves the hazardous query. Do not revert
+                    // this to RfPower/l RFPOWER for any reason.
+                    if (radio.TxPoW.HasValue) parts.Add($"power {radio.TxPoW.Value:0.#} W");
+                    if (radio.TxSwr.HasValue) parts.Add($"SWR {radio.TxSwr.Value:0.0}");
+                    if (radio.TxAlc.HasValue) parts.Add($"ALC {radio.TxAlc.Value:0.00}");
+                    StatusView.ShowMessage(parts.Count > 0 ? string.Join(", ", parts) : "Radio: no meter data available.", false);
+                    return;
+                }
 
-            StatusView.ShowMessage("Power/SWR needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", false);
+                // Not transmitting/tuning: the soundcard's own RX audio-in level (see this method's
+                // own top comment for why this differs from S-meter/power/SWR above).
+                StatusView.ShowMessage($"Audio in: {RxLevelToDb(radio.RxLevel):0} dB", false);
+            });
             return true;
         }
 
@@ -341,16 +386,6 @@ namespace WSJTX_Controller
             return Math.Max(0, Math.Min(90, 20 * Math.Log10(rms) + 90.3));
         }
 
-        private static string FormatRigctldPowerSwr(RadioStatus status)
-        {
-            if (!status.Ok) return $"Radio: {status.LastError ?? "no response"}";
-            var parts = new List<string>();
-            if (status.SMeterDb.HasValue) parts.Add($"S-meter {status.SMeterDb.Value} dB");
-            if (status.PowerRaw.HasValue) parts.Add($"power {status.PowerRaw.Value:0.00}");
-            if (status.Swr.HasValue) parts.Add($"SWR {status.Swr.Value:0.0}");
-            return parts.Count > 0 ? string.Join(", ", parts) : "Radio: no meter data available from rigctld.";
-        }
-
         // Added 2026-08-10: wired to the native engine's own Engine::set_tune (control port's
         // new SET_TUNING command, EngineHost/src/main.rs) -- Engine::set_tune already existed
         // (Nexus's own Tauri UI uses it) and already plays a continuous test carrier in small
@@ -365,8 +400,20 @@ namespace WSJTX_Controller
         // old unconditional version still claimed "Tune started" and let F11/F12 proceed as if a
         // real carrier existed -- the native engine has no equivalent to WSJT-X's own UDP-based
         // ToggleTuning, so classic mode genuinely cannot Tune at all right now).
+        // Release-audit finding, 2026-08-21 (completes the 2026-08-20 partial fix): DirectSetTuning
+        // used to be called synchronously here, on the UI thread, blocking Alt+T for
+        // DirectSendCommand's full bounded connect/read wait whenever the engine host is slow,
+        // starting, or hung -- same class of bug already fixed for RetuneBand/the fire-and-forget
+        // DirectSetXxx commands. _tuningRequestInFlight guards against a rapid double-press
+        // computing `newState = !tuning` from stale state while the first press's request is
+        // still out (tuning only updates once THIS continuation lands) -- Tune is a deliberate,
+        // infrequent action, so a second press while one is already in flight is simply ignored
+        // (handled, no-op) rather than queued or raced.
+        private bool _tuningRequestInFlight;
+
         public bool ToggleTuningProcess()
         {
+            if (_tuningRequestInFlight) return true;
             bool newState = !tuning;
             // Found live, 2026-08-10, auditing against production: the original classic-UDP
             // ToggleTuning() (deleted this same session, replacing Andy WM8Q's proprietary
@@ -375,26 +422,35 @@ namespace WSJTX_Controller
             // replacement dropped that -- restored here, same condition, HaltTx() itself is
             // already mode-aware (routes to DirectSendHaltTx() under Direct mode).
             if (newState && txEnabled) HaltTx();
-            if (!DirectSetTuning(newState))
+
+            _tuningRequestInFlight = true;
+            // Codex Audit 02 follow-up, 2026-08-21: DirectSetTuning now routes through the ordered
+            // dispatcher (WsjtxClient.Direct.cs's own class comment) instead of this method opening
+            // its own independent Task.Run -- the dispatcher already marshals onComplete onto the
+            // UI thread, same as ctrl.BeginInvoke did here before.
+            DirectSetTuning(newState, ok =>
             {
-                // "Talk to engine directly" used to be a real Options toggle this message could
-                // point the operator at -- removed (found stale while auditing UDP-transport
-                // code, 2026-08-17): the native engine is always running and always the only
-                // transport in production now (see NativeEngineSettings.cs's own comment), so a
-                // failure here means the engine process itself isn't reachable, not a mode
-                // choice.
-                StatusView.ShowMessage("Tune needs the native engine, which isn't currently reachable.", true);
-                return true;
-            }
-            tuning = newState;
-            if (!tuning) StartStatusTimer2(false);
-            StatusView.ShowMessage(tuning ? "Tune started" : "Tune stopped", false);
+                _tuningRequestInFlight = false;
+                if (!ok)
+                {
+                    // "Talk to engine directly" used to be a real Options toggle this message
+                    // could point the operator at -- removed (found stale while auditing
+                    // UDP-transport code, 2026-08-17): the native engine is always running and
+                    // always the only transport in production now (see
+                    // NativeEngineSettings.cs's own comment), so a failure here means the
+                    // engine process itself isn't reachable, not a mode choice.
+                    StatusView.ShowMessage("Tune needs the native engine, which isn't currently reachable.", true);
+                    return;
+                }
+                tuning = newState;
+                if (!tuning) StartStatusTimer2(false);
+                StatusView.ShowMessage(tuning ? "Tune started" : "Tune stopped", false);
+            });
             return true;
         }
 
         // Self-sufficiency plan, Phase 1: the one and only F11/F12 redirect point (confirmed by
-        // direct tracing -- HotkeyConfig.cs -> Controller.ProcessCmdKey -> here -> either path
-        // below).
+        // direct tracing -- HotkeyConfig.cs -> Controller.ProcessCmdKey -> here).
         //
         // Self-sufficiency plan Phase 6 addendum, 2026-08-09: F11/F12 originally (Andy WM8Q's
         // fork) sent a proprietary UDP sub-command (NewTxMsgIdx=20, see the very first commit in
@@ -402,22 +458,22 @@ namespace WSJTX_Controller
         // level -- not a CAT command to the radio, and not a Windows output-device volume
         // either. That only ever worked against Andy's actual fork; standard WSJT-X, WSJT-X
         // Improved, and the native engine all speak the standard protocol and never understood
-        // it, which is why Phase 1 replaced it with the Hamlib-rigctld CAT path below (adjusting
-        // the radio's own receive AF gain -- a different thing, but the closest available
-        // replacement at the time, and still the only option when Radio.Mode == WsjtxCat, where
-        // nothing here has any CAT connection to the radio at all).
+        // it.
         //
         // The native engine's own Engine::set_tx_level/tx_level (tempo-app/src/engine.rs) is the
         // real modern match to the original intent -- it's WSJT-X's own "Pwr" slider equivalent,
         // the sound-card/software side of the signal chain (scales the generated tone before it
         // ever reaches the sound card), already wired up on the Rust side and applied live every
-        // slot, just not exposed to Jimmy before now (control port's new SET_TX_LEVEL command,
-        // EngineHost/src/main.rs). Tried first below since it works regardless of whether
-        // Jimmy's own transport to the engine is UDP or Direct -- both talk to the same engine
-        // process over this same control port. Falls through to the legacy Hamlib-rigctld CAT
-        // path (the radio's own receive AF gain -- a different point in the signal chain, but
-        // the closest available replacement) if the engine isn't reachable at all (e.g. talking
-        // to real WSJT-X, no engine process exists).
+        // slot (control port's SET_TX_LEVEL command, EngineHost/src/main.rs).
+        //
+        // 2026-08-20: retired the Hamlib-rigctld CAT fallback this used to have when the engine
+        // wasn't reachable (adjusting the radio's own receive AF gain -- a different point in the
+        // signal chain entirely; kept from back when Jimmy could run F11/F12 against classic
+        // external WSJT-X with no native engine host at all). Jimmy is Direct-only now -- the
+        // engine host always exists -- so that fallback only ever fired on a genuine engine-host
+        // outage mid-transmission, and adjusting the radio's RX volume was never really the right
+        // substitute for that anyway. If the engine isn't reachable, this now just reports that,
+        // the same way ReportPowerSwr/Alt+Q already does.
         //
         // Added 2026-08-10: this used to read/write Engine::mic_gain via SET_MIC_GAIN instead --
         // confirmed live to be wrong by tracing every consumer of mic_gain() in Nexus's own
@@ -431,6 +487,18 @@ namespace WSJTX_Controller
         // such CAT-read-back field muddying it, so this fix resolves both problems at once --
         // wrong signal-chain point AND stale-reading -- with the same change.
 
+        // Codex Audit 02 finding, 2026-08-21: guards the read-modify-write below (SNAPSHOT to read
+        // TxLevel, then SET_TX_LEVEL to write the stepped value) against two overlapping F11/F12
+        // presses -- without this, a second press's SNAPSHOT could return the SAME pre-change
+        // TxLevel the first press already read (the first press's own SET_TX_LEVEL hasn't even
+        // been enqueued yet, since that only happens once ITS SNAPSHOT completion callback runs),
+        // computing the identical next value twice instead of two real steps -- confirmed live:
+        // pressing F11 twice quickly moved the level by only one step, not two. Same
+        // _xxxRequestInFlight pattern already used for Tune/mode-switch (ToggleTuningProcess/
+        // SetOperatingMode below/above): a second press while one round-trip is still in flight is
+        // simply ignored (handled, no-op), not queued or raced.
+        private bool _audioLevelRequestInFlight;
+
         public bool AudioLevel(bool up)
         {
             // "during tune or transmit" (see this hotkey's own help text, Controller.cs) --
@@ -441,13 +509,13 @@ namespace WSJTX_Controller
             // (see ToggleTuningProcess's own comment); during a real FT8/FT4 transmission this
             // still only takes effect on the next slot, same as before.
             if (!transmitting && !tuning) return false;
+            if (_audioLevelRequestInFlight) return true;
 
             if (!tuning) StartStatusTimer2(false);
 
             // Operator-configurable (Options > Radio tab), added 2026-08-09 -- previously a
-            // hardcoded 0.05 (5%) on both this path and RigctldClient.AdjustAudioLevel's own copy
-            // below. Clamped defensively even though the NumericUpDown's own range should already
-            // keep it sane.
+            // hardcoded 0.05 (5%). Clamped defensively even though the NumericUpDown's own range
+            // should already keep it sane.
             double step = Math.Max(1, Math.Min(25, ctrl.Radio.AudioStepPercent)) / 100.0;
 
             // sound:false on every announcement below, deliberately -- this whole method only
@@ -459,44 +527,46 @@ namespace WSJTX_Controller
             // live, 2026-08-09, from a report of hearing a Windows beep on every F11/F12 press
             // while transmitting. The screen-reader announcement itself is unaffected (driven by
             // ShowMsg's own SendKeys nudge, independent of sound) -- only the audible beep goes.
-            string snapJson = DirectSendCommand("SNAPSHOT");
-            if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
+            //
+            // Codex Audit 02 finding, 2026-08-21 ("remove the remaining synchronous Direct waits
+            // ... including Alt+Q/F11/F12"): both DirectSendCommand calls below used to run
+            // synchronously on the UI thread -- now routed through the ordered dispatcher
+            // (WsjtxClient.Direct.cs's own class comment), which also serializes them relative to
+            // every other Direct command and makes both exception-safe.
+            _audioLevelRequestInFlight = true;
+            EnqueueDirectCommand("SNAPSHOT", snapJson =>
             {
-                try
+                _audioLevelRequestInFlight = false;
+                if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
                 {
-                    var snap = System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(snapJson, DirectJsonOptions);
-                    // TxLevel is never null (Nexus always defaults it to 0.9, no CAT connection
-                    // needed -- unlike MicGain's Option<f32>), so only the Radio object itself
-                    // needs to exist for this path to apply.
-                    if (snap?.Radio != null)
+                    try
                     {
-                        double current = snap.Radio.TxLevel;
-                        double next = Math.Max(0.0, Math.Min(1.0, current + (up ? step : -step)));
-                        DirectSendCommand("SET_TX_LEVEL " + next.ToString(System.Globalization.CultureInfo.InvariantCulture));
-                        // Options > Radio "Remember F11/F12 audio level per band" -- see
-                        // RadioSettings.TxLevelByBand's own comment. Restored on the next band
-                        // change by WsjtxClient.Direct.cs's own band-change detection.
-                        if (ctrl.Radio.RememberTxLevelPerBand && bandIdx != null)
-                            ctrl.Radio.TxLevelByBand[(int)bandIdx] = next;
-                        StatusView.ShowMessage($"Audio level {next * 100:0}%", false);
-                        return true;
+                        var snap = System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(snapJson, DirectJsonOptions);
+                        // TxLevel is never null (Nexus always defaults it to 0.9, no CAT connection
+                        // needed -- unlike MicGain's Option<f32>), so only the Radio object itself
+                        // needs to exist for this path to apply.
+                        if (snap?.Radio != null)
+                        {
+                            double current = snap.Radio.TxLevel;
+                            double next = Math.Max(0.0, Math.Min(1.0, current + (up ? step : -step)));
+                            EnqueueDirectCommand("SET_TX_LEVEL " + next.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
+                            // Options > Radio "Remember F11/F12 audio level per band" -- see
+                            // RadioSettings.TxLevelByBand's own comment. Restored on the next band
+                            // change by WsjtxClient.Direct.cs's own band-change detection.
+                            if (ctrl.Radio.RememberTxLevelPerBand && bandIdx != null)
+                                ctrl.Radio.TxLevelByBand[(int)bandIdx] = next;
+                            StatusView.ShowMessage($"Audio level {next * 100:0}%", false);
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugOutput($"{Time()} AudioLevel: engine SNAPSHOT parse failed: {ex.Message}");
                     }
                 }
-                catch (Exception ex)
-                {
-                    DebugOutput($"{Time()} AudioLevel: engine SNAPSHOT parse failed, falling back to Hamlib rigctld: {ex.Message}");
-                }
-            }
 
-            if (ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
-            {
-                if (ctrl.rigctldClient.AdjustAudioLevel(up, step, out double newLevel))
-                    StatusView.ShowMessage($"Audio level {newLevel * 100:0}%", false);
-                else
-                    StatusView.ShowMessage($"Audio level: {ctrl.rigctldClient.LastError}", false);
-            }
-            else
-                StatusView.ShowMessage("Audio level needs the native engine or Hamlib rigctld -- neither is currently available.", false);
+                StatusView.ShowMessage("Audio level: engine host unreachable.", false);
+            });
             return true;
         }
 
@@ -526,7 +596,11 @@ namespace WSJTX_Controller
         {
             if (!ShouldRestoreTxLevel(ctrl.Radio.RememberTxLevelPerBand, bandIdx, ctrl.Radio.TxLevelByBand, out double savedLevel))
                 return;
-            DirectSendCommand("SET_TX_LEVEL " + savedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            // Codex Audit 02 finding, 2026-08-21: routed through the ordered dispatcher instead of
+            // a synchronous DirectSendCommand -- this runs on every confirmed band change, on the
+            // UI thread (DirectApplyStatus), so a slow/hung engine host used to block band-change
+            // handling for the full bounded connect/read wait.
+            EnqueueDirectCommand("SET_TX_LEVEL " + savedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
             DebugOutput($"{Time()} restored tx level {savedLevel:0.00} for band index {bandIdx}");
         }
 
@@ -629,6 +703,11 @@ namespace WSJTX_Controller
                     pendingCqAfterAnalysis = false;
                     ctrl.cqModeButton_Click(null, null);
                 }
+                // AutoFreqChanged(true, ...) parks opMode at START while the even/odd offsets
+                // are unknown (see its own comment); nothing else ever resumes it to ACTIVE once
+                // this analysis finishes, so ProcessDecodeMsg silently discarded every decode
+                // from here on -- CheckActive() is idempotent (no-op unless opMode == START).
+                CheckActive();
             }
             return bothKnown;
         }

@@ -19,19 +19,19 @@ namespace WSJTX_Controller
         // of what OnQsoLogged used to do for the UDP path -- ClaimLiveLoggedQso dedup,
         // EnrichWithClubLogGeoData, ImportLiveLoggedQso (all three still shared, still called from
         // RequestLog, unchanged below), logList.Add/ShowLogged, the completion sound, and
-        // RefreshStillNeedCache -- verified by reading RequestLog's own body, not assumed. Genuine
-        // audit finding, not silently dropped: OnQsoLogged's one piece of logic RequestLog does
-        // NOT already have an equivalent for was its CQ-mode auto-resume call
-        // (_callQueueStore.RemoveCall + CancelQso + SetupCq(true) to re-arm calling CQ after a
-        // completed QSO) -- investigated and confirmed this would be dead code even if ported: it
-        // worked by setting curCmd/qsoState, which the classic UDP dispatcher's own (now also
-        // removed) decode-cycle machinery translated into an actual outbound "resume CQing"
-        // command -- Direct's control protocol has no such outbound command at all (SNAPSHOT/
-        // REPLY/HALT_TX/SET_TX_ENABLED/... none of them mean "start calling CQ"), so porting the
-        // call site alone would not restore any real behavior. Direct-mode CQ-mode auto-continue
-        // after a completed QSO is a genuine, separate, pre-existing feature gap -- flagged here
-        // for the record, not silently reintroduced as inert glue code, and not something this
-        // transport-cleanup pass is the right place to design a fix for.
+        // RefreshStillNeedCache -- verified by reading RequestLog's own body, not assumed.
+        //
+        // Release-audit finding, 2026-08-20: OnQsoLogged's one remaining piece of logic --
+        // its CQ-mode auto-resume call (_callQueueStore.RemoveCall + CancelQso + SetupCq(true) to
+        // re-arm calling CQ after a completed QSO) -- was a genuine gap for a while: it used to
+        // work only because the classic UDP dispatcher's own decode-cycle machinery translated
+        // SetupCq's local curCmd/qsoState bookkeeping into an actual outbound "resume CQing"
+        // command, and Direct's control protocol had nothing that meant "start calling CQ" at
+        // all. Fixed by adding a real CALL_CQ Direct command (Engine::call_cq, EngineHost/src/
+        // main.rs) and DirectSendCq (WsjtxClient.Direct.cs) -- SetupCq now sends it on every
+        // Call-CQ start, and DirectApplyStatus's own Is73orRR73 branch now performs the same
+        // RemoveCall+CancelQso+SetupCq(true) re-arm this comment used to say was impossible to
+        // restore.
 
         // Fills COUNTRY/DXCC/CONT/CQZ from the callsign's DXCC prefix (Club Log's country
         // database, downloaded automatically at startup and available offline) when the
@@ -64,18 +64,21 @@ namespace WSJTX_Controller
         // allowed to propagate. Shared by both the QsoLoggedMessage and LoggedAdifMessage
         // code paths -- adifRecord is either built from QsoLoggedMessage's typed fields, or
         // (for the LoggedAdifMessage path) is the exact ADIF text WSJT-X itself logged.
-        private void ImportLiveLoggedQso(string dxCall, Dictionary<string, string> fields, string adifRecord, string dedupKey)
+        // Codex Audit 02 release blocker, 2026-08-21: now returns whether the local logbook write
+        // actually succeeded -- see LiveQsoUploadOrchestrator.ImportLiveLoggedQso's own comment,
+        // and this method's own caller in WsjtxClient.cs's RequestLog for the operator-visible half.
+        private bool ImportLiveLoggedQso(string dxCall, Dictionary<string, string> fields, string adifRecord, string dedupKey)
         {
-            LiveQsoUploader.ImportLiveLoggedQso(dxCall, fields, adifRecord, dedupKey);
+            return LiveQsoUploader.ImportLiveLoggedQso(dxCall, fields, adifRecord, dedupKey);
         }
 
-        // Alt+U. Tells WSJT-X to upload everything pending to LoTW, and also
-        // triggers the QRZ/Club Log upload catch-up, so pressing this one key
-        // sends everything pending to every configured service. Each part is
-        // independently gated -- an unconfigured/disabled service is silently
-        // skipped, never attempted. LoTW's gate (ctrl.lotwUploadEnabled, default
-        // true) exists for operators who don't use LoTW at all -- WSJT-X reports
-        // an error on this command when it has no LoTW/TQSL setup of its own.
+        // Alt+U. Runs Jimmy's own TQSL invocation to upload everything pending to LoTW (see
+        // RunTqslUpload below), and also triggers the QRZ/Club Log upload catch-up, so pressing
+        // this one key sends everything pending to every configured service. Each part is
+        // independently gated -- an unconfigured/disabled service is silently skipped, never
+        // attempted. LoTW's gate (ctrl.lotwUploadEnabled, default true) exists for operators who
+        // don't use LoTW at all -- TQSL reports an error on this command when it has no LoTW
+        // certificate/Station Location setup of its own.
         public bool UploadLotw()
         {
             HaltTuning();
@@ -106,6 +109,19 @@ namespace WSJTX_Controller
                             DebugOutput($"{Time()} TQSL upload failed: {client.LastError}");
                             ctrl.BeginInvoke(new Action(() =>
                                 ctrl.ShowUploadStatus($"LoTW (TQSL) upload failed: {client.LastError}", true)));
+                        }
+                        else if (client.LastError != null)
+                        {
+                            // Release-audit finding, 2026-08-20: UploadPendingAsync returns true
+                            // (not a hard failure) for TQSL's ambiguous "some already
+                            // uploaded/out of date range" status codes now, but still sets
+                            // LastError to explain that nothing was marked uploaded this run --
+                            // must actually reach the operator, not just log_tqsl_errors.txt,
+                            // or this fix's whole point (an honest status instead of a silent
+                            // false "complete") is lost at this call site.
+                            DebugOutput($"{Time()} TQSL upload: {client.LastError}");
+                            ctrl.BeginInvoke(new Action(() =>
+                                ctrl.ShowUploadStatus($"LoTW (TQSL) upload: {client.LastError}", false)));
                         }
                         else
                         {

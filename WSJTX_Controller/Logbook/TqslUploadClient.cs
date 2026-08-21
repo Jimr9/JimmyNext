@@ -111,7 +111,7 @@ namespace WSJTX_Controller
             string tqslPath = LocateTqsl();
             if (tqslPath == null)
             {
-                LastError = "TQSL was not found. Install TrustedQSL, or use the WSJT-X-delegated LoTW upload instead.";
+                LastError = "TQSL was not found. Install TrustedQSL to upload to LoTW.";
                 return false;
             }
 
@@ -162,14 +162,25 @@ namespace WSJTX_Controller
                     // even reached. Racing the read itself against the timeout via Task.WhenAny
                     // (same pattern NativeEngineClient.ListDevices already uses for the identical
                     // class of problem) actually bounds the whole wait, not just half of it.
+                    // Release-audit finding, 2026-08-20: RedirectStandardOutput was set above,
+                    // but nothing ever read it -- only stderr was drained. If TQSL writes enough
+                    // to stdout to fill the OS pipe buffer, the (single-threaded) TQSL process
+                    // blocks on that write and can stop writing to stderr too, delaying (though
+                    // still bounded by the timeout below) and misattributing the eventual "did
+                    // not finish within 2 minutes" error to the wrong cause. Starting this
+                    // ReadToEndAsync() call (even without awaiting its result immediately) begins
+                    // draining stdout concurrently with stderr below, the same way the read
+                    // itself has always started draining stderr concurrently with TQSL running.
+                    Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync();
                     Task<string> stderrTask = proc.StandardError.ReadToEndAsync();
-                    if (await Task.WhenAny(stderrTask, Task.Delay(120_000)).ConfigureAwait(false) != stderrTask)
+                    Task bothStreamsTask = Task.WhenAll(stderrTask, stdoutTask);
+                    if (await Task.WhenAny(bothStreamsTask, Task.Delay(120_000)).ConfigureAwait(false) != bothStreamsTask)
                     {
                         try { proc.Kill(); } catch { }
-                        // Killing the process closes its stderr handle, so the pending read can
-                        // finish now -- grab whatever partial output TQSL had already written
-                        // before being terminated, best-effort only (never let a failure here
-                        // mask the real timeout being reported).
+                        // Killing the process closes its stdout/stderr handles, so the pending
+                        // reads can finish now -- grab whatever partial output TQSL had already
+                        // written before being terminated, best-effort only (never let a failure
+                        // here mask the real timeout being reported).
                         try { stderrText = await stderrTask.ConfigureAwait(false); } catch { stderrText = ""; }
                         LastError = "TQSL did not finish within 2 minutes (possibly waiting on an unexpected dialog, e.g. a passphrase prompt).";
                         LogFailure("Timeout", LastError, stderrText);
@@ -182,21 +193,53 @@ namespace WSJTX_Controller
 
                 var (code, description) = ParseFinalStatus(stderrText);
 
-                // Per TQSL's own status-code table: 0 = full success; 8/9/14 mean some or all
-                // QSOs were already uploaded/out of range -- not a failure, same "duplicate is
-                // handled, not retried forever" treatment QrzLogbookClient/HrdLogUploadClient
-                // already give their own duplicate cases.
-                if (code == 0 || code == 8 || code == 9 || code == 14)
+                // Release-audit finding, 2026-08-20 (release blocker): codes 8/9/14 used to be
+                // treated identically to 0 (full success) and blanket-marked the ENTIRE `pending`
+                // batch as uploaded. Verified directly against the installed TQSL 2.8's own
+                // documentation (TrustedQSL\help\tqslapp\cmdline.htm, "Status Information" table)
+                // -- codes 8 and 9 are BOTH explicitly documented as "...already uploaded OR OUT
+                // OF DATE RANGE" (TQSL's own wording conflates two very different outcomes into
+                // one aggregate code: a QSO already on LoTW is fine to mark, but one outside the
+                // certificate's valid date range was NEVER uploaded at all). TQSL's batch/status
+                // output gives no reliable per-record breakdown to tell which QSOs in THIS batch
+                // hit which case -- see this method's own example in cmdline.htm: a single run
+                // reporting code 9 skipped 414 records and signed only 1, with no per-record
+                // detail available here to know which of Jimmy's own `pending` QSOs was the one
+                // that actually went through. Blanket-marking on 8/9/14 could permanently mark a
+                // QSO "uploaded" that was never actually sent to LoTW -- a QSO whose date falls
+                // outside a renewed certificate's validity window is a real, not rare, scenario
+                // -- with no UI anywhere in Jimmy that ever resets lotw_uploaded_at to retry it.
+                // Only code 0 ("success: all qsos submitted were signed and saved or signed and
+                // uploaded") is unambiguous. On 8/9/14, this now leaves every QSO in `pending`
+                // unmarked -- TQSL still does the real signing/upload work for whichever ones
+                // were genuinely new (per cmdline.htm's own -a compliant description: only
+                // already-uploaded/out-of-range QSOs are skipped, everything else IS signed), so
+                // no real LoTW submission is lost; those QSOs are simply reported "already
+                // uploaded" (code 8, safe to skip) on the next retry instead of possibly-wrongly
+                // "already handled" now. This trades a merely cosmetic "pending count doesn't
+                // shrink as fast" for ruling out a silent, effectively permanent data-integrity
+                // false positive.
+                switch (ClassifyFinalStatus(code))
                 {
-                    foreach (var q in pending) db.MarkUploaded(q.DedupKey, "LOTW", DateTime.UtcNow);
-                    return true;
-                }
+                    case FinalStatusOutcome.MarkAllUploaded:
+                        foreach (var q in pending) db.MarkUploaded(q.DedupKey, "LOTW", DateTime.UtcNow);
+                        return true;
 
-                LastError = code.HasValue
-                    ? $"TQSL reported: {description ?? "no description"} (code {code})."
-                    : $"TQSL exited (code {exitCode}) without a parseable status line.";
-                LogFailure("Upload failed", LastError, stderrText);
-                return false;
+                    case FinalStatusOutcome.AmbiguousLeaveUnmarked:
+                        LastError = $"TQSL reported: {description ?? "no description"} (code {code}) -- " +
+                            "some QSOs may not have actually been uploaded (already-uploaded and out-of-date-range " +
+                            "QSOs are reported the same way); none were marked uploaded this run, so they will be " +
+                            "retried, or confirmed as already uploaded, next time.";
+                        LogFailure("Partial/ambiguous status -- not marked uploaded", LastError, stderrText);
+                        return true;
+
+                    default:
+                        LastError = code.HasValue
+                            ? $"TQSL reported: {description ?? "no description"} (code {code})."
+                            : $"TQSL exited (code {exitCode}) without a parseable status line.";
+                        LogFailure("Upload failed", LastError, stderrText);
+                        return false;
+                }
             }
             catch (Exception ex)
             {
@@ -234,6 +277,35 @@ namespace WSJTX_Controller
             string description = match.Groups[1].Value.Trim();
             int.TryParse(match.Groups[2].Value, out int code);
             return (code, description);
+        }
+
+        public enum FinalStatusOutcome
+        {
+            // Only code 0 ("success: all qsos submitted were signed and saved or signed and
+            // uploaded", cmdline.htm) -- every QSO in the batch is safe to mark uploaded.
+            MarkAllUploaded,
+            // Codes 8/9/14 -- TQSL's own documentation conflates "already uploaded" (safe to
+            // treat as already handled) with "out of date range" (never actually uploaded) in
+            // the SAME aggregate code, with no per-record breakdown available to tell which
+            // QSOs in this batch hit which case. Not a failure (TQSL ran and did real,
+            // partially-successful work), but nothing here should be blanket-marked uploaded.
+            AmbiguousLeaveUnmarked,
+            // Anything else: a real TQSL failure (cancelled, rejected, connection error, no
+            // parseable status line at all, ...).
+            Failure,
+        }
+
+        // Release-audit finding, 2026-08-20 (release blocker): extracted into its own pure,
+        // synchronously-testable function (matching main.rs's validate_set_frequency's own
+        // reason for existing as a separate function -- the same audit pass) -- this decision
+        // used to be inlined directly in UploadPendingAsync with no unit coverage at all, and
+        // codes 8/9/14 used to be blanket-treated the same as 0 (see UploadPendingAsync's own
+        // comment for the full TQSL-documentation-verified reasoning on why that was wrong).
+        public static FinalStatusOutcome ClassifyFinalStatus(int? code)
+        {
+            if (code == 0) return FinalStatusOutcome.MarkAllUploaded;
+            if (code == 8 || code == 9 || code == 14) return FinalStatusOutcome.AmbiguousLeaveUnmarked;
+            return FinalStatusOutcome.Failure;
         }
 
         private static void LogFailure(string category, string summary, string detail)

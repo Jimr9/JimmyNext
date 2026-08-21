@@ -263,11 +263,12 @@ namespace WSJTX_Controller
                     // second one, so pointing it at the SAME port Jimmy's own bundled/external
                     // rigctld already uses is sufficient either way. Known gap: this auto-share
                     // only checks loopback, so a genuinely remote (non-127.0.0.1) external
-                    // rigctld host can't be shared with the engine this way -- Jimmy's own
-                    // RigctldClient (S-meter/SWR/power/retune) can still reach a remote host
-                    // directly; only the engine's own CAT/PTT would be receive-only in that
-                    // specific configuration. Not a concern for a bundled/local rigctld, which is
-                    // the common case this was tested against.
+                    // rigctld host can't be shared with the engine this way -- the engine's own
+                    // CAT/PTT would be receive-only in that specific configuration (2026-08-20:
+                    // Jimmy no longer runs its own live RigctldClient session that could reach a
+                    // remote host as a fallback; OptionsDlg's "Test connection" button still can,
+                    // but only as a one-shot diagnostic, not a runtime path). Not a concern for a
+                    // bundled/local rigctld, which is the common case this was tested against.
                     args += " --rig-conn serial";
                     if (!string.IsNullOrWhiteSpace(radio.RigModel))
                         args += $" --rig-model {radio.RigModel}";
@@ -285,17 +286,6 @@ namespace WSJTX_Controller
                         args += $" --ptt-serial-port {radio.PttSerialPort}";
                     if (radio.SplitMode != RadioSplitMode.None)
                         args += $" --split-mode {radio.SplitMode.ToString().ToLowerInvariant()}";
-
-                    // Startup-only power workaround (see RadioSettings.StartupPowerEnabled's own
-                    // comment for why this exists) -- clamp defensively even though OptionsDlg's
-                    // own NumericUpDown ranges should already keep these sane, since a fraction
-                    // outside 0..1 would otherwise pass straight through to the engine.
-                    if (radio.StartupPowerEnabled && radio.StartupPowerMaxWatts > 0)
-                    {
-                        double frac = Math.Max(0.0, Math.Min(1.0,
-                            (double)radio.StartupPowerWatts / radio.StartupPowerMaxWatts));
-                        args += $" --startup-power-frac {frac.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
-                    }
                 }
 
                 _process = new Process

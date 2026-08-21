@@ -330,40 +330,58 @@ namespace WSJTX_Controller
         {
             using (var client = new TcpClient())
             {
-                var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
-                if (!connectTask.Wait(Math.Min(timeoutMs, 3000)) || !client.Connected) return null;
-
-                using (var stream = client.GetStream())
+                // Codex Audit 02/03 findings (OTA refresh in-flight exception wedge): everything
+                // from the connect attempt through the read loop is now inside ONE try, closed by
+                // the single catch-all below -- Codex Audit 03 finding 6 confirmed the earlier,
+                // narrower fix (connect-only, plus a Write catch that only caught IOException) was
+                // incomplete: client.GetStream() sat outside any try at all, and
+                // client.Client.Shutdown() can throw SocketException, which does NOT derive from
+                // IOException in .NET, so it slipped past that catch clause too. Any of those
+                // throwing escaped SendCommand entirely -- straight out of GetOtaSpots/
+                // GetBandConditions/GetDxSpots/GetSpaceWx and the Task.Run body around them in
+                // OtaSpotsWindow, before SafeBeginInvoke could ever run and reset the relevant
+                // _xxxInFlight guard, wedging that tab's refresh forever (the exact class of bug
+                // the connect-phase fix addressed one release ago, just reachable from later in
+                // the same call). This makes SendCommand genuinely never-throw for any reason,
+                // matching DirectSendCommandSafe's own "any exception becomes an ordinary null
+                // response" contract (WsjtxClient.Direct.cs).
+                try
                 {
-                    stream.WriteTimeout = 3000;
-                    stream.ReadTimeout = timeoutMs;
-                    byte[] cmd = Encoding.UTF8.GetBytes(command + "\n");
-                    try
+                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
+                    if (!connectTask.Wait(Math.Min(timeoutMs, 3000)) || !client.Connected) return null;
+
+                    using (var stream = client.GetStream())
                     {
+                        stream.WriteTimeout = 3000;
+                        stream.ReadTimeout = timeoutMs;
+                        byte[] cmd = Encoding.UTF8.GetBytes(command + "\n");
                         stream.Write(cmd, 0, cmd.Length);
                         client.Client.Shutdown(SocketShutdown.Send);
-                    }
-                    catch (IOException)
-                    {
-                        return null;
-                    }
 
-                    using (var ms = new MemoryStream())
-                    {
-                        byte[] buf = new byte[8192];
-                        int n;
-                        try
+                        using (var ms = new MemoryStream())
                         {
-                            while ((n = stream.Read(buf, 0, buf.Length)) > 0)
-                                ms.Write(buf, 0, n);
+                            byte[] buf = new byte[8192];
+                            int n;
+                            try
+                            {
+                                while ((n = stream.Read(buf, 0, buf.Length)) > 0)
+                                    ms.Write(buf, 0, n);
+                            }
+                            catch (IOException)
+                            {
+                                // Read timeout or connection reset -- best-effort, matches
+                                // DirectSendCommand's own tolerance. Deliberately its own narrow
+                                // catch, not folded into the outer one below: a read that times
+                                // out after already receiving SOME data should still return that
+                                // partial response, not be treated as a total failure.
+                            }
+                            return Encoding.UTF8.GetString(ms.ToArray()).TrimEnd('\r', '\n');
                         }
-                        catch (IOException)
-                        {
-                            // Read timeout or connection reset -- best-effort, matches
-                            // DirectSendCommand's own tolerance.
-                        }
-                        return Encoding.UTF8.GetString(ms.ToArray()).TrimEnd('\r', '\n');
                     }
+                }
+                catch (Exception)
+                {
+                    return null;
                 }
             }
         }

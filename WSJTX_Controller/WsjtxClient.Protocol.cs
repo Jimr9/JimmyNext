@@ -53,6 +53,15 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // Release-audit finding, 2026-08-21 (completes the 2026-08-20 partial fix): guards
+        // against a rapid double-press of Alt+M computing `newModeValue != mode` from stale
+        // state while an earlier tier-change request is still out (mode only updates once that
+        // request's own continuation lands) -- same shape as ToggleTuningProcess's own
+        // _tuningRequestInFlight, and the same reasoning: a mode switch is a deliberate,
+        // infrequent action, so a second press while one is already in flight is simply ignored
+        // (handled, no-op) rather than queued or raced.
+        private bool _tierChangeRequestInFlight;
+
         public bool SetOperatingMode(string newModeValue)
         {
             if (transmitting || txEnabled) HaltTx();
@@ -66,7 +75,7 @@ namespace WSJTX_Controller
             // in WSJT-X's own UI, which Jimmy then picks up on the next Status message. Direct
             // mode has no separate UI to fall back to, so it needs a real command -- root-caused
             // live, 2026-08-09, from a report that Alt+M did nothing under direct-engine mode.
-            if (_directConnected && newModeValue != mode)
+            if (_directConnected && newModeValue != mode && !_tierChangeRequestInFlight)
             {
                 string tier = newModeValue == "FT4" ? "FT4" : "FT8";
                 // Found live (Codex release audit, 2026-08-19): `mode` used to be set right after
@@ -78,46 +87,78 @@ namespace WSJTX_Controller
                 // silently stayed on the old one. See DirectSetTier's own comment for the full
                 // reasoning; same bug class already fixed once for Tune (DirectSetTuning,
                 // 2026-08-10).
-                if (!DirectSetTier(tier))
+                //
+                // Release-audit finding, 2026-08-21: DirectSetTier used to be called
+                // synchronously here, on the UI thread -- Alt+M could block keyboard/screen-
+                // reader/repaint responsiveness for DirectSendCommand's full bounded connect/
+                // read wait whenever the engine host is slow, starting, or hung. Now runs on a
+                // background Task; only the (already-computed) state update/notification is
+                // marshaled back via BeginInvoke, same pattern as RetuneBand/ToggleTuningProcess.
+                _tierChangeRequestInFlight = true;
+                // Codex Audit 02 follow-up, 2026-08-21: DirectSetTier now routes through the
+                // ordered dispatcher (WsjtxClient.Direct.cs's own class comment) instead of this
+                // method opening its own independent Task.Run -- the dispatcher already marshals
+                // onComplete onto the UI thread, same as ctrl.BeginInvoke did here before.
+                DirectSetTier(tier, ok =>
                 {
-                    // Routed through NotificationCenter (2026-08-19, notification-system-
-                    // consistency pass) instead of a raw StatusView.ShowMessage -- same
-                    // "headline: reason" ErrorWarningEvent shape as the band-change-failure
-                    // conversion (WsjtxClient.BandAudio.cs). Error severity forces Important.
-                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Mode change to {tier} failed", "engine did not confirm"));
-                    return true;
-                }
-                mode = tier;
-                newMode = true;
-                // A tier switch changes the T/R period (FT8 15s / FT4 7.5s) -- everything queued
-                // under the old period's timing is stale, same treatment DirectApplyStatus's own
-                // band-change handling already gives a confirmed band change.
-                trPeriod = null;
-                // Found in the Direct-engine-path review, 2026-08-12: DT samples measured under
-                // one mode's decode correlator aren't directly comparable to the other mode's --
-                // averaging an FT8 sample together with a fresh FT4 one at the next boundary
-                // would measure something incoherent. _clockWasAcceptable deliberately NOT
-                // reset here (unlike ConnectDirectEngine's own reset): the operator's actual
-                // clock didn't change just because they switched modes, so the transition gate
-                // should keep its real, current answer rather than being forced to re-announce
-                // "still fine"/"still bad" on every mode toggle.
-                timeOffsets.Clear();
-                timeOffset = 0;
-                _rawDecodeHistory.Clear();
-                if (ctrl.advShowRaw) ShowRawDecodes();
-                ClearCalls(true);
-                logList.Clear();
-                ShowLogged();
-                SetCallInProg(null);
-                ShowStatus();
+                    _tierChangeRequestInFlight = false;
+                    if (!ok)
+                    {
+                        // Routed through NotificationCenter (2026-08-19, notification-system-
+                        // consistency pass) instead of a raw StatusView.ShowMessage -- same
+                        // "headline: reason" ErrorWarningEvent shape as the band-change-failure
+                        // conversion (WsjtxClient.BandAudio.cs). Error severity forces Important.
+                        Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Mode change to {tier} failed", "engine did not confirm"));
+                        return;
+                    }
+                    mode = tier;
+                    newMode = true;
+                    // A tier switch changes the T/R period (FT8 15s / FT4 7.5s) -- everything
+                    // queued under the old period's timing is stale, same treatment
+                    // DirectApplyStatus's own band-change handling already gives a confirmed
+                    // band change.
+                    trPeriod = null;
+                    // Found in the Direct-engine-path review, 2026-08-12: DT samples measured
+                    // under one mode's decode correlator aren't directly comparable to the
+                    // other mode's -- averaging an FT8 sample together with a fresh FT4 one
+                    // at the next boundary would measure something incoherent.
+                    // _clockWasAcceptable deliberately NOT reset here (unlike
+                    // ConnectDirectEngine's own reset): the operator's actual clock didn't
+                    // change just because they switched modes, so the transition gate should
+                    // keep its real, current answer rather than being forced to re-announce
+                    // "still fine"/"still bad" on every mode toggle.
+                    timeOffsets.Clear();
+                    timeOffset = 0;
+                    _rawDecodeHistory.Clear();
+                    if (ctrl.advShowRaw) ShowRawDecodes();
+                    ClearCalls(true);
+                    logList.Clear();
+                    ShowLogged();
+                    SetCallInProg(null);
+                    ShowStatus();
+                });
             }
             return true;
         }
 
+        // Live-testing finding, 2026-08-21: cmdPrompts' own canned prompt text (ShowStatus,
+        // WsjtxClient.Display.cs -- ", Control W for list or Alt N for next", etc.) hardcodes
+        // BEGINNER-mode-only concepts (the single callListBox and its own Ctrl+W, not Advanced
+        // Call Layout's separate TX1/TX2/Raw lists and their own Ctrl+1..4 navigation) -- letting
+        // this toggle (and its now-tied-together hotkey-name announcements, see
+        // Controller.RefreshHotkeyAccessibleNames) have any effect in advanced mode would be
+        // actively misleading, not just unnecessary. Gated the same way NavCallList/NavPending
+        // Count's own beginner-only restrictions are (Controller.cs).
         public bool TogglePrompts()
         {
+            if (ctrl.advancedCallLayout)
+            {
+                StatusView.ShowMessage("Command prompts only apply outside Advanced Call Layout.", false);
+                return true;
+            }
             cmdPrompts = !cmdPrompts;
             promptsChanged = true;
+            ctrl.RefreshHotkeyAccessibleNames();
             ShowStatus();
             return true;
         }
@@ -329,16 +370,17 @@ namespace WSJTX_Controller
             }
         }
 
-        // Retunes over rigctld when a real frequency is given (band changes); a bare txFirst
-        // toggle (freq==0, from ToggleTxFirst) is pure Jimmy-side TX-sequencing state with
-        // nothing to send anywhere.
+        // Retunes through the engine's own SET_FREQUENCY command when a real frequency is given
+        // (band changes) -- see DirectSetFrequency's own comment (WsjtxClient.Direct.cs); a bare
+        // txFirst toggle (freq==0, from ToggleTxFirst) is pure Jimmy-side TX-sequencing state
+        // with nothing to send anywhere.
         private void SetBandTxFirst(uint freq, bool state, string caller = "")
         {
             string bandLabel = freq > 0 ? (FreqToBandStr(freq / 1000.0 / 1e6) ?? $"{freq / 1000}kHz") : "none";
             DebugOutput($"{Time()} [BAND-AUDIT] SetBandTxFirst: caller:{caller} freq:{freq} band:{bandLabel} txFirst:{state} bandIdx:{bandIdx}");
 
-            if (freq > 0 && ctrl.Radio.Mode == RadioControlMode.HamlibRigctld && ctrl.rigctldClient != null)
-                ctrl.rigctldClient.SetFrequency(freq);
+            if (freq > 0 && ctrl.Radio.Mode == RadioControlMode.HamlibRigctld)
+                DirectSetFrequency(freq, bandLabel, "USB", null);
         }
 
         // HeartbeatNotRecd (heartbeatRecdTimer's own Tick handler) and CloseAllUdp (its own

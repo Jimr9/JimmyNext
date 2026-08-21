@@ -138,7 +138,9 @@ namespace WSJTX_Controller
             }
             string grid = WsjtxMessage.Grid(d.Message);
             string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
-            return !string.IsNullOrEmpty(state) && _wc.hrcNeededStates.Contains(state);
+            // UsGridStateMap.StateSetContains, not a plain Contains(state) -- state can be a
+            // compound border-straddling value like "MN-WI"; see that method's own comment.
+            return UsGridStateMap.StateSetContains(state, _wc.hrcNeededStates);
         }
 
         public bool IsHrcWasUnconfirmed(EnqueueDecodeMessage d)
@@ -154,7 +156,9 @@ namespace WSJTX_Controller
             }
             string grid = WsjtxMessage.Grid(d.Message);
             string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
-            return !string.IsNullOrEmpty(state) && _wc.hrcUnconfirmedStates.Contains(state);
+            // UsGridStateMap.StateSetContains, not a plain Contains(state) -- state can be a
+            // compound border-straddling value like "MN-WI"; see that method's own comment.
+            return UsGridStateMap.StateSetContains(state, _wc.hrcUnconfirmedStates);
         }
 
         // Dxcc/CqZone come from Jimmy's own offline Club Log/Big CTY data, same as

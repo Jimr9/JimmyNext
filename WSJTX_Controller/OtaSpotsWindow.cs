@@ -42,6 +42,12 @@ namespace WSJTX_Controller
         // DirectPollIntervalMs's own "cheap, dedup handles the rest" reasoning.
         private const int RefreshIntervalMs = 15000;
 
+        // Release-audit finding, 2026-08-20: guards against a second fetch for the SAME tab
+        // starting while a slow one is still out (a mashed Refresh button, or a timer tick
+        // landing mid-fetch) -- same reasoning as WsjtxClient.Direct.cs's _directPollInFlight.
+        // See RefreshPotaSota's own comment for the full "why this exists at all" writeup.
+        private bool _potaInFlight, _condInFlight, _dxInFlight, _wxInFlight;
+
         // ── POTA/SOTA tab ────────────────────────────────────────────────────────
         private ListView _potaList;
         private Label _potaStatusLabel;
@@ -138,6 +144,19 @@ namespace WSJTX_Controller
             }
         }
 
+        // Release-audit finding, 2026-08-20: marshals `action` onto this window's UI thread from
+        // a RefreshXxx background fetch's continuation, silently doing nothing if the window has
+        // already closed in the meantime (BeginInvoke throws on a disposed control's handle) --
+        // shared so every RefreshXxx's background-fetch continuation below has the same safe
+        // shape rather than four separate ad hoc try/catches.
+        private void SafeBeginInvoke(Action action)
+        {
+            if (IsDisposed) return;
+            try { BeginInvoke(action); }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+        }
+
         // ── Shared helpers ───────────────────────────────────────────────────────
 
         // No AccessibleName override -- TabPage's default accessible name is its own Text
@@ -226,45 +245,64 @@ namespace WSJTX_Controller
             return page;
         }
 
-        // Synchronous: ExternalDataClient's OTA_SPOTS call is a cache-only local read on
-        // EngineHost's side (bounded ~3s timeout, no internet round-trip on this thread) -- same
-        // "fast enough for a UI-thread call" reasoning as radioPollTimer_Tick's own PollOnce().
+        // Release-audit finding, 2026-08-20: this used to call _client.GetOtaSpots directly, ON
+        // THE UI THREAD, justified as "cache-only local read on EngineHost's side, bounded ~3s
+        // timeout, no internet round-trip on this thread". That's still true of what happens on
+        // EngineHost's OWN side, but a bounded ~3s wait is still a real, user-visible UI freeze
+        // here if EngineHost is ever slow to answer (or genuinely unresponsive, up to that 3s
+        // bound) -- and this doesn't run just on a manual click, it also fires automatically
+        // every RefreshIntervalMs (15s) via _refreshTimer, and on every switch to this tab. For a
+        // JAWS/NVDA user that's a silent freeze with no feedback anything is happening. Fixed the
+        // same way WsjtxClient.Direct.cs's DirectPollTick already was for the identical class of
+        // problem: the network call runs on a background Task; only the (already-computed) UI
+        // update is marshaled back, via SafeBeginInvoke.
         private void RefreshPotaSota()
         {
-            var result = _client.GetOtaSpots(out string error);
-            _potaList.BeginUpdate();
-            try
+            if (_potaInFlight) return;
+            _potaInFlight = true;
+            string band = _currentBand?.Invoke();
+            var tags = _activeAwardTags?.Invoke();
+            System.Threading.Tasks.Task.Run(() =>
             {
-                _potaList.Items.Clear();
-                if (result?.Spots != null)
+                var result = _client.GetOtaSpots(out string error);
+                SafeBeginInvoke(() =>
                 {
-                    string band = _currentBand?.Invoke();
-                    var tags = _activeAwardTags?.Invoke();
-                    foreach (var spot in result.Spots)
-                    {
-                        var annotation = OtaSpotAnnotator.Annotate(spot.Activator, band, _logbookDb, _lookupManager, tags);
-                        var item = new ListViewItem(spot.Program ?? "");
-                        item.SubItems.Add(spot.Reference ?? "");
-                        item.SubItems.Add(spot.Activator ?? "");
-                        item.SubItems.Add($"{spot.FreqKhz / 1000.0:0.000} {spot.Mode}");
-                        item.SubItems.Add(FormatAge(spot.SpotTimeUnix));
-                        item.SubItems.Add(FormatStatus(annotation));
-                        item.Name = spot.Activator;
-                        _potaList.Items.Add(item);
-                    }
-                }
-            }
-            finally
-            {
-                _potaList.EndUpdate();
-            }
+                    _potaInFlight = false;
+                    if (IsDisposed) return;
 
-            if (error != null)
-                _potaStatusLabel.Text = $"{_potaList.Items.Count} spots (stale) -- {error}";
-            else if (result?.LastError != null)
-                _potaStatusLabel.Text = $"{_potaList.Items.Count} spots -- feed warning: {result.LastError}";
-            else
-                _potaStatusLabel.Text = $"{_potaList.Items.Count} spots" + (result?.AgeSecs != null ? $" -- as of {result.AgeSecs}s ago" : "");
+                    _potaList.BeginUpdate();
+                    try
+                    {
+                        _potaList.Items.Clear();
+                        if (result?.Spots != null)
+                        {
+                            foreach (var spot in result.Spots)
+                            {
+                                var annotation = OtaSpotAnnotator.Annotate(spot.Activator, band, _logbookDb, _lookupManager, tags);
+                                var item = new ListViewItem(spot.Program ?? "");
+                                item.SubItems.Add(spot.Reference ?? "");
+                                item.SubItems.Add(spot.Activator ?? "");
+                                item.SubItems.Add($"{spot.FreqKhz / 1000.0:0.000} {spot.Mode}");
+                                item.SubItems.Add(FormatAge(spot.SpotTimeUnix));
+                                item.SubItems.Add(FormatStatus(annotation));
+                                item.Name = spot.Activator;
+                                _potaList.Items.Add(item);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        _potaList.EndUpdate();
+                    }
+
+                    if (error != null)
+                        _potaStatusLabel.Text = $"{_potaList.Items.Count} spots (stale) -- {error}";
+                    else if (result?.LastError != null)
+                        _potaStatusLabel.Text = $"{_potaList.Items.Count} spots -- feed warning: {result.LastError}";
+                    else
+                        _potaStatusLabel.Text = $"{_potaList.Items.Count} spots" + (result?.AgeSecs != null ? $" -- as of {result.AgeSecs}s ago" : "");
+                });
+            });
         }
 
         // One clause, not two -- a live JAWS pass on this window found every row saying
@@ -323,65 +361,78 @@ namespace WSJTX_Controller
             return page;
         }
 
+        // Release-audit finding, 2026-08-20: moved off the UI thread -- see RefreshPotaSota's
+        // own comment for the full reasoning (identical shape/fix here).
         private void RefreshBandConditions()
         {
-            var result = _client.GetBandConditions(out string error);
-            _condBandsList.BeginUpdate();
-            try
+            if (_condInFlight) return;
+            _condInFlight = true;
+            System.Threading.Tasks.Task.Run(() =>
             {
-                _condBandsList.Items.Clear();
-                if (result?.Bands != null)
+                var result = _client.GetBandConditions(out string error);
+                SafeBeginInvoke(() =>
                 {
-                    foreach (var b in result.Bands)
-                    {
-                        var item = new ListViewItem(b.Band ?? "");
-                        item.SubItems.Add(b.Tier ?? "");
-                        item.SubItems.Add(b.Confidence ?? "");
-                        item.SubItems.Add($"{b.NHearMe} / {b.NIHear}");
-                        item.SubItems.Add(b.BestRegion != null
-                            ? $"{b.BestRegion.Region} ({b.BestRegion.Octant}, {b.BestRegion.Stations} stn{(b.BestRegion.Stations == 1 ? "" : "s")})"
-                            : "--");
-                        item.SubItems.Add(b.Reason ?? "");
-                        item.ToolTipText = $"{b.Band}: {b.Tier}, {b.Confidence} confidence -- {b.Reason} " +
-                            $"(modeled: {b.Modeled} -- {b.ModeledReason})";
-                        _condBandsList.Items.Add(item);
-                    }
-                }
-            }
-            finally
-            {
-                _condBandsList.EndUpdate();
-            }
+                    _condInFlight = false;
+                    if (IsDisposed) return;
 
-            if (error != null)
-            {
-                _condHeadlineBox.Text = "";
-                _condStatusLabel.Text = $"(stale) -- {error}";
-            }
-            else if (result?.Error != null)
-            {
-                _condHeadlineBox.Text = "";
-                _condStatusLabel.Text = result.Error;
-            }
-            else
-            {
-                _condHeadlineBox.Text = result?.Headline ?? "";
-                string banners = (result?.Banners != null && result.Banners.Length > 0)
-                    ? " -- " + string.Join("; ", result.Banners)
-                    : "";
-                string connected = result != null && result.Connected ? "connected" : "not connected";
-                // Bands are always populated now (EngineHost's PropAdvisor falls back to a
-                // physics-only model when there are no PSK Reporter reception reports yet --
-                // see live_feeds.rs's band_conditions_json), so 0 reports no longer means an
-                // empty tab. Call that out explicitly rather than leaving the operator to guess
-                // whether the ladder below is observed or modeled.
-                string modeledOnly = (result?.SpotCount ?? 0) == 0
-                    ? " -- modeled only, no reception reports yet"
-                    : "";
-                _condStatusLabel.Text = $"{result?.SpotCount ?? 0} reception reports, {connected}" +
-                    (result?.LastEventAgeSecs != null ? $", last report {FormatAgeSecs(result.LastEventAgeSecs)}" : "") +
-                    modeledOnly + banners;
-            }
+                    _condBandsList.BeginUpdate();
+                    try
+                    {
+                        _condBandsList.Items.Clear();
+                        if (result?.Bands != null)
+                        {
+                            foreach (var b in result.Bands)
+                            {
+                                var item = new ListViewItem(b.Band ?? "");
+                                item.SubItems.Add(b.Tier ?? "");
+                                item.SubItems.Add(b.Confidence ?? "");
+                                item.SubItems.Add($"{b.NHearMe} / {b.NIHear}");
+                                item.SubItems.Add(b.BestRegion != null
+                                    ? $"{b.BestRegion.Region} ({b.BestRegion.Octant}, {b.BestRegion.Stations} stn{(b.BestRegion.Stations == 1 ? "" : "s")})"
+                                    : "--");
+                                item.SubItems.Add(b.Reason ?? "");
+                                item.ToolTipText = $"{b.Band}: {b.Tier}, {b.Confidence} confidence -- {b.Reason} " +
+                                    $"(modeled: {b.Modeled} -- {b.ModeledReason})";
+                                _condBandsList.Items.Add(item);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        _condBandsList.EndUpdate();
+                    }
+
+                    if (error != null)
+                    {
+                        _condHeadlineBox.Text = "";
+                        _condStatusLabel.Text = $"(stale) -- {error}";
+                    }
+                    else if (result?.Error != null)
+                    {
+                        _condHeadlineBox.Text = "";
+                        _condStatusLabel.Text = result.Error;
+                    }
+                    else
+                    {
+                        _condHeadlineBox.Text = result?.Headline ?? "";
+                        string banners = (result?.Banners != null && result.Banners.Length > 0)
+                            ? " -- " + string.Join("; ", result.Banners)
+                            : "";
+                        string connected = result != null && result.Connected ? "connected" : "not connected";
+                        // Bands are always populated now (EngineHost's PropAdvisor falls back to
+                        // a physics-only model when there are no PSK Reporter reception reports
+                        // yet -- see live_feeds.rs's band_conditions_json), so 0 reports no
+                        // longer means an empty tab. Call that out explicitly rather than leaving
+                        // the operator to guess whether the ladder below is observed or modeled.
+                        string modeledOnly = (result?.SpotCount ?? 0) == 0
+                            ? " -- modeled only, no reception reports yet"
+                            : "";
+                        _condStatusLabel.Text = $"{result?.SpotCount ?? 0} reception reports, {connected}" +
+                            (result?.LastEventAgeSecs != null ? $", last report {FormatAgeSecs(result.LastEventAgeSecs)}" : "") +
+                            modeledOnly + banners;
+                    }
+                });
+            });
         }
 
         // ── DX Spots tab ─────────────────────────────────────────────────────────
@@ -409,68 +460,82 @@ namespace WSJTX_Controller
             return page;
         }
 
+        // Release-audit finding, 2026-08-20: moved off the UI thread -- see RefreshPotaSota's
+        // own comment for the full reasoning (identical shape/fix here).
         private void RefreshDxSpots()
         {
-            var result = _client.GetDxSpots(out string error);
-            _dxList.BeginUpdate();
-            try
+            if (_dxInFlight) return;
+            _dxInFlight = true;
+            System.Threading.Tasks.Task.Run(() =>
             {
-                _dxList.Items.Clear();
-                if (result?.Spots != null)
+                var result = _client.GetDxSpots(out string error);
+                SafeBeginInvoke(() =>
                 {
-                    foreach (var s in result.Spots)
-                    {
-                        var item = new ListViewItem(s.DxCall ?? "");
-                        item.SubItems.Add($"{s.FreqKhz / 1000.0:0.000} MHz");
-                        item.SubItems.Add(s.Rbn ? (s.SkimmerMode ?? "RBN") : "");
-                        item.SubItems.Add(s.Spotter ?? "");
-                        item.SubItems.Add(FormatAgeSecs(s.AgeSecs));
-                        item.SubItems.Add(s.Comment ?? "");
-                        item.ToolTipText = $"{s.DxCall} -- {s.FreqKhz / 1000.0:0.000} MHz -- spotted by {s.Spotter} " +
-                            $"{FormatAgeSecs(s.AgeSecs)} -- {s.Comment}";
-                        _dxList.Items.Add(item);
-                    }
-                }
-            }
-            finally
-            {
-                _dxList.EndUpdate();
-            }
+                    _dxInFlight = false;
+                    if (IsDisposed) return;
 
-            if (error != null)
-            {
-                _dxStatusLabel.Text = $"{_dxList.Items.Count} spots (stale) -- {error}";
-            }
-            // The reverse beacon network (RBN) digital skimmer feed is always on and needs no
-            // configuration -- this used to read "No DX cluster server configured", which was
-            // both wrong (spots show up with nothing configured) and left the operator staring
-            // at an empty list with no idea it would ever fill in. "Connected" not yet being
-            // true here just means the RBN session hasn't come up yet.
-            else if (result != null && !result.Connected && _dxList.Items.Count == 0)
-            {
-                _dxStatusLabel.Text = "Connecting to the reverse beacon network...";
-            }
-            else if (result != null && !result.Connected)
-            {
-                _dxStatusLabel.Text = $"{_dxList.Items.Count} spots -- not currently connected.";
-            }
-            else if (result != null && result.Stale)
-            {
-                _dxStatusLabel.Text = $"{_dxList.Items.Count} spots -- connected, but quiet for a while.";
-            }
-            else
-            {
-                // Configured=false is a normal, complete state now (RBN-only, see
-                // DxSpotsResult's own comment) -- surfaced as a one-line opt-in tip, not an
-                // error, since adding a human cluster node only ADDS coverage (SSB/phone) it
-                // doesn't unlock something otherwise broken.
-                string tip = (result != null && !result.Configured)
-                    ? " -- add a DX cluster server in Options > Decode Engine for SSB/phone spots too"
-                    : "";
-                _dxStatusLabel.Text = $"{_dxList.Items.Count} spots" +
-                    (result?.LastEventAgeSecs != null ? $" -- last spot {FormatAgeSecs(result.LastEventAgeSecs)}" : "") +
-                    tip;
-            }
+                    _dxList.BeginUpdate();
+                    try
+                    {
+                        _dxList.Items.Clear();
+                        if (result?.Spots != null)
+                        {
+                            foreach (var s in result.Spots)
+                            {
+                                var item = new ListViewItem(s.DxCall ?? "");
+                                item.SubItems.Add($"{s.FreqKhz / 1000.0:0.000} MHz");
+                                item.SubItems.Add(s.Rbn ? (s.SkimmerMode ?? "RBN") : "");
+                                item.SubItems.Add(s.Spotter ?? "");
+                                item.SubItems.Add(FormatAgeSecs(s.AgeSecs));
+                                item.SubItems.Add(s.Comment ?? "");
+                                item.ToolTipText = $"{s.DxCall} -- {s.FreqKhz / 1000.0:0.000} MHz -- spotted by {s.Spotter} " +
+                                    $"{FormatAgeSecs(s.AgeSecs)} -- {s.Comment}";
+                                _dxList.Items.Add(item);
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        _dxList.EndUpdate();
+                    }
+
+                    if (error != null)
+                    {
+                        _dxStatusLabel.Text = $"{_dxList.Items.Count} spots (stale) -- {error}";
+                    }
+                    // The reverse beacon network (RBN) digital skimmer feed is always on and
+                    // needs no configuration -- this used to read "No DX cluster server
+                    // configured", which was both wrong (spots show up with nothing configured)
+                    // and left the operator staring at an empty list with no idea it would ever
+                    // fill in. "Connected" not yet being true here just means the RBN session
+                    // hasn't come up yet.
+                    else if (result != null && !result.Connected && _dxList.Items.Count == 0)
+                    {
+                        _dxStatusLabel.Text = "Connecting to the reverse beacon network...";
+                    }
+                    else if (result != null && !result.Connected)
+                    {
+                        _dxStatusLabel.Text = $"{_dxList.Items.Count} spots -- not currently connected.";
+                    }
+                    else if (result != null && result.Stale)
+                    {
+                        _dxStatusLabel.Text = $"{_dxList.Items.Count} spots -- connected, but quiet for a while.";
+                    }
+                    else
+                    {
+                        // Configured=false is a normal, complete state now (RBN-only, see
+                        // DxSpotsResult's own comment) -- surfaced as a one-line opt-in tip, not
+                        // an error, since adding a human cluster node only ADDS coverage
+                        // (SSB/phone) it doesn't unlock something otherwise broken.
+                        string tip = (result != null && !result.Configured)
+                            ? " -- add a DX cluster server in Options > Decode Engine for SSB/phone spots too"
+                            : "";
+                        _dxStatusLabel.Text = $"{_dxList.Items.Count} spots" +
+                            (result?.LastEventAgeSecs != null ? $" -- last spot {FormatAgeSecs(result.LastEventAgeSecs)}" : "") +
+                            tip;
+                    }
+                });
+            });
         }
 
         // ── Space Weather tab ────────────────────────────────────────────────────
@@ -538,66 +603,81 @@ namespace WSJTX_Controller
         // side (external_data.rs's new SpaceWxWire DTO) -- this method needed no change for
         // that part, but see below for what DID change: honest "Unavailable" text instead of a
         // misleading "--", and Nexus's own flare classification surfaced alongside X-ray.
+        // Release-audit finding, 2026-08-20: moved off the UI thread -- see RefreshPotaSota's
+        // own comment for the full reasoning (identical shape/fix here).
         private void RefreshSpaceWeather()
         {
-            var result = _client.GetSpaceWx(out string error);
-            if (error != null || result?.Value == null)
+            if (_wxInFlight) return;
+            _wxInFlight = true;
+            System.Threading.Tasks.Task.Run(() =>
             {
-                _wxSfiValue.Text = _wxSsnValue.Text = _wxKpValue.Text = _wxAValue.Text = _wxXrayValue.Text = "Unavailable";
-                _wxMufValue.Text = _wxGScaleValue.Text = _wxSScaleValue.Text = "Unavailable";
-                _wxStatusLabel.Text = error ?? result?.LastError ?? "No data yet.";
-                return;
-            }
+                var result = _client.GetSpaceWx(out string error);
+                SafeBeginInvoke(() =>
+                {
+                    _wxInFlight = false;
+                    if (IsDisposed) return;
 
-            var wx = result.Value;
-            _wxSfiValue.Text = wx.Sfi.ToString("0.0");
-            // Ssn is genuinely optional in Nexus's own model (no R12 feed currently wired --
-            // "consumers derive it from SFI" per SpaceWx's own doc comment) -- "Unavailable" is
-            // accurate here, not a zero standing in for a missing reading.
-            _wxSsnValue.Text = wx.Ssn.HasValue ? wx.Ssn.Value.ToString("0.0") : "Unavailable";
-            _wxKpValue.Text = wx.Kp.ToString("0.0");
-            _wxAValue.Text = wx.AIndex.ToString("0.0");
-            // NOAA flare-class letter + R-scale (radio-blackout risk, 0-5) are Nexus's own
-            // existing classifications of this same raw reading (SpaceWx::xray_class()/
-            // propagation::model::r_scale()), not a Jimmy Test interpretation -- surfaced
-            // alongside the raw value since a bare "1.0e-7 W/m²" means little to most operators
-            // on its own.
-            string flareClass = string.IsNullOrEmpty(wx.XrayClass) ? "" : $" ({wx.XrayClass}-class, R{wx.RScale})";
-            _wxXrayValue.Text = wx.XrayLong.ToString("0.0e+0") + " W/m²" + flareClass;
+                    if (error != null || result?.Value == null)
+                    {
+                        _wxSfiValue.Text = _wxSsnValue.Text = _wxKpValue.Text = _wxAValue.Text = _wxXrayValue.Text = "Unavailable";
+                        _wxMufValue.Text = _wxGScaleValue.Text = _wxSScaleValue.Text = "Unavailable";
+                        _wxStatusLabel.Text = error ?? result?.LastError ?? "No data yet.";
+                        return;
+                    }
 
-            // Nexus's own representative MUF: the ring-max controlling MUF over 8 evenly-spaced
-            // long-haul (~9000 km) directions from the operator's own grid -- NOT a specific DX
-            // path, and NOT an observed reading; it's a classical foF2 x obliquity model driven
-            // by the same SFI above (propagation::predict::representative_muf, investigated
-            // 2026-08-17). The row LABEL ("best long-haul") carries that caveat, so the value
-            // itself stays a plain number -- kept concise for JAWS rather than repeating the
-            // caveat on every read. Null (not zero) when the operator's grid isn't set/valid.
-            _wxMufValue.Text = result.MufNow.HasValue
-                ? $"{result.MufNow.Value:0.0} MHz"
-                : "Unavailable (My Grid not set)";
+                    var wx = result.Value;
+                    _wxSfiValue.Text = wx.Sfi.ToString("0.0");
+                    // Ssn is genuinely optional in Nexus's own model (no R12 feed currently
+                    // wired -- "consumers derive it from SFI" per SpaceWx's own doc comment) --
+                    // "Unavailable" is accurate here, not a zero standing in for a missing
+                    // reading.
+                    _wxSsnValue.Text = wx.Ssn.HasValue ? wx.Ssn.Value.ToString("0.0") : "Unavailable";
+                    _wxKpValue.Text = wx.Kp.ToString("0.0");
+                    _wxAValue.Text = wx.AIndex.ToString("0.0");
+                    // NOAA flare-class letter + R-scale (radio-blackout risk, 0-5) are Nexus's
+                    // own existing classifications of this same raw reading (SpaceWx::
+                    // xray_class()/propagation::model::r_scale()), not a Jimmy Test
+                    // interpretation -- surfaced alongside the raw value since a bare
+                    // "1.0e-7 W/m²" means little to most operators on its own.
+                    string flareClass = string.IsNullOrEmpty(wx.XrayClass) ? "" : $" ({wx.XrayClass}-class, R{wx.RScale})";
+                    _wxXrayValue.Text = wx.XrayLong.ToString("0.0e+0") + " W/m²" + flareClass;
 
-            // NOAA's own G/S scales (a separate SWPC product, fetched independently -- see
-            // NoaaScales's own comment for why R isn't duplicated here). Scales==null on a fetch
-            // that hasn't succeeded yet is reported plainly, not as a numeric 0 that would read
-            // as a real "all quiet" measurement.
-            if (result.Scales != null)
-            {
-                _wxGScaleValue.Text = FormatNoaaScale('G', result.Scales.GScale) +
-                    (result.Scales.GScaleTomorrow != result.Scales.GScale
-                        ? $" -- tomorrow {FormatNoaaScale('G', result.Scales.GScaleTomorrow)}"
-                        : "");
-                _wxSScaleValue.Text = FormatNoaaScale('S', result.Scales.SScale);
-            }
-            else
-            {
-                _wxGScaleValue.Text = _wxSScaleValue.Text = result.ScalesLastError != null
-                    ? "Unavailable"
-                    : "Loading...";
-            }
+                    // Nexus's own representative MUF: the ring-max controlling MUF over 8
+                    // evenly-spaced long-haul (~9000 km) directions from the operator's own grid
+                    // -- NOT a specific DX path, and NOT an observed reading; it's a classical
+                    // foF2 x obliquity model driven by the same SFI above (propagation::
+                    // predict::representative_muf, investigated 2026-08-17). The row LABEL
+                    // ("best long-haul") carries that caveat, so the value itself stays a plain
+                    // number -- kept concise for JAWS rather than repeating the caveat on every
+                    // read. Null (not zero) when the operator's grid isn't set/valid.
+                    _wxMufValue.Text = result.MufNow.HasValue
+                        ? $"{result.MufNow.Value:0.0} MHz"
+                        : "Unavailable (My Grid not set)";
 
-            _wxStatusLabel.Text = result.LastError != null
-                ? $"Feed warning: {result.LastError}"
-                : (result.AgeSecs != null ? $"As of {FormatAgeSecs(result.AgeSecs)}" : "");
+                    // NOAA's own G/S scales (a separate SWPC product, fetched independently --
+                    // see NoaaScales's own comment for why R isn't duplicated here).
+                    // Scales==null on a fetch that hasn't succeeded yet is reported plainly, not
+                    // as a numeric 0 that would read as a real "all quiet" measurement.
+                    if (result.Scales != null)
+                    {
+                        _wxGScaleValue.Text = FormatNoaaScale('G', result.Scales.GScale) +
+                            (result.Scales.GScaleTomorrow != result.Scales.GScale
+                                ? $" -- tomorrow {FormatNoaaScale('G', result.Scales.GScaleTomorrow)}"
+                                : "");
+                        _wxSScaleValue.Text = FormatNoaaScale('S', result.Scales.SScale);
+                    }
+                    else
+                    {
+                        _wxGScaleValue.Text = _wxSScaleValue.Text = result.ScalesLastError != null
+                            ? "Unavailable"
+                            : "Loading...";
+                    }
+
+                    _wxStatusLabel.Text = result.LastError != null
+                        ? $"Feed warning: {result.LastError}"
+                        : (result.AgeSecs != null ? $"As of {FormatAgeSecs(result.AgeSecs)}" : "");
+                });
+            });
         }
 
         // NOAA's own standard descriptor words for its 0-5 R/S/G scales (public, standard across

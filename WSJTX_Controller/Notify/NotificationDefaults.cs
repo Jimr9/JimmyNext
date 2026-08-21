@@ -74,27 +74,43 @@ namespace WSJTX_Controller
                 DeferWhileTransmitting = true,
             },
 
-            // Wave 1. Matches WsjtxClient.Protocol.cs:54: ShowMessage("WSJT-X closed", true).
+            // Wave 1. Originally matched WsjtxClient.Protocol.cs:54's classic-UDP-path wording
+            // (ShowMessage("WSJT-X closed", true)) -- that whole UDP dispatcher, and this event's
+            // only publisher, were removed in the 2026-08-18 Direct-only cutover (see
+            // WsjtxClient.Direct.cs's own class comment); nothing publishes ConnectionClosed
+            // today. Kept as a defined type for the notification system's own completeness
+            // (JimmyTests's "every NotificationEventType has a default template/DisplayName"
+            // guard depends on it existing) rather than removed outright -- see this project's
+            // own dead-code-cleanup rule (only remove what's proven to have no live OR test
+            // dependency). Codex Audit 02 finding, 2026-08-21: wording corrected to the current
+            // Direct/Nexus architecture regardless -- it's still user-visible/editable in
+            // Options > Notifications even while unused live, and "WSJT-X" is simply wrong now
+            // (Jimmy has no WSJT-X UDP connection to close in this build at all).
             [NotificationEventType.ConnectionClosed] = new NotificationPolicy
             {
                 Enabled = true,
                 Priority = NotificationPriority.Important,
                 RepeatSeconds = 0,
                 ThrottleMilliseconds = 0,
-                Template = "WSJT-X closed",
+                Template = "Native engine closed",
             },
 
-            // Wave 1. Matches WsjtxClient.Protocol.cs's HeartbeatNotRecd:
-            // ShowMessage("WSJT-X disconnected", false) -- the accompanying
-            // Sounds.PlaySoundEvent(soundEnabled_Disconnected, ...) stays untouched, called
-            // independently at the same site.
+            // Wave 1. Originally matched WsjtxClient.Protocol.cs's classic-UDP-path
+            // HeartbeatNotRecd wording (ShowMessage("WSJT-X disconnected", false)) -- that
+            // handler was removed in the 2026-08-18 Direct-only cutover. The live publisher today
+            // is WsjtxClient.Direct.cs's DirectHandlePollFailure (three consecutive failed
+            // SNAPSHOT polls to the native engine's own control port) -- Codex Audit 02 finding,
+            // 2026-08-21: "WSJT-X disconnected" was actively misleading (nothing named WSJT-X is
+            // involved in a Direct-mode disconnect), corrected to match what actually happens.
+            // The accompanying Sounds.PlaySoundEvent(soundEnabled_Disconnected, ...) stays
+            // untouched, called independently at the same site.
             [NotificationEventType.ConnectionLost] = new NotificationPolicy
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
                 RepeatSeconds = 0,
                 ThrottleMilliseconds = 0,
-                Template = "WSJT-X disconnected",
+                Template = "Native engine disconnected",
             },
 
             // Wave 1. Matches the shape already shared by every existing error ShowMessage call
@@ -151,8 +167,9 @@ namespace WSJTX_Controller
             },
 
             // Added 2026-08-19 (notification-system-consistency pass): recovery companion to
-            // the "Radio CAT link lost" ErrorWarningEvent (Controller.cs's radioPollTimer_Tick),
-            // which was already wired. Normal priority (not Important) -- a recovery is
+            // the "Radio CAT link lost" ErrorWarningEvent (WsjtxClient.Direct.cs's
+            // DirectApplyStatus, since 2026-08-20 -- originally Controller.cs's
+            // radioPollTimer_Tick), which was already wired. Normal priority (not Important) -- a recovery is
             // reassuring news, not something that needs to interrupt/beep the way the loss
             // itself does, matching ClockSynced's own Normal-priority precedent for its
             // recovery counterpart.
@@ -175,8 +192,8 @@ namespace WSJTX_Controller
             [NotificationEventType.QsoCompleted] = "QSO logged",
             [NotificationEventType.TxMessageChanged] = "Transmit message changed",
             [NotificationEventType.AwardsNeeded] = "Award needed",
-            [NotificationEventType.ConnectionClosed] = "WSJT-X closed",
-            [NotificationEventType.ConnectionLost] = "WSJT-X disconnected",
+            [NotificationEventType.ConnectionClosed] = "Native engine closed",
+            [NotificationEventType.ConnectionLost] = "Native engine disconnected",
             [NotificationEventType.ErrorWarning] = "Error or warning",
             [NotificationEventType.ClockOutOfSync] = "Computer clock out of sync",
             [NotificationEventType.ClockSynced] = "Computer clock back in sync",

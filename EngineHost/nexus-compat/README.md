@@ -79,6 +79,57 @@ struct to the `Rig` built in `open_cat` (both spawn paths), and changes the outb
 `tempo-audio-rig.patch` items are obsoleted -- this patch only wires those through, it carries
 no independent behavior of its own. Re-derive it against whichever of those three still apply.
 
+### `patches/tempo-audio-telemetry.patch` -- suppress the radio loop's own RFPOWER probe
+
+Adds `RadioConfig.disable_rfpower_probe: bool` (default `false`, unchanged upstream behavior)
+and a matching `RadioLoop` field copied from it at construction. When true, the radio loop's
+routine telemetry poll (`service.rs`'s heavy-poll block) never issues an `RFPOWER` level read at
+all -- the read site's gate becomes `!self.disable_rfpower_probe && self.level_supported[LVL_RFPOWER]
+!= Some(false)` instead of just the second half. EngineHost's `main.rs` sets this unconditionally
+(`disable_rfpower_probe: true` in the `RadioConfig` literal) -- it is not operator-configurable
+and has no CLI flag, because there is no scenario where Jimmy should ever risk it.
+
+**Why Jimmy needs it (confirmed live, 2026-08-20, twice):** on Kenwood rigs, Hamlib's own Kenwood
+backend keeps a "did the mode change" cache as a process-lifetime `static` that starts unset on
+every fresh `rigctld.exe` process. The FIRST `RFPOWER` read (or write) of that process's lifetime
+trips a destructive calibration sweep (Hamlib/Hamlib#1595) that silently drops the rig's actual
+transmit power (e.g. 100W -> 5W). Since `jimmy-engine-host.exe` spawns a fresh `rigctld.exe` on
+every single Jimmy Test launch, this fired on every single restart. Real WSJT-X never hits this
+bug at all -- it has no live power/SWR/ALC/wattage meters feature and never queries `RFPOWER`,
+only `SWR` (for its own "Halt Tx when SWR > 2.5"); the RFPOWER telemetry read is new functionality
+Nexus added beyond what WSJT-X's own CAT usage ever needed. Jimmy's own broader policy (operator
+directive, 2026-08-20) is that reading radio state must never be able to change anything on the
+radio -- since RFPOWER is the one Hamlib query where that isn't true, on this rig family, the only
+way to actually guarantee it is to never issue that query, not merely to reduce how often a fresh
+process sees it (an earlier, now-reverted Jimmy-side mitigation kept a rigctld process warm across
+restarts, which only reduced exposure to "once per reboot" -- this patch is the real fix).
+
+**What Jimmy loses:** the `rfPower`/`txPoW` SNAPSHOT telemetry fields (`DirectRadioStatus.RfPower`/
+`TxPoW` in Jimmy's own C#) go permanently null/absent for every rig, not just Kenwood -- there is
+no way to detect "this specific rig is vulnerable" from Nexus's own Settings/CLI surface, so the
+suppression is blanket. Jimmy doesn't display these today (Alt+Q reports S-meter/power/SWR when
+transmitting, so `RfPower` specifically stops showing there) and never wrote to RF power at all,
+so this is an accepted, deliberate tradeoff, not a regression anyone needs to chase.
+
+**Obsoleted when:** official Nexus adds a real way to suppress or scope the RFPOWER probe itself
+(e.g. a rig-model-aware skip, or its own operator-facing "don't poll power" toggle wired into the
+same read site), OR upstream Hamlib actually fixes Hamlib/Hamlib#1595 in the Kenwood backend
+Nexus's bundled `rigctld.exe` ships (unlikely to land inside this project's own control, but
+would make the whole gate moot -- see "How to check" below either way).
+**How to check:** `grep -n "disable_rfpower_probe\|fn read_level" crates/tempo-audio/src/service.rs`
+in a clean checkout of the new revision -- if Nexus's own code already gates that RFPOWER read
+behind something equivalent (a Settings field, a capability flag, a rig-model check), delete this
+patch and wire EngineHost's `main.rs` to that instead. **If a Nexus upstream merge is ever done
+without checking this first:** the read site this patches (`service.rs`'s heavy-poll block, search
+`LVL_RFPOWER`) is exactly the kind of code a routine merge could touch or move without anyone
+thinking about Hamlib #1595 at all -- `prepare-nexus.ps1`'s own `--dry-run` check will fail loudly
+and name this patch if the surrounding lines shift, which is the actual backstop; but if a future
+revision happens to leave enough context lines intact for the patch to apply cleanly while
+otherwise restructuring how/when RFPOWER gets read (e.g. moving it earlier, adding a second read
+site), a clean patch apply would NOT catch that -- re-read the diff by hand against the new
+revision's real `read_level("RFPOWER")` call sites (plural -- grep, don't assume there's still
+only one) before trusting this patch still does its job.
+
 ### `patches/tempo-fast-sys-build.patch` -- Windows `\\?\`-path / gfortran build fix
 
 Strips the `\\?\` extended-length-path prefix that `Path::canonicalize()` produces on Windows

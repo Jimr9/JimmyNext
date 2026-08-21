@@ -144,9 +144,21 @@
   <!-- Jimmy's Club Log application key lives in a private file outside the
        repo, never an environment variable and never source control. Only the
        path and line number are recorded here (this is a personal machine path,
-       not the key itself). -->
+       not the key itself).
+
+       Codex Audit 02 finding, 2026-08-21: the hardcoded default below is a
+       personal Dropbox path specific to one machine/account, so anyone else
+       (or this same account on a different machine) building Jimmy failed
+       here with no way to point at their own copy, only an error naming a
+       path they can't create. JIMMY_CLUBLOG_KEY_FILE lets any builder
+       override the location without editing this file; the original
+       absolute path stays as the fallback default so the existing build on
+       this machine keeps working completely unchanged, nothing to move or
+       reconfigure. The "must have a real key" requirement below is
+       untouched either way, only WHERE the build looks changes. -->
   <PropertyGroup>
-    <ClubLogKeyFile>C:\Users\Jim\Dropbox\amateur radio\Keys_private\Club Log API key for Jimmy.txt</ClubLogKeyFile>
+    <ClubLogKeyFile Condition="'$(ClubLogKeyFile)' == '' and '$(JIMMY_CLUBLOG_KEY_FILE)' != ''">$(JIMMY_CLUBLOG_KEY_FILE)</ClubLogKeyFile>
+    <ClubLogKeyFile Condition="'$(ClubLogKeyFile)' == ''">C:\Users\Jim\Dropbox\amateur radio\Keys_private\Club Log API key for Jimmy.txt</ClubLogKeyFile>
     <ClubLogKeyLineNumber>9</ClubLogKeyLineNumber>
   </PropertyGroup>
 
@@ -184,7 +196,7 @@
        reusing those exact names here gets silently overridden and never
        runs. Unique names + explicit BeforeTargets/AfterTargets avoid that. -->
   <Target Name="JimmyClubLogKeyCheck" BeforeTargets="Build">
-    <Error Condition="!Exists('$(ClubLogKeyFile)')" Text="Club Log key file not found: $(ClubLogKeyFile). Set up the key file before building." />
+    <Error Condition="!Exists('$(ClubLogKeyFile)')" Text="Club Log key file not found: $(ClubLogKeyFile). Set up the key file before building, or set the JIMMY_CLUBLOG_KEY_FILE environment variable to point at your own copy." />
     <ReadClubLogKeyLine Condition="Exists('$(ClubLogKeyFile)')" FilePath="$(ClubLogKeyFile)" LineNumber="$(ClubLogKeyLineNumber)">
       <Output TaskParameter="Key" PropertyName="_ClubLogKey" />
     </ReadClubLogKeyLine>

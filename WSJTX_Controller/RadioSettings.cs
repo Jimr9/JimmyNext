@@ -46,9 +46,6 @@ namespace WSJTX_Controller
         // even with PTT itself turned off, matching Rig's own control/PTT separation).
         public PttMethod PttMethod { get; set; } = PttMethod.Cat;
 
-        public bool PollEnabled { get; set; } = false;
-        public int PollIntervalMs { get; set; } = 1000;
-
         // Matches WSJT-X's own Radio tab "Mode" choice exactly: None / USB / Data-Pkt.
         // "DataPkt" (the default) commands the rig's DATA submode (PKTUSB/PKTLSB) over CAT for
         // every FT8/FT4 transmission. "Usb" commands plain USB/LSB instead -- Nexus itself warns
@@ -92,35 +89,17 @@ namespace WSJTX_Controller
         // this (Settings.ptt_serial_port); it was just never exposed in Jimmy's own settings.
         public string PttSerialPort { get; set; } = "";
 
-        // Matches WSJT-X's own Radio tab "Rig Data" section. ReadDisplayPwrSwr is the master
-        // toggle for polling S-meter/power/SWR at all (an alias, in spirit, for the existing
-        // PollEnabled -- kept as a separate field so a future UI can label/describe it exactly
-        // like WSJT-X's own checkbox without also implying anything about poll timing, which
-        // PollIntervalMs already owns). HaltTxOnHighSwr + SwrHaltThreshold add a real safety
-        // feature WSJT-X has that Jimmy did not: automatically halting transmission if a poll
-        // reports SWR above the threshold. Both requested by the operator, 2026-08-07, matching
-        // WSJT-X's Radio tab "Halt Tx when SWR > 2.5" default.
-        public bool ReadDisplayPwrSwr { get; set; } = false;
+        // Matches WSJT-X's own Radio tab "Halt Tx when SWR > 2.5" safety feature: automatically
+        // halting transmission once the engine's own SNAPSHOT reports SWR above the threshold
+        // (WsjtxClient.Direct.cs's DirectApplyStatus). Requested by the operator, 2026-08-07.
         public bool HaltTxOnHighSwr { get; set; } = false;
         public double SwrHaltThreshold { get; set; } = 2.5;
 
-        // Added 2026-08-09: works around a real Hamlib bug (Hamlib/Hamlib#1595, Kenwood rigs --
-        // reading OR setting RFPOWER on a freshly-spawned rigctld.exe triggers a destructive
-        // calibration sweep the very first time, because the backend's "did the mode change"
-        // cache is a static variable that starts unset every process). The native engine's own
-        // routine PWR/SWR telemetry polling (ReadDisplayPwrSwr above) is exactly the kind of
-        // first-interaction that trips it, once, at startup -- confirmed live the same day this
-        // was added: 100W dialed on a real TS-590SG dropped to 5W the moment Jimmy connected,
-        // reproduced with a bare two-line Hamlib rigctl test with neither Jimmy nor the engine
-        // running at all. Real WSJT-X never hits this because it has no such polling to begin
-        // with. Opt-in, default off: when enabled, jimmy-engine-host explicitly commands the
-        // radio to StartupPowerWatts/StartupPowerMaxWatts once, right at startup -- not a
-        // continuous override, so changing power by hand on the rig afterward (including
-        // switching bands, which never re-triggers the underlying bug) sticks exactly like the
-        // operator asked.
-        public bool StartupPowerEnabled { get; set; } = false;
-        public int StartupPowerWatts { get; set; } = 100;
-        public int StartupPowerMaxWatts { get; set; } = 100;
+        // 2026-08-20: the startup-only RF-power workaround this used to be (a one-shot
+        // Engine::set_rf_power commanded at jimmy-engine-host startup, working around Hamlib
+        // bug #1595 -- see nexus-compat's tempo-audio-telemetry.patch for that bug's real fix)
+        // was removed entirely, operator directive: RF power is controlled on the radio itself,
+        // full stop -- Jimmy must never write to it, not even once, not even as a workaround.
 
         // F11/F12 (Audio Level up/down) step size, as a whole-number percentage of the engine's
         // 0.0-1.0 mic_gain range -- WsjtxClient.BandAudio.cs's AudioLevel() reads this instead of
@@ -135,6 +114,21 @@ namespace WSJTX_Controller
         // read back from) -- startup falls back to 20m (index 5) in that case, matching the UDP
         // path's own long-standing InitialConnect default (WsjtxClient.Protocol.cs).
         public int LastBandIdx { get; set; } = -1;
+
+        // Release-audit finding, 2026-08-20: LastBandIdx alone only remembers WHICH band, not
+        // the exact confirmed dial frequency within it, or which FT8/FT4 tier was active --
+        // startup could leave the operator on the right band but the wrong sub-band frequency
+        // (jimmy-engine-host always starts fresh hardcoded to Tier::Ft8, EngineHost/src/
+        // main.rs's own startup set_tier call, silently reverting a prior FT4 session back to
+        // FT8). 0 = never confirmed yet (first run) -- same "no fallback data" contract as
+        // LastBandIdx's -1. See DirectApplyStatus's startup-restore block (WsjtxClient.
+        // Direct.cs) for where these are actually applied.
+        public double LastDialFrequencyHz { get; set; } = 0;
+
+        // "FT8" or "FT4", matching WsjtxClient's own `mode` field values exactly
+        // (SetOperatingMode/DirectSetTier). Empty = never confirmed -- startup leaves the
+        // engine on its own FT8 default rather than guessing.
+        public string LastTier { get; set; } = "";
 
         // Requested 2026-08-11: F11/F12 (AudioLevel(), WsjtxClient.BandAudio.cs) always applied
         // one carried-over level across every band. Opt-in (default off, matches current
@@ -159,9 +153,6 @@ namespace WSJTX_Controller
             if (Enum.TryParse(ini.Read("radioPttMethod"), out PttMethod pttMethod))
                 PttMethod = pttMethod;
             PttEnabled = ini.Read("radioPttEnabled") == "True";
-            PollEnabled = ini.Read("radioPollEnabled") == "True";
-            if (int.TryParse(ini.Read("radioPollIntervalMs"), out int interval) && interval >= 200)
-                PollIntervalMs = interval;
             if (Enum.TryParse(ini.Read("radioTxMode"), out RadioTxMode txMode))
                 TxMode = txMode;
             else if (ini.KeyExists("radioDataModesPlainSsb"))
@@ -171,19 +162,18 @@ namespace WSJTX_Controller
             if (Enum.TryParse(ini.Read("radioSplitMode"), out RadioSplitMode splitMode))
                 SplitMode = splitMode;
             if (ini.KeyExists("radioPttSerialPort")) PttSerialPort = ini.Read("radioPttSerialPort");
-            ReadDisplayPwrSwr = ini.Read("radioReadDisplayPwrSwr") == "True";
             HaltTxOnHighSwr = ini.Read("radioHaltTxOnHighSwr") == "True";
             if (double.TryParse(ini.Read("radioSwrHaltThreshold"), out double swrThreshold) && swrThreshold > 0)
                 SwrHaltThreshold = swrThreshold;
-            StartupPowerEnabled = ini.Read("radioStartupPowerEnabled") == "True";
-            if (int.TryParse(ini.Read("radioStartupPowerWatts"), out int startupWatts) && startupWatts > 0)
-                StartupPowerWatts = startupWatts;
-            if (int.TryParse(ini.Read("radioStartupPowerMaxWatts"), out int startupMaxWatts) && startupMaxWatts > 0)
-                StartupPowerMaxWatts = startupMaxWatts;
             if (int.TryParse(ini.Read("radioAudioStepPercent"), out int audioStep) && audioStep >= 1 && audioStep <= 25)
                 AudioStepPercent = audioStep;
             if (int.TryParse(ini.Read("radioLastBandIdx"), out int lastBandIdx) && lastBandIdx >= 0)
                 LastBandIdx = lastBandIdx;
+            if (double.TryParse(ini.Read("radioLastDialFrequencyHz"), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double lastDial) && lastDial > 0)
+                LastDialFrequencyHz = lastDial;
+            if (ini.Read("radioLastTier") is string lastTier && (lastTier == "FT8" || lastTier == "FT4"))
+                LastTier = lastTier;
             RememberTxLevelPerBand = ini.Read("radioRememberTxLevelPerBand") == "True";
             TxLevelByBand.Clear();
             string txLevelByBand = ini.Read("radioTxLevelByBand");
@@ -212,20 +202,17 @@ namespace WSJTX_Controller
             ini.Write("radioBaudRate", BaudRate);
             ini.Write("radioPttMethod", PttMethod.ToString());
             ini.Write("radioPttEnabled", PttEnabled.ToString());
-            ini.Write("radioPollEnabled", PollEnabled.ToString());
-            ini.Write("radioPollIntervalMs", PollIntervalMs.ToString());
             ini.Write("radioTxMode", TxMode.ToString());
             ini.Write("radioPttDataSource", PttDataSource.ToString());
             ini.Write("radioSplitMode", SplitMode.ToString());
             ini.Write("radioPttSerialPort", PttSerialPort);
-            ini.Write("radioReadDisplayPwrSwr", ReadDisplayPwrSwr.ToString());
             ini.Write("radioHaltTxOnHighSwr", HaltTxOnHighSwr.ToString());
             ini.Write("radioSwrHaltThreshold", SwrHaltThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            ini.Write("radioStartupPowerEnabled", StartupPowerEnabled.ToString());
-            ini.Write("radioStartupPowerWatts", StartupPowerWatts.ToString());
-            ini.Write("radioStartupPowerMaxWatts", StartupPowerMaxWatts.ToString());
             ini.Write("radioAudioStepPercent", AudioStepPercent.ToString());
             if (LastBandIdx >= 0) ini.Write("radioLastBandIdx", LastBandIdx.ToString());
+            if (LastDialFrequencyHz > 0)
+                ini.Write("radioLastDialFrequencyHz", LastDialFrequencyHz.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (!string.IsNullOrEmpty(LastTier)) ini.Write("radioLastTier", LastTier);
             ini.Write("radioRememberTxLevelPerBand", RememberTxLevelPerBand.ToString());
             ini.Write("radioTxLevelByBand", string.Join(";", System.Linq.Enumerable.Select(TxLevelByBand,
                 kv => $"{kv.Key}={kv.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}")));

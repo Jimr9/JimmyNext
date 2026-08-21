@@ -40,8 +40,18 @@ namespace WSJTX_Controller
                 $"login={Uri.EscapeDataString(username.Trim())}" +
                 $"&password={Uri.EscapeDataString(password.Trim())}" +
                 "&qso_query=1" +
+                "&qso_qsldetail=yes" +
                 "&qso_mydetail=yes" +
                 "&qso_withown=yes";
+            // qso_qsldetail=yes (added 2026-08-20, root-caused live): a DIFFERENT parameter from
+            // qso_detail below -- without it, LoTW's own export omits DXCC/CQZ/GRIDSQUARE/COUNTY
+            // for every returned QSO, confirmed/not, even though qso_mydetail=yes was already
+            // being sent (that one only supplies MY_* fields about the operator's own station,
+            // not the confirmed contact's). Every QSO imported before this fix landed with
+            // dxcc=0/cq_zone=0/grid='' regardless of LoTW confirmation status -- the QSL_RCVD
+            // flag itself was never the problem, only the missing entity/zone/grid detail feeding
+            // WAS/DXCC/WAZ progress and the logbook's own qso.dxcc column.
+            //
             // qso_detail=yes intentionally omitted: it restricts results to QSOs that have
             // a station location with detail set up in LoTW, filtering out most QSOs.
 

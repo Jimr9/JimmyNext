@@ -123,6 +123,7 @@ $PatchTargets = @{
     "tempo-app-settings.patch"   = "crates\tempo-app"
     "tempo-audio-rig.patch"      = "crates\tempo-audio"
     "tempo-audio-service.patch"  = "crates\tempo-audio"
+    "tempo-audio-telemetry.patch" = "crates\tempo-audio"
     "tempo-fast-sys-build.patch" = "crates\tempo-fast-sys"
 }
 

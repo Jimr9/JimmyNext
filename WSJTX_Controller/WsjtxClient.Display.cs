@@ -844,7 +844,16 @@ namespace WSJTX_Controller
                             curTxMode = transmitting ? "Transmitting" : "Receiving";
                             string cond = (!transmitting && txMode == TxModes.CALL_CQ) ? (!cqPaused ? ((uploadResult != null || txEnableChanged) ? ", transmit enabled" : "") : ", transmit disabled") : "";
 
-                            if (newTxFirst) curTxMode = (txFirst ? "TX1 selected, " : "TX2 selected, ") + curTxMode;
+                            // Live-testing finding, 2026-08-21: this used to fire regardless of
+                            // Advanced Call Layout -- but "TX1"/"TX2" is a side-labeling concept
+                            // that only exists in advanced mode's own split TX1/TX2 lists (see
+                            // UpdateCallListAccessibleName's own comment, WsjtxClient.cs). A
+                            // beginner-mode operator has one unified list and never sees a
+                            // TX1/TX2 split anywhere else in the UI, so announcing "TX1 selected"
+                            // when the Tx-first side flips (e.g. Alt+F) was meaningless to them,
+                            // not just extra detail.
+                            if (newTxFirst && ctrl.advancedCallLayout)
+                                curTxMode = (txFirst ? "TX1 selected, " : "TX2 selected, ") + curTxMode;
 
                             if (newPskReporter)
                             {

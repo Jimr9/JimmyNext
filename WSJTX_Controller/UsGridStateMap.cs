@@ -25,6 +25,28 @@ namespace WSJTX_Controller
             return Map.TryGetValue(grid.Substring(0, 4), out state);
         }
 
+        // Release-audit finding, 2026-08-20: a 4-char grid square straddling a state border is
+        // stored here as a compound value like "MN-WI" (see LoadGridDat's own comment) --
+        // exactly right for DISPLAY (BuildCallWaitingRow, the Raw Decodes row), but every
+        // set-membership MATCHING call site (AwardTagger.IsHrcWasNeeded/IsHrcWasUnconfirmed,
+        // AwardMatcher's RuleGroupBy.State branch) used to do a plain exact-string
+        // HashSet.Contains(state) -- "MN-WI" never matches a set containing "MN" or "WI"
+        // individually, so a station in a genuinely still-needed state, heard on a border grid
+        // square with no QRZ-cached single-state answer available, silently never got tagged as
+        // needed -- and via AwardMatcher, could even be treated as already-worked/not-needed and
+        // hidden from the call queue entirely: a real lost QSO opportunity, not just a missing
+        // notification. Shared here so every matching call site gets the fix once, matching
+        // ResolveUsState's own "one shared implementation, directly unit-testable" reasoning.
+        internal static bool StateSetContains(string state, ICollection<string> set)
+        {
+            if (string.IsNullOrEmpty(state) || set == null || set.Count == 0) return false;
+            if (set.Contains(state)) return true; // exact match -- the common, non-compound case
+            if (state.IndexOf('-') < 0) return false;
+            foreach (string part in state.Split('-'))
+                if (set.Contains(part)) return true;
+            return false;
+        }
+
         private static string FindGridDat()
         {
             // 1. Standard Windows install locations

@@ -41,6 +41,250 @@ namespace WSJTX_Controller
         private ulong _directLastSlotSeen;
         private readonly HashSet<string> _directSeenDecodeSignatures = new HashSet<string>();
 
+        // Codex Audit 02 release blockers, 2026-08-21 ("create ordered/serialized Direct command
+        // dispatch" + "make Direct transport exception-safe"): every DirectSendXxx/DirectSetXxx
+        // helper below used to open its OWN independent Task.Run, racing every other one for a
+        // TCP connection to the same EngineHost control port with no ordering guarantee at all --
+        // SetupCq's own "SET_TX_OFFSET, then CALL_CQ, then SET_TX_ENABLED" sequence (and ReplyTo's
+        // "SET_TX_OFFSET, then REPLY") could arrive at the engine in a different order than issued,
+        // and an unrelated later action's command could race an earlier one still in flight. Worse,
+        // none of those independent Task.Run bodies were exception-guarded -- DirectSendCommand's
+        // own ConnectAsync(...).Wait(1000) rethrows as AggregateException on a fast connection
+        // refusal (Task.Wait() rethrows a faulted task's exception, it does not just return false),
+        // and the Write/Shutdown calls around it are unguarded too -- so a refused/reset connection
+        // could throw INSIDE a Task.Run lambda nothing ever awaits, silently killing that
+        // continuation before any cleanup (clearing an in-flight flag, telling the operator it
+        // failed) ran. That is exactly the failure shape that could leave _pendingBandIdx/
+        // _tuningRequestInFlight/_tierChangeRequestInFlight/OTA in-flight guards stuck forever.
+        //
+        // Fixed with one ordered worker: every Direct WRITE command (not the separate SNAPSHOT
+        // poll timer, which already has its own correct epoch-guarded loop -- DirectPollTick's own
+        // comment) is enqueued here and sent strictly one at a time, in enqueue order, by a single
+        // dedicated background worker -- the same forward-progress and exception-safety guarantee
+        // a lock held across the whole network round-trip would give, without actually blocking
+        // any caller while holding one. Two queues, not a true priority queue: _directPriorityQueue
+        // (HALT_TX only) is always fully drained before _directNormalQueue, so a HALT_TX enqueued
+        // while other commands are still WAITING (not yet sent) jumps ahead of them -- it cannot
+        // interrupt a command already in flight (DirectSendCommand's own bounded ~4s worst case
+        // still applies to whatever is currently sending), but that bound was already the accepted
+        // worst case for any single Direct command, and jumping the queue is strictly better than
+        // no priority at all for a safety action.
+        private class DirectCommandRequest
+        {
+            public string Command;
+            public Action<string> OnComplete;
+            public bool IsTxArm;
+            // Codex Audit 04 finding 1, 2026-08-21: true for every ordinary caller (marshal the
+            // completion onto the UI thread via ctrl.BeginInvoke, as always) except
+            // HaltTxAndWaitForShutdown's own blocking shutdown-only HALT_TX -- see that method's
+            // own comment for why marshaling would deadlock there.
+            public bool MarshalToUiThread = true;
+        }
+        private readonly object _directQueueLock = new object();
+        private readonly Queue<DirectCommandRequest> _directPriorityQueue = new Queue<DirectCommandRequest>();
+        private readonly Queue<DirectCommandRequest> _directNormalQueue = new Queue<DirectCommandRequest>();
+        private readonly System.Threading.SemaphoreSlim _directQueueSignal = new System.Threading.SemaphoreSlim(0, int.MaxValue);
+        private bool _directCommandWorkerStarted;
+
+        // Codex Audit 03 finding 3, 2026-08-21: the write queues carried no connection awareness
+        // at all -- neither a reconnect (ConnectDirectEngine, e.g. after the engine host crashes
+        // and restarts) nor application shutdown ever cleared them, and enqueue stayed possible
+        // throughout. A command queued for an old/crashed session could sit there and execute
+        // against a brand-new EngineHost process once it came back up, and a command enqueued
+        // during the brief window between the operator closing Jimmy and CloseComm() actually
+        // killing the engine process would still reach it. Set true only from
+        // ShutdownDirectCommandQueue below (called once, from Closing()) -- a reconnect is NOT
+        // shutdown (ConnectDirectEngine below purges the queues for the same reason but must
+        // keep accepting new commands for the session it is starting), so this flag is
+        // deliberately narrower than "just purge on every connection-state change."
+        private bool _directQueueShutdown;
+
+        // Drains both queues unconditionally, delivering a null response to every pending
+        // caller the same way a purge/failure already does (see PurgePendingTxArmCommands_NoLock
+        // and DirectSendCommandSafe's own comments) -- used on reconnect (nothing queued for the
+        // old session belongs to the new one) and on shutdown (nothing queued should reach an
+        // engine process that is about to be killed).
+        private void PurgeAllDirectQueues_NoLock()
+        {
+            void Drain(Queue<DirectCommandRequest> q)
+            {
+                while (q.Count > 0) DeliverDirectCompletion(q.Dequeue(), null);
+            }
+            Drain(_directPriorityQueue);
+            Drain(_directNormalQueue);
+        }
+
+        // Shared completion-delivery point for every path that can finish a DirectCommandRequest
+        // (the worker's own normal completion, a halt purge, a shutdown purge/reject) -- see
+        // DirectCommandRequest.MarshalToUiThread's own comment for why this branches.
+        private void DeliverDirectCompletion(DirectCommandRequest req, string response)
+        {
+            if (req.OnComplete == null) return;
+            if (req.MarshalToUiThread)
+            {
+                try { ctrl.BeginInvoke(new Action(() => req.OnComplete(response))); }
+                catch { /* ctrl disposed/closing -- best-effort */ }
+            }
+            else
+            {
+                try { req.OnComplete(response); }
+                catch { /* best-effort, matches every other completion path's own tolerance */ }
+            }
+        }
+
+        // Called once, from WsjtxClient.cs's Closing() (via CloseComm() -> wsjtxClient.Closing()),
+        // right after that method's own HaltTx() -- see finding 3's own comment above. Stops the
+        // SNAPSHOT poll timer (the main source of new enqueues, e.g. SetupCq's post-QSO CALL_CQ
+        // auto-resume) and permanently closes the write queue: every EnqueueDirectCommand call
+        // after this point is a no-op that still calls onComplete(null), so no caller can hang
+        // waiting on a completion that will never come.
+        internal void ShutdownDirectCommandQueue()
+        {
+            _directPollTimer?.Stop();
+            lock (_directQueueLock)
+            {
+                _directQueueShutdown = true;
+                PurgeAllDirectQueues_NoLock();
+            }
+        }
+
+        // Codex Audit 03 release blocker #1, 2026-08-21: HALT_TX jumping the queue via priority
+        // only reorders it relative to normal-queue commands that have not been DEQUEUED yet --
+        // it never removed them. A CALL_CQ/REPLY/SET_TX_ENABLED "1"/SET_TUNING "1" already sitting
+        // in _directNormalQueue when the operator hits Halt was still sent right after HALT_TX
+        // finished, re-arming TX moments after an emergency stop. Confirmed real: nothing in
+        // EnqueueDirectCommand or the worker ever purged or invalidated a normal-queue entry.
+        // Fixed here, not with a generation counter Codex's own writeup suggested: every
+        // enqueue (both normal and priority) runs under the SAME _directQueueLock end to end, so
+        // there is no window between "purge what's queued right now" and "HALT_TX itself becomes
+        // the front of the line" for a stale TX-arm command to slip through -- nothing else can
+        // be mid-enqueue while this lock is held. isTxArm marks the handful of commands that can
+        // actually key the transmitter (CALL_CQ, REPLY, SET_TX_ENABLED "1", SET_TUNING "1" --
+        // never SET_TX_ENABLED "0"/SET_TUNING "0", which are themselves disable/stop commands and
+        // must never be purged). This does NOT reach a command already dequeued and mid-flight in
+        // DirectSendCommandSafe when Halt is pressed -- that remains bounded by
+        // DirectSendCommand's own connect/read timeouts (~4s worst case), the same accepted limit
+        // already documented on the dispatcher's own class comment, and the separate concern
+        // Codex's finding 5 raises about EngineHost's own serial control-socket accept loop.
+        private void PurgePendingTxArmCommands_NoLock()
+        {
+            if (_directNormalQueue.Count == 0) return;
+            int kept = _directNormalQueue.Count;
+            var survivors = new Queue<DirectCommandRequest>(kept);
+            while (_directNormalQueue.Count > 0)
+            {
+                var item = _directNormalQueue.Dequeue();
+                if (item.IsTxArm)
+                {
+                    // Null response matches the existing "did not reach the engine" contract
+                    // every current caller's onComplete already tolerates (see
+                    // DirectSendCommandSafe's own comment).
+                    DeliverDirectCompletion(item, null);
+                }
+                else
+                {
+                    survivors.Enqueue(item);
+                }
+            }
+            while (survivors.Count > 0) _directNormalQueue.Enqueue(survivors.Dequeue());
+        }
+
+        // Enqueues one Direct WRITE command for the ordered worker to send, strictly after every
+        // earlier-enqueued command has already been sent and answered (or failed) -- see the class
+        // comment above. onComplete is invoked EXACTLY ONCE, always marshaled onto the UI thread
+        // via ctrl.BeginInvoke, with the raw response string on success or null on ANY failure
+        // (refused connection, write error, read timeout, or any other exception -- see
+        // DirectSendCommandSafe's own comment) or on being purged by a halt (see
+        // PurgePendingTxArmCommands_NoLock above). isPriority is for HALT_TX only. isTxArm marks a
+        // command that can key the transmitter -- see PurgePendingTxArmCommands_NoLock's own
+        // comment for exactly which ones and why it matters.
+        private void EnqueueDirectCommand(string command, Action<string> onComplete, bool isPriority = false, bool isTxArm = false, bool marshalToUiThread = true)
+        {
+            var req = new DirectCommandRequest { Command = command, OnComplete = onComplete, IsTxArm = isTxArm, MarshalToUiThread = marshalToUiThread };
+            lock (_directQueueLock)
+            {
+                // Codex Audit 03 finding 3: once ShutdownDirectCommandQueue has run, nothing new
+                // gets queued at all -- the engine process is about to be (or already is) killed,
+                // so there is no connection left for this command to reach. Still delivers a null
+                // completion so a caller that awaits one is never left hanging.
+                if (_directQueueShutdown)
+                {
+                    DeliverDirectCompletion(req, null);
+                    return;
+                }
+                if (isPriority)
+                {
+                    // Codex Audit 03 release blocker #1: purge stale TX-arm commands under the
+                    // same lock, before HALT_TX itself is enqueued -- see this class's own comment.
+                    PurgePendingTxArmCommands_NoLock();
+                    _directPriorityQueue.Enqueue(req);
+                }
+                else
+                {
+                    _directNormalQueue.Enqueue(req);
+                }
+                if (!_directCommandWorkerStarted)
+                {
+                    _directCommandWorkerStarted = true;
+                    System.Threading.Tasks.Task.Run(RunDirectCommandWorkerAsync);
+                }
+            }
+            _directQueueSignal.Release();
+        }
+
+        // Found running the automated test suite, 2026-08-21: WaitAsync(), not the blocking
+        // Wait() a first pass of this used -- a synchronous SemaphoreSlim.Wait() inside an
+        // infinite loop permanently PINS one real thread-pool thread for as long as this
+        // WsjtxClient instance lives, even while idle waiting for the next command. Harmless in
+        // production (exactly one WsjtxClient instance exists for the app's whole lifetime, so
+        // at most one extra parked thread), but the test suite constructs a great many
+        // WsjtxClient instances across ~1000 tests, and every one that ever sends a single Direct
+        // command leaves its own worker permanently blocked here -- confirmed live: enough
+        // accumulate late in a full suite run to transiently starve the thread pool, delaying an
+        // unrelated LATER test's own first EnqueueDirectCommand past its 3s PumpUntil timeout
+        // (intermittent, not every run -- exactly the symptom of thread-pool growth lagging
+        // behind a burst of demand, not a logic bug). await WaitAsync() releases the thread-pool
+        // thread back to the pool while genuinely idle and resumes on whatever thread is free
+        // once signaled -- strictly better with no behavior change to the ordering/exception-
+        // safety guarantees this worker exists for.
+        private async System.Threading.Tasks.Task RunDirectCommandWorkerAsync()
+        {
+            while (true)
+            {
+                await _directQueueSignal.WaitAsync().ConfigureAwait(false);
+                DirectCommandRequest req = null;
+                lock (_directQueueLock)
+                {
+                    if (_directPriorityQueue.Count > 0) req = _directPriorityQueue.Dequeue();
+                    else if (_directNormalQueue.Count > 0) req = _directNormalQueue.Dequeue();
+                }
+                if (req == null) continue; // defensive only -- the semaphore count always matches enqueued items exactly
+                string response = DirectSendCommandSafe(req.Command);
+                DeliverDirectCompletion(req, response);
+            }
+        }
+
+        // Codex Audit 02 release blocker, 2026-08-21: wraps DirectSendCommand so a thrown
+        // exception (see the class comment above -- AggregateException from ConnectAsync(...).
+        // Wait(1000) on a fast refusal, or any exception from the unguarded Write/Shutdown calls)
+        // can never escape as an unobserved fault on the worker's background Task, which would
+        // otherwise silently kill the worker loop itself and wedge EVERY future Direct command,
+        // not just the one that failed. A thrown exception becomes an ordinary null response here
+        // -- exactly like every other already-expected failure mode (refused connection, read
+        // timeout) already was, so no caller needs to special-case it.
+        private string DirectSendCommandSafe(string command)
+        {
+            try
+            {
+                return DirectSendCommand(command);
+            }
+            catch (Exception ex)
+            {
+                DebugOutput($"{Time()} [DIRECT] '{command}' threw: {ex.GetType().Name}: {ex.Message}");
+                return null;
+            }
+        }
+
         // Release-blocker follow-up, 2026-08-19: guards against two overlapping SNAPSHOT polls
         // running at once now that DirectPollTick's network I/O moved off the UI thread (see its
         // own comment) -- the old fully-synchronous version got this for free (a Timer.Tick
@@ -85,6 +329,22 @@ namespace WSJTX_Controller
         private int _directConsecutivePollFailures;
         private bool _directLossAnnounced;
 
+        // "Halt Tx when SWR > threshold" (Options > Radio, matching WSJT-X's own Radio-tab
+        // safety feature), sourced from the engine's own SNAPSHOT (radio.txSwr) now that Jimmy
+        // no longer runs a second, concurrent RigctldClient poll loop for this -- see
+        // DirectApplyStatus's own check below. Edge-triggered (tracks the PREVIOUS poll's state)
+        // so this fires HaltTx()/announces once per episode, not every tick while SWR stays high.
+        private bool _swrOverThreshold;
+
+        // "Radio CAT link lost"/recovered -- was RigctldClient.PollOnce's own connection-health
+        // check (Controller.cs's old ApplyRadioPollResult, retired 2026-08-20); now sourced from
+        // the engine's own SNAPSHOT (radio.catOk/catDetail -- tempo-app/src/dto.rs's RadioStatus.
+        // cat_ok), which reports the SAME underlying CAT health more directly than a second,
+        // concurrent rigctldClient ever could. null = engine start value / not applicable
+        // (VOX, no CAT configured) -- distinguished from a real Some(true)/Some(false) reading
+        // so this doesn't fire on startup or misreport a VOX-only station as a lost CAT link.
+        private bool? _lastCatOk;
+
         // Starts polling the engine host's control port directly. Call once the engine host
         // process is known to be starting -- there is no socket to "open" here at all, every
         // request is its own short-lived TCP connection, matching the control server's own
@@ -102,6 +362,13 @@ namespace WSJTX_Controller
             myCall = string.IsNullOrWhiteSpace(myCallIn) ? null : myCallIn.Trim().ToUpperInvariant();
             myGrid = myGridIn;
             _directConnectionEpoch++;
+            // Codex Audit 03 finding 3, 2026-08-21: a write queued for the PRIOR connection (the
+            // engine host that just crashed/restarted, or the session being torn down for a
+            // deliberate reconnect) does not belong to this new one -- purge it rather than
+            // letting the worker send it to the freshly (re)started engine process. Does not set
+            // _directQueueShutdown: this is a reconnect, not a close, so new commands must keep
+            // being accepted for the session about to start below.
+            lock (_directQueueLock) { PurgeAllDirectQueues_NoLock(); }
             _directPollInFlight = false;
             _directSeenDecodeSignatures.Clear();
             _directLastSlotSeen = 0;
@@ -109,6 +376,8 @@ namespace WSJTX_Controller
             _directStartupBandResolved = false;
             _directConsecutivePollFailures = 0;
             _directLossAnnounced = false;
+            _swrOverThreshold = false;
+            _lastCatOk = null;
             _directConnected = true;
             // UDP-to-Direct parity pass, 2026-08-12: a stale bandIdx/lastDialFrequency surviving
             // from a PRIOR connection could make _directStartupBandResolved's own "band still
@@ -152,6 +421,10 @@ namespace WSJTX_Controller
         {
             _directPollTimer?.Stop();
             _directConnected = false;
+            // Codex Audit 03 finding 3, 2026-08-21: same reasoning as ConnectDirectEngine's own
+            // purge (this is always called immediately before it, at the one real call site,
+            // Controller.cs's reconnect sequence) -- belt and braces in case that ever changes.
+            lock (_directQueueLock) { PurgeAllDirectQueues_NoLock(); }
         }
 
         // Release-blocker follow-up, 2026-08-19: root-caused live (temporary instrumentation,
@@ -292,6 +565,44 @@ namespace WSJTX_Controller
             var radio = snap.Radio;
             if (radio == null) return;
 
+            // "Radio CAT link lost"/recovered -- see _lastCatOk's own comment. null (not
+            // applicable / not yet reported) never fires either branch, so a VOX-only station,
+            // or the very first snapshot of a session, announces nothing.
+            if (radio.CatOk.HasValue && _lastCatOk != radio.CatOk)
+            {
+                if (radio.CatOk.Value)
+                {
+                    // Only announce a RECOVERY, not the very first successful reading of a
+                    // session (that's just normal startup, not news).
+                    if (_lastCatOk == false)
+                        Notify?.Publish(new RadioCatRecoveredEvent());
+                }
+                else
+                {
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Radio CAT link lost", radio.CatDetail ?? "no response"));
+                }
+                _lastCatOk = radio.CatOk;
+            }
+
+            // "Halt Tx when SWR > threshold" -- matches WSJT-X's own Radio-tab safety feature.
+            // Used to run off RigctldClient's own periodic "l SWR" poll (Controller.cs's
+            // ApplyRadioPollResult); moved here now that Jimmy no longer runs that second,
+            // concurrent CAT poll loop -- radio.TxSwr is null on a rig/backend that doesn't
+            // report SWR, treated the same way as "no reading, nothing to act on". Runs on every
+            // Direct poll tick regardless of RadioControlMode (the engine's own Rig -- and
+            // therefore its SWR reading -- exists independently of it; Jimmy no longer runs any
+            // separate CAT session), so this now also protects operators under
+            // RadioControlMode.WsjtxCat, which the old RigctldClient-based polling never could.
+            bool swrOver = ctrl.Radio.HaltTxOnHighSwr && radio.TxSwr.HasValue
+                           && radio.TxSwr.Value > ctrl.Radio.SwrHaltThreshold;
+            if (swrOver && !_swrOverThreshold)
+            {
+                HaltTx();
+                Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Tx halted (high SWR)",
+                    $"SWR {radio.TxSwr.Value:F1} exceeds threshold {ctrl.Radio.SwrHaltThreshold:F1}"));
+            }
+            _swrOverThreshold = swrOver;
+
             // FreqToBandStr (which CurrentBandStr and this method's own band-change detection
             // below both depend on) refuses to resolve any band at all unless the class-level
             // "mode" field -- not StatusMessage.Mode below, a separate field -- is a real key
@@ -401,12 +712,121 @@ namespace WSJTX_Controller
             if (!_directStartupBandResolved)
             {
                 _directStartupBandResolved = true;
-                if (bandIdx == null)
+
+                // Release-audit finding, 2026-08-20 (startup dial/tier restore): restore the
+                // last CONFIRMED tier before touching frequency at all -- jimmy-engine-host
+                // always starts a fresh session hardcoded to Tier::Ft8 (main.rs's own startup
+                // set_tier call; see this.mode's own comment above), so a prior FT4 session
+                // silently reverted to FT8 on every restart with no correction. Only fires once
+                // (guarded by _directStartupBandResolved same as the frequency fallback below)
+                // and only when a real prior tier was actually confirmed and it differs from
+                // the engine's own current default -- an unconfirmed LastTier (fresh install)
+                // leaves the engine on its already-sane FT8 default rather than guessing.
+                //
+                // Release-audit finding, 2026-08-21: DirectSetTier used to be called
+                // synchronously here, on the UI thread. Backgrounded now, same as every other
+                // Direct command in this pass -- but unlike RetuneBand/ToggleTuningProcess/
+                // SetOperatingMode, this one call site genuinely needs its own completion
+                // SEQUENCED before the frequency-fallback decision below: RetuneBand's own
+                // two-arg overload resolves a fallback band's frequency via bandToFreq(idx),
+                // which reads freqsDict[mode] -- if the frequency fallback ran before the tier
+                // restore's own network round-trip actually landed, it could compute the WRONG
+                // tier's calling frequency (FT8's when FT4 was just requested, or vice versa).
+                // ApplyStartupBandFallback is therefore called explicitly, once, either
+                // immediately (no tier restore needed) or from the tier restore's own
+                // BeginInvoke continuation (once it's actually landed) -- never both, never
+                // neither. epoch mirrors DirectPollTick's own reconnect guard: if the engine
+                // host crashes/restarts (ConnectDirectEngine bumps _directConnectionEpoch and
+                // resets _directStartupBandResolved) while this tier restore is still in
+                // flight, its now-stale completion must not touch `mode` or retune anything on
+                // behalf of a connection that no longer exists.
+                int epoch = _directConnectionEpoch;
+
+                // Codex Audit 02 release blocker, 2026-08-21 (FT4/exact-frequency startup restore
+                // race): this same DirectApplyStatus invocation's own "persist confirmed snapshot"
+                // block further down (see its own comment) unconditionally overwrites
+                // ctrl.Radio.LastDialFrequencyHz/LastBandIdx with THIS poll's live values -- the
+                // actual current radio dial (wherever it happened to power up, not yet retuned) --
+                // and it runs SYNCHRONOUSLY, later in this exact same method call, regardless of
+                // whether the tier restore below is still in flight. Root-caused live:
+                // ApplyStartupBandFallback used to read ctrl.Radio.LastDialFrequencyHz/LastBandIdx
+                // directly, but by the time its continuation actually ran (after the persist block
+                // below had already run, in this same synchronous call), those fields no longer
+                // held the prior-session values they needed -- they held whatever this poll just
+                // wrote. Capturing both here, before the persist block runs, is the fix:
+                // ApplyStartupBandFallback below reads these captured locals instead of the live
+                // (by-then-overwritten) settings fields.
+                double capturedLastDialHz = ctrl.Radio.LastDialFrequencyHz;
+                int capturedLastBandIdx = ctrl.Radio.LastBandIdx;
+
+                void ApplyStartupBandFallback()
                 {
-                    int fallbackIdx = (ctrl.Radio.LastBandIdx >= 0 && ctrl.Radio.LastBandIdx < bands.Count)
-                        ? ctrl.Radio.LastBandIdx
-                        : 5; // 20m -- matches the UDP path's own InitialConnect default
-                    if (RetuneBand(fallbackIdx, "DirectInitialConnect")) ShowBandChangePending(fallbackIdx);
+                    // Release-audit finding, 2026-08-21 (operator directive, unconditional --
+                    // "always force it, no setting"): ALWAYS restore the operator's own last
+                    // CONFIRMED exact FT8/FT4 dial on startup once one is known, even when the
+                    // radio is already on a recognized ham band -- e.g. sitting on a CW/phone
+                    // frequency for another purpose, or simply not exactly where the prior
+                    // session left it. This is a deliberate broadening of the original,
+                    // narrower 2026-08-20 fallback (which only ever corrected a totally
+                    // UNRECOGNIZED band and otherwise left a recognized-but-different frequency
+                    // alone) -- the operator explicitly chose exact-frequency session
+                    // continuity over leaving the radio wherever it happened to power up.
+                    // RetuneBand is idempotent (Nexus's own Engine::set_frequency re-confirming
+                    // an already-correct dial is a harmless no-op), so this fires unconditionally
+                    // whenever real prior-session data exists, without checking bandIdx first.
+                    if (capturedLastDialHz > 0)
+                    {
+                        int? lastBandForDial = FreqToBandIdx(capturedLastDialHz / 1e6);
+                        if (lastBandForDial != null)
+                        {
+                            RetuneBand(lastBandForDial.Value, (uint)capturedLastDialHz, "DirectInitialConnect");
+                            return;
+                        }
+                        // A persisted dial that no longer resolves to any recognized band (e.g. a
+                        // stale value left over from a since-changed band-plan/frequency-table
+                        // configuration) falls through to the "no usable prior data" path below,
+                        // same as if LastDialFrequencyHz had never been confirmed at all.
+                    }
+
+                    // No usable prior-session dial -- fresh install, or a stale/unresolvable one.
+                    // Falls back to the original, narrower behavior: only correct a totally
+                    // unrecognized band (leaves an already-recognized band/frequency alone, since
+                    // there's no real prior-session data to prefer over it).
+                    if (bandIdx == null)
+                    {
+                        int fallbackIdx = (capturedLastBandIdx >= 0 && capturedLastBandIdx < bands.Count)
+                            ? capturedLastBandIdx
+                            : 5; // 20m -- matches the UDP path's own InitialConnect default
+                        // RetuneBand is itself void/backgrounded (2026-08-21) -- it owns showing
+                        // its own pending-status text or failure notification once the retune
+                        // actually completes; see its own comment.
+                        RetuneBand(fallbackIdx, "DirectInitialConnect");
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(ctrl.Radio.LastTier) && ctrl.Radio.LastTier != this.mode)
+                {
+                    string targetTier = ctrl.Radio.LastTier;
+                    // Codex Audit 02 follow-up, 2026-08-21: DirectSetTier now routes through the
+                    // ordered dispatcher (WsjtxClient.Direct.cs's own class comment, near the top of
+                    // this file) instead of this call site opening its own independent Task.Run --
+                    // the dispatcher already marshals onComplete onto the UI thread, same as
+                    // ctrl.BeginInvoke did here before.
+                    DirectSetTier(targetTier, ok =>
+                    {
+                        if (epoch != _directConnectionEpoch) return; // superseded by a reconnect
+
+                        if (ok)
+                        {
+                            this.mode = targetTier;
+                            DebugOutput($"{Time()} [DIRECT] DirectInitialConnect: restored tier '{this.mode}'");
+                        }
+                        ApplyStartupBandFallback();
+                    });
+                }
+                else
+                {
+                    ApplyStartupBandFallback();
                 }
             }
 
@@ -414,7 +834,17 @@ namespace WSJTX_Controller
             // cheap in-memory field write on every tick a real band is known; actual disk
             // persistence only happens once, on clean shutdown, via Controller_FormClosing's
             // existing Radio.SaveToIni call.
-            if (bandIdx != null) ctrl.Radio.LastBandIdx = (int)bandIdx;
+            if (bandIdx != null)
+            {
+                ctrl.Radio.LastBandIdx = (int)bandIdx;
+                // Release-audit finding, 2026-08-20 (startup dial/tier restore): LastBandIdx
+                // alone only remembers WHICH band, not the exact confirmed dial or which
+                // FT8/FT4 tier was active -- see RadioSettings.LastDialFrequencyHz/LastTier's
+                // own comment and this method's startup-restore block below for where these get
+                // applied on the NEXT connection.
+                ctrl.Radio.LastDialFrequencyHz = newDialFrequency;
+                if (!string.IsNullOrEmpty(this.mode)) ctrl.Radio.LastTier = this.mode;
+            }
 
             // Root-caused live, 2026-08-09: this method built smsg.Transmitting from the radio
             // but never actually copied it into the class-level `transmitting` field ShowStatus()
@@ -549,7 +979,25 @@ namespace WSJTX_Controller
                     // callInProg == null (WsjtxClient.Display.cs).
                     if (!logList.Contains(callInProg))
                         LogQso(callInProg);
+                    string justWorkedCall = callInProg;
                     SetCallInProg(null);
+
+                    // Release-audit finding, 2026-08-20 (Call-CQ auto-resume): the classic UDP
+                    // path's own OnQsoLogged used to re-arm calling CQ here
+                    // (_callQueueStore.RemoveCall + CancelQso + SetupCq(true)) once a QSO
+                    // finished -- removed along with the rest of the UDP dispatcher and never
+                    // ported to Direct mode, leaving Call CQ mode idle (TX enabled, but no
+                    // further CQ ever transmitted) after the very first completed contact. Only
+                    // in Call-CQ mode: Listen mode must keep waiting on the queue, not start
+                    // transmitting on its own. RemoveCall is defensive -- the worked call is
+                    // normally already dequeued by the ReplyTo() that started this QSO, but a
+                    // QSO started some other way (typed/manual call) may not have been.
+                    if (txMode == TxModes.CALL_CQ)
+                    {
+                        _callQueueStore.RemoveCall(justWorkedCall);
+                        CancelQso();
+                        SetupCq(true);
+                    }
                 }
             }
 
@@ -776,7 +1224,34 @@ namespace WSJTX_Controller
         // while investigating a real Rust compiler warning, not assumed) -- and even with that
         // fixed engine-side, this call still silently dropped the reply, matching-only on
         // "no response at all" cases the way the two DebugOutput-only helpers below do.
-        public void DirectSendReply(string dxcall, string dxgrid, string replyMsg, int? replySnr, double? dxFreqHz)
+        //
+        // Release-audit finding, 2026-08-20: this (and every other fire-and-forget DirectSendXxx/
+        // DirectSetXxx below whose return value nothing consumes) used to call DirectSendCommand
+        // directly, ON the calling thread -- almost always the UI thread, since these are all
+        // hotkey/button handlers. DirectSendCommand's own bounded connect/read pair can genuinely
+        // take on the order of a few seconds when the engine host is starting, hung, or restarting
+        // (see that method's own comment on the 2026-08-19 root-caused keyboard-lockup bug fixed
+        // for the SNAPSHOT poll the same way) -- so every one of these could freeze keyboard/
+        // screen-reader/repaint responsiveness for that same window, on EVERY press, including
+        // HALT_TX, a safety action. None of these callers ever used the return value for anything
+        // beyond this method's own DebugOutput logging, so moving the network I/O onto a
+        // background Task changes nothing observable except no longer blocking the UI thread --
+        // matching DirectPollTick's own already-established fix for the identical root cause.
+        // Codex Audit 04 finding 3, 2026-08-21: HALT_TX's own queue purge
+        // (PurgePendingTxArmCommands_NoLock) only reaches a TX-start command still WAITING in the
+        // queue -- it cannot cancel one already dequeued and waiting on the engine's response.
+        // Bumped every time HALT_TX is sent (DirectSendHaltTx/HaltTxAndWaitForShutdown below);
+        // DirectSendCq/DirectSendReply/DirectSetTxEnabled(true) capture the current value before
+        // enqueueing and compare it at completion -- if a Halt was sent while their own command
+        // was still in flight, its response (even a real "OK") must not be allowed to re-arm TX
+        // or commit local QSO state. The engine itself stays safe regardless (the single ordered
+        // worker always sends HALT_TX immediately after whatever was already in flight, and
+        // purges anything still queued -- see the dispatcher's own class comment), so this is
+        // specifically about JIMMY'S OWN bookkeeping not falsely committing "started"/"enabled"
+        // after the fact.
+        private long _haltGeneration;
+
+        public void DirectSendReply(string dxcall, string dxgrid, string replyMsg, int? replySnr, double? dxFreqHz, Action<bool> onComplete = null)
         {
             var args = new DirectReplyArgs
             {
@@ -787,32 +1262,123 @@ namespace WSJTX_Controller
                 DxFreqHz = dxFreqHz.HasValue ? (float?)dxFreqHz.Value : null,
             };
             string json = JsonSerializer.Serialize(args, DirectJsonOptions);
-            string resp = DirectSendCommand("REPLY " + json);
-            if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
-                DebugOutput($"{Time()} [DIRECT] REPLY to '{dxcall}' did not return OK (response: {(resp ?? "<no response>")})");
+            long capturedHaltGeneration = System.Threading.Interlocked.Read(ref _haltGeneration);
+            // isTxArm: true -- REPLY arms TX to answer a specific station. See
+            // PurgePendingTxArmCommands_NoLock's own comment (Codex Audit 03 release blocker #1).
+            EnqueueDirectCommand("REPLY " + json, resp =>
+            {
+                bool ok = resp != null && resp.Length > 0 && !resp.StartsWith("ERR");
+                if (!ok)
+                {
+                    DebugOutput($"{Time()} [DIRECT] REPLY to '{dxcall}' did not return OK (response: {(resp ?? "<no response>")})");
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Reply to {dxcall} failed",
+                        "the engine host did not confirm the reply -- not treated as started"));
+                }
+                else if (capturedHaltGeneration != System.Threading.Interlocked.Read(ref _haltGeneration))
+                {
+                    // Codex Audit 04 finding 3: superseded by a Halt sent while this REPLY was in
+                    // flight -- see _haltGeneration's own comment.
+                    DebugOutput($"{Time()} [DIRECT] REPLY to '{dxcall}' returned OK but was superseded by a Halt -- not re-arming");
+                    ok = false;
+                }
+                onComplete?.Invoke(ok);
+            }, isTxArm: true);
         }
 
-        // Fire-and-forget by design (see DirectSendCommand's own comment on the bounded
-        // connect/read pair) -- NOT changed to retry or block here, since altering a TX-safety
-        // command's timing/retry behavior needs real-radio verification this pass doesn't have.
-        // What IS safe and added here: a failed response no longer disappears silently. Every
-        // call site already treats "the command may not have reached the engine" as an expected,
-        // recoverable case (that's what DirectPollTick's own next SNAPSHOT poll is for -- it will
-        // surface a real disconnect via DirectHandlePollFailure within a few seconds either way),
-        // so this only adds visibility for diagnosing a suspected TX-command failure after the
-        // fact, never a behavior change.
+        // Codex Audit 04 finding 1, 2026-08-21: also called (without a completion callback, as a
+        // plain fire-and-forget) for the ordinary interactive Halt hotkey via HaltTx()
+        // (WsjtxClient.cs) -- see HaltTxAndWaitForShutdown below for the separate, blocking
+        // shutdown-only path CloseComm() now uses instead, while the engine host is still alive.
         public void DirectSendHaltTx()
         {
-            string resp = DirectSendCommand("HALT_TX");
-            if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
-                DebugOutput($"{Time()} [DIRECT] HALT_TX did not return OK (response: {(resp ?? "<no response>")})");
+            System.Threading.Interlocked.Increment(ref _haltGeneration);
+            // isPriority: true -- see the dispatcher's own class comment above. HALT_TX must jump
+            // ahead of any other not-yet-sent queued command (a CALL_CQ or REPLY that hasn't gone
+            // out yet, say), never wait behind it.
+            EnqueueDirectCommand("HALT_TX", resp =>
+            {
+                if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
+                    DebugOutput($"{Time()} [DIRECT] HALT_TX did not return OK (response: {(resp ?? "<no response>")})");
+            }, isPriority: true);
+        }
+
+        // Codex Audit 04 finding 1, 2026-08-21: shutdown-only variant of DirectSendHaltTx --
+        // called from WsjtxClient.Closing(), which Controller.cs's CloseComm() now runs BEFORE
+        // disposing nativeEngineClient (previously reversed: HALT_TX had nothing left to reach by
+        // the time it was sent). Blocks the calling thread (the UI thread, from
+        // Controller_FormClosing) for up to `timeout`, waiting for a real response -- deliberately
+        // does NOT marshal the completion through ctrl.BeginInvoke the way every other Direct
+        // command does (marshalToUiThread: false): blocking here means the UI message loop isn't
+        // pumping, so a BeginInvoke-marshaled callback would never actually run, deadlocking
+        // shutdown forever. Returns false (last-resort backstop, per the required outcome) on
+        // timeout or any failure -- CloseComm() proceeds to terminate the engine process either
+        // way; this only gives a graceful halt a real chance to land first.
+        internal bool HaltTxAndWaitForShutdown(TimeSpan timeout)
+        {
+            System.Threading.Interlocked.Increment(ref _haltGeneration);
+            using (var done = new System.Threading.ManualResetEventSlim(false))
+            {
+                bool ok = false;
+                EnqueueDirectCommand("HALT_TX", resp =>
+                {
+                    ok = resp != null && resp.Length > 0 && resp.StartsWith("OK");
+                    done.Set();
+                }, isPriority: true, marshalToUiThread: false);
+                done.Wait(timeout);
+                return ok;
+            }
+        }
+
+        // "Start/resume calling CQ" -- release-audit finding, 2026-08-20: SetupCq (WsjtxClient.cs)
+        // has always computed curCmd/qsoState locally for both a fresh Call-CQ start AND the
+        // post-QSO auto-resume, but Direct's control protocol had no outbound command that meant
+        // "transmit CQ now" at all -- WsjtxClient.Uploads.cs's own comment documented this exact
+        // gap since the UDP-transport cleanup. Calls EngineHost's CALL_CQ, which reaches
+        // Engine::call_cq -- deliberately NOT the mode-switching Engine::start_cq (see main.rs's
+        // own comment on this command): call_cq only queues one CQ frame and arms TX, it never
+        // hands pileup-answering decisions to Nexus's own auto-sequencer, so Jimmy's
+        // CallQueueRanker stays the only thing that ever decides who gets replied to.
+        // dir is the exact directed-CQ token SetupCq's own NextDirCq() already resolved (e.g.
+        // "DX"), or null/empty for a plain CQ. Codex Audit 04 finding 2, 2026-08-21: now takes an
+        // onComplete callback -- SetupCq (WsjtxClient.cs) gates its own local qsoState/curCmd
+        // commit and EnableTx() on this reporting success, instead of committing unconditionally
+        // before the engine has accepted the command.
+        public void DirectSendCq(string dir, Action<bool> onComplete = null)
+        {
+            long capturedHaltGeneration = System.Threading.Interlocked.Read(ref _haltGeneration);
+            // isTxArm: true -- CALL_CQ arms/starts a transmission. See
+            // PurgePendingTxArmCommands_NoLock's own comment (Codex Audit 03 release blocker #1):
+            // a HALT_TX enqueued while this is still sitting unsent in the normal queue purges it
+            // instead of letting it re-arm TX right after the halt.
+            EnqueueDirectCommand("CALL_CQ " + (dir ?? "").Trim(), resp =>
+            {
+                bool ok = resp != null && resp.Length > 0 && !resp.StartsWith("ERR");
+                if (!ok)
+                {
+                    DebugOutput($"{Time()} [DIRECT] CALL_CQ '{dir}' did not return OK (response: {(resp ?? "<no response>")})");
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Call CQ failed",
+                        "the engine host did not confirm the CQ -- not treated as started"));
+                }
+                else if (capturedHaltGeneration != System.Threading.Interlocked.Read(ref _haltGeneration))
+                {
+                    // Codex Audit 04 finding 3: superseded by a Halt sent while this CALL_CQ was
+                    // in flight -- see _haltGeneration's own comment.
+                    DebugOutput($"{Time()} [DIRECT] CALL_CQ '{dir}' returned OK but was superseded by a Halt -- not re-arming");
+                    ok = false;
+                }
+                onComplete?.Invoke(ok);
+            }, isTxArm: true);
         }
 
         public void DirectSetTxEnabled(bool enabled)
         {
-            string resp = DirectSendCommand("SET_TX_ENABLED " + (enabled ? "1" : "0"));
-            if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
-                DebugOutput($"{Time()} [DIRECT] SET_TX_ENABLED {(enabled ? 1 : 0)} did not return OK (response: {(resp ?? "<no response>")})");
+            // isTxArm: only when enabling -- disabling TX must never be purged by a halt (see
+            // PurgePendingTxArmCommands_NoLock's own comment, Codex Audit 03 release blocker #1).
+            EnqueueDirectCommand("SET_TX_ENABLED " + (enabled ? "1" : "0"), resp =>
+            {
+                if (resp == null || resp.Length == 0 || resp.StartsWith("ERR"))
+                    DebugOutput($"{Time()} [DIRECT] SET_TX_ENABLED {(enabled ? 1 : 0)} did not return OK (response: {(resp ?? "<no response>")})");
+            }, isTxArm: enabled);
         }
 
         // PSK Reporter checkbox (Options), live path for direct-engine mode -- see
@@ -820,7 +1386,7 @@ namespace WSJTX_Controller
         // usePskReporter never actually sent anything anywhere before this, in either transport.
         public void DirectSetPskReporter(bool on)
         {
-            DirectSendCommand("SET_PSKREPORTER " + (on ? "1" : "0"));
+            EnqueueDirectCommand("SET_PSKREPORTER " + (on ? "1" : "0"), null);
         }
 
         // Alt+T (Toggle Tune Mode) for direct-engine mode -- see WsjtxClient.BandAudio.cs's
@@ -833,10 +1399,32 @@ namespace WSJTX_Controller
         // right after calling this, which under classic WSJT-X/UDP mode (no engine host running
         // at all, DirectSendCommand can't even connect) claimed "Tune started" and let F11/F12
         // proceed as if a real tune carrier existed when nothing had actually happened.
-        public bool DirectSetTuning(bool on)
+        //
+        // Release-audit finding, 2026-08-20 (partial fix, tracked as follow-up work, not done
+        // here): this, DirectSetTier, and DirectSetFrequency below are the three DirectSetXxx
+        // commands whose bool result a caller still consumes SYNCHRONOUSLY on the UI thread
+        // (ToggleTuningProcess/SetOperatingMode/RetuneBand each branch on it immediately to
+        // decide what to tell the operator) -- unlike every fire-and-forget DirectSendXxx/
+        // DirectSetXxx above, these three still block the UI thread for DirectSendCommand's full
+        // bounded connect/read wait. Converting them the same way needs each of those three
+        // callers restructured to a background-dispatch + UI-thread-marshaled-callback shape
+        // (matching DirectPollTick's own pattern) rather than a same-signature drop-in change --
+        // real, still-open work, deliberately not attempted in the same pass that fixed the
+        // fire-and-forget commands, to avoid rushing a change to core Tune/mode/frequency control
+        // flow without live-radio verification.
+        // Codex Audit 02 follow-up, 2026-08-21: now routes through the ordered dispatcher (see its
+        // class comment above) instead of running synchronously or opening its own independent
+        // Task.Run -- ToggleTuningProcess (WsjtxClient.BandAudio.cs) passes onComplete instead of
+        // wrapping this call in its own Task.Run+BeginInvoke; the dispatcher already marshals
+        // onComplete onto the UI thread.
+        public void DirectSetTuning(bool on, Action<bool> onComplete)
         {
-            string resp = DirectSendCommand("SET_TUNING " + (on ? "1" : "0"));
-            return resp != null && resp.StartsWith("OK");
+            // isTxArm: only when starting Tune -- a continuous test carrier is exactly the kind
+            // of transmission an emergency halt must prevent restarting; turning tuning OFF must
+            // never be purged (Codex Audit 03 release blocker #1, see
+            // PurgePendingTxArmCommands_NoLock's own comment).
+            EnqueueDirectCommand("SET_TUNING " + (on ? "1" : "0"),
+                resp => onComplete(resp != null && resp.StartsWith("OK")), isTxArm: on);
         }
 
         // Options > Decode tab's "Decode depth" (Fast/Normal/Deep) -- the one Decode-tab setting
@@ -847,7 +1435,7 @@ namespace WSJTX_Controller
         // both talk to the same already-running engine process over this same port.
         public void DirectSetDecodeDepth(int depth)
         {
-            DirectSendCommand("SET_DECODE_DEPTH " + depth);
+            EnqueueDirectCommand("SET_DECODE_DEPTH " + depth, null);
         }
 
         // "Use best Tx frequency" apply step, restored 2026-08-18 -- see CalcBestOffset's own
@@ -863,7 +1451,8 @@ namespace WSJTX_Controller
         public void DirectSetTxOffset(double hz)
         {
             if (hz <= 0) return;
-            DirectSendCommand("SET_TX_OFFSET " + hz.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            string arg = hz.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            EnqueueDirectCommand("SET_TX_OFFSET " + arg, null);
         }
 
         // Alt+M (Toggle Mode) equivalent for direct-engine mode -- see SetOperatingMode's own
@@ -879,10 +1468,44 @@ namespace WSJTX_Controller
         // mode while the engine -- and the actual FT8/FT4 decode/TX cycle on the air -- silently
         // stayed on the old one. Same bug class DirectSetTuning was already fixed for (2026-08-10,
         // see its own comment); this is that fix applied to Alt+M.
-        public bool DirectSetTier(string newTier)
+        // Codex Audit 02 follow-up, 2026-08-21: now routes through the ordered dispatcher (see its
+        // class comment above) instead of running synchronously or opening its own independent
+        // Task.Run -- SetOperatingMode (WsjtxClient.Protocol.cs) and the startup tier restore
+        // below pass onComplete instead of wrapping this call in their own Task.Run+BeginInvoke;
+        // the dispatcher already marshals onComplete onto the UI thread.
+        public void DirectSetTier(string newTier, Action<bool> onComplete)
         {
-            string resp = DirectSendCommand("SET_TIER " + newTier);
-            return resp != null && resp.StartsWith("OK");
+            EnqueueDirectCommand("SET_TIER " + newTier,
+                resp => onComplete(resp != null && resp.StartsWith("OK")));
+        }
+
+        // Band Up/Down and Options>Frequencies hotkeys' retune path, native/Direct-engine mode.
+        // Replaces the old RigctldClient.SetFrequency write (a second, uncoordinated client on
+        // the same rigctld session the engine host itself owns) with the engine's own
+        // Engine::set_frequency via this command -- Nexus is then the only thing that ever
+        // writes a frequency to the radio, and it owns halt/split-clear/dial-memory/retry itself.
+        // mode is the logical sideband label Engine::set_frequency expects, not a raw CAT mode
+        // word; callers should pass "USB" for FT8/FT4 (Nexus forces the DATA submode USB-side
+        // unconditionally for Digital operation, regardless of band -- see settings.rs's own
+        // rig_mode_on_sideband comment), matching every FT8/FT4 test call site in the engine.
+        // Returns success, same as DirectSetTuning/DirectSetTier above -- callers need to know
+        // whether the retune actually reached the engine before claiming a band change happened.
+        // Codex Audit 02 follow-up, 2026-08-21: now routes through the ordered dispatcher (see its
+        // class comment above) instead of running synchronously or opening its own independent
+        // Task.Run -- RetuneBand (WsjtxClient.BandAudio.cs) passes onComplete instead of wrapping
+        // this call in its own Task.Run+BeginInvoke; the dispatcher already marshals onComplete
+        // onto the UI thread.
+        public void DirectSetFrequency(double hz, string band, string mode, Action<bool> onComplete)
+        {
+            var args = new DirectSetFrequencyArgs { Hz = hz, Band = band, Mode = mode };
+            string json = JsonSerializer.Serialize(args, DirectJsonOptions);
+            EnqueueDirectCommand("SET_FREQUENCY " + json, resp =>
+            {
+                bool ok = resp != null && resp.Length > 0 && !resp.StartsWith("ERR");
+                if (!ok)
+                    DebugOutput($"{Time()} [DIRECT] SET_FREQUENCY {band}/{hz}Hz/{mode} did not return OK (response: {(resp ?? "<no response>")})");
+                onComplete?.Invoke(ok);
+            });
         }
 
         // One command, one short-lived TCP connection, matching the control server's own
@@ -941,6 +1564,22 @@ namespace WSJTX_Controller
             PropertyNameCaseInsensitive = true,
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         };
+
+        // Codex Audit 03 release blocker #1 regression test hook, 2026-08-21: a direct,
+        // deterministic check of the purge fix (PurgePendingTxArmCommands_NoLock) that needs no
+        // real network I/O or stub engine host -- avoids the timing/port-sharing flakiness a
+        // real-connection test would inherit from running inside a ~1000-test single process
+        // (SNAPSHOT poll timers and leftover dispatcher workers from other tests all sharing the
+        // same control port).
+        internal bool TestDirectNormalQueueHasTxArmCommand()
+        {
+            lock (_directQueueLock)
+            {
+                foreach (var item in _directNormalQueue)
+                    if (item.IsTxArm) return true;
+            }
+            return false;
+        }
 
         // ── Test-only hooks (JimmyTests, see InternalsVisibleTo in AssemblyInfo.Testing.cs) ──
         // Exercise the exact same DirectApplyStatus/DirectApplyDecodes pipeline the live poll
@@ -1083,6 +1722,31 @@ namespace WSJTX_Controller
         // completeness (a real, separate engine field) but NOT what Alt+Q's receive-time report
         // uses; see RxLevel above for that.
         public int? SmeterDb { get; set; }
+        // Hamlib's 0.0-1.0 relative RF-power reading (tempo-app/src/dto.rs: RadioStatus.
+        // rf_power) -- the SNAPSHOT-sourced replacement for RigctldClient.PollOnce's own
+        // "l RFPOWER" query. Null on a rig/backend that doesn't report it, same "no reading,
+        // nothing to act on" contract RigctldClient.RadioStatus.PowerRaw always had.
+        public double? RfPower { get; set; }
+        // CAT SWR reading (tempo-app/src/dto.rs: RadioStatus.tx_swr) -- drives both Alt+Q's
+        // quick report and the "Halt Tx when SWR > threshold" safety check below in
+        // DirectApplyStatus, replacing RigctldClient.PollOnce's own "l SWR" query.
+        public double? TxSwr { get; set; }
+        // CAT ALC reading (tempo-app/src/dto.rs: RadioStatus.tx_alc) -- RigctldClient never
+        // polled this (Hamlib's ALC level has no WSJT-X-parity feature depending on it today);
+        // carried here only because the engine already reports it in the same SNAPSHOT.
+        public double? TxAlc { get; set; }
+        // Calibrated output watts, where the rig/backend can report them (tempo-app/src/dto.rs:
+        // RadioStatus.tx_po_w) -- distinct from RfPower's raw 0.0-1.0 Hamlib fraction. Not polled
+        // by RigctldClient at all before this (Hamlib's plain rigctld protocol has no calibrated-
+        // watts query); available here only because Nexus's own radio loop computes it.
+        public double? TxPoW { get; set; }
+        // Rig/CAT connection health (tempo-app/src/dto.rs: RadioStatus.cat_ok) -- null = not
+        // applicable (VOX, no CAT configured), true = CAT connected, false = CAT configured but
+        // failing. Drives DirectApplyStatus's "Radio CAT link lost"/recovered notification.
+        public bool? CatOk { get; set; }
+        // Human-readable detail paired with CatOk above (tempo-app/src/dto.rs: RadioStatus.
+        // cat_detail), e.g. "rigctld not reachable..." -- used as the failure reason text.
+        public string CatDetail { get; set; }
         // Added 2026-08-19 (release-blocker follow-up): the engine's own authoritative belief
         // about whether it will currently transmit -- tempo-app/src/dto.rs's RadioStatus.
         // tx_enabled. Confirmed live to be the real cause of a stuck-forever callInProg: the
@@ -1119,5 +1783,14 @@ namespace WSJTX_Controller
         public string ReplyMsg { get; set; }
         public int? ReplySnr { get; set; }
         public float? DxFreqHz { get; set; }
+    }
+
+    // Field names (camelCase via DirectJsonOptions) must line up with EngineHost/src/main.rs's
+    // own SetFrequencyArgs struct.
+    internal class DirectSetFrequencyArgs
+    {
+        public double Hz { get; set; }
+        public string Band { get; set; }
+        public string Mode { get; set; }
     }
 }

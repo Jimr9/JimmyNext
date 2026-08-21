@@ -408,13 +408,6 @@ struct Args {
     /// and fault natively. Keeping every device query inside the one already-running process
     /// makes that race structurally impossible instead of papering over it.
     control_port: u16,
-    /// Command RFPOWER to this fraction (0.0-1.0) exactly once, right after startup -- Jimmy's
-    /// own workaround for the Hamlib Kenwood-backend bug (see RadioSettings.StartupPowerEnabled's
-    /// doc comment): the engine's own routine PWR/SWR telemetry polling is what trips a fresh
-    /// rigctld.exe's first RFPOWER interaction into a destructive calibration sweep, so this
-    /// deliberately fires first, before that polling loop's first pass. `None` (the default, when
-    /// the operator has not opted in) means do nothing, matching today's behavior exactly.
-    startup_power_frac: Option<f32>,
     /// WSJT-X "Fast/Normal/Deep" decoder depth (1/2/3) -- Settings.decode_depth. Startup value
     /// only; SET_DECODE_DEPTH (control port, below) is the live path used after that, since
     /// Engine::set_decode_depth is safe to call mid-session (the decoder reads it fresh on
@@ -469,7 +462,6 @@ fn parse_args() -> Args {
     let mut ptt_serial_port = String::new();
     let mut split_mode = "none".to_string();
     let mut control_port: u16 = 58239;
-    let mut startup_power_frac: Option<f32> = None;
     let mut decode_depth: Option<u8> = None;
     let mut decode_flow_hz: Option<u32> = None;
     let mut decode_fhigh_hz: Option<u32> = None;
@@ -519,11 +511,6 @@ fn parse_args() -> Args {
             "--control-port" => {
                 if let Some(v) = it.next() {
                     control_port = v.parse().unwrap_or(control_port);
-                }
-            }
-            "--startup-power-frac" => {
-                if let Some(v) = it.next() {
-                    startup_power_frac = v.parse().ok();
                 }
             }
             "--decode-depth" => {
@@ -583,7 +570,6 @@ fn parse_args() -> Args {
         ptt_serial_port,
         split_mode,
         control_port,
-        startup_power_frac,
         decode_depth,
         decode_flow_hz,
         decode_fhigh_hz,
@@ -709,6 +695,70 @@ fn reply_wire_response(result: Result<(), String>) -> String {
     }
 }
 
+/// Recognizes a CALL_CQ control-port line (the accept loop's own `line.trim()` has already run
+/// by the time this sees it) and extracts its optional directed-CQ token. `None` means `line`
+/// isn't a CALL_CQ command at all (falls through to "ERR unknown command"); `Some(None)` is a
+/// plain CQ; `Some(Some(token))` is a directed one.
+///
+/// Release-audit finding (Codex Audit 02, 2026-08-21) -- confirmed real, release blocker: the
+/// handler this feeds used to be `line.strip_prefix("CALL_CQ ")` directly (a literal trailing
+/// space required to match at all). Plain CQ's own C# sender (WsjtxClient.Direct.cs's
+/// DirectSendCq) sends exactly "CALL_CQ " for an empty/no directed token -- but the accept
+/// loop's own `line.trim()`, applied before ANY command match, strips that trailing space
+/// first, turning "CALL_CQ " into bare "CALL_CQ" before the old handler ever saw it.
+/// strip_prefix("CALL_CQ ") could then never match a plain CQ at all -- it silently fell
+/// through to "ERR unknown command" every time, while Jimmy's own C# side had already updated
+/// its local "calling CQ" state and enabled TX. Only a DIRECTED token (e.g. "CALL_CQ DX",
+/// which still has a real non-whitespace character after the space and so survives
+/// line.trim() intact) could ever match -- exactly the "configuration-dependent and deceptive"
+/// shape the audit described. Extracted into its own pure, synchronously-testable function
+/// (matching `validate_set_frequency`'s own reason for existing separately, just below) so
+/// this parsing has real unit coverage for the plain-CQ case specifically, not just the
+/// directed one the original code happened to already exercise correctly.
+fn parse_call_cq_line(line: &str) -> Option<Option<&str>> {
+    if line != "CALL_CQ" && !line.starts_with("CALL_CQ ") {
+        return None;
+    }
+    let dir = line.strip_prefix("CALL_CQ").unwrap_or("").trim();
+    Some(if dir.is_empty() { None } else { Some(dir) })
+}
+
+/// Release-audit finding, 2026-08-20: the SET_FREQUENCY handler used to only check that
+/// hz/band/mode were each individually well-formed (finite/positive/non-empty), never that
+/// they actually agreed WITH EACH OTHER -- a malformed internal caller could request e.g.
+/// `{hz: 7100000, band: "20m"}` and this would happily answer OK and command the radio there,
+/// even though Jimmy's own display/persistence (RetuneBand's caller, RadioSettings.
+/// LastBandIdx/LastDialFrequencyHz) believed it was on 20m. Extracted into its own pure,
+/// synchronously-testable function (matching `reply_wire_response`'s own reason for existing
+/// as a separate function above) so this validation has real unit coverage without needing to
+/// spin up `run_control_server`'s actual TCP listener. Cross-checks the claimed band against
+/// `tempo_app::bandplan::band_for_dial` -- the SAME canonical band-plan table Nexus's own
+/// `tune_dial` already canonicalizes every dial through (`bandplan::canonical_band`), so this
+/// reuses Nexus's existing source of truth rather than adding a second, possibly-drifting band
+/// table in EngineHost.
+fn validate_set_frequency(a: &SetFrequencyArgs) -> Result<(), String> {
+    if !a.hz.is_finite() || a.hz <= 0.0 {
+        return Err(format!("hz must be finite and positive, got {}", a.hz));
+    }
+    if a.band.trim().is_empty() {
+        return Err("band must not be empty".to_string());
+    }
+    if a.mode.trim().is_empty() {
+        return Err("mode must not be empty".to_string());
+    }
+    match tempo_app::bandplan::band_for_dial(a.hz / 1_000_000.0) {
+        Some(actual_band) if actual_band.eq_ignore_ascii_case(a.band.trim()) => Ok(()),
+        Some(actual_band) => Err(format!(
+            "{} Hz is on {actual_band}, not the requested band {}",
+            a.hz, a.band
+        )),
+        None => Err(format!(
+            "{} Hz is not on any recognized amateur band",
+            a.hz
+        )),
+    }
+}
+
 /// Bounds how long `read_one_control_line` will wait for an accepted connection's command line
 /// to arrive, and how many bytes it will buffer while waiting -- see that function's own doc
 /// comment for why. Generous relative to Jimmy's own client-side round-trip budget
@@ -720,13 +770,15 @@ const CONTROL_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const MAX_CONTROL_LINE_BYTES: u64 = 8192;
 
 /// Reads exactly one command line from an already-accepted control-port connection, bounded by
-/// both a read timeout and a maximum line length. Found live (Codex release audit, 2026-08-19):
-/// `run_control_server` below is single-threaded and fully serial by design -- every command
-/// waits for the one ahead of it to finish, HALT_TX included. Before this, receiving that FIRST
-/// line had no timeout and no length bound at all (`TcpStream::read_line` can block
-/// indefinitely), so a client that connected and never sent a newline -- or never sent a complete
-/// line -- stalled this thread forever, blocking every later command behind it with no way to
-/// recover short of restarting the process. Returns None on any failure: couldn't set the
+/// both a read timeout and a maximum line length. Found live (Codex release audit, 2026-08-19),
+/// back when `run_control_server` handled every connection serially, inline, on one thread
+/// (fixed since -- Codex Audit 03 finding 5, see `handle_control_connection`'s own doc comment):
+/// receiving that FIRST line had no timeout and no length bound at all (`TcpStream::read_line`
+/// can block indefinitely), so a client that connected and never sent a newline -- or never sent
+/// a complete line -- stalled whichever thread was handling it forever. This bound stays load-
+/// bearing regardless of the threading model: a run-away connection today only ever pins its own
+/// spawned thread, not every other command, but an unbounded read is still an unbounded read.
+/// Returns None on any failure: couldn't set the
 /// timeout, couldn't clone the stream, the read itself timed out (a real Err from read_line --
 /// distinct from a clean EOF), or a line that never reached a terminating newline within
 /// max_bytes. That last case needs an explicit check: `BufRead::read_line` treats hitting EOF
@@ -752,32 +804,35 @@ fn read_one_control_line(
     if line.ends_with('\n') { Some(line) } else { None }
 }
 
-fn run_control_server(
-    port: u16,
+/// Codex Audit 03 finding 5, 2026-08-21: `run_control_server` used to process one accepted
+/// connection fully, inline, before ever calling `listener.incoming()` again -- a client that
+/// connected but stalled sending its first line held `read_one_control_line`'s full
+/// `CONTROL_READ_TIMEOUT` (5s) and blocked EVERY other command behind it, HALT_TX included, on
+/// the one accept-loop thread. This file already had the right pattern for exactly this shape of
+/// problem: EQSL_UPLOAD/EQSL_DOWNLOAD/HAMQTH_LOOKUP/HAMQTH_TEST below each spawn their own
+/// thread so the KNOWN-slow ones can't block the accept loop -- this extends that same pattern
+/// one level up, to every connection, since the actual risk (a stalled/slow client) can happen
+/// before the command is even known, at the read_one_control_line stage itself. Engine
+/// mutations stay correctly serialized at Arc<Mutex<Engine>> exactly as they already were (each
+/// handler locks briefly, calls one method, unlocks -- never holds the lock for a whole
+/// connection), so concurrent connections interleave safely; this only removes the artificial
+/// socket-accept-order serialization Codex's finding is about. No connection cap/thread pool
+/// added: this is a loopback-only, single-operator, one-shot-per-command local control channel
+/// (Jimmy's own client already opens a fresh connection per command, matching the eQSL/HamQTH
+/// spawns' own established shape), not a public-facing service that needs DoS hardening.
+fn handle_control_connection(
+    mut stream: std::net::TcpStream,
     engine: Arc<Mutex<Engine>>,
     external_cache: Arc<external_data::SharedCache>,
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
 ) {
     use std::io::Write;
-    use std::net::TcpListener;
 
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("jimmy-engine-host: control server failed to bind 127.0.0.1:{port}: {e}");
-            return;
-        }
+    let line = match read_one_control_line(&stream, CONTROL_READ_TIMEOUT, MAX_CONTROL_LINE_BYTES) {
+        Some(l) => l,
+        None => return,
     };
-    for incoming in listener.incoming() {
-        let mut stream = match incoming {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let line = match read_one_control_line(&stream, CONTROL_READ_TIMEOUT, MAX_CONTROL_LINE_BYTES) {
-            Some(l) => l,
-            None => continue,
-        };
-        let line = line.trim();
+    let line = line.trim();
 
         if line == "LIST_DEVICES" || line == "LIST_OUTPUT_DEVICES" {
             let (inputs, outputs) = tempo_audio::device::available_devices();
@@ -823,6 +878,29 @@ fn run_control_server(
                     let _ = writeln!(stream, "ERR bad REPLY args: {e}");
                 }
             }
+        } else if let Some(dir) = parse_call_cq_line(line) {
+            // Jimmy's own Call-CQ start/resume command -- Direct's control protocol had
+            // REPLY/HALT_TX/SET_TX_ENABLED/SET_TIER/SET_FREQUENCY/SET_TUNING and setters, but
+            // nothing meant "start calling CQ" at all (release-audit finding, 2026-08-20; see
+            // WsjtxClient.Uploads.cs's own long-standing comment on this exact gap). SetupCq
+            // (WsjtxClient.cs) already computes curCmd/qsoState locally on every Call-CQ start
+            // AND on every post-QSO auto-resume, but under Direct mode neither one ever reached
+            // the engine -- Jimmy could believe it was calling CQ while the radio transmitted
+            // nothing. Deliberately Engine::call_cq, NOT Engine::start_cq: start_cq calls
+            // set_mode("qso-run"), which hands the ENTIRE pileup -- who to answer next -- to
+            // Nexus's own auto-answer sequencer (see its own doc comment: "including the
+            // return-to-CQ after each pileup contact"). Jimmy's CallQueueRanker already owns
+            // that decision (award-priority ranking, not "first/strongest caller"); using
+            // start_cq would put two different callers-choosers in the same seat -- exactly the
+            // kind of duplicate ownership this whole audit pass was watching for. call_cq queues
+            // one structured CQ frame and arms TX without touching self.mode at all, matching
+            // call_station_ctx's existing REPLY role: Jimmy decides what happens next, the
+            // engine only executes the one transmission it was just told to make. dir is the
+            // directed-CQ token Jimmy's own NextDirCq() already resolved (e.g. "DX"), or None
+            // for a plain CQ -- see parse_call_cq_line's own comment for why this can no longer
+            // silently reject the plain-CQ case.
+            let result = engine.lock().unwrap_or_else(|e| e.into_inner()).call_cq(dir);
+            let _ = writeln!(stream, "{}", reply_wire_response(result));
         } else if line == "HALT_TX" {
             engine.lock().unwrap_or_else(|e| e.into_inner()).halt_tx();
             let _ = writeln!(stream, "OK");
@@ -900,6 +978,28 @@ fn run_control_server(
                     let _ = writeln!(stream, "ERR bad SET_TX_OFFSET value: {e}");
                 }
             }
+        } else if let Some(json) = line.strip_prefix("SET_FREQUENCY ") {
+            // Jimmy's own Band Up/Down and Options>Frequencies hotkeys used to retune the radio
+            // by writing straight to the rigctld daemon the engine's own radio loop already owns
+            // (RigctldClient.SetFrequency, a second concurrent client on the same CAT session) --
+            // a second, uncoordinated writer to state the engine believes only IT changes (split,
+            // TX halt, per-(band,mode) dial memory, retry/reconciliation all live in Engine::
+            // set_frequency/tune_dial already). This routes the same request through the engine
+            // instead, so Nexus is the only thing that ever writes a frequency to the radio.
+            match serde_json::from_str::<SetFrequencyArgs>(json) {
+                Ok(a) => match validate_set_frequency(&a) {
+                    Ok(()) => {
+                        engine.lock().unwrap_or_else(|e| e.into_inner()).set_frequency(a.hz / 1_000_000.0, &a.band, &a.mode);
+                        let _ = writeln!(stream, "OK");
+                    }
+                    Err(e) => {
+                        let _ = writeln!(stream, "ERR bad SET_FREQUENCY args: {e}");
+                    }
+                },
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad SET_FREQUENCY args: {e}");
+                }
+            }
         } else if let Some(v) = line.strip_prefix("SET_DECODE_DEPTH ") {
             // WSJT-X "Fast/Normal/Deep" (1/2/3), Jimmy's Decode tab -- the one decode-tab
             // setting with a live setter (Engine::set_decode_depth), so this can change
@@ -956,7 +1056,7 @@ fn run_control_server(
                     let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
             }
-            continue;
+            return;
         } else if let Some(json) = line.strip_prefix("EQSL_DOWNLOAD ") {
             match serde_json::from_str::<external_data::EqslDownloadArgs>(json) {
                 Ok(args) => {
@@ -985,7 +1085,7 @@ fn run_control_server(
                     let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
             }
-            continue;
+            return;
         } else if let Some(json) = line.strip_prefix("HAMQTH_LOOKUP ") {
             match serde_json::from_str::<external_data::HamQthLookupArgs>(json) {
                 Ok(args) => {
@@ -1012,7 +1112,7 @@ fn run_control_server(
                     let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
             }
-            continue;
+            return;
         } else if let Some(json) = line.strip_prefix("HAMQTH_TEST ") {
             match serde_json::from_str::<external_data::HamQthTestArgs>(json) {
                 Ok(args) => {
@@ -1034,11 +1134,42 @@ fn run_control_server(
                     let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
             }
-            continue;
+            return;
         } else {
             let _ = writeln!(stream, "ERR unknown command");
         }
         let _ = stream.shutdown(std::net::Shutdown::Write);
+}
+
+/// Accepts connections and hands each one to its own thread (handle_control_connection) --
+/// see that function's own doc comment (Codex Audit 03 finding 5) for why this changed from
+/// fully serial, inline handling.
+fn run_control_server(
+    port: u16,
+    engine: Arc<Mutex<Engine>>,
+    external_cache: Arc<external_data::SharedCache>,
+    live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
+) {
+    use std::net::TcpListener;
+
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("jimmy-engine-host: control server failed to bind 127.0.0.1:{port}: {e}");
+            return;
+        }
+    };
+    for incoming in listener.incoming() {
+        let stream = match incoming {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let engine = Arc::clone(&engine);
+        let external_cache = Arc::clone(&external_cache);
+        let live_feeds_cache = Arc::clone(&live_feeds_cache);
+        std::thread::spawn(move || {
+            handle_control_connection(stream, engine, external_cache, live_feeds_cache);
+        });
     }
 }
 
@@ -1052,6 +1183,19 @@ struct ReplyArgs {
     reply_msg: Option<String>,
     reply_snr: Option<i32>,
     dx_freq_hz: Option<f32>,
+}
+
+/// Wire shape for the SET_FREQUENCY command's JSON argument -- field names match what
+/// WsjtxClient.Direct.cs sends (camelCase, mirroring ReplyArgs's own convention). `mode` is the
+/// logical sideband/class label Engine::set_frequency expects ("USB"/"LSB"/"FM"/"CW"), not a raw
+/// CAT mode word -- the engine's own rig_mode()/rig_mode_effective() derives the actual CAT
+/// mode (e.g. PKTUSB) from it every radio-loop tick.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetFrequencyArgs {
+    hz: f64,
+    band: String,
+    mode: String,
 }
 
 fn main() {
@@ -1188,16 +1332,6 @@ fn main() {
     // picker yet; add a --tier arg here when FT4/other modes are wired up.
     engine.lock().unwrap().set_tier(tempo_app::dto::Tier::Ft8);
 
-    // Startup-only power workaround (RadioSettings.StartupPowerEnabled's doc comment has the
-    // full Hamlib #1595 story). Deliberately called here, before run_radio's first tick, so
-    // Engine already has a desired rf_power queued up the moment the radio loop starts polling
-    // -- set_rf_power only records the desired value (clamped to the mode's power ceiling); the
-    // radio loop is what actually sends it to the rig, once, on its first pass. No further calls
-    // after this: the operator's own manual rig-knob changes afterward are left alone.
-    if let Some(frac) = args.startup_power_frac {
-        engine.lock().unwrap().set_rf_power(frac);
-    }
-
     // POTA/SOTA spots + space weather: background-refreshed, credential-free, cached in memory
     // (see external_data.rs's own header comment). Independent of the engine/radio loop
     // entirely -- a POTA/SWPC outage can never affect decode/TX.
@@ -1243,6 +1377,15 @@ fn main() {
         audio_out: args.output_device.unwrap_or_default(),
         ptt_data_source: args.ptt_data_source,
         pskreporter: args.pskreporter,
+        // JIMMY COMPAT (nexus-compat patch tempo-audio-telemetry.patch): never let the radio
+        // loop's own routine telemetry poll issue an RFPOWER read at all. Always on,
+        // unconditionally -- not operator-configurable, no CLI flag -- because reading RFPOWER
+        // on a freshly-spawned rigctld process can trip a destructive calibration-sweep bug in
+        // Hamlib's Kenwood backend (Hamlib/Hamlib#1595) on first touch, dropping the operator's
+        // actual transmit power (confirmed live, twice, 2026-08-20). Jimmy's own policy is that
+        // a read must never be able to change anything on the radio -- see nexus-compat/
+        // README.md for the full story and what to do if a future Nexus revision obsoletes this.
+        disable_rfpower_probe: true,
         // RadioConfig has no ptt_serial_port field -- Transport::from_cfg (tempo-audio/service.rs)
         // deliberately seeds it empty regardless (it's a GLOBAL keying-line setting the live
         // per-tick Transport::from_settings rebuild supplies instead); Settings.ptt_serial_port
@@ -1305,6 +1448,103 @@ mod tests {
     fn reply_wire_response_err_reports_err_with_the_real_message() {
         let msg = "No recent decode from W1AW -- wait for their next transmission, then click again.";
         assert_eq!(reply_wire_response(Err(msg.to_string())), format!("ERR {msg}"));
+    }
+
+    // Release-audit finding (Codex Audit 02, 2026-08-21) -- release blocker: plain CQ
+    // (Jimmy's own DirectSendCq sends exactly "CALL_CQ ", which the accept loop's line.trim()
+    // reduces to bare "CALL_CQ" before any handler sees it) used to be UNREACHABLE --
+    // strip_prefix("CALL_CQ ") required a literal trailing space no plain-CQ line could ever
+    // have by the time it got here. This is the positive control: prove the plain case is
+    // recognized at all, not just the directed case the original code happened to already
+    // exercise correctly.
+    #[test]
+    fn parse_call_cq_line_recognizes_plain_cq_as_the_bare_command_with_no_directed_token() {
+        assert_eq!(parse_call_cq_line("CALL_CQ"), Some(None));
+    }
+
+    #[test]
+    fn parse_call_cq_line_recognizes_a_directed_token() {
+        assert_eq!(parse_call_cq_line("CALL_CQ DX"), Some(Some("DX")));
+    }
+
+    #[test]
+    fn parse_call_cq_line_trims_the_directed_token() {
+        // Defensive: the accept loop's own line.trim() only trims the WHOLE line's outer
+        // whitespace, not whatever a caller puts between "CALL_CQ" and a token.
+        assert_eq!(parse_call_cq_line("CALL_CQ  DX  "), Some(Some("DX")));
+    }
+
+    #[test]
+    fn parse_call_cq_line_treats_a_whitespace_only_token_as_plain_cq() {
+        assert_eq!(parse_call_cq_line("CALL_CQ   "), Some(None));
+    }
+
+    #[test]
+    fn parse_call_cq_line_rejects_an_unrelated_command() {
+        assert_eq!(parse_call_cq_line("SNAPSHOT"), None);
+    }
+
+    #[test]
+    fn parse_call_cq_line_rejects_a_command_that_merely_starts_with_the_same_letters() {
+        // "CALL_CQX" must not be mistaken for a CALL_CQ variant just because it shares a prefix.
+        assert_eq!(parse_call_cq_line("CALL_CQX"), None);
+    }
+
+    // Release-audit finding, 2026-08-20 (real validation/coverage for the SET_FREQUENCY
+    // Direct contract): a positive control first -- proves this test module can actually see a
+    // rejection at all, not just that every case happens to hit the Ok(()) branch.
+    #[test]
+    fn validate_set_frequency_accepts_a_self_consistent_20m_request() {
+        let a = SetFrequencyArgs { hz: 14_074_000.0, band: "20m".to_string(), mode: "USB".to_string() };
+        assert_eq!(validate_set_frequency(&a), Ok(()));
+    }
+
+    #[test]
+    fn validate_set_frequency_accepts_band_case_insensitively() {
+        let a = SetFrequencyArgs { hz: 7_074_000.0, band: "40M".to_string(), mode: "USB".to_string() };
+        assert_eq!(validate_set_frequency(&a), Ok(()));
+    }
+
+    #[test]
+    fn validate_set_frequency_rejects_a_frequency_band_mismatch() {
+        // 14.074 MHz is real 20m -- claiming it's 40m must be refused, not silently accepted
+        // and commanded to the radio anyway.
+        let a = SetFrequencyArgs { hz: 14_074_000.0, band: "40m".to_string(), mode: "USB".to_string() };
+        let result = validate_set_frequency(&a);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("20m"));
+    }
+
+    #[test]
+    fn validate_set_frequency_rejects_a_frequency_off_any_ham_band() {
+        let a = SetFrequencyArgs { hz: 11_000_000.0, band: "20m".to_string(), mode: "USB".to_string() };
+        let result = validate_set_frequency(&a);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not on any recognized amateur band"));
+    }
+
+    #[test]
+    fn validate_set_frequency_rejects_non_positive_hz() {
+        let a = SetFrequencyArgs { hz: 0.0, band: "20m".to_string(), mode: "USB".to_string() };
+        assert!(validate_set_frequency(&a).is_err());
+    }
+
+    #[test]
+    fn validate_set_frequency_rejects_non_finite_hz() {
+        let a = SetFrequencyArgs { hz: f64::NAN, band: "20m".to_string(), mode: "USB".to_string() };
+        assert!(validate_set_frequency(&a).is_err());
+    }
+
+    #[test]
+    fn validate_set_frequency_rejects_empty_band() {
+        let a = SetFrequencyArgs { hz: 14_074_000.0, band: "".to_string(), mode: "USB".to_string() };
+        assert!(validate_set_frequency(&a).is_err());
+    }
+
+    #[test]
+    fn validate_set_frequency_rejects_empty_mode() {
+        let a = SetFrequencyArgs { hz: 14_074_000.0, band: "20m".to_string(), mode: "".to_string() };
+        assert!(validate_set_frequency(&a).is_err());
     }
 
     // Regression coverage for the control-port blocking fix (Codex release audit, 2026-08-19):

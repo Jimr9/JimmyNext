@@ -11,6 +11,7 @@ namespace WSJTX_Controller
         Help,
         UpdateCheck,
         CallCqMode,
+        CallCqOptions,
         ListenMode,
         EnableTx,
         HaltTx,
@@ -61,6 +62,11 @@ namespace WSJTX_Controller
             [HotkeyAction.Help]            = Keys.Alt | Keys.K,
             [HotkeyAction.UpdateCheck]     = Keys.F4,
             [HotkeyAction.CallCqMode]      = Keys.Alt | Keys.C,
+            // Requested 2026-08-21: the "Call CQ options..." button (directed CQ / CQ DX only /
+            // CQ and CQ DX -- what CallCqMode/Alt+C actually calls CQ WITH) had no hotkey of its
+            // own at all, easy to confuse with Alt+C itself given the name overlap. Alt+B is
+            // free of conflicts with every other default above.
+            [HotkeyAction.CallCqOptions]   = Keys.Alt | Keys.B,
             [HotkeyAction.ListenMode]      = Keys.Alt | Keys.L,
             [HotkeyAction.EnableTx]        = Keys.Alt | Keys.E,
             [HotkeyAction.HaltTx]          = Keys.Alt | Keys.H,
@@ -105,6 +111,7 @@ namespace WSJTX_Controller
             [HotkeyAction.Help]            = "Help (show shortcuts)",
             [HotkeyAction.UpdateCheck]     = "Check for Update",
             [HotkeyAction.CallCqMode]      = "Start selected CQ mode",
+            [HotkeyAction.CallCqOptions]   = "Call CQ Options",
             [HotkeyAction.ListenMode]      = "Listen for Calls Mode",
             [HotkeyAction.EnableTx]        = "Enable Transmit",
             [HotkeyAction.HaltTx]          = "Halt Transmit",
@@ -121,7 +128,7 @@ namespace WSJTX_Controller
             [HotkeyAction.BandDown]        = "Band Down",
             [HotkeyAction.ToggleMode]      = "Toggle Mode (FT8 / FT4)",
             [HotkeyAction.PSKReporter]     = "Toggle PSKReporter",
-            [HotkeyAction.Prompts]         = "Toggle Command Prompts",
+            [HotkeyAction.Prompts]         = "Show Command Prompts and Hotkeys",
             [HotkeyAction.UploadLotw]      = "Upload to Logbook of the World",
             [HotkeyAction.SortOrder]       = "Sort Order Editor",
             [HotkeyAction.RowOrder]        = "Row Order Editor",
@@ -136,9 +143,9 @@ namespace WSJTX_Controller
             [HotkeyAction.NavPendingCount] = "Focus Pending Count",
             [HotkeyAction.NavLoggedList]   = "Focus Auto Logged List",
             [HotkeyAction.NavLoggedCount]  = "Focus Auto Logged Count",
-            [HotkeyAction.NavAdvTx1]       = "Focus TX1 Available Stations",
-            [HotkeyAction.NavAdvTx2]       = "Focus TX2 Available Stations",
-            [HotkeyAction.NavAdvRaw]       = "Focus Raw Decodes",
+            [HotkeyAction.NavAdvTx1]       = "Focus TX1 Available Stations List",
+            [HotkeyAction.NavAdvTx2]       = "Focus TX2 Available Stations List",
+            [HotkeyAction.NavAdvRaw]       = "Focus Raw Decodes List",
             [HotkeyAction.NavSpotWatch]    = "Focus Spot Watch List",
         };
 
@@ -150,6 +157,7 @@ namespace WSJTX_Controller
             HotkeyAction.OpenLogbook,
             HotkeyAction.AddManualQso,
             HotkeyAction.OpenOtaSpots,
+            HotkeyAction.CallCqOptions,
             HotkeyAction.NavAdvTx1,
             HotkeyAction.NavAdvTx2,
             HotkeyAction.NavAdvRaw,

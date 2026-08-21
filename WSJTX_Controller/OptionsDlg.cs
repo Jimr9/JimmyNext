@@ -321,6 +321,34 @@ namespace WSJTX_Controller
             };
             generalPanel.Controls.Add(_maxCallQueueAgeNumeric);
 
+            // Live-testing finding, 2026-08-21: moved here from the Advanced UI tab's "Advanced
+            // Call Layout" group, where it was inaccessible/disabled to a beginner-mode operator
+            // despite governing the same call queue their own simple list displays -- see
+            // BuildAdvancedUiTab's own comment. Default matches ctrl.maxQueuedCallsBase's own
+            // field default (5).
+            var maxQueuedLabel = new System.Windows.Forms.Label
+            {
+                Text     = "Max calls shown in the list:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 168),
+                Font     = font,
+                TabStop  = false
+            };
+            generalPanel.Controls.Add(maxQueuedLabel);
+
+            _maxQueuedCallsNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Max calls shown in the list",
+                Location       = new System.Drawing.Point(210, 165),
+                Size           = new System.Drawing.Size(70, 20),
+                TabIndex       = 6,
+                Minimum        = 4,
+                Maximum        = 100,
+                Value          = Math.Max(4, Math.Min(100, ctrl.maxQueuedCallsBase)),
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_maxQueuedCallsNumeric);
+
             checkForUpdatesCheckBox = new System.Windows.Forms.CheckBox
             {
                 Text                  = "Check for updates on startup",
@@ -366,6 +394,10 @@ namespace WSJTX_Controller
             int maxAge = (int)(_maxCallQueueAgeNumeric?.Value ?? 16);
             ctrl.maxCallQueueAgePeriods = Math.Max(4, Math.Min(200, maxAge));
 
+            // Moved here from SaveAdvancedUiTab, 2026-08-21 -- see BuildGeneralTab's own comment.
+            int maxQueued = (int)(_maxQueuedCallsNumeric?.Value ?? 5);
+            ctrl.maxQueuedCallsBase = Math.Max(4, Math.Min(100, maxQueued));
+
             ctrl.alwaysOnTop = udpOnTopCheckBox.Checked;
             wsjtxClient.LogModeChanged(udpDiagLogCheckBox.Checked);
         }
@@ -405,6 +437,11 @@ namespace WSJTX_Controller
             SaveSoundsTab();
             SaveLookupTab();
             SaveAppearanceTab();
+            // Release-audit finding, 2026-08-20: commit these settings to disk NOW, not only on
+            // the next clean app shutdown -- see SaveOptionsRelatedSettings's own comment
+            // (Controller.cs). Every Save*Tab() above already applied its changes live to
+            // memory; this just makes that change durable immediately too.
+            ctrl.SaveOptionsRelatedSettings();
             // Give Club Log real-time upload another chance now that the user has
             // had an opportunity to fix credentials/settings -- see
             // LiveQsoUploadOrchestrator's circuit breaker.
@@ -487,30 +524,14 @@ namespace WSJTX_Controller
             _advUiDependentControls.Add(maxLabel);
             _advUiDependentControls.Add(rawMaxRowsNumeric);
 
-            var maxQueuedLabel = new System.Windows.Forms.Label
-            {
-                Text = "Max queued calls:",
-                AutoSize = true,
-                Location = new System.Drawing.Point(8, 136),
-                Font = font,
-                TabStop = false
-            };
-            layoutGroup.Controls.Add(maxQueuedLabel);
-
-            _maxQueuedCallsNumeric = new System.Windows.Forms.NumericUpDown
-            {
-                AccessibleName = "Max queued calls",
-                Location = new System.Drawing.Point(195, 133),
-                Size = new System.Drawing.Size(70, 20),
-                TabIndex = 6,
-                Minimum = 4,
-                Maximum = 100,
-                Value = Math.Max(4, Math.Min(100, ctrl.maxQueuedCallsBase)),
-                Font = font
-            };
-            layoutGroup.Controls.Add(_maxQueuedCallsNumeric);
-            _advUiDependentControls.Add(maxQueuedLabel);
-            _advUiDependentControls.Add(_maxQueuedCallsNumeric);
+            // Live-testing finding, 2026-08-21: "Max queued calls" used to live here, inside the
+            // Advanced Call Layout group -- disabled/inaccessible whenever Advanced Call Layout
+            // was unchecked. But it governs the SAME underlying call queue the plain BEGINNER-
+            // mode callListBox displays too (CallQueueStore/UpdateMaxAutoGenEnqueue read
+            // ctrl.maxQueuedCallsBase regardless of layout mode) -- a beginner-mode operator had
+            // no way to change how many calls their own list could ever hold without first
+            // turning on a layout feature they don't use. Moved to the General tab (see
+            // BuildGeneralTab/ApplyGeneralSettings) where it's available in both modes.
 
             advUiPanel.Controls.Add(layoutGroup);
             y += 165;
@@ -649,8 +670,8 @@ namespace WSJTX_Controller
             ctrl.keepListPositionDuringRefresh = keepListPositionDuringRefreshCheckBox?.Checked ?? false;
             int rawMax = (int)(rawMaxRowsNumeric?.Value ?? 100);
             ctrl.rawMaxRows = Math.Max(10, Math.Min(5000, rawMax));
-            int maxQueued = (int)(_maxQueuedCallsNumeric?.Value ?? 4);
-            ctrl.maxQueuedCallsBase = Math.Max(4, Math.Min(100, maxQueued));
+            // "Max queued calls" (_maxQueuedCallsNumeric) moved to the General tab, 2026-08-21 --
+            // see BuildAdvancedUiTab's own comment; saved from ApplyGeneralSettings now.
         }
 
         // ===== WANTED CALLS TAB =====
@@ -904,13 +925,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.RadioButton _radioSplitNoneRb;
         private System.Windows.Forms.RadioButton _radioSplitRigRb;
         private System.Windows.Forms.RadioButton _radioSplitFakeItRb;
-        private System.Windows.Forms.NumericUpDown _radioPollIntervalUpDown;
-        private System.Windows.Forms.CheckBox _radioReadDisplayPwrSwrCheckBox;
         private System.Windows.Forms.CheckBox _radioHaltTxOnHighSwrCheckBox;
         private System.Windows.Forms.NumericUpDown _radioSwrHaltThresholdUpDown;
-        private System.Windows.Forms.CheckBox _radioStartupPowerEnabledCheckBox;
-        private System.Windows.Forms.NumericUpDown _radioStartupPowerWattsUpDown;
-        private System.Windows.Forms.NumericUpDown _radioStartupPowerMaxWattsUpDown;
         private System.Windows.Forms.NumericUpDown _radioAudioStepUpDown;
         private System.Windows.Forms.CheckBox _radioRememberTxLevelPerBandCheckBox;
 
@@ -1222,7 +1238,7 @@ namespace WSJTX_Controller
 
             _radioPttEnabledCheckBox = new System.Windows.Forms.CheckBox
             {
-                Text = "Use rigctld for PTT (instead of WSJT-X's own CAT-driven PTT)",
+                Text = "Use rigctld for PTT (instead of VOX)",
                 Checked = ctrl.Radio.PttEnabled,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
@@ -1391,52 +1407,24 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioSplitGroupBox);
             y += 52;
 
-            var pollIntervalLabel = new System.Windows.Forms.Label
-            {
-                Text = "Poll interval (s):",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left + 290, y + 3),
-                Font = font,
-                TabStop = false,
-            };
-            radioPanel.Controls.Add(pollIntervalLabel);
-
-            _radioPollIntervalUpDown = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum = 1,
-                Maximum = 30,
-                Value = Math.Max(1, Math.Min(30, ctrl.Radio.PollIntervalMs / 1000)),
-                Location = new System.Drawing.Point(left + 410, y),
-                Size = new System.Drawing.Size(55, 21),
-                TabIndex = 19,
-                Font = font,
-                AccessibleName = "Poll interval seconds",
-            };
-            radioPanel.Controls.Add(_radioPollIntervalUpDown);
-            y += 32;
-
-            _radioReadDisplayPwrSwrCheckBox = new System.Windows.Forms.CheckBox
-            {
-                Text = "Read and display PWR and SWR",
-                Checked = ctrl.Radio.ReadDisplayPwrSwr,
-                Location = new System.Drawing.Point(left, y),
-                AutoSize = true,
-                TabIndex = 20,
-                Font = font,
-                AccessibleName = "Read and display PWR and SWR",
-            };
-            _radioReadDisplayPwrSwrCheckBox.CheckedChanged += (s, e) => UpdateSwrHaltEnabled();
-            radioPanel.Controls.Add(_radioReadDisplayPwrSwrCheckBox);
-
             _radioHaltTxOnHighSwrCheckBox = new System.Windows.Forms.CheckBox
             {
                 Text = "Halt Tx when SWR >",
                 Checked = ctrl.Radio.HaltTxOnHighSwr,
-                Location = new System.Drawing.Point(left + 290, y),
+                Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
-                TabIndex = 21,
+                TabIndex = 19,
                 Font = font,
                 AccessibleName = "Halt Tx when SWR exceeds threshold",
+                // Codex Audit 02 finding, 2026-08-21: AccessibleName stays terse per this
+                // project's own "short, clear AccessibleName" rule -- the caveat belongs in
+                // AccessibleDescription instead (JAWS/NVDA surface it on request, not on every
+                // focus announcement). Real limits worth stating: this reads the engine's own
+                // SNAPSHOT (radio.txSwr, DirectApplyStatus) roughly once a second, not
+                // instantaneously, and only ever reports a value at all when the rig's own CAT
+                // interface exposes SWR (not every rig does) -- it is a best-effort software
+                // safeguard, never a substitute for a real hardware SWR/power protection circuit.
+                AccessibleDescription = "Best-effort only, checked about once a second from the radio's own reported SWR reading when the rig provides one -- not a substitute for hardware protection.",
             };
             radioPanel.Controls.Add(_radioHaltTxOnHighSwrCheckBox);
 
@@ -1447,79 +1435,13 @@ namespace WSJTX_Controller
                 DecimalPlaces = 1,
                 Increment = 0.1m,
                 Value = (decimal)Math.Max(1.0, Math.Min(10.0, ctrl.Radio.SwrHaltThreshold)),
-                Location = new System.Drawing.Point(left + 470, y),
+                Location = new System.Drawing.Point(left + 180, y),
                 Size = new System.Drawing.Size(55, 21),
-                TabIndex = 22,
+                TabIndex = 20,
                 Font = font,
                 AccessibleName = "SWR halt threshold",
             };
             radioPanel.Controls.Add(_radioSwrHaltThresholdUpDown);
-            y += 32;
-
-            // Startup-only power workaround for the Hamlib Kenwood-backend bug (RadioSettings.
-            // StartupPowerEnabled's own doc comment has the full story) -- off by default, so
-            // nothing changes for anyone who hasn't hit the bug. When checked, jimmy-engine-host
-            // commands Watts/Max watts (as a fraction) to the rig exactly once at startup, then
-            // leaves power alone -- changing it by hand on the rig afterward, including band
-            // changes, sticks.
-            _radioStartupPowerEnabledCheckBox = new System.Windows.Forms.CheckBox
-            {
-                Text = "Set power once at startup",
-                Checked = ctrl.Radio.StartupPowerEnabled,
-                Location = new System.Drawing.Point(left, y),
-                AutoSize = true,
-                TabIndex = 23,
-                Font = font,
-                AccessibleName = "Set power once at startup",
-            };
-            _radioStartupPowerEnabledCheckBox.CheckedChanged += (s, e) => UpdateStartupPowerEnabled();
-            radioPanel.Controls.Add(_radioStartupPowerEnabledCheckBox);
-
-            var startupPowerWattsLabel = new System.Windows.Forms.Label
-            {
-                Text = "Watts:",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left + 290, y + 3),
-                Font = font,
-                TabStop = false,
-            };
-            radioPanel.Controls.Add(startupPowerWattsLabel);
-
-            _radioStartupPowerWattsUpDown = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum = 1,
-                Maximum = 1000,
-                Value = Math.Max(1, Math.Min(1000, ctrl.Radio.StartupPowerWatts)),
-                Location = new System.Drawing.Point(left + 340, y),
-                Size = new System.Drawing.Size(55, 21),
-                TabIndex = 24,
-                Font = font,
-                AccessibleName = "Startup power watts",
-            };
-            radioPanel.Controls.Add(_radioStartupPowerWattsUpDown);
-
-            var startupPowerMaxWattsLabel = new System.Windows.Forms.Label
-            {
-                Text = "Rig max watts:",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left + 410, y + 3),
-                Font = font,
-                TabStop = false,
-            };
-            radioPanel.Controls.Add(startupPowerMaxWattsLabel);
-
-            _radioStartupPowerMaxWattsUpDown = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum = 1,
-                Maximum = 1000,
-                Value = Math.Max(1, Math.Min(1000, ctrl.Radio.StartupPowerMaxWatts)),
-                Location = new System.Drawing.Point(left + 510, y),
-                Size = new System.Drawing.Size(55, 21),
-                TabIndex = 25,
-                Font = font,
-                AccessibleName = "Rig maximum watts",
-            };
-            radioPanel.Controls.Add(_radioStartupPowerMaxWattsUpDown);
             y += 32;
 
             var audioStepLabel = new System.Windows.Forms.Label
@@ -1585,21 +1507,18 @@ namespace WSJTX_Controller
 
             UpdateRadioHostPortEnabled();
             UpdateSwrHaltEnabled();
-            UpdateStartupPowerEnabled();
         }
 
+        // 2026-08-20: used to gate these on "Read/Display Pwr+SWR" (pollOn), since SWR-halt used
+        // to depend on the SAME RigctldClient poll loop that checkbox enabled. That poll loop is
+        // retired -- SWR-halt now reads the engine's own SNAPSHOT (radio.txSwr) unconditionally,
+        // via WsjtxClient.Direct.cs's DirectApplyStatus -- so it no longer depends on that
+        // checkbox at all, and gating it there would leave a real safety feature unreachable
+        // (greyed out) for an operator who happens to have Pwr+SWR display turned off.
         private void UpdateSwrHaltEnabled()
         {
-            bool pollOn = _radioReadDisplayPwrSwrCheckBox?.Checked ?? false;
-            if (_radioHaltTxOnHighSwrCheckBox != null) _radioHaltTxOnHighSwrCheckBox.Enabled = pollOn;
-            if (_radioSwrHaltThresholdUpDown != null) _radioSwrHaltThresholdUpDown.Enabled = pollOn;
-        }
-
-        private void UpdateStartupPowerEnabled()
-        {
-            bool on = _radioStartupPowerEnabledCheckBox?.Checked ?? false;
-            if (_radioStartupPowerWattsUpDown != null) _radioStartupPowerWattsUpDown.Enabled = on;
-            if (_radioStartupPowerMaxWattsUpDown != null) _radioStartupPowerMaxWattsUpDown.Enabled = on;
+            if (_radioHaltTxOnHighSwrCheckBox != null) _radioHaltTxOnHighSwrCheckBox.Enabled = true;
+            if (_radioSwrHaltThresholdUpDown != null) _radioSwrHaltThresholdUpDown.Enabled = true;
         }
 
         // Split out from BuildRadioTab: this section had grown tall enough to render below the
@@ -3026,7 +2945,13 @@ namespace WSJTX_Controller
             bool ok;
             using (var test = new RigctldClient(host, port))
             {
-                if (!external)
+                // Try whatever's already listening first -- e.g. the engine host's own rigctld,
+                // if a session happens to already be running -- before ever trying to launch a
+                // second one on the same port, which would just fail with a misleading "port
+                // already in use" error rather than the real PASS this should report.
+                bool alreadyAnswering = test.WaitUntilReady(500);
+
+                if (!alreadyAnswering && !external)
                 {
                     if (!test.LaunchBundled(ExtractRigModelId(_radioRigModelCombo.Text.Trim()), _radioComPortTextBox.Text.Trim(), _radioBaudRateTextBox.Text.Trim()))
                     {
@@ -3039,14 +2964,18 @@ namespace WSJTX_Controller
                     }
                 }
 
-                var status = test.PollOnce();
-                ok = status.Ok;
-                resultText = status.Ok
-                    ? "PASS -- rigctld answered."
-                    : "FAIL: " + (status.LastError ?? "no response");
+                // A plain frequency query -- deliberately never "l RFPOWER"/"l SWR"/"l STRENGTH"
+                // here (which is what this used to do, via PollOnce()). This button only ever
+                // reports PASS/FAIL, never the actual meter values, so there was nothing to gain
+                // from those level queries -- and on a Kenwood rig, an RFPOWER read on a
+                // freshly-spawned rigctld can trip Hamlib bug #1595's destructive calibration
+                // sweep, dropping the operator's actual transmit power to 5W. A read must never
+                // be able to change anything on the radio.
+                ok = alreadyAnswering || test.WaitUntilReady(3000);
+                resultText = ok ? "PASS -- rigctld answered." : "FAIL: " + (test.LastError ?? "no response");
                 SetRadioTestResult(resultText);
 
-                if (!external) test.StopBundled();
+                if (!alreadyAnswering && !external) test.StopBundled();
             }
 
             System.Windows.Forms.MessageBox.Show(this, resultText, "Radio Test Result",
@@ -3058,15 +2987,14 @@ namespace WSJTX_Controller
         {
             if (_radioWsjtxCatRb == null) return;
 
-            // Snapshot everything ApplyEngineMode()/ApplyRadioSettings() actually care about,
-            // from BEFORE this save's writes below -- confirmed live, 2026-08-07: both used to
-            // run unconditionally on every single Options save, restarting the live native
-            // engine (and its rigctld connection) even when the operator only touched an
-            // unrelated tab (e.g. Logbook Sync). That restart does not durably preserve the
-            // radio's actual current frequency, so it retuned the operator's real radio away
-            // from what it was actually on (40m -> 20m), with no radio-related change intended
-            // at all. Now: only restart/reconnect when something that actually feeds into
-            // either call changed.
+            // Snapshot everything ApplyEngineMode() actually cares about, from BEFORE this
+            // save's writes below -- confirmed live, 2026-08-07: it used to run unconditionally
+            // on every single Options save, restarting the live native engine even when the
+            // operator only touched an unrelated tab (e.g. Logbook Sync). That restart does not
+            // durably preserve the radio's actual current frequency, so it retuned the
+            // operator's real radio away from what it was actually on (40m -> 20m), with no
+            // radio-related change intended at all. Now: only restart when something that
+            // actually feeds into it changed.
             string wasMyCall = ctrl.NativeEngine.MyCall;
             string wasMyGrid = ctrl.NativeEngine.MyGrid;
             string wasAudioIn = ctrl.NativeEngine.AudioInputDevice;
@@ -3086,13 +3014,6 @@ namespace WSJTX_Controller
             bool wasPttDataSource = r.PttDataSource;
             RadioSplitMode wasSplitMode = r.SplitMode;
             string wasPttSerialPort = r.PttSerialPort;
-            int wasPollIntervalMs = r.PollIntervalMs;
-            bool wasReadDisplayPwrSwr = r.ReadDisplayPwrSwr;
-            bool wasHaltTxOnHighSwr = r.HaltTxOnHighSwr;
-            double wasSwrHaltThreshold = r.SwrHaltThreshold;
-            bool wasStartupPowerEnabled = r.StartupPowerEnabled;
-            int wasStartupPowerWatts = r.StartupPowerWatts;
-            int wasStartupPowerMaxWatts = r.StartupPowerMaxWatts;
 
             ctrl.Radio.Mode = _radioHamlibRb.Checked ? RadioControlMode.HamlibRigctld : RadioControlMode.WsjtxCat;
             ctrl.Radio.RigModel = ExtractRigModelId(_radioRigModelCombo.Text.Trim());
@@ -3100,8 +3021,22 @@ namespace WSJTX_Controller
             ctrl.Radio.BaudRate = _radioBaudRateTextBox.Text.Trim();
             ctrl.Radio.UseExternalRigctld = _radioUseExternalCheckBox.Checked;
             ctrl.Radio.RigctldHost = _radioHostTextBox.Text.Trim();
+            // Release-audit finding, 2026-08-20: an invalid/out-of-range port used to be
+            // silently discarded here -- ctrl.Radio.RigctldPort just kept its previous value
+            // with no warning, no correction, and no re-highlighting, unlike RadioTestButton_
+            // Click's own handling of the same field (falls back to a sensible default on the
+            // same bad input). Now surfaced to the operator instead of disappearing silently.
             if (int.TryParse(_radioPortTextBox.Text.Trim(), out int port) && port > 0 && port <= 65535)
+            {
                 ctrl.Radio.RigctldPort = port;
+            }
+            else
+            {
+                MessageBox.Show(
+                    $"'{_radioPortTextBox.Text.Trim()}' is not a valid rigctld port (must be 1-65535). Keeping the previous port, {ctrl.Radio.RigctldPort}.",
+                    "Invalid Radio Port", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _radioPortTextBox.Text = ctrl.Radio.RigctldPort.ToString();
+            }
             ctrl.Radio.PttEnabled = _radioPttEnabledCheckBox.Checked;
             ctrl.Radio.PttMethod = _radioPttMethodCombo != null && Enum.TryParse(_radioPttMethodCombo.SelectedItem as string, out PttMethod pttMethod)
                 ? pttMethod : ctrl.Radio.PttMethod;
@@ -3119,17 +3054,18 @@ namespace WSJTX_Controller
                     : RadioSplitMode.None;
             }
             if (_radioPttSerialPortCombo != null) ctrl.Radio.PttSerialPort = _radioPttSerialPortCombo.Text.Trim();
-            if (_radioPollIntervalUpDown != null) ctrl.Radio.PollIntervalMs = (int)_radioPollIntervalUpDown.Value * 1000;
-            if (_radioReadDisplayPwrSwrCheckBox != null)
-            {
-                ctrl.Radio.ReadDisplayPwrSwr = _radioReadDisplayPwrSwrCheckBox.Checked;
-                ctrl.Radio.PollEnabled = _radioReadDisplayPwrSwrCheckBox.Checked;
-            }
+            // Release-audit finding, 2026-08-20: HaltTxOnHighSwr/SwrHaltThreshold used to be
+            // included in radioSettingsChanged below, forcing a full EngineHost/radio/audio
+            // restart (interrupting decode/audio/CAT, risking a missed slot) for what is really a
+            // live-read-only Jimmy-side setting -- DirectApplyStatus (WsjtxClient.Direct.cs)
+            // reads ctrl.Radio.HaltTxOnHighSwr/SwrHaltThreshold directly on every SNAPSHOT poll
+            // tick; neither one is ever baked into the engine host's own launch args the way an
+            // actual radio-identity setting (rig model, CAT port, PTT method, ...) is. Same
+            // "not part of radioSettingsChanged, read live" shape as AudioStepPercent/
+            // RememberTxLevelPerBand just below -- moved to sit with them instead of with the
+            // real restart-requiring radio settings above.
             if (_radioHaltTxOnHighSwrCheckBox != null) ctrl.Radio.HaltTxOnHighSwr = _radioHaltTxOnHighSwrCheckBox.Checked;
             if (_radioSwrHaltThresholdUpDown != null) ctrl.Radio.SwrHaltThreshold = (double)_radioSwrHaltThresholdUpDown.Value;
-            if (_radioStartupPowerEnabledCheckBox != null) ctrl.Radio.StartupPowerEnabled = _radioStartupPowerEnabledCheckBox.Checked;
-            if (_radioStartupPowerWattsUpDown != null) ctrl.Radio.StartupPowerWatts = (int)_radioStartupPowerWattsUpDown.Value;
-            if (_radioStartupPowerMaxWattsUpDown != null) ctrl.Radio.StartupPowerMaxWatts = (int)_radioStartupPowerMaxWattsUpDown.Value;
             // Not part of radioSettingsChanged below -- read live on every AudioLevel() call
             // (WsjtxClient.BandAudio.cs), never baked into the engine's own launch args, so no
             // restart is ever needed for this one to take effect.
@@ -3151,11 +3087,10 @@ namespace WSJTX_Controller
             ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
             if (_dxClusterAddressTextBox != null) ctrl.dxClusterAddress = _dxClusterAddressTextBox.Text.Trim();
 
-            // Only run either call if something it actually depends on changed -- see this
-            // method's own opening comment. radioSettingsChanged also covers ApplyEngineMode(),
-            // not just ApplyRadioSettings(): Launch() bakes the whole Radio settings object into
-            // the engine host's own CLI args, so a Radio-only change still needs a restart to
-            // take effect.
+            // Only restart if something it actually depends on changed -- see this method's own
+            // opening comment. radioSettingsChanged feeds ApplyEngineMode(): Launch() bakes the
+            // whole Radio settings object into the engine host's own CLI args, so a Radio-only
+            // change still needs a restart to take effect.
             bool engineIdentityChanged =
                 wasMyCall != ctrl.NativeEngine.MyCall || wasMyGrid != ctrl.NativeEngine.MyGrid ||
                 wasAudioIn != ctrl.NativeEngine.AudioInputDevice || wasAudioOut != ctrl.NativeEngine.AudioOutputDevice ||
@@ -3165,21 +3100,10 @@ namespace WSJTX_Controller
                 wasBaudRate != r.BaudRate || wasUseExternal != r.UseExternalRigctld || wasHost != r.RigctldHost ||
                 wasPort != r.RigctldPort || wasPttEnabled != r.PttEnabled || wasPttMethod != r.PttMethod ||
                 wasTxMode != r.TxMode || wasPttDataSource != r.PttDataSource ||
-                wasSplitMode != r.SplitMode || wasPttSerialPort != r.PttSerialPort ||
-                wasPollIntervalMs != r.PollIntervalMs || wasReadDisplayPwrSwr != r.ReadDisplayPwrSwr ||
-                wasHaltTxOnHighSwr != r.HaltTxOnHighSwr || wasSwrHaltThreshold != r.SwrHaltThreshold ||
-                wasStartupPowerEnabled != r.StartupPowerEnabled || wasStartupPowerWatts != r.StartupPowerWatts ||
-                wasStartupPowerMaxWatts != r.StartupPowerMaxWatts;
+                wasSplitMode != r.SplitMode || wasPttSerialPort != r.PttSerialPort;
 
-            // ApplyEngineMode() first (when applicable): under HamlibRigctld it launches the
-            // engine host, which owns and spawns the real rigctld; ApplyRadioSettings() then
-            // only ever CONNECTS to that rigctld in this combination, never launches its own,
-            // so running it after gives the real rigctld a head start instead of racing its first
-            // poll tick against a daemon that doesn't exist yet (found live, 2026-08-06/07).
             if (engineIdentityChanged || radioSettingsChanged)
                 ctrl.ApplyEngineMode();
-            if (radioSettingsChanged)
-                ctrl.ApplyRadioSettings();
         }
 
         // Options > Decode tab. Only DecodeDepth has a live control-port path (see
@@ -3201,8 +3125,26 @@ namespace WSJTX_Controller
             bool wasSingleDecode = d.SingleDecode;
 
             d.DecodeDepth = _decodeDepthCombo.SelectedIndex + 1;
-            d.DecodeFLowHz = (int)_decodeFLowUpDown.Value;
-            d.DecodeFHighHz = (int)_decodeFHighUpDown.Value;
+
+            // Release-audit finding, 2026-08-20: F Low and F High used to each be independently
+            // clamped to [200, 3900] but never cross-validated against each other -- an operator
+            // could save FLow=3900, FHigh=200 (or any other inverted range) and have it flow
+            // straight into the native engine's launch args via ApplyEngineMode() below.
+            int newFLow = (int)_decodeFLowUpDown.Value;
+            int newFHigh = (int)_decodeFHighUpDown.Value;
+            if (newFLow >= newFHigh)
+            {
+                MessageBox.Show(
+                    $"Decode F Low ({newFLow} Hz) must be less than F High ({newFHigh} Hz). Keeping the previous values, F Low {wasFLow} Hz and F High {wasFHigh} Hz.",
+                    "Invalid Decode Frequency Range", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                _decodeFLowUpDown.Value = wasFLow;
+                _decodeFHighUpDown.Value = wasFHigh;
+            }
+            else
+            {
+                d.DecodeFLowHz = newFLow;
+                d.DecodeFHighHz = newFHigh;
+            }
             d.ApDecode = _decodeApDecodeCheckBox.Checked;
             d.ApCqOnly = _decodeApCqOnlyCheckBox.Checked;
             d.SingleDecode = _decodeSingleDecodeCheckBox.Checked;
@@ -3273,7 +3215,7 @@ namespace WSJTX_Controller
                 new { Key = "CallingMe",      Label = "Calling me",          Enabled = ctrl.mycallCheckBox.Checked,    File = ctrl.soundFile_CallingMe,   EnabledEditable = true  },
                 new { Key = "Logged",         Label = "Logged",              Enabled = ctrl.loggedCheckBox.Checked,    File = ctrl.soundFile_Logged,      EnabledEditable = true  },
                 new { Key = "TxEnabled",      Label = "TX enabled",          Enabled = ctrl.soundEnabled_TxEnabled,    File = ctrl.soundFile_TxEnabled,   EnabledEditable = true  },
-                new { Key = "Disconnected",   Label = "WSJT-X disconnected", Enabled = ctrl.soundEnabled_Disconnected, File = ctrl.soundFile_Disconnected,EnabledEditable = true  },
+                new { Key = "Disconnected",   Label = "Engine disconnected", Enabled = ctrl.soundEnabled_Disconnected, File = ctrl.soundFile_Disconnected,EnabledEditable = true  },
                 new { Key = "NewDxcc",        Label = "New DXCC",            Enabled = ctrl.soundEnabled_NewDxcc,      File = ctrl.soundFile_NewDxcc,     EnabledEditable = true  },
                 new { Key = "NewDxccOnBand",  Label = "New DXCC on band",    Enabled = ctrl.soundEnabled_NewDxccOnBand,File = ctrl.soundFile_NewDxccOnBand,EnabledEditable = true },
                 new { Key = "AlwaysWanted",   Label = "Always Wanted",       Enabled = ctrl.soundEnabled_AlwaysWanted, File = ctrl.soundFile_AlwaysWanted, EnabledEditable = true },
@@ -3811,6 +3753,7 @@ namespace WSJTX_Controller
                 HotkeyAction.Help,
                 HotkeyAction.UpdateCheck,
                 HotkeyAction.CallCqMode,
+                HotkeyAction.CallCqOptions,
                 HotkeyAction.ListenMode,
                 HotkeyAction.EnableTx,
                 HotkeyAction.HaltTx,
@@ -4772,14 +4715,15 @@ namespace WSJTX_Controller
             };
             lotwBox.Controls.Add(_lotwStatusLbl);
 
-            // LoTW upload itself stays a manual, WSJT-X-driven action (its own TQSL
-            // signing/upload is batch-oriented, not a per-QSO API call like QRZ/Club Log,
-            // so there is no real-time-upload option to offer here) -- this checkbox only
-            // gates whether the upload hotkey below tells WSJT-X to do it at all, for
-            // operators who don't use LoTW and would otherwise see WSJT-X report an error.
+            // LoTW upload itself stays a manual action (Jimmy invokes TQSL itself --
+            // RunTqslUpload/TqslUploadClient.cs -- its own signing/upload is batch-oriented,
+            // not a per-QSO API call like QRZ/Club Log, so there is no real-time-upload option
+            // to offer here) -- this checkbox only gates whether the upload hotkey below tells
+            // TQSL to do it at all, for operators who don't use LoTW and would otherwise see a
+            // TQSL error.
             _lotwUploadEnabledCb = new System.Windows.Forms.CheckBox
             {
-                Text           = $"Have WSJT-X upload to LoTW when pressing {uploadLotwKeyText} (uncheck if you don't use LoTW)",
+                Text           = $"Upload to LoTW (via TQSL) when pressing {uploadLotwKeyText} (uncheck if you don't use LoTW)",
                 Checked        = ctrl.lotwUploadEnabled,
                 Location       = new System.Drawing.Point(10, 116),
                 AutoSize       = true,
