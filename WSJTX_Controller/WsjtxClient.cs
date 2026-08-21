@@ -2590,13 +2590,24 @@ namespace WSJTX_Controller
             DisableTx(true);
         }
 
-        // After abandoning a QSO, reset WSJT-X's pending TX message to CQ (cmd:10 + cmd:6).
-        // This prevents a stale mid-QSO message (e.g. RRR) from firing if TX is re-enabled
-        // before a fresh Reply can reset the selection.
+        // Live critical bug, 2026-08-21: this used to call SetupCq(false), which -- regardless of
+        // the enableTx argument -- still sends a real CALL_CQ command to the engine
+        // (DirectSendCq), and Engine::call_cq itself arms TX on the engine side. Both Escape and
+        // Alt+H (Controller.cs) call HaltAndDisableTx() (HALT_TX + SET_TX_ENABLED 0) and then
+        // immediately called this method, which re-armed TX moments later -- pressing Escape/
+        // Alt+H visibly halted transmission and Jimmy then started transmitting again on its own.
+        // The original cmd:10/cmd:6 comment described the classic WSJT-X/UDP protocol, where
+        // "reset the pending TX message to CQ" was a purely local, passive UI operation with no
+        // engine-side arming at all -- WSJT-X wouldn't transmit until separately told to. That
+        // concept does not exist in Direct mode: the engine only ever transmits when explicitly
+        // commanded via CALL_CQ/REPLY, so there is no "stale pending message" that can fire on
+        // its own, and nothing here needs to pre-arm anything for a future action to build on.
+        // Now a genuine no-op under Direct mode -- required behavior: after an explicit halt, TX
+        // must stay disabled until the operator starts a real new transmit action (Alt+C, a
+        // Reply, etc.), each of which already sends its own real CALL_CQ/REPLY when the operator
+        // asks for it.
         public void ResetTxToCq()
         {
-            if (!ConnectedToWsjtx()) return;
-            SetupCq(false);
         }
 
         public void UpdateModeSelection()
