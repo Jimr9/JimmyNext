@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Using Jimmy Next — Jimmy Next</title>
+<meta name="description" content="How operating mode, the calling queue, wanted calls, and replies work in Jimmy Next.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <div class="site-title-row">
+      <a class="site-title" href="index.html">Jimmy Next</a>
+      <span class="beta-badge">Public Beta</span>
+    </div>
+    <p class="site-tagline">Accessible FT8/FT4 operation — the next generation of Jimmy</p>
+    <nav class="site-nav" aria-label="Site">
+      <ul>
+        <li><a href="index.html">Home</a></li>
+        <li><a href="install.html">Get Started</a></li>
+        <li><a href="using.html" aria-current="page">Using Jimmy Next</a></li>
+        <li><a href="keyboard.html">Keyboard Commands</a></li>
+        <li><a href="awards.html">Awards &amp; Logging</a></li>
+        <li><a href="settings.html">Settings</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <h1>Using Jimmy Next</h1>
+  <p class="lede">Jimmy Next processes QSOs in one of two modes, and builds an accessible "Stations calling" list you work through from the keyboard.</p>
+
+  <h2>Two operating modes</h2>
+  <p>Switch between them any time:</p>
+  <ul>
+    <li><strong>Call CQ mode</strong> (<kbd>Alt</kbd>+<kbd>C</kbd>) — Jimmy Next calls CQ for you, using whichever CQ variant you've selected (CQ only, CQ DX only, or both).</li>
+    <li><strong>Listen for calls mode</strong> (<kbd>Alt</kbd>+<kbd>L</kbd>) — Jimmy Next listens without transmitting CQ, and still builds the calling list from everything it hears.</li>
+  </ul>
+  <p>In either mode, stations you haven't worked yet are added to the <strong>Stations calling</strong> list. Stations calling you directly always get top priority and are moved to the top of the list.</p>
+
+  <h2>The calling queue</h2>
+  <p>You never have to manually track who's calling — Jimmy Next filters, tags, and orders incoming stations for you:</p>
+  <ul>
+    <li>A station replying to your callsign always ranks above everything else.</li>
+    <li>Below that, categories like New DXCC, Wanted Calls, Directed CQ, and stations still needed for an active award are ranked in tiers you can fully reorder and re-weight yourself (<kbd>Alt</kbd>+<kbd>S</kbd>, the Sort Order Editor).</li>
+    <li>Within ordinary CQ traffic, stations are sorted by whichever method you choose — order received, most recent first, strongest/weakest signal, nearest/farthest, or by compass direction — with several methods chainable as tie-breakers.</li>
+    <li>Filters let you decide which categories are even admitted to the queue, and a block list keeps specific callsigns out entirely.</li>
+  </ul>
+  <p>Focus the list with <kbd>Ctrl</kbd>+<kbd>W</kbd>, and press <kbd>Alt</kbd>+<kbd>N</kbd> to skip straight to the next available station without waiting out a timeout — one of the most useful shortcuts in Jimmy Next.</p>
+
+  <h2>Wanted Calls</h2>
+  <p>Type specific callsigns into the Wanted Calls list (Options) to always push them toward the top of the queue. There's also a separate "alert when heard anywhere" option, which plays a distinct sound the instant a wanted callsign is heard in any decode — even one you wouldn't otherwise be shown.</p>
+  <p>Jimmy Next also tags calls as wanted automatically based on your logbook: new DXCC entities, states you still need, CQ zones you still need, and stations still needed for any award you're actively tracking (see <a href="awards.html">Awards &amp; Logging</a>).</p>
+
+  <h2>Replying and managing a contact</h2>
+  <ul>
+    <li>Select a station from the calling list and Jimmy Next handles the rest of the exchange — signal reports, RR73/73 — automatically.</li>
+    <li><strong>Manual Call</strong> (<kbd>Alt</kbd>+<kbd>J</kbd>) lets you type any callsign to call directly, bypassing the queue. If lookups are enabled, Jimmy Next shows a quick confirmation with the station's grid square before actually calling.</li>
+    <li><strong>Toggle Extended Timeout</strong> (<kbd>Alt</kbd>+<kbd>X</kbd>, sometimes called "Hold") gives a marginal or weak station extra transmissions before Jimmy Next would otherwise give up and move on — useful when you can tell a contact is close to completing. It resets automatically once the contact finishes or changes.</li>
+    <li><kbd>Escape</kbd> halts transmit, cancels the current QSO, and returns you to Listen mode.</li>
+  </ul>
+
+  <h2>DX Spot Watch</h2>
+  <p>Press <kbd>Ctrl</kbd>+<kbd>4</kbd> to open a small, personal watch list of specific callsigns. For each one, Jimmy Next shows when and where it was last heard on the air in near real time — even stations you haven't decoded yourself — pulled from PSK Reporter's live spot feed. It's ideal for tracking a specific chase target: a DXpedition, a special-event station, or a POTA/SOTA activator you're waiting for. Spot Watch is intentionally separate from Wanted Calls — adding a callsign here doesn't change queue priority, it's purely "is this station even active right now, and where."</p>
+</main>
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <p>Jimmy Next is developed by KB0UZT.</p>
+    <p><a href="https://groups.io/g/tilly-beta/topics">Discussion group</a> &middot; <a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings — Jimmy Next</title>
+<meta name="description" content="Jimmy Next's appearance, sound, lookup, radio, and accessibility options.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <div class="site-title-row">
+      <a class="site-title" href="index.html">Jimmy Next</a>
+      <span class="beta-badge">Public Beta</span>
+    </div>
+    <p class="site-tagline">Accessible FT8/FT4 operation — the next generation of Jimmy</p>
+    <nav class="site-nav" aria-label="Site">
+      <ul>
+        <li><a href="index.html">Home</a></li>
+        <li><a href="install.html">Get Started</a></li>
+        <li><a href="using.html">Using Jimmy Next</a></li>
+        <li><a href="keyboard.html">Keyboard Commands</a></li>
+        <li><a href="awards.html">Awards &amp; Logging</a></li>
+        <li><a href="settings.html" aria-current="page">Settings</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <h1>Settings</h1>
+  <p class="lede">Everything below lives in Options (<kbd>Alt</kbd>+<kbd>O</kbd>), organized into tabs.</p>
+
+  <h2>Accessibility</h2>
+  <p>Accessibility isn't a separate mode in Jimmy Next — it's how the whole program is built. Every control has a clear, plain-language accessible name for JAWS and NVDA, and every action is reachable without a mouse. A few settings specifically control how much Jimmy Next says:</p>
+  <ul>
+    <li><strong>Keep list position during refresh</strong> (Advanced UI tab) — uncheck this for quieter screen-reader behavior when lists update frequently.</li>
+    <li><strong>Move focus to status after selecting a call</strong> (General tab, off by default) — re-announces the status line right after you pick a call from a list.</li>
+    <li>A dedicated <strong>Accessibility Navigation</strong> group of hotkeys jumps focus directly to any list or status area — see <a href="keyboard.html">Keyboard Commands</a>.</li>
+    <li>Nearly every hotkey in Jimmy Next, including navigation shortcuts, can be reassigned to a key combination that works for you. A small handful of fixed commands (Delete, Escape, and Ctrl+Y) aren't reassignable — see <a href="keyboard.html">Keyboard Commands</a> for the full list.</li>
+  </ul>
+
+  <h2>Radio</h2>
+  <p>The Radio tab is where you point Jimmy Next at your rig for CAT control and PTT/audio — select your radio and audio devices there. Since Jimmy Next's engine is bundled, there's no separate program's radio settings to keep in sync with Jimmy Next's own.</p>
+
+  <h2>Appearance</h2>
+  <p>The Appearance tab controls how the station lists look, for sighted users or anyone using screen magnification:</p>
+  <ul>
+    <li><strong>Theme</strong> — Default, Dark, or High Contrast presets.</li>
+    <li>Independent color pickers for list background, list text, and alternating-row color, if you want something other than a preset.</li>
+    <li><strong>Per-alert colors</strong> — give any alert category (New DXCC, Zone Needed, Always Wanted, and the rest) its own foreground and background color, independent of the general list colors, so the calling queue can visually stand out row by row.</li>
+    <li><strong>List font size</strong> — 8 to 18 points.</li>
+    <li>A <strong>Restore Defaults</strong> button to reset colors and font size back to Jimmy Next's original look.</li>
+  </ul>
+
+  <h2>Sounds</h2>
+  <p>Jimmy Next can play a distinct sound for 14 different events — a new call added, a call directed to you, a QSO logged, transmit enabled, a new DXCC (overall or on the current band), an always-wanted call, a directed CQ, POTA or SOTA activity, a wanted call heard anywhere, an interesting call on the opposite period, and a needed-award match. Each one can be turned on or off individually and pointed at your own <code>.wav</code> file, with a Test button to preview it.</p>
+
+  <h2>Lookups</h2>
+  <p>Jimmy Next can combine several sources into one record for any callsign — country, DXCC entity, state, grid, LoTW status, and more. All of it is optional and configured on the <strong>Lookup Data</strong> tab in Options:</p>
+  <ul>
+    <li><strong>QRZ Callsign Lookup</strong> — your normal QRZ.com login (username and password). Adds name, country, state, grid, and QSL manager info, cached locally. A free login works, but QRZ restricts the data fields it returns without an XML Data subscription; adding that subscription's API key (see below) unlocks full data.</li>
+    <li><strong>Club Log Country Data</strong> — an offline country/DXCC reference dataset Jimmy Next downloads and refreshes automatically, no account needed.</li>
+    <li><strong>HamQTH</strong> — an alternate callsign lookup source, cached the same way as QRZ.</li>
+    <li><strong>LoTW User Activity</strong> — tracks which callsigns are known LoTW users, usable as an optional tiebreaker when ranking the calling queue.</li>
+    <li><strong>FCC ULS</strong> — the official FCC amateur license database, for the most authoritative US state on a callsign, and downloaded weekly rather than fetched per-call. Opt-in and off by default, since it's roughly a 170&nbsp;MB download; it always takes priority over QRZ's state guess once enabled. It can also fill in an operator's name for US callsigns — QRZ's own profile name is still preferred, but some QRZ profiles only have a first name/initial on file with no last name, so Jimmy Next uses whichever source's name is more complete.</li>
+  </ul>
+  <p>A master <strong>Use lookup data</strong> switch turns all of this off at once without losing your saved settings. Looking up a station manually (the Lookup Selected Station command, unassigned by default, works from any list — see <a href="keyboard.html">Keyboard Commands</a>) shows whatever's already known immediately, and automatically checks QRZ live if that callsign hasn't been looked up yet.</p>
+  <p>Your own logbook's upload/download credentials — QRZ Logbook, Club Log, LoTW, and eQSL — live on a separate <strong>Logbook Sync</strong> tab instead, since they serve a different purpose (syncing QSOs you've logged, not looking up other stations). See <a href="awards.html">Awards &amp; Logging</a> for how that works, including optional automatic downloads.</p>
+
+  <h2>Updates</h2>
+  <p>Press <kbd>F4</kbd> any time to check for a newer Jimmy Next release in your browser. To have Jimmy Next check on its own, enable <strong>Check for updates on startup</strong> (General tab, off by default). If a newer version is published, Jimmy Next asks whether to download and install it — say yes, and it downloads the installer, then closes itself and launches it for you. Jimmy Next only ever offers Jimmy Next updates — it never checks against or installs a production Jimmy release, and production Jimmy never checks against Jimmy Next's releases.</p>
+</main>
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <p>Jimmy Next is developed by KB0UZT.</p>
+    <p><a href="https://groups.io/g/tilly-beta/topics">Discussion group</a> &middot; <a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Get Started — Jimmy Next</title>
+<meta name="description" content="Requirements and step-by-step setup for installing Jimmy Next, the accessible FT8/FT4 program with its own built-in engine.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <div class="site-title-row">
+      <a class="site-title" href="index.html">Jimmy Next</a>
+      <span class="beta-badge">Public Beta</span>
+    </div>
+    <p class="site-tagline">Accessible FT8/FT4 operation — the next generation of Jimmy</p>
+    <nav class="site-nav" aria-label="Site">
+      <ul>
+        <li><a href="index.html">Home</a></li>
+        <li><a href="install.html" aria-current="page">Get Started</a></li>
+        <li><a href="using.html">Using Jimmy Next</a></li>
+        <li><a href="keyboard.html">Keyboard Commands</a></li>
+        <li><a href="awards.html">Awards &amp; Logging</a></li>
+        <li><a href="settings.html">Settings</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <h1>Get Started</h1>
+  <p class="lede">Jimmy Next is self-contained — there's no companion program to track down first. Install it and it's ready to operate.</p>
+
+  <h2>What you'll need</h2>
+  <ul>
+    <li>Windows 10 or 11, 64-bit.</li>
+    <li>Nothing else. Jimmy Next ships with its own FT8/FT4 decode/transmit engine and its own .NET runtime bundled in — no separate WSJT-X install, no modified WSJT-X build, no .NET download.</li>
+  </ul>
+
+  <h2>Setup steps</h2>
+  <ol>
+    <li>Download the latest Jimmy Next installer (see the <a href="index.html">Download</a> button on the home page) — it comes as a zip; extract <code>JimmyNext.msi</code> from it and run that. <strong>If Jimmy Next is already installed and running, close it first</strong> — the installer can't update Jimmy Next while it's open.</li>
+    <li>Run through the installer, choosing your install location and shortcut preferences (Desktop and Start Menu shortcuts are offered, both on by default).</li>
+    <li>Start Jimmy Next. It launches its own bundled engine automatically in the background — there's no separate program to start first or connect to.</li>
+  </ol>
+  <p class="note">The very first time Jimmy Next runs its bundled engine, Windows Defender (or another antivirus) may take a few extra seconds to scan it — that's expected for a new, unsigned executable and only happens once. If anything looks stuck longer than that, see <a href="troubleshooting.html">Troubleshooting</a>.</p>
+
+  <h2>First run: the quick setup wizard</h2>
+  <p>The first time you open Options (<kbd>Alt</kbd>+<kbd>O</kbd>), the <strong>Basic</strong> tab walks you through the handful of choices that matter most for how Jimmy Next operates:</p>
+  <ul>
+    <li>Call CQ mode, or Listen for calls mode.</li>
+    <li>When calling CQ: plain CQ, CQ DX, or both.</li>
+    <li>Whether to also reply to DX stations and stations on your own continent.</li>
+    <li>Parks on the Air role, if relevant: Activator or Hunter.</li>
+    <li>Reply order: in the order calls were received, or most-recent-first.</li>
+  </ul>
+  <p>You'll also want to set up your radio connection (for CAT control and PTT/audio) from the Radio tab if you haven't already — see <a href="settings.html">Settings</a>. Everything chosen in the wizard can be revisited any time from the same tab, or fine-tuned further on the other Options tabs.</p>
+
+  <h2>While operating</h2>
+  <p>Once you're running, keep Jimmy Next's own window active and focused — it's designed to be operated entirely from its own window. See <a href="using.html">Using Jimmy Next</a> for how a typical operating session works, and <a href="keyboard.html">Keyboard Commands</a> for the full shortcut list.</p>
+</main>
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <p>Jimmy Next is developed by KB0UZT.</p>
+    <p><a href="https://groups.io/g/tilly-beta/topics">Discussion group</a> &middot; <a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

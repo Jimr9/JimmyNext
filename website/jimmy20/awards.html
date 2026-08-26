@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Awards &amp; Logging — Jimmy Next</title>
+<meta name="description" content="How Jimmy Next's Ham Radio Center handles automatic logging, award tracking, and syncing with QRZ, Club Log, LoTW, and eQSL.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <div class="site-title-row">
+      <a class="site-title" href="index.html">Jimmy Next</a>
+      <span class="beta-badge">Public Beta</span>
+    </div>
+    <p class="site-tagline">Accessible FT8/FT4 operation — the next generation of Jimmy</p>
+    <nav class="site-nav" aria-label="Site">
+      <ul>
+        <li><a href="index.html">Home</a></li>
+        <li><a href="install.html">Get Started</a></li>
+        <li><a href="using.html">Using Jimmy Next</a></li>
+        <li><a href="keyboard.html">Keyboard Commands</a></li>
+        <li><a href="awards.html" aria-current="page">Awards &amp; Logging</a></li>
+        <li><a href="settings.html">Settings</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <h1>Awards &amp; Logging</h1>
+  <p class="lede">Jimmy Next logs your QSOs automatically and can track dozens of amateur radio awards, flagging stations you still need right in the calling queue.</p>
+
+  <h2>Automatic logging</h2>
+  <p>You don't press a "log this QSO" button. Jimmy Next itself decides when a contact is complete — based on the standard FT8/FT4 exchange finishing — and logs it immediately, so your award progress and "still needed" tags stay current the instant a contact finishes.</p>
+
+  <h2>The Ham Radio Center</h2>
+  <p>Open it with the "Open Ham Radio Center Logbook" hotkey (unassigned by default — see <a href="keyboard.html">Keyboard Commands</a>) to reach a six-tab window:</p>
+  <ul>
+    <li><strong>My Log</strong> — your totals (QSOs, LoTW confirmed, QRZ confirmed), Worked All States/DXCC/Zones progress, upload sync status for each service, and your 10 most recent QSOs.</li>
+    <li><strong>Awards</strong> — pick any award to see detailed progress: worked/confirmed counts, a "Complete!" flag when finished, and a checklist of every state, entity, or zone still needed.</li>
+    <li><strong>Still Need</strong> — turn on live tracking for any award (see below).</li>
+    <li><strong>Lookup</strong> — search your own logbook by callsign to see every past contact with that station.</li>
+    <li><strong>Edit Log</strong> — search and filter your logbook by callsign, source, or date range, then edit, delete, or export specific QSOs, or manually add one Jimmy Next never heard directly (a CW or Phone contact worked separately, for example). Adding a new QSO fills in what it safely can — known callsign info (including name) once you tab off the Callsign field, band/mode from the current session, and the time — and a Submit/Close workflow lets you log contact after contact (handy during a contest or pileup) without the dialog closing in between; Band and Mode are left alone between entries so they don't need retyping. Mode is a combo box listing common modes (FT8, FT4, SSB, CW, RTTY, and more), but you can always type in anything else instead. Everything here is local to Jimmy Next's own logbook — it never contacts QRZ, Club Log, or LoTW, so edits and deletions don't push anywhere else automatically.</li>
+    <li><strong>Sync</strong> — manually download from QRZ, LoTW, Club Log, or eQSL, import an ADIF file, export your logbook to an ADIF file, with a history of recent imports. Exporting lets you choose which logging services' QSOs to include before the file is written.</li>
+  </ul>
+
+  <h2>"Still needed" tracking</h2>
+  <p>There are two layers, and one of them requires no setup at all:</p>
+  <ul>
+    <li><strong>Automatic baseline</strong> — Jimmy Next always flags a state you haven't confirmed yet ("WAS Needed"), a worked-but-unconfirmed DXCC entity ("DXCC Unconf"), or a CQ zone you haven't confirmed ("Zone Needed") right in the calling queue, purely from your logbook.</li>
+    <li><strong>Active award tracking</strong> — on the Still Need tab, arrow through the list of awards and press Space to check the ones you want Jimmy Next to actively tag as still-needed in the queue (and optionally play a distinct sound). Moving to a different award (without checking it) just changes which one's checklist is shown below — checking is independent of browsing, and any number of awards can be checked at once.</li>
+  </ul>
+  <p>Not every award can be tagged live while you're operating — awards grouped by county, grid square, IOTA reference, or similar detail aren't available at decode time, so those show their progress on the Awards tab instead, just without a live queue tag.</p>
+
+  <h2>Awards Jimmy Next tracks</h2>
+  <p>Jimmy Next ships with a substantial set of well-known awards already defined, and you choose which ones matter to you:</p>
+  <ul>
+    <li><strong>General:</strong> Worked All States (WAS), DXCC, Worked All Continents (WAC), CQ Worked All Zones (WAZ), CQ Worked Prefixes (WPX), CQ DX Award.</li>
+    <li><strong>QRZ-confirmed variants:</strong> QRZ United States, QRZ DX World, QRZ World Continents, QRZ Grid Squared, QRZ United States Counties.</li>
+    <li><strong>Regional:</strong> Worked All North America (RAC), Canadaward (RAC), IOTA 100 Islands (simplified), WWFF Hunter (simplified).</li>
+    <li><strong>Special events:</strong> 13 Colonies (Clean Sweep and Bonus Stations), Route 66 On The Air.</li>
+    <li><strong>Per-band Worked All States:</strong> a separate single-band WAS award for each band from 160m through 6m.</li>
+  </ul>
+  <p>Enable, disable, or fine-tune any of these from the Awards tab's <strong>Manage Rule Definitions</strong> dialog — and if none of the built-in ones fit, you can build your own from a template, including band-restricted or date-scoped ones (useful for a specific year's special event). If your award files ever end up out of date or cluttered with old test entries, a <strong>Restore Defaults</strong> button in that same dialog resets every built-in award back to its original shipped version — any award of your own it finds gets a keep-or-remove choice first, and anything removed goes to the Recycle Bin rather than being permanently deleted.</p>
+
+  <h2>Syncing with QRZ, Club Log, LoTW, and eQSL</h2>
+  <p>Each service is configured independently on the <strong>Logbook Sync</strong> tab in Options (split out from Lookup Data, which handles reference lookups instead — see <a href="settings.html">Settings</a>):</p>
+  <ul>
+    <li><strong>QRZ and Club Log</strong> both support real-time upload — each completed QSO is sent automatically as soon as it's logged, if you turn that on. Both can also download your full existing logbook from that service, either on demand with a button press or automatically on a schedule you choose (off by default, minimum once a day).</li>
+    <li><strong>LoTW</strong> is upload-on-request. Press <kbd>Alt</kbd>+<kbd>U</kbd> any time to trigger it. That same keypress also catches up any QSOs still pending for QRZ and Club Log, so it's effectively "upload everything pending, everywhere configured" in one shortcut. LoTW's own confirmation report can still be downloaded automatically on a schedule, same as QRZ and Club Log.</li>
+    <li><strong>eQSL</strong> confirmations can be downloaded and reconciled against your own logbook, so eQSL InBox confirmations show up alongside your other confirmation sources.</li>
+    <li>When any automatic download is due, it runs once, shortly after Jimmy Next starts an active session — you'll see a brief status message only if something actually ran.</li>
+    <li>The My Log tab's <strong>Sync Status</strong> section shows, per service, whether you're up to date or how many QSOs are pending, plus the last time each ran.</li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <p>Jimmy Next is developed by KB0UZT.</p>
+    <p><a href="https://groups.io/g/tilly-beta/topics">Discussion group</a> &middot; <a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a></p>
+  </div>
+</footer>
+</body>
+</html>

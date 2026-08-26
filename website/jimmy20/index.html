@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<script>
+// Jimmy Next's F4 hotkey opens this exact URL with a running-version query param
+// (https://blindsea.com/jimmy20?v=<version>). Forward straight to the dedicated
+// update-check page so F4 keeps working without needing a Jimmy Next code change --
+// this runs on every page load regardless of caching, since it just reads the
+// live URL. Anyone visiting normally (no "v" param) is unaffected.
+(function () {
+  var q = window.location.search;
+  if (/[?&]v=/.test(q)) window.location.replace("update.html" + q);
+})();
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jimmy Next — Accessible FT8/FT4 (Public Beta)</title>
+<meta name="description" content="Jimmy Next is a free Windows program that makes FT8 and FT4 operating fully accessible with a screen reader, with its own built-in engine — no separate WSJT-X install required. Public beta.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <div class="site-title-row">
+      <a class="site-title" href="index.html">Jimmy Next</a>
+      <span class="beta-badge">Public Beta</span>
+    </div>
+    <p class="site-tagline">Accessible FT8/FT4 operation — the next generation of Jimmy</p>
+    <nav class="site-nav" aria-label="Site">
+      <ul>
+        <li><a href="index.html" aria-current="page">Home</a></li>
+        <li><a href="install.html">Get Started</a></li>
+        <li><a href="using.html">Using Jimmy Next</a></li>
+        <li><a href="keyboard.html">Keyboard Commands</a></li>
+        <li><a href="awards.html">Awards &amp; Logging</a></li>
+        <li><a href="settings.html">Settings</a></li>
+        <li><a href="troubleshooting.html">Troubleshooting</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  <h1>Jimmy Next</h1>
+  <p class="lede">A free Windows program that makes FT8 and FT4 operating fully accessible with a screen reader — keyboard-driven from install to QSO, with its own decode/transmit engine built in.</p>
+
+  <div class="card beta">
+    <p><strong>Jimmy Next is public beta software.</strong> It's the actively-developed next generation of Jimmy, replacing the old external-WSJT-X-companion design with a fully self-contained program. Expect occasional rough edges, and please report anything that looks wrong — see <a href="troubleshooting.html">Troubleshooting</a> for how. If you'd rather stay on the established, stable release, see <a href="https://blindsea.com/jimmy">production Jimmy</a> instead; the two install and update completely independently, so you can also run both side by side.</p>
+  </div>
+
+  <p>
+    <a class="btn" href="https://github.com/Jimr9/JimmyNext/releases/latest/download/JimmyNext.msi.zip">Download Jimmy Next</a>
+  </p>
+  <p class="note">Free installer for 64-bit Windows 10/11, downloaded as a zip — your browser may still warn that it "isn't commonly downloaded," which is expected for a small independent project; choose Keep/Download anyway. Extract <code>JimmyNext.msi</code> from the zip and run it. (Prefer the installer directly? <a href="https://github.com/Jimr9/JimmyNext/releases/latest/download/JimmyNext.msi">Download JimmyNext.msi</a> — may trigger a stronger warning than the zip.) See <a href="install.html">Get Started</a> for what to expect during setup. If Jimmy Next is already installed and running, close it before running the installer.</p>
+
+  <h2>What's different in Jimmy Next</h2>
+  <p>Jimmy Next carries forward the same accessible, keyboard-driven operating experience as production Jimmy, on a rebuilt foundation:</p>
+  <ul>
+    <li><strong>No external WSJT-X install required.</strong> Jimmy Next includes its own FT8/FT4 decode and transmit engine — install Jimmy Next and it's ready to operate on its own.</li>
+    <li><strong>One installer, self-contained.</strong> No separate .NET runtime or modified WSJT-X build to track down or keep in sync.</li>
+    <li><strong>Runs independently of production Jimmy.</strong> Its own install folder, its own settings, its own update channel — installing or updating Jimmy Next never touches a production Jimmy install, and vice versa.</li>
+  </ul>
+
+  <h2>What Jimmy Next does</h2>
+  <p>Jimmy Next builds a list of stations calling you, manages the back-and-forth of each contact, logs completed QSOs automatically, and tracks your progress toward awards like Worked All States and DXCC — all readable and controllable with JAWS or NVDA, no mouse required.</p>
+
+  <div class="feature-grid">
+    <div class="card">
+      <h3>Built for screen readers</h3>
+      <p>Every action is reachable from the keyboard, every control has a clear accessible name, and speech output is kept short and to the point.</p>
+    </div>
+    <div class="card">
+      <h3>Smart calling queue</h3>
+      <p>Jimmy Next automatically lists stations calling you and prioritizes them — stations calling you directly always come first.</p>
+    </div>
+    <div class="card">
+      <h3>Award tracking</h3>
+      <p>Worked All States, DXCC, and dozens more, with live alerts the moment a station you still need is heard.</p>
+    </div>
+    <div class="card">
+      <h3>Automatic logging &amp; sync</h3>
+      <p>Completed QSOs are logged for you and can sync with QRZ, Club Log, LoTW, and eQSL.</p>
+    </div>
+    <div class="card">
+      <h3>Callsign lookups</h3>
+      <p>Combines QRZ, Club Log, LoTW, HamQTH, and FCC data automatically, so you know who you're working.</p>
+    </div>
+    <div class="card">
+      <h3>Fully customizable</h3>
+      <p>Remap every keyboard shortcut, choose a color theme, and control exactly which sounds and messages you get.</p>
+    </div>
+  </div>
+
+  <h2>Where to go next</h2>
+  <ul>
+    <li><a href="install.html">Get Started</a> — requirements and step-by-step setup.</li>
+    <li><a href="using.html">Using Jimmy Next</a> — how operating a QSO actually works.</li>
+    <li><a href="keyboard.html">Keyboard Commands</a> — the full command reference.</li>
+    <li><a href="troubleshooting.html">Troubleshooting</a> — reporting problems and getting help.</li>
+  </ul>
+</main>
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <p>Jimmy Next is developed by KB0UZT, built on Tilly by Andy WM8Q, with a bundled engine built on Nexus.</p>
+    <p><a href="https://groups.io/g/tilly-beta/topics">Discussion group</a> &middot; <a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a> &middot; <a href="https://blindsea.com/jimmy">Production Jimmy</a></p>
+  </div>
+</footer>
+</body>
+</html>

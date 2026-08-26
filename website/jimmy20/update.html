@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Jimmy Next Update Check</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #555555;
+    --border: #cccccc;
+    --accent: #0b5fff;
+    --ok-bg: #e6f4ea;
+    --ok-fg: #14532d;
+    --update-bg: #fff4e5;
+    --update-fg: #7a4a00;
+    --error-bg: #fdecea;
+    --error-fg: #7a1a1a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121212;
+      --fg: #f0f0f0;
+      --muted: #b8b8b8;
+      --border: #444444;
+      --accent: #6ea8ff;
+      --ok-bg: #12341f;
+      --ok-fg: #a6e6b8;
+      --update-bg: #3a2a00;
+      --update-fg: #ffcf80;
+      --error-bg: #3a1414;
+      --error-fg: #ffb3ab;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2rem 1rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    font-size: 1.1rem;
+    line-height: 1.5;
+  }
+  main {
+    max-width: 40rem;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.8rem;
+    margin-bottom: 0.25rem;
+  }
+  .subtitle {
+    color: var(--muted);
+    margin-top: 0;
+    margin-bottom: 2rem;
+  }
+  .card {
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .status {
+    font-weight: bold;
+    font-size: 1.2rem;
+    margin: 0 0 0.5rem;
+  }
+  .status.ok { background: var(--ok-bg); color: var(--ok-fg); }
+  .status.update { background: var(--update-bg); color: var(--update-fg); }
+  .status.error { background: var(--error-bg); color: var(--error-fg); }
+  .status.loading { color: var(--muted); }
+  .card.ok { background: var(--ok-bg); color: var(--ok-fg); border-color: transparent; }
+  .card.update { background: var(--update-bg); color: var(--update-fg); border-color: transparent; }
+  .card.error { background: var(--error-bg); color: var(--error-fg); border-color: transparent; }
+  dl {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.25rem 1rem;
+    margin: 1rem 0 0;
+  }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-weight: bold; }
+  .download-btn {
+    display: inline-block;
+    margin-top: 1.25rem;
+    padding: 0.75rem 1.5rem;
+    background: var(--accent);
+    color: #ffffff;
+    text-decoration: none;
+    border-radius: 0.375rem;
+    font-weight: bold;
+    font-size: 1.1rem;
+  }
+  .download-btn:focus-visible,
+  a:focus-visible {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .secondary-link {
+    display: inline-block;
+    margin-top: 1rem;
+    color: var(--accent);
+  }
+  .download-note {
+    margin-top: 1.25rem;
+    margin-bottom: 0;
+    color: var(--muted);
+    font-size: 1rem;
+  }
+  footer {
+    margin-top: 2.5rem;
+    color: var(--muted);
+    font-size: 0.95rem;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Jimmy Next Update Check</h1>
+  <p class="subtitle">Accessible FT8/FT4 for screen reader users — public beta.</p>
+
+  <div id="result" class="card" role="status" aria-live="polite">
+    <p class="status loading">Checking for updates&hellip;</p>
+  </div>
+
+  <footer>
+    <p>Jimmy Next is developed by KB0UZT. This page checks the latest release published on
+      <a href="https://github.com/jimr9/JimmyNext">GitHub</a>. This is Jimmy Next's own update
+      channel, separate from production Jimmy's.</p>
+    <p><a href="index.html">Learn more about Jimmy Next &rarr;</a></p>
+  </footer>
+</main>
+
+<script>
+(function () {
+  var REPO = "jimr9/JimmyNext";
+  var RELEASES_PAGE = "https://github.com/" + REPO + "/releases";
+
+  function parseVersion(v) {
+    if (!v) return null;
+    var cleaned = String(v).trim().replace(/^v/i, "");
+    var parts = cleaned.split(".").map(function (p) { return parseInt(p, 10); });
+    if (parts.length === 0 || parts.some(isNaN)) return null;
+    return parts;
+  }
+
+  function compareVersions(a, b) {
+    var len = Math.max(a.length, b.length);
+    for (var i = 0; i < len; i++) {
+      var x = a[i] || 0, y = b[i] || 0;
+      if (x !== y) return x - y;
+    }
+    return 0;
+  }
+
+  function getRunningVersion() {
+    var params = new URLSearchParams(window.location.search);
+    return params.get("v");
+  }
+
+  function render(html, statusClass) {
+    var el = document.getElementById("result");
+    el.className = "card" + (statusClass ? " " + statusClass : "");
+    el.innerHTML = html;
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  var runningRaw = getRunningVersion();
+  var runningParsed = parseVersion(runningRaw);
+
+  fetch("https://api.github.com/repos/" + REPO + "/releases/latest?_=" + Date.now(), {
+      cache: "no-store"
+    })
+    .then(function (r) {
+      if (!r.ok) throw new Error("GitHub API returned " + r.status);
+      return r.json();
+    })
+    .then(function (data) {
+      var latestRaw = data.tag_name || data.name || "";
+      var latestParsed = parseVersion(latestRaw);
+      var latestDisplay = escapeHtml(latestRaw.replace(/^v/i, ""));
+
+      var msiAsset = (data.assets || []).find(function (a) {
+        return /\.msi$/i.test(a.name);
+      });
+      var zipAsset = (data.assets || []).find(function (a) {
+        return /\.zip$/i.test(a.name);
+      });
+      // Prefer the zipped MSI: browsers/SmartScreen flag a bare .msi download far more
+      // aggressively than a .zip, so this avoids the scary warning for most users.
+      var primaryAsset = zipAsset || msiAsset;
+      var downloadUrl = primaryAsset ? primaryAsset.browser_download_url : RELEASES_PAGE;
+      var downloadLabel = primaryAsset
+        ? "Download " + escapeHtml(primaryAsset.name)
+        : "Go to releases";
+
+      if (!latestParsed) {
+        render(
+          '<p class="status error">Couldn\'t read the latest version from GitHub.</p>' +
+          '<a class="secondary-link" href="' + RELEASES_PAGE + '">View releases on GitHub &rarr;</a>',
+          "error"
+        );
+        return;
+      }
+
+      var publishedDate = data.published_at
+        ? new Date(data.published_at).toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" })
+        : null;
+
+      var detailsHtml = "<dl>";
+      if (runningParsed) {
+        detailsHtml += "<dt>You have</dt><dd>" + escapeHtml(runningRaw.replace(/^v/i, "")) + "</dd>";
+      }
+      detailsHtml += "<dt>Latest</dt><dd>" + latestDisplay + "</dd>";
+      if (publishedDate) {
+        detailsHtml += "<dt>Released</dt><dd>" + escapeHtml(publishedDate) + "</dd>";
+      }
+      detailsHtml += "</dl>";
+
+      var msiDirectLink = (zipAsset && msiAsset)
+        ? '<p class="download-note">Prefer the installer directly? ' +
+          '<a href="' + msiAsset.browser_download_url + '">Download ' + escapeHtml(msiAsset.name) + '</a> ' +
+          '(may trigger a stronger browser warning than the zip).</p>'
+        : "";
+
+      var downloadHtml = primaryAsset
+        ? '<p class="download-note">Your browser may still warn that this file "isn\'t commonly downloaded" ' +
+          'or could be dangerous. That\'s expected for a small, independent project like Jimmy Next &mdash; ' +
+          'choose <strong>Keep</strong> (or "Download anyway") to continue.</p>' +
+          (zipAsset ? '<p class="download-note">After downloading, extract JimmyNext.msi from the zip and run it.</p>' : '') +
+          '<p class="download-note">If Jimmy Next is currently running, close it before running the installer.</p>' +
+          '<a class="download-btn" href="' + downloadUrl + '">' + downloadLabel + "</a>" +
+          msiDirectLink
+        : '<a class="download-btn" href="' + downloadUrl + '">' + downloadLabel + "</a>";
+
+      if (!runningParsed) {
+        render(
+          '<p class="status">Latest version of Jimmy Next</p>' + detailsHtml + downloadHtml,
+          ""
+        );
+        return;
+      }
+
+      var cmp = compareVersions(runningParsed, latestParsed);
+      if (cmp < 0) {
+        render(
+          '<p class="status update">Update available</p>' + detailsHtml + downloadHtml,
+          "update"
+        );
+      } else if (cmp === 0) {
+        render(
+          '<p class="status ok">You&rsquo;re up to date</p>' + detailsHtml + downloadHtml,
+          "ok"
+        );
+      } else {
+        render(
+          '<p class="status">You&rsquo;re running a newer build than the latest published release</p>' + detailsHtml + downloadHtml,
+          ""
+        );
+      }
+    })
+    .catch(function () {
+      render(
+        '<p class="status error">Couldn\'t check for updates right now.</p>' +
+        '<a class="secondary-link" href="' + RELEASES_PAGE + '">View releases on GitHub &rarr;</a>',
+        "error"
+      );
+    });
+})();
+</script>
+</body>
+</html>
