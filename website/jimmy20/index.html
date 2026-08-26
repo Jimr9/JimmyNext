@@ -52,14 +52,15 @@
   <p>
     <a class="btn" href="https://github.com/Jimr9/JimmyNext/releases/latest/download/JimmyNext.msi.zip">Download Jimmy Next</a>
   </p>
-  <p class="note">Free installer for 64-bit Windows 10/11, downloaded as a zip — your browser may still warn that it "isn't commonly downloaded," which is expected for a small independent project; choose Keep/Download anyway. Extract <code>JimmyNext.msi</code> from the zip and run it. (Prefer the installer directly? <a href="https://github.com/Jimr9/JimmyNext/releases/latest/download/JimmyNext.msi">Download JimmyNext.msi</a> — may trigger a stronger warning than the zip.) See <a href="install.html">Get Started</a> for what to expect during setup. If Jimmy Next is already installed and running, close it before running the installer.</p>
+  <p class="note">Free installer for 64-bit Windows 10/11, downloaded as a zip. Your browser or Windows may report that Jimmy Next is not commonly downloaded, because it's a small independent project — that's expected. Only continue past that warning if you downloaded it from this official Jimmy Next website or the official <a href="https://github.com/Jimr9/JimmyNext">Jimr9/JimmyNext</a> GitHub release; if the source or filename looks different, cancel the installation. Extract <code>JimmyNext.msi</code> from the zip and run it. (Prefer the installer directly? <a href="https://github.com/Jimr9/JimmyNext/releases/latest/download/JimmyNext.msi">Download JimmyNext.msi</a> — may trigger a stronger warning than the zip.) See <a href="install.html">Get Started</a> for what to expect during setup. If Jimmy Next is already installed and running, close it before running the installer.</p>
+  <p class="note">Want to verify the download itself? Each <a href="https://github.com/Jimr9/JimmyNext/releases/latest">release on GitHub</a> publishes the exact SHA-256 checksum for both files in its release notes — compare it against what you downloaded with <code>certutil -hashfile JimmyNext.msi SHA256</code> (Windows' own built-in tool, no install needed) if you want to double-check.</p>
 
   <h2>What's different in Jimmy Next</h2>
   <p>Jimmy Next carries forward the same accessible, keyboard-driven operating experience as production Jimmy, on a rebuilt foundation:</p>
   <ul>
     <li><strong>No external WSJT-X install required.</strong> Jimmy Next bundles a built-in FT8/FT4 engine based on the free, open-source Nexus project (see <a href="#credits">Credits</a>) — install Jimmy Next and it's ready to operate on its own.</li>
     <li><strong>One installer, self-contained.</strong> No separate .NET runtime or modified WSJT-X build to track down or keep in sync.</li>
-    <li><strong>Runs independently of production Jimmy.</strong> Its own install folder, its own settings, its own update channel — installing or updating Jimmy Next never touches a production Jimmy install, and vice versa.</li>
+    <li><strong>Its own separate identity from production Jimmy.</strong> Its own install, its own settings and data, and its own update channel — kept separate by design so installing or updating one is not expected to affect the other.</li>
   </ul>
 
   <h2>What Jimmy Next does</h2>
@@ -68,7 +69,7 @@
   <div class="feature-grid">
     <div class="card">
       <h3>Built for screen readers</h3>
-      <p>Every action is reachable from the keyboard, every control has a clear accessible name, and speech output is kept short and to the point.</p>
+      <p>Jimmy Next is designed for keyboard and screen-reader operation throughout its primary setup and operating workflows, with clear accessible names on controls and speech output kept short and to the point.</p>
     </div>
     <div class="card">
       <h3>Smart calling queue</h3>
@@ -80,7 +81,7 @@
     </div>
     <div class="card">
       <h3>Automatic logging &amp; sync</h3>
-      <p>Completed QSOs are logged for you and can sync with QRZ, Club Log, LoTW, and eQSL.</p>
+      <p>Completed QSOs are logged for you automatically. Optional account setup enables real-time upload and syncing with QRZ, Club Log, LoTW, and eQSL — see <a href="awards.html">Awards &amp; Logging</a> for how each service's upload and download behavior differs.</p>
     </div>
     <div class="card">
       <h3>Callsign lookups</h3>
@@ -97,7 +98,8 @@
     <li><a href="install.html">Get Started</a> — requirements and step-by-step setup.</li>
     <li><a href="using.html">Using Jimmy Next</a> — how operating a QSO actually works.</li>
     <li><a href="keyboard.html">Keyboard Commands</a> — the full command reference.</li>
-    <li><a href="troubleshooting.html">Troubleshooting</a> — reporting problems and getting help.</li>
+    <li><a href="troubleshooting.html">Troubleshooting</a> — backing up your data, reporting problems, and getting help.</li>
+    <li><a href="https://github.com/Jimr9/JimmyNext/releases">Release notes</a> — what changed in each version, on GitHub.</li>
   </ul>
 
   <h2 id="credits">Credits</h2>
