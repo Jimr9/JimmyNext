@@ -15,7 +15,7 @@
 </script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Jimmy Next — Accessible FT8/FT4 (Public Beta)</title>
-<meta name="description" content="Jimmy Next is a free Windows program that makes FT8 and FT4 operating fully accessible with a screen reader, with its own built-in engine — no separate WSJT-X install required. Public beta.">
+<meta name="description" content="Jimmy Next is a free Windows program that makes FT8 and FT4 operating fully accessible with a screen reader. It bundles a built-in FT8/FT4 engine based on the Nexus project, so a separate WSJT-X install isn't required. Public beta.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -43,7 +43,7 @@
 
 <main id="main">
   <h1>Jimmy Next</h1>
-  <p class="lede">A free Windows program that makes FT8 and FT4 operating fully accessible with a screen reader — keyboard-driven from install to QSO, with its own decode/transmit engine built in.</p>
+  <p class="lede">A free Windows program that makes FT8 and FT4 operating fully accessible with a screen reader — keyboard-driven from install to QSO, with a built-in FT8/FT4 engine based on Nexus.</p>
 
   <div class="card beta">
     <p><strong>Jimmy Next is public beta software.</strong> It's the actively-developed next generation of Jimmy, replacing the old external-WSJT-X-companion design with a fully self-contained program. Expect occasional rough edges, and please report anything that looks wrong — see <a href="troubleshooting.html">Troubleshooting</a> for how. If you'd rather stay on the established, stable release, see <a href="https://blindsea.com/jimmy">production Jimmy</a> instead; the two install and update completely independently, so you can also run both side by side.</p>
@@ -57,7 +57,7 @@
   <h2>What's different in Jimmy Next</h2>
   <p>Jimmy Next carries forward the same accessible, keyboard-driven operating experience as production Jimmy, on a rebuilt foundation:</p>
   <ul>
-    <li><strong>No external WSJT-X install required.</strong> Jimmy Next includes its own FT8/FT4 decode and transmit engine — install Jimmy Next and it's ready to operate on its own.</li>
+    <li><strong>No external WSJT-X install required.</strong> Jimmy Next bundles a built-in FT8/FT4 engine based on the free, open-source Nexus project (see <a href="#credits">Credits</a>) — install Jimmy Next and it's ready to operate on its own.</li>
     <li><strong>One installer, self-contained.</strong> No separate .NET runtime or modified WSJT-X build to track down or keep in sync.</li>
     <li><strong>Runs independently of production Jimmy.</strong> Its own install folder, its own settings, its own update channel — installing or updating Jimmy Next never touches a production Jimmy install, and vice versa.</li>
   </ul>
@@ -99,12 +99,17 @@
     <li><a href="keyboard.html">Keyboard Commands</a> — the full command reference.</li>
     <li><a href="troubleshooting.html">Troubleshooting</a> — reporting problems and getting help.</li>
   </ul>
+
+  <h2 id="credits">Credits</h2>
+  <p>Jimmy Next's bundled FT8/FT4 engine isn't something we built from scratch — it's based on <a href="https://github.com/kd9taw/Nexus">Nexus</a>, a free, open-source amateur radio project by KD9TAW. Nexus's own FT8/FT4 code is in turn derived from WSJT-X's GPL-licensed work by Joe Taylor, K1JT, and the WSJT Development Group. We're grateful to both projects for the work that makes Jimmy Next's engine possible.</p>
+  <p>Jimmy Next is an independent project and is not affiliated with or endorsed by the WSJT Development Group.</p>
+  <p>Jimmy itself has a separate history worth knowing: it began as <strong>Tilly</strong>, created by Andy WM8Q, and that's where the accessible, keyboard-driven approach to FT8/FT4 operating carried forward into Jimmy — and now into Jimmy Next — first came from. Tilly is part of Jimmy's own story, not part of the engine Jimmy Next bundles today.</p>
 </main>
 
 <footer class="site-footer">
   <div class="site-footer-inner">
-    <p>Jimmy Next is developed by KB0UZT, built on Tilly by Andy WM8Q, with a bundled engine built on Nexus.</p>
-    <p><a href="https://groups.io/g/tilly-beta/topics">Discussion group</a> &middot; <a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a> &middot; <a href="https://blindsea.com/jimmy">Production Jimmy</a></p>
+    <p>Jimmy Next is developed by KB0UZT.</p>
+    <p><a href="https://groups.io/g/tilly-beta/topics">Discussion group</a> &middot; <a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a> &middot; <a href="#credits">Credits</a> &middot; <a href="https://blindsea.com/jimmy">Production Jimmy</a></p>
   </div>
 </footer>
 </body>

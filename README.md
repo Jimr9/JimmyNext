@@ -5,11 +5,13 @@ amateur radio operators, with a keyboard-driven interface built for screen reade
 NVDA). It is the next generation of **Jimmy**, KB0UZT's accessible FT8/FT4 companion for
 WSJT-X — currently in public beta.
 
-**Jimmy Next bundles its own FT8/FT4 decode/transmit engine.** Unlike production Jimmy, it does
-not require WSJT-X or any modified WSJT-X build at all — Jimmy Next talks directly to a
-bundled engine host (built on the third-party [Nexus](https://github.com/kd9taw/Nexus) engine,
-GPL-3.0) over a local control connection. Install Jimmy Next and go; there is nothing else to
-install alongside it.
+**Jimmy Next bundles a built-in FT8/FT4 decode/transmit engine — not one we wrote ourselves.**
+Unlike production Jimmy, it does not require WSJT-X or any modified WSJT-X build at all — Jimmy
+Next talks directly to a bundled engine host, built on the third-party, open-source
+[Nexus](https://github.com/kd9taw/Nexus) project (GPL-3.0), over a local control connection.
+Install Jimmy Next and go; there is nothing else to install alongside it. See
+[Acknowledgements](#acknowledgements) below for the full credit, including Nexus's own WSJT-X
+lineage.
 
 ## Key Features
 
@@ -34,8 +36,9 @@ production Jimmy install and update completely independently of one another.
 Jimmy began as **Tilly**, created by Andy WM8Q. Tilly provided the foundation for accessible
 FT8/FT4 operation with keyboard control, audio feedback, queue handling, and WSJT-X UDP
 integration. Jimmy is a modified and expanded continuation of that work. Jimmy Next carries that
-same operator-facing experience forward onto its own bundled decode/transmit engine, removing the
-external WSJT-X dependency entirely.
+same operator-facing experience forward onto a bundled decode/transmit engine based on Nexus,
+removing the external WSJT-X dependency entirely — see [Acknowledgements](#acknowledgements) for
+how Tilly, Nexus, and WSJT-X each fit into that history.
 
 ## Requirements
 
@@ -46,7 +49,7 @@ external WSJT-X dependency entirely.
 ## Getting Started
 
 1. Install the latest `JimmyNext.msi` from [Releases](https://github.com/jimr9/JimmyNext/releases/latest) (see [Installation](#installation) below).
-2. Start Jimmy Next. It launches its own bundled engine automatically — there is no separate program to start first.
+2. Start Jimmy Next. It launches its bundled engine automatically — there is no separate program to start first.
 
 ## Installation
 
@@ -70,10 +73,18 @@ To build the installer: `wix build -o Release\JimmyNext.msi JimmyNext.wxs` (from
 
 ## Acknowledgements
 
-Jimmy is built on **Tilly**, the original accessible WSJT-X companion application created by
+Jimmy began as **Tilly**, the original accessible WSJT-X companion application created by
 **Andy WM8Q**. Andy's work on Tilly — including the UDP integration, audio feedback system,
-keyboard control model, and queue handling — made this project possible. Jimmy Next's bundled
-engine is built on **Nexus** by kd9taw. Thank you both.
+keyboard control model, and queue handling — is why this project exists at all. That's part of
+Jimmy's own history; it isn't part of the engine Jimmy Next bundles today.
+
+Jimmy Next's bundled FT8/FT4 engine is based on **[Nexus](https://github.com/kd9taw/Nexus)**, a
+free, open-source amateur radio project by **KD9TAW**. Nexus's own FT8/FT4 code is in turn
+derived from WSJT-X's GPL-licensed work by **Joe Taylor, K1JT**, and the **WSJT Development
+Group**. Thanks to both projects for the work that makes Jimmy Next's engine possible.
+
+Jimmy Next is an independent project and is not affiliated with or endorsed by the WSJT
+Development Group.
 
 ## License
 
