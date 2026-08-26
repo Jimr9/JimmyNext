@@ -327,7 +327,19 @@ namespace WSJTX_Controller
                 // EffectiveClassification() instead of directly off the wire.
                 ClassifiedCall classification = d.EffectiveClassification();
 
-                string side = IsEvenCall(d) ? "TX1" : "TX2";
+                // Raw Decodes side-labeling fix, 2026-08-24 (item 1, independent audit finding,
+                // CONFIRMED via code reading): this used to hardcode "TX1" for the even period and
+                // "TX2" for the odd period regardless of txFirst -- correct only when txFirst is
+                // true (Jimmy transmits on the even/TX1 side). With RX First configured
+                // (txFirst=false), Jimmy transmits on the ODD side, so the even period is actually
+                // the RECEIVE side -- every raw decode heard there was mislabeled "TX1" (implying
+                // it was Jimmy's own transmit slot) instead of "RX1". Matches the SAME (band,mode)
+                // TX1/RX1/RX2/TX2 convention already used everywhere else in this file (e.g.
+                // ShowAdvancedQueue's own tx1Prefix/tx2Prefix just above, and ShowStatus's own
+                // "txFirst decides which is which" comment) -- Raw Decodes was the one place that
+                // convention was never applied.
+                bool evenCall = IsEvenCall(d);
+                string side = evenCall ? (txFirst ? "TX1" : "RX1") : (txFirst ? "RX2" : "TX2");
 
                 string tag = "";
                 if (rawPriorityTags && d.Category != CallCategory.DEFAULT)
@@ -705,7 +717,26 @@ namespace WSJTX_Controller
                             // whatever finalSignoffCall/uploadResult/etc. already prepended to
                             // curTxMode) -- those genuinely special cases are already covered
                             // by the other checks here independent of cqPaused.
-                            deferEligible = finalSignoffCall == null && uploadResult == null && !deletedAllCalls
+                            // Final-QSO notification ordering fix (part 2), 2026-08-24 --
+                            // independent audit finding, CONFIRMED live (K4XN, real QSO): the
+                            // log SOUND (LogQso's own PlaySoundEvent, fully independent of
+                            // ShowStatus) always fires the instant LogQso runs -- but the
+                            // CORRESPONDING SPOKEN "{call} logged, Transmitting, sending 73" text
+                            // (the part item 5's earlier fix built) could still be silently
+                            // deferred right here, because loggedCall was missing from this
+                            // exclusion list even though finalSignoffCall (its sibling "a final
+                            // 73" case this method's own comment calls out by name) was already
+                            // here. A deferred render's one-shot flags (loggedCall included) still
+                            // get consumed/reset in the block below regardless of whether that
+                            // specific render is ever actually delivered -- if a LATER, unrelated
+                            // immediate render (e.g. transmitting itself flipping true) arrives
+                            // before the deferred one's own timer fires, "a fresher render always
+                            // wins" (this method's own render-vs-defer comment) silently drops the
+                            // deferred one for good. Confirmed exactly this shape in the real log:
+                            // the combined "K4XN logged, Transmitting, sending 73" text WAS built
+                            // correctly but never announced; 12 seconds later a plain "Transmitting,
+                            // sending 73" (loggedCall already consumed) is the only thing that was.
+                            deferEligible = finalSignoffCall == null && loggedCall == null && uploadResult == null && !deletedAllCalls
                                 && !newBand && !newMode && !newPskReporter && !newTxFirst && !promptsChanged
                                 && tuneResult == null && !replyFromInProg && !tuning
                                 && consecNoDecodes < maxNoDecodes && Math.Abs(timeOffset) <= maxTimeOffset
@@ -829,11 +860,28 @@ namespace WSJTX_Controller
                             // "0 available stations" -- the NEXT natural status update (once the
                             // just-unsuppressed side's list has had a moment to reflect the real
                             // queue) will include the real count normally.
-                            string callsWaiting = (!transmitting || qsoState == WsjtxMessage.QsoStates.CALLING) && callInProg == null
+                            // Item 2, 2026-08-24 (operator request, opt-in/default off): normally
+                            // this clause CAN still appear while transmitting (qsoState==CALLING,
+                            // e.g. calling CQ) -- the one piece of ShowStatus's own text that's
+                            // genuinely receive-side chatter, not TX-critical info (sending/
+                            // logged/expired/timed-out text below is never gated by this). With
+                            // the new setting on, transmitting alone suppresses it outright,
+                            // regardless of qsoState, so transmit-related speech isn't competing
+                            // with a "N available stations" summary for the same utterance.
+                            string callsWaiting = (!transmitting || (qsoState == WsjtxMessage.QsoStates.CALLING && !ctrl.suppressReceiveNotificationsDuringTx)) && callInProg == null
                                 && !(justStoppedTransmitting && displayedCount == 0)
                                 ? $", {count} {callsStr}{pri}{cty}{want}{needed}"
                                 : "";
-                            string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? $", Alt E to enable transmit" : (!transmitting && qcw > 0 ? $", Control W for list or Alt N for next" : "")) : "";
+                            // T2 fix, 2026-08-23 (CONFIRMED bug -- KJ5OUL log evidence, 2026-08-21):
+                            // "Control W for list or Alt N for next" is Beginner-mode-only
+                            // guidance -- Ctrl+W is a Beginner Available Stations shortcut not
+                            // even assigned in Advanced Call Layout, and Advanced mode has its
+                            // own separate TX1/TX2 list navigation entirely. This clause used to
+                            // fire regardless of layout; confirmed live emitted while genuinely in
+                            // Advanced mode. Alt E to enable transmit is left ungated -- that's a
+                            // real TX-enable action available in both layouts, not Beginner list
+                            // navigation.
+                            string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? $", Alt E to enable transmit" : (!ctrl.advancedCallLayout && !transmitting && qcw > 0 ? $", Control W for list or Alt N for next" : "")) : "";
 
                             string curCall = callInProg;
                             //string txToCall = WsjtxMessage.ToCall(curTxMsg);
@@ -841,7 +889,20 @@ namespace WSJTX_Controller
  
                             string sel = newSelection ? " selected" : "";
                             string inProg = curCall != null ? $", {Spacify(curCall)}{sel}" : "";
-                            curTxMode = transmitting ? "Transmitting" : "Receiving";
+                            // Final-QSO notification ordering fix, 2026-08-24 (operator finding --
+                            // "Logged" heard while transmitting the final 73, then "Sending 73"
+                            // heard afterward, as two separate utterances): loggedCall != null here
+                            // means LogQso just fired (DirectApplyStatus's Is73orRR73(curTxMsg)
+                            // branch) on THIS SAME poll tick, and that branch's own trigger already
+                            // guarantees curTxMsg IS the final 73/RR73 text -- but the engine can
+                            // report qso.TxNow as that final text before `transmitting` itself
+                            // flips true for the period, so this render can land before the
+                            // "Transmitting" render does. Describing it as "Receiving" here (the
+                            // literal current flag) while ALSO about to say "logged" reads as
+                            // contradictory once the txStr fix just below adds "sending 73" to the
+                            // same sentence -- treat this one-shot moment as the transmitting side
+                            // too, matching what's actually about to go out.
+                            curTxMode = (transmitting || loggedCall != null) ? "Transmitting" : "Receiving";
                             string cond = (!transmitting && txMode == TxModes.CALL_CQ) ? (!cqPaused ? ((uploadResult != null || txEnableChanged) ? ", transmit enabled" : "") : ", transmit disabled") : "";
 
                             // Live-testing finding, 2026-08-21: this used to fire regardless of
@@ -948,7 +1009,15 @@ namespace WSJTX_Controller
                                     backColor = Color.Green;
                                 }
 
-                                if (curTxMsg != null && transmitting)
+                                // Final-QSO notification ordering fix, 2026-08-24 -- see the
+                                // curTxMode assignment above for the full root-cause writeup.
+                                // loggedCall != null merges "sending {payload}" into this SAME
+                                // render instead of waiting for a later one, so the operator hears
+                                // one coherent "{call} logged, Transmitting, sending 73." instead
+                                // of "Logged" and "Sending 73" as two separate utterances. No
+                                // change to LogQso's own trigger/timing -- this only widens when
+                                // the ALREADY-known curTxMsg gets described in the status text.
+                                if (curTxMsg != null && (transmitting || loggedCall != null))
                                 {
                                     if (curTxPayload == null) curTxPayload = WsjtxMessage.Payload(curTxMsg);
                                     string p = SpacifyPayload(curTxPayload);

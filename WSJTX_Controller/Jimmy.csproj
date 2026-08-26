@@ -17,12 +17,12 @@
     <NoWarn>$(NoWarn);WFO1000</NoWarn>
   </PropertyGroup>
 
-  <!-- Production-safety isolation (urgent fix, 2026-08-13): the same -p:AssemblyName="Jimmy Test"
-       override that build.bat/JimmyTest.wxs already use to isolate the .ini/data folder now also
-       drives AssemblyInfo.cs's Title/Product attributes (see that file's own comment), so a Test
-       build's on-disk identity is consistently "Jimmy Test" everywhere, not just the file name. -->
-  <PropertyGroup Condition="'$(AssemblyName)' == 'Jimmy Test'">
-    <DefineConstants>$(DefineConstants);JIMMY_TEST_BUILD</DefineConstants>
+  <!-- Production-safety isolation (urgent fix, 2026-08-13): the same -p:AssemblyName="Jimmy Next"
+       override that build.bat/JimmyNext.wxs already use to isolate the .ini/data folder now also
+       drives AssemblyInfo.cs's Title/Product attributes (see that file's own comment), so a Next
+       build's on-disk identity is consistently "Jimmy Next" everywhere, not just the file name. -->
+  <PropertyGroup Condition="'$(AssemblyName)' == 'Jimmy Next'">
+    <DefineConstants>$(DefineConstants);JIMMY_NEXT_BUILD</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -77,11 +77,11 @@
          comment: "used by JimmyReplay.py Group 17... Not a real award"). Must never ship
          in a real end-user "Jimmy" install/publish, where RuleLoader's SeedIfMissing would
          copy it straight into a real operator's Rule Definition/Awards UI as a fake entry.
-         Included only when building/publishing as "Jimmy Test" (the replay harness's own
-         AssemblyName, see build.bat and JimmyTest.wxs), so the harness's documented Group 17
+         Included only when building/publishing as "Jimmy Next" (the replay harness's own
+         AssemblyName, see build.bat and JimmyNext.wxs), so the harness's documented Group 17
          workflow ("check 'Replay Test Award' in the Still Need tab") keeps working exactly
          as before. -->
-    <None Include="RuleDefinitions\_ReplayTestAward.ini" Condition="'$(AssemblyName)' == 'Jimmy Test'">
+    <None Include="RuleDefinitions\_ReplayTestAward.ini" Condition="'$(AssemblyName)' == 'Jimmy Next'">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
@@ -129,7 +129,7 @@
          (crates/tempo-audio) finds it via its "hamlib/rigctld.exe" candidate, relative to
          jimmy-engine-host.exe's own directory. Resources\hamlib\ is a SIBLING of
          Resources\EngineHost\, not a child of it, so resolve_rigctld's candidates never reach
-         it there. Setup_WiX\JimmyTest.wxs's ResourcesEngineHostHamlibComponents harvests THIS
+         it there. Setup_WiX\JimmyNext.wxs's ResourcesEngineHostHamlibComponents harvests THIS
          physical copy (not Resources\hamlib\ a second time) because WiX's own file harvesting
          dedupes by source path; an install-time-only duplication trick does not work, this has
          to be two real files on disk. See that .wxs file's own Directory-declaration comment

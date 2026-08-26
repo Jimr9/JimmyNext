@@ -1,45 +1,47 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Jimmy Test installer - WiX 5 source, mirrors Jimmy.wxs exactly except for the
+  Jimmy Next installer - WiX 5 source, mirrors Jimmy.wxs exactly except for the
   identity/isolation changes needed to install SIDE BY SIDE with a production
   Jimmy install on the same machine, rather than upgrading/replacing it:
-    - Different Package Name ("Jimmy Test") and INSTALLFOLDER ("Jimmy Test").
-    - A FRESH UpgradeCode (never reuse production's {D5415907-...}); reusing
-      it would make this a major upgrade of production instead of a separate,
-      coexisting product.
+    - Different Package Name ("Jimmy Next") and INSTALLFOLDER ("Jimmy Next").
+    - A FRESH UpgradeCode (never reuse production's {D5415907-...}, nor the
+      retired "Jimmy Test" flavor's {BFC5D246-...}); reusing either would make
+      this a major upgrade of that product instead of a separate, coexisting
+      one -- Jimmy Next testers uninstall Jimmy Test manually first, they are
+      not upgraded in place.
     - Different shortcut names and HKCU registry key path (Software\KB0UZT\
-      "Jimmy Test" instead of "Jimmy"), so the two installs' shortcuts/registry
+      "Jimmy Next" instead of "Jimmy"), so the two installs' shortcuts/registry
       state never collide.
-    - Target exe is "Jimmy Test.exe" (AssemblyName overridden at publish time),
+    - Target exe is "Jimmy Next.exe" (AssemblyName overridden at publish time),
       which also makes Jimmy's OWN runtime data folder isolate automatically
-      (%LocalAppData%\Jimmy Test\ instead of %LocalAppData%\Jimmy\; see
+      (%LocalAppData%\Jimmy Next\ instead of %LocalAppData%\Jimmy\; see
       LookupManager.DataRoot and Controller.cs's pgmName, both derived from the
-      running assembly's own name), so this test build never reads or writes
+      running assembly's own name), so this build never reads or writes
       the production install's real settings/logbook database.
 
-  Product  : Jimmy Test (WSJT-X Controller, test/beta build)
-  Version  : 2.0.29
+  Product  : Jimmy Next (WSJT-X Controller, public beta build)
+  Version  : 2.0.37
   Mfr      : KB0UZT
-  Install  : C:\Program Files\KB0UZT\Jimmy Test\
+  Install  : C:\Program Files\KB0UZT\Jimmy Next\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
 
-  PublishOutputTest\ is produced by (self-contained, distinct AssemblyName):
-    dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Test" -p:SelfContained=true -r win-x64 -o PublishOutputTest
+  PublishOutputNext\ is produced by (self-contained, distinct AssemblyName):
+    dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Next" -p:SelfContained=true -r win-x64 -o PublishOutputNext
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
 
   <Package
-    Name="Jimmy Test"
-    Version="2.0.29"
+    Name="Jimmy Next"
+    Version="2.0.37"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"
-    UpgradeCode="{BFC5D246-0851-4DB3-B351-EDFD8BDFEA2B}"
+    UpgradeCode="{594D5C69-67A3-40E2-A5D9-68289DCAB98A}"
     InstallerVersion="500"
     Compressed="yes">
 
-    <SummaryInformation Description="Jimmy Test (WSJT-X Controller) Installer" />
+    <SummaryInformation Description="Jimmy Next (WSJT-X Controller) Installer" />
 
     <MajorUpgrade
       DowngradeErrorMessage="A newer version of [ProductName] is already installed."
@@ -51,14 +53,14 @@
          Jimmy.wxs: never copied into build/publish output either before or after
          the migration (ApplicationIcon embeds it into the exe resource directly;
          this is a separate loose-file reference). -->
-    <Icon Id="JimmyTestIcon" SourceFile="..\WSJTX_Controller\Properties\netfol.ico" />
-    <Property Id="ARPPRODUCTICON" Value="JimmyTestIcon" />
+    <Icon Id="JimmyNextIcon" SourceFile="..\WSJTX_Controller\Properties\netfol.ico" />
+    <Property Id="ARPPRODUCTICON" Value="JimmyNextIcon" />
     <Property Id="ARPCONTACT" Value="KB0UZT" />
 
     <!-- Standard dialog set: Welcome -> InstallDir (Browse) -> VerifyReady -> Progress -> Finish -->
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <!-- Custom UI fragment that adds ShortcutsDlg and overrides the dialog chain -->
-    <UIRef Id="JimmyTestUI" />
+    <UIRef Id="JimmyNextUI" />
 
     <!-- Shortcut options: 1 = create (checked), empty = skip (unchecked).
          Both default checked. Secure passes them from UI to elevated execute sequence. -->
@@ -69,7 +71,7 @@
          publish carries its own .NET 10 runtime, so there is no prerequisite to
          verify before installing. -->
 
-    <Feature Id="DefaultFeature" Title="Jimmy Test" Level="1">
+    <Feature Id="DefaultFeature" Title="Jimmy Next" Level="1">
       <ComponentGroupRef Id="PublishComponents" />
       <ComponentGroupRef Id="RuleDefinitionsComponents" />
       <ComponentGroupRef Id="RuleDefinitionsListsComponents" />
@@ -120,25 +122,21 @@
   <Fragment>
     <StandardDirectory Id="ProgramFilesFolder">
       <Directory Id="ManufacturerDir" Name="KB0UZT">
-        <Directory Id="INSTALLFOLDER" Name="Jimmy Test">
+        <Directory Id="INSTALLFOLDER" Name="Jimmy Next">
           <!-- Declared explicitly (not left to harvesting) for RuleDefinitions\
                and Resources\, because both mix direct files with a
                subdirectory; this is exactly the known WiX 5 harvesting bug
                (wixtoolset/issues#8608) already found and fixed in production's
                own Jimmy.wxs: a folder that has both won't get harvested as
                one Directory row, it gets duplicate rows with the same name.
-               This file originally predated that fix and never picked it up,
-               meaning a Test install's Resources\EngineHost\ and
-               Resources\hamlib\ (rigctld, jimmy-engine-host.exe: Native
-               mode and CAT control) were never reliably packaged. Every other
-               folder here (each locale subfolder) is leaf-only, so plain
-               recursive harvesting is safe for those. -->
+               Every other folder here (each locale subfolder) is leaf-only, so
+               plain recursive harvesting is safe for those. -->
           <Directory Id="RuleDefinitionsDir" Name="RuleDefinitions">
             <Directory Id="RuleDefinitionsListsDir" Name="Lists" />
           </Directory>
           <Directory Id="ResourcesDir" Name="Resources">
             <Directory Id="ResourcesEngineHostDir" Name="EngineHost">
-              <!-- Nexus/EngineHost owns launching and controlling rigctld; Jimmy Test never
+              <!-- Nexus/EngineHost owns launching and controlling rigctld; Jimmy Next never
                    independently launches or owns a second one for this path. Nexus's own
                    official build does not embed/build Hamlib into any crate (confirmed:
                    tempo-fast-sys's build.rs has zero hamlib/rigctld references); it EXPECTS
@@ -168,8 +166,8 @@
   </Fragment>
 
   <!-- ── Harvested publish output ───────────────────────────────────────────
-       Recursively harvests every file under PublishOutputTest\ (the self-
-       contained win-x64 publish: "Jimmy Test.exe"/.dll, the .NET 10 runtime,
+       Recursively harvests every file under PublishOutputNext\ (the self-
+       contained win-x64 publish: "Jimmy Next.exe"/.dll, the .NET 10 runtime,
        SQLite.Interop.dll, MQTTnet*.dll, clublog_key.txt, Resources\*.wav, and
        the satellite-resource culture subfolders), preserving directory
        structure under INSTALLFOLDER automatically. RuleDefinitions\ is
@@ -177,43 +175,43 @@
        declaration above for why). ────────────────────────────────────── -->
   <Fragment>
     <ComponentGroup Id="PublishComponents" Directory="INSTALLFOLDER">
-      <Files Include="PublishOutputTest\**">
-        <Exclude Files="PublishOutputTest\RuleDefinitions\**" />
-        <Exclude Files="PublishOutputTest\Resources\**" />
+      <Files Include="PublishOutputNext\**">
+        <Exclude Files="PublishOutputNext\RuleDefinitions\**" />
+        <Exclude Files="PublishOutputNext\Resources\**" />
       </Files>
     </ComponentGroup>
 
     <ComponentGroup Id="RuleDefinitionsComponents" Directory="RuleDefinitionsDir">
-      <Files Include="PublishOutputTest\RuleDefinitions\*" />
+      <Files Include="PublishOutputNext\RuleDefinitions\*" />
     </ComponentGroup>
 
     <ComponentGroup Id="RuleDefinitionsListsComponents" Directory="RuleDefinitionsListsDir">
-      <Files Include="PublishOutputTest\RuleDefinitions\Lists\*" />
+      <Files Include="PublishOutputNext\RuleDefinitions\Lists\*" />
     </ComponentGroup>
 
     <!-- Resources\ split the same way as RuleDefinitions\ above, for the same reason
          (mixed direct files + subdirectories; see the Directory declaration's own
          comment). -->
     <ComponentGroup Id="ResourcesComponents" Directory="ResourcesDir">
-      <Files Include="PublishOutputTest\Resources\*" />
+      <Files Include="PublishOutputNext\Resources\*" />
     </ComponentGroup>
 
     <ComponentGroup Id="ResourcesEngineHostComponents" Directory="ResourcesEngineHostDir">
-      <Files Include="PublishOutputTest\Resources\EngineHost\*" />
+      <Files Include="PublishOutputNext\Resources\EngineHost\*" />
     </ComponentGroup>
 
     <ComponentGroup Id="ResourcesHamlibComponents" Directory="ResourcesHamlibDir">
-      <Files Include="PublishOutputTest\Resources\hamlib\*" />
+      <Files Include="PublishOutputNext\Resources\hamlib\*" />
     </ComponentGroup>
 
     <!-- A second physical on-disk copy of the same hamlib files, published separately by
-         Jimmy.csproj into PublishOutputTest\Resources\EngineHost\hamlib\ (see that project's
+         Jimmy.csproj into PublishOutputNext\Resources\EngineHost\hamlib\ (see that project's
          own comment): WiX's file harvesting dedupes by SOURCE path, so pointing a second
          <Files Include> at the SAME Resources\hamlib\ source silently harvests nothing (found
          via a real build: WIX8602 "Skipping file that has already been harvested" on every
          file). Harvesting a second, genuinely distinct source path is what actually works. -->
     <ComponentGroup Id="ResourcesEngineHostHamlibComponents" Directory="ResourcesEngineHostHamlibDir">
-      <Files Include="PublishOutputTest\Resources\EngineHost\hamlib\*" />
+      <Files Include="PublishOutputNext\Resources\EngineHost\hamlib\*" />
     </ComponentGroup>
   </Fragment>
 
@@ -224,14 +222,14 @@
          Component Condition is evaluated at InstallValidate; empty property = absent. -->
     <Component Id="DesktopShortcutComp" Directory="DesktopFolder" Condition="DESKTOP_SHORTCUT">
       <Shortcut Id="DesktopSC"
-                Name="Jimmy Test"
-                Description="WSJT-X Controller (test/beta build)"
-                Target="[INSTALLFOLDER]Jimmy Test.exe"
+                Name="Jimmy Next"
+                Description="WSJT-X Controller (public beta build)"
+                Target="[INSTALLFOLDER]Jimmy Next.exe"
                 WorkingDirectory="INSTALLFOLDER"
-                Icon="JimmyTestIcon"
+                Icon="JimmyNextIcon"
                 IconIndex="0" />
       <RegistryValue Root="HKCU"
-                     Key="Software\KB0UZT\Jimmy Test"
+                     Key="Software\KB0UZT\Jimmy Next"
                      Name="DesktopShortcut"
                      Type="integer"
                      Value="1"
@@ -241,14 +239,14 @@
     <!-- Start Menu shortcut: only installed when checkbox is checked -->
     <Component Id="StartMenuShortcutComp" Directory="ProgramMenuFolder" Condition="STARTMENU_SHORTCUT">
       <Shortcut Id="StartMenuSC"
-                Name="Jimmy Test"
-                Description="WSJT-X Controller (test/beta build)"
-                Target="[INSTALLFOLDER]Jimmy Test.exe"
+                Name="Jimmy Next"
+                Description="WSJT-X Controller (public beta build)"
+                Target="[INSTALLFOLDER]Jimmy Next.exe"
                 WorkingDirectory="INSTALLFOLDER"
-                Icon="JimmyTestIcon"
+                Icon="JimmyNextIcon"
                 IconIndex="0" />
       <RegistryValue Root="HKCU"
-                     Key="Software\KB0UZT\Jimmy Test"
+                     Key="Software\KB0UZT\Jimmy Next"
                      Name="StartMenuShortcut"
                      Type="integer"
                      Value="1"
@@ -257,49 +255,10 @@
 
   </Fragment>
 
-  <!-- Firewall exceptions, REMOVED 2026-08-21. Originally added 2026-08-07:
-       a fresh standalone install prompted Windows Security's "Allow/Cancel"
-       the first time rigctld.exe (or the Native engine host, which also
-       speaks the rigctld protocol when it owns the radio directly) tried
-       to listen for a connection, confusing for a tester with no context
-       for what's asking, with Cancel leaving radio control silently
-       non-functional. That happened because, at the time, both programs
-       could bind their listening socket to the wildcard address (Hamlib
-       rigctld's own documented default when no -T is given), which is
-       exactly the condition that makes Windows Firewall prompt for a new
-       inbound rule in the first place: a listener Windows can see is
-       reachable from beyond the loopback interface.
-
-       Re-verified 2026-08-21, with the UDP transport now fully gone and
-       Direct/Nexus the sole architecture: every listener either program
-       can ever open in the actual packaged build is loopback-only
-       (127.0.0.1), confirmed at the real spawn/bind call sites, not
-       inferred.
-         * jimmy-engine-host.exe's own control port: TcpListener::bind(
-           ("127.0.0.1", port)) (EngineHost/src/main.rs).
-         * every rigctld.exe EngineHost itself spawns: forced via -T
-           127.0.0.1 in the pinned vendored Nexus's own rigctld_args()
-           (EngineHost/.nexus-src/crates/tempo-audio/src/rigctld_proc.rs,
-           issue #53, Nexus's own fix for this exact wildcard-default
-           problem).
-         * the one remaining gap, Jimmy's own fallback rigctld launch
-           (RigctldClient.LaunchBundled, the Radio Test button's "nothing
-           is already listening" path), did not pass -T and so still
-           relied on Hamlib's unsafe wildcard default; fixed in the same
-           pass that removed this Fragment (RigctldClient.cs now also
-           forces -T 127.0.0.1), closing the one code path that could
-           still have triggered a real prompt.
-       A socket bound specifically to 127.0.0.1 never becomes reachable
-       from outside the machine, and Windows Firewall does not filter
-       loopback traffic at all, so there is nothing left for these
-       exceptions to pre-allow. No current feature needs LAN reachability
-       to either program either: "external rigctld" (Options > Radio) is
-       Jimmy connecting OUT to an operator-specified host, an outbound
-       connection that has never needed an inbound allow-rule. Removed
-       rather than left in place: an unnecessary Program-scoped Windows
-       Firewall rule is still a real, user-visible attack-surface/trust
-       question for anyone who inspects what an installer adds, not a
-       harmless no-op. -->
+  <!-- Firewall exceptions: intentionally not added. See production Jimmy.wxs / the retired
+       Jimmy Test flavor's own history for why -- every listener either program can ever open
+       in the actual packaged build is loopback-only (127.0.0.1), which Windows Firewall
+       never filters and never prompts for. Nothing here needs LAN reachability. -->
 
   <!-- ── UI customizations ─────────────────────────────────────────────── -->
   <!--
@@ -316,7 +275,7 @@
         redirecting back to ShortcutsDlg instead.
   -->
   <Fragment>
-    <UI Id="JimmyTestUI">
+    <UI Id="JimmyNextUI">
       <!-- Skip LicenseAgreementDlg: WelcomeDlg Next -> InstallDirDlg (Order=5 overrides built-in Order=1->LicenseAgreementDlg) -->
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="5"
                Condition="NOT Installed" />

@@ -1357,7 +1357,14 @@ namespace WSJTX_Controller
                     item.SubItems.Add(h.NewlyConfirmed.ToString("N0"));
                     item.SubItems.Add(h.Corrected.ToString("N0"));
                     item.SubItems.Add(h.TotalQso.ToString("N0"));
-                    item.SubItems.Add(h.ErrorText?.Length > 0 ? h.ErrorText.Split('\n')[0] : "");
+                    // T11 fix, 2026-08-23 (CONFIRMED bug): used to show a blank cell for success
+                    // (less clear than an explicit "0") and silently truncated a multi-error
+                    // import to its first line with no indication more existed. A truthful count
+                    // (and the first line as detail, when there are any) is now always shown.
+                    string[] errorLines = h.ErrorText?.Length > 0
+                        ? h.ErrorText.Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                        : Array.Empty<string>();
+                    item.SubItems.Add(errorLines.Length == 0 ? "0" : $"{errorLines.Length}: {errorLines[0]}");
                     _srcHistoryLv.Items.Add(item);
                 }
             }
@@ -1857,7 +1864,23 @@ namespace WSJTX_Controller
 
                 SetStatus("Fetching LoTW unconfirmed QSOs…");
                 string adif2 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: false).ConfigureAwait(true);
-                if (adif2 == null) adif2 = "";
+                // Independent audit finding 2, 2026-08-23 (CONFIRMED bug, HIGH PRIORITY): this
+                // used to silently replace a null adif2 with "" and continue as if the complete
+                // two-part download had succeeded -- LoTWQsoClient.LastError was discarded, and
+                // the subsequent import still advanced LogbookLastLoTWRefresh, so a genuinely
+                // failed unconfirmed-QSO fetch was reported and checkpointed as a full success.
+                // Missing unconfirmed QSOs matter for worked-but-unconfirmed award state and
+                // duplicate/worked classification -- treated the same as adif1==null above:
+                // abort before import, log the real error, and leave the previous refresh
+                // timestamp unchanged so the next scheduled/manual run retries the whole sync
+                // rather than silently missing this half forever.
+                if (adif2 == null)
+                {
+                    string msg = "LoTW error (unconfirmed QSOs): " + (client.LastError ?? "Unknown error");
+                    LogSyncFailure("LOTW", msg);
+                    SetStatus(msg);
+                    return;
+                }
 
                 await RunImportFromText(adif1 + "\r\n" + adif2, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true);
             }
@@ -1912,7 +1935,7 @@ namespace WSJTX_Controller
 
         // Downloads and reconciles eQSL InBox confirmations -- deliberately NOT
         // RunImportFromText/AdifImporter.Import (see EqslReconciler's own comment: an eQSL
-        // InBox record is someone else's confirmation report, not Jimmy Test's own logbook,
+        // InBox record is someone else's confirmation report, not Jimmy Next's own logbook,
         // so it must never create a new local QSO row). since_unix is Jimmy's own last-synced
         // watermark, same "always incremental after the first pull" idea LoTW/QRZ/Club Log
         // already use -- but unlike them, a fresh install still does a full pull (since_unix
@@ -2014,14 +2037,23 @@ namespace WSJTX_Controller
 
                 _db.LogImportFinish(logId, result.Processed, result.NewQsos, result.NewlyConfirmed, result.Corrected, result.Skipped, result.Errors);
 
-                if (metaKey != null)
+                // Independent audit finding 3, 2026-08-23 (CONFIRMED bug, HIGH/MEDIUM PRIORITY):
+                // the checkpoint used to be written unconditionally, before result.Errors was
+                // even checked below -- a malformed or newly unsupported source record could be
+                // skipped and then not retried until the full refresh interval expired, even
+                // though the persisted "last success" timestamp claimed a complete refresh. Valid
+                // records still import (the DB transaction above is unaffected); only the
+                // checkpoint write itself is now gated on a genuinely clean import, so a source
+                // with any errors gets retried in full next time rather than being silently
+                // marked "done".
+                if (metaKey != null && string.IsNullOrWhiteSpace(result.Errors))
                     _ini?.Write(metaKey, DateTime.UtcNow.ToString("o"));
 
                 SetStatus($"{source} import complete: {result.NewQsos:N0} new, {result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged.");
 
                 if (!string.IsNullOrWhiteSpace(result.Errors))
                 {
-                    string summary = result.Errors.Split(new[]{'\n'}, StringSplitOptions.RemoveEmptyEntries).Length + " errors encountered.";
+                    string summary = result.Errors.Split(new[]{'\n'}, StringSplitOptions.RemoveEmptyEntries).Length + " errors encountered -- will retry this source in full next time.";
                     SetStatus(SetStatus_Text + "  " + summary);
                 }
 
@@ -2058,8 +2090,13 @@ namespace WSJTX_Controller
             }
             if (e.KeyCode == Keys.Escape)
             {
+                // T10 fix, 2026-08-23 (CONFIRMED bug): used to only move focus to _tabControl --
+                // Escape must close the window like every other Jimmy dialog, not leave the
+                // operator needing the Close button or Alt+F4. Same Close() path the Close
+                // button already uses (closeBtn.Click above) -- no separate busy/closing policy
+                // exists to preserve; there was none before this fix either.
                 e.Handled = true;
-                _tabControl?.Focus();
+                Close();
                 return;
             }
         }

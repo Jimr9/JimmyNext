@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using MQTTnet;
 using MQTTnet.Client;
@@ -51,6 +52,13 @@ namespace WSJTX_Controller
         private readonly Dictionary<string, SpotInfo> _lastSpots = new Dictionary<string, SpotInfo>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _subscribedCalls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object _lock = new object();
+        // Independent audit finding 5, 2026-08-23 (LIKELY bug, MEDIUM PRIORITY): serializes
+        // UpdateWatchList reconciliations -- see that method's own comment for the race this
+        // closes (two rapid Options saves computing toAdd/toRemove against the same stale
+        // _subscribedCalls snapshot and finishing out of order, leaving a subscription set that
+        // matches neither the old nor the latest desired list).
+        private readonly SemaphoreSlim _reconcileLock = new SemaphoreSlim(1, 1);
+        private HashSet<string> _latestDesired;
 
         // Raised whenever any watched call's last-seen data changes, or the watch list itself
         // changes. Fires on a background thread -- see class remarks above.
@@ -66,12 +74,53 @@ namespace WSJTX_Controller
         // newly-added calls, unsubscribes removed ones, connects if not yet connected and the
         // list is non-empty, and fully disconnects when the list becomes empty (no connection
         // held open for nothing to watch). Safe to call repeatedly (e.g. every Options save).
-        public async void UpdateWatchList(HashSet<string> calls)
+        //
+        // Independent audit finding 5, 2026-08-23 (LIKELY bug, MEDIUM PRIORITY, confidence 92%):
+        // this used to be `async void` with no lock/generation/cancellation around the whole
+        // multi-await reconciliation -- two rapid calls (e.g. two Options saves) could each
+        // snapshot toAdd/toRemove against the same stale _subscribedCalls state and complete out
+        // of order (example from the audit: request A adds X; before its subscribe finishes,
+        // request B computes its own toAdd/toRemove against the same pre-A state and asks only
+        // for Y; neither accounts for the other, leaving X+Y subscribed although the latest
+        // desired set was only Y). Returns a real Task (callers that don't need to await it can
+        // still fire-and-forget) and serializes every call through _reconcileLock so only one
+        // reconciliation pass ever runs at a time; _latestDesired/the while loop below make a
+        // queued-up caller's own pass redundant (superseded) rather than stale-and-wrong -- the
+        // thread that wins the lock keeps reconciling against whatever the CURRENT latest
+        // desired set is until a pass observes no newer request arrived during it, so every
+        // caller's desired outcome is eventually reached by exactly one thread, not raced.
+        public async Task UpdateWatchList(HashSet<string> calls)
+        {
+            var desired = calls ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            lock (_lock) { _latestDesired = desired; }
+
+            await _reconcileLock.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                while (true)
+                {
+                    HashSet<string> toReconcile;
+                    lock (_lock) { toReconcile = _latestDesired; }
+                    await ReconcileAsync(toReconcile).ConfigureAwait(false);
+                    lock (_lock)
+                    {
+                        // No newer request arrived while this pass was running -- done. If one
+                        // did, _latestDesired now points at it; loop and reconcile again rather
+                        // than leaving it unaddressed for a caller that already returned.
+                        if (ReferenceEquals(_latestDesired, toReconcile)) break;
+                    }
+                }
+            }
+            finally
+            {
+                _reconcileLock.Release();
+            }
+        }
+
+        private async Task ReconcileAsync(HashSet<string> desired)
         {
             try
             {
-                var desired = calls ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
                 if (desired.Count == 0)
                 {
                     if (_client.IsStarted) await _client.StopAsync();

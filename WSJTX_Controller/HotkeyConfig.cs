@@ -33,6 +33,7 @@ namespace WSJTX_Controller
         SortOrder,
         RowOrder,
         AnalyzeSlot,
+        ClockStatus,
         LookupStation,
         OpenLogbook,
         AddManualQso,
@@ -88,6 +89,11 @@ namespace WSJTX_Controller
             [HotkeyAction.SortOrder]       = Keys.Alt | Keys.S,
             [HotkeyAction.RowOrder]        = Keys.Alt | Keys.I,
             [HotkeyAction.AnalyzeSlot]     = Keys.Alt | Keys.Z,
+            // Item 4, 2026-08-24 (operator request): on-demand clock sync status, reusing the
+            // exact same timeOffset/_clockWasAcceptable state the automatic ClockOutOfSync/
+            // ClockSynced notifications already track (WsjtxClient.BandAudio.cs's own
+            // CalcAvgTimeOffset) -- Alt+Y is free of conflicts with every other default above.
+            [HotkeyAction.ClockStatus]     = Keys.Alt | Keys.Y,
             [HotkeyAction.LookupStation]   = Keys.None,
             [HotkeyAction.OpenLogbook]     = Keys.None,
             [HotkeyAction.AddManualQso]    = Keys.None,
@@ -133,6 +139,7 @@ namespace WSJTX_Controller
             [HotkeyAction.SortOrder]       = "Sort Order Editor",
             [HotkeyAction.RowOrder]        = "Row Order Editor",
             [HotkeyAction.AnalyzeSlot]     = "Analyze Transmit Slot",
+            [HotkeyAction.ClockStatus]     = "Report Clock Sync Status",
             [HotkeyAction.LookupStation]   = "Lookup Selected Station",
             [HotkeyAction.OpenLogbook]     = "Open Ham Radio Center Logbook",
             [HotkeyAction.AddManualQso]    = "Add Manual QSO to Logbook",

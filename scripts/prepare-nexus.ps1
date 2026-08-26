@@ -1,10 +1,10 @@
 <#
 .SYNOPSIS
     Prepares a clean, reproducible local checkout of official Nexus (pinned revision) with
-    Jimmy Test's minimum-necessary compatibility patches applied, for EngineHost to build against.
+    Jimmy Next's minimum-necessary compatibility patches applied, for EngineHost to build against.
 
 .DESCRIPTION
-    Jimmy Test is a CONSUMER of the third-party Nexus project (https://github.com/kd9taw/Nexus).
+    Jimmy Next is a CONSUMER of the third-party Nexus project (https://github.com/kd9taw/Nexus).
     We never modify a developer's own reference clone of Nexus, and we never submit changes
     upstream. This script instead builds and owns a SEPARATE staging checkout
     (EngineHost/.nexus-src, git-ignored, safe to delete and regenerate at any time) by:

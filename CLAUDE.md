@@ -1,4 +1,4 @@
-# Jimmy — WSJT-X Controller: Project Rules
+# Jimmy Next — WSJT-X Controller: Project Rules
 
 ## Workflow
 
@@ -33,19 +33,24 @@
 
 ## Release Versioning
 
-For every public Jimmy release, even a small beta or installer-only fix:
+This repo (c:\claude\jimmy_next) builds and releases Jimmy Next, a separate product from
+production Jimmy: its own AssemblyName ("Jimmy Next"), its own WiX UpgradeCode, its own
+GitHub repo (Jimr9/JimmyNext) for update checks, and its own site (blindsea.com/jimmy20).
+Never touch production Jimmy's repo, installer, or blindsea.com/jimmy site from here.
+
+For every public Jimmy Next release, even a small beta or installer-only fix:
 - Increment AssemblyFileVersion.
 - Increment AssemblyInformationalVersion.
-- Increment WiX ProductVersion.
+- Increment WiX ProductVersion (Setup_WiX\JimmyNext.wxs).
 - Rebuild Release with /t:Rebuild.
-- Rebuild the MSI.
+- Rebuild the MSI (JimmyNext.msi).
 - Verify the MSI ProductVersion.
-- Verify the Jimmy.exe File table version inside the MSI.
-- Verify that MajorUpgrade will upgrade the previous public release.
-- Copy the fresh MSI to C:\claude\Jimmy\Jimmy.msi.
+- Verify the "Jimmy Next.exe" File table version inside the MSI.
+- Verify that MajorUpgrade will upgrade the previous public Jimmy Next release.
 - Verify SHA-256 before upload.
-- Zip the MSI (Jimmy.msi.zip) and upload it as an additional GitHub release asset
-  alongside the raw MSI — the update page (blindsea.com/jimmy) prefers the zip since
+- Publish the release to Jimr9/JimmyNext on GitHub (never Jimr9/Jimmy).
+- Zip the MSI (JimmyNext.msi.zip) and upload it as an additional GitHub release asset
+  alongside the raw MSI — the update page (blindsea.com/jimmy20) prefers the zip since
   browsers/SmartScreen flag a bare .msi download more aggressively.
 
 AssemblyVersion may remain frozen unless project policy changes.

@@ -5,7 +5,7 @@ JimmyDirectReplay.py - Direct-protocol replay tester with automatic verification
 Replaces JimmyReplay.py (retired 2026-08-18, UDP-to-Direct test-harness migration).
 JimmyReplay.py simulated a standard WSJT-X UDP peer talking to Jimmy's now-deleted
 classic-protocol listener. Production Jimmy has been Direct-only since 2026-08-12
-(Jimmy Test -> Direct control port -> EngineHost -> Nexus); the only reason the UDP
+(Jimmy Next -> Direct control port -> EngineHost -> Nexus); the only reason the UDP
 transport code survived this long was this test harness. This script closes that gap:
 it is a fake control-port SERVER standing in for jimmy-engine-host.exe, listening on
 127.0.0.1:58239 (NativeEngineClient.ControlPort) and speaking the exact same line-
@@ -123,7 +123,7 @@ def _style(hwnd):
 
 def _owning_process_name(hwnd):
     """Executable name (no path/extension, case folded) of the process that owns
-    hwnd, e.g. "jimmy" for C:\\...\\Jimmy Test.exe. Returns "" if it can't be
+    hwnd, e.g. "jimmy" for C:\\...\\Jimmy Next.exe. Returns "" if it can't be
     determined -- callers should treat that as "not a match" rather than raise.
     """
     pid = ctypes.wintypes.DWORD()
@@ -1139,7 +1139,7 @@ def main():
         print("ERROR: JIMMY_TEST_DB_PATH is not set in this shell.")
         print("Refusing to run -- run via run_replay_tests.bat instead of calling this")
         print("script directly, or set JIMMY_TEST_DB_PATH yourself before starting BOTH")
-        print("Jimmy Test.exe and this script.")
+        print("Jimmy Next.exe and this script.")
         sys.exit(1)
 
     print("=" * 60)

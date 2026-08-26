@@ -95,6 +95,63 @@ namespace WSJTX_Controller
 
         private StreamWriter logSw = null;
         private bool settingChanged = false;
+        // T15 fix, 2026-08-23: best-known location facts (country/continent/distance/azimuth)
+        // seen so far this band session, per callsign -- see MergeBandSessionLocation's own call
+        // site (ProcessDecodeMsg) for the full defect this guards against. Cleared on confirmed
+        // band change (ClearCalls(true)), never on Halt -- band-session-scoped by design.
+        private readonly Dictionary<string, ClassifiedCall> _bandSessionLocationCache =
+            new Dictionary<string, ClassifiedCall>(StringComparer.OrdinalIgnoreCase);
+
+        // Merges `fresh` (this decode's own newly computed classification) against whatever
+        // this band session already knows about `call`, IN PLACE: a field fresh could not
+        // resolve (Country/Continent empty, Distance/Azimuth still -1 -- ClassifiedCall's own
+        // "unknown" sentinels, see that class's own comment) is filled in from the cache instead
+        // of being left/rendered as unknown; a field fresh DID resolve updates the cache for next
+        // time. Never downgrades a known fact to unknown, and never blocks a genuinely fresher
+        // resolved value from taking over.
+        private void MergeBandSessionLocation(string call, ClassifiedCall fresh)
+        {
+            if (string.IsNullOrEmpty(call) || fresh == null) return;
+
+            _bandSessionLocationCache.TryGetValue(call, out ClassifiedCall known);
+
+            bool freshHasGeo = fresh.Distance >= 0 && fresh.Azimuth >= 0;
+            if (freshHasGeo)
+            {
+                // A newly resolved geo fact is always the freshest truth (a station can move
+                // grids between decodes, however rare) -- update the cache rather than merge.
+            }
+            else if (known != null && known.Distance >= 0 && known.Azimuth >= 0)
+            {
+                fresh.Distance = known.Distance;
+                fresh.Azimuth = known.Azimuth;
+            }
+
+            if (string.IsNullOrEmpty(fresh.Country) && known != null && !string.IsNullOrEmpty(known.Country))
+                fresh.Country = known.Country;
+            if (string.IsNullOrEmpty(fresh.Continent) && known != null && !string.IsNullOrEmpty(known.Continent))
+                fresh.Continent = known.Continent;
+
+            if (freshHasGeo || !string.IsNullOrEmpty(fresh.Country) || !string.IsNullOrEmpty(fresh.Continent))
+            {
+                _bandSessionLocationCache[call] = new ClassifiedCall
+                {
+                    Distance = fresh.Distance,
+                    Azimuth = fresh.Azimuth,
+                    Country = fresh.Country,
+                    Continent = fresh.Continent,
+                };
+            }
+        }
+
+        // internal (not private): T15 regression coverage exercises the merge logic directly --
+        // driving it through the full ProcessDecodeMsg admission pipeline (period gating,
+        // weak-signal floor, DX-only filters, blocked-call tracking, etc.) would make the test
+        // fragile against unrelated admission-gate changes when the actual behavior under test
+        // is the merge semantics themselves, which this call reaches identically to the real
+        // ProcessDecodeMsg call site.
+        internal void TestMergeBandSessionLocation(string call, ClassifiedCall fresh) => MergeBandSessionLocation(call, fresh);
+
         internal Dictionary<string, EnqueueDecodeMessage> callDict = new Dictionary<string, EnqueueDecodeMessage>();
         internal Queue<string> callQueue = new Queue<string>();
         internal List<string> sentReportList = new List<string>();
@@ -127,6 +184,10 @@ namespace WSJTX_Controller
         private bool txEnabled = false;
         private bool wsjtxTxEnableButton = false;
         private bool transmitting = false;
+        // Read-only external view of `transmitting`, for callers (Controller.cs's Escape
+        // handler) that need to know whether there was actually anything to halt before
+        // announcing that Tx was halted -- see that handler's own comment.
+        public bool IsTransmitting => transmitting;
         // Tracks `transmitting` across ShowStatus() calls specifically (not the same as
         // DirectApplyStatus's own local transmittingChanged, which only covers Direct mode) --
         // lets ShowStatus() detect "this is the first render right after Tx ended" so it can
@@ -172,6 +233,17 @@ namespace WSJTX_Controller
         private string curCmd = null;       //cmd last issed, can be CQ
         private EnqueueDecodeMessage replyDecode = null;
         public string callInProg = null;
+        // Active QSO survives band change fix, 2026-08-23: bumped by the one place a band change
+        // becomes authoritative (WsjtxClient.Direct.cs's confirmed-band-change handler, right
+        // where it clears callInProg/queue/TX-message state for the band just left). ReplyTo and
+        // SetupCq below each capture this before sending REPLY/CALL_CQ and compare it again in
+        // that command's own completion callback -- a callback landing after the epoch moved on
+        // belongs to a station/band this session no longer considers current, and must not
+        // resurrect callInProg/curCmd/replyCmd for it. Not reset anywhere else (ResetOpMode's own
+        // ClearCalls(true) doesn't bump it): only an actual BAND change needs this -- ResetOpMode
+        // and a tier switch already commit their own SetCallInProg(null) synchronously on the
+        // same thread as this field's readers, so there's no async race for those to guard against.
+        private int _bandSessionEpoch;
         // The callsign callInProg is heard actually working (a report/roger-report/73/RR73
         // addressed to someone else), and a short verb describing that stage ("working" or
         // "signing with") -- lets ShowStatus() mention it so the operator knows callInProg is
@@ -1153,6 +1225,20 @@ namespace WSJTX_Controller
             // instead (Classification/ClassificationCutover.cs), which returns this
             // computed value or falls back to the wire fields per the rollback flag.
             dmsg.Classified = Classifier.Classify(deCall, CurrentBandStr, dmsg.Message, myGrid, myContinent);
+            // T15 fix, 2026-08-23 (LIKELY bug -- KJ5OUL, 2026-08-21): Classify() is stateless per
+            // decode -- a CQ carrying a grid resolves real distance/bearing/country/continent,
+            // but a later report/73/RR73 from the SAME station in the SAME band session often
+            // has no grid at all, and (confirmed live) RequeueAbortedCall (Escape/Halt) re-enqueues
+            // callInProg using its OWN captured decode, which CallQueueStore.UpdateCall's
+            // priority-improvement branch can then fully REPLACE with that next gridless message
+            // -- silently downgrading known location facts to ClassifiedCall's own -1/empty
+            // "unknown" defaults. Merges the freshly computed classification against the
+            // best-known facts seen so far THIS band session for the same call: a field already
+            // resolved (grid-derived distance/azimuth, or a real country/continent) is never
+            // overwritten by an unresolved/empty one, and a genuinely BETTER new value still
+            // updates the cache. Cleared on confirmed band change (ClearCalls(true)), not on
+            // Halt -- band-session-scoped, matching the required outcome exactly.
+            MergeBandSessionLocation(deCall, dmsg.Classified);
             // TEMPORARY developer diagnostic (Stage A6 field verification) -- see
             // Classification/ClassificationParityLogger.cs. No-ops unless explicitly
             // enabled via an undocumented .ini key.
@@ -1431,7 +1517,14 @@ namespace WSJTX_Controller
                             else        //deCall is not call in progress
                             {
                                 //check for required reply to RR73
-                                if (isCorrectTimePeriod && logList.Contains(deCall) && dmsg.IsRR73() && (ctrl.replyRR73CheckBox.Checked || Priority(deCall) <= (int)CallPriority.NEW_COUNTRY_ON_BAND))        //call not in queue, enqueue the call data
+                                // T16 fix, 2026-08-23: !_completedThisPollTick.Contains(deCall) added --
+                                // without it, a station whose own QSO CompleteQso just finished earlier
+                                // in THIS SAME poll tick (DirectApplyStatus runs before this) could be
+                                // immediately re-admitted here by its own trailing RR73 decode, exactly
+                                // reproducing the W5PF post-completion queue-reappearance bug this same
+                                // pass fixed in DirectApplyStatus. A DIFFERENT already-logged station's
+                                // courtesy-RR73 (the case this branch exists for) is unaffected.
+                                if (isCorrectTimePeriod && logList.Contains(deCall) && dmsg.IsRR73() && !_completedThisPollTick.Contains(deCall) && (ctrl.replyRR73CheckBox.Checked || Priority(deCall) <= (int)CallPriority.NEW_COUNTRY_ON_BAND))        //call not in queue, enqueue the call data
                                 {
                                     AddTimeoutCall(deCall);
                                     //allow RR73 to be processed
@@ -1782,6 +1875,27 @@ namespace WSJTX_Controller
                 sentCallList.Clear();
                 sentReportList.Clear();
                 unwantedCqList.Clear();
+                // T19 fix, 2026-08-23 (CONFIRMED bug -- W5PF band-change log evidence, 2026-08-21:
+                // curTxMsg remained "W5PF KB0UZT 73" after 20m->17m and again after 17m->15m).
+                // clearBandSpecific is only ever true at a genuine band/mode-context reset (a
+                // confirmed band change -- WsjtxClient.Direct.cs; a tier switch -- WsjtxClient.
+                // Protocol.cs; or a full ResetOpMode), never for a period-only change -- see this
+                // method's own signature comment. curTxMsg/txMsg/curTxPayload were deliberately
+                // never cleared by the completed-QSO path either (T16, DirectApplyStatus's own
+                // comment: "only ever overwrite curTxMsg with a REAL message") specifically so a
+                // confirmed band change remains the one place old-band TX text is flushed, not
+                // silently overwritten by the next unrelated status render. curCmd/replyCmd/
+                // replyDecode describe whatever reply was last sent -- also band-owned, and
+                // ResetOpMode already cleared these separately before this fix; now consistent
+                // across all three ClearCalls(true) call sites. _bandSessionLocationCache (T15)
+                // is explicitly band-session-scoped by design -- cleared here, not on Halt.
+                curTxMsg = null;
+                txMsg = null;
+                curTxPayload = null;
+                curCmd = null;
+                replyCmd = null;
+                replyDecode = null;
+                _bandSessionLocationCache.Clear();
             }
             decodeNum = 0;
             ShowQueue();
@@ -1806,23 +1920,19 @@ namespace WSJTX_Controller
             // Codex Audit 04 finding 1, 2026-08-21: Controller.cs's CloseComm() now calls this
             // method BEFORE disposing nativeEngineClient (previously reversed -- the engine
             // process was already dead by the time HaltTx()'s own HALT_TX reached the dispatcher,
-            // so a graceful halt/tune-off/TX-release could never actually land). Blocking,
-            // bounded wait (2s) for a real response while the engine is still alive to answer;
-            // times out and proceeds regardless if it doesn't -- process termination (CloseComm()
-            // killing the engine right after this returns) remains the last-resort backstop, same
-            // as it already was.
-            if (opMode > OpModes.IDLE)
-            {
-                StopDecodeTimers();
-                tuning = false;
-                if (_directConnected)
-                {
-                    bool halted = HaltTxAndWaitForShutdown(TimeSpan.FromSeconds(2));
-                    DebugOutput($"{Time()} [DIRECT] shutdown halt {(halted ? "confirmed" : "did not confirm within 2s -- proceeding to terminate the engine regardless")}");
-                    txEnabled = false;
-                    wsjtxTxEnableButton = false;
-                }
-            }
+            // so a graceful halt/tune-off/TX-release could never actually land). T6/T7 fix,
+            // 2026-08-23: the halt-and-confirm sequence itself is now shared with
+            // Controller.ApplyEngineMode()'s own engine-restart path via HaltAndConfirmTxStopped
+            // -- see that method's own comment for the bound and for why an Options-triggered
+            // restart needed the exact same protection a normal exit already had.
+            // Independent audit finding, 2026-08-23: NOT surfaced as an accessible notification
+            // here the way ApplyEngineMode's own restart path does on a false result -- the
+            // window is already closing at this point, so there is no operator left to hear a
+            // screen-reader announcement land. The DebugOutput inside HaltAndConfirmTxStopped
+            // itself still records whether this confirmed, for diagnostic-log review after the
+            // fact; forced fallback (NativeEngineClient.Dispose() -> Process.Kill(), Controller.
+            // CloseComm(), right after this call) remains the safety net either way.
+            HaltAndConfirmTxStopped();
             // Codex Audit 03 finding 3, 2026-08-21: stops the SNAPSHOT poll timer (the main
             // source of new Direct-command enqueues, e.g. SetupCq's post-QSO CALL_CQ auto-resume)
             // and permanently closes the write queue -- the shutdown halt just above already
@@ -2133,16 +2243,30 @@ namespace WSJTX_Controller
         public bool ToggleTxFirst()
         {
             HaltTuning();
-            HaltTx();           // stop current TX before switching period so WSJT-X honors the new setting
-            DebugOutput($"{Time()} ToggleTxFirst, newFreq:{0} newTxFirst:{!txFirst}");
-            SetBandTxFirst(0, !txFirst, "ToggleTxFirst");
-            // Write an immediate status before WSJT-X confirms via StatusMessage
-            // (~100 ms round-trip).  ShowStatus() will overwrite this once newTxFirst
-            // is set in the txFirst-change handler.
-            string pendingSide = txFirst ? "second" : "first";
+            HaltTx();           // stop current TX before switching period so the engine honors the new setting
+            bool willBeTxFirst = !txFirst;
+            DebugOutput($"{Time()} ToggleTxFirst, newFreq:{0} newTxFirst:{willBeTxFirst}");
+            SetBandTxFirst(0, willBeTxFirst, "ToggleTxFirst");
+            // TX First/RX First fix, 2026-08-24: arms the SAME one-shot announcement flag
+            // ShowStatus() (WsjtxClient.Display.cs) already reads for the Advanced-UI-only
+            // "TX1 selected,"/"TX2 selected," prefix -- never set anywhere before this fix, so
+            // that announcement could never fire even once `txFirst` itself is correctly toggled.
+            // UpdateCallListAccessibleName(force: true) mirrors that same "operator-triggered,
+            // don't wait for the next poll tick" immediacy for the RX1/RX2 call-list labels
+            // (Controller.cs's own Alt+P handler already forces this the same way for its own
+            // hotkey-driven change).
+            newTxFirst = true;
+            UpdateCallListAccessibleName(force: true);
+            // TX First/RX First fix, 2026-08-24: SetBandTxFirst (WsjtxClient.Protocol.cs) now
+            // writes `txFirst` synchronously right above -- there is no WSJT-X confirmation round
+            // trip to wait for under Direct-engine mode (see that method's own comment on why the
+            // old "immediate status before WSJT-X confirms" design no longer applies). Describe
+            // the state actually just applied (willBeTxFirst) rather than re-deriving it from
+            // `txFirst`, which by this point already holds the new value.
+            string newSide = willBeTxFirst ? "first" : "second";
             ctrl.statusText.ForeColor = Color.Black;
             ctrl.statusText.BackColor = Color.Yellow;
-            ctrl.statusText.Text = $"Tx {pendingSide} selected, halted";
+            ctrl.statusText.Text = $"Tx {newSide} selected, halted";
             ctrl.statusText.SelectionStart  = 0;
             ctrl.statusText.SelectionLength = 0;
             // Force NVDA/JAWS to announce this pending status immediately, same guard and
@@ -2281,6 +2405,26 @@ namespace WSJTX_Controller
                     DateTime dtNow = DateTime.Now;
                     bool evenCall = IsEvenCall(dmsg);
                     bool evenPeriod = IsEvenPeriod((dtNow.Minute * 60) + dtNow.Second);       //listen mode can xmit on either period depending on current time
+
+                    // Advanced UI shows both TX1/TX2 (RX1/RX2) panels at once and lets the
+                    // operator reply to a call from either one regardless of the current
+                    // txFirst setting (see IsCorrectTimePeriodForMode's own comment: advanced
+                    // mode accepts both periods into the queue). Without this, committing to
+                    // reply to a call never updated txFirst, so the panel that had just become
+                    // the real TX side kept displaying "RX" (and vice versa) for the rest of
+                    // the QSO -- txFirst only ever moved via the manual Toggle Transmit Period
+                    // hotkey. Sync it here, to whichever period this specific reply actually
+                    // needs (IsCorrectTimePeriodForMode's own res = evenCall != txFirst), right
+                    // before the reply is dispatched below, so the labels reflect reality.
+                    if (ctrl.advancedCallLayout)
+                    {
+                        bool desiredTxFirst = !evenCall;
+                        if (desiredTxFirst != txFirst)
+                        {
+                            SetBandTxFirst(0, desiredTxFirst, "NextCall (advanced UI reply)");
+                            UpdateCallListAccessibleName(force: true);
+                        }
+                    }
 
                     if (txMode == TxModes.LISTEN)
                     {
@@ -2949,9 +3093,19 @@ namespace WSJTX_Controller
             // engine has genuinely accepted the command (and, per finding 3, only if a Halt
             // hasn't superseded it while in flight -- see DirectSendCq's own comment,
             // WsjtxClient.Direct.cs). EnableTx() moves here too, for the same reason.
+            int capturedBandSessionEpoch = _bandSessionEpoch;
             DirectSendCq(dirCq.Trim(), ok =>
             {
                 if (!ok) return;
+                // Active QSO survives band change fix, 2026-08-23: see ReplyTo's own identical
+                // check/comment -- curCmd is band-owned (WsjtxClient.cs's ClearCalls own comment),
+                // so a CALL_CQ confirmed after a band change already moved on must not stomp it
+                // back with a CQ message that named the OLD band's now-cleared context.
+                if (capturedBandSessionEpoch != _bandSessionEpoch)
+                {
+                    DebugOutput($"{Time()} SetupCq: CALL_CQ confirmed but superseded by a band change while in flight -- not committing");
+                    return;
+                }
                 qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
                 replyCmd = null;        //invalidate last reply cmd since not replying
                 replyDecode = null;
@@ -2968,10 +3122,15 @@ namespace WSJTX_Controller
             DebugOutput($"{spacer}BEEP");
         }
 
-        //get (and remove) call/msg at specified index in queue;
-        //queue not assumed to have any entries;
-        //return null if failure
-        private string GetCall(int idx, out EnqueueDecodeMessage dmsg)
+        // T8 fix, 2026-08-23 (CONFIRMED bug, HIGH): used to be GetCall(idx), which REMOVED the
+        // call from the queue immediately, before REPLY was even attempted -- if EngineHost
+        // rejected/timed out the reply, the station was permanently gone with no rollback (the
+        // operator had to wait for another decode). Codex Audit 04 finding 2 (2026-08-21) had
+        // already deferred committing callInProg/curCmd/EnableTx to DirectSendReply's own
+        // success callback; this finishes that same principle by deferring the DEQUEUE to that
+        // same success callback too (see ReplyTo(EnqueueDecodeMessage) below) -- peek here,
+        // never remove. queue not assumed to have any entries; returns null on failure.
+        private string PeekCallForReply(int idx, out EnqueueDecodeMessage dmsg)
         {
             dmsg = null;
             if (callQueue.Count == 0)
@@ -2990,8 +3149,6 @@ namespace WSJTX_Controller
                 return null;
             }
 
-            _callQueueStore.RemoveCall(call);
-
             DebugOutput($"{spacer}call:{call}: msg:'{dmsg.Message}'");
             return call;
         }
@@ -2999,7 +3156,7 @@ namespace WSJTX_Controller
         private void ReplyTo(int queueIdx)
         {
             var dmsg = new EnqueueDecodeMessage();
-            string nCall = GetCall(queueIdx, out dmsg);
+            string nCall = PeekCallForReply(queueIdx, out dmsg);
             DebugOutput($"{Time()} ReplyTo, queueIdx:{queueIdx} nCall:'{nCall}'");
             ReplyTo(dmsg);
         }
@@ -3056,16 +3213,31 @@ namespace WSJTX_Controller
             // Codex Audit 04 finding 2, 2026-08-21: replyCmd/curCmd/callInProg/EnableTx used to
             // commit here, synchronously, before REPLY was even sent -- an EngineHost refusal,
             // timeout, or lost response could leave Jimmy displaying/ranking a QSO that never
-            // actually started, with the station already dequeued (GetCall, above). Now committed
-            // only from DirectSendReply's own completion callback, once the engine has genuinely
-            // accepted the reply (and, per finding 3, only if a Halt hasn't superseded it while in
-            // flight -- see DirectSendReply's own comment, WsjtxClient.Direct.cs). The dequeue
-            // itself is NOT rolled back on failure -- see this method's own earlier comment on why
-            // an automatic queue-state rollback is a separate, riskier change needing real-radio
-            // verification this pass doesn't have.
+            // actually started. Now committed only from DirectSendReply's own completion
+            // callback, once the engine has genuinely accepted the reply (and, per finding 3,
+            // only if a Halt hasn't superseded it while in flight -- see DirectSendReply's own
+            // comment, WsjtxClient.Direct.cs).
+            // T8 fix, 2026-08-23 (CONFIRMED bug, HIGH): the DEQUEUE itself is now part of this
+            // same success-only commit -- PeekCallForReply (above) no longer removes the call
+            // up front, so a rejected/timed-out REPLY simply leaves the station exactly where it
+            // was (still visible, still ranked, still selectable) instead of permanently
+            // dropping it with no recovery but a fresh decode. Only removed here, once REPLY is
+            // confirmed accepted.
+            int capturedBandSessionEpoch = _bandSessionEpoch;
             DirectSendReply(nCall, null, dmsg.Message, dmsg.Snr, null, ok =>
             {
                 if (!ok) return;
+                // Active QSO survives band change fix, 2026-08-23: a confirmed band change while
+                // this REPLY was still in flight already terminally cleared callInProg/queue/
+                // TX-message state for the band nCall was heard on -- committing it now would
+                // resurrect exactly that stale state under the NEW band's session. See
+                // _bandSessionEpoch's own comment.
+                if (capturedBandSessionEpoch != _bandSessionEpoch)
+                {
+                    DebugOutput($"{Time()} ReplyTo: REPLY to '{nCall}' confirmed but superseded by a band change while in flight -- not committing");
+                    return;
+                }
+                _callQueueStore.RemoveCall(nCall);
                 replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress
                 replyDecode = dmsg.DeepCopy();      //save the decode the reply cmd derived from
                 curCmd = dmsg.Message;
@@ -3347,19 +3519,58 @@ namespace WSJTX_Controller
 
         private void DiscardCall()
         {
-            if (callInProg == discardCall && ((txMode == TxModes.LISTEN && !txEnabled) || txMode == TxModes.CALL_CQ))
+            // T14 fix, 2026-08-23 (CONFIRMED bug, HIGH -- 9V1SH, 2026-08-23): if discardCall is no
+            // longer even the active call, this tracker is stale/superseded by some other path
+            // already -- always safe to disarm regardless of txEnabled.
+            if (callInProg != discardCall)
             {
-                DebugOutput($"{Time()} DiscardCall: in effect, discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount}");
-                if (txMode == TxModes.LISTEN) Pause(true, false);
-                if (!transmitting) expiredCall = discardCall;
-                SetCallInProg(null);
-                DebugOutput($"{spacer}callInProg:'{callInProg}' expiredCall:'{expiredCall}' txTimeout:{txTimeout} xmitCycleCount:{xmitCycleCount} timedOutCall:'{timedOutCall}'");
-            }
-            else
-            {
-                DebugOutput($"{Time()} DiscardCall: not in effect (was discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount})");
+                DebugOutput($"{Time()} DiscardCall: not in effect, discardCall:'{discardCall}' no longer callInProg:'{callInProg}' -- disarming (discardCallCycleCount was {discardCallCycleCount})");
+                discardCall = null;
+                discardCallCycleCount = 0;
+                return;
             }
 
+            // Repeat limit authoritative-stop fix, 2026-08-24 (independent audit finding,
+            // CONFIRMED live -- Repeat Limit set to 3, engine kept transmitting past it, 5 real
+            // overs observed before manual operator intervention): this used to only be terminal
+            // once txEnabled ALREADY read false (T14's own "wait for EngineHost's own authoritative
+            // retry limit" design) -- but EngineHost's own retry/call-cap mechanism never actually
+            // disabled txEnabled at all (only a separate, unrelated wall-clock watchdog did, on
+            // its own uncorrelated schedule), so LISTEN mode could sit "armed, not yet terminal"
+            // for periods on end while the engine kept calling. EngineHost's own call-cap
+            // (directed_max_calls) is now disabled outright (main.rs's own Settings construction),
+            // making Jimmy's own count the ONLY attempt-based stop -- so this is unconditionally
+            // terminal the moment it's called (matching CALL_CQ mode's own pre-existing immediate-
+            // terminal behavior), and ACTIVELY stops TX itself instead of waiting to observe that
+            // it already stopped.
+            DebugOutput($"{Time()} DiscardCall: in effect, discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount}");
+            // Captured BEFORE Pause() below -- LISTEN mode's own Pause(true, false) calls HaltTx()
+            // internally, which sets the local txEnabled field false as a side effect (a real
+            // HALT_TX command, same one Escape/Alt+H sends). Reading the field AFTER that call
+            // would always see it already false and skip the explicit send below entirely for
+            // LISTEN mode -- found writing this test's own regression coverage, confirmed the
+            // fix needs the ORIGINAL value, not whatever Pause() already changed it to.
+            bool wasTxEnabled = txEnabled;
+            if (txMode == TxModes.LISTEN) Pause(true, false);
+            if (!transmitting) expiredCall = discardCall;
+            // Independent audit finding, 2026-08-24: the terminal cleanup below only ever updated
+            // Jimmy's OWN local state (callInProg, discardCall, etc.) -- it never told the engine
+            // to actually stop. If the engine were still independently mid-retry (which, per the
+            // finding above, it always was), Jimmy would locally consider this call "done" while
+            // the radio kept transmitting to it. Sent unconditionally off wasTxEnabled (not
+            // Pause's possibly-already-mutated txEnabled) so CALL_CQ mode (which never calls
+            // Pause -- nothing else stops it) and LISTEN mode (already halted via Pause's own
+            // HaltTx() above, but this makes the stop explicit and uniform rather than relying on
+            // that as an implicit side effect) both always get it. Fire-and-forget, same shape as
+            // every other DirectSetXxx cleanup call: the completion callback only logs a failure,
+            // nothing else downstream depends on it -- matching this method's own "give up
+            // locally" semantics rather than a bounded halt-and-confirm sequence
+            // (HaltAndConfirmTxStopped exists separately for full teardown/restart, not this
+            // routine per-call give-up).
+            if (wasTxEnabled)
+                DirectSetTxEnabled(false);
+            SetCallInProg(null);
+            DebugOutput($"{spacer}callInProg:'{callInProg}' expiredCall:'{expiredCall}' txTimeout:{txTimeout} xmitCycleCount:{xmitCycleCount} timedOutCall:'{timedOutCall}'");
             discardCall = null;
             discardCallCycleCount = 0;
             DebugOutput($"{spacer} now discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount}");

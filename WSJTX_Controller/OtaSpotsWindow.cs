@@ -7,11 +7,14 @@ namespace WSJTX_Controller
     // Accessible, keyboard-navigable Nexus-facts browser: POTA/SOTA spots, DX-cluster/RBN
     // spots, a plain-language band-conditions nowcast, and space weather -- each its own tab,
     // independently refreshable. Built entirely in code, no Designer.cs -- same convention as
-    // LookupInfoDlg.cs. Every list is a plain ListView(View=Details): natively keyboard-
-    // navigable (arrow keys move between rows, Tab/Shift+Tab between controls, column headers
-    // and cell text read by JAWS/NVDA out of the box) without any custom accessibility
-    // infrastructure. TabControl itself is a standard WinForms control with full built-in
-    // keyboard support (Ctrl+Tab / Ctrl+Shift+Tab between tabs, arrow keys within the tab strip).
+    // LookupInfoDlg.cs. Every list is a plain single-column ListBox with each row pre-formatted
+    // as one full text line (see MakeListBox's own comment: a multi-column ListView read fine in
+    // JAWS but not NVDA -- a live-tested, still-open WinForms accessibility gap, live-NVDA
+    // finding 2026-08-24) -- natively keyboard-navigable (arrow keys move between rows, Tab/
+    // Shift+Tab between controls, full row text read by JAWS/NVDA out of the box) without any
+    // custom accessibility infrastructure. TabControl itself is a standard WinForms control with
+    // full built-in keyboard support (Ctrl+Tab / Ctrl+Shift+Tab between tabs, arrow keys within
+    // the tab strip).
     //
     // Non-modal (Show(), not ShowDialog()) and left open across a session, same pattern as
     // LogbookWindow -- an operator chasing activity wants this visible alongside normal
@@ -49,16 +52,16 @@ namespace WSJTX_Controller
         private bool _potaInFlight, _condInFlight, _dxInFlight, _wxInFlight;
 
         // ── POTA/SOTA tab ────────────────────────────────────────────────────────
-        private ListView _potaList;
+        private ListBox _potaList;
         private Label _potaStatusLabel;
 
         // ── Band Conditions tab ─────────────────────────────────────────────────
         private TextBox _condHeadlineBox;
-        private ListView _condBandsList;
+        private ListBox _condBandsList;
         private Label _condStatusLabel;
 
         // ── DX Spots tab ─────────────────────────────────────────────────────────
-        private ListView _dxList;
+        private ListBox _dxList;
         private Label _dxStatusLabel;
 
         // ── Space Weather tab ────────────────────────────────────────────────────
@@ -180,24 +183,50 @@ namespace WSJTX_Controller
             return btn;
         }
 
+        // Live JAWS-vs-NVDA finding, 2026-08-24: these three lists were originally a multi-
+        // column ListView (View.Details) -- visually tidy, but WinForms ListView subitem/column
+        // text has long-standing, still-unresolved gaps in its UI Automation accessibility
+        // support (see https://github.com/dotnet/winforms/issues/3223). JAWS has its own legacy
+        // SysListView32 fallback that reads every column regardless, which is why a live JAWS
+        // pass read all 72 POTA/SOTA rows fine; NVDA (UIA-first) only ever read the first
+        // column's text moving row to row ("17m", "12m", "20m", ..." for Band Conditions) --
+        // a real, reported live-NVDA regression, not a one-off. A plain single-column ListBox
+        // sidesteps the whole problem: each row's FULL text (every field, pre-formatted into one
+        // line by the Refresh methods below) IS the item's only accessible text, so both screen
+        // readers read the complete row the same way -- exactly the pattern Controller.cs's own
+        // callListBox (the main station list, RowFormatter-built rows) already proves works.
+        // Sighted users lose the aligned column grid; HorizontalScrollbar covers a row too wide
+        // to fit rather than truncating it.
         // accessibleName is deliberately short ("Spots list"/"Bands list") -- the tab already
         // named the subject when it was switched to (e.g. "POTA / SOTA"), so repeating it here
-        // is the redundancy a live JAWS pass flagged. No AccessibleDescription: JAWS announces
-        // it alongside the name every time focus lands on the list, and the column headers
-        // already explain each field -- a longer one-time description added repetition, not
-        // clarity, for a control the operator revisits constantly.
-        private static ListView MakeListView(string accessibleName)
+        // is the redundancy a live JAWS pass flagged.
+        private static ListBox MakeListBox(string accessibleName)
         {
-            return new ListView
+            return new ListBox
             {
-                View = View.Details,
-                FullRowSelect = true,
-                GridLines = true,
-                MultiSelect = false,
                 Dock = DockStyle.Fill,
+                HorizontalScrollbar = true,
                 TabIndex = 0,
                 AccessibleName = accessibleName,
             };
+        }
+
+        // Companion to MakeListBox's own comment: a ListBox's "current item" for keyboard/
+        // screen-reader purposes is just SelectedIndex, but Items.Clear()+Add() (every Refresh
+        // below) always resets it to -1, so the FIRST population after a tab/window opens would
+        // otherwise leave nothing selected for a screen reader to land on. Selecting item 0 only
+        // when nothing was already selected (captured via hadSelectionBeforeClear, taken before
+        // Items.Clear() since Clear() wipes SelectedIndex) fixes that opening silence without
+        // yanking an operator who already arrowed deeper into the list back to the top on a
+        // routine 15s refresh. None of these lists have a click/Enter action, so selecting an
+        // item has no side effect beyond the visual/accessible highlight.
+        // internal (not private): JimmyTests exercises this directly (InternalsVisibleTo, see
+        // AssemblyInfo.Testing.cs), same convention as FormatStatus/FormatNoaaScale above -- no
+        // live EngineHost/network fetch needed to lock in the pure ListBox-state behavior.
+        internal static void SelectFirstItemIfNoneSelectedYet(ListBox lb, bool hadSelectionBeforeClear)
+        {
+            if (!hadSelectionBeforeClear && lb.Items.Count > 0)
+                lb.SelectedIndex = 0;
         }
 
         // Formats a server-supplied AGE IN SECONDS (not a unix timestamp -- EngineHost's
@@ -225,13 +254,7 @@ namespace WSJTX_Controller
         private TabPage BuildPotaSotaTab()
         {
             var page = MakeTabPage("POTA / SOTA");
-            _potaList = MakeListView("Spots list");
-            _potaList.Columns.Add("Program", 70);
-            _potaList.Columns.Add("Reference", 90);
-            _potaList.Columns.Add("Activator", 100);
-            _potaList.Columns.Add("Freq/Mode", 110);
-            _potaList.Columns.Add("Age", 70);
-            _potaList.Columns.Add("Status", 150);
+            _potaList = MakeListBox("Spots list");
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _potaStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
@@ -270,6 +293,7 @@ namespace WSJTX_Controller
                     _potaInFlight = false;
                     if (IsDisposed) return;
 
+                    bool hadSelection = _potaList.SelectedIndex >= 0;
                     _potaList.BeginUpdate();
                     try
                     {
@@ -279,14 +303,7 @@ namespace WSJTX_Controller
                             foreach (var spot in result.Spots)
                             {
                                 var annotation = OtaSpotAnnotator.Annotate(spot.Activator, band, _logbookDb, _lookupManager, tags);
-                                var item = new ListViewItem(spot.Program ?? "");
-                                item.SubItems.Add(spot.Reference ?? "");
-                                item.SubItems.Add(spot.Activator ?? "");
-                                item.SubItems.Add($"{spot.FreqKhz / 1000.0:0.000} {spot.Mode}");
-                                item.SubItems.Add(FormatAge(spot.SpotTimeUnix));
-                                item.SubItems.Add(FormatStatus(annotation));
-                                item.Name = spot.Activator;
-                                _potaList.Items.Add(item);
+                                _potaList.Items.Add(FormatPotaSotaRow(spot, annotation));
                             }
                         }
                     }
@@ -294,6 +311,7 @@ namespace WSJTX_Controller
                     {
                         _potaList.EndUpdate();
                     }
+                    SelectFirstItemIfNoneSelectedYet(_potaList, hadSelection);
 
                     if (error != null)
                         _potaStatusLabel.Text = $"{_potaList.Items.Count} spots (stale) -- {error}";
@@ -321,6 +339,17 @@ namespace WSJTX_Controller
             return a.WorkedBefore ? "worked" : "not worked";
         }
 
+        // One line per spot, every field labeled -- the exact wording a live JAWS pass on this
+        // window already read out loud correctly (see MakeListBox's own comment for why this
+        // replaced a multi-column ListView). internal (not private): JimmyTests exercises this
+        // directly, same convention as FormatStatus above.
+        internal static string FormatPotaSotaRow(OtaSpot spot, OtaSpotAnnotation annotation)
+        {
+            return $"{spot.Program}, Reference: {spot.Reference}, Activator: {spot.Activator}, " +
+                $"Freq/Mode: {spot.FreqKhz / 1000.0:0.000} {spot.Mode}, Age: {FormatAge(spot.SpotTimeUnix)}, " +
+                $"Status: {FormatStatus(annotation)}";
+        }
+
         // ── Band Conditions tab ──────────────────────────────────────────────────
 
         private TabPage BuildBandConditionsTab()
@@ -340,13 +369,7 @@ namespace WSJTX_Controller
                 Text = "Loading...",
             };
 
-            _condBandsList = MakeListView("Bands list");
-            _condBandsList.Columns.Add("Band", 60);
-            _condBandsList.Columns.Add("Tier", 70);
-            _condBandsList.Columns.Add("Confidence", 80);
-            _condBandsList.Columns.Add("Hear Me / I Hear", 110);
-            _condBandsList.Columns.Add("Best Region", 150);
-            _condBandsList.Columns.Add("Reason", 260);
+            _condBandsList = MakeListBox("Bands list");
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _condStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
@@ -359,6 +382,21 @@ namespace WSJTX_Controller
             page.Controls.Add(_condHeadlineBox);
             page.Controls.Add(bottom);
             return page;
+        }
+
+        // One line per band, every field labeled -- see MakeListBox's own comment for why this
+        // replaced a multi-column ListView. Folds in the "modeled" detail that used to be
+        // ListView-tooltip-only (mouse-hover, never reachable by keyboard/screen reader at all)
+        // since it's already computed and free to include now that the whole row is one string.
+        // internal (not private): JimmyTests exercises this directly.
+        internal static string FormatBandConditionsRow(BandReport b)
+        {
+            string hearMe = $"{b.NHearMe} / {b.NIHear}";
+            string bestRegion = b.BestRegion != null
+                ? $"{b.BestRegion.Region} ({b.BestRegion.Octant}, {b.BestRegion.Stations} stn{(b.BestRegion.Stations == 1 ? "" : "s")})"
+                : "--";
+            return $"{b.Band}: {b.Tier}, {b.Confidence} confidence, Hear Me/I Hear: {hearMe}, " +
+                $"Best Region: {bestRegion}, Reason: {b.Reason} (modeled: {b.Modeled} -- {b.ModeledReason})";
         }
 
         // Release-audit finding, 2026-08-20: moved off the UI thread -- see RefreshPotaSota's
@@ -375,6 +413,7 @@ namespace WSJTX_Controller
                     _condInFlight = false;
                     if (IsDisposed) return;
 
+                    bool hadSelection = _condBandsList.SelectedIndex >= 0;
                     _condBandsList.BeginUpdate();
                     try
                     {
@@ -382,25 +421,14 @@ namespace WSJTX_Controller
                         if (result?.Bands != null)
                         {
                             foreach (var b in result.Bands)
-                            {
-                                var item = new ListViewItem(b.Band ?? "");
-                                item.SubItems.Add(b.Tier ?? "");
-                                item.SubItems.Add(b.Confidence ?? "");
-                                item.SubItems.Add($"{b.NHearMe} / {b.NIHear}");
-                                item.SubItems.Add(b.BestRegion != null
-                                    ? $"{b.BestRegion.Region} ({b.BestRegion.Octant}, {b.BestRegion.Stations} stn{(b.BestRegion.Stations == 1 ? "" : "s")})"
-                                    : "--");
-                                item.SubItems.Add(b.Reason ?? "");
-                                item.ToolTipText = $"{b.Band}: {b.Tier}, {b.Confidence} confidence -- {b.Reason} " +
-                                    $"(modeled: {b.Modeled} -- {b.ModeledReason})";
-                                _condBandsList.Items.Add(item);
-                            }
+                                _condBandsList.Items.Add(FormatBandConditionsRow(b));
                         }
                     }
                     finally
                     {
                         _condBandsList.EndUpdate();
                     }
+                    SelectFirstItemIfNoneSelectedYet(_condBandsList, hadSelection);
 
                     if (error != null)
                     {
@@ -440,13 +468,7 @@ namespace WSJTX_Controller
         private TabPage BuildDxSpotsTab()
         {
             var page = MakeTabPage("DX Spots");
-            _dxList = MakeListView("Spots list");
-            _dxList.Columns.Add("DX Call", 90);
-            _dxList.Columns.Add("Frequency", 90);
-            _dxList.Columns.Add("Mode", 70);
-            _dxList.Columns.Add("Spotter", 90);
-            _dxList.Columns.Add("Age", 70);
-            _dxList.Columns.Add("Comment", 200);
+            _dxList = MakeListBox("Spots list");
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _dxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
@@ -458,6 +480,16 @@ namespace WSJTX_Controller
             page.Controls.Add(_dxList);
             page.Controls.Add(bottom);
             return page;
+        }
+
+        // One line per spot, every field labeled -- see MakeListBox's own comment for why this
+        // replaced a multi-column ListView. internal (not private): JimmyTests exercises this
+        // directly.
+        internal static string FormatDxSpotRow(DxSpot s)
+        {
+            string mode = s.Rbn ? (s.SkimmerMode ?? "RBN") : "";
+            return $"DX Call: {s.DxCall}, Frequency: {s.FreqKhz / 1000.0:0.000} MHz, Mode: {mode}, " +
+                $"Spotter: {s.Spotter}, Age: {FormatAgeSecs(s.AgeSecs)}, Comment: {s.Comment}";
         }
 
         // Release-audit finding, 2026-08-20: moved off the UI thread -- see RefreshPotaSota's
@@ -474,6 +506,7 @@ namespace WSJTX_Controller
                     _dxInFlight = false;
                     if (IsDisposed) return;
 
+                    bool hadSelection = _dxList.SelectedIndex >= 0;
                     _dxList.BeginUpdate();
                     try
                     {
@@ -481,23 +514,14 @@ namespace WSJTX_Controller
                         if (result?.Spots != null)
                         {
                             foreach (var s in result.Spots)
-                            {
-                                var item = new ListViewItem(s.DxCall ?? "");
-                                item.SubItems.Add($"{s.FreqKhz / 1000.0:0.000} MHz");
-                                item.SubItems.Add(s.Rbn ? (s.SkimmerMode ?? "RBN") : "");
-                                item.SubItems.Add(s.Spotter ?? "");
-                                item.SubItems.Add(FormatAgeSecs(s.AgeSecs));
-                                item.SubItems.Add(s.Comment ?? "");
-                                item.ToolTipText = $"{s.DxCall} -- {s.FreqKhz / 1000.0:0.000} MHz -- spotted by {s.Spotter} " +
-                                    $"{FormatAgeSecs(s.AgeSecs)} -- {s.Comment}";
-                                _dxList.Items.Add(item);
-                            }
+                                _dxList.Items.Add(FormatDxSpotRow(s));
                         }
                     }
                     finally
                     {
                         _dxList.EndUpdate();
                     }
+                    SelectFirstItemIfNoneSelectedYet(_dxList, hadSelection);
 
                     if (error != null)
                     {
@@ -551,7 +575,7 @@ namespace WSJTX_Controller
             _wxKpValue = AddWxRow(panel, "Planetary K-index (Kp):", ref y, lx, vx, fw, rh, ref tabIndex);
             _wxAValue = AddWxRow(panel, "Planetary A-index:", ref y, lx, vx, fw, rh, ref tabIndex);
             _wxXrayValue = AddWxRow(panel, "X-ray flux (long):", ref y, lx, vx, fw, rh, ref tabIndex);
-            // Three additions Nexus already computes/fetches but Jimmy Test wasn't surfacing
+            // Three additions Nexus already computes/fetches but Jimmy Next wasn't surfacing
             // (investigated 2026-08-17 -- see RefreshSpaceWeather's own comment for exactly what
             // each one is and isn't): a representative long-haul MUF, and NOAA's own G
             // (geomagnetic storm) and S (solar radiation storm) scales. NOAA's R (radio
@@ -636,7 +660,7 @@ namespace WSJTX_Controller
                     _wxAValue.Text = wx.AIndex.ToString("0.0");
                     // NOAA flare-class letter + R-scale (radio-blackout risk, 0-5) are Nexus's
                     // own existing classifications of this same raw reading (SpaceWx::
-                    // xray_class()/propagation::model::r_scale()), not a Jimmy Test
+                    // xray_class()/propagation::model::r_scale()), not a Jimmy Next
                     // interpretation -- surfaced alongside the raw value since a bare
                     // "1.0e-7 W/m²" means little to most operators on its own.
                     string flareClass = string.IsNullOrEmpty(wx.XrayClass) ? "" : $" ({wx.XrayClass}-class, R{wx.RScale})";

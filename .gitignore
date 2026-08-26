@@ -25,7 +25,7 @@ Setup1/build_log*.txt
 Setup_WiX/.wix/
 Setup_WiX/Release/
 Setup_WiX/PublishOutput/
-Setup_WiX/PublishOutputTest/
+Setup_WiX/PublishOutputNext/
 *.wixpdb
 debug/
 installer_build.log

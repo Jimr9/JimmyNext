@@ -439,6 +439,50 @@ struct Args {
     /// must be the operator's own choice. Startup-only, same reasoning as decode_flow_hz above --
     /// changing it in Options requires the usual engine restart.
     dx_cluster_addr: Option<String>,
+    /// Independent audit finding, 2026-08-23 (EngineHost ownership / session identity, HIGH
+    /// PRIORITY): a per-launch random value NativeEngineClient.cs generates fresh before every
+    /// Launch() and never reuses. Echoed back verbatim as the `sessionToken` field on every
+    /// SNAPSHOT response (see `handle_control_connection`'s own SNAPSHOT branch) so Jimmy can
+    /// prove the control-port connection actually reaches the specific child process it just
+    /// launched, not a stale/orphan jimmy-engine-host.exe left over from a prior session that
+    /// still happens to hold port 58239 (the fail-closed bind fix closes a NEW second process
+    /// silently coexisting with an old one, but does nothing about an old one Jimmy itself never
+    /// launched THIS session). Empty when not passed (e.g. a manual/debug launch with no
+    /// --session-token flag) -- Jimmy's own expected token is always a real generated value, so
+    /// an empty/missing echoed token can never accidentally satisfy its match check.
+    session_token: String,
+    /// Repeat limit / TX watchdog authority split, 2026-08-24: Jimmy computes this from its own
+    /// "Repeat limit" setting (Controller.cs's timeoutNumUpDown) plus real FT8/FT4 timing and a
+    /// safety margin -- see NativeEngineClient.ComputeAutomaticTxWatchdogMinutes's own comment
+    /// for the exact formula. Passed straight through to Settings.tx_watchdog_min (main() below)
+    /// as the wall-clock-only runaway-TX safety backstop, now fully independent of
+    /// directed_max_calls (which main() disables outright -- see that assignment's own comment).
+    /// Startup-only, same reasoning as decode_flow_hz above: Engine::apply_settings exists but is
+    /// a whole-settings-form-save mechanism with extensive live-state-preservation logic, not a
+    /// safe vehicle for a single-field live update, so a Repeat-limit change takes effect on the
+    /// next engine restart (OptionsDlg.cs restarts automatically when it actually changed).
+    /// Defaults to Nexus's own Settings::default() (6) when not passed, matching every other
+    /// startup-only field's own "absent = stock behavior" convention.
+    tx_watchdog_min: u32,
+    /// Frequency-override authority split, 2026-08-24 (independent audit finding): mirrors
+    /// Jimmy's own Options>Frequencies per-band/per-mode overrides (FrequencySettings.cs) into
+    /// Nexus's own documented working-frequency override mechanism (Engine::band_plan's own doc
+    /// comment: "WSJT-X Settings > Frequencies... an override replaces the dial of the matching
+    /// (band, mode) row"). Without this, Engine::set_tier's own internal auto-QSY (engine.rs,
+    /// ~line 8122 -- "switching the mode moves the rig to the NEW mode's dial for the CURRENT
+    /// band") always retunes to Nexus's stock band-plan dial on every tier switch, independent
+    /// of whatever dial Jimmy itself just restored/commanded. Harmless on a band the operator
+    /// has never customized -- Jimmy's own built-in defaults (WsjtxClient.cs's freqsDict)
+    /// already match Nexus's stock table exactly on every band checked -- but an unnecessary
+    /// extra retune on any band the operator HAS customized. Passed as a JSON array
+    /// (`[{"band":"30m","mode":"FT4","mhz":10.14}, ...]`, matching WorkingFreq's own
+    /// #[serde(rename_all = "camelCase")]) at startup; SET_WORKING_FREQUENCIES (control port,
+    /// below) is the live-update counterpart for an Options>Frequencies edit made mid-session --
+    /// unlike tx_watchdog_min, this is a normal operator-facing settings field (Nexus's own
+    /// SettingsPanel edits it the same way), so Engine::apply_settings is its intended vehicle,
+    /// not an inappropriate one. Empty (default) = Nexus's own stock table, matching every other
+    /// startup field's "absent = stock behavior" convention.
+    working_frequencies: Vec<tempo_app::settings::WorkingFreq>,
 }
 
 fn parse_args() -> Args {
@@ -469,6 +513,9 @@ fn parse_args() -> Args {
     let mut ap_cq_only: Option<bool> = None;
     let mut single_decode: Option<bool> = None;
     let mut dx_cluster_addr: Option<String> = None;
+    let mut session_token = String::new();
+    let mut tx_watchdog_min: u32 = 6; // Nexus's own Settings::default() -- see Args::tx_watchdog_min's own comment
+    let mut working_frequencies: Vec<tempo_app::settings::WorkingFreq> = Vec::new(); // empty = Nexus's own stock table
 
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -546,6 +593,22 @@ fn parse_args() -> Args {
             "--dx-cluster" => {
                 dx_cluster_addr = it.next().filter(|v| !v.trim().is_empty());
             }
+            "--session-token" => session_token = it.next().unwrap_or(session_token),
+            "--tx-watchdog-min" => {
+                if let Some(v) = it.next() {
+                    tx_watchdog_min = v.parse().unwrap_or(tx_watchdog_min);
+                }
+            }
+            "--working-frequencies" => {
+                if let Some(v) = it.next() {
+                    match serde_json::from_str::<Vec<tempo_app::settings::WorkingFreq>>(&v) {
+                        Ok(wf) => working_frequencies = wf,
+                        Err(e) => eprintln!(
+                            "jimmy-engine-host: ignoring unparseable --working-frequencies value: {e}"
+                        ),
+                    }
+                }
+            }
             other => eprintln!("jimmy-engine-host: ignoring unrecognized argument '{other}'"),
         }
     }
@@ -577,6 +640,9 @@ fn parse_args() -> Args {
         ap_cq_only,
         single_decode,
         dx_cluster_addr,
+        session_token,
+        tx_watchdog_min,
+        working_frequencies,
     }
 }
 
@@ -825,6 +891,7 @@ fn handle_control_connection(
     engine: Arc<Mutex<Engine>>,
     external_cache: Arc<external_data::SharedCache>,
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
+    session_token: Arc<str>,
 ) {
     use std::io::Write;
 
@@ -845,9 +912,23 @@ fn handle_control_connection(
             // elsewhere while holding this lock must not also take the control channel's
             // ability to report state down with it.
             let snap = engine.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
-            match serde_json::to_string(&snap) {
-                Ok(json) => {
-                    let _ = writeln!(stream, "{json}");
+            // Independent audit finding, 2026-08-23 (EngineHost ownership / session identity):
+            // sessionToken/pid are injected at the JSON level, AFTER AppSnapshot (a pinned
+            // Nexus/tempo-app type) has already been serialized normally -- this never touches
+            // the pinned struct itself, only wraps its own output with two extra top-level
+            // fields via serde_json::Value. Jimmy's DirectSnapshot (WsjtxClient.Direct.cs)
+            // compares sessionToken against the value it generated before launching this exact
+            // process and never marks Direct connected/sends TX-capable commands without a
+            // match -- see that file's own comment. pid is informational only (support-report/
+            // diagnostic cross-check), not itself required for the match.
+            match serde_json::to_value(&snap) {
+                Ok(serde_json::Value::Object(mut obj)) => {
+                    obj.insert("sessionToken".to_string(), serde_json::Value::String(session_token.to_string()));
+                    obj.insert("pid".to_string(), serde_json::Value::Number(std::process::id().into()));
+                    let _ = writeln!(stream, "{}", serde_json::Value::Object(obj));
+                }
+                Ok(_) => {
+                    let _ = writeln!(stream, "ERR snapshot serialize failed: not a JSON object");
                 }
                 Err(e) => {
                     let _ = writeln!(stream, "ERR snapshot serialize failed: {e}");
@@ -863,7 +944,7 @@ fn handle_control_connection(
                     // STATE CHANGES ... bail must mean nothing happened": no QSO starts, TX is
                     // not armed for this station. Previously this Result was discarded and OK
                     // was written unconditionally, so a refused reply was indistinguishable from
-                    // a real one on Jimmy Test's side. Propagate the real outcome instead --
+                    // a real one on Jimmy Next's side. Propagate the real outcome instead --
                     // same shape every other fallible command in this match already uses.
                     let result = engine.lock().unwrap_or_else(|e| e.into_inner()).call_station_ctx(
                         &a.dxcall,
@@ -1000,6 +1081,27 @@ fn handle_control_connection(
                     let _ = writeln!(stream, "ERR bad SET_FREQUENCY args: {e}");
                 }
             }
+        } else if let Some(json) = line.strip_prefix("SET_WORKING_FREQUENCIES ") {
+            // Live counterpart of --working-frequencies (Args's own doc comment) -- Jimmy sends
+            // this when the operator saves an edited Options>Frequencies entry mid-session, so
+            // Nexus's own auto-QSY (Engine::set_tier -> Engine::band_plan) picks up the new dial
+            // immediately, without an EngineHost restart. working_frequencies is a normal
+            // operator-facing settings field (Nexus's own Settings panel edits it the same way),
+            // so Engine::apply_settings -- clone the current settings, change this one field,
+            // apply -- is its intended live-update vehicle, same pattern Nexus's own test suite
+            // uses throughout (engine.rs's apply_settings_* tests).
+            match serde_json::from_str::<Vec<tempo_app::settings::WorkingFreq>>(json) {
+                Ok(wf) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut s = eng.settings().clone();
+                    s.working_frequencies = wf;
+                    eng.apply_settings(s);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad SET_WORKING_FREQUENCIES args: {e}");
+                }
+            }
         } else if let Some(v) = line.strip_prefix("SET_DECODE_DEPTH ") {
             // WSJT-X "Fast/Normal/Deep" (1/2/3), Jimmy's Decode tab -- the one decode-tab
             // setting with a live setter (Engine::set_decode_depth), so this can change
@@ -1033,7 +1135,7 @@ fn handle_control_connection(
         } else if let Some(json) = line.strip_prefix("EQSL_UPLOAD ") {
             // Credential-bearing, real network I/O (eQSL can take up to ~60s -- it builds the
             // file server-side). MUST NOT run inline: this accept loop is single-threaded, and
-            // Jimmy Test polls SNAPSHOT every ~1s -- blocking it here for a minute would read as
+            // Jimmy Next polls SNAPSHOT every ~1s -- blocking it here for a minute would read as
             // a false-positive engine disconnect. Spawn a dedicated thread for just this
             // connection's request/response and let the accept loop move on immediately.
             match serde_json::from_str::<external_data::EqslUploadArgs>(json) {
@@ -1144,21 +1246,27 @@ fn handle_control_connection(
 /// Accepts connections and hands each one to its own thread (handle_control_connection) --
 /// see that function's own doc comment (Codex Audit 03 finding 5) for why this changed from
 /// fully serial, inline handling.
+///
+/// Independent audit finding 1, 2026-08-23 (confirmed bug, HIGH PRIORITY): this used to bind
+/// its own TcpListener internally, INSIDE the spawned thread -- a bind failure (port already
+/// held by another Jimmy/engine-host instance, or a stale process that never exited) only
+/// printed to stderr and returned from that one thread, while main() below carried on into
+/// run_radio() regardless, still opening real audio/CAT/PTT hardware with no usable control
+/// channel. Worse, NativeEngineClient never handshakes the control-port TCP connection against
+/// this specific process (see NativeEngineClient.cs's own Launch() -- confirmed no PID/session
+/// check exists), so a second Jimmy instance launched while a first is still running could
+/// silently end up controlling hardware nothing can reach, while ITS OWN commands land on
+/// whichever older process still owns the port. Fixed by moving the bind to main(), BEFORE
+/// run_radio starts and before this thread is even spawned -- see main()'s own comment at the
+/// call site. A bind failure is now fatal to the entire process, matching every other startup
+/// precondition failure in this file (--mycall/--mygrid, RadioConfig).
 fn run_control_server(
-    port: u16,
+    listener: std::net::TcpListener,
     engine: Arc<Mutex<Engine>>,
     external_cache: Arc<external_data::SharedCache>,
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
+    session_token: Arc<str>,
 ) {
-    use std::net::TcpListener;
-
-    let listener = match TcpListener::bind(("127.0.0.1", port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("jimmy-engine-host: control server failed to bind 127.0.0.1:{port}: {e}");
-            return;
-        }
-    };
     for incoming in listener.incoming() {
         let stream = match incoming {
             Ok(s) => s,
@@ -1167,8 +1275,9 @@ fn run_control_server(
         let engine = Arc::clone(&engine);
         let external_cache = Arc::clone(&external_cache);
         let live_feeds_cache = Arc::clone(&live_feeds_cache);
+        let session_token = Arc::clone(&session_token);
         std::thread::spawn(move || {
-            handle_control_connection(stream, engine, external_cache, live_feeds_cache);
+            handle_control_connection(stream, engine, external_cache, live_feeds_cache, session_token);
         });
     }
 }
@@ -1253,6 +1362,11 @@ fn main() {
     // Read before args.* fields below get moved into settings/cfg -- control_port (u16) is
     // Copy, but grabbing it now keeps this independent of exactly which fields move later.
     let control_port = args.control_port;
+    // Same reasoning -- session_token (String) is not Copy, so it must be taken (not merely
+    // read) before settings/cfg construction below could otherwise move args.session_token
+    // itself. Arc<str> so every per-connection handler thread gets a cheap clone rather than
+    // needing its own owned String.
+    let session_token: Arc<str> = Arc::from(args.session_token.as_str());
 
     // Tx parity 0: an initial default only -- Engine::call_station_ctx (the real WSJT-X
     // double-click-to-reply entry point) recomputes the correct parity per-QSO from decode
@@ -1296,6 +1410,34 @@ fn main() {
         // "Radio CAT link lost: ... target machine actively refused it" on every fresh connect
         // after this crate picked up the broker feature. Off here since nothing uses it.
         cat_broker: false,
+        // Repeat limit authority split, 2026-08-24 (independent audit finding): Nexus's own
+        // directed_max_calls (default Some(8)) governs every in-QSO directed step (AwaitReport/
+        // Roger/RR73/etc, tempo-core's QsoStation::tx_capped) completely independently of
+        // Jimmy's own "Repeat limit" -- confirmed live, a Jimmy limit of 3 kept transmitting
+        // past it (5 real overs observed before manual intervention) because the two counters
+        // never agreed and NEITHER of Nexus's own mechanisms actually disables tx_enabled when
+        // the count is reached (only the separate, wall-clock-only watchdog below does that --
+        // see tempo-app/src/engine.rs's own "THE CAPPED STATION IS STILL AN ARMED TRANSMITTER"
+        // comment). None here fully disables that cap -- the well-supported, intrinsic "uncapped"
+        // state (tx_capped() is bool::is_some_and, unconditionally false for None; every
+        // Default/test constructor in tempo-core's own qso.rs already starts here) -- so Jimmy's
+        // own DiscardCall (WsjtxClient.cs), which now actively sends SET_TX_ENABLED 0 the moment
+        // ITS count is reached, is the only attempt-count-based stop. Disabling this also avoids
+        // inheriting a documented upstream defect (.nexus-src/scripts/create-issues.sh, "No
+        // latch": a capped station stays armed and can spontaneously re-key later with no
+        // operator action) -- moot once nothing is ever capped this way. cq_max_calls
+        // (unrelated -- only the CallingCq/"nobody answering at all" phase, not an in-QSO step)
+        // is untouched: it already defaults to None/unbounded, matching stock WSJT-X.
+        directed_max_calls: None,
+        // tx_watchdog_min: the ONE remaining safety backstop after the above -- see
+        // Args::tx_watchdog_min's own comment for where this value comes from (Jimmy's own
+        // Automatic calculation, or Nexus's stock 6 if not passed at all).
+        tx_watchdog_min: args.tx_watchdog_min,
+        // Frequency-override authority split, 2026-08-24 -- see Args::working_frequencies' own
+        // comment. Engine::band_plan (read by Engine::set_tier's own internal auto-QSY on every
+        // tier switch) applies these the same way Nexus's own Settings panel would, so Nexus
+        // never needs correcting by a follow-up Jimmy retune after a tier switch.
+        working_frequencies: args.working_frequencies.clone(),
         ..Settings::default()
     };
     settings.wsjtx_udp = true;
@@ -1348,16 +1490,32 @@ fn main() {
     );
     live_feeds_cache.spawn_feed_threads(args.dx_cluster_addr.as_deref());
 
-    // Own thread, not the one run_radio blocks on: see run_control_server's own doc comment.
-    // Spawned here (after engine exists), not earlier alongside control_port's own read above,
-    // specifically so it can share this same Arc<Mutex<Engine>> -- the whole point of the
-    // SNAPSHOT/REPLY/HALT_TX/SET_TX_ENABLED commands added to it.
+    // Independent audit finding 1, 2026-08-23: bind the control-port listener HERE, on main's
+    // own thread, synchronously, and treat a failed bind as fatal to the whole process --
+    // BEFORE run_radio (below) ever starts opening real audio/CAT/PTT hardware. Previously the
+    // bind happened inside run_control_server's own spawned thread, so a failure there only
+    // logged to stderr while this thread carried on regardless (see run_control_server's own
+    // updated doc comment for the full failure mode this closes). Only the bind itself moves
+    // up-front; accepting/handling connections still happens on its own thread below exactly as
+    // before, sharing the same Arc<Mutex<Engine>>.
+    let control_listener = match std::net::TcpListener::bind(("127.0.0.1", control_port)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!(
+                "FATAL: jimmy-engine-host control server failed to bind 127.0.0.1:{control_port}: {e} \
+                 -- another Jimmy/engine-host instance may already be running. Refusing to start \
+                 (would otherwise control radio/audio hardware with no usable control channel)."
+            );
+            std::process::exit(1);
+        }
+    };
     {
         let control_engine = engine.clone();
         let control_cache = external_cache.clone();
         let control_live_feeds = live_feeds_cache.clone();
+        let control_session_token = Arc::clone(&session_token);
         std::thread::spawn(move || {
-            run_control_server(control_port, control_engine, control_cache, control_live_feeds)
+            run_control_server(control_listener, control_engine, control_cache, control_live_feeds, control_session_token)
         });
     }
 
@@ -1437,7 +1595,7 @@ mod tests {
     // discarded and "OK" was written unconditionally, so a refusal (Engine's own "No recent
     // decode from <call>" -- fired when reply_msg is Some but no decode context can be found,
     // and guaranteed to leave engine state untouched) was indistinguishable from a real success
-    // on Jimmy Test's side. These two cases are exactly what reply_wire_response now decides.
+    // on Jimmy Next's side. These two cases are exactly what reply_wire_response now decides.
 
     #[test]
     fn reply_wire_response_ok_reports_ok() {

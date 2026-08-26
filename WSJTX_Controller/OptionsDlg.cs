@@ -176,12 +176,29 @@ namespace WSJTX_Controller
         private Dictionary<Control, Point> originalLocations = new Dictionary<Control, Point>();
         private List<Control> reparentedControls = new List<Control>();
 
+        // Repeat limit / TX watchdog authority split, 2026-08-24: timeoutNumUpDown ("Repeat
+        // limit") is a live main-form control -- its own ValueChanged already applies Jimmy's
+        // local (attempt-count) enforcement immediately, with no Options-dialog-local staging the
+        // way every other tab's fields have. But NativeEngineClient.ComputeAutomaticTxWatchdogMinutes
+        // (the engine-side safety-backstop sizing) is startup-CLI-arg-only -- see that method's
+        // own comment -- so it only takes effect on the next ApplyEngineMode() restart. Captured
+        // here, in the constructor, before the operator can have touched anything this Options
+        // session -- SaveRepeatLimitTab (below) compares against the CURRENT value at OK-save time
+        // and restarts once, only if it actually changed, same "don't restart on an unrelated tab"
+        // discipline SaveRadioTab already established (2026-08-07 finding).
+        private readonly decimal _wasRepeatLimit;
+
         public OptionsDlg(WsjtxClient wsjtxClient, Controller ctrl)
         {
             InitializeComponent();
 
             this.wsjtxClient = wsjtxClient;
             this.ctrl = ctrl;
+            // Null-tolerant (OptionsDlgConstructionTests' own "InitializeComponent alone must not
+            // throw, even with ctrl/wsjtxClient null" regression coverage) -- production always
+            // passes a real Controller (Controller.cs's own optionsDlg = new OptionsDlg(...)
+            // call site), so this only matters for that isolated construction-only test.
+            _wasRepeatLimit = ctrl?.timeoutNumUpDown?.Value ?? 0m;
 
             normalFore = okButton.ForeColor;
             normalBack = okButton.BackColor;
@@ -227,16 +244,19 @@ namespace WSJTX_Controller
             BuildLogbookSyncTab();
             BuildLookupDataTab();
             BuildAppearanceTab();
+            BuildProfilesTab();
             ReparentControlsToDialog();
 
             // Order must match _categoryListBox.Items (OptionsDlg.Designer.cs) and
             // HotkeysCategoryIndex above -- basicPanel first, so the very first item is
-            // already visible before subtitleLabel.Focus() below.
+            // already visible before subtitleLabel.Focus() below. profilesPanel is appended
+            // last, matching "Profiles" being appended last in the Designer's own item list --
+            // every other category keeps its existing index unchanged.
             WireCategoryList(_categoryListBox, _categoryDetailHost, new List<Control> {
                 basicPanel, generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
                 advUiPanel, wantedCallsPanel, spotWatchPanel, soundsPanel, radioPanel,
                 decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
-                appearancePanel
+                appearancePanel, profilesPanel
             });
 
             UpdateAllButtons();
@@ -432,6 +452,7 @@ namespace WSJTX_Controller
             SaveSpotWatchTab();
             SaveRadioTab();
             SaveDecodeTab();
+            SaveRepeatLimitTab();
             SaveFrequenciesTab();
             SaveNotificationsTab();
             SaveSoundsTab();
@@ -912,6 +933,15 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox _engineMyGridTextBox;
         private System.Windows.Forms.ComboBox _engineAudioDeviceCombo;
         private System.Windows.Forms.ComboBox _engineAudioOutputDeviceCombo;
+        // T13 fix, 2026-08-23: the audio input/output device combos' visible name for the
+        // stored-empty-string "use whatever Windows currently has as its default" choice --
+        // previously a blank item with no accessible name to announce. internal (not private):
+        // JimmyTests exercises the translation helpers directly.
+        internal const string SystemDefaultDeviceLabel = "System default";
+        internal static string ToDisplayDeviceName(string stored) =>
+            string.IsNullOrEmpty(stored) ? SystemDefaultDeviceLabel : stored;
+        internal static string ToStoredDeviceName(string display) =>
+            display == SystemDefaultDeviceLabel ? "" : display;
         private System.Windows.Forms.NumericUpDown _engineAudioInputLevelUpDown;
         private System.Windows.Forms.NumericUpDown _engineAudioOutputLevelUpDown;
         private System.Windows.Forms.TextBox _dxClusterAddressTextBox;
@@ -946,6 +976,9 @@ namespace WSJTX_Controller
         private List<FrequencyEntry> _freqListBoxEntries;      // parallel to _freqListBox.Items
         private List<int> _freqListBoxBandIdx;                 // parallel to _freqListBox.Items -- which band each row belongs to
         private System.Windows.Forms.NumericUpDown _freqValueUpDown;
+        // T18 fix, 2026-08-23: lets the operator configure FrequencyEntry.Sideband per row --
+        // previously RetuneBand hardcoded "USB" for every entry with no way to change it.
+        private System.Windows.Forms.ComboBox _freqSidebandCombo;
         private HotkeyCaptureBox _freqHotkeyCaptureBox;
         private System.Windows.Forms.Button _freqClearHotkeyButton;
         private System.Windows.Forms.Button _freqAddButton;
@@ -973,6 +1006,9 @@ namespace WSJTX_Controller
         private System.Windows.Forms.RadioButton _notifyTimingImmediateRadio;
         private System.Windows.Forms.RadioButton _notifyTimingDeferredRadio;
         private System.Windows.Forms.CheckBox _notifyDeferWhileTxCheckBox;
+        // Item 2, 2026-08-24: global (not per-notification-type) toggle -- see Controller.cs's
+        // own suppressReceiveNotificationsDuringTx field comment.
+        private System.Windows.Forms.CheckBox _suppressReceiveDuringTxCheckBox;
         private System.Windows.Forms.NumericUpDown _notifyRepeatSecondsUpDown;
         private System.Windows.Forms.NumericUpDown _notifyThrottleMsUpDown;
         private System.Windows.Forms.CheckBox _notifySuppressUnchangedCheckBox;
@@ -1001,9 +1037,15 @@ namespace WSJTX_Controller
                 ForeColor      = System.Drawing.SystemColors.ControlText,
                 Location       = new System.Drawing.Point(left, y),
                 Size           = new System.Drawing.Size(w, 48),
-                Text           = "Choose where signal-meter, power, and SWR readings come from. Receive Only reports " +
+                // T9 fix, 2026-08-23 (CONFIRMED bug): "power" removed -- RFPOWER polling/control
+                // was intentionally retired (front-panel RF output power is authoritative; Jimmy
+                // never polls or sets it). Now describes only what Hamlib rigctld actually adds:
+                // CAT frequency tracking, a real S-meter, and SWR.
+                Text           = "Choose where frequency, S-meter, and SWR readings come from. Receive Only reports " +
                                  "whatever the native engine itself broadcasts, no separate radio connection. Hamlib " +
-                                 "rigctld adds a real S-meter and connects to the radio directly.",
+                                 "rigctld adds real CAT frequency tracking and an S-meter, and connects to the radio " +
+                                 "directly. RF output power is always controlled from the radio's own front panel, " +
+                                 "never by Jimmy.",
                 TabStop        = false,
                 Font           = font,
             };
@@ -1025,7 +1067,9 @@ namespace WSJTX_Controller
 
             _radioHamlibRb = new System.Windows.Forms.RadioButton
             {
-                Text = "Use Hamlib rigctld (S-meter, power, SWR; optional PTT)",
+                // T9 fix, 2026-08-23 (CONFIRMED bug): "power" removed -- see instrBox's own
+                // comment above.
+                Text = "Use Hamlib rigctld (frequency, S-meter, SWR; optional PTT)",
                 Checked = ctrl.Radio.Mode == RadioControlMode.HamlibRigctld,
                 Location = new System.Drawing.Point(left, y),
                 AutoSize = true,
@@ -1617,11 +1661,19 @@ namespace WSJTX_Controller
                 Font = font,
                 AccessibleName = "Audio input device",
             };
-            _engineAudioDeviceCombo.Items.Add("");   // blank = system default
+            // T13 fix, 2026-08-23 (PARTIALLY CONFIRMED -- combo-box accessibility, reported
+            // 2026-08-21): the blank sentinel item (still stored as "" -- SaveDecodeEngineTab's
+            // own Trim() below is unaffected) is now a real, meaningfully-named entry instead of
+            // an empty string. Confirmed real per the audit: a blank ComboBox item has no
+            // accessible name for JAWS/NVDA to announce, which plausibly explained the reported
+            // "3 items" / missing "x of y" position confusion for what the operator saw as 2
+            // real devices -- every item now has a real name to announce, whatever the platform's
+            // own item-count/position behavior otherwise does.
+            _engineAudioDeviceCombo.Items.Add(SystemDefaultDeviceLabel);
             bool engineSessionActive = ctrl.nativeEngineClient != null && ctrl.nativeEngineClient.Running;
             foreach (var dev in NativeEngineClient.ListAudioDevices(engineSessionActive))
                 _engineAudioDeviceCombo.Items.Add(dev);
-            _engineAudioDeviceCombo.Text = ctrl.NativeEngine.AudioInputDevice;
+            _engineAudioDeviceCombo.Text = ToDisplayDeviceName(ctrl.NativeEngine.AudioInputDevice);
             decodeEnginePanel.Controls.Add(_engineAudioDeviceCombo);
             y += 24;
 
@@ -1678,10 +1730,11 @@ namespace WSJTX_Controller
                 Font = font,
                 AccessibleName = "Audio output device",
             };
-            _engineAudioOutputDeviceCombo.Items.Add("");   // blank = system default
+            // T13 fix, 2026-08-23: see the input combo's own comment above.
+            _engineAudioOutputDeviceCombo.Items.Add(SystemDefaultDeviceLabel);
             foreach (var dev in NativeEngineClient.ListOutputAudioDevices(engineSessionActive))
                 _engineAudioOutputDeviceCombo.Items.Add(dev);
-            _engineAudioOutputDeviceCombo.Text = ctrl.NativeEngine.AudioOutputDevice;
+            _engineAudioOutputDeviceCombo.Text = ToDisplayDeviceName(ctrl.NativeEngine.AudioOutputDevice);
             decodeEnginePanel.Controls.Add(_engineAudioOutputDeviceCombo);
             y += 24;
 
@@ -1746,7 +1799,7 @@ namespace WSJTX_Controller
                 // dxc.wa9pie.net:8000 is a genuine human-node example (Nexus's own default
                 // secondary node) -- the previous example, dxc.nc7j.com:7373, is actually
                 // NC7J's *skimmer* port per Nexus's own settings.rs comment, not a human node,
-                // and would have just duplicated RBN spots Jimmy Test already pulls in.
+                // and would have just duplicated RBN spots Jimmy Next already pulls in.
             };
             decodeEnginePanel.Controls.Add(_dxClusterAddressTextBox);
             y += 24;
@@ -2009,21 +2062,49 @@ namespace WSJTX_Controller
 
             frequenciesPanel.Controls.Add(new System.Windows.Forms.Label
             {
-                Text = "Hotkey:",
+                Text = "Sideband:",
                 Location = new System.Drawing.Point(356, 100),
                 Size = new System.Drawing.Size(140, 18),
                 Font = font,
                 TabStop = false,
             });
 
-            // Tab stop 2 -- one shared capture box, same idiom as the Hotkeys panel's own
+            // T18 fix, 2026-08-23: Tab stop 2 -- the CAT sideband/data mode RetuneBand commands
+            // when this entry is selected. DropDownList (not editable DropDown): only "USB"/"LSB"
+            // are ever meaningful values, matching Engine::set_frequency's own accepted literals
+            // (WsjtxClient.Direct.cs's own DirectSetFrequency comment) -- nothing to type.
+            _freqSidebandCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(356, 120),
+                Size = new System.Drawing.Size(100, 22),
+                TabIndex = tabIdx++,
+                Font = font,
+                AccessibleName = "Selected entry sideband",
+                AccessibleDescription = "USB is correct for nearly every rig/band -- change only if your specific radio/wiring needs LSB for digital modes.",
+            };
+            _freqSidebandCombo.Items.Add("USB");
+            _freqSidebandCombo.Items.Add("LSB");
+            _freqSidebandCombo.SelectedIndexChanged += (s, e) => CommitFreqSideband();
+            frequenciesPanel.Controls.Add(_freqSidebandCombo);
+
+            frequenciesPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Hotkey:",
+                Location = new System.Drawing.Point(356, 150),
+                Size = new System.Drawing.Size(140, 18),
+                Font = font,
+                TabStop = false,
+            });
+
+            // Tab stop 3 -- one shared capture box, same idiom as the Hotkeys panel's own
             // _sharedCaptureBox. Deliberately no ReadOnly here, matching _sharedCaptureBox --
             // HotkeyCaptureBox already suppresses OnKeyPress itself (see that class), so
             // ReadOnly adds no real protection, only an extra "read only" JAWS/NVDA announcement
             // that the Hotkeys panel's own box doesn't have. Blind operator feedback, 2026-08-12.
             _freqHotkeyCaptureBox = new HotkeyCaptureBox
             {
-                Location = new System.Drawing.Point(356, 120),
+                Location = new System.Drawing.Point(356, 170),
                 Size = new System.Drawing.Size(160, 22),
                 TabIndex = tabIdx++,
                 Font = font,
@@ -2043,7 +2124,7 @@ namespace WSJTX_Controller
             _freqClearHotkeyButton = new System.Windows.Forms.Button
             {
                 Text = "Clear",
-                Location = new System.Drawing.Point(522, 119),
+                Location = new System.Drawing.Point(522, 169),
                 Size = new System.Drawing.Size(55, 23),
                 TabIndex = tabIdx++,
                 Font = font,
@@ -2055,7 +2136,7 @@ namespace WSJTX_Controller
             _freqAddButton = new System.Windows.Forms.Button
             {
                 Text = "Add",
-                Location = new System.Drawing.Point(356, 156),
+                Location = new System.Drawing.Point(356, 206),
                 Size = new System.Drawing.Size(80, 24),
                 TabIndex = tabIdx++,
                 Font = font,
@@ -2067,7 +2148,7 @@ namespace WSJTX_Controller
             _freqRemoveButton = new System.Windows.Forms.Button
             {
                 Text = "Remove",
-                Location = new System.Drawing.Point(446, 156),
+                Location = new System.Drawing.Point(446, 206),
                 Size = new System.Drawing.Size(80, 24),
                 TabIndex = tabIdx++,
                 Font = font,
@@ -2079,7 +2160,7 @@ namespace WSJTX_Controller
             var restoreButton = new System.Windows.Forms.Button
             {
                 Text = "Restore All to Defaults",
-                Location = new System.Drawing.Point(356, 192),
+                Location = new System.Drawing.Point(356, 242),
                 Size = new System.Drawing.Size(160, 27),
                 TabIndex = tabIdx++,
                 Font = font,
@@ -2117,13 +2198,22 @@ namespace WSJTX_Controller
         // first entry gets the band name folded into its own row text ("160 Meter Band: FT8 —
         // 1,840 kHz"), every other entry in that band just indents, exactly the same grouping
         // idiom BuildActionList uses for "General Commands:" / "Accessibility Navigation:".
+        //
+        // T18 fix, 2026-08-23 (CONFIRMED bug -- display order): iterated ascending by bandIdx
+        // (160m first, 6m last) before this fix -- _pendingFreqBands is index-aligned with
+        // WsjtxClient.bands (160/80/60/40/30/20/17/15/12/10/6), a persistence/CAT-facing index
+        // this fix deliberately leaves untouched (Radio.LastBandIdx and every other bandIdx
+        // consumer would need a matching migration otherwise). Reversed here for DISPLAY only --
+        // highest-frequency band first (6m, 10m, 12m, 15m, 17m, 20m, 30m, 40m, 60m, 80m, 160m),
+        // the order requested in testing feedback -- with no change to what bandIdx actually
+        // means anywhere else in the app.
         private void BuildFreqList()
         {
             var bandsMeters = wsjtxClient.BandsMeters;
             _freqListBox.Items.Clear();
             _freqListBoxEntries = new List<FrequencyEntry>();
             _freqListBoxBandIdx = new List<int>();
-            for (int b = 0; b < _pendingFreqBands.Length; b++)
+            for (int b = _pendingFreqBands.Length - 1; b >= 0; b--)
             {
                 var entries = _pendingFreqBands[b];
                 for (int i = 0; i < entries.Count; i++)
@@ -2148,7 +2238,13 @@ namespace WSJTX_Controller
         // a run-on "Mode — Freq kHz [Hotkey]" phrase instead of one clean piece of information.
         private static string FreqRowText(FrequencyEntry entry)
         {
-            return $"{entry.Mode} — {entry.FreqKHz:N0} kHz";
+            // T18 fix, 2026-08-23: sideband only appended when it's the non-default LSB -- USB
+            // (the overwhelmingly common case) stays out of the row text, matching this method's
+            // own established "one clean piece of information, not a run-on phrase" philosophy
+            // (Hotkey, similarly, is shown only in the separate capture box below once selected,
+            // not folded in here); an LSB row is the exception worth flagging at a glance.
+            string sidebandSuffix = entry.Sideband == "LSB" ? " (LSB)" : "";
+            return $"{entry.Mode} — {entry.FreqKHz:N0} kHz{sidebandSuffix}";
         }
 
         private void LoadSelectedFreqEntry()
@@ -2156,6 +2252,7 @@ namespace WSJTX_Controller
             bool hasSelection = _freqListBoxEntries != null
                 && _freqListBox.SelectedIndex >= 0 && _freqListBox.SelectedIndex < _freqListBoxEntries.Count;
             _freqValueUpDown.Enabled = hasSelection;
+            _freqSidebandCombo.Enabled = hasSelection;
             _freqHotkeyCaptureBox.Enabled = hasSelection;
             _freqClearHotkeyButton.Enabled = hasSelection;
             _freqRemoveButton.Enabled = hasSelection;
@@ -2166,12 +2263,29 @@ namespace WSJTX_Controller
             try
             {
                 _freqValueUpDown.Value = Math.Max(_freqValueUpDown.Minimum, Math.Min(_freqValueUpDown.Maximum, entry.FreqKHz));
+                _freqSidebandCombo.SelectedItem = entry.Sideband == "LSB" ? "LSB" : "USB";
                 _freqHotkeyCaptureBox.SetValue(entry.Hotkey);
             }
             finally
             {
                 _freqUpdatingFields = false;
             }
+        }
+
+        // T18 fix, 2026-08-23: same commit idiom as CommitFreqValue below -- the combo's own
+        // SelectedIndexChanged fires for BOTH an operator's real change and LoadSelectedFreqEntry
+        // programmatically syncing it to a newly-selected row, so _freqUpdatingFields guards it
+        // the same way.
+        private void CommitFreqSideband()
+        {
+            if (_freqUpdatingFields || _freqListBox.SelectedIndex < 0) return;
+            var entry = _freqListBoxEntries[_freqListBox.SelectedIndex];
+            string newVal = (string)_freqSidebandCombo.SelectedItem == "LSB" ? "LSB" : "USB";
+            if (entry.Sideband == newVal) return;
+            entry.Sideband = newVal;
+            int selectedIdx = _freqListBox.SelectedIndex;
+            BuildFreqList();
+            _freqListBox.SelectedIndex = selectedIdx;
         }
 
         private void CommitFreqValue()
@@ -2193,7 +2307,7 @@ namespace WSJTX_Controller
             if (_freqListBox.SelectedIndex < 0) return;
             int bandIdx = _freqListBoxBandIdx[_freqListBox.SelectedIndex];
             var selected = _freqListBoxEntries[_freqListBox.SelectedIndex];
-            var newEntry = new FrequencyEntry { Mode = selected.Mode, FreqKHz = selected.FreqKHz, Hotkey = Keys.None };
+            var newEntry = new FrequencyEntry { Mode = selected.Mode, FreqKHz = selected.FreqKHz, Hotkey = Keys.None, Sideband = selected.Sideband };
             _pendingFreqBands[bandIdx].Add(newEntry);
             _pendingFreqBands[bandIdx].Sort((a, b) => a.FreqKHz.CompareTo(b.FreqKHz));
             BuildFreqList();
@@ -2286,14 +2400,30 @@ namespace WSJTX_Controller
             if (idx >= 0) _freqListBox.SelectedIndex = idx;
         }
 
+        // Frequency-override authority split, 2026-08-24: live counterpart of the startup
+        // --working-frequencies CLI arg (NativeEngineClient.Launch) -- see
+        // WsjtxClient.BuildWorkingFrequencyEntries' own comment for why this exists (Nexus's own
+        // internal auto-QSY otherwise fights any band the operator has customized here). Compares
+        // JSON before/after (simpler and just as correct as a manual per-entry diff across 11
+        // bands x 2 modes) so an Options save that never touched this tab doesn't send an
+        // unnecessary live command, matching the "don't act on an unrelated tab" discipline
+        // SaveRadioTab/SaveDecodeTab already established.
         private void SaveFrequenciesTab()
         {
             if (_pendingFreqBands == null) return;
+            string wasJson = System.Text.Json.JsonSerializer.Serialize(
+                WsjtxClient.BuildWorkingFrequencyEntries(ctrl.Frequencies), WsjtxClient.DirectJsonOptions);
+
             for (int i = 0; i < _pendingFreqBands.Length; i++)
             {
                 ctrl.Frequencies.Bands[i].Clear();
                 ctrl.Frequencies.Bands[i].AddRange(_pendingFreqBands[i]);
             }
+
+            var newEntries = WsjtxClient.BuildWorkingFrequencyEntries(ctrl.Frequencies);
+            string newJson = System.Text.Json.JsonSerializer.Serialize(newEntries, WsjtxClient.DirectJsonOptions);
+            if (newJson != wasJson)
+                ctrl.wsjtxClient?.DirectSetWorkingFrequencies(newEntries, null);
         }
 
         // ===== NOTIFICATIONS TAB =====
@@ -2623,6 +2753,36 @@ namespace WSJTX_Controller
             resetAllButton.Click += ResetAllNotifications_Click;
             notificationsPanel.Controls.Add(resetAllButton);
 
+            // Item 2, 2026-08-24 (operator request): a GLOBAL toggle, unlike everything above it
+            // in this tab (which all edit ONE selected notification type's own policy) -- applies
+            // regardless of which type is selected. Deliberately separate from the per-type "Wait
+            // until transmitting stops" checkbox further up: that one defers a NotificationCenter
+            // event until Tx ends; this one is read directly by ShowStatus() (WsjtxClient.
+            // Display.cs) to omit the routine "N available stations" summary specifically while
+            // transmitting -- the live, actually-spoken source of receive-side chatter today
+            // (QsoStarted/AwardsNeeded, the NotificationCenter events this tab's DeferWhileTx
+            // checkbox would otherwise apply to, aren't wired to any live call site yet).
+            var suppressReceiveGroup = new System.Windows.Forms.GroupBox
+            {
+                Text = "Transmit speech priority",
+                Location = new System.Drawing.Point(8, 490),
+                Size = new System.Drawing.Size(596, 50),
+                Font = font,
+            };
+            notificationsPanel.Controls.Add(suppressReceiveGroup);
+
+            _suppressReceiveDuringTxCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "While transmitting, suppress the receive-side \"available stations\" summary",
+                AccessibleName = "While transmitting, suppress the receive-side available stations summary",
+                Location = new System.Drawing.Point(10, 20),
+                Size = new System.Drawing.Size(576, 20),
+                TabIndex = tabIdx++,
+                Font = font,
+                Checked = ctrl.suppressReceiveNotificationsDuringTx,
+            };
+            suppressReceiveGroup.Controls.Add(_suppressReceiveDuringTxCheckBox);
+
             _notifyTypesListBox.SelectedIndex = 0;
         }
 
@@ -2891,6 +3051,7 @@ namespace WSJTX_Controller
             CommitNotifyTemplateText();
             foreach (var kv in _pendingNotifyPolicies)
                 ctrl.Notifications.Policies[kv.Key] = kv.Value;
+            ctrl.suppressReceiveNotificationsDuringTx = _suppressReceiveDuringTxCheckBox?.Checked ?? false;
         }
 
         private void UpdateRadioHostPortEnabled()
@@ -2981,6 +3142,17 @@ namespace WSJTX_Controller
             System.Windows.Forms.MessageBox.Show(this, resultText, "Radio Test Result",
                 System.Windows.Forms.MessageBoxButtons.OK,
                 ok ? System.Windows.Forms.MessageBoxIcon.Information : System.Windows.Forms.MessageBoxIcon.Error);
+        }
+
+        // Repeat limit / TX watchdog authority split, 2026-08-24: see _wasRepeatLimit's own
+        // comment. Deliberately does NOT touch timeoutNumUpDown.Value itself -- that already
+        // applied live the instant the operator changed it (ValueChanged); this only restarts the
+        // engine so its own tx_watchdog_min catches up, and only when the value genuinely
+        // changed during this Options session.
+        private void SaveRepeatLimitTab()
+        {
+            if (ctrl.timeoutNumUpDown.Value != _wasRepeatLimit)
+                ctrl.ApplyEngineMode();
         }
 
         private void SaveRadioTab()
@@ -3083,8 +3255,11 @@ namespace WSJTX_Controller
             // makes the field actually look right either way.
             ctrl.NativeEngine.MyCall = _engineMyCallTextBox.Text.Trim().ToUpperInvariant();
             ctrl.NativeEngine.MyGrid = FormatGridSquare(_engineMyGridTextBox.Text.Trim());
-            ctrl.NativeEngine.AudioInputDevice = _engineAudioDeviceCombo.Text.Trim();
-            ctrl.NativeEngine.AudioOutputDevice = _engineAudioOutputDeviceCombo.Text.Trim();
+            // T13 fix, 2026-08-23: translate the visible "System default" label back to the
+            // empty string NativeEngine.AudioInputDevice/AudioOutputDevice have always stored it
+            // as -- no INI/storage format change, only the combo's own displayed text changed.
+            ctrl.NativeEngine.AudioInputDevice = ToStoredDeviceName(_engineAudioDeviceCombo.Text.Trim());
+            ctrl.NativeEngine.AudioOutputDevice = ToStoredDeviceName(_engineAudioOutputDeviceCombo.Text.Trim());
             if (_dxClusterAddressTextBox != null) ctrl.dxClusterAddress = _dxClusterAddressTextBox.Text.Trim();
 
             // Only restart if something it actually depends on changed -- see this method's own
@@ -3775,6 +3950,7 @@ namespace WSJTX_Controller
                 HotkeyAction.SortOrder,
                 HotkeyAction.RowOrder,
                 HotkeyAction.AnalyzeSlot,
+                HotkeyAction.ClockStatus,
                 HotkeyAction.LookupStation,
                 HotkeyAction.OpenLogbook,
                 HotkeyAction.AddManualQso,
@@ -4396,7 +4572,7 @@ namespace WSJTX_Controller
 
             // ── eQSL.cc Upload ────────────────────────────────────────────────────
             // Uploaded via EngineHost/Nexus's own eQSL transport (propagation::live::eqsl) --
-            // Jimmy Test supplies the operator's own eQSL.cc credentials and the completed
+            // Jimmy Next supplies the operator's own eQSL.cc credentials and the completed
             // ADIF record; Nexus already implements the upload plumbing well, so it isn't
             // duplicated here (see ARCHITECTURE.md's logbook/logging comparison). No auto-
             // download here yet -- see ARCHITECTURE.md for the deferred download/reconciliation
@@ -5511,6 +5687,97 @@ namespace WSJTX_Controller
                 ctrl.Settings.AlertForeColors[cat] = _alertForeColors.TryGetValue(cat, out var fc) ? fc : null;
                 ctrl.Settings.AlertBackColors[cat] = _alertBackColors.TryGetValue(cat, out var bc) ? bc : null;
             }
+        }
+
+        // ===== PROFILES TAB =====
+        //
+        // Item 7, 2026-08-24 (operator request, clarified 2026-08-24): a real MenuStrip was
+        // tried first and abandoned -- live JAWS testing showed tapping Alt/Alt+F10 stopped
+        // reliably reaching it (Windows' own window system menu responded instead), on top of
+        // every natural mnemonic letter already colliding with an existing global hotkey. This
+        // category lives in the SAME already-JAWS/NVDA-verified _categoryListBox navigation
+        // every other Options category already uses (see WireCategoryList's own comment) --
+        // "things stay consistent" per the operator's own explicit choice -- and needs no change
+        // to the main window's layout, Alt-key handling, or MinimumSize/ResetWindowSize math.
+        // No Save*Tab()/pending-state pair the way most other categories have: Save/Load/Delete
+        // each act immediately when clicked (Controller.cs's own SaveProfileAs_Click/
+        // LoadProfile_Click/DeleteProfile_Click, unchanged from the abandoned menu -- only how
+        // they're reached changed), matching how they always worked and how Load's own restart
+        // can't sensibly wait for this dialog's OK button anyway.
+        private void BuildProfilesTab()
+        {
+            profilesPanel.Controls.Clear();
+
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+
+            var instrBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true,
+                Multiline = true,
+                BorderStyle = System.Windows.Forms.BorderStyle.None,
+                BackColor = profilesPanel.BackColor,
+                ForeColor = System.Drawing.SystemColors.ControlText,
+                Location = new System.Drawing.Point(8, 8),
+                Size = new System.Drawing.Size(560, 50),
+                Text = "A profile is a complete, saved copy of every Jimmy setting. Save the " +
+                    "current configuration under a name, then load it back (or a different " +
+                    "one) at any time -- loading restarts Jimmy cleanly with that profile's " +
+                    "settings, it never merges into the current session.",
+                TabStop = false,
+                Font = font,
+            };
+            profilesPanel.Controls.Add(instrBox);
+
+            // Operator feedback (2026-08-24): after loading a profile there was "no way to tell
+            // what profile is loaded" short of re-opening Load Profile's own picker. This label
+            // answers that directly and at a glance; Load Profile's picker also now marks and
+            // preselects the active entry in its own list for the same reason.
+            var activeLabel = new System.Windows.Forms.Label
+            {
+                Text = $"Active profile: {Controller.ActiveProfileDisplayName()}",
+                AccessibleName = "Active profile",
+                Location = new System.Drawing.Point(8, 62),
+                Size = new System.Drawing.Size(560, 18),
+                Font = new System.Drawing.Font(font, System.Drawing.FontStyle.Bold),
+                TabStop = false,
+            };
+            profilesPanel.Controls.Add(activeLabel);
+
+            var saveButton = new System.Windows.Forms.Button
+            {
+                Text = "Save Current Configuration As Profile...",
+                AccessibleName = "Save current configuration as profile",
+                Location = new System.Drawing.Point(8, 88),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 0,
+                Font = font,
+            };
+            saveButton.Click += (s, e) => ctrl.SaveProfileAs_Click();
+            profilesPanel.Controls.Add(saveButton);
+
+            var loadButton = new System.Windows.Forms.Button
+            {
+                Text = "Load Profile...",
+                AccessibleName = "Load profile",
+                Location = new System.Drawing.Point(8, 120),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 1,
+                Font = font,
+            };
+            loadButton.Click += (s, e) => ctrl.LoadProfile_Click();
+            profilesPanel.Controls.Add(loadButton);
+
+            var deleteButton = new System.Windows.Forms.Button
+            {
+                Text = "Delete Profile...",
+                AccessibleName = "Delete profile",
+                Location = new System.Drawing.Point(8, 152),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 2,
+                Font = font,
+            };
+            deleteButton.Click += (s, e) => ctrl.DeleteProfile_Click();
+            profilesPanel.Controls.Add(deleteButton);
         }
 
         // Tests QRZ.com login (username/password) as before, and -- if a Logbook API key

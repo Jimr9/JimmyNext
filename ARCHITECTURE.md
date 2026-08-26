@@ -25,7 +25,7 @@ WinForms (C#, WSJTX_Controller/*.Designer.cs, Controller.cs's UI half)
     accessible operator interface (JAWS/NVDA)
 ```
 
-**Direct is the sole production transport.** `Jimmy Test -> Direct (TCP control port) ->
+**Direct is the sole production transport.** `Jimmy Next -> Direct (TCP control port) ->
 EngineHost -> Nexus` is not "the preferred path" or "the default" -- it is the only one real
 production code can reach. `Controller.Form_Load` always calls `ApplyEngineMode()`
 unconditionally (its own comment: *"Phase 4g: always launches the native engine host"*), which
@@ -105,7 +105,7 @@ launches its own copy -- but `grep`-ing every call site of `RigctldClient.Launch
 exactly one: `OptionsDlg.cs`'s `RadioTestButton_Click` (Options > Radio > Test Connection),
 which launches Jimmy's own bundled copy to verify a configured rig model/COM port/baud rate
 *independent of whether the native engine is even running*. Two separate processes
-(`Jimmy Test.exe` and `jimmy-engine-host.exe`), each needing the binary at a path relative to
+(`Jimmy Next.exe` and `jimmy-engine-host.exe`), each needing the binary at a path relative to
 its own executable, for two separate still-used purposes -- not architectural duplication for
 appearance's sake. Nothing removed.
 
@@ -223,7 +223,7 @@ policy, and reconciliation with its own richer local records.**
 
 **eQSL capability map:**
 
-| Capability | eQSL.cc supports it | Nexus implements it | Jimmy Test uses it |
+| Capability | eQSL.cc supports it | Nexus implements it | Jimmy Next uses it |
 |---|---|---|---|
 | Authentication (account username/password) | yes | yes (`EqslQuery`, per-request, no session) | yes |
 | Individual QSO upload (ADIF) | yes | yes (`build_upload_body`, one record per call) | yes -- real-time, `LiveQsoUploadOrchestrator` |
@@ -258,11 +258,11 @@ this comparison exists to avoid.
 
 **HamQTH capability map:**
 
-| Capability | HamQTH.com supports it | Nexus implements it | Jimmy Test uses it |
+| Capability | HamQTH.com supports it | Nexus implements it | Jimmy Next uses it |
 |---|---|---|---|
 | Authentication / session (~1h session id) | yes | yes (`HamQthLogin`/`HamQthSession`) | yes -- re-logs in per call, no session caching (see below) |
 | Callsign lookup | yes | yes (`parse_callsign`) | yes -- real alternative primary provider |
-| Returned fields | call/name/qth/grid/us_state/country/adif/cq/itu/picture/lat/lon/us_county | all of the above **except `us_county`** (parsed struct omits it) | call/name/qth/grid/state/country/**dxcc/cq_zone/itu_zone** (this pass added the numeric fields -- previously fetched by Nexus, then discarded before reaching Jimmy Test) |
+| Returned fields | call/name/qth/grid/us_state/country/adif/cq/itu/picture/lat/lon/us_county | all of the above **except `us_county`** (parsed struct omits it) | call/name/qth/grid/state/country/**dxcc/cq_zone/itu_zone** (this pass added the numeric fields -- previously fetched by Nexus, then discarded before reaching Jimmy Next) |
 | DXCC/ADIF numeric entity ID | yes (`<adif>`) | yes | yes -- see the DXCC-opportunity finding below |
 | QSO upload / log download / sync | HamQTH.com has its own web logbook | **no** | no |
 | Confirmation info | n/a for HamQTH the lookup service | **no** | no |
@@ -283,7 +283,7 @@ data into `Build()`'s merge regardless of which is primary (no network cost -- s
 reuse every other provider already does). `HAMQTH_TEST` (login only, no lookup spent) backs a new
 Options "Test Login" button, mirroring QRZ's own.
 
-**QRZ vs HamQTH, what Jimmy Test actually gets from each:**
+**QRZ vs HamQTH, what Jimmy Next actually gets from each:**
 
 | | QRZ (via Jimmy's `QrzProvider`) | HamQTH (via `HamQthProvider`) |
 |---|---|---|
@@ -327,7 +327,7 @@ wired via `HamQthProvider.Contribute()`'s blank-fill into `Build()`, positioned 
 
 **3. Diagnostic/application logging vs. QSO logbook.** Kept explicitly separate per the operator's request. Jimmy's `SupportReportBuilder.cs` (766 lines, already redacts credential-shaped keywords before building a support report) is diagnostic-only and has no overlap with QSO data. Nexus's own diagnostics (`crates/tempo-core/src/diagnostics.rs`) were not compared in depth -- no evidence surfaced during this pass that Jimmy's diagnostic logging has a gap worth closing, and application/crash diagnostics carry none of the QSO-data risk that would make this urgent for a release-candidate pass.
 
-**Decision: Jimmy's logbook/upload stack stays fully authoritative; eQSL and HamQTH are additive integrations on top of it, not a replacement or migration.** Both are now genuinely usable end to end (eQSL upload+download+reconciliation, HamQTH as a real alternative primary lookup provider), built strictly against what Nexus actually implements -- nothing was duplicated in C# that Nexus already does, and nothing was claimed that Nexus doesn't yet support (eQSL OutBox/update/delete, HamQTH upload/download/sync/spots all remain unbuilt because Nexus has no such capability to expose, not because Jimmy Test chose to skip them).
+**Decision: Jimmy's logbook/upload stack stays fully authoritative; eQSL and HamQTH are additive integrations on top of it, not a replacement or migration.** Both are now genuinely usable end to end (eQSL upload+download+reconciliation, HamQTH as a real alternative primary lookup provider), built strictly against what Nexus actually implements -- nothing was duplicated in C# that Nexus already does, and nothing was claimed that Nexus doesn't yet support (eQSL OutBox/update/delete, HamQTH upload/download/sync/spots all remain unbuilt because Nexus has no such capability to expose, not because Jimmy Next chose to skip them).
 
 ## Nexus-backed facts beyond FT8/FT4: POTA, SOTA, DX spots, band conditions, space weather
 
@@ -419,7 +419,7 @@ now the OLD design; what actually shipped:
   no operator configuration needed -- mirroring official Nexus's own desktop app default exactly
   (`kd9taw/Nexus src-tauri/src/lib.rs`'s `start_cluster_feeds`/`RBN_DIGITAL_HOST`, "the RBN CW +
   digital skimmer feeds are wired automatically" per its own `Settings::default` comment). The
-  CW-only port (7000) is deliberately not wired -- Jimmy Test is FT8/FT4-only. The Options >
+  CW-only port (7000) is deliberately not wired -- Jimmy Next is FT8/FT4-only. The Options >
   Decode Engine "DX Cluster server" field is now purely an ADDITIVE, optional human-cluster node
   (SSB/phone + human-typed spots RBN's automated skimmers don't cover) -- leaving it blank still
   gives a working DX Spots tab. Both sources push into one shared, de-duped `SpotBuffer`
@@ -435,7 +435,7 @@ now the OLD design; what actually shipped:
 - **Space Weather's A-index/X-ray always read "0.0"/"0.0e+0"** -- looking like real
   measurements, not missing data. Root cause: `SPACE_WX`'s response serialized Nexus's own
   `SpaceWx` type verbatim, whose Rust field names (`a_index`, `xray_long`) don't match what
-  Jimmy Test's `JsonNamingPolicy.CamelCase` deserialization looks for (`aIndex`, `xrayLong`);
+  Jimmy Next's `JsonNamingPolicy.CamelCase` deserialization looks for (`aIndex`, `xrayLong`);
   `System.Text.Json` silently leaves an unmatched property at its default rather than throwing.
   Fixed with a proper wire DTO on EngineHost's own side (`external_data.rs`'s `SpaceWxWire`,
   never touching the vendored Nexus type), which also now surfaces Nexus's own existing
@@ -473,7 +473,7 @@ now the OLD design; what actually shipped:
   which tab the UI is currently polling.
 - **Nexus propagation data audit** (per an explicit request not to duplicate or invent anything):
   read through `predict.rs`, `likelihood.rs`, `swpc_scales.rs`, and `pca.rs` for genuinely useful,
-  already-computed values Jimmy Test wasn't surfacing.
+  already-computed values Jimmy Next wasn't surfacing.
   - **MUF exists**: `propagation::representative_muf` (used internally by
     `predict::modeled_now`, which `advisor.rs` already calls for Band Conditions' physics prior,
     but never itself surfaced in any payload). It is the **ring-max controlling MUF** -- the
@@ -586,7 +586,7 @@ future pass.
   command's reliability behavior needs real-radio verification this pass doesn't have.
 - **Deliberately deferred, not forgotten**: explicit protocol/version negotiation and a central
   capability model. Investigated first, not assumed unnecessary: `jimmy-engine-host.exe` and
-  `Jimmy Test.exe` are always built, versioned, and shipped together from the same commit in the
+  `Jimmy Next.exe` are always built, versioned, and shipped together from the same commit in the
   same MSI -- there is no current real-world scenario where they'd be mismatched, so a
   negotiation system would police a case that cannot happen yet. The control protocol is a
   simple line-based command dispatch (`EngineHost/src/main.rs`'s `line.strip_prefix(...)` match

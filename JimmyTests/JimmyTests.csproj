@@ -27,12 +27,12 @@
          On net10.0-windows, Jimmy.exe is a native apphost launcher stub (no CLR
          metadata); the actual managed assembly is Jimmy.dll alongside it. -->
     <!-- Build Jimmy first (run build.bat or test.bat). -->
-    <!-- "Jimmy Test.dll", not "Jimmy.dll": 2026 08 10, build.bat now compiles Jimmy.csproj
-         with AssemblyName="Jimmy Test" so local Debug builds never share production's
+    <!-- "Jimmy Next.dll", not "Jimmy.dll": 2026 08 10, build.bat now compiles Jimmy.csproj
+         with AssemblyName="Jimmy Next" so local Debug builds never share production's
          LocalAppData identity (see build.bat's own comment); this reference has to name
          the same output file build.bat now actually produces. -->
-    <Reference Include="Jimmy Test">
-      <HintPath>..\WSJTX_Controller\bin\Debug\net10.0-windows\Jimmy Test.dll</HintPath>
+    <Reference Include="Jimmy Next">
+      <HintPath>..\WSJTX_Controller\bin\Debug\net10.0-windows\Jimmy Next.dll</HintPath>
       <Private>true</Private>
     </Reference>
     <!-- SQLite managed DLL, needed for LogbookDb tests. -->

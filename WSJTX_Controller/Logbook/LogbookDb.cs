@@ -265,6 +265,101 @@ namespace WSJTX_Controller
 
                 SetMeta("db_version", "8");
             }
+
+            // v9: one-time repair for a real matching bug (found live, 2026-08-26): LoTW's own
+            // ADIF export reports FT4 QSOs under the ADIF umbrella MODE "MFSK" (see
+            // AdifImporter's own SUBMODE comment), which never matched the "FT4" every other
+            // source here (QRZ, Club Log, Jimmy's own live logging) already used for the exact
+            // same real QSOs -- so every LoTW download before that fix inserted a SEPARATE
+            // mode='MFSK' duplicate row instead of recognizing the QSO it already had, and
+            // left the real FT4 row's LoTW-upload status permanently unmatched/pending. That
+            // fix only stops new duplicates; this repairs data the bug already wrote. For each
+            // mode='MFSK' row: if a real mode='FT4' row exists for the same
+            // callsign/band/date/time, backfill whatever LoTW fields the FT4 row is still
+            // missing from the MFSK row (never overwrites a value the FT4 row already has),
+            // then delete the MFSK duplicate. If no FT4 counterpart exists -- this MFSK row is
+            // the ONLY record of that contact -- relabel it to FT4 in place instead of
+            // deleting it; deleting an unmatched row would be a real, unrecoverable QSO loss,
+            // worse than leaving one merge undone (see this project's own "never knowingly
+            // lose a valid QSO" rule).
+            if (ver < 9)
+            {
+                var mfskRows = new List<(long id, string callsign, string band, string qsoDate, string timeOn,
+                                          string lotwUploadedAt, string lotwQslSent, string lotwQslRcvd)>();
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText =
+                        "SELECT id, callsign, band, qso_date, time_on, lotw_uploaded_at, lotw_qsl_sent, lotw_qsl_rcvd " +
+                        "FROM qso WHERE mode='MFSK';";
+                    using (var r = cmd.ExecuteReader())
+                    {
+                        while (r.Read())
+                            mfskRows.Add((
+                                r.GetInt64(0),
+                                r.IsDBNull(1) ? "" : r.GetString(1),
+                                r.IsDBNull(2) ? "" : r.GetString(2),
+                                r.IsDBNull(3) ? "" : r.GetString(3),
+                                r.IsDBNull(4) ? "" : r.GetString(4),
+                                r.IsDBNull(5) ? "" : r.GetString(5),
+                                r.IsDBNull(6) ? "" : r.GetString(6),
+                                r.IsDBNull(7) ? "" : r.GetString(7)));
+                    }
+                }
+
+                foreach (var row in mfskRows)
+                {
+                    long? counterpartId = null;
+                    using (var cmd = _conn.CreateCommand())
+                    {
+                        cmd.CommandText =
+                            "SELECT id FROM qso " +
+                            "WHERE callsign=@c AND band=@b AND qso_date=@d AND time_on=@t AND mode='FT4' LIMIT 1;";
+                        cmd.Parameters.AddWithValue("@c", row.callsign);
+                        cmd.Parameters.AddWithValue("@b", row.band);
+                        cmd.Parameters.AddWithValue("@d", row.qsoDate);
+                        cmd.Parameters.AddWithValue("@t", row.timeOn);
+                        var result = cmd.ExecuteScalar();
+                        if (result != null && result != DBNull.Value) counterpartId = Convert.ToInt64(result);
+                    }
+
+                    if (counterpartId.HasValue)
+                    {
+                        using (var upd = _conn.CreateCommand())
+                        {
+                            upd.CommandText =
+                                "UPDATE qso SET " +
+                                "lotw_uploaded_at = CASE WHEN lotw_uploaded_at != '' THEN lotw_uploaded_at ELSE @lu END, " +
+                                "lotw_qsl_sent    = CASE WHEN lotw_qsl_sent    != '' THEN lotw_qsl_sent    ELSE @ls END, " +
+                                "lotw_qsl_rcvd    = CASE WHEN lotw_qsl_rcvd    != '' THEN lotw_qsl_rcvd    ELSE @lr END " +
+                                "WHERE id=@id;";
+                            upd.Parameters.AddWithValue("@lu", row.lotwUploadedAt);
+                            upd.Parameters.AddWithValue("@ls", row.lotwQslSent);
+                            upd.Parameters.AddWithValue("@lr", row.lotwQslRcvd);
+                            upd.Parameters.AddWithValue("@id", counterpartId.Value);
+                            upd.ExecuteNonQuery();
+                        }
+                        using (var del = _conn.CreateCommand())
+                        {
+                            del.CommandText = "DELETE FROM qso WHERE id=@id;";
+                            del.Parameters.AddWithValue("@id", row.id);
+                            del.ExecuteNonQuery();
+                        }
+                    }
+                    else
+                    {
+                        string newDedupKey = AdifImporter.BuildDedupKey(row.callsign, row.band, "FT4", row.qsoDate, row.timeOn);
+                        using (var upd = _conn.CreateCommand())
+                        {
+                            upd.CommandText = "UPDATE qso SET mode='FT4', dedup_key=@k WHERE id=@id;";
+                            upd.Parameters.AddWithValue("@k", newDedupKey);
+                            upd.Parameters.AddWithValue("@id", row.id);
+                            upd.ExecuteNonQuery();
+                        }
+                    }
+                }
+
+                SetMeta("db_version", "9");
+            }
         }
 
         // ── Meta ─────────────────────────────────────────────────────────────────
@@ -717,7 +812,7 @@ ON CONFLICT(dedup_key) DO UPDATE SET
 
         // Conservative, deterministic, idempotent match against EXISTING qso rows -- unlike
         // Upsert/AdifImporter.Import (which QRZ/LoTW/Club Log downloads use, and which CAN
-        // create a new row for a record Jimmy Test doesn't have yet), this method never
+        // create a new row for a record Jimmy Next doesn't have yet), this method never
         // creates a row and never guesses: an eQSL InBox "confirmation" is someone else's
         // report about a QSO, not a request to add one, so ambiguous or absent matches are
         // simply left alone (see EqslReconciler, the caller). Match key: callsign + band

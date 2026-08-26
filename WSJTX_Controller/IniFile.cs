@@ -22,6 +22,12 @@ namespace WSJTX_Controller
             Path = new FileInfo(IniPath ?? EXE + ".ini").FullName;
         }
 
+        // Profiles feature, 2026-08-24: "Save Current Configuration As Profile" flushes every
+        // setting to this instance's own file (the normal save path, unchanged) and then needs
+        // to copy that exact file to a new named-profile path -- this is the only way it learns
+        // where "this exact file" actually lives.
+        public string FilePath => Path;
+
         public string Read(string Key, string Section = null)
         {
             // 2048 chars (not the old 255) so a DPAPI-encrypted, base64-encoded credential

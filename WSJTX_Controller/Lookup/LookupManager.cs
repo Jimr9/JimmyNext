@@ -82,13 +82,69 @@ namespace WSJTX_Controller
         public QrzLookupPolicy  Policy  => _policy;
 
         // Derived from the running assembly's own name (not a literal "Jimmy") so a
-        // differently-named build (e.g. a side-by-side "Jimmy Test" release) gets its own
+        // differently-named build (e.g. a side-by-side "Jimmy Next" release) gets its own
         // isolated data folder automatically, rather than sharing the production install's
         // logbook database -- this is the root LogbookDb.cs's own DbPath builds from.
-        public static string DataRoot =>
-            Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                Assembly.GetExecutingAssembly().GetName().Name, "Data");
+        //
+        // Replay-test isolation, 2026-08-23: under TestModeGuard.IsTestMode, redirects to the
+        // same isolated temp root Controller.cs's own settings-.ini redirect uses (Jimmy Next.ini
+        // lives directly under it; this nests "Data" underneath exactly like the real layout).
+        // Seeded ONCE (read-only against the real folder -- a recursive copy never opens a real
+        // source file for write) the first time a session finds no isolated Data folder yet, so
+        // offline classification (Club Log/Big CTY entity data -- ClassificationEngine's
+        // always-on country/DXCC lookups, independent of any live-network provider) behaves
+        // identically to a real session instead of silently having no entity data at all for the
+        // whole replay run (network refresh is itself blocked in test mode -- see e.g.
+        // ClubLogProvider's own TestModeGuard checks -- so an unseeded isolated folder would stay
+        // empty for the entire session).
+        public static string DataRoot
+        {
+            get
+            {
+                string pgmName = Assembly.GetExecutingAssembly().GetName().Name;
+                if (!TestModeGuard.IsTestMode)
+                    return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), pgmName, "Data");
+
+                string isolatedRoot = Path.Combine(Path.GetTempPath(), "JimmyReplayTest_AppData", "Data");
+                try
+                {
+                    if (!Directory.Exists(isolatedRoot))
+                    {
+                        string realRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), pgmName, "Data");
+                        if (Directory.Exists(realRoot)) CopyDirectoryReadOnly(realRoot, isolatedRoot);
+                        else Directory.CreateDirectory(isolatedRoot);
+                    }
+                }
+                catch
+                {
+                    // Best-effort seed only -- callers still get a real (if unseeded) isolated
+                    // path back either way; Directory.CreateDirectory calls below this property
+                    // (this class's own constructor) create whatever's still missing.
+                }
+                return isolatedRoot;
+            }
+        }
+
+        // Recursive copy that only ever OPENS a source file for reading -- used exclusively to
+        // seed the isolated replay-test Data folder from the real one once; never used against
+        // any other path, and never called outside TestModeGuard.IsTestMode (DataRoot above).
+        // Skips the "Logbook" subfolder deliberately -- that's the real operator's actual QSO
+        // history (LogbookDb.DbPath), already independently and unconditionally overridden by
+        // JIMMY_TEST_DB_PATH whenever it's set (see that property's own comment), so nothing
+        // under DataRoot's own "Logbook" folder is ever read during a replay-test session in the
+        // first place; copying it here would only duplicate personal QSO data into a temp
+        // folder for no functional reason.
+        private static void CopyDirectoryReadOnly(string sourceDir, string destDir)
+        {
+            Directory.CreateDirectory(destDir);
+            foreach (string file in Directory.GetFiles(sourceDir))
+                File.Copy(file, Path.Combine(destDir, Path.GetFileName(file)), overwrite: false);
+            foreach (string subDir in Directory.GetDirectories(sourceDir))
+            {
+                if (string.Equals(Path.GetFileName(subDir), "Logbook", StringComparison.OrdinalIgnoreCase)) continue;
+                CopyDirectoryReadOnly(subDir, Path.Combine(destDir, Path.GetFileName(subDir)));
+            }
+        }
 
         // Callback invoked on background thread when an auto-lookup completes.
         // WsjtxClient should BeginInvoke to marshal back to the UI thread.
@@ -323,25 +379,101 @@ namespace WSJTX_Controller
             _autoTimer = null;
         }
 
+        // Independent audit finding 6, 2026-08-23 (LIKELY bug, MEDIUM PRIORITY): the call used
+        // to be removed from _queued immediately after dequeue, before LookupAsync even ran --
+        // an exception, a transient network/rate-limit failure, or a temporarily unreachable
+        // provider all silently discarded the attempt with no retry and no requeue. A station
+        // still visible in the queue is not guaranteed to produce another live decode, so a
+        // transient miss could leave country/continent/state/awards/rank display unresolved for
+        // the rest of that opportunity. Bounded (MaxAutoLookupAttempts), not unlimited -- a
+        // genuinely nonexistent/never-answering callsign still gives up eventually rather than
+        // retrying forever. No separate exponential backoff: each retry already waits a full
+        // _autoTimer interval (the provider's own configured minimum-interval spacing) before
+        // trying again, which is itself already a rate-limit-safe bound for a handful of retries.
+        private readonly Dictionary<string, int> _autoLookupAttempts =
+            new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private const int MaxAutoLookupAttempts = 3;
+
+        // Background shutdown / quiescence, 2026-08-23 (independent audit finding): Dispose()
+        // below stops the _autoTimer so no NEW tick can start this handler, but an ALREADY-
+        // in-flight call (awaiting PrimaryProvider.LookupAsync when Dispose runs) keeps
+        // executing past that point -- this is checked again right before the one place that
+        // matters, invoking OnLookupCompleted, so a lookup that finishes after shutdown never
+        // reaches into (by then possibly disposed) Controller/UI state. Volatile: read on
+        // whatever thread this async continuation resumes on, written from Dispose(), which may
+        // run on a different thread (the UI thread, typically).
+        private volatile bool _disposed;
+
         private async void AutoTimerElapsed(object sender, System.Timers.ElapsedEventArgs e)
         {
+            if (_disposed) return;
             if (!await _autoSem.WaitAsync(0)) return;
             try
             {
                 string call;
                 if (!_autoQueue.TryDequeue(out call)) return;
-                lock (_queuedLock) _queued.Remove(call);
-                if (!CanAutoQueue(call)) return;
-                var result = await PrimaryProvider.LookupAsync(call).ConfigureAwait(false);
-                if (result != null) OnLookupCompleted?.Invoke();
+                // Deliberately NOT removed from _queued here (moved into the ok/retry handling
+                // below) -- keeping it queued for the whole attempt (including while the network
+                // call is in flight) also closes a related gap: a fresh QueueAutoLookup for the
+                // same call while a lookup is already running no longer enqueues a concurrent
+                // duplicate (QueueAutoLookup's own _queued.Contains check now sees it as busy).
+                bool ok;
+                try
+                {
+                    if (!CanAutoQueue(call))
+                    {
+                        ok = true; // no longer eligible (already resolved/policy changed/disabled) -- done, not a failure to retry
+                    }
+                    else
+                    {
+                        var result = await PrimaryProvider.LookupAsync(call).ConfigureAwait(false);
+                        ok = result != null;
+                        // Re-checked here specifically (not just at the top) -- this is the one
+                        // call in this method that reaches outside LookupManager's own state into
+                        // whatever Controller/UI closure OnLookupCompleted was set to; the awaited
+                        // LookupAsync above is exactly where a Dispose() racing in from the UI
+                        // thread could land.
+                        if (ok && !_disposed) OnLookupCompleted?.Invoke();
+                    }
+                }
+                catch
+                {
+                    ok = false;
+                }
+
+                lock (_queuedLock)
+                {
+                    if (ok)
+                    {
+                        _queued.Remove(call);
+                        _autoLookupAttempts.Remove(call);
+                        return;
+                    }
+                    int attempts = _autoLookupAttempts.TryGetValue(call, out int a) ? a + 1 : 1;
+                    if (attempts >= MaxAutoLookupAttempts)
+                    {
+                        _queued.Remove(call);
+                        _autoLookupAttempts.Remove(call);
+                    }
+                    else
+                    {
+                        _autoLookupAttempts[call] = attempts;
+                        _autoQueue.Enqueue(call); // stays in _queued -- retried on a later tick
+                    }
+                }
             }
-            catch { }
             finally { _autoSem.Release(); }
         }
 
         public void Dispose()
         {
+            _disposed = true;
             StopAutoTimer();
+            // Codex finding, 2026-08-23: "clear its callback" -- drops the reference to
+            // whatever Controller/UI-bound closure was set here, so nothing keeps that closure
+            // (and everything it captured) alive past this Dispose call, on top of the _disposed
+            // guard above already preventing it from ever being invoked again.
+            OnLookupCompleted = null;
         }
     }
 }

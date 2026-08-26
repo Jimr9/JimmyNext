@@ -83,6 +83,43 @@ namespace WSJTX_Controller
             return sb.ToString();
         }
 
+        // Independent audit finding 10, 2026-08-23 (CLEANUP / OPERATIONAL BUG, MEDIUM/LOW
+        // PRIORITY): diagnostic logs had no retention or size bound at all -- one date-named
+        // file per day, AutoFlush, no rollover, no age cap. Real evidence: a single day's log
+        // reached ~34MB; a machine left with diagnostic logging on could accumulate gigabytes
+        // with no warning. Conservative retention (newest 30 days) only, run once when a log is
+        // opened (never on every write, so this never adds per-line overhead) -- deletes ONLY
+        // files matching this exact "log_M-D-YYYY.txt" naming convention inside Jimmy's own log
+        // directory, never touching any other file. Best-effort: a delete failure (file in use,
+        // permissions) is silently skipped rather than blocking the new log from opening.
+        private const int LogRetentionDays = 30;
+
+        private void CleanUpOldLogs()
+        {
+            try
+            {
+                if (!Directory.Exists(path)) return;
+                DateTime cutoff = DateTime.Now.Date.AddDays(-LogRetentionDays);
+                int removed = 0;
+                foreach (string file in Directory.GetFiles(path, "log_*.txt"))
+                {
+                    string stem = Path.GetFileNameWithoutExtension(file);
+                    string datePart = stem.Length > 4 ? stem.Substring(4) : null; // strip "log_"
+                    if (datePart != null && DateTime.TryParse(datePart.Replace('-', '/'), out DateTime fileDate)
+                        && fileDate.Date < cutoff)
+                    {
+                        try { File.Delete(file); removed++; } catch { /* in use/permissions -- skip, try again next time a log opens */ }
+                    }
+                }
+                if (removed > 0) DebugOutput($"{Time()} Diagnostic log retention: removed {removed} log file(s) older than {LogRetentionDays} days");
+            }
+            catch { /* best-effort housekeeping only -- must never block opening the real log */ }
+        }
+
+        // internal (not private): JimmyTests exercises the retention logic directly against an
+        // isolated temp directory (wc.path overridden), never the real operator log folder.
+        internal void TestCleanUpOldLogs() => CleanUpOldLogs();
+
         //set log file open/closed state
         //return new diagnostic log file state (true = open)
         private bool SetLogFileState(bool enable)
@@ -97,6 +134,7 @@ namespace WSJTX_Controller
                         logSw = File.AppendText($"{path}\\log_{DateTime.Now.Date.ToShortDateString().Replace('/', '-')}.txt");      //local time
                         logSw.AutoFlush = true;
                         logSw.WriteLine($"{nl}{nl}{Time()} Opened log");
+                        CleanUpOldLogs(); // after logSw is live so its own "removed N" notice (if any) actually lands in the log
                     }
                     catch (Exception err)
                     {

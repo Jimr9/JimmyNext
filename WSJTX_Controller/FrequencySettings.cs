@@ -3,15 +3,28 @@ using System.Windows.Forms;
 
 namespace WSJTX_Controller
 {
-    // A single calling-frequency entry: which mode it's for, its frequency in kHz, and an
-    // optional hotkey that jumps straight to it (retunes and switches mode if needed).
+    // A single calling-frequency entry: which mode it's for, its frequency in kHz, an optional
+    // hotkey that jumps straight to it (retunes and switches mode if needed), and (T18 fix,
+    // 2026-08-23) the logical sideband/data-mode to command the radio into when this entry is
+    // selected.
     public class FrequencyEntry
     {
         public string Mode { get; set; }        // "FT8" or "FT4"
         public int FreqKHz { get; set; }
         public Keys Hotkey { get; set; } = Keys.None;
+        // T18 fix, 2026-08-23 (CONFIRMED bug -- Jimmy test fix list item 17-18): FrequencyEntry
+        // previously had no way to represent sideband at all -- RetuneBand (WsjtxClient.
+        // BandAudio.cs) hardcoded the literal "USB" for every single entry regardless of band,
+        // matching Nexus's own "force USB-side PKTUSB for Digital operation" convention
+        // (settings.rs's own comment) but leaving no way to configure the rare rig/wiring
+        // combination that genuinely needs something else. "USB" is the default for every
+        // existing/migrated entry -- preserves the exact previous behavior for anyone who never
+        // touches this new field. Values: "USB" or "LSB" (matches the exact literal strings
+        // Engine::set_frequency/settings.rs's own rig_mode_on_sideband already expects verbatim
+        // -- see WsjtxClient.Direct.cs's own DirectSetFrequency comment).
+        public string Sideband { get; set; } = "USB";
 
-        public FrequencyEntry Clone() => new FrequencyEntry { Mode = Mode, FreqKHz = FreqKHz, Hotkey = Hotkey };
+        public FrequencyEntry Clone() => new FrequencyEntry { Mode = Mode, FreqKHz = FreqKHz, Hotkey = Hotkey, Sideband = Sideband };
     }
 
     // Options > Frequencies tab, rebuilt 2026-08-12 from the old fixed one-override-per-band
@@ -48,13 +61,19 @@ namespace WSJTX_Controller
             foreach (string entry in raw.Split(';'))
             {
                 string[] parts = entry.Split(':');
-                if (parts.Length != 4) continue;
+                // T18 fix, 2026-08-23: 4-part legacy rows (no Sideband field yet) still load
+                // fine -- Sideband simply keeps FrequencyEntry's own "USB" default, an exact,
+                // silent migration with no behavior change for anyone who never touches the new
+                // field. New rows are written with 5 parts (SaveToIni below).
+                if (parts.Length != 4 && parts.Length != 5) continue;
                 if (!int.TryParse(parts[0], out int bandIdx) || bandIdx < 0 || bandIdx >= Bands.Length) continue;
                 string mode = parts[1];
                 if (mode != "FT8" && mode != "FT4") continue;
                 if (!int.TryParse(parts[2], out int freqKHz) || freqKHz <= 0) continue;
                 if (!int.TryParse(parts[3], out int hotkeyVal)) continue;
-                Bands[bandIdx].Add(new FrequencyEntry { Mode = mode, FreqKHz = freqKHz, Hotkey = (Keys)hotkeyVal });
+                string sideband = "USB";
+                if (parts.Length == 5 && (parts[4] == "USB" || parts[4] == "LSB")) sideband = parts[4];
+                Bands[bandIdx].Add(new FrequencyEntry { Mode = mode, FreqKHz = freqKHz, Hotkey = (Keys)hotkeyVal, Sideband = sideband });
             }
             for (int i = 0; i < Bands.Length; i++)
                 Bands[i].Sort((a, b) => a.FreqKHz.CompareTo(b.FreqKHz));
@@ -65,7 +84,7 @@ namespace WSJTX_Controller
             var parts = new List<string>();
             for (int i = 0; i < Bands.Length; i++)
                 foreach (var e in Bands[i])
-                    parts.Add($"{i}:{e.Mode}:{e.FreqKHz}:{(int)e.Hotkey}");
+                    parts.Add($"{i}:{e.Mode}:{e.FreqKHz}:{(int)e.Hotkey}:{e.Sideband}");
             ini.Write("freqEntries", string.Join(";", parts));
         }
     }

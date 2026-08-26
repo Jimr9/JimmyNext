@@ -4,9 +4,9 @@
 //!   - **Background-cached, no credentials**: POTA/SOTA activator spots and space weather.
 //!     Fetched periodically on a dedicated thread from Nexus's own public-feed transports
 //!     (`propagation::live::{pota,swpc}` -- reused as-is, never reimplemented), cached, served
-//!     instantly from memory on request. Jimmy Test polls like it polls SNAPSHOT.
+//!     instantly from memory on request. Jimmy Next polls like it polls SNAPSHOT.
 //!
-//!   - **On-demand, credential-bearing**: eQSL upload/download and HamQTH lookup. Jimmy Test
+//!   - **On-demand, credential-bearing**: eQSL upload/download and HamQTH lookup. Jimmy Next
 //!     owns credential storage (DPAPI-encrypted, same as every other logbook service) and sends
 //!     them with each request; EngineHost never stores or logs them, and hands them straight to
 //!     Nexus's own transports (`propagation::live::{eqsl,hamqth}` / `tempo_core::{eqsl,hamqth}`)
@@ -15,7 +15,7 @@
 //!     server-side) -- see run_control_server's own comment on why they must never run on its
 //!     single-threaded accept loop.
 //!
-//! Ownership stays clean: this module is plumbing only. Jimmy Test decides what a spot means
+//! Ownership stays clean: this module is plumbing only. Jimmy Next decides what a spot means
 //! (needed for which award, worth a notification), owns local logbook reconciliation for eQSL
 //! downloads, and owns enable/disable policy for all of it.
 
@@ -252,18 +252,18 @@ struct SpotsPayload<'a> {
 }
 
 // propagation::model::SpaceWx (#[derive(Serialize)]) has no #[serde(rename_all)], so it
-// serializes its Rust field names verbatim: "a_index", "xray_long". Jimmy Test's C# side
+// serializes its Rust field names verbatim: "a_index", "xray_long". Jimmy Next's C# side
 // (ExternalDataClient.cs) deserializes with JsonNamingPolicy.CamelCase, which expects
 // "aIndex"/"xrayLong" -- System.Text.Json does not throw on an unmatched property, so those
 // two silently kept C#'s default float value (0.0) instead of the real reading, while sfi/kp/
 // ssn (no underscore, already camelCase-equivalent) happened to match and came through fine.
 // Confirmed live in a JAWS pass: SFI/Kp read correctly, A-index/X-ray always read "0.0"/
-// "0.0e+0". Fixed here, on Jimmy Test's own EngineHost side, rather than touching the vendored
+// "0.0e+0". Fixed here, on Jimmy Next's own EngineHost side, rather than touching the vendored
 // Nexus SpaceWx type (never hand-edited -- see scripts/prepare-nexus.ps1) -- this wire DTO is
 // exactly the pattern live_feeds.rs's BandReportPayload/RegionReportPayload already use for
 // the same reason.
 //
-// Also surfaces two of Nexus's OWN existing classifications for xray_long (never a Jimmy Test
+// Also surfaces two of Nexus's OWN existing classifications for xray_long (never a Jimmy Next
 // interpretation): SpaceWx::xray_class() (the standard NOAA flare-class letter) and
 // propagation::model::r_scale() (the standard NOAA R-scale radio-blackout risk, 0-5) -- both
 // already computed by Nexus from the same raw value, just not previously surfaced.
@@ -304,7 +304,7 @@ impl From<&SpaceWx> for SpaceWxWire {
 // propagation::model::r_scale(xray_long) (already in SpaceWxWire.rScale) computes from the same
 // raw reading this response already carries, so re-fetching NOAA's own copy of the same number
 // would be a second source for the same fact, not new information. G and S are different
-// physical quantities (Kp-derived and >=10 MeV proton-flux-derived respectively) Jimmy Test has
+// physical quantities (Kp-derived and >=10 MeV proton-flux-derived respectively) Jimmy Next has
 // no other source for, which is the actual point of this second fetch.
 #[derive(serde::Serialize)]
 struct NoaaScalesWire {
@@ -352,7 +352,7 @@ mod space_wx_wire_tests {
         let wire = SpaceWxWire::from(&wx);
         let json = serde_json::to_string(&wire).unwrap();
         // The exact bug: "a_index"/"xray_long" (Rust default) vs "aIndex"/"xrayLong" (what
-        // Jimmy Test's JsonNamingPolicy.CamelCase actually looks for).
+        // Jimmy Next's JsonNamingPolicy.CamelCase actually looks for).
         assert!(json.contains("\"aIndex\":8.0"), "got: {json}");
         assert!(json.contains("\"xrayLong\":"), "got: {json}");
         assert!(!json.contains("a_index"), "must not regress to the snake_case name: {json}");
@@ -433,8 +433,8 @@ mod space_wx_wire_tests {
 // and live only as long as this one function call.
 // ---------------------------------------------------------------------------------------------
 
-/// EQSL_UPLOAD wire args (Jimmy Test sends the whole ADIF record it already built for its own
-/// local logbook -- EngineHost does not construct ADIF, that stays Jimmy Test's job).
+/// EQSL_UPLOAD wire args (Jimmy Next sends the whole ADIF record it already built for its own
+/// local logbook -- EngineHost does not construct ADIF, that stays Jimmy Next's job).
 #[derive(serde::Deserialize)]
 pub struct EqslUploadArgs {
     pub username: String,
@@ -454,7 +454,7 @@ pub fn eqsl_upload(args: &EqslUploadArgs) -> Result<&'static str, String> {
     }
 }
 
-/// EQSL_DOWNLOAD wire args. `since_unix` is the last-reconciled watermark (Jimmy Test's own
+/// EQSL_DOWNLOAD wire args. `since_unix` is the last-reconciled watermark (Jimmy Next's own
 /// local logbook already tracks a per-service "last synced" time the same way it does for
 /// LoTW/Club Log) -- eQSL's own `format_rcvd_since` turns it into the InBox query's date filter,
 /// so this never re-downloads a operator's entire confirmation history on every sync.
@@ -465,9 +465,9 @@ pub struct EqslDownloadArgs {
     pub since_unix: Option<i64>,
 }
 
-/// Downloads eQSL InBox confirmations as raw ADIF text. Jimmy Test parses/reconciles this
+/// Downloads eQSL InBox confirmations as raw ADIF text. Jimmy Next parses/reconciles this
 /// against its own logbook (dedup by its own dedup_key, same as every other import path) --
-/// EngineHost does not touch Jimmy Test's database.
+/// EngineHost does not touch Jimmy Next's database.
 pub fn eqsl_download(args: &EqslDownloadArgs) -> Result<String, String> {
     let query = tempo_core::eqsl::EqslQuery {
         username: args.username.clone(),
@@ -479,7 +479,7 @@ pub fn eqsl_download(args: &EqslDownloadArgs) -> Result<String, String> {
     if !tempo_core::eqsl::is_eqsl_adif(&body) {
         return Err("eQSL: response was not a recognizable ADIF InBox".to_string());
     }
-    // A truncated-but-HTTP-200 body (partial final record) must never reach Jimmy Test as if
+    // A truncated-but-HTTP-200 body (partial final record) must never reach Jimmy Next as if
     // it were a complete download -- Jimmy's own reconciliation would otherwise treat a missing
     // trailing record as "not confirmed" rather than "not yet received", and (if it also
     // advances a since_unix watermark from this response) could permanently skip the record on
@@ -492,7 +492,7 @@ pub fn eqsl_download(args: &EqslDownloadArgs) -> Result<String, String> {
 
 /// HAMQTH_LOOKUP wire args. Combined login+lookup per call (no session-id caching across
 /// requests) -- simpler and more robust than threading HamQTH's ~1h session lifetime through
-/// this process's own state for what is, in Jimmy Test's usage, an occasional operator-driven
+/// this process's own state for what is, in Jimmy Next's usage, an occasional operator-driven
 /// lookup rather than a per-decode hot path.
 #[derive(serde::Deserialize)]
 pub struct HamQthLookupArgs {
@@ -502,10 +502,10 @@ pub struct HamQthLookupArgs {
 }
 
 // Full shape of tempo_core::hamqth::HamQthLookup -- previously this DTO dropped dxcc/cq_zone/
-// itu_zone (obtained the data, then discarded it before it ever reached Jimmy Test). dxcc is
+// itu_zone (obtained the data, then discarded it before it ever reached Jimmy Next). dxcc is
 // the numeric ADIF/DXCC entity ID from HamQTH's own <adif> element (the operator's self-reported
 // profile address, resolved by HamQTH -- NOT a prefix-algorithm resolution the way
-// ClubLogProvider is). image/lat/lon are left out: nothing in Jimmy Test's accessible lookup
+// ClubLogProvider is). image/lat/lon are left out: nothing in Jimmy Next's accessible lookup
 // dialog currently has a slot for a photo or a map, and adding one is out of scope here -- see
 // ARCHITECTURE.md if a future pass wants them.
 #[derive(serde::Serialize)]

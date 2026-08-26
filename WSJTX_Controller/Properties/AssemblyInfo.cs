@@ -14,17 +14,17 @@ using System.Runtime.Versioning;
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
 // Title/Product deliberately mirror the AssemblyName override used to build a side-by-side
-// "Jimmy Test" flavor (build.bat, Setup_WiX\JimmyTest.wxs both pass
-// -p:AssemblyName="Jimmy Test"), via JIMMY_TEST_BUILD (set by Jimmy.csproj from that same
+// "Jimmy Next" flavor (build.bat, Setup_WiX\JimmyNext.wxs both pass
+// -p:AssemblyName="Jimmy Next"), via JIMMY_NEXT_BUILD (set by Jimmy.csproj from that same
 // property -- see its own comment). Production safety fix, 2026-08-13: these two attributes
-// were hardcoded to "Jimmy" regardless of AssemblyName, so a Jimmy Test build's File Properties
+// were hardcoded to "Jimmy" regardless of AssemblyName, so a Jimmy Next build's File Properties
 // dialog and Application.ProductName both claimed to BE "Jimmy" even while running as a
-// correctly-isolated "Jimmy Test.exe" -- misleading at minimum, and Application.ProductName
+// correctly-isolated "Jimmy Next.exe" -- misleading at minimum, and Application.ProductName
 // specifically feeds .NET's legacy Properties.Settings.Default user.config path, one more
 // reason that identity has to actually vary by build, not just the file name.
-#if JIMMY_TEST_BUILD
-[assembly: AssemblyTitle("Jimmy Test")]
-[assembly: AssemblyProduct("Jimmy Test")]
+#if JIMMY_NEXT_BUILD
+[assembly: AssemblyTitle("Jimmy Next")]
+[assembly: AssemblyProduct("Jimmy Next")]
 #else
 [assembly: AssemblyTitle("Jimmy")]
 [assembly: AssemblyProduct("Jimmy")]
@@ -55,5 +55,5 @@ using System.Runtime.Versioning;
 // by using the '*' as shown below:
 // [assembly: AssemblyVersion("1.0.*")]
 [assembly: AssemblyVersion("1.0.0.0")]          //major.minor.build.private; freeze all so config re-used each new AssemblyFileVersion
-[assembly: AssemblyFileVersion("2.0.29.0")]      //major.minor.build.private; increment minor when new install pkg
-[assembly: AssemblyInformationalVersion("2.0.29")]
+[assembly: AssemblyFileVersion("2.0.37.0")]      //major.minor.build.private; increment minor when new install pkg
+[assembly: AssemblyInformationalVersion("2.0.37")]

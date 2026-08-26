@@ -67,6 +67,20 @@ namespace WSJTX_Controller
             return freqsDict[mode][i];
         }
 
+        // T18 fix, 2026-08-23: bandToFreq's own sideband counterpart -- same chokepoint/lookup
+        // convention (first entry matching the current mode is this band's primary entry), so
+        // BandUp/BandDown/SelectBand resolve the CONFIGURED sideband for whatever they retune to
+        // instead of RetuneBand hardcoding "USB" for every band regardless of what Options >
+        // Frequencies actually has configured. "USB" (FrequencyEntry's own default) for a band
+        // never customized -- preserves prior behavior exactly.
+        private string bandToSideband(int? idx)
+        {
+            if (idx == null || (int)idx < 0 || (int)idx >= ctrl.Frequencies.Bands.Length) return "USB";
+            foreach (var entry in ctrl.Frequencies.Bands[(int)idx])
+                if (entry.Mode == mode) return entry.Sideband;
+            return "USB";
+        }
+
         public bool BandUp()
         {
             if (!freqsDict.Keys.Contains(mode)) return false;
@@ -130,7 +144,7 @@ namespace WSJTX_Controller
         // (not necessarily a band's primary/first entry the way SelectBand's bandToFreq lookup
         // always resolves to) -- switches mode first if the entry's mode differs from the
         // current one, matching Alt+M's own SetOperatingMode path.
-        public bool SelectFrequency(int targetIdx, string entryMode, int freqKHz)
+        public bool SelectFrequency(int targetIdx, string entryMode, int freqKHz, string sideband = "USB")
         {
             if (targetIdx < 0 || targetIdx >= bands.Count) return false;
             if (freqKHz <= 0) return false;
@@ -142,7 +156,7 @@ namespace WSJTX_Controller
             Pause(true, false);
             CancelQso();
 
-            RetuneBand(targetIdx, (uint)(freqKHz * 1000), "SelectFrequency", $"{freqKHz} kHz");
+            RetuneBand(targetIdx, (uint)(freqKHz * 1000), "SelectFrequency", sideband, $"{freqKHz} kHz");
             return true;
         }
 
@@ -171,7 +185,7 @@ namespace WSJTX_Controller
         // Hamlib -vvvv trace capture cross-referenced with the operator's own hotkey audit.
         public bool SelectFrequencyHotkey(int targetIdx, FrequencyEntry entry)
         {
-            if (entry.Mode == mode) return SelectFrequency(targetIdx, entry.Mode, entry.FreqKHz);
+            if (entry.Mode == mode) return SelectFrequency(targetIdx, entry.Mode, entry.FreqKHz, entry.Sideband);
             return SelectBand(targetIdx);
         }
 
@@ -180,8 +194,11 @@ namespace WSJTX_Controller
         // DirectSetFrequency's own comment (WsjtxClient.Direct.cs). Under RadioControlMode.
         // WsjtxCat there is no separate CAT connection at all (radio state comes read-only from
         // the engine's own StatusMessage broadcasts), so there is nothing to retune.
+        // T18 fix, 2026-08-23: resolves the target band's own configured sideband (bandToSideband)
+        // instead of RetuneBand's core overload hardcoding "USB" for every caller -- BandUp/
+        // BandDown/SelectBand (the only callers of THIS overload) go through here.
         private void RetuneBand(int targetIdx, string caller, string detail = null) =>
-            RetuneBand(targetIdx, (uint)(bandToFreq(targetIdx) * 1000), caller, detail);
+            RetuneBand(targetIdx, (uint)(bandToFreq(targetIdx) * 1000), caller, bandToSideband(targetIdx), detail);
 
         // SelectFrequency's own entry point: an explicit target frequency, not necessarily the
         // band's primary/first entry bandToFreq(targetIdx) would resolve to.
@@ -222,9 +239,15 @@ namespace WSJTX_Controller
         // NEWER BandUp/BandDown/SelectBand/SelectFrequency press already superseded this one
         // while it was still in flight, that newer request now owns _pendingBandIdx and the
         // pending-status text -- this now-stale completion must not clobber either.
-        private void RetuneBand(int targetIdx, uint freqHz, string caller, string detail = null)
+        // T18 fix, 2026-08-23: `sideband` defaults "USB" only for the rare direct caller that
+        // doesn't have a real FrequencyEntry to resolve one from (there are none left in this
+        // file after this pass -- every live caller now passes a real resolved value via
+        // bandToSideband/entry.Sideband) -- kept as a default rather than required so a future
+        // caller can't accidentally omit it and silently regress to always-USB without at least
+        // reading this comment.
+        private void RetuneBand(int targetIdx, uint freqHz, string caller, string sideband = "USB", string detail = null)
         {
-            DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst}");
+            DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst} sideband:{sideband}");
             if (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld)
             {
                 StatusView.ShowMessage("Band change needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
@@ -237,12 +260,23 @@ namespace WSJTX_Controller
             // ordered dispatcher (WsjtxClient.Direct.cs's own class comment) instead of this method
             // opening its own independent Task.Run -- the dispatcher already marshals onComplete
             // onto the UI thread, same as ctrl.BeginInvoke did here before.
-            DirectSetFrequency(freqHz, bandLabel, "USB", ok =>
+            // T18 fix, 2026-08-23: sideband, not a hardcoded "USB" literal -- see this method's
+            // own signature comment and FrequencyEntry.Sideband's own comment.
+            DirectSetFrequency(freqHz, bandLabel, sideband, ok =>
             {
                 if (_pendingBandIdx != targetIdx) return; // superseded by a newer request
 
                 if (ok)
                 {
+                    // T17 fix, 2026-08-23: record what was actually confirmed commanded, for
+                    // DirectApplyStatus's own readback-mismatch check (WsjtxClient.Direct.cs) to
+                    // compare against the rig's next CAT mode readback. CAT mode command/readback
+                    // correlation fix, 2026-08-23: the timestamp travels with it (both set here,
+                    // together, only on a non-superseded confirmed retune -- see the guard just
+                    // above) -- see _lastCommandedSidebandChangedUtc's own comment for why.
+                    _lastCommandedSideband = sideband;
+                    _lastCommandedSidebandChangedUtc = DateTime.UtcNow;
+                    _sidebandMismatchStreak = 0;
                     ShowBandChangePending(targetIdx, detail);
                     return;
                 }
@@ -761,6 +795,26 @@ namespace WSJTX_Controller
                 ctrl.bandComboBox.Items.AddRange(new string[] { "for 1 band", "this band" });
             }
             ctrl.bandComboBox.SelectedIndex = idx;
+        }
+
+        // Item 4, 2026-08-24 (operator request): on-demand clock sync status hotkey. Deliberately
+        // reads the SAME timeOffset/_clockWasAcceptable state CalcAvgTimeOffset (below) already
+        // maintains for the automatic ClockOutOfSync/ClockSynced notifications, rather than
+        // computing anything fresh -- guarantees this always agrees with whatever the automatic
+        // notification would say, and needs no engine round trip (unlike ReportPowerSwr's own
+        // on-demand SNAPSHOT query above, timeOffset is already tracked locally every period).
+        public bool ReportClockStatus()
+        {
+            string offsetStr = timeOffset.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+            string msg;
+            if (_clockWasAcceptable == null)
+                msg = "Clock sync not yet measured";
+            else if (_clockWasAcceptable == true)
+                msg = $"Clock sync good, offset {offsetStr} seconds";
+            else
+                msg = $"Clock out of sync, offset {offsetStr} seconds, check clock time";
+            StatusView.ShowMessage(msg, false);
+            return true;
         }
 
         private void CalcAvgTimeOffset(bool clear)

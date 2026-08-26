@@ -1,12 +1,12 @@
 <#
 .SYNOPSIS
-    Verifies the built JimmyTest.msi without installing it: version info,
-    "Jimmy Test.exe" File table entry, and MajorUpgrade configuration.
+    Verifies the built JimmyNext.msi without installing it: version info,
+    "Jimmy Next.exe" File table entry, and MajorUpgrade configuration.
     Adapted from the stable Jimmy workspace's verify_msi.ps1 pattern for the
-    Jimmy Test side-by-side product (different ProductName/File id/paths).
+    Jimmy Next side-by-side product (different ProductName/File id/paths).
 #>
 param(
-    [string]$MsiPath = "C:\claude\jimmy_wsjtx31\Setup_WiX\JimmyTest.msi"
+    [string]$MsiPath = "C:\claude\jimmy_next\Setup_WiX\JimmyNext.msi"
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,7 +46,7 @@ function LongFileName($fileNameField) {
     return $parts[$parts.Count - 1]
 }
 
-Write-Output "=== Jimmy Test MSI Verification ==="
+Write-Output "=== Jimmy Next MSI Verification ==="
 Write-Output "MSI: $MsiPath"
 Write-Output ""
 
@@ -68,26 +68,26 @@ $productCode    = GetProperty $db "ProductCode"
 $upgradeCode    = GetProperty $db "UpgradeCode"
 $manufacturer   = GetProperty $db "Manufacturer"
 
-Write-Check ($productName -eq "Jimmy Test") "ProductName" $productName
+Write-Check ($productName -eq "Jimmy Next") "ProductName" $productName
 Write-Check ($productVersion -match '^\d+\.\d+\.\d+$') "ProductVersion (well-formed)" $productVersion
 Write-Check ($null -ne $productCode) "ProductCode" $productCode
-Write-Check ($upgradeCode -eq "{BFC5D246-0851-4DB3-B351-EDFD8BDFEA2B}") "UpgradeCode (Jimmy Test's own, not production's)" $upgradeCode
+Write-Check ($upgradeCode -eq "{594D5C69-67A3-40E2-A5D9-68289DCAB98A}") "UpgradeCode (Jimmy Next's own, not production's or Jimmy Test's)" $upgradeCode
 Write-Check ($manufacturer -eq "KB0UZT") "Manufacturer" $manufacturer
 Write-Output ""
 
-Write-Output "--- Jimmy Test.exe File table entry ---"
+Write-Output "--- Jimmy Next.exe File table entry ---"
 $allFiles = Query $db "SELECT File, FileName, Version FROM File"
-$exeRows = @($allFiles | Where-Object { (LongFileName $_[1]) -ieq "Jimmy Test.exe" })
+$exeRows = @($allFiles | Where-Object { (LongFileName $_[1]) -ieq "Jimmy Next.exe" })
 if ($exeRows.Count -eq 0) {
-    Write-Check $false "Jimmy Test.exe present in File table" "not found"
-    $failures += "Jimmy Test.exe missing from MSI File table"
+    Write-Check $false "Jimmy Next.exe present in File table" "not found"
+    $failures += "Jimmy Next.exe missing from MSI File table"
 }
 else {
     $exeVersion = $exeRows[0][2]
-    Write-Check $true "Jimmy Test.exe present" (LongFileName $exeRows[0][1])
+    Write-Check $true "Jimmy Next.exe present" (LongFileName $exeRows[0][1])
     $versionOk = ($exeVersion -eq $productVersion + ".0" -or $exeVersion -eq $productVersion)
-    Write-Check $versionOk "Jimmy Test.exe Version matches ProductVersion" "$exeVersion vs $productVersion"
-    if (-not $versionOk) { $warnings += "Jimmy Test.exe file version ($exeVersion) doesn't match ProductVersion ($productVersion)" }
+    Write-Check $versionOk "Jimmy Next.exe Version matches ProductVersion" "$exeVersion vs $productVersion"
+    if (-not $versionOk) { $warnings += "Jimmy Next.exe file version ($exeVersion) doesn't match ProductVersion ($productVersion)" }
 }
 Write-Output ""
 

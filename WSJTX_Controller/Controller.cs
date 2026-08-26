@@ -82,6 +82,15 @@ namespace WSJTX_Controller
         // announce the moment the period is confirmed done.
         public int statusBatchDelayMs = 500;
         public bool keepTransmitListDuringTx = false;
+        // Item 2, 2026-08-24 (operator request): "while transmitting, transmit-related speech
+        // can take priority and receive-side notifications are suppressed until receiving
+        // resumes" -- opt-in (default off), matching every other new-behavior toggle's own
+        // "don't change existing behavior for anyone who hasn't touched Options" convention.
+        // Read directly by ShowStatus() (WsjtxClient.Display.cs) to omit the routine "N
+        // available stations" summary specifically while transmitting -- the one piece of
+        // ShowStatus's own text that's genuinely receive-side chatter, not TX-critical info
+        // (sending/logged/expired/timed-out text is never touched by this).
+        public bool suppressReceiveNotificationsDuringTx = false;
         public bool keepListPositionDuringRefresh = false;
         public bool moveFocusToStatusOnCallSelect = false;
         public bool checkForUpdatesOnStartup = false;
@@ -288,6 +297,15 @@ namespace WSJTX_Controller
         public Controller()
         {
             InitializeComponent();
+            // Profiles feature, 2026-08-24: a real MenuStrip retrofit was tried and abandoned --
+            // live JAWS testing showed tapping Alt/Alt+F10 stopped reaching the menu at all
+            // (Windows' own window system menu responded instead), on top of every natural
+            // mnemonic letter already colliding with an existing global hotkey. Save/Load/Delete
+            // Profile now live as a new "Profiles" category in the existing Options dialog
+            // instead (OptionsDlg.cs's BuildProfilesTab) -- reuses the SAME already-JAWS/NVDA-
+            // verified category-list navigation every other Options category uses, needs no
+            // change to this form's own layout, Alt-key handling, or MinimumSize/ResetWindowSize
+            // math at all.
             KeyPreview = true;
 
             //timers
@@ -395,8 +413,57 @@ namespace WSJTX_Controller
         {
             //use .ini file for settings (avoid .Net config file mess)
             string pgmName = Assembly.GetExecutingAssembly().GetName().Name.ToString();
-            string path = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{pgmName}";
-            string pathFileNameExt = path + "\\" + pgmName + ".ini";
+            string realAppDataPath = $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{pgmName}";
+            string realPathFileNameExt = realAppDataPath + "\\" + pgmName + ".ini";
+            // Replay-test settings isolation, 2026-08-23: this .ini path had no test-mode branch
+            // at all before this fix -- unlike the diagnostic log (WsjtxClient.path) and the
+            // logbook DB (JIMMY_TEST_DB_PATH), a replay-test run of "Jimmy Next.exe" always read
+            // AND WROTE the operator's own real settings file. Under TestModeGuard.IsTestMode
+            // (the exact same JIMMY_TEST_DB_PATH signal those two already key off), every
+            // read/write this session instead targets an isolated copy in the same temp root
+            // WsjtxClient.path already uses -- one shared isolated folder. The isolated copy is
+            // seeded ONCE, the first time a test session finds none there yet, by copying the
+            // real file -- read-only against the real file (File.Copy never opens the source for
+            // write), never touched again afterward. Without a seed, a replay run would start
+            // from a blank ini with no My Call/My Grid/Radio mode/Advanced Call Layout -- exactly
+            // the operator-configured baseline JimmyDirectReplay.py's own test messages and
+            // run_replay_tests.bat's documented prerequisites assume already exists.
+            string path = realAppDataPath;
+            string pathFileNameExt = realPathFileNameExt;
+            if (TestModeGuard.IsTestMode)
+            {
+                path = $"{Path.GetTempPath()}JimmyReplayTest_AppData";
+                pathFileNameExt = path + "\\" + pgmName + ".ini";
+                try
+                {
+                    if (!File.Exists(pathFileNameExt))
+                    {
+                        if (!Directory.Exists(path)) Directory.CreateDirectory(path);
+                        if (File.Exists(realPathFileNameExt)) File.Copy(realPathFileNameExt, pathFileNameExt);
+                    }
+                }
+                catch
+                {
+                    // Best-effort seed only -- a session that couldn't seed still isolates writes
+                    // correctly (they go to `path`/`pathFileNameExt` above either way), it just
+                    // starts from code defaults instead of the operator's real prior settings.
+                }
+            }
+            // Profiles feature, 2026-08-24: `{pgmName}.ini` directly under realAppDataPath (NOT
+            // inside the Profiles subfolder) is the built-in/default profile -- it's the one
+            // file every existing install already has and the one this whole bootstrap sequence
+            // reads first no matter what, so it structurally can never be deleted by the
+            // profile-delete UI (there's nothing named "the default" living in the Profiles
+            // folder to delete) and never needs its own special-cased filename check (works
+            // identically once pgmName becomes "Jimmy" in production, not just "Jimmy Next").
+            // Its own "activeProfile" key names which OTHER profile (if any) actually governs
+            // this session -- resolved here, before iniFile is ever opened, so an existing user
+            // with no such key (every install before this feature) falls straight through to
+            // today's exact behavior: the default/base file itself, unchanged, no migration, no
+            // lost settings. Skipped in test mode -- replay tests stay on their own isolated
+            // copy, unaffected by whatever profile the operator's real install has selected.
+            if (!TestModeGuard.IsTestMode)
+                pathFileNameExt = ResolveActiveIniPath(realPathFileNameExt, ProfilesDirectory());
             // Production-safety isolation (urgent fix, 2026-08-13): Properties.Settings.Default
             // is the legacy .NET user.config-backed settings store, predating the .ini file
             // system below. Its on-disk path is derived from assembly Product/Company identity
@@ -404,7 +471,7 @@ namespace WSJTX_Controller
             // deliberately is -- so unlike the .ini file, the logbook/lookup DataRoot, and the
             // diagnostic log (all keyed off Assembly.GetExecutingAssembly().GetName().Name),
             // there is no guarantee this legacy store is isolated per build identity. A
-            // side-by-side "Jimmy Test" build has no legitimate reason to read it at all -- it
+            // side-by-side "Jimmy Next" build has no legitimate reason to read it at all -- it
             // should always start from clean defaults, never inherit another install's history --
             // so every read of Properties.Settings.Default below is now gated on this being the
             // real production identity specifically, not just "any .ini-less first run".
@@ -477,7 +544,16 @@ namespace WSJTX_Controller
                     if (Properties.Settings.Default.windowHt != 0)
                         this.Height = Properties.Settings.Default.windowHt;
                     port = Properties.Settings.Default.port;
-                    timeoutNumUpDown.Value = Properties.Settings.Default.timeout;
+                    // Independent audit finding, 2026-08-23 (persisted settings validation):
+                    // same class of bug as minSnrNumUpDown's own fix below -- NumericUpDown.Value
+                    // throws ArgumentOutOfRangeException for anything outside [Minimum, Maximum],
+                    // crashing startup for a corrupted/edited legacy Properties.Settings value.
+                    // Clamped to the SAME semantic range timeoutNumUpDown_ValueChanged already
+                    // enforces live (minSkipCount..maxSkipCount, 1..20) rather than merely the
+                    // control's own wider default [0,100] -- that handler can't run yet this
+                    // early (gated on formLoaded, set true only near the end of Form_Load), so
+                    // this is the one place that range must be enforced for a value loaded here.
+                    timeoutNumUpDown.Value = Math.Max(minSkipCount, Math.Min(maxSkipCount, Properties.Settings.Default.timeout));
                     directedTextBox.Text = Properties.Settings.Default.directeds;
                     callDirCqCheckBox.Checked = Properties.Settings.Default.useDirected;
                     mycallCheckBox.Checked = Properties.Settings.Default.playMyCall;
@@ -498,7 +574,7 @@ namespace WSJTX_Controller
                     cmdPrompts = Properties.Settings.Default.cmdPrompts;
                     usePskReporter = Properties.Settings.Default.usePskReporter;
                 }
-                // Jimmy Test (or any other non-production identity) falls through with the
+                // Jimmy Next (or any other non-production identity) falls through with the
                 // plain C# defaults already declared above (newOnBand=true, cmdPrompts=true,
                 // usePskReporter=true, etc.) and whatever Designer.cs set each control's
                 // Checked/Text to -- a genuinely clean first run, not production's history.
@@ -561,14 +637,19 @@ namespace WSJTX_Controller
                 {
                     // Same isolation rule as the first-run migration block above: production
                     // alone may fall back to the legacy Properties.Settings.Default store.
-                    // Every other identity (Jimmy Test included) falls back to WSJT-X's own
+                    // Every other identity (Jimmy Next included) falls back to WSJT-X's own
                     // standard UDP defaults instead (matching App.config's own default values),
                     // never another install's possibly-different saved settings.
                     port = isProductionIdentity ? Properties.Settings.Default.port : 2237;
                 }
 
                 int.TryParse(iniFile.Read("timeout"), out i);
-                timeoutNumUpDown.Value = i;
+                // Independent audit finding, 2026-08-23 (persisted settings validation): same
+                // fix as the legacy Properties.Settings.Default.timeout path just above -- a
+                // malformed/edited/out-of-range "timeout" key (or int.TryParse's own failure
+                // default of 0, itself out of the semantic 1..20 range) must not crash startup
+                // via NumericUpDown.Value's ArgumentOutOfRangeException.
+                timeoutNumUpDown.Value = Math.Max(minSkipCount, Math.Min(maxSkipCount, i));
                 directedTextBox.Text = iniFile.Read("directeds");
                 callDirCqCheckBox.Checked = iniFile.Read("useDirected") == "True";
                 if (iniFile.KeyExists("directedCqLockedEntry")) directedCqLockedEntry = iniFile.Read("directedCqLockedEntry");
@@ -617,7 +698,18 @@ namespace WSJTX_Controller
                 Decode.LoadFromIni(iniFile);
                 Frequencies.LoadFromIni(iniFile);
                 Notifications.LoadFromIni(iniFile);
-                if (iniFile.KeyExists("rankMethod")) int.TryParse(iniFile.Read("rankMethod"), out rankMethodIdx);
+                // T4 fix, 2026-08-23: reject an out-of-range/undefined ordinal (truncated or
+                // future/older-version INI) rather than assigning it -- rankMethodIdx feeds
+                // (WsjtxClient.RankMethods)rankMethodIdx casts downstream (CallQueueRanker), an
+                // undefined value there is a real correctness bug (silently degrades to
+                // whichever memory happens to be interpreted), not just a display glitch. Keeps
+                // its own already-sane default (MOST_RECENT) when invalid.
+                if (iniFile.KeyExists("rankMethod"))
+                {
+                    if (int.TryParse(iniFile.Read("rankMethod"), out int parsedRankMethod)
+                        && Enum.IsDefined(typeof(WsjtxClient.RankMethods), parsedRankMethod))
+                        rankMethodIdx = parsedRankMethod;
+                }
                 if (iniFile.KeyExists("rankOrder")) rankOrderStr = iniFile.Read("rankOrder");
                 if (iniFile.KeyExists("rankBeam")) rankBeamStr = iniFile.Read("rankBeam");
                 if (iniFile.KeyExists("categoryWeights"))   categoryWeightsStr   = iniFile.Read("categoryWeights");
@@ -631,8 +723,16 @@ namespace WSJTX_Controller
                 anyMsgRadioButton.Checked = iniFile.Read("anyMsg") == "True";
                 if (iniFile.KeyExists("txPeriodIdx"))
                 {
-                    int.TryParse(iniFile.Read("txPeriodIdx"), out i);
-                    periodComboBox.SelectedIndex = i;
+                    // Independent audit finding 4, 2026-08-23 (CONFIRMED bug, MEDIUM PRIORITY):
+                    // used to assign unconditionally -- a truncated, manually edited, or
+                    // future/older-version INI value outside periodComboBox's real item range
+                    // threw ArgumentOutOfRangeException straight out of startup, making the
+                    // whole application (including its accessible UI) unavailable. Falls back
+                    // silently to the control's existing default when out of range, same
+                    // "invalid values retain the declared default" contract T5's own required
+                    // outcome describes.
+                    if (int.TryParse(iniFile.Read("txPeriodIdx"), out i) && i >= 0 && i < periodComboBox.Items.Count)
+                        periodComboBox.SelectedIndex = i;
                 }
                 usePskReporter = iniFile.Read("usePskReporter") != "False";              //default: true
                 showUsStateCheckBox.Checked = iniFile.Read("showUsState") == "True";
@@ -666,6 +766,7 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("statusBatchDelayMs") && int.TryParse(iniFile.Read("statusBatchDelayMs"), out statusBatchMs) && statusBatchMs >= 0 && statusBatchMs <= 5000)
                     statusBatchDelayMs = statusBatchMs;
                 keepTransmitListDuringTx = iniFile.Read("keepTransmitListDuringTx") == "True";
+                suppressReceiveNotificationsDuringTx = iniFile.Read("suppressReceiveNotificationsDuringTx") == "True";
                 keepListPositionDuringRefresh = iniFile.Read("keepListPositionDuringRefresh") == "True";
                 moveFocusToStatusOnCallSelect = iniFile.Read("moveFocusToStatusOnCallSelect") == "True";
                 checkForUpdatesOnStartup = iniFile.Read("checkForUpdatesOnStartup") == "True";
@@ -706,7 +807,12 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("qrzUsername"))        qrzUsername        = iniFile.Read("qrzUsername");
                 if (iniFile.KeyExists("qrzPassword"))        qrzPassword        = CredentialProtector.Unprotect(iniFile.Read("qrzPassword"));
                 int qrzcd; if (iniFile.KeyExists("qrzCacheDays")    && int.TryParse(iniFile.Read("qrzCacheDays"),    out qrzcd)   && qrzcd   >= 1) qrzCacheDays    = qrzcd;
-                int qrzpol; if (iniFile.KeyExists("qrzLookupPolicy") && int.TryParse(iniFile.Read("qrzLookupPolicy"), out qrzpol)) qrzLookupPolicy = (QrzLookupPolicy)qrzpol;
+                // Independent audit finding 4, 2026-08-23 (CONFIRMED bug, MEDIUM PRIORITY):
+                // used to cast any parsed integer straight to the enum with no Enum.IsDefined
+                // check -- an undefined ordinal (truncated/future-version INI) silently became
+                // an undefined QrzLookupPolicy value rather than falling back to the field's own
+                // already-sane default (Disabled).
+                int qrzpol; if (iniFile.KeyExists("qrzLookupPolicy") && int.TryParse(iniFile.Read("qrzLookupPolicy"), out qrzpol) && Enum.IsDefined(typeof(QrzLookupPolicy), qrzpol)) qrzLookupPolicy = (QrzLookupPolicy)qrzpol;
                 int qrzint; if (iniFile.KeyExists("qrzMinIntervalSeconds") && int.TryParse(iniFile.Read("qrzMinIntervalSeconds"), out qrzint) && qrzint >= 5) qrzMinIntervalSeconds = qrzint;
                 if (iniFile.KeyExists("lotwEnabled"))        lotwEnabled        = iniFile.Read("lotwEnabled")    == "True";
                 if (iniFile.KeyExists("lotwBoostEnabled"))   lotwBoostEnabled   = iniFile.Read("lotwBoostEnabled") == "True";
@@ -737,8 +843,18 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("hamQthUsername"))     hamQthUsername     = iniFile.Read("hamQthUsername") ?? "";
                 if (iniFile.KeyExists("hamQthPassword"))     hamQthPassword     = CredentialProtector.Unprotect(iniFile.Read("hamQthPassword"));
                 if (iniFile.KeyExists("hamQthCacheDays"))    int.TryParse(iniFile.Read("hamQthCacheDays"), out hamQthCacheDays);
+                // Independent audit finding 4, 2026-08-23 (CONFIRMED bug, MEDIUM PRIORITY):
+                // Enum.TryParse alone accepts ANY numeric string, defined or not (it does not
+                // validate against Enum.IsDefined) -- e.g. "callsignLookupProvider=999" used to
+                // "successfully" parse into an undefined enum value. Requires a real defined
+                // member now; an invalid saved value keeps the field's own already-sane default
+                // (Qrz) instead.
                 if (iniFile.KeyExists("callsignLookupProvider"))
-                    Enum.TryParse(iniFile.Read("callsignLookupProvider"), out callsignLookupProvider);
+                {
+                    if (Enum.TryParse(iniFile.Read("callsignLookupProvider"), out CallsignLookupProvider parsedProvider)
+                        && Enum.IsDefined(typeof(CallsignLookupProvider), parsedProvider))
+                        callsignLookupProvider = parsedProvider;
+                }
                 if (iniFile.KeyExists("dxClusterAddress")) dxClusterAddress = iniFile.Read("dxClusterAddress") ?? "";
                 if (iniFile.KeyExists("tqslStationLocation"))    tqslStationLocation   = iniFile.Read("tqslStationLocation")    ?? "";
                 if (iniFile.KeyExists("qrzLogbookAutoSyncEnabled"))     qrzLogbookAutoSyncEnabled     = iniFile.Read("qrzLogbookAutoSyncEnabled")     == "True";
@@ -870,8 +986,15 @@ namespace WSJTX_Controller
             wsjtxClient.ApplySpotWatchCalls(ParseSpotWatchCalls(spotWatchCallsStr));
 
             dxSpotWatcher = new DxSpotWatcher();
-            dxSpotWatcher.Updated += () => BeginInvoke(new Action(RenderSpotWatchList));
-            dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls);
+            // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
+            // SafeBeginInvoke instead of a raw BeginInvoke -- DxSpotWatcher's own class comment
+            // already documents that Updated fires on a background MQTT thread and subscribers
+            // must marshal themselves; an MQTT message already being processed when this form
+            // starts closing (DxSpotWatcher.Dispose() unsubscribes/disposes the client, but
+            // can't reach into a callback already past that point) must not crash trying to
+            // BeginInvoke against a torn-down handle.
+            dxSpotWatcher.Updated += () => SafeBeginInvoke(RenderSpotWatchList);
+            _ = dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls); // fire-and-observe -- see UpdateWatchList's own comment
             spotWatchAgeTimer.Start();
             ApplyEngineMode();      // Phase 4g: always launches the native engine host
             wsjtxClient.rawPriorityTags = rawPriorityTags;
@@ -899,8 +1022,15 @@ namespace WSJTX_Controller
             wsjtxClient.lotwBoostEnabled  = lotwBoostEnabled;
             BackfillMissingStates();
             LoadHrcCache();
+            // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
+            // SafeBeginInvoke (see its own comment) instead of a raw BeginInvoke -- an in-flight
+            // auto-lookup that completes after this form starts closing must not throw
+            // ObjectDisposedException/InvalidOperationException trying to marshal back onto a
+            // torn-down handle. LookupManager.Dispose() also now guards this same callback
+            // on its own side (_disposed check before invoking it at all) -- this is defense in
+            // depth for the same race, not a duplicate of it.
             lookupManager.OnLookupCompleted = () =>
-                BeginInvoke(new Action(() => wsjtxClient.RefreshQueueDisplay()));
+                SafeBeginInvoke(() => wsjtxClient.RefreshQueueDisplay());
             lookupManager.StartBackgroundRefreshIfNeeded(lotwRefreshDays, clubLogRefreshDays, fccUlsRefreshDays);
 
             // Loads every .ini file from the RuleDefinitions folder (awards engine).
@@ -1010,7 +1140,14 @@ namespace WSJTX_Controller
             if (iniFile != null)
             {
                 ignoreWeakSnrCheckBox.Checked = iniFile.Read("ignoreWeakSnr") == "True";
-                if (int.TryParse(iniFile.Read("minSnr"), out int savedMinSnr)) minSnrNumUpDown.Value = savedMinSnr;
+                // Independent audit finding 4, 2026-08-23 (CONFIRMED bug, MEDIUM PRIORITY):
+                // used to assign unconditionally -- NumericUpDown.Value throws
+                // ArgumentOutOfRangeException for anything outside [Minimum, Maximum] (-30..20
+                // here), so a corrupted/out-of-range saved value crashed startup. Clamped, not
+                // silently ignored -- a value 5 dB too high/low is still meaningfully closer to
+                // what the operator saved than falling back to the control's unrelated default.
+                if (int.TryParse(iniFile.Read("minSnr"), out int savedMinSnr))
+                    minSnrNumUpDown.Value = Math.Max(minSnrNumUpDown.Minimum, Math.Min(minSnrNumUpDown.Maximum, savedMinSnr));
                 removeOnWeakSnrCheckBox.Checked = iniFile.Read("removeOnWeakSnr") == "True";
             }
             ignoreWeakSnrCheckBox.CheckedChanged += (s2, e2) => minSnrNumUpDown.Enabled = ignoreWeakSnrCheckBox.Checked;
@@ -1077,6 +1214,21 @@ namespace WSJTX_Controller
             }
         }
 
+        // Independent audit finding 8, 2026-08-23 (LIKELY bug, MEDIUM/LOW PRIORITY): a
+        // fire-and-forget update-check/download Task that later calls plain BeginInvoke with no
+        // IsDisposed/Disposing/IsHandleCreated check can throw InvalidOperationException/
+        // ObjectDisposedException if the operator closes Jimmy while it's still in flight (the
+        // startup check waits up to UpdateChecker's own 15s HTTP timeout; the download/install
+        // path can take much longer). Matches OtaSpotsWindow's own already-established
+        // SafeBeginInvoke pattern for exactly this disposed-control case.
+        private void SafeBeginInvoke(Action action)
+        {
+            if (IsDisposed || Disposing || !IsHandleCreated) return;
+            try { BeginInvoke(action); }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+        }
+
         // Fire-and-forget from Form_Load: runs entirely on a background thread until it
         // has something to show, then hops back to the UI thread via BeginInvoke. Silent
         // on any failure (network down, GitHub rate limit, etc.) -- see UpdateChecker.
@@ -1089,7 +1241,7 @@ namespace WSJTX_Controller
             UpdateInfo info = await UpdateChecker.CheckForNewerVersionAsync(currentVersion).ConfigureAwait(false);
             if (info == null) return;
 
-            BeginInvoke(new Action(() => OfferUpdate(info, currentVersion)));
+            SafeBeginInvoke(() => OfferUpdate(info, currentVersion));
         }
 
         private void OfferUpdate(UpdateInfo info, string currentVersion)
@@ -1116,13 +1268,13 @@ namespace WSJTX_Controller
             }
             catch (Exception ex)
             {
-                BeginInvoke(new Action(() =>
+                SafeBeginInvoke(() =>
                     MessageBox.Show(this, $"Could not download the update:{nl}{ex.Message}", "Update Failed",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error)));
+                        MessageBoxButtons.OK, MessageBoxIcon.Error));
                 return;
             }
 
-            BeginInvoke(new Action(() =>
+            SafeBeginInvoke(() =>
             {
                 try
                 {
@@ -1135,24 +1287,30 @@ namespace WSJTX_Controller
                     return;
                 }
                 Application.Exit();
-            }));
+            });
         }
 
-        private void Controller_FormClosing(object sender, FormClosingEventArgs e)
+        // Found live (release blocker, 2026-08-19): this whole block reads wsjtxClient.*
+        // extensively, but wsjtxClient is only ever assigned once Form_Load reaches its own
+        // WsjtxClient construction -- a startup that failed before that point (e.g. the
+        // IPAddress.Parse crash this same investigation found) left it null, and the
+        // original `if (iniFile != null)` guard alone didn't cover that: iniFile is created
+        // much earlier in Form_Load, so it was already non-null, and every wsjtxClient.*
+        // read below threw NullReferenceException the moment the operator tried to close the
+        // window after a failed startup. formLoaded is the existing, already-established
+        // "did Form_Load actually finish" flag (set true only at its very end, well after
+        // wsjtxClient's construction -- see its own declaration comment) that many other
+        // handlers in this class already guard on; reusing it here is the correct fix, not
+        // just a null-check bolted onto this one symptom -- a session that never finished
+        // starting has nothing real to persist anyway.
+        //
+        // Profiles feature, 2026-08-24: extracted out of Controller_FormClosing (unchanged
+        // body/behavior) so "Save Current Configuration As Profile" can flush every setting to
+        // the live iniFile on demand, the same way a clean close always has, without actually
+        // closing the app -- SaveProfileAs then copies that exact, now-current file to the new
+        // named-profile path (see SaveProfileAs' own comment).
+        private void SaveAllSettingsToIniFile()
         {
-            // Found live (release blocker, 2026-08-19): this whole block reads wsjtxClient.*
-            // extensively, but wsjtxClient is only ever assigned once Form_Load reaches its own
-            // WsjtxClient construction -- a startup that failed before that point (e.g. the
-            // IPAddress.Parse crash this same investigation found) left it null, and the
-            // original `if (iniFile != null)` guard alone didn't cover that: iniFile is created
-            // much earlier in Form_Load, so it was already non-null, and every wsjtxClient.*
-            // read below threw NullReferenceException the moment the operator tried to close the
-            // window after a failed startup. formLoaded is the existing, already-established
-            // "did Form_Load actually finish" flag (set true only at its very end, well after
-            // wsjtxClient's construction -- see its own declaration comment) that many other
-            // handlers in this class already guard on; reusing it here is the correct fix, not
-            // just a null-check bolted onto this one symptom -- a session that never finished
-            // starting has nothing real to persist anyway.
             if (iniFile != null && formLoaded)
             {
                 iniFile.Write("debug", wsjtxClient.debug.ToString());
@@ -1208,7 +1366,18 @@ namespace WSJTX_Controller
                 iniFile.Write("cqOnly", cqOnlyRadioButton.Checked.ToString());
                 iniFile.Write("newOnBand", (bandComboBox.SelectedIndex == 1).ToString());
                 iniFile.Write("myContinent", wsjtxClient.myContinent);
-                iniFile.Write("rankMethod", wsjtxClient.Ranker.rankMethodIdx.ToString());
+                // T4 fix, 2026-08-23: rankMethod is legacy migration-compatibility data --
+                // Controller only ever READS it as a fallback when modern rankOrder/rankBeam are
+                // absent (see this method's own rankMethodIdx load above). Once the operator has
+                // used Options > Rank Order at least once (RankOrderDlg's own save writes both
+                // modern keys together, further below in this file), those keys are the real
+                // source of truth and rankMethod stops being rewritten here on every ordinary
+                // settings save -- it simply stays at whatever RankOrderDlg last wrote it as,
+                // rather than this unrelated save path repeatedly re-deriving and rewriting a
+                // now-redundant legacy value. An INI that has never used Rank Order still gets
+                // rankMethod written/kept current here, exactly as before.
+                if (!iniFile.KeyExists("rankOrder") || !iniFile.KeyExists("rankBeam"))
+                    iniFile.Write("rankMethod", wsjtxClient.Ranker.rankMethodIdx.ToString());
                 iniFile.Write("categoryWeights",   FormatCategoryWeights(wsjtxClient.Ranker.categoryWeight));
                 iniFile.Write("callingPriorities", FormatCallingPriorities(wsjtxClient.Ranker.callingEnabled));
                 iniFile.Write("wantedCalls",              FormatWantedCalls(wsjtxClient.wantedCalls));
@@ -1252,6 +1421,7 @@ namespace WSJTX_Controller
                 iniFile.Write("maxCallQueueAgePeriods", maxCallQueueAgePeriods.ToString());
                 iniFile.Write("statusBatchDelayMs", statusBatchDelayMs.ToString());
                 iniFile.Write("keepTransmitListDuringTx", keepTransmitListDuringTx.ToString());
+                iniFile.Write("suppressReceiveNotificationsDuringTx", suppressReceiveNotificationsDuringTx.ToString());
                 iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
                 iniFile.Write("moveFocusToStatusOnCallSelect", moveFocusToStatusOnCallSelect.ToString());
                 iniFile.Write("checkForUpdatesOnStartup", checkForUpdatesOnStartup.ToString());
@@ -1343,8 +1513,360 @@ namespace WSJTX_Controller
                 // Club Log is now always-on infrastructure, not a user toggle --
                 // remove the old per-user enabled flag left by earlier versions.
                 iniFile.DeleteKey("clubLogEnabled");
+                // T5A fix, 2026-08-23: six retired radio keys, confirmed via a full read-only
+                // inventory of every literal key read/write, settings class, dynamic-key family,
+                // migration fallback, EngineHost launch argument, and Nexus consumer -- none of
+                // these has any reader, writer, model property, or consumer left anywhere in the
+                // current tree. radioPollEnabled/radioPollIntervalMs/radioReadDisplayPwrSwr were
+                // superseded by EngineHost's own SNAPSHOT-based radio status; radioStartupPower*
+                // were superseded by the intentional retirement of automatic startup RF-power
+                // control (Jimmy never polls/controls RF output power -- front-panel control is
+                // authoritative). Explicit, versioned allowlist -- never a blanket "delete every
+                // unrecognized key" sweep, which could destroy an active, dynamic (Hotkeys/
+                // notify*), optional-blank, credential, or forward-version setting.
+                iniFile.DeleteKey("radioPollEnabled");
+                iniFile.DeleteKey("radioPollIntervalMs");
+                iniFile.DeleteKey("radioReadDisplayPwrSwr");
+                iniFile.DeleteKey("radioStartupPowerEnabled");
+                iniFile.DeleteKey("radioStartupPowerWatts");
+                iniFile.DeleteKey("radioStartupPowerMaxWatts");
                 hotkeyConfig?.SaveToIni(iniFile);
             }
+        }
+
+        // ===== Profiles feature, 2026-08-24 (operator request) =====
+        //
+        // A profile is nothing more than a complete copy of the SAME .ini format/content
+        // Jimmy already reads and writes today -- no new settings architecture, no per-field
+        // migration, no duplicated save logic. Save = flush every setting to the live file via
+        // SaveAllSettingsToIniFile() (unchanged, existing method), then File.Copy it to a new
+        // named path. Load = point the "activeProfile" pointer key (in the built-in/default
+        // file, read first thing at startup -- see Form_Load's own comment) at the chosen
+        // profile and restart cleanly; Jimmy never merges a second profile's settings into a
+        // live session. Delete = a plain file delete, refused for the built-in/default profile
+        // (which isn't a file in the Profiles folder at all -- there's nothing there named
+        // "default" to delete) and for whichever profile is currently active (would orphan the
+        // pointer -- self-healing on the READ side too, see Form_Load, but refused here for a
+        // clearer operator experience).
+        private static string ProgramName() => Assembly.GetExecutingAssembly().GetName().Name;
+        private static string ProfilesAppDataPath() => $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{ProgramName()}";
+        private static string BaseIniFilePath() => ProfilesAppDataPath() + "\\" + ProgramName() + ".ini";
+        private static string ProfilesDirectory() => ProfilesAppDataPath() + "\\Profiles";
+
+        // Shown in the Profiles menu's own list alongside real named profiles, and used as the
+        // reserved name a new profile may not claim -- never a literal product name (the
+        // operator's own explicit requirement: don't design this around "Jimmy Next", since the
+        // production build is named differently -- ProgramName()/BaseIniFilePath() above are
+        // already dynamic for exactly that reason; this label is deliberately NOT).
+        private const string DefaultProfileDisplayName = "(Default)";
+
+        // internal (not private): JimmyTests exercises this directly.
+        internal static List<string> ListNamedProfiles()
+        {
+            var names = new List<string>();
+            string dir = ProfilesDirectory();
+            if (Directory.Exists(dir))
+                foreach (string file in Directory.GetFiles(dir, "*.ini"))
+                    names.Add(Path.GetFileNameWithoutExtension(file));
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            return names;
+        }
+
+        // Extracted out of Form_Load (2026-08-24) so its own resolution logic -- given the
+        // built-in/default file's path and the Profiles folder, which .ini path should this
+        // session actually load from -- is independently testable without needing a real
+        // Form_Load/startup pass. internal (not private): JimmyTests exercises this directly.
+        // No key at all, or a key naming a profile that no longer exists, both fall back to
+        // realPathFileNameExt unchanged -- self-healing, never a startup failure.
+        internal static string ResolveActiveIniPath(string realPathFileNameExt, string profilesDir)
+        {
+            if (!File.Exists(realPathFileNameExt)) return realPathFileNameExt;
+            try
+            {
+                string activeProfile = new IniFile(realPathFileNameExt).Read("activeProfile");
+                if (!string.IsNullOrWhiteSpace(activeProfile))
+                {
+                    string candidate = profilesDir + "\\" + activeProfile + ".ini";
+                    if (File.Exists(candidate)) return candidate;
+                }
+            }
+            catch
+            {
+                // Falls back to realPathFileNameExt below.
+            }
+            return realPathFileNameExt;
+        }
+
+        private static string SafeReadBaseIniKey(string key)
+        {
+            try
+            {
+                string path = BaseIniFilePath();
+                return File.Exists(path) ? new IniFile(path).Read(key) : "";
+            }
+            catch { return ""; }
+        }
+
+        // internal (not private): OptionsDlg's Profiles tab shows this so there's a way to see
+        // which profile is actually loaded without going through Load Profile's own picker --
+        // the operator hit this gap directly ("no way to tell what profile is loaded").
+        internal static string ActiveProfileDisplayName()
+        {
+            string active = SafeReadBaseIniKey("activeProfile");
+            return string.IsNullOrWhiteSpace(active) ? DefaultProfileDisplayName : active;
+        }
+
+        // internal (not private): OptionsDlg's new Profiles tab (2026-08-24, see its own
+        // comment for why the MenuStrip approach was abandoned) drives this same dialog.
+        internal string PromptForText(string title, string prompt, string initialValue)
+        {
+            using (var dlg = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ShowInTaskbar = false,
+                ClientSize = new Size(360, 110),
+            })
+            {
+                var label = new Label { Text = prompt, AutoSize = true, Location = new Point(10, 12) };
+                var textBox = new TextBox { Text = initialValue, Location = new Point(10, 32), Width = 340, AccessibleName = prompt };
+                var okButton = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(190, 70), Width = 75 };
+                var cancelButton = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(275, 70), Width = 75 };
+                dlg.Controls.Add(label);
+                dlg.Controls.Add(textBox);
+                dlg.Controls.Add(okButton);
+                dlg.Controls.Add(cancelButton);
+                dlg.AcceptButton = okButton;
+                dlg.CancelButton = cancelButton;
+                dlg.ActiveControl = textBox;
+                return dlg.ShowDialog(this) == DialogResult.OK ? textBox.Text : null;
+            }
+        }
+
+        // internal (not private): OptionsDlg's Profiles tab drives this same dialog.
+        // preSelect: index to start the list on (e.g. the currently active profile), so the
+        // operator lands on it instead of always index 0 -- falls back to 0 when out of range.
+        internal string PromptForChoice(string title, string prompt, List<string> choices, int preSelect = 0)
+        {
+            using (var dlg = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ShowInTaskbar = false,
+                ClientSize = new Size(360, 220),
+            })
+            {
+                var label = new Label { Text = prompt, Location = new Point(10, 10), Size = new Size(340, 32) };
+                var listBox = new ListBox { Location = new Point(10, 46), Size = new Size(340, 130), AccessibleName = title };
+                listBox.Items.AddRange(choices.Cast<object>().ToArray());
+                if (listBox.Items.Count > 0)
+                    listBox.SelectedIndex = (preSelect >= 0 && preSelect < listBox.Items.Count) ? preSelect : 0;
+                var okButton = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(190, 182), Width = 75 };
+                var cancelButton = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(275, 182), Width = 75 };
+                dlg.Controls.Add(label);
+                dlg.Controls.Add(listBox);
+                dlg.Controls.Add(okButton);
+                dlg.Controls.Add(cancelButton);
+                dlg.AcceptButton = okButton;
+                dlg.CancelButton = cancelButton;
+                dlg.ActiveControl = listBox;
+                if (dlg.ShowDialog(this) != DialogResult.OK) return null;
+                return listBox.SelectedItem as string;
+            }
+        }
+
+        // internal (not private): called from OptionsDlg's Profiles tab button.
+        internal void SaveProfileAs_Click()
+        {
+            string name = PromptForText("Save Current Configuration As Profile", "Profile name:", "");
+            if (string.IsNullOrWhiteSpace(name)) return;
+            name = name.Trim();
+            if (string.Equals(name, DefaultProfileDisplayName, StringComparison.OrdinalIgnoreCase)
+                || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            {
+                MessageBox.Show(this, $"'{name}' is not a valid profile name.", "Invalid Name",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                string dir = ProfilesDirectory();
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                string destPath = dir + "\\" + name + ".ini";
+                if (File.Exists(destPath))
+                {
+                    var confirm = MessageBox.Show(this, $"A profile named '{name}' already exists. Overwrite it?",
+                        "Overwrite Profile", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    if (confirm != DialogResult.Yes) return;
+                }
+
+                // Flush every setting to the LIVE ini file first (the exact, unchanged save path
+                // a clean close already uses) so the copy below reflects the true current
+                // configuration, not whatever was last written on an earlier close/Options-save.
+                SaveAllSettingsToIniFile();
+                if (iniFile == null)
+                {
+                    MessageBox.Show(this, "No active settings file to save from.", "Save Profile Failed",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+                File.Copy(iniFile.FilePath, destPath, overwrite: true);
+                ShowMsg($"Profile '{name}' saved.", false);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not save profile: {ex.Message}", "Save Profile Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // internal (not private): called from OptionsDlg's Profiles tab button.
+        internal void LoadProfile_Click()
+        {
+            var names = new List<string> { DefaultProfileDisplayName };
+            names.AddRange(ListNamedProfiles());
+
+            string activeDisplayName = ActiveProfileDisplayName();
+            int preSelect = names.FindIndex(n => string.Equals(n, activeDisplayName, StringComparison.OrdinalIgnoreCase));
+            var decorated = names.Select((n, i) => i == preSelect ? n + " (active)" : n).ToList();
+
+            string chosenDecorated = PromptForChoice("Load Profile", "Choose a profile to load. Jimmy will restart.", decorated, preSelect < 0 ? 0 : preSelect);
+            if (chosenDecorated == null) return;
+            int chosenIdx = decorated.IndexOf(chosenDecorated);
+            string chosen = chosenIdx >= 0 ? names[chosenIdx] : chosenDecorated;
+
+            string currentActive = SafeReadBaseIniKey("activeProfile");
+            bool isDefaultChoice = string.Equals(chosen, DefaultProfileDisplayName, StringComparison.OrdinalIgnoreCase);
+            bool alreadyActive = isDefaultChoice
+                ? string.IsNullOrWhiteSpace(currentActive)
+                : string.Equals(chosen, currentActive, StringComparison.OrdinalIgnoreCase);
+            if (alreadyActive)
+            {
+                MessageBox.Show(this, $"'{chosen}' is already the active profile.", "Load Profile",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var confirm = MessageBox.Show(this,
+                $"Loading '{chosen}' will restart Jimmy. Any unsaved change to the current profile is saved first. Continue?",
+                "Load Profile", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes) return;
+
+            try
+            {
+                string dir = ProfilesAppDataPath();
+                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                var baseIni = new IniFile(BaseIniFilePath());
+                baseIni.Write("activeProfile", isDefaultChoice ? "" : chosen);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not switch profiles: {ex.Message}", "Load Profile Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            RestartApplication();
+        }
+
+        // internal (not private): called from OptionsDlg's Profiles tab button.
+        internal void DeleteProfile_Click()
+        {
+            var names = ListNamedProfiles();
+            if (names.Count == 0)
+            {
+                MessageBox.Show(this, "There are no named profiles to delete.", "Delete Profile",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            string chosen = PromptForChoice("Delete Profile",
+                "Choose a profile to permanently delete. The built-in default profile cannot be deleted.", names);
+            if (chosen == null) return;
+
+            string currentActive = SafeReadBaseIniKey("activeProfile");
+            if (string.Equals(chosen, currentActive, StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this,
+                    $"'{chosen}' is the currently active profile and cannot be deleted. Load a different profile first.",
+                    "Delete Profile", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var confirm = MessageBox.Show(this, $"Permanently delete profile '{chosen}'? This cannot be undone.",
+                "Delete Profile", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes) return;
+
+            try
+            {
+                File.Delete(ProfilesDirectory() + "\\" + chosen + ".ini");
+                ShowMsg($"Profile '{chosen}' deleted.", false);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not delete profile: {ex.Message}", "Delete Profile Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Single-instance guard (Program.cs's own Mutex + process-name check) would reject an
+        // immediate relaunch while this process is still shutting down. A FIXED delay (the
+        // original "timeout /t 2") is a guess that can be wrong -- real-world shutdown
+        // (SaveAllSettingsToIniFile, upload-wait, CloseComm tearing down EngineHost) took
+        // longer than 2 seconds at least once in practice, so the relaunch fired while the
+        // old process/Mutex was still alive, hit "already running", and gave up -- leaving
+        // NO instance running. Instead of guessing a longer number, the detached helper
+        // waits on THIS process's own PID via PowerShell's Wait-Process, which blocks exactly
+        // as long as shutdown actually takes (with a generous safety-net timeout in case the
+        // PID somehow never exits), then starts the new instance.
+        // Application.Exit() below routes through the normal Controller_FormClosing path (same
+        // as the existing Update-Check-then-restart flow, Controller.cs's own "Application.
+        // Exit()" call site), so the CURRENT profile's own settings are saved cleanly first.
+        private void RestartApplication()
+        {
+            try
+            {
+                string exePath = Application.ExecutablePath;
+                int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
+                string script =
+                    $"try {{ Wait-Process -Id {pid} -Timeout 30 -ErrorAction SilentlyContinue }} catch {{}}\n" +
+                    $"Start-Process -FilePath {PowerShellSingleQuoteLiteral(exePath)}\n";
+                string encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
+                };
+                System.Diagnostics.Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not restart automatically: {ex.Message}{nl}Please start Jimmy again manually.",
+                    "Restart Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            Application.Exit();
+        }
+
+        // Escapes a value for use inside a PowerShell single-quoted string literal (only ' needs
+        // doubling in that context) -- a different layer than NativeEngineClient's Win32
+        // command-line argv escaping, and not to be confused with it.
+        internal static string PowerShellSingleQuoteLiteral(string value)
+        {
+            return "'" + (value ?? string.Empty).Replace("'", "''") + "'";
+        }
+
+        private void Controller_FormClosing(object sender, FormClosingEventArgs e)
+        {
+            SaveAllSettingsToIniFile();
 
             // Codex Audit 02 finding, 2026-08-21 ("improve shutdown handling for outstanding
             // optional remote-upload work"): a real-time QRZ/Club Log/HRDLog/eQSL upload from a
@@ -1470,6 +1992,23 @@ namespace WSJTX_Controller
             wsjtxClient?.Closing();
             nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path); last-resort backstop if the graceful halt above didn't confirm
             nativeEngineClient = null;
+            // Independent audit finding 9, 2026-08-23 (CONFIRMED bug, LOW/MEDIUM PRIORITY):
+            // neither background service was ever disposed during shutdown -- both implement
+            // IDisposable (a System.Timers.Timer inside LookupManager, a managed MQTT client
+            // inside DxSpotWatcher), but nothing here ever called either Dispose(). The OS
+            // ultimately reclaims both on process exit, but their callbacks could keep firing
+            // during the shutdown window (a lookup completion or spot-watch Updated event
+            // reaching BeginInvoke against a form that's now closing), keep network work alive
+            // for no reason, and left the implemented IDisposable contracts misleading. Disposed
+            // here (after wsjtxClient.Closing()/nativeEngineClient teardown above, before this
+            // method returns) and nulled so a second CloseComm() call (Controller_FormClosing can
+            // in principle run more than once on some close paths) is a safe no-op rather than a
+            // double-dispose.
+            dxSpotWatcher?.Dispose();
+            dxSpotWatcher = null;
+            lookupManager?.Dispose();
+            lookupManager = null;
+            if (wsjtxClient != null) wsjtxClient.lookupManager = null;   // same object -- clear the mirrored reference too
         }
 
         private void Controller_FormClosed(object sender, FormClosedEventArgs e)
@@ -1722,6 +2261,11 @@ namespace WSJTX_Controller
             if (keyData == hotkeyConfig[HotkeyAction.PowerSwr])
             {
                 return wsjtxClient.ReportPowerSwr();
+            }
+
+            if (keyData == hotkeyConfig[HotkeyAction.ClockStatus] && hotkeyConfig[HotkeyAction.ClockStatus] != Keys.None)
+            {
+                return wsjtxClient.ReportClockStatus();
             }
 
             if (keyData == hotkeyConfig[HotkeyAction.TuneMode])
@@ -2144,8 +2688,11 @@ namespace WSJTX_Controller
                     () => qrzLogbookApiKey, () => lotwLogbookUser, () => lotwLogbookPass,
                     () => clubLogUploadEmail, () => clubLogUploadPassword, () => clubLogUploadCallsign,
                     () => eqslUsername, () => eqslPassword,
-                    onImportComplete: () => BeginInvoke(new Action(() =>
-                        { PruneStaleActiveAwardRuleIds(); LoadHrcCache(); RefreshStillNeedCache(); })),
+                    // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
+                    // SafeBeginInvoke -- an import running in the child LogbookWindow can finish
+                    // after this parent form starts closing.
+                    onImportComplete: () => SafeBeginInvoke(() =>
+                        { PruneStaleActiveAwardRuleIds(); LoadHrcCache(); RefreshStillNeedCache(); }),
                     initialActiveAwardRuleIds: activeAwardRuleIds,
                     onActiveAwardRuleIdsChanged: (ruleId, isTracked) =>
                     {
@@ -2747,8 +3294,41 @@ namespace WSJTX_Controller
             // (classification, awards, call-queue ranking, notifications, band tracking) runs
             // completely unchanged, because it never knew UDP vs Direct in the first place, let
             // alone real-engine vs fake-engine-for-testing.
+            // T6 fix, 2026-08-23 (Codex finding 1/12, confirmed bug): previously this disconnected
+            // and disposed the OLD engine session immediately below with no halt at all, unlike
+            // WsjtxClient.Closing() (normal exit), which sends HALT_TX and waits for confirmation
+            // before the engine loses its control channel. An Options save that restarts the
+            // engine (Radio tab, or a restart-required Decode setting) could therefore leave a
+            // keyed/tuning radio to raw process teardown (NativeEngineClient.Dispose() ->
+            // Process.Kill()) instead of a graceful stop. HaltAndConfirmTxStopped() is the exact
+            // same bounded halt-and-wait sequence Closing() uses -- see its own comment; it is a
+            // best-effort grace period only, never a guarantee, so the dispose/relaunch sequence
+            // below still runs unconditionally afterward regardless of whether it confirmed.
+            // Independent audit finding, 2026-08-23 (HALT/restart stopped-state confirmation):
+            // captured so a restart that could only fall back to forced process termination
+            // (below, nativeEngineClient.Dispose() -> Process.Kill()) is reported accessibly --
+            // an operator relying on JAWS/NVDA gets no other signal that this restart didn't get
+            // the graceful stopped-state confirmation a normal one does. Not published for a
+            // never-connected/already-disconnected session (HaltAndConfirmTxStopped's own early-
+            // return true cases) -- those aren't a fallback at all, nothing to report.
+            bool haltConfirmed = wsjtxClient?.HaltAndConfirmTxStopped() ?? true;
+            if (!haltConfirmed)
+            {
+                wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Native engine restart",
+                    "could not confirm the previous engine session's transmitter stopped -- forcing it to close"));
+            }
             wsjtxClient?.DisconnectDirectEngine();
-            wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid);
+            // EngineHost ownership / session identity, 2026-08-23: a fresh per-launch nonce so
+            // ConnectDirectEngine/DirectPollTick can refuse to trust a stale/orphan process left
+            // listening on the fixed control port (see WsjtxClient.Direct.cs's own comment on
+            // _directExpectedSessionToken). null in test mode, deliberately: JimmyDirectReplay.py's
+            // fake control-port server has no way to know a real launch's random token, and
+            // ConnectDirectEngine's own default (no token requested = no check performed) already
+            // preserves every existing replay test's TX-arming behavior unchanged -- authentication
+            // itself is covered directly against the stub engine host in JimmyTests.cs instead of
+            // through the replay harness.
+            string sessionToken = TestModeGuard.IsTestMode ? null : Guid.NewGuid().ToString("N");
+            wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid, sessionToken);
 
             nativeEngineClient?.Dispose();
             nativeEngineClient = null;
@@ -2794,6 +3374,20 @@ namespace WSJTX_Controller
             RadioSettings radioSnapshot = Radio;
             DecodeSettings decodeSnapshot = Decode;
             WsjtxClient wsjtx = wsjtxClient;
+            // Repeat limit / TX watchdog authority split, 2026-08-24: feeds
+            // NativeEngineClient.ComputeAutomaticTxWatchdogMinutes -- see its own comment for the
+            // full calculation. Captured here, on the UI thread, same reasoning as every other
+            // snapshot on this page (myCall/radioSnapshot/etc.) -- Launch() itself runs on the
+            // background Task below.
+            int repeatLimitSnapshot = (int)timeoutNumUpDown.Value;
+            // Frequency-override authority split, 2026-08-24: WorkingFreqArg is a fresh,
+            // immutable-in-practice snapshot (BuildWorkingFrequencyEntries copies each entry's
+            // primitive/string values out of Frequencies.Bands) -- built here, on the UI thread,
+            // same reasoning as every other snapshot on this page: Launch() itself runs on the
+            // background Task below, and Frequencies.Bands could otherwise be concurrently
+            // mutated by OptionsDlg's own SaveFrequenciesTab (also UI-thread, but not
+            // necessarily this exact call).
+            var workingFrequenciesSnapshot = WsjtxClient.BuildWorkingFrequencyEntries(Frequencies);
 
             // Launch() (specifically Process.Start()) runs on a background thread -- Process.Start()
             // for a new, unsigned exe is well known to be able to block synchronously on real-time
@@ -2806,11 +3400,15 @@ namespace WSJTX_Controller
                 // wrong with real-time visibility into the native engine's health). Marshal to the
                 // UI thread explicitly -- Process.Exited fires on a threadpool thread, and
                 // ShowMessage touches statusText.
+                // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
+                // SafeBeginInvoke for both marshaled callbacks below -- the native engine process
+                // can exit, or Launch itself can fail/return, after this form starts closing;
+                // neither must crash trying to marshal onto a torn-down handle.
                 bool ok = client.Launch(myCall, myGrid, inDevice, jimmyPort, outDevice, radioSnapshot,
                     msg => wsjtx?.DebugOutput(msg),
-                    () => BeginInvoke(new Action(() => OnNativeEngineUnexpectedExit(client))),
+                    () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, wsjtx != null && wsjtx.usePskReporter,
-                    dxClusterAddress);
+                    dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-
@@ -2819,8 +3417,8 @@ namespace WSJTX_Controller
                     // own engine-related errors) -- Error severity forces Important (a beep, and
                     // now also eligible for the off-focus UIA announcement), matching this
                     // event's own weight: TX/decode cannot work at all until this is resolved.
-                    BeginInvoke(new Action(() =>
-                        wsjtx?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine", client.LastError))));
+                    SafeBeginInvoke(() =>
+                        wsjtx?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine", client.LastError)));
                 }
             });
         }
@@ -3083,7 +3681,7 @@ namespace WSJTX_Controller
             string ver = Assembly.GetExecutingAssembly()
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
                 ?.InformationalVersion ?? string.Empty;
-            string command = "https://blindsea.com/jimmy?v=" + Uri.EscapeDataString(ver);
+            string command = "https://blindsea.com/jimmy20?v=" + Uri.EscapeDataString(ver);
             System.Diagnostics.Process.Start(command);
         }
 
@@ -3549,24 +4147,39 @@ namespace WSJTX_Controller
 
         private void Controller_KeyDown(object sender, KeyEventArgs e)
         {
+            // Found live, 2026-08-26: none of the branches below ever set e.SuppressKeyPress
+            // (or e.Handled), unlike the General Commands hotkeys (dispatched through
+            // ProcessCmdKey, which fully consumes the key by returning true) and unlike the
+            // list-specific Enter/Space handlers elsewhere in this file, which already do this
+            // correctly with the exact same comment. Without it, Windows keeps processing the
+            // same keystroke as if Jimmy had never touched it -- confirmed live: Ctrl+A
+            // collided with "select all" in whatever text control had focus, and ALT+A (after
+            // remapping to test) triggered the OS's own "no matching menu accelerator" beep,
+            // since Alt+<letter> combos with nothing consuming them are treated as a menu
+            // shortcut lookup. Every matched branch below now suppresses further processing of
+            // that keystroke, the same way the rest of this codebase's key handlers already do.
             if (e.Control && e.KeyCode == Keys.Y)
             {
+                e.SuppressKeyPress = true;
                 if (wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                 DemoSounds();
             }
 
             if (e.Control && e.Shift && e.KeyCode == Keys.O)
             {
+                e.SuppressKeyPress = true;
                 optionsButton_Click(null, null);
             }
 
             if (e.Control && e.Shift && e.KeyCode == Keys.D)
             {
+                e.SuppressKeyPress = true;
                 verLabel_DoubleClick(null, null);
             }
 
             if (e.KeyData == hotkeyConfig[HotkeyAction.NavStatus])
             {
+                e.SuppressKeyPress = true;
                 if (!statusText.Focused)
                 {
                     statusText.Focus();
@@ -3579,6 +4192,7 @@ namespace WSJTX_Controller
 
             if (e.KeyData == hotkeyConfig[HotkeyAction.NavLoggedList])
             {
+                e.SuppressKeyPress = true;
                 if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                 logListBox.Focus();
             }
@@ -3596,6 +4210,7 @@ namespace WSJTX_Controller
                 // Notification event (RaiseAccessibleAlert, same mechanism the off-focus
                 // important-alert feature uses) instead of moving focus at all. loggedLabel.Text
                 // already holds the live "Auto-logged: N" header RenderLoggedList last wrote.
+                e.SuppressKeyPress = true;
                 if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                 RaiseAccessibleAlert(loggedLabel.Text);
             }
@@ -3612,6 +4227,7 @@ namespace WSJTX_Controller
                 // conceptually not the operator's current one to navigate to.
                 if (!advancedCallLayout && callListBox.Visible)
                 {
+                    e.SuppressKeyPress = true;
                     if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                     callListBox.Focus();
                 }
@@ -3624,6 +4240,7 @@ namespace WSJTX_Controller
                 // focusable by default) and only ever appeared to work once, before focus had
                 // already drifted. Announces the live "Stations calling: N" header text without
                 // relocating focus.
+                e.SuppressKeyPress = true;
                 if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                 RaiseAccessibleAlert(replyListLabel.Text);
             }
@@ -3632,6 +4249,7 @@ namespace WSJTX_Controller
             {
                 if (advTx1ListBox.Visible)
                 {
+                    e.SuppressKeyPress = true;
                     if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                     advTx1ListBox.Focus();
                 }
@@ -3641,6 +4259,7 @@ namespace WSJTX_Controller
             {
                 if (advTx2ListBox.Visible)
                 {
+                    e.SuppressKeyPress = true;
                     if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                     advTx2ListBox.Focus();
                 }
@@ -3650,6 +4269,7 @@ namespace WSJTX_Controller
             {
                 if (advRawListBox.Visible)
                 {
+                    e.SuppressKeyPress = true;
                     if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                     advRawListBox.Focus();
                     if (advRawListBox.Items.Count > 0 && advRawListBox.SelectionMode != SelectionMode.None && advRawListBox.SelectedIndex < 0)
@@ -3661,6 +4281,7 @@ namespace WSJTX_Controller
             {
                 if (spotWatchListBox.Visible)
                 {
+                    e.SuppressKeyPress = true;
                     if (formLoaded && wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
                     spotWatchListBox.Focus();
                     if (spotWatchListBox.Items.Count > 0 && spotWatchListBox.SelectionMode != SelectionMode.None && spotWatchListBox.SelectedIndex < 0)
@@ -3672,15 +4293,29 @@ namespace WSJTX_Controller
 
             if (e.KeyCode == Keys.Escape)               //halt Tx, return to Listen mode
             {
+                e.SuppressKeyPress = true;
                 var focused = this.ActiveControl;
                 if (wsjtxClient.ConnectedToWsjtx())
                 {
+                    // Found live, 2026-08-26: "Tx halted" used to be announced unconditionally
+                    // on every Escape press, even already in Listen mode with nothing
+                    // transmitting -- misleading (there was nothing to halt) and exactly the
+                    // kind of redundant announcement this project's own accessibility rules
+                    // call out. Captured BEFORE the halt sequence below, which changes both of
+                    // these -- CALL_CQ mode is itself "something to halt" (Escape's job also
+                    // includes stopping the CQ cycle) even at an instant transmitting happens
+                    // to read false between cycles. The halt/reset actions themselves stay
+                    // fully unconditional (safety net, same as before) -- only the spoken
+                    // announcement is gated.
+                    bool hadSomethingToHalt =
+                        wsjtxClient.IsTransmitting || wsjtxClient.txMode == WsjtxClient.TxModes.CALL_CQ;
+
                     wsjtxClient.RequeueAbortedCall();   // must precede CancelQso (needs callInProg/replyDecode)
                     wsjtxClient.CancelQso();
                     wsjtxClient.HaltAndDisableTx();     // unconditional: works in both CQ and Listen mode
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
-                    ShowMsg("Tx halted", true);
+                    if (hadSomethingToHalt) ShowMsg("Tx halted", true);
                 }
                 BeginInvoke((Action)(() =>
                     BeginInvoke((Action)(() => RestoreFocus(focused)))
@@ -4100,7 +4735,7 @@ namespace WSJTX_Controller
             wsjtxClient.ApplySpotWatchCalls(normalized);
             if (iniFile != null)
                 iniFile.Write("spotWatchCalls", FormatSpotWatchCalls(normalized));
-            dxSpotWatcher?.UpdateWatchList(normalized);
+            _ = (dxSpotWatcher?.UpdateWatchList(normalized)); // fire-and-observe -- see UpdateWatchList's own comment
         }
 
         private void callListBox_MouseDown(object sender, MouseEventArgs e)
@@ -4414,13 +5049,31 @@ namespace WSJTX_Controller
             return wsjtxClient.SpacifyMyCall();
         }
 
-        private void DemoSounds()
+        // Independent audit finding 11, 2026-08-23 (CLEANUP / ACCESSIBILITY POLISH): used to
+        // call Thread.Sleep(750)/Thread.Sleep(250) directly on the UI thread between sound-event
+        // handlers -- during that ~1s window the whole application's message loop couldn't
+        // process keyboard input, repaint, or screen-reader interaction. Task.Delay (awaited,
+        // not blocking) keeps the exact same sequencing/timing while the message loop keeps
+        // pumping. _demoSoundsRunning guards re-entrancy (Ctrl+Y is a plain hotkey, not a button
+        // that can be disabled while its own demo plays) -- a second press mid-sequence is
+        // simply ignored rather than overlapping two demo sequences' timers.
+        private bool _demoSoundsRunning;
+        private async void DemoSounds()
         {
-            callAddedCheckBox_CheckedChanged(null, null);
-            Thread.Sleep(750);
-            mycallCheckBox_CheckedChanged(null, null);
-            Thread.Sleep(250);
-            loggedCheckBox_CheckedChanged(null, null);
+            if (_demoSoundsRunning) return;
+            _demoSoundsRunning = true;
+            try
+            {
+                callAddedCheckBox_CheckedChanged(null, null);
+                await Task.Delay(750);
+                mycallCheckBox_CheckedChanged(null, null);
+                await Task.Delay(250);
+                loggedCheckBox_CheckedChanged(null, null);
+            }
+            finally
+            {
+                _demoSoundsRunning = false;
+            }
         }
 
         private void CallListBox_KeyDown(object sender, KeyEventArgs e)

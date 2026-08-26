@@ -133,7 +133,16 @@ namespace WSJTX_Controller
                 return false;
             }
             string adif2 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: false).ConfigureAwait(true);
-            if (adif2 == null) adif2 = "";
+            // Independent audit finding 2, 2026-08-23 (CONFIRMED bug): matches
+            // LogbookWindow.LoTWRefreshBtn_Click's own fix -- a failed unconfirmed-QSO fetch
+            // must not be silently treated as a complete two-part success. Aborts before import
+            // (same as the adif1==null case above) so the checkpoint is not advanced and the
+            // next scheduled run retries the whole sync.
+            if (adif2 == null)
+            {
+                _logbookWindowStatus("Auto-sync: LoTW error (unconfirmed QSOs): " + (client.LastError ?? "Unknown error"));
+                return false;
+            }
             return ImportAndReport(db, adif1 + "\r\n" + adif2, "LOTW", "LogbookLastLoTWRefresh");
         }
 
@@ -155,10 +164,17 @@ namespace WSJTX_Controller
             int logId = db.LogImportStart(source);
             var result = AdifImporter.Import(db, AdifParser.Parse(adifText), source, null, _resolveUsState);
             db.LogImportFinish(logId, result.Processed, result.NewQsos, result.NewlyConfirmed, result.Corrected, result.Skipped, result.Errors);
-            _ini?.Write(lastRefreshIniKey, DateTime.UtcNow.ToString("o"));
+            // Independent audit finding 3, 2026-08-23 (CONFIRMED bug): matches
+            // LogbookWindow.RunImportFromText's own fix -- only write the checkpoint on a
+            // genuinely clean import, so a source with any errors gets retried in full on the
+            // next scheduled run instead of silently being marked "done" for another
+            // RefreshDays-day period.
+            bool clean = string.IsNullOrWhiteSpace(result.Errors);
+            if (clean) _ini?.Write(lastRefreshIniKey, DateTime.UtcNow.ToString("o"));
             _logbookWindowStatus($"Auto-sync: {source} import complete: {result.NewQsos:N0} new, " +
-                $"{result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged.");
-            return string.IsNullOrWhiteSpace(result.Errors);
+                $"{result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged." +
+                (clean ? "" : " (errors -- will retry this source in full next time)"));
+            return clean;
         }
     }
 }

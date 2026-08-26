@@ -1,4 +1,4 @@
-# Jimmy Test-owned Nexus compatibility patches
+# Jimmy Next-owned Nexus compatibility patches
 
 Nexus (https://github.com/kd9taw/Nexus) is a third-party, GPL-3.0 project. Jimmy is a
 **consumer only**: we do not own it, do not modify the official checkout, and never submit
@@ -8,7 +8,7 @@ Jimmy Next's EngineHost builds against a clean checkout of Nexus at the exact re
 in `pin.txt`, with a small number of source patches applied on top by `scripts/prepare-nexus.ps1`
 (run automatically as part of the normal build -- see that script). Those patches are the
 **only** difference between what Jimmy actually builds and official upstream Nexus, and they
-exist for exactly one reason: to carry functionality Jimmy Test genuinely requires that official
+exist for exactly one reason: to carry functionality Jimmy Next genuinely requires that official
 Nexus, at the pinned revision, does not yet provide (or, for one patch, to work around a Windows
 build-toolchain interaction bug in Nexus's own build script).
 
@@ -94,7 +94,7 @@ backend keeps a "did the mode change" cache as a process-lifetime `static` that 
 every fresh `rigctld.exe` process. The FIRST `RFPOWER` read (or write) of that process's lifetime
 trips a destructive calibration sweep (Hamlib/Hamlib#1595) that silently drops the rig's actual
 transmit power (e.g. 100W -> 5W). Since `jimmy-engine-host.exe` spawns a fresh `rigctld.exe` on
-every single Jimmy Test launch, this fired on every single restart. Real WSJT-X never hits this
+every single Jimmy Next launch, this fired on every single restart. Real WSJT-X never hits this
 bug at all -- it has no live power/SWR/ALC/wattage meters feature and never queries `RFPOWER`,
 only `SWR` (for its own "Halt Tx when SWR > 2.5"); the RFPOWER telemetry read is new functionality
 Nexus added beyond what WSJT-X's own CAT usage ever needed. Jimmy's own broader policy (operator

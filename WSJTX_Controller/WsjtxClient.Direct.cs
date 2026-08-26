@@ -218,6 +218,14 @@ namespace WSJTX_Controller
                     // same lock, before HALT_TX itself is enqueued -- see this class's own comment.
                     PurgePendingTxArmCommands_NoLock();
                     _directPriorityQueue.Enqueue(req);
+                    // T7 fix, 2026-08-23: purging the QUEUE above only reaches commands still
+                    // waiting -- a command already dequeued and blocked inside DirectSendCommand
+                    // is untouched by it. Abort that in-flight command now too (see
+                    // AbortInFlightDirectCommand's own comment) so the worker is free to dequeue
+                    // and send THIS priority command immediately instead of waiting behind the
+                    // in-flight one's own ~4s worst-case budget. isPriority is HALT_TX-only, so
+                    // this only ever fires for an emergency stop, never an ordinary command.
+                    AbortInFlightDirectCommand();
                 }
                 else
                 {
@@ -300,6 +308,18 @@ namespace WSJTX_Controller
         // comment for the full reasoning.
         private int _directConnectionEpoch;
 
+        // EngineHost ownership / session identity, 2026-08-23: the per-launch token Jimmy
+        // expects THIS connection's engine-host child to echo back on every SNAPSHOT (see
+        // main.rs's own sessionToken JSON field). Set by ConnectDirectEngine; null/empty means
+        // no authentication was requested for this connection (test-mode default -- see that
+        // method's own comment) and DirectPollTick's check is skipped entirely, matching prior
+        // (pre-authentication) behavior exactly for those callers. _directAuthenticated is the
+        // gate TX-arming commands (DirectSendCq/DirectSendReply/DirectSetTxEnabled(true)/
+        // DirectSetTuning(true)) check before sending -- see each method's own comment.
+        private string _directExpectedSessionToken;
+        private bool _directAuthenticated;
+        private bool _directSessionAuthFailureAnnounced;
+
         // Has DirectApplyStatus ever actually rendered a status once this connection came up?
         // Forces the very first poll's status through regardless of the transmitting/newBand
         // gate below (see that gate's own comment).
@@ -336,6 +356,54 @@ namespace WSJTX_Controller
         // so this fires HaltTx()/announces once per episode, not every tick while SWR stays high.
         private bool _swrOverThreshold;
 
+        // T17 fix, 2026-08-23: what Jimmy last actually commanded via SET_FREQUENCY's own
+        // sideband argument (WsjtxClient.BandAudio.cs's RetuneBand, on CONFIRMED success only --
+        // see that method's own DirectSetFrequency completion callback) -- compared every poll
+        // against the rig's own CAT readback (radio.RigMode) below. Null until the first
+        // confirmed retune this session; a null readback or null commanded value never fires a
+        // mismatch (nothing to compare yet).
+        internal string _lastCommandedSideband;
+        private bool _sidebandMismatchAnnounced;
+        // CAT mode command/readback correlation, 2026-08-23 (independent audit finding): WHEN
+        // _lastCommandedSideband was last actually set, paired with it (RetuneBand's own
+        // completion callback below sets both together, never one without the other). The
+        // mismatch check gives the physical rig this long to catch up (relay switching/CAT
+        // mode-set propagation) before comparing at all -- a freshly confirmed retune's very
+        // next poll, arriving well inside normal transition latency, must not be compared
+        // against a readback that simply hasn't caught up yet. Not an "epoch"/generation counter
+        // -- RetuneBand's existing `_pendingBandIdx != targetIdx` supersession guard already
+        // ensures an older, since-superseded retune's delayed completion callback returns before
+        // ever reaching the `_lastCommandedSideband = sideband` assignment, so this field is
+        // already always the newest confirmed request; this timestamp only rate-limits how soon
+        // readback comparison starts trusting a genuine mismatch as real.
+        private DateTime? _lastCommandedSidebandChangedUtc;
+        private static readonly TimeSpan SidebandMismatchGraceWindow = TimeSpan.FromSeconds(3);
+        // How many CONSECUTIVE polls (after the grace window above has already elapsed) must
+        // keep agreeing on a real mismatch before DirectApplyStatus reconciles Jimmy's own
+        // _lastCommandedSideband to match the rig's actual reported mode -- see that check's own
+        // comment for why this exists (stop warning forever) and why it requires sustained
+        // agreement, not a single reading (a stale/transient readback must not overwrite the
+        // newest requested state on its own).
+        private const int SidebandReconcileAfterConsecutiveMismatches = 5;
+        private int _sidebandMismatchStreak;
+
+        // Normalizes both sides to a simple USB/LSB substring check rather than an exact string
+        // match -- a real rig's own CAT-reported mode word varies by backend/model (e.g.
+        // "PKTUSB"/"PKTLSB", "USB-D", "DATA-U"), so this tolerates that vocabulary instead of
+        // false-positiving on every rig that doesn't echo back the bare literal "USB"/"LSB".
+        // Returns true (a real mismatch) when the readback contains NEITHER substring too --
+        // that means the rig reports being in some other mode entirely (FM/CW/etc.), not a
+        // sideband naming variant, which is just as wrong for FT8/FT4 as the opposite sideband.
+        internal static bool RigModeMismatchesCommandedSideband(string commandedSideband, string rigMode)
+        {
+            if (string.IsNullOrEmpty(commandedSideband) || string.IsNullOrEmpty(rigMode)) return false;
+            bool rigReportsLsb = rigMode.IndexOf("LSB", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool rigReportsUsb = rigMode.IndexOf("USB", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (!rigReportsLsb && !rigReportsUsb) return true;
+            bool commandedLsb = commandedSideband.Equals("LSB", StringComparison.OrdinalIgnoreCase);
+            return commandedLsb ? !rigReportsLsb : !rigReportsUsb;
+        }
+
         // "Radio CAT link lost"/recovered -- was RigctldClient.PollOnce's own connection-health
         // check (Controller.cs's old ApplyRadioPollResult, retired 2026-08-20); now sourced from
         // the engine's own SNAPSHOT (radio.catOk/catDetail -- tempo-app/src/dto.rs's RadioStatus.
@@ -357,11 +425,22 @@ namespace WSJTX_Controller
         // Direct-based replay harness, JimmyDirectReplay.py, replaced the UDP one), along with
         // WsjtxProtocolAdapter and CloseAllUdp itself -- there is no longer any UDP socket this
         // method could ever need to tear down, in production or in test mode.
-        public void ConnectDirectEngine(string myCallIn, string myGridIn)
+        // expectedSessionToken: the token this SAME session passed to NativeEngineClient.Launch()
+        // as --session-token, so DirectPollTick can refuse to trust a SNAPSHOT that didn't come
+        // from the child THIS call actually launched (stale/orphan process left bound to the
+        // fixed control port -- see DirectPollTick's own comment for the full reasoning).
+        // Defaults to null: the many existing JimmyTests.cs call sites that construct a
+        // WsjtxClient and drive it directly (StartStubEngineHostWithResponses etc.) never
+        // launched a real child and have no token to expect, so they get the pre-authentication
+        // behavior unchanged -- only Controller.cs's real ApplyEngineMode call site supplies one.
+        public void ConnectDirectEngine(string myCallIn, string myGridIn, string expectedSessionToken = null)
         {
             myCall = string.IsNullOrWhiteSpace(myCallIn) ? null : myCallIn.Trim().ToUpperInvariant();
             myGrid = myGridIn;
             _directConnectionEpoch++;
+            _directExpectedSessionToken = expectedSessionToken;
+            _directAuthenticated = string.IsNullOrEmpty(expectedSessionToken);
+            _directSessionAuthFailureAnnounced = false;
             // Codex Audit 03 finding 3, 2026-08-21: a write queued for the PRIOR connection (the
             // engine host that just crashed/restarted, or the session being torn down for a
             // deliberate reconnect) does not belong to this new one -- purge it rather than
@@ -378,6 +457,10 @@ namespace WSJTX_Controller
             _directLossAnnounced = false;
             _swrOverThreshold = false;
             _lastCatOk = null;
+            _lastCommandedSideband = null;
+            _lastCommandedSidebandChangedUtc = null;
+            _sidebandMismatchAnnounced = false;
+            _sidebandMismatchStreak = 0;
             _directConnected = true;
             // UDP-to-Direct parity pass, 2026-08-12: a stale bandIdx/lastDialFrequency surviving
             // from a PRIOR connection could make _directStartupBandResolved's own "band still
@@ -514,6 +597,64 @@ namespace WSJTX_Controller
                     _directConsecutivePollFailures = 0;
                     _directLossAnnounced = false;
 
+                    // Independent audit finding, 2026-08-23 (EngineHost ownership / session
+                    // identity, HIGH PRIORITY): a real, well-formed SNAPSHOT response alone used
+                    // to be trusted unconditionally -- but a TCP connection to port 58239
+                    // reaching a real process proves nothing about WHICH process. A stale/orphan
+                    // jimmy-engine-host.exe left running from a prior session (crash without
+                    // clean exit, or -- before the fail-closed bind fix -- a second instance that
+                    // silently kept running hardware while a NEW child's own bind failed) can
+                    // answer exactly like the real one. See ConnectDirectEngine's own comment for
+                    // where _directExpectedSessionToken comes from. Treated exactly like a failed
+                    // poll (DirectHandlePollFailure, no DirectApplyStatus/Decodes) when it
+                    // doesn't match -- this snapshot's data is never trusted or acted on, and
+                    // NegoState is never promoted to RECD, so nothing downstream can consider
+                    // Direct connected on the strength of an unauthenticated response. Empty
+                    // _directExpectedSessionToken (test mode / a caller that didn't request
+                    // authentication -- see ConnectDirectEngine) skips this check entirely,
+                    // matching prior behavior for those callers exactly.
+                    if (!string.IsNullOrEmpty(_directExpectedSessionToken) &&
+                        !string.Equals(snap.SessionToken, _directExpectedSessionToken, StringComparison.Ordinal))
+                    {
+                        if (!_directSessionAuthFailureAnnounced)
+                        {
+                            _directSessionAuthFailureAnnounced = true;
+                            // Real-launch-failure root cause, 2026-08-24: a completely empty/
+                            // absent sessionToken (and no pid, still its int default 0) is NOT
+                            // the same evidence as a real, different, non-empty token -- the
+                            // former is exactly what an EngineHost binary built BEFORE this
+                            // feature existed reports (main.rs's own sessionToken/pid fields are
+                            // injected into the SNAPSHOT JSON only by a build that has them at
+                            // all; an older jimmy-engine-host.exe simply omits both, which
+                            // deserializes to SessionToken=null/Pid=0, not to some OTHER real
+                            // value). Confirmed live: a freshly-launched child (nothing else was
+                            // running beforehand) hit this exact branch because the deployed
+                            // jimmy-engine-host.exe on disk predated --session-token support --
+                            // the ORIGINAL single message here ("close any stale jimmy-engine-
+                            // host.exe process") is actively WRONG guidance in that situation
+                            // (there is no stale process to close; the running one IS the one
+                            // this session launched, it just doesn't speak this protocol yet).
+                            // Only the genuinely-ambiguous case (a real, non-empty, merely
+                            // DIFFERENT token -- meaning some other real process, with its own
+                            // real launch/token, is answering) still gets that specific advice.
+                            bool likelyOutdatedBinary = string.IsNullOrEmpty(snap.SessionToken) && snap.Pid == 0;
+                            string detail = likelyOutdatedBinary
+                                ? "the native engine (jimmy-engine-host.exe) did not report a session identity at all -- it is likely an outdated build from before this Jimmy version. Rebuild/redeploy jimmy-engine-host.exe."
+                                : "the control port answered from an unexpected process, not the one this session launched -- not treated as connected. Close any stale jimmy-engine-host.exe process (Task Manager) and restart Jimmy.";
+                            DebugOutput($"{Time()} [DIRECT] SNAPSHOT session token mismatch (expected a token from this session's own launch, got '{snap.SessionToken}', reported pid={snap.Pid}, likelyOutdatedBinary={likelyOutdatedBinary}) -- not treated as connected");
+                            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine", detail));
+                        }
+                        _directAuthenticated = false;
+                        DirectHandlePollFailure();
+                        return;
+                    }
+                    _directSessionAuthFailureAnnounced = false;
+                    if (!_directAuthenticated)
+                    {
+                        _directAuthenticated = true;
+                        DebugOutput($"{Time()} [DIRECT] session authenticated (sessionToken matched, reported pid={snap.Pid})");
+                    }
+
                     // First successful poll = "connected" as far as every OTHER piece of Jimmy's
                     // own status/UI code is concerned -- most of it gates on NegoState, not on
                     // anything specific to this class (found live, 2026-08-08, testing this for
@@ -560,8 +701,19 @@ namespace WSJTX_Controller
             WsjtxMessage.NegoState = WsjtxMessage.NegoStates.WAIT;
         }
 
+        // T16 fix, 2026-08-23 (CONFIRMED bug, CRITICAL -- W5PF, 2026-08-21): tracks which
+        // call(s) CompleteQso (below) fully finished THIS poll tick, so ProcessDecodeMsg's own
+        // "deCall is not call in progress" RR73 courtesy-reply branch (WsjtxClient.cs) does not
+        // immediately re-admit the very call that just completed if that same station's RR73
+        // decode is processed later in this identical tick (DirectApplyStatus always runs before
+        // DirectApplyDecodes -- see DirectPollTick's own call order). Cleared at the top of every
+        // DirectApplyStatus call -- deliberately scoped to ONE tick, not permanent: a station
+        // that legitimately calls again in a LATER tick must still be admitted normally.
+        private readonly HashSet<string> _completedThisPollTick = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         private void DirectApplyStatus(DirectSnapshot snap)
         {
+            _completedThisPollTick.Clear();
             var radio = snap.Radio;
             if (radio == null) return;
 
@@ -602,6 +754,71 @@ namespace WSJTX_Controller
                     $"SWR {radio.TxSwr.Value:F1} exceeds threshold {ctrl.Radio.SwrHaltThreshold:F1}"));
             }
             _swrOverThreshold = swrOver;
+
+            // T17 fix, 2026-08-23: reconcile the rig's own CAT-reported mode readback against
+            // what Jimmy last commanded -- see radio.RigMode's own comment for the full defect
+            // this closes (previously never read/compared at all). Edge-triggered like CatOk/
+            // swrOver above: warns once per mismatch episode, not every poll tick while stuck,
+            // and clears silently the instant a later readback agrees again (no separate
+            // "recovered" announcement -- unlike a lost CAT link, a corrected sideband isn't
+            // itself news worth a second interruption).
+            //
+            // CAT mode command/readback correlation fix, 2026-08-23 (independent audit finding):
+            // two refinements on top of the check above, both bounded and neither retrying/
+            // re-sending any CAT command:
+            //  1. SidebandMismatchGraceWindow -- a freshly confirmed retune's very next poll(s),
+            //     arriving well inside normal relay-switching/CAT-mode-set propagation latency,
+            //     must not be compared against a readback that simply hasn't caught up to this
+            //     SAME retune yet (see _lastCommandedSidebandChangedUtc's own comment). Skipped
+            //     entirely during the grace window -- not warned, not counted toward the
+            //     reconcile streak below.
+            //  2. Reconciliation -- a mismatch that survives SidebandReconcileAfterConsecutive
+            //     Mismatches consecutive polls AFTER the grace window has already elapsed is no
+            //     longer "still settling"; it is Jimmy's own belief that's stale (an operator
+            //     manually changed the rig's mode, a rig that silently declined the commanded
+            //     mode, etc). Reconciling ADOPTS the rig's own reported mode as the new
+            //     "commanded" baseline -- stops warning forever, per the required behavior --
+            //     but ONLY when the rig unambiguously reports USB or LSB; a rig reporting neither
+            //     (some other mode entirely) is left as an open, still-announced mismatch rather
+            //     than guessed at, per "do not guess about rig-specific USB/Data/PKTUSB
+            //     behavior." Requiring several CONSECUTIVE agreeing polls (not one reading) is
+            //     what keeps a single stale/transient readback from overwriting the newest
+            //     requested state on its own.
+            bool sidebandMismatch = RigModeMismatchesCommandedSideband(_lastCommandedSideband, radio.RigMode);
+            bool withinTransitionGrace = _lastCommandedSidebandChangedUtc.HasValue &&
+                (DateTime.UtcNow - _lastCommandedSidebandChangedUtc.Value) < SidebandMismatchGraceWindow;
+            if (sidebandMismatch && withinTransitionGrace)
+            {
+                // Still within normal transition latency -- neither announce nor count yet.
+            }
+            else if (sidebandMismatch)
+            {
+                if (!_sidebandMismatchAnnounced)
+                {
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio CAT mode mismatch",
+                        $"commanded {_lastCommandedSideband}, radio reports '{radio.RigMode}' -- check Options > Frequencies and the rig's own mode/menu settings"));
+                }
+                _sidebandMismatchAnnounced = true;
+                _sidebandMismatchStreak++;
+                bool rigReportsLsb = radio.RigMode.IndexOf("LSB", StringComparison.OrdinalIgnoreCase) >= 0;
+                bool rigReportsUsb = !rigReportsLsb && radio.RigMode.IndexOf("USB", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (_sidebandMismatchStreak >= SidebandReconcileAfterConsecutiveMismatches && (rigReportsLsb || rigReportsUsb))
+                {
+                    string reconciledSideband = rigReportsLsb ? "LSB" : "USB";
+                    DebugOutput($"{Time()} [DIRECT] CAT mode mismatch persisted {_sidebandMismatchStreak} polls past the transition grace window -- reconciling commanded sideband from '{_lastCommandedSideband}' to the rig's own reported '{reconciledSideband}'");
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio CAT mode reconciled",
+                        $"the rig has been reporting {reconciledSideband} instead of the commanded {_lastCommandedSideband} -- Jimmy now treats {reconciledSideband} as current; use Options > Frequencies if this isn't what you intended"));
+                    _lastCommandedSideband = reconciledSideband;
+                    _lastCommandedSidebandChangedUtc = DateTime.UtcNow;
+                    _sidebandMismatchStreak = 0;
+                    _sidebandMismatchAnnounced = false;
+                }
+            }
+            else
+            {
+                _sidebandMismatchAnnounced = false;
+                _sidebandMismatchStreak = 0;
+            }
 
             // FreqToBandStr (which CurrentBandStr and this method's own band-change detection
             // below both depend on) refuses to resolve any band at all unless the class-level
@@ -664,6 +881,26 @@ namespace WSJTX_Controller
                 _rawDecodeHistory.Clear();
                 if (ctrl.advShowRaw) ShowRawDecodes();
                 ClearCalls(true);
+                // Independent audit finding, 2026-08-23 (active QSO survives band change,
+                // CONFIRMED bug): ClearCalls(true) clears queues/dict/TX-message state but was
+                // never the place callInProg itself was cleared -- WsjtxClient.Protocol.cs's own
+                // tier-switch handler and ResetOpMode (WsjtxClient.cs) both already pair every
+                // OTHER ClearCalls(true) call with their own SetCallInProg(null) right next to
+                // it; this was the one ClearCalls(true) call site missing that pairing. Left
+                // uncleared, an active QSO's callInProg (and everything SetCallInProg(null) also
+                // tears down: the discard/retry tracker via CancelDiscardCall, otherParty*
+                // "resume" tracking, _manualCallInProg) survived into the NEW band's session,
+                // even though the station being worked was on the OLD band and everything else
+                // about that QSO (its queue entry, its TX text) was just erased out from under it.
+                SetCallInProg(null);
+                // Bumped so a REPLY/CALL_CQ enqueued just before this band change, whose
+                // completion callback (ReplyTo/SetupCq, WsjtxClient.cs) lands AFTER this point,
+                // cannot resurrect the callInProg/curCmd/replyCmd this band change just
+                // terminally cleared -- see those callbacks' own capturedBandSessionEpoch check.
+                // Engine-side TX itself isn't touched here (a REPLY already in flight when the
+                // band changes still transmits once; this only stops JIMMY's own LOCAL state from
+                // being re-committed for a station that belongs to the band just left).
+                _bandSessionEpoch++;
                 logList.Clear();
                 ShowLogged();
                 ctrl.LoadHrcCache();
@@ -779,7 +1016,11 @@ namespace WSJTX_Controller
                         int? lastBandForDial = FreqToBandIdx(capturedLastDialHz / 1e6);
                         if (lastBandForDial != null)
                         {
-                            RetuneBand(lastBandForDial.Value, (uint)capturedLastDialHz, "DirectInitialConnect");
+                            // T18 fix, 2026-08-23: bandToSideband(...), not this overload's own
+                            // "USB" default -- without this, startup's exact-dial restore alone
+                            // (of every RetuneBand call site) ignored a configured non-default
+                            // sideband for the restored band/mode.
+                            RetuneBand(lastBandForDial.Value, (uint)capturedLastDialHz, "DirectInitialConnect", bandToSideband(lastBandForDial.Value));
                             return;
                         }
                         // A persisted dial that no longer resolves to any recognized band (e.g. a
@@ -819,7 +1060,66 @@ namespace WSJTX_Controller
                         if (ok)
                         {
                             this.mode = targetTier;
+                            // Startup/restart mode-sync fix, 2026-08-24 (independent audit
+                            // finding, CONFIRMED live): the engine and Jimmy's own tracked `mode`
+                            // both correct to the restored tier here, genuinely fast (confirmed
+                            // live: ~5ms after the first snapshot) -- but nothing here previously
+                            // told the UI/announced status about it. The FIRST status render this
+                            // session had already used `mode`'s earlier optimistic "FT8" default
+                            // (DirectApplyStatus's own "if (string.IsNullOrEmpty(this.mode))
+                            // this.mode = 'FT8'" lazy fallback, which always runs before this
+                            // restore lands) and rendered plain text with no mode name in it at
+                            // all -- so the operator was shown/told nothing about EITHER mode,
+                            // and only found out the real (already-correct) mode later, whenever
+                            // some unrelated status render happened to include it (this method's
+                            // own header comment's "5ms" gap is misleadingly small: the STATUS
+                            // TEXT itself doesn't refresh again until the next unrelated render,
+                            // which can be much later). newMode=true is the exact same flag
+                            // SetOperatingMode's own callback (Alt+M, an operator-driven switch)
+                            // already sets, and WsjtxClient.Display.cs's own ShowStatus reads it
+                            // to prefix the very next render with "{mode} mode, ..." -- making a
+                            // startup RESTORE announce itself exactly the same way a live SWITCH
+                            // already does, on the next poll tick rather than silently. UpdateRR73
+                            // is the other piece of UI that reads `mode` directly (the "Use RR73"
+                            // checkbox, FT4-only) -- ResetNego calls it once at connection start,
+                            // before this restore has landed, so it also needs a fresh call here
+                            // for the same reason.
+                            newMode = true;
+                            UpdateRR73();
+                            // Independent audit finding, 2026-08-24 (the REAL root cause behind
+                            // the visible symptom above -- confirmed by direct log/timing math,
+                            // not just the display gap): trPeriod (WsjtxClient.cs) is computed
+                            // exactly ONCE per connection and then left alone, guarded on
+                            // "trPeriod == null" (UpdateTrPeriod, WsjtxClient.Protocol.cs) --
+                            // DirectApplyStatus's own FIRST poll this session already computed it
+                            // from the SAME stale optimistic "FT8" default (same lazy-fallback
+                            // race as `mode` above, see that comment), and with trPeriod no
+                            // longer null, nothing ever re-derives it again for the rest of the
+                            // session. trPeriod is NOT cosmetic -- it directly drives even/odd
+                            // period-parity math (WsjtxClient.cs's own IsEvenPeriod, "(secPastHour
+                            // / (trPeriod / 1000)) % 2 == 0") and call-queue age expiry
+                            // (CallQueueStore.cs), so a stale 15000ms (FT8) value under a real
+                            // FT4 session would silently mis-time period-boundary/parity decisions
+                            // and queue expiry for the ENTIRE REST OF THE SESSION -- a genuine
+                            // functional bug, not just a wrong label. Reset to null here so
+                            // UpdateTrPeriod's own guard fires again and re-derives it correctly
+                            // from the NOW-corrected mode -- the exact same reset
+                            // SetOperatingMode's own live-switch callback already does (see its
+                            // own comment, WsjtxClient.Protocol.cs) for an operator-driven switch;
+                            // this is that same fix's missing startup-restore counterpart.
+                            trPeriod = null;
                             DebugOutput($"{Time()} [DIRECT] DirectInitialConnect: restored tier '{this.mode}'");
+                            // Retest finding, 2026-08-24: newMode=true alone only primes the
+                            // NEXT unrelated ShowStatus() render to include the corrected mode --
+                            // it doesn't force one. Live retest showed that render can be many
+                            // seconds away (or never come before the operator acts), so the
+                            // operator heard/saw the stale pre-restore text, believed the restore
+                            // hadn't happened, and pressed Alt+M themselves -- which actually
+                            // TOGGLED the already-correct restored tier back to the wrong one.
+                            // SetOperatingMode's own live-switch callback (WsjtxClient.Protocol.cs)
+                            // already calls ShowStatus() directly instead of waiting; do the same
+                            // here so the restore is announced immediately, not passively.
+                            ShowStatus();
                         }
                         ApplyStartupBandFallback();
                     });
@@ -907,15 +1207,39 @@ namespace WSJTX_Controller
             // the time that check reads it).
             txEnabled = radio.TxEnabled;
 
-            // Queue-age expiry (TrimCallQueue) and the retry-limit/discard-give-up counter used
-            // to live here, gated on "transmitting just started" -- moved to DirectApplyDecodes'
-            // own new-slot detection instead. Root-caused live, 2026-08-11: that gate can never
-            // fire in Listen mode (which by definition never transmits), so queue-age expiry
-            // silently never ran at all while listening -- confirmed via a full session's debug
-            // log showing txMode:LISTEN throughout with callQueue.Count only ever growing. The
-            // classic UDP path never had this bug: its own trigger (WsjtxClient.Protocol.cs,
-            // "WSJT-X event, Decode start") is a genuine per-period decode-cycle boundary, true
-            // whether or not that period transmits -- Direct mode's port used the wrong event.
+            // Queue-age expiry (TrimCallQueue) used to live here too, alongside the retry-limit/
+            // discard-give-up counter below -- both moved to DirectApplyDecodes' own new-slot
+            // detection together, 2026-08-11. Root-caused live: "transmitting just started" can
+            // never fire while just monitoring with nothing armed (by definition nothing is
+            // transmitting then), so queue-age expiry silently never ran at all while listening
+            // -- confirmed via a full session's debug log showing txMode:LISTEN throughout with
+            // callQueue.Count only ever growing. TrimCallQueue itself is unrelated to any one
+            // call's own attempt count, so it's still correctly driven by DirectApplyDecodes'
+            // own new-slot trigger (a genuine per-period decode-cycle boundary, true whether or
+            // not that period transmits -- see that method's own comment).
+            //
+            // Repeat-limit timing fix, 2026-08-24 (independent audit finding, CONFIRMED live --
+            // KF4TST, Repeat Limit 3: attempts 1-3 transmitted normally, but on what would be
+            // attempt 4 the radio ACTUALLY KEYED UP for about a second before Jimmy's own halt
+            // landed). The discard-give-up counter got swept into that SAME 2026-08-11 move
+            // alongside TrimCallQueue, but it needed the opposite fix: DirectApplyDecodes' own
+            // new-slot trigger fires from a fresh decode becoming visible, which happens at
+            // essentially the SAME moment the engine has already autonomously re-armed and
+            // started transmitting the NEXT period (the engine's own QSO-continuation logic runs
+            // on its own real-time clock, independent of Jimmy's poll) -- so by the time that
+            // check ran, the disallowed attempt had already started keying the radio. Reactive,
+            // not proactive. Triggering on "transmitting just ENDED" instead (the SAME
+            // wasTransmitting/transmitting edge consecTxCount above already uses) checks the
+            // count during the FOLLOWING receive period -- roughly one full period (7.5s FT4 /
+            // 15s FT8) of lead time before the next period's TX would begin -- so
+            // DirectSetTxEnabled(false) (inside DiscardCall(), via wasTxEnabled below) reaches
+            // the engine well before it would otherwise re-key, not after. Placed after the
+            // txEnabled reconciliation just above (not up with consecTxCount near the top of this
+            // method) so DiscardCall()'s own "wasTxEnabled" capture reads this poll's fresh,
+            // reconciled value, not a stale pre-poll one.
+            if (wasTransmitting && !transmitting && discardCall != null && discardCall == callInProg
+                && ++discardCallCycleCount >= maxTxRepeat)
+                DiscardCall();
 
             // Mirrors the transmitting assignment above -- same root cause, same fix: without
             // this, the class-level `tuning` field (AudioLevel()'s own guard, Alt+T's status
@@ -982,19 +1306,44 @@ namespace WSJTX_Controller
                     string justWorkedCall = callInProg;
                     SetCallInProg(null);
 
+                    // T16 fix, 2026-08-23 (CONFIRMED bug, CRITICAL -- W5PF, 2026-08-21): dequeue
+                    // the just-completed call regardless of txMode. Previously RemoveCall only
+                    // ran "if (txMode == TxModes.CALL_CQ)" below -- Listen/Reply-mode completions
+                    // (the W5PF reproduction: replyRR73CheckBox reply flow, not Call-CQ) had NO
+                    // completion dequeue at all, leaving the finished call in CallQueueStore where
+                    // ShowStatus's "first"/"to you" wording (WsjtxClient.Display.cs) kept treating
+                    // it as still waiting to be worked. RemoveCall is still defensive here (the
+                    // worked call is normally already dequeued by ReplyTo()'s own now-deferred-to-
+                    // success removal -- see that method's own comment -- but a QSO started some
+                    // other way, e.g. a typed/manual call, may not have been). _completedThisPollTick
+                    // additionally blocks ProcessDecodeMsg's RR73 courtesy-reply branch from
+                    // immediately re-admitting this exact call if its own RR73 decode is processed
+                    // later in this SAME tick (see that field's own comment) -- confirmed exactly
+                    // this shape in the W5PF log evidence ("1 to you, W5PF first" right after
+                    // logging).
+                    _callQueueStore.RemoveCall(justWorkedCall);
+                    _completedThisPollTick.Add(justWorkedCall);
+                    // curCmd/replyCmd/replyDecode only ever describe the reply that just finished
+                    // -- clear them so nothing downstream can attribute stale finished-QSO text to
+                    // whatever gets selected/replied-to next. (curTxMsg is deliberately left alone
+                    // -- see the "only ever overwrite curTxMsg with a REAL message" comment above;
+                    // it is flushed on a confirmed band change instead, T19, ClearTransientBandState.)
+                    if (justWorkedCall.Equals(WsjtxMessage.DeCall(curCmd ?? ""), StringComparison.OrdinalIgnoreCase))
+                    {
+                        curCmd = null;
+                        replyCmd = null;
+                        replyDecode = null;
+                    }
+
                     // Release-audit finding, 2026-08-20 (Call-CQ auto-resume): the classic UDP
-                    // path's own OnQsoLogged used to re-arm calling CQ here
-                    // (_callQueueStore.RemoveCall + CancelQso + SetupCq(true)) once a QSO
-                    // finished -- removed along with the rest of the UDP dispatcher and never
-                    // ported to Direct mode, leaving Call CQ mode idle (TX enabled, but no
-                    // further CQ ever transmitted) after the very first completed contact. Only
-                    // in Call-CQ mode: Listen mode must keep waiting on the queue, not start
-                    // transmitting on its own. RemoveCall is defensive -- the worked call is
-                    // normally already dequeued by the ReplyTo() that started this QSO, but a
-                    // QSO started some other way (typed/manual call) may not have been.
+                    // path's own OnQsoLogged used to re-arm calling CQ here (CancelQso +
+                    // SetupCq(true)) once a QSO finished -- removed along with the rest of the UDP
+                    // dispatcher and never ported to Direct mode, leaving Call CQ mode idle (TX
+                    // enabled, but no further CQ ever transmitted) after the very first completed
+                    // contact. Only in Call-CQ mode: Listen mode must keep waiting on the queue,
+                    // not start transmitting on its own.
                     if (txMode == TxModes.CALL_CQ)
                     {
-                        _callQueueStore.RemoveCall(justWorkedCall);
                         CancelQso();
                         SetupCq(true);
                     }
@@ -1112,21 +1461,18 @@ namespace WSJTX_Controller
                 if (_callQueueStore.TrimAllCallDict())
                     DebugOutput(_callQueueStore.AllCallDictString());
 
-                // Queue-age expiry + the retry-limit/discard-give-up counter -- moved here
-                // 2026-08-11 from DirectApplyStatus's own "transmitting just started" gate,
-                // which could never fire in Listen mode. A new slot is a genuine per-period
-                // boundary regardless of transmit state, matching the classic UDP path's own
-                // "Decode start" trigger (WsjtxClient.Protocol.cs).
+                // Queue-age expiry -- moved here 2026-08-11 from DirectApplyStatus's own
+                // "transmitting just started" gate, which could never fire while just monitoring
+                // with nothing armed. A new slot is a genuine per-period boundary regardless of
+                // transmit state, matching the classic UDP path's own "Decode start" trigger
+                // (WsjtxClient.Protocol.cs). The retry-limit/discard-give-up counter that used to
+                // also live here moved OUT again, 2026-08-24, to DirectApplyStatus's own
+                // "transmitting just ended" edge -- see that check's own comment for why (this
+                // new-slot trigger fires too late for that specific job, at/after the engine has
+                // already autonomously re-armed and started the next period's TX, not before it).
                 UpdateMaxTxRepeat();
-                // No "+2" grace buffer -- see WsjtxClient.cs's ProcessDecodes' matching comment
-                // (removed 2026-08-11, user request): the reset-on-any-activity logic already
-                // protects a genuinely progressing QSO, so padding only made the configured
-                // "repeat limit" number inaccurate.
-                int maxDiscardCount = maxTxRepeat;
                 if (_callQueueStore.TrimCallQueue())
                     DebugOutput($"{spacer}[DIRECT] TrimCallQueue: expired calls removed{nl}{_callQueueStore.CallQueueString()}");
-                if (discardCall != null && discardCall == callInProg && ++discardCallCycleCount >= maxDiscardCount)
-                    DiscardCall();
 
                 // UDP-to-Direct parity pass, 2026-08-12: the recovery half of the Tx-hold safety
                 // net ported into DirectApplyStatus above -- without this, autoFreqPauseMode
@@ -1251,8 +1597,35 @@ namespace WSJTX_Controller
         // after the fact.
         private long _haltGeneration;
 
+        // EngineHost ownership / session identity, 2026-08-23: shared guard for every TX-arming
+        // Direct command (DirectSendCq, DirectSendReply, DirectSetTxEnabled(true),
+        // DirectSetTuning(true)) -- refuses to arm TX until DirectPollTick has actually
+        // confirmed (a real SNAPSHOT whose sessionToken matched _directExpectedSessionToken)
+        // that this connection reaches the exact child process this session launched, not
+        // merely that SOME process is listening on the fixed control port. False both before
+        // the first snapshot has arrived yet and for as long as a mismatch persists; true
+        // unconditionally when no token was requested at all for this connection (test-mode/
+        // legacy callers -- see ConnectDirectEngine's own comment). Disabling TX/Tune is never
+        // gated -- see each call site's own isTxArm comment for why turning OFF must always go
+        // through.
+        private bool DirectAuthorizedToArmTx(string what)
+        {
+            // string.IsNullOrEmpty(_directExpectedSessionToken) covers a WsjtxClient that never
+            // called ConnectDirectEngine at all -- _directAuthenticated defaults to false (a
+            // plain bool field), which on its own would wrongly block a caller that never
+            // requested authentication in the first place, not just one still waiting to confirm
+            // it. ConnectDirectEngine keeps both in sync going forward (it sets
+            // _directAuthenticated = true immediately whenever expectedSessionToken is empty --
+            // see its own comment), so this OR is redundant there; it only matters for this
+            // no-Connect-yet edge case.
+            if (string.IsNullOrEmpty(_directExpectedSessionToken) || _directAuthenticated) return true;
+            DebugOutput($"{Time()} [DIRECT] refusing to send '{what}' -- session not yet authenticated");
+            return false;
+        }
+
         public void DirectSendReply(string dxcall, string dxgrid, string replyMsg, int? replySnr, double? dxFreqHz, Action<bool> onComplete = null)
         {
+            if (!DirectAuthorizedToArmTx("REPLY")) { onComplete?.Invoke(false); return; }
             var args = new DirectReplyArgs
             {
                 Dxcall = dxcall,
@@ -1329,6 +1702,88 @@ namespace WSJTX_Controller
             }
         }
 
+        // T7 fix, 2026-08-23: DirectSendCommand's own real worst case is 1000ms connect +
+        // 3000ms read (see that method's own comment) -- the previous 2s bound Closing() used
+        // could expire before even a single HALT_TX round trip finished, let alone one that had
+        // to wait behind an already-in-flight ordinary command first (now mitigated separately
+        // by AbortInFlightDirectCommand, called automatically for every priority enqueue). Sized
+        // to the real worst case plus margin, not an arbitrary round number.
+        internal const int DirectHaltConfirmTimeoutMs = 4500;
+
+        // T6/T7 shared halt-and-confirm sequence, 2026-08-23: extracted from Closing() so
+        // Controller.ApplyEngineMode() (Options-triggered engine restart) can use the exact same
+        // protection a normal application exit already had -- previously ApplyEngineMode
+        // disconnected/disposed the OLD engine session immediately with no halt at all (Codex
+        // finding 1/12, T6: confirmed bug -- a keyed/tuning radio was left to raw process
+        // teardown). Blocking, bounded wait for a real response while the old engine session is
+        // still alive to answer; times out and proceeds regardless if it doesn't -- process
+        // termination (NativeEngineClient.Dispose(), called right after either caller) remains
+        // the last-resort backstop either way, unchanged.
+        // Independent audit finding, 2026-08-23 (HALT/restart stopped-state confirmation, HIGH
+        // PRIORITY): a small, bounded follow-up budget for SnapshotConfirmsTxAndTuneStopped
+        // below, ON TOP OF DirectHaltConfirmTimeoutMs's own wait for HALT_TX's "OK" -- both of
+        // HaltAndConfirmTxStopped's callers (Controller.ApplyEngineMode, WsjtxClient.Closing)
+        // already block their calling thread for up to DirectHaltConfirmTimeoutMs today, so this
+        // adds a second, much smaller wait on an already-bounded, already-blocking sequence, not
+        // a new open-ended one.
+        internal const int DirectHaltStateConfirmBudgetMs = 1200;
+        internal const int DirectHaltStateConfirmPollIntervalMs = 200;
+
+        internal bool HaltAndConfirmTxStopped()
+        {
+            if (opMode <= OpModes.IDLE) return true;    // never connected this session -- nothing to halt
+            StopDecodeTimers();
+            tuning = false;
+            if (!_directConnected) return true;         // already disconnected -- no engine left to reach
+            bool halted = HaltTxAndWaitForShutdown(TimeSpan.FromMilliseconds(DirectHaltConfirmTimeoutMs));
+            DebugOutput($"{Time()} [DIRECT] HALT_TX {(halted ? "acknowledged (OK received)" : $"did not confirm within {DirectHaltConfirmTimeoutMs}ms")}");
+            txEnabled = false;
+            wsjtxTxEnableButton = false;
+            if (!halted) return false;   // no OK at all -- nothing left to confirm, straight to forced fallback
+
+            // Independent audit finding, 2026-08-23: HALT_TX's own "OK" only proves main.rs's
+            // control-port handler received the command and called Engine::halt_tx() (pinned
+            // Nexus code) -- NOT that the engine's own transmit/tune state has actually stopped.
+            // This does NOT prove physical PTT release either (that remains a real-radio
+            // acceptance test, per the same finding) -- it is the strongest confirmation Jimmy
+            // can obtain over this control protocol: the engine's own next reported SNAPSHOT
+            // state agrees TX/Tune are off.
+            bool stateConfirmed = SnapshotConfirmsTxAndTuneStopped(TimeSpan.FromMilliseconds(DirectHaltStateConfirmBudgetMs));
+            DebugOutput($"{Time()} [DIRECT] post-halt state confirmation {(stateConfirmed ? "SNAPSHOT confirmed transmitting/tuning both false" : $"did NOT confirm within {DirectHaltStateConfirmBudgetMs}ms -- proceeding to forced fallback")}");
+            return stateConfirmed;
+        }
+
+        // Polls a real SNAPSHOT (same request DirectPollTick's own automatic poll sends, called
+        // directly here since HaltAndConfirmTxStopped is already fully synchronous/blocking on
+        // its own caller's thread -- see that method's own comment) until radio.transmitting and
+        // radio.tuning both read back false, or `budget` elapses, whichever comes first. Only
+        // ever called after HALT_TX's own "OK" already confirmed above -- if the engine were
+        // unreachable entirely, HaltAndConfirmTxStopped already returned before reaching here.
+        private bool SnapshotConfirmsTxAndTuneStopped(TimeSpan budget)
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.Elapsed < budget)
+            {
+                string json = DirectSendCommandSafe("SNAPSHOT");
+                if (!string.IsNullOrEmpty(json) && !json.StartsWith("ERR"))
+                {
+                    try
+                    {
+                        var snap = JsonSerializer.Deserialize<DirectSnapshot>(json, DirectJsonOptions);
+                        if (snap?.Radio != null && !snap.Radio.Transmitting && !snap.Radio.Tuning)
+                            return true;
+                    }
+                    catch (JsonException)
+                    {
+                        // Malformed/partial response -- treat like any other miss and retry
+                        // within budget, same tolerance DirectPollTick's own poll already has.
+                    }
+                }
+                System.Threading.Thread.Sleep(DirectHaltStateConfirmPollIntervalMs);
+            }
+            return false;
+        }
+
         // "Start/resume calling CQ" -- release-audit finding, 2026-08-20: SetupCq (WsjtxClient.cs)
         // has always computed curCmd/qsoState locally for both a fresh Call-CQ start AND the
         // post-QSO auto-resume, but Direct's control protocol had no outbound command that meant
@@ -1345,6 +1800,7 @@ namespace WSJTX_Controller
         // before the engine has accepted the command.
         public void DirectSendCq(string dir, Action<bool> onComplete = null)
         {
+            if (!DirectAuthorizedToArmTx("CALL_CQ")) { onComplete?.Invoke(false); return; }
             long capturedHaltGeneration = System.Threading.Interlocked.Read(ref _haltGeneration);
             // isTxArm: true -- CALL_CQ arms/starts a transmission. See
             // PurgePendingTxArmCommands_NoLock's own comment (Codex Audit 03 release blocker #1):
@@ -1372,6 +1828,7 @@ namespace WSJTX_Controller
 
         public void DirectSetTxEnabled(bool enabled)
         {
+            if (enabled && !DirectAuthorizedToArmTx("SET_TX_ENABLED 1")) return;
             // isTxArm: only when enabling -- disabling TX must never be purged by a halt (see
             // PurgePendingTxArmCommands_NoLock's own comment, Codex Audit 03 release blocker #1).
             EnqueueDirectCommand("SET_TX_ENABLED " + (enabled ? "1" : "0"), resp =>
@@ -1419,12 +1876,30 @@ namespace WSJTX_Controller
         // onComplete onto the UI thread.
         public void DirectSetTuning(bool on, Action<bool> onComplete)
         {
+            if (on && !DirectAuthorizedToArmTx("SET_TUNING 1")) { onComplete?.Invoke(false); return; }
+            long capturedHaltGeneration = System.Threading.Interlocked.Read(ref _haltGeneration);
             // isTxArm: only when starting Tune -- a continuous test carrier is exactly the kind
             // of transmission an emergency halt must prevent restarting; turning tuning OFF must
             // never be purged (Codex Audit 03 release blocker #1, see
             // PurgePendingTxArmCommands_NoLock's own comment).
             EnqueueDirectCommand("SET_TUNING " + (on ? "1" : "0"),
-                resp => onComplete(resp != null && resp.StartsWith("OK")), isTxArm: on);
+                resp =>
+                {
+                    bool ok = resp != null && resp.StartsWith("OK");
+                    // HALT/restart stopped-state confirmation, 2026-08-23 (independent audit
+                    // finding: "an already-received/in-flight command cannot later re-arm TX
+                    // after Halt/restart"): mirrors DirectSendReply/DirectSendCq's own identical
+                    // check -- a SET_TUNING 1 that was still in flight when HALT_TX ran and only
+                    // reports OK afterward must not let ToggleTuningProcess's own onComplete
+                    // (WsjtxClient.BandAudio.cs) flip the local `tuning` flag back to true right
+                    // after a halt just confirmed it stopped. See _haltGeneration's own comment.
+                    if (ok && on && capturedHaltGeneration != System.Threading.Interlocked.Read(ref _haltGeneration))
+                    {
+                        DebugOutput($"{Time()} [DIRECT] SET_TUNING 1 returned OK but was superseded by a Halt -- not re-arming");
+                        ok = false;
+                    }
+                    onComplete(ok);
+                }, isTxArm: on);
         }
 
         // Options > Decode tab's "Decode depth" (Fast/Normal/Deep) -- the one Decode-tab setting
@@ -1508,42 +1983,140 @@ namespace WSJTX_Controller
             });
         }
 
+        // Frequency-override authority split, 2026-08-24 (independent audit finding): Nexus's
+        // own Engine::set_tier has an internal auto-QSY that retunes to ITS OWN stock band-plan
+        // dial on every tier switch (engine.rs, "switching the mode moves the rig to the NEW
+        // mode's dial for the CURRENT band"), independent of whatever dial Jimmy just restored
+        // or commanded -- harmless on a band the operator has never customized (Jimmy's own
+        // built-in defaults, freqsDict above, already match Nexus's stock table exactly on every
+        // band checked), but an unnecessary extra retune on any band the operator HAS
+        // customized. Engine::band_plan already has a documented, intended extension point for
+        // exactly this ("WSJT-X Settings > Frequencies" overrides, Settings.working_frequencies)
+        // -- this builds Jimmy's side of that hand-off. Only the PRIMARY entry per band+mode
+        // (FrequencySettings.cs's own "the FIRST entry matching the current mode is that band's
+        // primary/canonical frequency" contract) is sent, not every direct-jump hotkey extra --
+        // Engine::band_plan has exactly one dial per (band,mode) row, so only the canonical one
+        // is meaningful to it. A band the operator has never customized is deliberately left out
+        // entirely (not backfilled from Jimmy's own defaults) so Nexus's own stock table --
+        // already correct there -- is used unmodified, matching Engine::band_plan's own "Empty
+        // overrides = stock" semantics exactly. Shared by NativeEngineClient.Launch (the startup
+        // --working-frequencies CLI arg) and OptionsDlg's Frequencies-tab save (the live
+        // SET_WORKING_FREQUENCIES command below) so the two never compute this differently.
+        internal static List<WorkingFreqArg> BuildWorkingFrequencyEntries(FrequencySettings freq)
+        {
+            // Index-aligned with this class's own private `bands` field (160/80/60/40/30/20/17/
+            // 15/12/10/6) -- FrequencySettings.cs's own class comment documents the same
+            // contract; there is no shared constant to import instead (bands is a private
+            // instance field, not static).
+            int[] bandNumbers = { 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 };
+            var result = new List<WorkingFreqArg>();
+            for (int i = 0; i < freq.Bands.Length && i < bandNumbers.Length; i++)
+            {
+                foreach (string mode in new[] { "FT8", "FT4" })
+                {
+                    var entry = freq.Bands[i].Find(e => e.Mode == mode);
+                    if (entry == null) continue;
+                    result.Add(new WorkingFreqArg { Band = $"{bandNumbers[i]}m", Mode = mode, Mhz = entry.FreqKHz / 1000.0 });
+                }
+            }
+            return result;
+        }
+
+        // Live counterpart of --working-frequencies (BuildWorkingFrequencyEntries's own
+        // comment) -- OptionsDlg calls this when the operator saves an edited
+        // Options>Frequencies entry mid-session, so Nexus's own auto-QSY picks up the new dial
+        // immediately without an EngineHost restart.
+        public void DirectSetWorkingFrequencies(List<WorkingFreqArg> entries, Action<bool> onComplete)
+        {
+            string json = JsonSerializer.Serialize(entries, DirectJsonOptions);
+            EnqueueDirectCommand("SET_WORKING_FREQUENCIES " + json, resp =>
+            {
+                bool ok = resp != null && resp.Length > 0 && !resp.StartsWith("ERR");
+                if (!ok)
+                    DebugOutput($"{Time()} [DIRECT] SET_WORKING_FREQUENCIES did not return OK (response: {(resp ?? "<no response>")})");
+                onComplete?.Invoke(ok);
+            });
+        }
+
+        // T7 (release-critical, 2026-08-23): the dispatcher's own class comment above already
+        // documented that a priority HALT_TX cannot preempt a command already dequeued and
+        // blocked inside DirectSendCommand -- it can only jump ahead of commands still WAITING.
+        // Confirmed real: DirectSendCommand's own worst case is ~4s (1000ms connect + 3000ms
+        // read, immediately below), so an already-in-flight ordinary command could make an
+        // emergency HALT_TX wait behind that FULL budget before the single ordered worker is
+        // even free to send it. Tracks whichever DirectCommandRequest is currently blocked
+        // inside DirectSendCommand (there is at most one -- the worker is strictly serial) so a
+        // priority enqueue can force it to fail fast instead of running out its full timeout.
+        // volatile: read from whatever thread calls EnqueueDirectCommand (usually the UI
+        // thread), written only by the single worker thread.
+        private volatile TcpClient _directInFlightClient;
+
+        // Closes whatever Direct command is currently blocked in DirectSendCommand, if any --
+        // makes its blocked ConnectAsync/Read throw immediately (caught by
+        // DirectSendCommandSafe, same as any other transport failure) instead of running out
+        // its own ~4s worst-case budget, so the single ordered worker becomes free to dequeue
+        // and send a just-enqueued priority HALT_TX right away. Safe to call whether or not
+        // anything is actually in flight, and safe against the field changing/clearing
+        // concurrently (Close() on an already-disposed TcpClient just throws
+        // ObjectDisposedException, swallowed here -- best-effort, matching every other
+        // best-effort teardown in this class).
+        private void AbortInFlightDirectCommand()
+        {
+            try { _directInFlightClient?.Close(); } catch { /* best-effort */ }
+        }
+
         // One command, one short-lived TCP connection, matching the control server's own
         // one-connection-per-request shape (EngineHost/src/main.rs's run_control_server) --
         // deliberately not a persistent stream, so a hung/slow engine host can never leave this
         // blocking on a socket that will never send anything, only ever on this bounded
-        // connect/read pair.
-        private static string DirectSendCommand(string command)
+        // connect/read pair. Instance method (not static, as originally written) specifically so
+        // it can publish the in-flight client to _directInFlightClient above -- T7's abort path
+        // needs a handle to whatever is currently blocked here.
+        private string DirectSendCommand(string command)
         {
             using (var client = new TcpClient())
             {
-                var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
-                if (!connectTask.Wait(1000) || !client.Connected) return null;
-
-                using (var stream = client.GetStream())
+                _directInFlightClient = client;
+                try
                 {
-                    stream.WriteTimeout = 1000;
-                    stream.ReadTimeout = 3000;
-                    byte[] cmd = Encoding.UTF8.GetBytes(command + "\n");
-                    stream.Write(cmd, 0, cmd.Length);
-                    client.Client.Shutdown(SocketShutdown.Send);
+                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
+                    if (!connectTask.Wait(1000) || !client.Connected) return null;
 
-                    using (var ms = new System.IO.MemoryStream())
+                    using (var stream = client.GetStream())
                     {
-                        byte[] buf = new byte[8192];
-                        int n;
-                        try
+                        stream.WriteTimeout = 1000;
+                        stream.ReadTimeout = 3000;
+                        byte[] cmd = Encoding.UTF8.GetBytes(command + "\n");
+                        stream.Write(cmd, 0, cmd.Length);
+                        client.Client.Shutdown(SocketShutdown.Send);
+
+                        using (var ms = new System.IO.MemoryStream())
                         {
-                            while ((n = stream.Read(buf, 0, buf.Length)) > 0)
-                                ms.Write(buf, 0, n);
+                            byte[] buf = new byte[8192];
+                            int n;
+                            try
+                            {
+                                while ((n = stream.Read(buf, 0, buf.Length)) > 0)
+                                    ms.Write(buf, 0, n);
+                            }
+                            catch (System.IO.IOException)
+                            {
+                                // Read timeout, connection reset, or AbortInFlightDirectCommand's
+                                // own Close() above -- best-effort, return whatever arrived
+                                // before that (usually nothing useful, but never throws).
+                            }
+                            return Encoding.UTF8.GetString(ms.ToArray()).TrimEnd('\r', '\n');
                         }
-                        catch (System.IO.IOException)
-                        {
-                            // Read timeout or connection reset -- best-effort, return whatever
-                            // arrived before that (usually nothing useful, but never throws).
-                        }
-                        return Encoding.UTF8.GetString(ms.ToArray()).TrimEnd('\r', '\n');
                     }
+                }
+                finally
+                {
+                    // Plain assignment, not compare-and-swap: RunDirectCommandWorkerAsync is the
+                    // ONLY caller of DirectSendCommandSafe/DirectSendCommand (single ordered
+                    // worker, awaited strictly one request at a time -- see this file's own
+                    // class comment), so there is never a second call whose "clear" could race
+                    // this one's.
+                    _directInFlightClient = null;
                 }
             }
         }
@@ -1600,6 +2173,21 @@ namespace WSJTX_Controller
 
         internal string TestCallQueueString => _callQueueStore.CallQueueString();
         internal List<EnqueueDecodeMessage> TestRawDecodeHistory => _rawDecodeHistory;
+        // Test-only (item 1, 2026-08-24): ShowRawDecodes is private, and its own real trigger
+        // (a new decode arriving via TestApplyDirectSnapshot) always stamps SinceMidnight from
+        // the real wall clock -- not controllable from a test, and the even/odd period boundary
+        // it needs to land on to prove BOTH alternating sides render correctly would make a test
+        // that waits for real time to cross it slow and flaky. This lets a test instead populate
+        // TestRawDecodeHistory directly with entries carrying whatever exact SinceMidnight it
+        // needs, then render deterministically.
+        internal void TestShowRawDecodes() => ShowRawDecodes();
+        // Test-only (item 5, 2026-08-24): a status render can be batched (ScheduleStatusAnnounce,
+        // WsjtxClient.cs) rather than delivered immediately -- its own real interval runs up to a
+        // full trPeriod plus statusBatchDelayMs (as long as ~15.5s for FT8), which would make a
+        // test that waits for the real Timer slow and, worse, timing-dependent/flaky depending on
+        // exactly where in the real wall-clock period the test happens to run. Reading the
+        // pending text directly is deterministic and instant either way.
+        internal string TestPendingStatusText => _pendingStatusText;
 
         // Test-only: `mode` is private and DirectApplyStatus only ever sets it to "FT8" (its
         // own lazy first-run fallback -- see that method's own comment on why Direct mode has
@@ -1654,6 +2242,50 @@ namespace WSJTX_Controller
         // directly -- a real snapshot reporting the engine's own txEnabled must update Jimmy's
         // local belief, not leave it stuck on whatever EnableTx()/DisableTx() last wrote.
         internal bool TestTxEnabled => txEnabled;
+        // internal (not private): T14 regression coverage sets txEnabled directly, isolating
+        // DiscardCall()'s own two-clock-divergence logic without needing a full synthetic
+        // snapshot round trip through DirectApplyStatus.
+        internal void TestSetTxEnabled(bool v) => txEnabled = v;
+        // internal (not private): T16 regression coverage (CompletedQsoRemovesStaleQueueStateTests)
+        // proves curCmd/replyCmd/replyDecode are actually cleared once CompleteQso-equivalent
+        // cleanup runs for the just-finished call, not merely that callInProg was cleared.
+        internal string TestCurCmd => curCmd;
+        // internal (not private): T19 regression coverage proves curTxMsg is actually flushed on
+        // a confirmed band change, not merely left to be silently overwritten by the next status.
+        internal string TestCurTxMsg => curTxMsg;
+        internal string TestReplyCmd => replyCmd;
+        internal EnqueueDecodeMessage TestReplyDecode => replyDecode;
+        // internal (not private): T19 regression coverage (ConfirmedBandChangeFlushesStale
+        // TxStateTests) needs to seed old-band curCmd/replyCmd/replyDecode directly to prove the
+        // confirmed-band-change flush clears them, without needing a full real-Reply round trip.
+        internal void TestSetCurCmd(string v) => curCmd = v;
+        internal void TestSetReplyCmd(string v) => replyCmd = v;
+        internal void TestSetReplyDecode(EnqueueDecodeMessage v) => replyDecode = v;
+        // internal (not private): T14 regression coverage (DiscardCallTwoClockDivergenceTests)
+        // proves the discard tracker stays ARMED (not disarmed) while txEnabled is still true.
+        internal string TestDiscardCall => discardCall;
+        internal int TestDiscardCallCycleCount => discardCallCycleCount;
+        internal void TestStartDiscardCall(string call) => StartDiscardCall(call);
+        internal void TestTriggerDiscardCall() => DiscardCall();
+        // internal (not private): lets a test call ConnectDirectEngine (for its myCall/myGrid/
+        // opMode/_directConnected side effects) without the 1s SNAPSHOT poll timer it also
+        // starts racing a short, timing-sensitive test's own stub-engine-host expectations.
+        internal void TestStopPollTimer() => _directPollTimer?.Stop();
+        // internal (not private): EngineHost ownership / session identity regression coverage
+        // (SessionTokenAuthenticationTests) drives a real SNAPSHOT round trip against a stub
+        // engine host -- TestStopPollTimer above is used to stop the automatic 1s timer racing
+        // the test's own explicit calls, and this fires exactly one tick on demand instead, the
+        // same production DirectPollTick() the real timer calls, so the test proves the actual
+        // authentication/NegoState-promotion logic rather than a hand-rolled stand-in for it.
+        internal void TestTriggerDirectPollTick() => DirectPollTick();
+        internal bool TestDirectAuthenticated => _directAuthenticated;
+        // internal (not private): CAT mode command/readback correlation regression coverage
+        // (RigModeMismatchGraceWindowAndReconciliationTests) seeds/backdates these directly so it
+        // can exercise DirectApplyStatus's own real grace-window/reconcile logic against a chosen
+        // elapsed time without an actual multi-second sleep -- _lastCommandedSideband itself is
+        // already internal and needs no accessor.
+        internal void TestSetLastCommandedSidebandChangedUtc(DateTime utc) => _lastCommandedSidebandChangedUtc = utc;
+        internal int TestSidebandMismatchStreak => _sidebandMismatchStreak;
     }
 
     // JSON shapes matching AppSnapshot/RadioStatus/DecodeRow's own camelCase serde output
@@ -1672,6 +2304,14 @@ namespace WSJTX_Controller
         // ProcessTxStart/ProcessTxEnd, driven by real WSJT-X status messages Direct mode never
         // receives). Null while the engine reports no active QSO (listening, or between QSOs).
         public DirectQsoStatus Qso { get; set; }
+        // EngineHost ownership / session identity, 2026-08-23: injected at the JSON level by
+        // main.rs's own SNAPSHOT handler AFTER AppSnapshot is serialized (never part of the
+        // pinned Nexus struct itself -- see that handler's own comment). SessionToken is the
+        // per-launch nonce DirectPollTick compares against _directExpectedSessionToken before
+        // trusting this snapshot at all; Pid is informational/diagnostic only (logged on a
+        // mismatch), never itself part of the match.
+        public string SessionToken { get; set; }
+        public int Pid { get; set; }
     }
 
     // Mirrors the QSO-relevant slice of tempo-app::dto::QsoStatus (Rust) -- only the fields
@@ -1747,6 +2387,20 @@ namespace WSJTX_Controller
         // Human-readable detail paired with CatOk above (tempo-app/src/dto.rs: RadioStatus.
         // cat_detail), e.g. "rigctld not reachable..." -- used as the failure reason text.
         public string CatDetail { get; set; }
+        // T17 fix, 2026-08-23 (PARTIAL/CONFIRMED -- radio ended up in LSB on 30m FT4, reported
+        // 2026-08-21): the rig's own CAT-reported mode readback (tempo-app/src/dto.rs:
+        // RadioStatus.rig_mode -- "the rig's actual mode read back over CAT... Display-only --
+        // the cockpit flags a mismatch with the commanded mode"). Confirmed by tracing every
+        // C#->EngineHost->Nexus request that Jimmy's own SET_FREQUENCY always requested USB
+        // (never LSB) for every band, including 30m FT4/FT8 -- the reproduced LSB outcome is
+        // therefore downstream of what Jimmy commands (CAT-mode application/readback, rig
+        // memory, or Hamlib behavior), not a Jimmy-side logic bug in frequency/sideband
+        // selection. Jimmy previously never read this field at all, so a radio that silently
+        // stayed in a different mode than requested was never detected or surfaced -- see
+        // DirectApplyStatus's own new reconciliation/warning for the fix this enables. Null
+        // until the rig has reported a real CAT mode at least once (VOX-only/no-CAT stations,
+        // or the first snapshot before a readback has arrived, correctly report nothing here).
+        public string RigMode { get; set; }
         // Added 2026-08-19 (release-blocker follow-up): the engine's own authoritative belief
         // about whether it will currently transmit -- tempo-app/src/dto.rs's RadioStatus.
         // tx_enabled. Confirmed live to be the real cause of a stuck-forever callInProg: the
@@ -1792,5 +2446,17 @@ namespace WSJTX_Controller
         public double Hz { get; set; }
         public string Band { get; set; }
         public string Mode { get; set; }
+    }
+
+    // Field names (camelCase via DirectJsonOptions) must line up with pinned Nexus's own
+    // WorkingFreq struct (tempo-app/src/settings.rs) -- see BuildWorkingFrequencyEntries' own
+    // comment. Public (unlike DirectSetFrequencyArgs above): appears in DirectSetWorkingFrequencies
+    // and NativeEngineClient.Launch's own public signatures, so it can't be more restrictive
+    // than internal without an accessibility mismatch on those methods.
+    public class WorkingFreqArg
+    {
+        public string Band { get; set; }
+        public string Mode { get; set; }
+        public double Mhz { get; set; }
     }
 }

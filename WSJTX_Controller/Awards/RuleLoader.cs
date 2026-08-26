@@ -260,9 +260,15 @@ namespace WSJTX_Controller
         {
             try
             {
-                string dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    Assembly.GetExecutingAssembly().GetName().Name);
+                // Replay-test isolation, 2026-08-23: only reachable on an actual rule-definition
+                // load error (not normal operation), but redirected under TestModeGuard.IsTestMode
+                // for the same reason as Controller.cs's own settings-.ini redirect -- a test
+                // session must never write into the real AppData folder, error path included.
+                string dir = TestModeGuard.IsTestMode
+                    ? Path.Combine(Path.GetTempPath(), "JimmyReplayTest_AppData")
+                    : Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        Assembly.GetExecutingAssembly().GetName().Name);
                 Directory.CreateDirectory(dir);
                 string file = Path.Combine(dir, "log_rules_errors.txt");
 

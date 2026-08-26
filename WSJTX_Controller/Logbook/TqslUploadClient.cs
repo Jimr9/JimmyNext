@@ -115,7 +115,18 @@ namespace WSJTX_Controller
                 return false;
             }
 
-            var pending = db.GetPendingUploads("LOTW");
+            // Found live, 2026-08-25: GetPendingUploads' default limit (1000), sorted oldest
+            // first, silently starves every newer QSO out of this batch once the LoTW-pending
+            // backlog exceeds 1000 -- e.g. an expired-then-replaced TQSL certificate that
+            // doesn't cover older QSOs (see ClassifyFinalStatus's own comment) can permanently
+            // strand 1000+ old QSOs as "pending," and from that point on TQSL never even SEES
+            // brand-new same-day QSOs, regardless of whether the current certificate covers
+            // them fine -- confirmed live: a QSO made today was completely absent from the
+            // batch TQSL received, cut off by the 1000-row cap around a QSO from 2024. A large
+            // but bounded limit here (10000, comfortably beyond any realistic backlog) ensures
+            // every genuinely pending QSO is at least offered to TQSL each run, not just
+            // whichever 1000 happen to sort oldest.
+            var pending = db.GetPendingUploads("LOTW", limit: 10000);
             if (pending.Count == 0) return true;   // nothing to do -- not a failure
 
             var sb = new StringBuilder();
@@ -174,7 +185,13 @@ namespace WSJTX_Controller
                     Task<string> stdoutTask = proc.StandardOutput.ReadToEndAsync();
                     Task<string> stderrTask = proc.StandardError.ReadToEndAsync();
                     Task bothStreamsTask = Task.WhenAll(stderrTask, stdoutTask);
-                    if (await Task.WhenAny(bothStreamsTask, Task.Delay(120_000)).ConfigureAwait(false) != bothStreamsTask)
+                    // Bumped from 2 to 5 minutes, 2026-08-25: the batch this now signs/uploads
+                    // can be far larger since the GetPendingUploads limit above was raised from
+                    // 1000 to 10000 for the same reason -- a large but legitimately-pending
+                    // backlog needs more real TQSL processing time than a small one, and this
+                    // bound must not fire on genuinely-still-working TQSL just because the
+                    // batch got bigger.
+                    if (await Task.WhenAny(bothStreamsTask, Task.Delay(300_000)).ConfigureAwait(false) != bothStreamsTask)
                     {
                         try { proc.Kill(); } catch { }
                         // Killing the process closes its stdout/stderr handles, so the pending
@@ -182,7 +199,7 @@ namespace WSJTX_Controller
                         // written before being terminated, best-effort only (never let a failure
                         // here mask the real timeout being reported).
                         try { stderrText = await stderrTask.ConfigureAwait(false); } catch { stderrText = ""; }
-                        LastError = "TQSL did not finish within 2 minutes (possibly waiting on an unexpected dialog, e.g. a passphrase prompt).";
+                        LastError = "TQSL did not finish within 5 minutes (possibly waiting on an unexpected dialog, e.g. a passphrase prompt).";
                         LogFailure("Timeout", LastError, stderrText);
                         return false;
                     }

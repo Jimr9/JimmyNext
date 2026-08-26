@@ -31,10 +31,17 @@ namespace WSJTX_Controller
         private static StreamWriter _writer;
 
         // Derived from the running assembly's own name (not a literal "Jimmy") so a
-        // differently-named build (e.g. a side-by-side "Jimmy Test" release) writes to its
+        // differently-named build (e.g. a side-by-side "Jimmy Next" release) writes to its
         // own data folder, consistent with LookupManager.DataRoot.
-        private static string LogPath =>
-            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        //
+        // Replay-test isolation, 2026-08-23: Enabled itself is read from the settings .ini
+        // (Controller.cs), which is now isolated under TestModeGuard.IsTestMode -- but if the
+        // operator's real ini happened to have this undocumented flag on, the isolated copy
+        // would inherit it, so this path is redirected the same way for consistency/safety even
+        // though it isn't expected to be set.
+        private static string LogPath => TestModeGuard.IsTestMode
+            ? Path.Combine(Path.GetTempPath(), "JimmyReplayTest_AppData", "ClassificationParityMismatches.log")
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                 System.Reflection.Assembly.GetExecutingAssembly().GetName().Name, "ClassificationParityMismatches.log");
 
         public static void CheckAndLog(EnqueueDecodeMessage dmsg, string call, string band,

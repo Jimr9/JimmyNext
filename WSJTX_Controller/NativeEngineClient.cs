@@ -5,6 +5,8 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Text;
+using System.Text.Json;
 using System.Threading.Tasks;
 
 namespace WSJTX_Controller
@@ -158,6 +160,89 @@ namespace WSJTX_Controller
         // should only ever fire for.
         private bool _stopping;
 
+        // Repeat limit / TX watchdog authority split, 2026-08-24 (independent audit finding):
+        // Jimmy's own "Repeat limit" (Controller.cs's timeoutNumUpDown) is now the sole
+        // attempt-count-based stop (WsjtxClient.cs's DiscardCall actively sends SET_TX_ENABLED 0
+        // once reached -- see its own comment); EngineHost's own directed_max_calls is disabled
+        // outright (main.rs's own Settings construction). This is what sizes the ONE remaining
+        // backstop -- the wall-clock-only TX watchdog (Settings.tx_watchdog_min) -- so it can
+        // never silently override a legitimate Repeat Limit by firing first, while still staying
+        // a genuine runaway-TX safety net if Jimmy's own stop command somehow never lands.
+        //
+        // Both stations transmit on alternating slots -- one real attempt costs TWO periods, not
+        // one (confirmed two ways: a live SNAPSHOT capture showing periodSecs:15.0 for FT8, and
+        // Nexus's own maintainer notes, ".nexus-src/scripts/create-issues.sh": "8 overs is 16
+        // slots ~= 4 minutes on FT8, not 2 -- we transmit every other slot"). FT8's 30s/attempt is
+        // used UNCONDITIONALLY, even under FT4 (15s/attempt) -- computing per-mode would need the
+        // watchdog re-sent on every FT8<->FT4 switch, which (like a live Repeat-Limit change) has
+        // no clean live-update path into an already-running Engine (see Launch's own
+        // sessionToken-adjacent comments on tx_watchdog_min being startup-CLI-arg-only). Using the
+        // slower basis is always safe in both directions: extra, harmless margin under FT4, exact
+        // under FT8, and Jimmy's own live SET_TX_ENABLED 0 -- not this backstop -- is what
+        // actually stops things on time either way.
+        //
+        // marginAttempts=2: one full cycle for detection lag (DiscardCall's own caller only
+        // re-checks on the NEXT period boundary after the count is reached -- confirmed live, up
+        // to one full attempt-cycle late in the worst case) plus one more for command round-trip
+        // and ordinary timing jitter (observed directly: real period-boundary spacing in a live
+        // diagnostic log drifted several seconds either side of the nominal 30s).
+        //
+        // ceil (not round): the field is whole minutes only (Settings.tx_watchdog_min: u32) --
+        // rounding down could under-shoot Jimmy's own limit, which a BACKSTOP must never do.
+        //
+        // Bounds: floor of 2 minutes -- Nexus's own code treats 0 as "watchdog disabled entirely"
+        // (`if limit_secs > 0`), which Automatic must never compute even at Repeat Limit's own
+        // floor of 1; a hard 0-2 min backstop also isn't a genuine safety margin, just a
+        // hair-trigger. Ceiling of 30 minutes is defensive headroom, not a real-world constraint
+        // today -- Repeat Limit's own enforced UI range (Controller.cs's minSkipCount..
+        // maxSkipCount, 1..20) only ever needs up to 11 minutes at the current ceiling; 30 leaves
+        // generous room if that ceiling is ever raised without silently producing something absurd.
+        internal const int TxWatchdogSecondsPerAttempt = 30;
+        internal const int TxWatchdogMarginAttempts = 2;
+        internal const int TxWatchdogMinMinutes = 2;
+        internal const int TxWatchdogMaxMinutes = 30;
+
+        internal static int ComputeAutomaticTxWatchdogMinutes(int repeatLimit)
+        {
+            int seconds = (repeatLimit + TxWatchdogMarginAttempts) * TxWatchdogSecondsPerAttempt;
+            int minutes = (seconds + 59) / 60; // ceiling division -- see this method's own comment on why ceil, not round
+            return Math.Max(TxWatchdogMinMinutes, Math.Min(TxWatchdogMaxMinutes, minutes));
+        }
+
+        // Frequency-override authority split, 2026-08-24: `args` (below) is handed to
+        // ProcessStartInfo.Arguments as ONE raw command-line string, parsed by the OS the same
+        // way any CommandLineToArgvW consumer does. Every other value quoted in this method
+        // (device names, a DX-cluster address) is wrapped naively (`\"..\"`, no escaping of
+        // embedded quotes) because none of them realistically contain a literal '"'. The
+        // --working-frequencies JSON payload is different in kind, not just in size -- it always
+        // contains many literal '"' characters, so that naive wrapping would truncate the
+        // argument at the first one. This implements the real Win32 rule instead: each '"' needs
+        // an odd number of '\' immediately before it (so it's read as an escaped quote, not an
+        // argument terminator), and a run of '\' immediately before the closing quote must be
+        // doubled so it isn't misread as escaping that quote.
+        internal static string EscapeCommandLineArg(string arg)
+        {
+            var sb = new StringBuilder();
+            sb.Append('"');
+            int backslashes = 0;
+            foreach (char c in arg)
+            {
+                if (c == '\\') { backslashes++; continue; }
+                if (c == '"')
+                {
+                    sb.Append('\\', backslashes * 2 + 1);
+                    backslashes = 0;
+                    sb.Append('"');
+                    continue;
+                }
+                if (backslashes > 0) { sb.Append('\\', backslashes); backslashes = 0; }
+                sb.Append(c);
+            }
+            if (backslashes > 0) sb.Append('\\', backslashes * 2);
+            sb.Append('"');
+            return sb.ToString();
+        }
+
         // `onUnexpectedExit`: called (NOT marshalled to any particular thread -- Process.Exited
         // fires on a threadpool thread, so the caller must marshal to the UI thread itself if it
         // touches Windows Forms controls) if the engine host process exits on its own, outside
@@ -165,11 +250,26 @@ namespace WSJTX_Controller
         // completely silent -- Jimmy kept showing whatever state it last had (decode, radio
         // status) with no indication the engine backing all of it was simply gone. Optional:
         // null is fine and skips the whole EnableRaisingEvents/Exited wiring.
+        // sessionToken: EngineHost ownership / session identity, 2026-08-23 -- the per-launch
+        // nonce this exact child process echoes back on every SNAPSHOT (main.rs's own
+        // --session-token arg / sessionToken JSON field), so ConnectDirectEngine's caller can
+        // refuse to trust a stale/orphan process answering on the fixed control port instead of
+        // the one launched here. Optional/null keeps existing callers (and any future one that
+        // doesn't care about authentication) working exactly as before -- no arg is passed and
+        // the child simply reports an empty token, which ConnectDirectEngine(expectedSessionToken:
+        // null) never checks.
+        // repeatLimit: Controller.cs's own timeoutNumUpDown.Value at launch time -- feeds
+        // ComputeAutomaticTxWatchdogMinutes above. Optional/null (rather than a required param)
+        // for the same backward-compatibility reason sessionToken is: any existing/future caller
+        // that doesn't pass one gets Nexus's own stock tx_watchdog_min (6) via
+        // Args::tx_watchdog_min's own default, not a crash or a nonsensical computed value.
         public bool Launch(string mycall, string mygrid, string audioDevice, int jimmyPort,
                             string outputDevice = null, RadioSettings radio = null,
                             Action<string> debugOutput = null, Action onUnexpectedExit = null,
                             DecodeSettings decode = null, bool pskreporter = false,
-                            string dxClusterAddress = null)
+                            string dxClusterAddress = null, string sessionToken = null,
+                            int? repeatLimit = null,
+                            List<WorkingFreqArg> workingFrequencies = null)
         {
             LastError = null;
             try
@@ -213,6 +313,22 @@ namespace WSJTX_Controller
                 // (2026-08-18) not to remove. Do not treat this as leftover dead code in a future pass
                 // without re-checking that decision first.
                 var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
+                if (!string.IsNullOrWhiteSpace(sessionToken))
+                    args += $" --session-token {sessionToken}";
+                if (repeatLimit.HasValue)
+                    args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
+                // Frequency-override authority split, 2026-08-24 -- see
+                // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
+                // empty (no band customized), matching every other startup arg's "absent =
+                // stock behavior" convention -- and unlike every other arg here, this one is
+                // JSON containing many literal '"' characters, so it needs real command-line
+                // escaping (EscapeCommandLineArg below), not the naive \"..\" wrapping the rest
+                // of this method uses for plain device/address strings.
+                if (workingFrequencies != null && workingFrequencies.Count > 0)
+                {
+                    string wfJson = JsonSerializer.Serialize(workingFrequencies, WsjtxClient.DirectJsonOptions);
+                    args += $" --working-frequencies {EscapeCommandLineArg(wfJson)}";
+                }
                 if (!string.IsNullOrWhiteSpace(audioDevice))
                     args += $" --device \"{audioDevice}\"";
                 if (!string.IsNullOrWhiteSpace(outputDevice))

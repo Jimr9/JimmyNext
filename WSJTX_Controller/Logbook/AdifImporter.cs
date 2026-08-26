@@ -162,7 +162,19 @@ namespace WSJTX_Controller
             call = call.ToUpperInvariant().Trim();
 
             string band = NormalizeBand(GetField(f, "BAND"), GetField(f, "FREQ"));
-            string mode = (GetField(f, "MODE") ?? "").ToUpperInvariant().Trim();
+            // Found live, 2026-08-26: LoTW's own ADIF export reports FT4 QSOs under the ADIF
+            // umbrella MODE "MFSK" with SUBMODE "FT4" (per the ADIF spec, SUBMODE exists
+            // specifically to narrow an umbrella MODE like this), while every other source here
+            // (QRZ, Club Log, Jimmy's own live logging) reports MODE="FT4" directly. Since
+            // dedup_key (BuildDedupKey below) includes mode as a literal string, "MFSK" vs
+            // "FT4" for the exact same real QSO never matched -- confirmed live: a QSO both QRZ
+            // and LoTW's website agree is genuinely LoTW-confirmed still showed as permanently
+            // "pending" locally, because LoTW's download inserted it as a SEPARATE mode=MFSK
+            // row instead of backfilling the existing mode=FT4 row's upload-confirmed flag.
+            // Preferring SUBMODE when present (the ADIF-spec-correct, more specific value)
+            // keeps mode consistent across every source instead of just working around MFSK
+            // specifically.
+            string mode = (GetField(f, "SUBMODE") ?? GetField(f, "MODE") ?? "").ToUpperInvariant().Trim();
 
             string qsoDate = NormalizeDate(GetField(f, "QSO_DATE") ?? GetField(f, "QSO_DATE_OFF") ?? "");
             string timeOn  = NormalizeTime(GetField(f, "TIME_ON")  ?? "");
@@ -183,6 +195,37 @@ namespace WSJTX_Controller
 
             int cqZone = 0;
             int.TryParse(GetField(f, "CQZ") ?? GetField(f, "CQ_ZONE") ?? "", out cqZone);
+
+            string country = GetField(f, "COUNTRY") ?? "";
+            string continent = (GetField(f, "CONT") ?? "").ToUpperInvariant();
+
+            // T12 fix, 2026-08-23 (PARTIALLY CONFIRMED -- LoTW-only DXCC/awards, reported
+            // 2026-08-21): core confirmation logic (QSL flags below, HrcCache) was already
+            // service-neutral, but nothing backfilled a missing DXCC/country/continent when the
+            // SOURCE ADIF simply omitted them -- some real LoTW/Club Log exports do, while QRZ's
+            // own export more often already includes them, which plausibly explained "only QRZ
+            // data behaves correctly" without any service actually being required. Live
+            // classification and worked/confirmed DXCC sets are gated on dxcc>0 (LogbookDb.
+            // LoadHrcCache), so a real confirmed QSO with dxcc left at 0 was invisible to
+            // DXCC-needed/worked-DXCC award logic regardless of its QSL flags. Backfills ONLY
+            // fields the source record itself left blank/zero, from the same canonical offline
+            // Club Log prefix/entity data every live decode already classifies against
+            // (RuleLibrary.ClubLog, populated once at startup, Controller.cs) -- never overrides
+            // a real value the ADIF file actually supplied. RuleLibrary.ClubLog can be null in a
+            // narrow startup/test window before it's assigned; a missing/undeleted resolution
+            // simply leaves the field at its prior (possibly still zero/blank) value, same as
+            // before this fix existed.
+            if ((dxcc == 0 || string.IsNullOrEmpty(country) || string.IsNullOrEmpty(continent))
+                && RuleLibrary.ClubLog != null)
+            {
+                var entity = RuleLibrary.ClubLog.FindByCallsign(call);
+                if (entity != null && !entity.Deleted)
+                {
+                    if (dxcc == 0) dxcc = entity.Adif;
+                    if (string.IsNullOrEmpty(country)) country = entity.Name;
+                    if (string.IsNullOrEmpty(continent)) continent = entity.Continent;
+                }
+            }
 
             // QSL field mapping differs by source.
             // LoTW download: QSL_RCVD:Y means confirmed (LOTW_QSL_RCVD is a logging-software field, absent in LoTW's own export).
@@ -246,7 +289,7 @@ namespace WSJTX_Controller
                 rstSent      = GetField(f, "RST_SENT") ?? "",
                 rstRcvd      = GetField(f, "RST_RCVD") ?? "",
                 state        = state,
-                country      = GetField(f, "COUNTRY") ?? "",
+                country      = country,
                 dxcc         = dxcc,
                 cqZone       = cqZone,
                 grid         = grid,
@@ -262,7 +305,7 @@ namespace WSJTX_Controller
                 qrzQslRcvd   = qrzRcvd,
                 sourceQsoId  = GetField(f, "APP_QRZLOG_QSLDATE") ?? "",
                 dedupKey     = dedupKey,
-                continent    = (GetField(f, "CONT") ?? "").ToUpperInvariant(),
+                continent    = continent,
                 ituZone      = ituZone,
                 county       = (GetField(f, "CNTY") ?? "").ToUpperInvariant(),
                 iota         = (GetField(f, "IOTA") ?? "").ToUpperInvariant(),

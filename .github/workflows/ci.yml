@@ -2,7 +2,7 @@ name: CI
 
 # Practical safety net, not a replacement for JAWS/NVDA or real-radio testing (see
 # ARCHITECTURE.md). Mirrors the exact manual build sequence used during development:
-# prepare pinned+patched Nexus, build/test EngineHost, build/test Jimmy Test.
+# prepare pinned+patched Nexus, build/test EngineHost, build/test Jimmy Next.
 on:
   push:
     branches: [development/jimmy-next]
@@ -123,8 +123,8 @@ jobs:
           Set-Content -Path $path -Value $lines
           echo "CLUBLOG_KEY_FILE=$path" >> $env:GITHUB_ENV
 
-      - name: Build Jimmy Test (Debug, isolated identity)
-        run: dotnet build "WSJTX_Controller\Jimmy.csproj" -c Debug -p:AssemblyName="Jimmy Test" -p:ClubLogKeyFile="$env:CLUBLOG_KEY_FILE" -v:minimal
+      - name: Build Jimmy Next (Debug, isolated identity)
+        run: dotnet build "WSJTX_Controller\Jimmy.csproj" -c Debug -p:AssemblyName="Jimmy Next" -p:ClubLogKeyFile="$env:CLUBLOG_KEY_FILE" -v:minimal
 
       - name: Build JimmyTests
         run: dotnet build "JimmyTests\JimmyTests.csproj" -c Debug -v:minimal
@@ -132,17 +132,17 @@ jobs:
       - name: Run JimmyTests
         run: '& "JimmyTests\bin\Debug\net10.0-windows\JimmyTests.exe"'
 
-      - name: Publish self-contained Jimmy Test + build installer MSI
+      - name: Publish self-contained Jimmy Next + build installer MSI
         run: |
           cd Setup_WiX
-          dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Test" -p:ClubLogKeyFile="$env:CLUBLOG_KEY_FILE" -p:SelfContained=true -r win-x64 -o PublishOutputTest
+          dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Next" -p:ClubLogKeyFile="$env:CLUBLOG_KEY_FILE" -p:SelfContained=true -r win-x64 -o PublishOutputNext
           dotnet tool install --global wix --version 5.0.2
           wix extension add WixToolset.Firewall.wixext/5.0.2 WixToolset.UI.wixext/5.0.2
-          wix build JimmyTest.wxs -ext WixToolset.Firewall.wixext -ext WixToolset.UI.wixext -arch x64 -o JimmyTest.msi
+          wix build JimmyNext.wxs -ext WixToolset.Firewall.wixext -ext WixToolset.UI.wixext -arch x64 -o JimmyNext.msi
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JimmyTest-msi
-          path: Setup_WiX/JimmyTest.msi
+          name: JimmyNext-msi
+          path: Setup_WiX/JimmyNext.msi
           retention-days: 14

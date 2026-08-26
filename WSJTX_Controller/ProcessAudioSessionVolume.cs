@@ -7,7 +7,7 @@ namespace WSJTX_Controller
     // so Jimmy can read/set jimmy-engine-host.exe's own OS-level output and input session volume
     // directly, without the operator needing to find it themselves in the Windows Volume Mixer --
     // confirmed live, 2026-08-09: the process shows up there under its own raw, unfriendly
-    // filename ("jimmy-engine-host.exe"), not "Jimmy"/"Jimmy Test", since it has no embedded
+    // filename ("jimmy-engine-host.exe"), not "Jimmy"/"Jimmy Next", since it has no embedded
     // Windows version resource. This is a SEPARATE, real, functional control from
     // Engine::set_mic_gain (F11/F12): mic_gain scales the waveform digitally before the engine
     // ever hands samples to Windows; this scales AGAIN, afterward, as part of Windows' own

@@ -13,7 +13,7 @@
 //!     (kd9taw/Nexus src-tauri/src/lib.rs's `start_cluster_feeds`):
 //!       - RBN digital skimmer (`telnet.reversebeacon.net:7001` -- FT8/FT4/RTTY/PSK, the port
 //!         relevant to an FT8/FT4-only app; the CW-only port 7000 is deliberately not wired,
-//!         it would just add spots Jimmy Test's operator can't work). ALWAYS on, no operator
+//!         it would just add spots Jimmy Next's operator can't work). ALWAYS on, no operator
 //!         configuration needed -- official Nexus wires this unconditionally too ("the RBN CW +
 //!         digital skimmer feeds are wired automatically", Settings::default's own comment),
 //!         it needs only the operator's own callsign (already known at EngineHost startup),
@@ -24,7 +24,7 @@
 //!         federation of nodes), so it stays operator-configured (Options > Decode Engine,
 //!         `--dx-cluster host:port`), same convention as the Decode tab's other
 //!         non-live-settable options (NativeEngineClient.cs's own comment) -- changing it
-//!         requires restarting the native engine, which Jimmy Test already does for those.
+//!         requires restarting the native engine, which Jimmy Next already does for those.
 //!     Every spot is tagged `rbn: true`/`false` at the push site (DxSpot.Rbn) so the UI can
 //!     tell an automated skimmer spot from a human-typed one, same convention Nexus's own
 //!     `start_cluster_feed` uses.
@@ -46,7 +46,7 @@ const PSKR_MQTT_ADDR: &str = "mqtt.pskreporter.info:1883";
 /// RBN's digital skimmer port (FT8/FT4/RTTY/PSK) -- matches official Nexus's own
 /// `RBN_DIGITAL_HOST` constant (kd9taw/Nexus src-tauri/src/lib.rs), wired unconditionally
 /// there too. The CW-only port (7000, Nexus's `RBN_CW_HOST`) is deliberately not wired here --
-/// Jimmy Test is FT8/FT4-only, and CW skimmer spots aren't something its operator can work.
+/// Jimmy Next is FT8/FT4-only, and CW skimmer spots aren't something its operator can work.
 const RBN_DIGITAL_ADDR: &str = "telnet.reversebeacon.net:7001";
 /// Matches PropAdvisor's own default observation window (advisor.rs::AdvisorConfig::default) --
 /// the accumulation buffer must cover at least this much, so advise() never reads past what's

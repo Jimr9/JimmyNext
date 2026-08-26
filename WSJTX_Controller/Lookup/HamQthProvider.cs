@@ -39,7 +39,7 @@ namespace WSJTX_Controller
     // HamQTH callsign lookup, reached through EngineHost/Nexus (ExternalDataClient.LookupHamQth)
     // rather than a second direct HTTP client -- Nexus's tempo_core::hamqth already implements
     // the session-login + XML-parse logic well; this class only adds the caching/policy layer
-    // Jimmy Test needs, the same role QrzProvider plays for QRZ. Deliberately the same on-disk
+    // Jimmy Next needs, the same role QrzProvider plays for QRZ. Deliberately the same on-disk
     // cache shape (own XML file under LookupManager.DataRoot\HamQTH\) and the same
     // Configure/GetCached/NeedsLookup/LookupAsync/Contribute contract as QrzProvider, so
     // LookupManager's existing automatic-lookup/policy/queue machinery (built once for QRZ) can

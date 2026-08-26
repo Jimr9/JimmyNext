@@ -18,7 +18,7 @@ namespace WSJTX_Controller
     // ═══════════════════════════════════════════════════════════════════════════════════
     // UDP TRANSPORT REMOVED, 2026-08-18 (full cleanup pass, following the 2026-08-18
     // UDP-to-Direct test-harness migration that first made it provably unreachable). Jimmy
-    // Next's sole transport is Jimmy Test -> Direct (control port) -> EngineHost -> Nexus
+    // Next's sole transport is Jimmy Next -> Direct (control port) -> EngineHost -> Nexus
     // (WsjtxClient.Direct.cs); Controller.ApplyEngineMode() calls ConnectDirectEngine()
     // unconditionally, in production and in test mode alike. The classic WSJT-X UDP
     // dispatcher that used to live in this file (Update(), the Heartbeat/StatusMessage/
@@ -141,21 +141,20 @@ namespace WSJTX_Controller
             return true;
         }
 
-        // Live-testing finding, 2026-08-21: cmdPrompts' own canned prompt text (ShowStatus,
-        // WsjtxClient.Display.cs -- ", Control W for list or Alt N for next", etc.) hardcodes
-        // BEGINNER-mode-only concepts (the single callListBox and its own Ctrl+W, not Advanced
-        // Call Layout's separate TX1/TX2/Raw lists and their own Ctrl+1..4 navigation) -- letting
-        // this toggle (and its now-tied-together hotkey-name announcements, see
-        // Controller.RefreshHotkeyAccessibleNames) have any effect in advanced mode would be
-        // actively misleading, not just unnecessary. Gated the same way NavCallList/NavPending
-        // Count's own beginner-only restrictions are (Controller.cs).
+        // T2 fix, 2026-08-23 (CONFIRMED bug -- KJ5OUL log evidence, 2026-08-21): this used to
+        // refuse to toggle at all in Advanced Call Layout, announcing "Command prompts only
+        // apply outside Advanced Call Layout" -- incorrect per the required behavior: Alt+P DOES
+        // apply in Advanced UI, where it controls the button hotkey-label display only (see
+        // Controller.RefreshHotkeyAccessibleNames, itself already layout-agnostic). The ORIGINAL
+        // reasoning for blocking this outright was real (cmdPrompts' own canned status-text
+        // prompts -- ", Control W for list or Alt N for next", etc., ShowStatus() in
+        // WsjtxClient.Display.cs -- hardcode Beginner-mode-only concepts), but the fix for that
+        // is gating those specific prompt clauses on !ctrl.advancedCallLayout directly (done,
+        // see ShowStatus()'s own comment), not disabling cmdPrompts/Alt+P as a whole. cmdPrompts
+        // now safely drives ONLY the hotkey-label toggle while in Advanced UI, since the
+        // Beginner-only text is independently blocked regardless of this flag's value.
         public bool TogglePrompts()
         {
-            if (ctrl.advancedCallLayout)
-            {
-                StatusView.ShowMessage("Command prompts only apply outside Advanced Call Layout.", false);
-                return true;
-            }
             cmdPrompts = !cmdPrompts;
             promptsChanged = true;
             ctrl.RefreshHotkeyAccessibleNames();
@@ -378,6 +377,23 @@ namespace WSJTX_Controller
         {
             string bandLabel = freq > 0 ? (FreqToBandStr(freq / 1000.0 / 1e6) ?? $"{freq / 1000}kHz") : "none";
             DebugOutput($"{Time()} [BAND-AUDIT] SetBandTxFirst: caller:{caller} freq:{freq} band:{bandLabel} txFirst:{state} bandIdx:{bandIdx}");
+
+            // TX First/RX First fix, 2026-08-24 (independent audit finding, CONFIRMED live --
+            // Ctrl+F always announced "Tx first selected, halted", never "second", and the
+            // Advanced UI TX1/TX2 indication never changed either, no matter how many times the
+            // hotkey was pressed): under the classic UDP transport this method never wrote
+            // `txFirst` itself -- it sent a command to real WSJT-X and waited for ITS OWN
+            // confirming StatusMessage to report the new state back (see ToggleTxFirst's own,
+            // now-stale, "before WSJT-X confirms via StatusMessage" comment). That confirming
+            // StatusMessage doesn't exist under Direct-engine mode (no real WSJT-X in the loop at
+            // all), and nothing else ever took over writing `txFirst` when the classic UDP status
+            // handler was removed -- so the field was permanently stuck at its construction-time
+            // default (false) regardless of how many times ToggleTxFirst ran. `txFirst` is not
+            // cosmetic -- it's the pure Jimmy-side (this method's own header comment) TX-period
+            // decision every CALL_CQ xmit gate (IsCorrectTimePeriodForMode) and the call-queue's
+            // own opposite-period filtering (CallQueueStore.cs) actually read, so this was a real
+            // stuck-TX-period bug, not just a wrong announcement.
+            txFirst = state;
 
             if (freq > 0 && ctrl.Radio.Mode == RadioControlMode.HamlibRigctld)
                 DirectSetFrequency(freq, bandLabel, "USB", null);

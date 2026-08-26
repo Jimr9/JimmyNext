@@ -41,6 +41,7 @@ namespace WSJTX_Controller
             this.notificationsPanel = new System.Windows.Forms.Panel();
             this.soundsPanel = new System.Windows.Forms.Panel();
             this.appearancePanel = new System.Windows.Forms.Panel();
+            this.profilesPanel = new System.Windows.Forms.Panel();
             this.udpOnTopCheckBox = new System.Windows.Forms.CheckBox();
             this.udpDiagLogCheckBox = new System.Windows.Forms.CheckBox();
             this.filterGroupBox = new System.Windows.Forms.GroupBox();
@@ -78,6 +79,7 @@ namespace WSJTX_Controller
             this.notificationsPanel.SuspendLayout();
             this.soundsPanel.SuspendLayout();
             this.appearancePanel.SuspendLayout();
+            this.profilesPanel.SuspendLayout();
             this.SuspendLayout();
             //
             // _categoryListBox
@@ -111,7 +113,8 @@ namespace WSJTX_Controller
                 "Notifications",
                 "Logbook Sync",
                 "Lookup Data",
-                "Appearance"});
+                "Appearance",
+                "Profiles"});
             this._categoryListBox.Location = new System.Drawing.Point(0, 0);
             this._categoryListBox.Name = "_categoryListBox";
             this._categoryListBox.Size = new System.Drawing.Size(190, 380);
@@ -342,6 +345,13 @@ namespace WSJTX_Controller
             this.appearancePanel.AutoScroll = true;
             this.appearancePanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.appearancePanel.Name = "appearancePanel";
+            //
+            // profilesPanel
+            //
+            this.profilesPanel.AccessibleName = "Profiles";
+            this.profilesPanel.AutoScroll = true;
+            this.profilesPanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.profilesPanel.Name = "profilesPanel";
             //
             // logbookSyncPanel
             //
@@ -613,6 +623,13 @@ namespace WSJTX_Controller
             this.cancelButton.TabIndex = 2;
             this.cancelButton.Text = "Cancel";
             this.cancelButton.UseVisualStyleBackColor = true;
+            // T10A fix, 2026-08-23 (HIGHLY LIKELY bug): DialogResult.Cancel was never assigned
+            // to this button, and the form's own CancelButton property (below) was never set --
+            // OptionsDlg_KeyDown's Escape handler still closed the form correctly, but with no
+            // control registered as the form's real Cancel action, a focused child control could
+            // participate in Escape/default-button key processing on its own first, plausibly
+            // producing the reported Windows default beep even though the form still closed.
+            this.cancelButton.DialogResult = System.Windows.Forms.DialogResult.Cancel;
             this.cancelButton.Click += new System.EventHandler(this.cancelButton_Click);
             //
             // OptionsDlg
@@ -628,6 +645,9 @@ namespace WSJTX_Controller
             this.KeyPreview = true;
             this.MaximizeBox = false;
             this.MinimizeBox = false;
+            // T10A fix, 2026-08-23: see cancelButton's own comment above -- the form-level
+            // CancelButton property was never set at all.
+            this.CancelButton = this.cancelButton;
             this.Name = "OptionsDlg";
             this.Text = "Jimmy Options";
             this.FormClosing += new System.Windows.Forms.FormClosingEventHandler(this.OptionsDlg_FormClosing);
@@ -651,6 +671,7 @@ namespace WSJTX_Controller
             this.notificationsPanel.ResumeLayout(false);
             this.soundsPanel.ResumeLayout(false);
             this.appearancePanel.ResumeLayout(false);
+            this.profilesPanel.ResumeLayout(false);
             this.ResumeLayout(false);
         }
 
@@ -703,5 +724,6 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Panel logbookSyncPanel;
         private System.Windows.Forms.Panel lookupPanel;
         private System.Windows.Forms.Panel appearancePanel;
+        private System.Windows.Forms.Panel profilesPanel;
     }
 }

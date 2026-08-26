@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace WSJTX_Controller
 {
     // Reconciles a downloaded eQSL InBox ADIF (ExternalDataClient.DownloadEqsl) against
-    // Jimmy Test's own local logbook. Deliberately NOT AdifImporter.Import: that path (used
+    // Jimmy Next's own local logbook. Deliberately NOT AdifImporter.Import: that path (used
     // for QRZ/LoTW/Club Log downloads) treats the source as a full logbook and can create a
     // new local QSO row for anything it doesn't already have -- appropriate for "my own log,
     // downloaded from a service I uploaded to," wrong for an eQSL InBox, which is a set of
