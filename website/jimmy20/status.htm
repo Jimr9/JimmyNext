@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Jimmy Next — Project Status</title>
+<meta name="description" content="Private snapshot of GitHub activity for the Jimmy Next project.">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+<header class="site-header">
+  <div class="site-header-inner">
+    <a class="site-title" href="index.html">Jimmy Next</a>
+    <p class="site-tagline">Project status — not linked from the site, bookmark this page if you want to find it again</p>
+  </div>
+</header>
+
+<main id="main">
+  <h1>Project Status</h1>
+  <p class="lede">A private look at how Jimmy Next is doing on GitHub. Nothing here is linked from the public site — only visible to someone with this exact address.</p>
+
+  <h2>Release downloads</h2>
+  <p class="note">Live — pulled directly from GitHub each time this page loads.</p>
+  <div id="downloads-status" class="status loading">Loading…</div>
+  <table class="keys" id="downloads-table" style="display:none;">
+    <caption>Downloads per release (MSI installer)</caption>
+    <thead>
+      <tr><th>Release</th><th>Published</th><th>Downloads</th></tr>
+    </thead>
+    <tbody id="downloads-body"></tbody>
+  </table>
+  <dl class="kv" id="downloads-total" style="display:none;">
+    <dt>Total downloads, all releases</dt><dd id="downloads-total-value"></dd>
+  </dl>
+
+  <h2>Repository activity</h2>
+  <p class="note">Live — pulled directly from GitHub each time this page loads.</p>
+  <div id="activity-status" class="status loading">Loading…</div>
+  <dl class="kv" id="activity-kv" style="display:none;"></dl>
+
+  <h2>Repository traffic</h2>
+  <p class="note">GitHub only keeps 14 days of page-view and clone history — there's no way to pull a full "since day one" number, even for the repo owner. The figures below are a manually-taken snapshot, not live.</p>
+  <div class="card">
+    <p class="status">Snapshot taken August 26, 2026 (repo just created — expect zeros)</p>
+    <dl class="kv">
+      <dt>Page views (last 14 days)</dt><dd>0 (0 unique visitors)</dd>
+      <dt>Clones (last 14 days)</dt><dd>0 (0 unique cloners)</dd>
+    </dl>
+  </div>
+  <p class="note">Ask for a fresh snapshot any time and this section can be updated.</p>
+</main>
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <p><a href="https://github.com/Jimr9/JimmyNext">Source on GitHub</a></p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  fetch("https://api.github.com/repos/Jimr9/JimmyNext/releases?per_page=100")
+    .then(function (r) {
+      if (!r.ok) throw new Error("GitHub API returned " + r.status);
+      return r.json();
+    })
+    .then(function (releases) {
+      var body = document.getElementById("downloads-body");
+      var total = 0;
+      releases.forEach(function (rel) {
+        (rel.assets || []).forEach(function (asset) {
+          total += asset.download_count;
+          var tr = document.createElement("tr");
+          var published = rel.published_at ? rel.published_at.slice(0, 10) : "";
+          tr.innerHTML =
+            "<td>" + rel.tag_name + "</td>" +
+            "<td>" + published + "</td>" +
+            "<td>" + asset.download_count + "</td>";
+          body.appendChild(tr);
+        });
+      });
+      document.getElementById("downloads-status").style.display = "none";
+      document.getElementById("downloads-table").style.display = "";
+      document.getElementById("downloads-total").style.display = "";
+      document.getElementById("downloads-total-value").textContent = total;
+    })
+    .catch(function (err) {
+      var el = document.getElementById("downloads-status");
+      el.textContent = "Couldn't load live data from GitHub (" + err.message + "). Try again later, or check https://github.com/Jimr9/JimmyNext/releases directly.";
+      el.classList.remove("loading");
+    });
+
+  function addRow(dl, term, value) {
+    var dt = document.createElement("dt"); dt.textContent = term;
+    var dd = document.createElement("dd"); dd.textContent = value;
+    dl.appendChild(dt); dl.appendChild(dd);
+  }
+
+  // Total commit count isn't a direct field on the repo object -- GitHub exposes it
+  // only via pagination: asking for 1 commit per page and reading the "last" page
+  // number out of the Link response header gives the true total without fetching
+  // every commit.
+  function fetchCommitCount() {
+    return fetch("https://api.github.com/repos/Jimr9/JimmyNext/commits?per_page=1")
+      .then(function (r) {
+        if (!r.ok) throw new Error("commits API returned " + r.status);
+        var link = r.headers.get("Link");
+        if (!link) return 1; // no Link header means only one page exists
+        var match = link.match(/[?&]page=(\d+)>;\s*rel="last"/);
+        return match ? parseInt(match[1], 10) : 1;
+      });
+  }
+
+  Promise.all([
+    fetch("https://api.github.com/repos/Jimr9/JimmyNext").then(function (r) {
+      if (!r.ok) throw new Error("repo API returned " + r.status);
+      return r.json();
+    }),
+    fetchCommitCount()
+  ])
+    .then(function (results) {
+      var repo = results[0];
+      var commitCount = results[1];
+      var dl = document.getElementById("activity-kv");
+      addRow(dl, "Stars / Watchers / Forks", repo.stargazers_count + " / " + repo.subscribers_count + " / " + repo.forks_count);
+      addRow(dl, "Open issues", repo.open_issues_count);
+      addRow(dl, "Total commits (default branch)", commitCount);
+      addRow(dl, "Last pushed", repo.pushed_at ? repo.pushed_at.slice(0, 10) : "unknown");
+      addRow(dl, "Repository created", repo.created_at ? repo.created_at.slice(0, 10) : "unknown");
+      document.getElementById("activity-status").style.display = "none";
+      dl.style.display = "";
+    })
+    .catch(function (err) {
+      var el = document.getElementById("activity-status");
+      el.textContent = "Couldn't load live data from GitHub (" + err.message + "). Try again later, or check https://github.com/Jimr9/JimmyNext directly.";
+      el.classList.remove("loading");
+    });
+})();
+</script>
+</body>
+</html>
