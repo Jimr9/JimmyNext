@@ -7,7 +7,7 @@
     - A FRESH UpgradeCode (never reuse production's {D5415907-...}, nor the
       retired "Jimmy Test" flavor's {BFC5D246-...}); reusing either would make
       this a major upgrade of that product instead of a separate, coexisting
-      one -- Jimmy Next testers uninstall Jimmy Test manually first, they are
+      one; Jimmy Next testers uninstall Jimmy Test manually first, they are
       not upgraded in place.
     - Different shortcut names and HKCU registry key path (Software\KB0UZT\
       "Jimmy Next" instead of "Jimmy"), so the two installs' shortcuts/registry
@@ -20,7 +20,7 @@
       the production install's real settings/logbook database.
 
   Product  : Jimmy Next (WSJT-X Controller, public beta build)
-  Version  : 2.0.37
+  Version  : 2.0.38
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy Next\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
@@ -33,7 +33,7 @@
 
   <Package
     Name="Jimmy Next"
-    Version="2.0.37"
+    Version="2.0.38"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"
@@ -256,7 +256,7 @@
   </Fragment>
 
   <!-- Firewall exceptions: intentionally not added. See production Jimmy.wxs / the retired
-       Jimmy Test flavor's own history for why -- every listener either program can ever open
+       Jimmy Test flavor's own history for why; every listener either program can ever open
        in the actual packaged build is loopback-only (127.0.0.1), which Windows Firewall
        never filters and never prompts for. Nothing here needs LAN reachability. -->
 
