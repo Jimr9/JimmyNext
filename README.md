@@ -55,9 +55,8 @@ how Tilly, Nexus, and WSJT-X each fit into that history.
 
 Download the latest `JimmyNext.msi` (or `JimmyNext.msi.zip`) from the
 [Releases](https://github.com/jimr9/JimmyNext/releases/latest) page and run it. Jimmy Next
-installs side by side with production Jimmy if both are present — it uses its own install
-folder, its own settings/data location, and its own update channel, and will never upgrade,
-replace, or remove a production Jimmy install (or vice versa).
+uses its own install folder, its own settings/data location, and its own update channel, and
+will never upgrade, replace, or remove a production Jimmy install (or vice versa).
 
 ## Building from Source
 
