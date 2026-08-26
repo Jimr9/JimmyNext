@@ -316,6 +316,7 @@ static class JimmyTests
         EscapeCommandLineArgRoundTripsThroughRealWindowsArgvTests();
         PowerShellSingleQuoteLiteralRoundTripsThroughRealPowerShellTests();
         BeginnerModeOnlyAccessibilityTests();
+        CrashLoggerTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -9880,6 +9881,60 @@ static class JimmyTests
         {
             try { File.Delete(tmpDb); } catch { }
         }
+    }
+
+    // CrashLogger.Log has no test-mode path override (unlike LogbookDb/JIMMY_TEST_DB_PATH) --
+    // a crash log genuinely belongs at the real %LocalAppData%\Jimmy Next\log_crashes.txt
+    // location regardless of build flavor, so this test exercises that real path directly
+    // rather than an isolated copy. Records the file's length beforehand and only inspects
+    // what Log() actually appended, so a real crash logged earlier in this same session
+    // (or by a previous test run) can't make this test pass or fail for the wrong reason.
+    static void CrashLoggerTests()
+    {
+        Console.WriteLine("\n── CrashLogger.Log: writes exception details to log_crashes.txt ──");
+        // CrashLogger.Log's own internal Assembly.GetExecutingAssembly() resolves to
+        // wherever CrashLogger's IL actually lives (Jimmy Next.dll) regardless of who calls
+        // it -- using THIS test's own GetExecutingAssembly() here would resolve to
+        // JimmyTests.dll instead and silently check the wrong folder.
+        string logPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            typeof(CrashLogger).Assembly.GetName().Name, "log_crashes.txt");
+        long beforeLength = File.Exists(logPath) ? new FileInfo(logPath).Length : 0;
+
+        Exception thrown;
+        try
+        {
+            try { throw new InvalidOperationException("CrashLoggerTests inner exception"); }
+            catch (Exception inner) { throw new ApplicationException("CrashLoggerTests outer exception", inner); }
+        }
+        catch (Exception ex) { thrown = ex; }
+
+        CrashLogger.Log("CrashLoggerTests", thrown);
+
+        Check("log_crashes.txt exists after Log()", File.Exists(logPath), true);
+        if (!File.Exists(logPath)) return;
+
+        string appended;
+        using (var fs = new FileStream(logPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        {
+            fs.Seek(beforeLength, SeekOrigin.Begin);
+            using (var reader = new StreamReader(fs)) appended = reader.ReadToEnd();
+        }
+
+        Check("Logged text names the source passed to Log()", appended.Contains("UNHANDLED EXCEPTION (CrashLoggerTests)"), true);
+        Check("Logged text includes the outer exception's type", appended.Contains("ApplicationException"), true);
+        Check("Logged text includes the outer exception's message", appended.Contains("CrashLoggerTests outer exception"), true);
+        Check("Logged text marks the inner exception", appended.Contains("[Inner exception 1]"), true);
+        Check("Logged text includes the inner exception's type", appended.Contains("InvalidOperationException"), true);
+        Check("Logged text includes the inner exception's message", appended.Contains("CrashLoggerTests inner exception"), true);
+
+        // Log(null) for the exception must be a silent no-op, not a NullReferenceException --
+        // a defensive-programming guarantee for a handler that itself runs inside another
+        // unhandled-exception handler, where throwing again would be far worse than doing
+        // nothing.
+        bool threwOnNull = false;
+        try { CrashLogger.Log("null-exception guard", null); } catch { threwOnNull = true; }
+        Check("Log(null) does not throw", threwOnNull, false);
     }
 
     // Walks up from the test binary's directory looking for Jimmy.sln, then

@@ -30,6 +30,38 @@ namespace WSJTX_Controller
         [STAThread]
         static void Main()
         {
+            // Crash visibility, 2026-08-26: previously nothing here caught an unhandled
+            // exception at all, so a bug like the F4 Process.Start crash showed .NET's raw
+            // "JIT Debugging" dialog and left zero trace in any log -- a Support Report
+            // generated afterward had no record the crash even happened unless the operator
+            // thought to copy-paste the dialog text themselves. These three handlers cover
+            // the three places an exception can go unhandled: a WinForms event handler (UI
+            // thread), a background Task.Run that never gets awaited/observed, and anything
+            // else fatal. All three funnel into CrashLogger, which writes to its own
+            // log_crashes.txt regardless of the Diagnostic Log setting, named to match the
+            // "log_*.txt" pattern Create Support Report already scans -- so a crash now shows
+            // up in the next report automatically, no operator action required. Registered
+            // before anything else in Main() so even a startup-time exception is covered.
+            Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+            Application.ThreadException += (s, e) =>
+            {
+                CrashLogger.Log("UI thread", e.Exception);
+                MessageBox.Show(
+                    $"Jimmy Next hit an unexpected problem and logged the details (Help > Create Support Report to send them).{Environment.NewLine}{Environment.NewLine}" +
+                    $"You can keep going, but if things look wrong afterward, save your work and restart.{Environment.NewLine}{Environment.NewLine}" +
+                    e.Exception.Message,
+                    "Jimmy Next - Unexpected Problem",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            };
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+                CrashLogger.Log("background thread (fatal)", e.ExceptionObject as Exception);
+            TaskScheduler.UnobservedTaskException += (s, e) =>
+            {
+                CrashLogger.Log("unobserved task", e.Exception);
+                e.SetObserved();
+            };
+
             if (System.Diagnostics.Process.GetProcessesByName(System.IO.Path.GetFileNameWithoutExtension(System.Reflection.Assembly.GetEntryAssembly().Location)).Count() > 1)
             {
                 MessageBox.Show("An instance of this application is already running.");
