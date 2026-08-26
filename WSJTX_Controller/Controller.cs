@@ -1278,7 +1278,10 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    System.Diagnostics.Process.Start(msiPath);
+                    // UseShellExecute=true, explicit -- see verLabel2_Click's own comment. An
+                    // .msi isn't a directly-executable PE file either way; without shell
+                    // execution Windows has no association handler to hand it to msiexec.
+                    System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(msiPath) { UseShellExecute = true });
                 }
                 catch (Exception ex)
                 {
@@ -3682,7 +3685,19 @@ namespace WSJTX_Controller
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
                 ?.InformationalVersion ?? string.Empty;
             string command = "https://blindsea.com/jimmy20?v=" + Uri.EscapeDataString(ver);
-            System.Diagnostics.Process.Start(command);
+            try
+            {
+                // UseShellExecute=true, explicit: on .NET (Core) 5+, Process.Start(string) no
+                // longer implies shell execution the way it did on .NET Framework -- without
+                // this, launching a URL fails with Win32Exception "The system cannot find the
+                // file specified" because it tries to run the literal URL text as a program.
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(command) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not open the update page:{nl}{ex.Message}", "Update Check Failed",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
 
         private void ExcludeHelpLabel_Click(object sender, EventArgs e)
