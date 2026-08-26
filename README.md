@@ -68,7 +68,7 @@ To build the installer: `wix build -o Release\JimmyNext.msi JimmyNext.wxs` (from
 
 ## More Information
 
-- Discussion group: https://groups.io/g/tilly-beta/topics
+- Issues and discussion: https://github.com/Jimr9/JimmyNext/issues
 
 ## Acknowledgements
 
