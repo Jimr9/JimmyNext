@@ -1915,11 +1915,20 @@ namespace WSJTX_Controller
         // own frequency, not pick a quiet gap for Jimmy's own transmission). Fire-and-forget, same
         // as DirectSetDecodeDepth/DirectSetPskReporter above -- a dropped SET_TX_OFFSET just means
         // this particular Tx uses whatever offset the engine already had, not a safety concern.
-        public void DirectSetTxOffset(double hz)
+        //
+        // onComplete (audit finding 1, 2026-08-27): the manual frequency hotkeys pass a callback
+        // so they can announce the change only after the engine actually confirms it -- rather
+        // than speaking the requested value while EngineHost is restarting/unreachable and the
+        // marker never moved. true = the engine returned OK; false = ERR/timeout/no response.
+        // The automatic pre-reply placement still passes null (best-effort, doesn't announce a
+        // number). The dispatcher marshals onComplete onto the UI thread.
+        public void DirectSetTxOffset(double hz, Action<bool> onComplete = null)
         {
-            if (hz <= 0) return;
+            if (hz <= 0) { onComplete?.Invoke(false); return; }
             string arg = hz.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            EnqueueDirectCommand("SET_TX_OFFSET " + arg, null);
+            EnqueueDirectCommand("SET_TX_OFFSET " + arg,
+                onComplete == null ? (Action<string>)null
+                    : resp => onComplete(resp != null && resp.Length > 0 && !resp.StartsWith("ERR")));
         }
 
         // Companion to DirectSetTxOffset for the receive marker (Engine::set_rx_offset via the
@@ -1930,11 +1939,13 @@ namespace WSJTX_Controller
         // Hold/Best-mode reply and every caller-answers-our-CQ), and DirectSetTxOffset for the
         // TX side. Same fire-and-forget contract: a dropped one just leaves the marker where it
         // was for one more cycle. Engine clamps 200-4000 Hz.
-        public void DirectSetRxOffset(double hz)
+        public void DirectSetRxOffset(double hz, Action<bool> onComplete = null)
         {
-            if (hz <= 0) return;
+            if (hz <= 0) { onComplete?.Invoke(false); return; }
             string arg = hz.ToString(System.Globalization.CultureInfo.InvariantCulture);
-            EnqueueDirectCommand("SET_RX_OFFSET " + arg, null);
+            EnqueueDirectCommand("SET_RX_OFFSET " + arg,
+                onComplete == null ? (Action<string>)null
+                    : resp => onComplete(resp != null && resp.Length > 0 && !resp.StartsWith("ERR")));
         }
 
         // Alt+M (Toggle Mode) equivalent for direct-engine mode -- see SetOperatingMode's own

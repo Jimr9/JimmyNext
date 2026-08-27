@@ -223,6 +223,7 @@ static class JimmyTests
         RuleEngineBandOverrideIntersectEndToEndTests();
         RowFormatterBuildOrderedRowTests();
         ParseRowOrderTests();
+        HotkeyConfigNewActionConflictTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
@@ -9918,6 +9919,54 @@ static class JimmyTests
         Check("ParseRowOrder accepts 'freq' against the real allowed set",
               (Controller.ParseRowOrder("callp,snr,freq", RowDisplayOrderDlg.CallWaitingDefaultFields) ?? new List<string>())
                   .Contains("freq"), true);
+    }
+
+    // ── HotkeyConfig: a newer action whose default key an upgrade's saved hotkeys already use
+    //    is left unassigned, not silently double-bound (audit finding 3, 2026-08-27) ──
+    static void HotkeyConfigNewActionConflictTests()
+    {
+        Console.WriteLine("\n── HotkeyConfig: new frequency-shortcut default that collides with a saved binding ──");
+
+        string tmpIni = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "JimmyHotkeyConflictTest_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // Simulate an operator upgrading from a build with no frequency shortcuts who had
+            // remapped Quick Power / SWR Check onto Shift+F12 -- which is now TxFreqUp's default.
+            int shiftF12 = (int)(System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F12);
+            var seed = new IniFile(tmpIni);
+            seed.Write("PowerSwr", shiftF12.ToString(), "Hotkeys");
+
+            var cfg = new HotkeyConfig();
+            cfg.LoadFromIni(new IniFile(tmpIni));
+
+            Check("The operator's custom PowerSwr = Shift+F12 binding is kept",
+                cfg[HotkeyAction.PowerSwr] == (System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F12), true);
+            Check("TxFreqUp (whose default is now taken) is left unassigned, not double-bound",
+                cfg[HotkeyAction.TxFreqUp] == System.Windows.Forms.Keys.None, true);
+            Check("...and it's reported so Controller can tell the operator",
+                cfg.UnassignedDueToConflict.Contains(HotkeyAction.TxFreqUp), true);
+            Check("A frequency shortcut with no collision keeps its default",
+                cfg[HotkeyAction.RxFreqDown] == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F11), true);
+
+            // No conflicts at all -> nothing unassigned, empty report.
+            var clean = new HotkeyConfig();
+            clean.LoadFromIni(new IniFile(System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "JimmyHotkeyConflictTest_none_" + Guid.NewGuid().ToString("N") + ".ini")));
+            Check("Fresh install (no saved hotkeys): no frequency shortcut is unassigned",
+                clean.UnassignedDueToConflict.Count == 0, true);
+            Check("Fresh install: TxFreqUp has its Shift+F12 default",
+                clean[HotkeyAction.TxFreqUp] == (System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F12), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  HotkeyConfigNewActionConflictTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            try { System.IO.File.Delete(tmpIni); } catch { }
+        }
     }
 
     // ── RuleEngine: fixed single-band award restriction ([Match] Bands=) ────────

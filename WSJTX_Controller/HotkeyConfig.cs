@@ -30,6 +30,8 @@ namespace WSJTX_Controller
         AnnounceFreq,
         TxFreqUp,
         TxFreqDown,
+        RxFreqUp,
+        RxFreqDown,
         TxFromRx,
         RxFromTx,
         SetTxFreq,
@@ -89,13 +91,18 @@ namespace WSJTX_Controller
             [HotkeyAction.BandDown]        = Keys.Alt | Keys.PageDown,
             [HotkeyAction.ToggleMode]      = Keys.Alt | Keys.M,
             // Frequency Control -- accessible equivalents of dragging the waterfall markers.
-            // Alt+V / Alt+W were the last two free Alt-letters; the Rx/Tx moves use the
-            // Ctrl+Shift+arrow cluster (no conflict with any existing default).
+            // No arrow keys (screen readers own those) and no F10 (menu bar / Shift+F10 context
+            // menu). The F11/F12 family pairs with those two keys already being audio level
+            // down/up: F12 = up / transmit side, F11 = down / receive side; Shift nudges Tx,
+            // Ctrl+Shift nudges Rx, Ctrl snaps one marker to the other. Alt+V / Alt+W were the
+            // last two free Alt-letters. None of these collide with a Windows or JAWS/NVDA key.
             [HotkeyAction.AnnounceFreq]    = Keys.Alt | Keys.V,
-            [HotkeyAction.TxFreqUp]        = Keys.Control | Keys.Shift | Keys.Up,
-            [HotkeyAction.TxFreqDown]      = Keys.Control | Keys.Shift | Keys.Down,
-            [HotkeyAction.TxFromRx]        = Keys.Control | Keys.Shift | Keys.Left,
-            [HotkeyAction.RxFromTx]        = Keys.Control | Keys.Shift | Keys.Right,
+            [HotkeyAction.TxFreqUp]        = Keys.Shift | Keys.F12,
+            [HotkeyAction.TxFreqDown]      = Keys.Shift | Keys.F11,
+            [HotkeyAction.RxFreqUp]        = Keys.Control | Keys.Shift | Keys.F12,
+            [HotkeyAction.RxFreqDown]      = Keys.Control | Keys.Shift | Keys.F11,
+            [HotkeyAction.TxFromRx]        = Keys.Control | Keys.F12,
+            [HotkeyAction.RxFromTx]        = Keys.Control | Keys.F11,
             [HotkeyAction.SetTxFreq]       = Keys.Alt | Keys.W,
             [HotkeyAction.PSKReporter]     = Keys.Alt | Keys.R,
             [HotkeyAction.Prompts]         = Keys.Alt | Keys.P,
@@ -149,6 +156,8 @@ namespace WSJTX_Controller
             [HotkeyAction.AnnounceFreq]    = "Announce Rx / Tx Frequencies",
             [HotkeyAction.TxFreqUp]        = "Transmit Frequency Up",
             [HotkeyAction.TxFreqDown]      = "Transmit Frequency Down",
+            [HotkeyAction.RxFreqUp]        = "Receive Frequency Up",
+            [HotkeyAction.RxFreqDown]      = "Receive Frequency Down",
             [HotkeyAction.TxFromRx]        = "Set Transmit Frequency to Receive",
             [HotkeyAction.RxFromTx]        = "Set Receive Frequency to Transmit",
             [HotkeyAction.SetTxFreq]       = "Set Transmit Frequency...",
@@ -188,6 +197,16 @@ namespace WSJTX_Controller
             HotkeyAction.NavAdvTx2,
             HotkeyAction.NavAdvRaw,
             HotkeyAction.NavSpotWatch,
+            // Frequency-control shortcuts are all optional extras -- and the load-time conflict
+            // resolver (see LoadFromIni) can legitimately leave one unassigned.
+            HotkeyAction.AnnounceFreq,
+            HotkeyAction.TxFreqUp,
+            HotkeyAction.TxFreqDown,
+            HotkeyAction.RxFreqUp,
+            HotkeyAction.RxFreqDown,
+            HotkeyAction.TxFromRx,
+            HotkeyAction.RxFromTx,
+            HotkeyAction.SetTxFreq,
         };
 
         private static readonly HashSet<Keys> ReservedKeys = new HashSet<Keys>
@@ -201,6 +220,23 @@ namespace WSJTX_Controller
         };
 
         public Keys this[HotkeyAction action] => _keys[action];
+
+        // Actions added after the first public Jimmy Next betas (the frequency-control group).
+        // An install that predates them has no ini entry for these, so they take their new
+        // defaults -- which an operator's earlier custom binding may already occupy. When that
+        // happens LoadFromIni unassigns the NEW action rather than let two actions share a key
+        // (whichever ProcessCmdKey checks first would silently win). See UnassignedDueToConflict.
+        private static readonly HashSet<HotkeyAction> NewerActions = new HashSet<HotkeyAction>
+        {
+            HotkeyAction.AnnounceFreq, HotkeyAction.TxFreqUp, HotkeyAction.TxFreqDown,
+            HotkeyAction.RxFreqUp, HotkeyAction.RxFreqDown, HotkeyAction.TxFromRx,
+            HotkeyAction.RxFromTx, HotkeyAction.SetTxFreq,
+        };
+
+        // Populated by LoadFromIni: newer actions that were left unassigned because this
+        // install's saved hotkeys already used their default key. Controller surfaces this once
+        // at startup so the operator can rebind them in Options.
+        public readonly List<HotkeyAction> UnassignedDueToConflict = new List<HotkeyAction>();
 
         public HotkeyConfig()
         {
@@ -218,6 +254,22 @@ namespace WSJTX_Controller
                 Keys k = (Keys)val;
                 if (IsValid(k) && !IsReserved(k))
                     _keys[action] = k;
+            }
+
+            // Now that every stored binding is in place, drop any newer action whose (usually
+            // default) key collides with another action -- leave it unassigned, don't
+            // double-bind. Only the newer action yields; an existing/custom binding is never
+            // disturbed.
+            UnassignedDueToConflict.Clear();
+            foreach (HotkeyAction action in NewerActions)
+            {
+                Keys k = _keys[action];
+                if (k == Keys.None) continue;
+                if (FindConflict(k, action) != null)
+                {
+                    _keys[action] = Keys.None;
+                    UnassignedDueToConflict.Add(action);
+                }
             }
         }
 

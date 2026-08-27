@@ -1076,17 +1076,24 @@ namespace WSJTX_Controller
         // rxOffset are refreshed from the engine SNAPSHOT every Direct poll (WsjtxClient.
         // Direct.cs) and updated optimistically here so the spoken value is right immediately.
 
-        // WSJT-X-familiar coarse step for the Tx up/down hotkeys -- about one FT8 "lane" x10,
-        // enough to clear a caller in a press or two without overshooting a narrow gap.
-        public const int TxNudgeStepHz = 60;
+        // Default step for the Tx/Rx up/down hotkeys -- about one FT8 "lane" x10, enough to
+        // clear a caller in a press or two without overshooting a narrow gap. The operator can
+        // change it on the Transmit tab ("Frequency step"), MinFreqStepHz..MaxFreqStepHz.
+        public const int DefaultFreqStepHz = 60;
+        public const int MinFreqStepHz = 5;
+        public const int MaxFreqStepHz = 500;
         private const int MinAudioOffsetHz = 200;    // matches Engine::set_tx_offset's clamp
         private const int MaxAudioOffsetHz = 4000;
+
+        // The live step, from Options (clamped defensively in case the ini was hand-edited).
+        private int FreqStepHz => Math.Max(MinFreqStepHz, Math.Min(MaxFreqStepHz, ctrl.freqStepHz));
 
         public TxFreqMode TxFrequencyMode => ctrl.txFreqMode;
         public int CurrentTxOffsetHz => (int)txOffset;
         public int CurrentRxOffsetHz => (int)rxOffset;
         public int AudioOffsetMinHz => MinAudioOffsetHz;
         public int AudioOffsetMaxHz => MaxAudioOffsetHz;
+        public int CurrentFreqStepHz => FreqStepHz;
 
         // Options > Transmit "Transmit frequency" radio group changed. Re-selecting "Best free
         // frequency" is an explicit request for automatic placement again, so it clears any
@@ -1100,9 +1107,11 @@ namespace WSJTX_Controller
 
         private int ClampAudioOffset(int hz) => Math.Max(MinAudioOffsetHz, Math.Min(MaxAudioOffsetHz, hz));
 
-        // Shared by every manual Tx-frequency hotkey: send it to the engine, remember it
-        // optimistically, mark this CQ/QSO as operator-placed (suppresses the automatic
-        // best-free pick until Halt / QSO end / band / mode change), and speak it.
+        // Shared by every manual Tx-frequency hotkey. Marks this CQ/QSO as operator-placed
+        // (suppresses the automatic best-free pick until Halt / QSO end / band / mode change),
+        // sends the change, and -- audit finding 1, 2026-08-27 -- speaks the result only after
+        // the engine confirms it, so a change that never landed (EngineHost restarting /
+        // unreachable) is announced as such rather than as success.
         private void ApplyManualTxOffset(int hz, string prefix)
         {
             if (!_directConnected)
@@ -1111,40 +1120,73 @@ namespace WSJTX_Controller
                 return;
             }
             int clamped = ClampAudioOffset(hz);
-            txOffset = (uint)clamped;
             _manualFreqThisQso = true;
-            DirectSetTxOffset(clamped);
-            DebugOutput($"{Time()} {prefix}: manual txOffset:{clamped} _manualFreqThisQso:true");
-            StatusView.ShowMessage($"{prefix} {clamped} hertz", false);
+            DebugOutput($"{Time()} {prefix}: manual txOffset request:{clamped} _manualFreqThisQso:true");
+            DirectSetTxOffset(clamped, ok =>
+            {
+                if (ok)
+                {
+                    txOffset = (uint)clamped;
+                    StatusView.ShowMessage($"{prefix} {clamped} hertz", false);
+                }
+                else
+                {
+                    StatusView.ShowMessage($"{prefix} frequency change not confirmed -- engine not responding", false);
+                }
+            });
         }
 
-        // Ctrl+Shift+Up / Ctrl+Shift+Down -- move Tx by TxNudgeStepHz.
-        public bool NudgeTxFrequency(int steps)
-        {
-            int baseHz = txOffset > 0 ? (int)txOffset : 1500;
-            ApplyManualTxOffset(baseHz + steps * TxNudgeStepHz, "Transmit");
-            return true;
-        }
-
-        // Ctrl+Shift+Right -- "Rx <- Tx": set the receive frequency equal to the transmit
-        // frequency (WSJT-X's Rx<-Tx button). Does not touch Tx, so it is not a manual Tx
-        // override.
-        public bool SetRxFromTx()
+        // Same as ApplyManualTxOffset for the receive marker. Moving Rx is "follow the station"
+        // intent, not a Tx placement, so it does NOT set _manualFreqThisQso.
+        private void ApplyManualRxOffset(int hz)
         {
             if (!_directConnected)
             {
                 StatusView.ShowMessage("Receive frequency needs the native engine, which isn't currently reachable.", false);
-                return true;
+                return;
             }
-            int hz = ClampAudioOffset(txOffset > 0 ? (int)txOffset : 1500);
-            rxOffset = (uint)hz;
-            DirectSetRxOffset(hz);
-            StatusView.ShowMessage($"Receive {hz} hertz", false);
+            int clamped = ClampAudioOffset(hz);
+            DebugOutput($"{Time()} Receive: manual rxOffset request:{clamped}");
+            DirectSetRxOffset(clamped, ok =>
+            {
+                if (ok)
+                {
+                    rxOffset = (uint)clamped;
+                    StatusView.ShowMessage($"Receive {clamped} hertz", false);
+                }
+                else
+                {
+                    StatusView.ShowMessage("Receive frequency change not confirmed -- engine not responding", false);
+                }
+            });
+        }
+
+        // Shift+F12 / Shift+F11 -- move Tx by the configured Frequency step.
+        public bool NudgeTxFrequency(int steps)
+        {
+            int baseHz = txOffset > 0 ? (int)txOffset : 1500;
+            ApplyManualTxOffset(baseHz + steps * FreqStepHz, "Transmit");
             return true;
         }
 
-        // Ctrl+Shift+Left -- "Tx <- Rx": set the transmit frequency equal to the current
-        // receive frequency (WSJT-X's Tx<-Rx button). This IS a deliberate manual Tx placement.
+        // Ctrl+Shift+F12 / Ctrl+Shift+F11 -- move Rx by the configured Frequency step.
+        public bool NudgeRxFrequency(int steps)
+        {
+            int baseHz = rxOffset > 0 ? (int)rxOffset : 1500;
+            ApplyManualRxOffset(baseHz + steps * FreqStepHz);
+            return true;
+        }
+
+        // Ctrl+F11 -- "Rx <- Tx": set the receive frequency equal to the transmit frequency
+        // (WSJT-X's Rx<-Tx button). Does not touch Tx, so it is not a manual Tx override.
+        public bool SetRxFromTx()
+        {
+            ApplyManualRxOffset(txOffset > 0 ? (int)txOffset : 1500);
+            return true;
+        }
+
+        // Ctrl+F12 -- "Tx <- Rx": set the transmit frequency equal to the current receive
+        // frequency (WSJT-X's Tx<-Rx button). This IS a deliberate manual Tx placement.
         public bool SetTxFromRx()
         {
             int hz = rxOffset > 0 ? (int)rxOffset : (txOffset > 0 ? (int)txOffset : 1500);

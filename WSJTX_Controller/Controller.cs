@@ -34,6 +34,9 @@ namespace WSJTX_Controller
         // WsjtxClient.TxFreqMode). Persisted as ini "txFreqMode"; "bestOffset" still written
         // too so nothing downstream that keys off it changes.
         public WsjtxClient.TxFreqMode txFreqMode = WsjtxClient.TxFreqMode.BestFree;
+        // Options > Transmit "Frequency step (Hz)" -- how far the Tx/Rx frequency nudge hotkeys
+        // move per press. Persisted as ini "freqStepHz"; clamped MinFreqStepHz..MaxFreqStepHz.
+        public int freqStepHz = WsjtxClient.DefaultFreqStepHz;
         // Advanced Call Layout display flags now live in Settings (JimmySettings.cs) so
         // they're unit-testable outside a live Form. These are thin pass-through
         // properties, kept under the original field names so the ~65 existing call
@@ -678,6 +681,8 @@ namespace WSJTX_Controller
                 // exactly what the unchecked box always did (no SET_TX_OFFSET, Tx stays put).
                 txFreqMode = ParseTxFreqMode(iniFile.Read("txFreqMode"), freqCheckBox.Checked);
                 freqCheckBox.Checked = txFreqMode == WsjtxClient.TxFreqMode.BestFree;
+                if (int.TryParse(iniFile.Read("freqStepHz"), out int fsh))
+                    freqStepHz = Math.Max(WsjtxClient.MinFreqStepHz, Math.Min(WsjtxClient.MaxFreqStepHz, fsh));
                 replyRR73CheckBox.Checked = iniFile.Read("replyRR73") == "True";
                 cmdPrompts = iniFile.Read("cmdPrompts") != "False";     //default: true
 
@@ -1225,6 +1230,20 @@ namespace WSJTX_Controller
             {
                 _ = CheckForUpdateOnStartupAsync();
             }
+
+            // Rx/Tx frequency-control follow-up, 2026-08-27 (audit finding 3): when this
+            // install's saved hotkeys already claimed a key that one of the newer frequency
+            // shortcuts defaults to, HotkeyConfig.LoadFromIni left the new shortcut UNassigned
+            // rather than silently double-binding. Tell the operator once, so they can set it
+            // themselves in Options > Hotkeys.
+            if (hotkeyConfig != null && hotkeyConfig.UnassignedDueToConflict.Count > 0)
+            {
+                var names = hotkeyConfig.UnassignedDueToConflict
+                    .Select(a => HotkeyConfig.DisplayNames.TryGetValue(a, out var n) ? n : a.ToString());
+                this.BeginInvoke(new Action(() => ShowMsg(
+                    $"New shortcut(s) left unassigned because your custom keys already use them: {string.Join(", ", names)}. Set them in Options, Hotkeys.",
+                    false)));
+            }
         }
 
         // Independent audit finding 8, 2026-08-23 (LIKELY bug, MEDIUM/LOW PRIORITY): a
@@ -1373,6 +1392,7 @@ namespace WSJTX_Controller
                 // txMode startup is always LISTEN; not persisted across sessions
                 iniFile.Write("bestOffset", freqCheckBox.Checked.ToString());
                 iniFile.Write("txFreqMode", txFreqMode.ToString());
+                iniFile.Write("freqStepHz", freqStepHz.ToString());
                 iniFile.Write("optimizeTx", optimizeCheckBox.Checked.ToString());
                 if (exceptTextBox.Text == separateBySpaces) exceptTextBox.Clear();
                 iniFile.Write("exceptCalls", exceptTextBox.Text.Trim());
@@ -2276,6 +2296,10 @@ namespace WSJTX_Controller
                 return wsjtxClient.NudgeTxFrequency(+1);
             if (keyData == hotkeyConfig[HotkeyAction.TxFreqDown] && hotkeyConfig[HotkeyAction.TxFreqDown] != Keys.None)
                 return wsjtxClient.NudgeTxFrequency(-1);
+            if (keyData == hotkeyConfig[HotkeyAction.RxFreqUp] && hotkeyConfig[HotkeyAction.RxFreqUp] != Keys.None)
+                return wsjtxClient.NudgeRxFrequency(+1);
+            if (keyData == hotkeyConfig[HotkeyAction.RxFreqDown] && hotkeyConfig[HotkeyAction.RxFreqDown] != Keys.None)
+                return wsjtxClient.NudgeRxFrequency(-1);
             if (keyData == hotkeyConfig[HotkeyAction.TxFromRx] && hotkeyConfig[HotkeyAction.TxFromRx] != Keys.None)
                 return wsjtxClient.SetTxFromRx();
             if (keyData == hotkeyConfig[HotkeyAction.RxFromTx] && hotkeyConfig[HotkeyAction.RxFromTx] != Keys.None)
@@ -3795,7 +3819,8 @@ namespace WSJTX_Controller
                 $"{nl}{K(HotkeyAction.BandUp)}: Select next higher band." +
                 $"{nl}{K(HotkeyAction.BandDown)}: Select next lower band." +
                 $"{nl}{K(HotkeyAction.AnnounceFreq)}: Announce current receive and transmit audio frequencies and mode." +
-                $"{nl}{K(HotkeyAction.TxFreqUp)} / {K(HotkeyAction.TxFreqDown)}: Move transmit audio frequency up / down {WsjtxClient.TxNudgeStepHz} Hz." +
+                $"{nl}{K(HotkeyAction.TxFreqUp)} / {K(HotkeyAction.TxFreqDown)}: Move transmit audio frequency up / down (step set on the Transmit tab, default {WsjtxClient.DefaultFreqStepHz} Hz)." +
+                $"{nl}{K(HotkeyAction.RxFreqUp)} / {K(HotkeyAction.RxFreqDown)}: Move receive audio frequency up / down by the same step." +
                 $"{nl}{K(HotkeyAction.TxFromRx)}: Set transmit frequency to the current receive frequency." +
                 $"{nl}{K(HotkeyAction.RxFromTx)}: Set receive frequency to the current transmit frequency." +
                 $"{nl}{K(HotkeyAction.SetTxFreq)}: Set the transmit audio frequency to an exact value." +
@@ -5210,7 +5235,7 @@ namespace WSJTX_Controller
                 wsjtxClient.CurrentTxOffsetHz,
                 wsjtxClient.AudioOffsetMinHz,
                 wsjtxClient.AudioOffsetMaxHz,
-                WsjtxClient.TxNudgeStepHz))
+                wsjtxClient.CurrentFreqStepHz))
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 wsjtxClient.SetTxFrequencyHz(dlg.Hz);

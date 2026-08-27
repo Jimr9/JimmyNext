@@ -617,6 +617,38 @@ namespace WSJTX_Controller
             }
         }
 
+        // Best-effort "stop transmitting NOW" for the unhandled-exception path (Program.cs,
+        // audit finding 2, 2026-08-27). After an unhandled UI exception Jimmy's own state is
+        // unreliable, so this deliberately does NOT go through the live WsjtxClient / ordered
+        // dispatcher -- it opens a fresh raw socket straight to the engine's fixed control port
+        // and sends one HALT_TX line, bounded hard so a hung/absent engine can't stall the
+        // crash dialog. Whatever the engine was transmitting (an active CQ or QSO over) stops
+        // at the next slot boundary instead of continuing while the operator reads the dialog.
+        // Returns true only if the line was actually written; everything is swallowed.
+        public static bool TryEmergencyHaltTx()
+        {
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    if (!connectTask.Wait(500) || !client.Connected) return false;
+                    using (var stream = client.GetStream())
+                    {
+                        stream.WriteTimeout = 500;
+                        byte[] cmd = System.Text.Encoding.ASCII.GetBytes("HALT_TX\n");
+                        stream.Write(cmd, 0, cmd.Length);
+                        stream.Flush();
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         // How long to wait for the killed process (and, via its own Job Object, its child
         // rigctld) to actually release its COM port and rigctld TCP port before Stop() returns.
         private const int StopWaitMs = 3000;

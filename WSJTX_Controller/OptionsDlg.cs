@@ -3638,7 +3638,7 @@ namespace WSJTX_Controller
             // ComboBox keeps the same one-line footprint the checkbox had and reads cleanly
             // under a screen reader. WSJT-X/Nexus-familiar wording.
             BuildTxFreqModeCombo();
-            ReparentTo(ctrl.AutoFreqHelpLabel,  rcvTransmitGroupBox, new Point(330, 18));
+            ReparentTo(ctrl.AutoFreqHelpLabel,  rcvTransmitGroupBox, new Point(465, 18));
             ReparentTo(ctrl.skipGridCheckBox,   rcvTransmitGroupBox, new Point(10, 40));
             ReparentTo(ctrl.useRR73CheckBox,    rcvTransmitGroupBox, new Point(110, 40));
             ReparentTo(ctrl.logEarlyCheckBox,   rcvTransmitGroupBox, new Point(10, 62));
@@ -3659,6 +3659,8 @@ namespace WSJTX_Controller
 
         private System.Windows.Forms.Label _txFreqModeLabel;
         private System.Windows.Forms.ComboBox _txFreqModeCombo;
+        private System.Windows.Forms.Label _freqStepLabel;
+        private System.Windows.Forms.NumericUpDown _freqStepUpDown;
 
         // "Transmit frequency:" chooser on the Transmit tab. OptionsDlg-owned (not a reparented
         // Controller control) -- created fresh each time Options opens, torn down on close.
@@ -3669,8 +3671,12 @@ namespace WSJTX_Controller
             {
                 rcvTransmitGroupBox.Controls.Remove(_txFreqModeLabel);
                 rcvTransmitGroupBox.Controls.Remove(_txFreqModeCombo);
+                rcvTransmitGroupBox.Controls.Remove(_freqStepLabel);
+                rcvTransmitGroupBox.Controls.Remove(_freqStepUpDown);
                 _txFreqModeLabel.Dispose();
                 _txFreqModeCombo.Dispose();
+                _freqStepLabel.Dispose();
+                _freqStepUpDown.Dispose();
             }
 
             _txFreqModeLabel = new System.Windows.Forms.Label
@@ -3701,8 +3707,31 @@ namespace WSJTX_Controller
                 ctrl.SetTxFreqMode(mode);
             };
 
+            // "Frequency step (Hz)" -- how far the Tx/Rx frequency nudge hotkeys move per press.
+            _freqStepLabel = new System.Windows.Forms.Label
+            {
+                Text = "Step (Hz):",
+                Location = new Point(330, 19),
+                AutoSize = true,
+                Font = rcvTransmitGroupBox.Font,
+            };
+            _freqStepUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Location = new Point(395, 15),
+                Size = new Size(58, 21),
+                Minimum = WsjtxClient.MinFreqStepHz,
+                Maximum = WsjtxClient.MaxFreqStepHz,
+                Increment = 5,
+                Font = rcvTransmitGroupBox.Font,
+                AccessibleName = "Frequency step in hertz",
+                Value = Math.Max(WsjtxClient.MinFreqStepHz, Math.Min(WsjtxClient.MaxFreqStepHz, ctrl.freqStepHz)),
+            };
+            _freqStepUpDown.ValueChanged += (s, e) => ctrl.freqStepHz = (int)_freqStepUpDown.Value;
+
             rcvTransmitGroupBox.Controls.Add(_txFreqModeLabel);
             rcvTransmitGroupBox.Controls.Add(_txFreqModeCombo);
+            rcvTransmitGroupBox.Controls.Add(_freqStepLabel);
+            rcvTransmitGroupBox.Controls.Add(_freqStepUpDown);
         }
 
         private void ReparentTo(Control c, Control newParent, Point newLocation)
@@ -3737,10 +3766,16 @@ namespace WSJTX_Controller
             {
                 rcvTransmitGroupBox.Controls.Remove(_txFreqModeLabel);
                 rcvTransmitGroupBox.Controls.Remove(_txFreqModeCombo);
+                rcvTransmitGroupBox.Controls.Remove(_freqStepLabel);
+                rcvTransmitGroupBox.Controls.Remove(_freqStepUpDown);
                 _txFreqModeLabel.Dispose();
                 _txFreqModeCombo.Dispose();
+                _freqStepLabel.Dispose();
+                _freqStepUpDown.Dispose();
                 _txFreqModeLabel = null;
                 _txFreqModeCombo = null;
+                _freqStepLabel = null;
+                _freqStepUpDown = null;
             }
         }
 
@@ -4022,6 +4057,8 @@ namespace WSJTX_Controller
                 HotkeyAction.AnnounceFreq,
                 HotkeyAction.TxFreqUp,
                 HotkeyAction.TxFreqDown,
+                HotkeyAction.RxFreqUp,
+                HotkeyAction.RxFreqDown,
                 HotkeyAction.TxFromRx,
                 HotkeyAction.RxFromTx,
                 HotkeyAction.SetTxFreq,

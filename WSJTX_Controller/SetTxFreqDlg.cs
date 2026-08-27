@@ -8,7 +8,7 @@ namespace WSJTX_Controller
     // accessible equivalent of dragging the red waterfall marker to a specific spot. Mirrors
     // ManualCallDlg's hand-coded small-Form pattern (no Designer file) -- one labelled
     // NumericUpDown, OK / Cancel, Enter accepts. Range/step match Engine::set_tx_offset's own
-    // 200-4000 Hz passband clamp and WsjtxClient.TxNudgeStepHz.
+    // 200-4000 Hz passband clamp and the Options "Frequency step (Hz)" value.
     internal class SetTxFreqDlg : Form
     {
         private readonly NumericUpDown _hzUpDown;

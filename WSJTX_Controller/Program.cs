@@ -46,16 +46,26 @@ namespace WSJTX_Controller
             Application.ThreadException += (s, e) =>
             {
                 CrashLogger.Log("UI thread", e.Exception);
+                // Audit finding 2, 2026-08-27: Nexus/EngineHost transmits independently of
+                // Jimmy's UI, so an active CQ or QSO would keep going on the air while this
+                // dialog sits open and Jimmy's own state is unreliable. Best-effort halt first
+                // (raw socket, bounded -- never touches the possibly-corrupt WsjtxClient).
+                bool halted = NativeEngineClient.TryEmergencyHaltTx();
                 MessageBox.Show(
                     $"Jimmy Next hit an unexpected problem and logged the details (Help > Create Support Report to send them).{Environment.NewLine}{Environment.NewLine}" +
-                    $"You can keep going, but if things look wrong afterward, save your work and restart.{Environment.NewLine}{Environment.NewLine}" +
+                    (halted
+                        ? $"Transmit has been halted as a precaution. It is safest to restart Jimmy Next now.{Environment.NewLine}{Environment.NewLine}"
+                        : $"If the radio may still be transmitting, press Escape, and it is safest to restart Jimmy Next now.{Environment.NewLine}{Environment.NewLine}") +
                     e.Exception.Message,
                     "Jimmy Next - Unexpected Problem",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning);
             };
             AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                NativeEngineClient.TryEmergencyHaltTx();
                 CrashLogger.Log("background thread (fatal)", e.ExceptionObject as Exception);
+            };
             TaskScheduler.UnobservedTaskException += (s, e) =>
             {
                 CrashLogger.Log("unobserved task", e.Exception);
