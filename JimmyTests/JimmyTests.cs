@@ -293,6 +293,7 @@ static class JimmyTests
         HaltConfirmsStoppedStateViaFollowUpSnapshotTests();
         HaltDoesNotConfirmWhenStillTransmittingTests();
         RejectedReplyPreservesQueuedStationTests();
+        RxTxFrequencyModeReplyTests();
         SessionTokenAuthenticationTests();
         RepeatLimitActivelyStopsTxTests();
         CompletedQsoRemovesStaleQueueStateTests();
@@ -7405,17 +7406,17 @@ static class JimmyTests
             delivery.AnnounceCount == beforeSwitch + 1, true);
     }
 
-    // ── UDP-to-Direct parity pass, 2026-08-12: Tx-hold safety net ported to Direct mode ──
-    // The UDP path's ProcessTxEnd (WsjtxClient.cs) has always disabled Tx once too many
-    // consecutive Hold-mode transmit cycles pass with no reply (consecTxCount/
-    // maxConsecTxCount), then automatically re-enables it a couple of periods later
-    // (CheckNextXmit's ENABLED->ACTIVE->DISABLED progression). Direct mode had neither half at
-    // all before this pass -- a UDP-vs-Direct parity audit found the gap. Drives the real
-    // DirectApplyStatus/DirectApplyDecodes pipeline via TestApplyDirectSnapshot, same as the
-    // clock-sync tests above, rather than reaching into private state directly.
+    // ── Rx/Tx frequency control, 2026-08-27: Tx stays stable during an active contact ──
+    // The old behavior (removed): after maxConsecTxCount consecutive transmit cycles with no
+    // reply (while the retired "Extended Timeout" was on), Direct mode disabled Tx and re-ran
+    // the best-free-frequency analysis, moving the operator's transmit slot mid-QSO. Both that
+    // re-pick and the Extended Timeout / "Hold" checkbox itself are now gone -- automatic
+    // best-frequency selection happens ONLY at the start of a CQ or a reply. This test guards
+    // that: consecTxCount still counts (debug/status only) but must NEVER trip auto-freq-pause,
+    // however long a station stays silent. Drives the real DirectApplyStatus pipeline.
     static void DirectTxHoldSafetyNetTests()
     {
-        Console.WriteLine("\n── Direct-path Tx-hold safety net (consecTxCount/auto-freq-pause) ──");
+        Console.WriteLine("\n── Rx/Tx frequency control: Tx stays put during a contact (no mid-QSO re-pick) ──");
 
         var ctrl = new Controller();
         ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
@@ -7426,11 +7427,7 @@ static class JimmyTests
         ctrl.anyMsgRadioButton.Checked = true;
         ctrl.replyDxCheckBox.Checked = true;
         ctrl.replyLocalCheckBox.Checked = true;
-        // Both gates the real UDP-side consecTxCount block requires -- the safety net is
-        // deliberately Hold-mode-specific (see ProcessTxEnd's own comment on why an ordinary
-        // S&P reply must never count toward this).
-        ctrl.holdCheckBox.Checked = true;
-        ctrl.freqCheckBox.Checked = true;
+        ctrl.freqCheckBox.Checked = true;   // "Best free frequency" mode active
 
         const string myCall = "KB0UZT";
         const string myGrid = "FN42";
@@ -7452,53 +7449,26 @@ static class JimmyTests
         ApplyTransmitting(false);
         Check("Setup: auto-freq-pause starts disabled", wc.TestAutoFreqPauseDisabled, true);
 
-        // 11 full transmitting-cycles (true then false) -- one short of the 12-cycle trip --
-        // must NOT disable Tx yet.
-        for (int i = 0; i < 11; i++)
+        // A long string of unanswered transmit cycles (well past the old 12-cycle trip point),
+        // with "Best free frequency" active, must NEVER disable Tx or start a frequency re-pick.
+        for (int i = 0; i < 30; i++)
         {
             ApplyTransmitting(true);
             ApplyTransmitting(false);
         }
-        Check("11 consecutive Hold-mode Tx cycles with no reply -> not yet tripped",
+        Check("30 consecutive unanswered Tx cycles -> auto-freq-pause still disabled (Tx stays put)",
             wc.TestAutoFreqPauseDisabled, true);
-        Check("...consecTxCount reads 11", wc.TestConsecTxCount == 11, true);
+        Check("...consecTxCount still tracks the run (reads 30)", wc.TestConsecTxCount == 30, true);
 
-        // The 12th cycle trips it.
-        ApplyTransmitting(true);
-        ApplyTransmitting(false);
-        Check("12th consecutive Hold-mode Tx cycle -> auto-freq-pause trips (Tx disabled)",
-            !wc.TestAutoFreqPauseDisabled, true);
-
-        // Any decode heard FROM the calling station resets consecTxCount before it ever gets
-        // this far in real operation (ProcessDecodeMsg, WsjtxClient.cs) -- not re-tested here,
-        // that reset is shared/transport-agnostic code already exercised elsewhere; this test
-        // is specifically about the counting/trip/recovery mechanism itself.
-
-        // Recovery: the next new-slot boundary (DirectApplyDecodes) must move ENABLED -> ACTIVE,
-        // not straight back to DISABLED -- mirrors CheckNextXmit's own two-step progression.
-        slot++;
-        ApplyTransmitting(false);
-        Check("One period after tripping -> auto-freq-pause is ACTIVE, not yet cleared",
-            !wc.TestAutoFreqPauseDisabled, true);
-
-        // The period after THAT clears it and resets every counter (DisableAutoFreqPause()).
-        slot++;
-        ApplyTransmitting(false);
-        Check("Two periods after tripping -> auto-freq-pause clears (Tx protection lifted)",
-            wc.TestAutoFreqPauseDisabled, true);
-        Check("...consecTxCount reset to 0", wc.TestConsecTxCount == 0, true);
-
-        // Turning Hold off (or the freq-pause checkbox off) must mean ordinary transmit cycles
-        // never count at all -- matches the UDP path's own "else consecTxCount = 0" branch.
-        ctrl.holdCheckBox.Checked = false;
+        // Even more unanswered cycles -- still nothing. There is no longer any counter,
+        // checkbox, or hotkey that turns a long silent run into a frequency change.
         for (int i = 0; i < 20; i++)
         {
-            slot++;
             ApplyTransmitting(true);
             ApplyTransmitting(false);
         }
-        Check("Hold mode off -> ordinary Tx cycles never count toward the safety net",
-            wc.TestConsecTxCount == 0 && wc.TestAutoFreqPauseDisabled, true);
+        Check("50 unanswered cycles total -> auto-freq-pause still fully disabled",
+            wc.TestAutoFreqPauseDisabled, true);
     }
 
     // ── Codex Audit 03 release blocker #1 regression test: HALT purges a queued CALL_CQ ──
@@ -7810,6 +7780,108 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  RejectedReplyPreservesQueuedStationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            engineListener.Stop();
+        }
+    }
+
+    // ── Rx/Tx frequency control, 2026-08-27: where a reply transmits and receives, per the
+    // "Transmit frequency" mode, and the caller-answers-our-CQ special case ──
+    // Drives the real ReplyTo path (NextCall -> dialogTimer2_Tick) against a command-capturing
+    // stub engine host and asserts the exact SET_RX_OFFSET / SET_TX_OFFSET commands Jimmy
+    // emits. REPLY's dxFreqHz must always be null (Jimmy owns every offset move explicitly).
+    static void RxTxFrequencyModeReplyTests()
+    {
+        Console.WriteLine("\n── Rx/Tx frequency control: reply placement per Transmit-frequency mode ──");
+
+        var seen = new System.Collections.Generic.List<string>();
+        var seenLock = new object();
+        var engineListener = StartStubEngineHostWithResponses(line =>
+        {
+            lock (seenLock) seen.Add(line);
+            return "OK";
+        });
+        if (engineListener == null)
+        {
+            Skip("RxTxFrequencyModeReplyTests", "control port 58239 already in use by another Jimmy/engine-host session");
+            return;
+        }
+        try
+        {
+            const int theirHz = 1234;
+
+            // Runs one reply to `message` in `mode`, returns the commands the stub saw.
+            System.Collections.Generic.List<string> RunReply(WsjtxClient.TxFreqMode mode, string message, string curCmd)
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.txFreqMode = mode;
+                ctrl.freqCheckBox.Checked = mode == WsjtxClient.TxFreqMode.BestFree;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.ConnectDirectEngine("KB0UZT", "FN42");
+                wc.TestStopPollTimer();
+                wc.TestSetBestOffsets(2500, 2500);   // so BestFree has a slot to send
+                if (curCmd != null) wc.TestSetCurCmd(curCmd);
+
+                const string call = "9V1SH";
+                var dmsg = new EnqueueDecodeMessage
+                {
+                    Message = message,
+                    Snr = -10,
+                    DeltaFrequency = theirHz,
+                    AutoGen = true,
+                    RxDate = DateTime.UtcNow.Date,
+                    SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                };
+                wc.callDict[call] = dmsg;
+                wc.callQueue.Enqueue(call);
+
+                lock (seenLock) seen.Clear();
+                wc.NextCall(false, 0);
+                var deadline = System.Diagnostics.Stopwatch.StartNew();
+                while (deadline.ElapsedMilliseconds < 1500)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    System.Threading.Thread.Sleep(5);
+                }
+                lock (seenLock) return new System.Collections.Generic.List<string>(seen);
+            }
+
+            bool Has(System.Collections.Generic.List<string> cmds, string prefix) => cmds.Exists(c => c.StartsWith(prefix));
+            bool HasExact(System.Collections.Generic.List<string> cmds, string exact) => cmds.Contains(exact);
+
+            // S&P -- answering their CQ.
+            var hold = RunReply(WsjtxClient.TxFreqMode.Hold, "CQ 9V1SH OJ22", null);
+            Check("Hold: RX follows the station (SET_RX_OFFSET 1234)", HasExact(hold, "SET_RX_OFFSET 1234"), true);
+            Check("Hold: TX is left alone (no SET_TX_OFFSET)", Has(hold, "SET_TX_OFFSET"), false);
+            Check("Hold: REPLY carries no dxFreqHz", hold.Exists(c => c.StartsWith("REPLY") && c.Contains("\"dxFreqHz\":null")), true);
+
+            var onStation = RunReply(WsjtxClient.TxFreqMode.OnStation, "CQ 9V1SH OJ22", null);
+            Check("OnStation: RX moves to the station (SET_RX_OFFSET 1234)", HasExact(onStation, "SET_RX_OFFSET 1234"), true);
+            Check("OnStation: TX moves to the station (SET_TX_OFFSET 1234)", HasExact(onStation, "SET_TX_OFFSET 1234"), true);
+
+            var best = RunReply(WsjtxClient.TxFreqMode.BestFree, "CQ 9V1SH OJ22", null);
+            Check("BestFree: RX follows the station (SET_RX_OFFSET 1234)", HasExact(best, "SET_RX_OFFSET 1234"), true);
+            Check("BestFree: TX goes to the analyzed free slot (SET_TX_OFFSET 2500), not the station", HasExact(best, "SET_TX_OFFSET 2500"), true);
+
+            // Caller answered OUR CQ: hold our CQ transmit frequency, only follow them on RX --
+            // in every mode.
+            foreach (var mode in new[] { WsjtxClient.TxFreqMode.BestFree, WsjtxClient.TxFreqMode.Hold, WsjtxClient.TxFreqMode.OnStation })
+            {
+                var ans = RunReply(mode, "KB0UZT 9V1SH FN31", "CQ KB0UZT FN42");
+                Check($"Caller answers our CQ ({mode}): RX follows the caller (SET_RX_OFFSET 1234)", HasExact(ans, "SET_RX_OFFSET 1234"), true);
+                Check($"Caller answers our CQ ({mode}): our CQ TX frequency is preserved (no SET_TX_OFFSET)", Has(ans, "SET_TX_OFFSET"), false);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RxTxFrequencyModeReplyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally
@@ -9831,6 +9903,21 @@ static class JimmyTests
         var trimmed = Controller.ParseRowOrder(" callsign , side ", allowed);
         Check("Whitespace around tokens is trimmed",
               trimmed != null && trimmed.SequenceEqual(new[] { "callsign", "side" }), true);
+
+        // "freq" (station's audio Hz) is a selectable Row Order field for both the Stations
+        // Available list and the Raw Decodes list, with a screen-reader label, but is NOT in
+        // either default row (opt-in only).
+        Check("'freq' is an allowed Stations Available row field",
+              RowDisplayOrderDlg.CallWaitingDefaultFields.Contains("freq"), true);
+        Check("'freq' is an allowed Raw Decodes row field",
+              RowDisplayOrderDlg.RawDecodeDefaultFields.Contains("freq"), true);
+        Check("'freq' has a Stations Available label",
+              RowDisplayOrderDlg.CallWaitingFieldLabels.ContainsKey("freq"), true);
+        Check("'freq' has a Raw Decodes label",
+              RowDisplayOrderDlg.RawDecodeFieldLabels.ContainsKey("freq"), true);
+        Check("ParseRowOrder accepts 'freq' against the real allowed set",
+              (Controller.ParseRowOrder("callp,snr,freq", RowDisplayOrderDlg.CallWaitingDefaultFields) ?? new List<string>())
+                  .Contains("freq"), true);
     }
 
     // ── RuleEngine: fixed single-band award restriction ([Match] Bands=) ────────

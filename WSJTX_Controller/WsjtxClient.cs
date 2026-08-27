@@ -80,7 +80,6 @@ namespace WSJTX_Controller
         public int maxPrevTo = 2;
         public int maxPrevPotaTo = 4;
         public int maxAutoGenEnqueue = 4;
-        public int holdMaxTxRepeat = 50;
         public bool suspendComm = false;
         public string myCall = null, myGrid = null, myContinent = null;
         public bool cmdPrompts = true;
@@ -229,6 +228,22 @@ namespace WSJTX_Controller
         internal IReadOnlyDictionary<string, IReadOnlyList<int>> FreqsDictDefaults =>
             freqsDict.ToDictionary(kv => kv.Key, kv => (IReadOnlyList<int>)kv.Value);
         private UInt32 txOffset = 0;
+        // RX audio offset (Hz) read back from the engine's SNAPSHOT every Direct poll (0 until
+        // the first snapshot). Companion to txOffset above -- both are the read-back for the
+        // accessible Rx/Tx frequency controls (announce, Tx<->Rx exchange, Set Tx frequency,
+        // Tx nudge); Jimmy moves them only through DirectSetTxOffset / DirectSetRxOffset.
+        private UInt32 rxOffset = 0;
+        // Engine's own "Hold Tx Freq" state from SNAPSHOT -- informational only (Jimmy always
+        // passes REPLY dxFreqHz=null and owns every offset move itself, so this never changes
+        // Jimmy's behavior); surfaced by the announce hotkey / support report.
+        private bool engineHoldTxFreq = false;
+        // Set true when the operator has manually moved the Tx frequency for the current CQ /
+        // QSO (any of the manual frequency hotkeys). While true, automatic "Best free
+        // frequency" selection is suppressed -- Jimmy will not pick a different slot out from
+        // under the operator mid-contact. Cleared on Halt, QSO completion/reset, band change,
+        // mode change, and whenever the operator re-selects "Best free frequency" in Options.
+        // Only meaningful when TxFreqMode == BestFree (the other modes never auto-pick anyway).
+        private bool _manualFreqThisQso = false;
         private string replyCmd = null;     //no "reply to" cmd sent to WSJT-X yet, will not be a CQ
         private string curCmd = null;       //cmd last issed, can be CQ
         private EnqueueDecodeMessage replyDecode = null;
@@ -403,7 +418,6 @@ namespace WSJTX_Controller
         private string cancelledCall = null;
         private int maxTxRepeat = 4;
         private bool _manualCallInProg = false;
-        // holdTxRepeat removed — manual Hold now always uses holdMaxTxRepeat.
         private int consecCqCount = 0;
         private int lastConsecCqCountDebug = 0;
         private const int maxConsecCqCount = 8;
@@ -516,6 +530,21 @@ namespace WSJTX_Controller
         {
             LISTEN,
             CALL_CQ
+        }
+
+        // Options > Transmit "Transmit frequency" -- how Jimmy chooses its transmit audio
+        // offset when it starts a CQ or answers a station. BestFree is the automatic default
+        // (analyze recent decodes, transmit in the widest quiet gap -- the long-standing "Use
+        // best Tx frequency" behavior). Hold keeps the current Tx offset and only moves RX to
+        // follow the station worked (identical to the old unchecked-checkbox behavior).
+        // OnStation transmits (and receives) on the worked station's own frequency -- WSJT-X's
+        // classic double-click-to-work with Hold Tx Freq off. BestFree <=> freqCheckBox.Checked
+        // (kept in sync so the ~20 existing freqCheckBox.Checked call sites are untouched).
+        public enum TxFreqMode
+        {
+            BestFree,
+            Hold,
+            OnStation
         }
 
         private enum OpModes
@@ -836,7 +865,6 @@ namespace WSJTX_Controller
             xmitCycleCount = 0;
             txTimeout = false;
             timedOutCall = null;
-            ctrl.holdCheckBox.Checked = false;
         }
 
         // Must be called BEFORE CancelQso() so callInProg/replyDecode are still valid.
@@ -1040,15 +1068,116 @@ namespace WSJTX_Controller
             UpdateDebug();
         }
 
-        public bool ToggleHoldCheckBox()
-        {
-            HaltTuning();
-            if (callInProg == null) return false;
+        // ---- Accessible Rx/Tx audio-frequency operating controls (2026-08-27) -----------------
+        // The sighted WSJT-X/Nexus equivalents are dragging the red/green waterfall markers and
+        // the Tx<->Rx / Rx<->Tx buttons. Jimmy exposes the same capability as hotkeys with
+        // spoken confirmation. Jimmy is the sole authority on both offsets: it sends
+        // SET_TX_OFFSET / SET_RX_OFFSET explicitly and never uses REPLY's dxFreqHz. txOffset /
+        // rxOffset are refreshed from the engine SNAPSHOT every Direct poll (WsjtxClient.
+        // Direct.cs) and updated optimistically here so the spoken value is right immediately.
 
-            ctrl.holdCheckBox.Checked = !ctrl.holdCheckBox.Checked;
-            if (ctrl.holdCheckBox.Checked) xmitCycleCount = 0;
-            return HoldCheckBoxChanged();
+        // WSJT-X-familiar coarse step for the Tx up/down hotkeys -- about one FT8 "lane" x10,
+        // enough to clear a caller in a press or two without overshooting a narrow gap.
+        public const int TxNudgeStepHz = 60;
+        private const int MinAudioOffsetHz = 200;    // matches Engine::set_tx_offset's clamp
+        private const int MaxAudioOffsetHz = 4000;
+
+        public TxFreqMode TxFrequencyMode => ctrl.txFreqMode;
+        public int CurrentTxOffsetHz => (int)txOffset;
+        public int CurrentRxOffsetHz => (int)rxOffset;
+        public int AudioOffsetMinHz => MinAudioOffsetHz;
+        public int AudioOffsetMaxHz => MaxAudioOffsetHz;
+
+        // Options > Transmit "Transmit frequency" radio group changed. Re-selecting "Best free
+        // frequency" is an explicit request for automatic placement again, so it clears any
+        // manual override that was suppressing the auto-pick.
+        public void OnTxFreqModeChanged()
+        {
+            if (ctrl.txFreqMode == TxFreqMode.BestFree) _manualFreqThisQso = false;
+            DebugOutput($"{Time()} OnTxFreqModeChanged txFreqMode:{ctrl.txFreqMode} _manualFreqThisQso:{_manualFreqThisQso}");
+            UpdateDebug();
         }
+
+        private int ClampAudioOffset(int hz) => Math.Max(MinAudioOffsetHz, Math.Min(MaxAudioOffsetHz, hz));
+
+        // Shared by every manual Tx-frequency hotkey: send it to the engine, remember it
+        // optimistically, mark this CQ/QSO as operator-placed (suppresses the automatic
+        // best-free pick until Halt / QSO end / band / mode change), and speak it.
+        private void ApplyManualTxOffset(int hz, string prefix)
+        {
+            if (!_directConnected)
+            {
+                StatusView.ShowMessage("Transmit frequency needs the native engine, which isn't currently reachable.", false);
+                return;
+            }
+            int clamped = ClampAudioOffset(hz);
+            txOffset = (uint)clamped;
+            _manualFreqThisQso = true;
+            DirectSetTxOffset(clamped);
+            DebugOutput($"{Time()} {prefix}: manual txOffset:{clamped} _manualFreqThisQso:true");
+            StatusView.ShowMessage($"{prefix} {clamped} hertz", false);
+        }
+
+        // Ctrl+Shift+Up / Ctrl+Shift+Down -- move Tx by TxNudgeStepHz.
+        public bool NudgeTxFrequency(int steps)
+        {
+            int baseHz = txOffset > 0 ? (int)txOffset : 1500;
+            ApplyManualTxOffset(baseHz + steps * TxNudgeStepHz, "Transmit");
+            return true;
+        }
+
+        // Ctrl+Shift+Right -- "Rx <- Tx": set the receive frequency equal to the transmit
+        // frequency (WSJT-X's Rx<-Tx button). Does not touch Tx, so it is not a manual Tx
+        // override.
+        public bool SetRxFromTx()
+        {
+            if (!_directConnected)
+            {
+                StatusView.ShowMessage("Receive frequency needs the native engine, which isn't currently reachable.", false);
+                return true;
+            }
+            int hz = ClampAudioOffset(txOffset > 0 ? (int)txOffset : 1500);
+            rxOffset = (uint)hz;
+            DirectSetRxOffset(hz);
+            StatusView.ShowMessage($"Receive {hz} hertz", false);
+            return true;
+        }
+
+        // Ctrl+Shift+Left -- "Tx <- Rx": set the transmit frequency equal to the current
+        // receive frequency (WSJT-X's Tx<-Rx button). This IS a deliberate manual Tx placement.
+        public bool SetTxFromRx()
+        {
+            int hz = rxOffset > 0 ? (int)rxOffset : (txOffset > 0 ? (int)txOffset : 1500);
+            ApplyManualTxOffset(hz, "Transmit");
+            return true;
+        }
+
+        // Alt+W -- exact type-in. hz is already validated by the caller dialog; clamp defensively.
+        public bool SetTxFrequencyHz(int hz)
+        {
+            ApplyManualTxOffset(hz, "Transmit");
+            return true;
+        }
+
+        // Alt+V -- speak the current Rx and Tx audio frequencies plus the active mode, no
+        // engine round trip (the poll-refreshed cached values are at most ~1 s old).
+        public bool AnnounceRxTxFrequencies()
+        {
+            string modeText;
+            switch (ctrl.txFreqMode)
+            {
+                case TxFreqMode.BestFree:
+                    modeText = _manualFreqThisQso ? "manual transmit frequency" : "best free frequency";
+                    break;
+                case TxFreqMode.OnStation: modeText = "transmit on station's frequency"; break;
+                default: modeText = "hold transmit frequency"; break;
+            }
+            string rxText = rxOffset > 0 ? $"{rxOffset}" : "unknown";
+            string txText = txOffset > 0 ? $"{txOffset}" : "unknown";
+            StatusView.ShowMessage($"Receive {rxText} hertz, transmit {txText} hertz, {modeText}", false);
+            return true;
+        }
+        // ------------------------------------------------------------------------------------
 
         public bool ToggleOperatingMode()
         {
@@ -1115,7 +1244,6 @@ namespace WSJTX_Controller
 
             StopDecodeTimers();
             DisableAutoFreqPause();
-            ctrl.holdCheckBox.Checked = false;
 
             if (txMode == TxModes.CALL_CQ) cqPaused = true;
             DebugOutput($"{spacer}cqPaused:{cqPaused} txEnabled:{txEnabled}");
@@ -1859,7 +1987,6 @@ namespace WSJTX_Controller
             UpdateBandComboBox();
             UpdateDblClkTip();
             AutoFreqChanged(ctrl.freqCheckBox.Checked, true);
-            ctrl.holdCheckBox.Checked = false;
             DebugOutput($"{nl}{Time()} ResetOpMode, opMode:{opMode} NegoState:{WsjtxMessage.NegoState} cqPaused:{cqPaused}");
         }
 
@@ -1903,7 +2030,6 @@ namespace WSJTX_Controller
             xmitCycleCount = 0;
             timedOutCall = null;
             CancelDiscardCall();
-            ctrl.holdCheckBox.Checked = false;  //reset hold
             DebugOutput($"{Time()} ClearCalls, clearBandSpecific:{clearBandSpecific} decodeNum:{decodeNum} xmitCycleCount:{xmitCycleCount}");
             StopDecodeTimers();
         }
@@ -2455,11 +2581,10 @@ namespace WSJTX_Controller
                     timedOutCall = null;
                     txTimeout = false;
                     newSelection = true;
-                    ctrl.holdCheckBox.Checked = false;
                     EnqueueDecodeMessage prevReplyDecode = replyDecode;
 
                     if (operatorSelected) _manualCallInProg = true;
-                    DebugOutput($"{spacer}reply to {call}, txTimeout:{txTimeout} holdCheckBox.Checked{ctrl.holdCheckBox.Checked} operatorSelected:{operatorSelected} _manualCallInProg:{_manualCallInProg}");
+                    DebugOutput($"{spacer}reply to {call}, txTimeout:{txTimeout} operatorSelected:{operatorSelected} _manualCallInProg:{_manualCallInProg}");
                     ReplyTo(idx);
                     StartDiscardCall(call);
                     if (!transmitting)                  //if transmtting,
@@ -2616,12 +2741,17 @@ namespace WSJTX_Controller
 
         private void SetCallInProg(string call)
         {
-            ctrl.holdCheckBox.Enabled = (call != null);
-            DebugOutput($"{spacer}SetCallInProg: callInProg:'{CallPriorityString(call)}' (was '{CallPriorityString(callInProg)}') holdCheckBox.Enabled:{ctrl.holdCheckBox.Enabled}");
+            DebugOutput($"{spacer}SetCallInProg: callInProg:'{CallPriorityString(call)}' (was '{CallPriorityString(callInProg)}')");
 
             if (call != null) lCall = null;     //last logged call is not relevant now
 
             if (call == null) { CancelDiscardCall(); _manualCallInProg = false; }
+
+            // Rx/Tx frequency control: a manual Tx-frequency override is scoped to one
+            // CQ/QSO. Any callInProg transition -- new contact, contact ended, band change
+            // (all route through here) -- ends that scope so the next CQ/reply gets the
+            // automatic "Best free frequency" treatment again.
+            if (call != callInProg) _manualFreqThisQso = false;
 
             callInProg = call;
             otherPartyForCallInProg = null;
@@ -3056,9 +3186,12 @@ namespace WSJTX_Controller
         {
             //set/show frequency offset for period after decodes started
             // Restored 2026-08-18 -- see DirectSetTxOffset's own comment (WsjtxClient.Direct.cs).
-            // Only sends when there's a real, checkbox-gated offset to send: AudioOffsetFromTxPeriod
-            // already returns 0 if "Use best Tx frequency" is off or the period isn't known yet.
-            if (_directConnected)
+            // AudioOffsetFromTxPeriod already returns 0 when the "Transmit frequency" mode is
+            // not "Best free frequency" (freqCheckBox.Checked) or the period isn't known yet --
+            // so Hold and Transmit-on-station both keep the operator's current CQ frequency,
+            // which is the right thing for a CQ (there is no station to transmit "on"). A
+            // manual Tx-frequency override for this CQ also wins over the automatic pick.
+            if (_directConnected && !_manualFreqThisQso)
             {
                 uint cqOffset = AudioOffsetFromTxPeriod();
                 if (cqOffset > 0) DirectSetTxOffset(cqOffset);
@@ -3204,11 +3337,49 @@ namespace WSJTX_Controller
                 return;
             }
 
-            // Restored 2026-08-18 -- see DirectSetTxOffset's own comment (WsjtxClient.Direct.cs).
-            // AudioOffsetFromMsg picks the offset for the period opposite dmsg's own (i.e. the
-            // period Jimmy will actually transmit the reply on), returns 0 if not applicable.
-            uint replyOffset = AudioOffsetFromMsg(dmsg);
-            if (replyOffset > 0) DirectSetTxOffset(replyOffset);
+            // Rx/Tx frequency placement for this reply (2026-08-27). Jimmy is the sole
+            // authority on both audio offsets: REPLY's dxFreqHz stays null (below) and every
+            // move goes through DirectSetTxOffset / DirectSetRxOffset here.
+            //
+            //   theirHz          = the worked station's own decoded audio frequency.
+            //   answeringOurCq   = we were calling CQ and this decode is addressed to us
+            //                      (a caller answering our CQ) -- runner semantics: hold our
+            //                      established CQ transmit frequency, only follow them on RX.
+            //   otherwise (S&P)  = we're answering their CQ or tail-ending; the "Transmit
+            //                      frequency" mode decides where we transmit.
+            //
+            // A manual Tx-frequency override for the current QSO (any of the frequency
+            // hotkeys) suppresses the automatic best-free pick -- but never the RX-follow,
+            // which is always what the operator wants when working a specific station.
+            if (nCall != callInProg) _manualFreqThisQso = false;
+            uint theirHz = dmsg.DeltaFrequency > 0 ? (uint)dmsg.DeltaFrequency : 0;
+            bool answeringOurCq = curCmd != null && WsjtxMessage.IsCQ(curCmd)
+                && !WsjtxMessage.IsCQ(dmsg.Message)
+                && string.Equals(WsjtxMessage.ToCall(dmsg.Message), myCall, StringComparison.OrdinalIgnoreCase);
+
+            if (theirHz > 0) DirectSetRxOffset(theirHz);
+
+            if (!answeringOurCq)
+            {
+                switch (ctrl.txFreqMode)
+                {
+                    case TxFreqMode.BestFree:
+                        // AudioOffsetFromMsg returns the widest-quiet-gap offset for the
+                        // period Jimmy will transmit on (0 if analysis isn't ready).
+                        if (!_manualFreqThisQso)
+                        {
+                            uint best = AudioOffsetFromMsg(dmsg);
+                            if (best > 0) DirectSetTxOffset(best);
+                        }
+                        break;
+                    case TxFreqMode.OnStation:
+                        if (theirHz > 0 && !_manualFreqThisQso) DirectSetTxOffset(theirHz);
+                        break;
+                    case TxFreqMode.Hold:
+                        // Keep the current Tx offset -- nothing to send.
+                        break;
+                }
+            }
 
             // Codex Audit 04 finding 2, 2026-08-21: replyCmd/curCmd/callInProg/EnableTx used to
             // commit here, synchronously, before REPLY was even sent -- an EngineHost refusal,

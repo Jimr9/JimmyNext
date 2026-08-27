@@ -78,7 +78,6 @@
             this.useRR73CheckBox = new System.Windows.Forms.CheckBox();
             this.optimizeCheckBox = new System.Windows.Forms.CheckBox();
             this.replyLocalCheckBox = new System.Windows.Forms.CheckBox();
-            this.holdCheckBox = new System.Windows.Forms.CheckBox();
             this.callAddedCheckBox = new System.Windows.Forms.CheckBox();
             this.mycallCheckBox = new System.Windows.Forms.CheckBox();
             this.loggedCheckBox = new System.Windows.Forms.CheckBox();
@@ -725,19 +724,6 @@
             this.replyLocalCheckBox.UseVisualStyleBackColor = true;
             this.replyLocalCheckBox.Visible = false;
             this.replyLocalCheckBox.CheckedChanged += new System.EventHandler(this.replyLocalCheckBox_CheckedChanged);
-            // 
-            // holdCheckBox
-            // 
-            this.holdCheckBox.AutoSize = true;
-            this.holdCheckBox.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.holdCheckBox.Location = new System.Drawing.Point(234, 415);
-            this.holdCheckBox.Name = "holdCheckBox";
-            this.holdCheckBox.Size = new System.Drawing.Size(48, 17);
-            this.holdCheckBox.TabIndex = 48;
-            this.holdCheckBox.Text = "Hold";
-            this.holdCheckBox.UseVisualStyleBackColor = true;
-            this.holdCheckBox.Visible = false;
-            this.holdCheckBox.CheckedChanged += new System.EventHandler(this.holdCheckBox_CheckedChanged);
             //
             // callAddedCheckBox
             //
@@ -1515,7 +1501,6 @@
             this.Controls.Add(this.callAddedCheckBox);
             this.Controls.Add(this.label27);
             this.Controls.Add(this.label26);
-            this.Controls.Add(this.holdCheckBox);
             this.Controls.Add(this.optimizeCheckBox);
             this.Controls.Add(this.label25);
             this.Controls.Add(this.label24);
@@ -1639,7 +1624,6 @@
         public System.Windows.Forms.CheckBox useRR73CheckBox;
         public System.Windows.Forms.CheckBox optimizeCheckBox;
         public System.Windows.Forms.CheckBox replyLocalCheckBox;
-        public System.Windows.Forms.CheckBox holdCheckBox;
         public System.Windows.Forms.CheckBox callAddedCheckBox;
         public System.Windows.Forms.CheckBox mycallCheckBox;
         public System.Windows.Forms.CheckBox loggedCheckBox;

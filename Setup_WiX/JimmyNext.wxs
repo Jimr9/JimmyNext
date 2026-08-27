@@ -20,7 +20,7 @@
       the production install's real settings/logbook database.
 
   Product  : Jimmy Next (WSJT-X Controller, public beta build)
-  Version  : 2.0.40
+  Version  : 2.0.41
   Mfr      : KB0UZT
   Install  : C:\Program Files\KB0UZT\Jimmy Next\
   Shortcuts: Desktop + Start Menu (optional checkboxes, both on by default)
@@ -33,7 +33,7 @@
 
   <Package
     Name="Jimmy Next"
-    Version="2.0.40"
+    Version="2.0.41"
     Manufacturer="KB0UZT"
     Language="1033"
     Codepage="1252"

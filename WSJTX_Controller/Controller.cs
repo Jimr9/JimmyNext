@@ -28,6 +28,12 @@ namespace WSJTX_Controller
         public OptionsDlg optionsDlg;
         public bool alwaysOnTop = false;
         public bool skipLevelPrompt = false;
+        // Options > Transmit "Transmit frequency" mode. BestFree is kept in lock-step with
+        // freqCheckBox.Checked (the long-standing "Use best Tx frequency" flag); Hold and
+        // OnStation are the two ways freqCheckBox.Checked == false can behave (see
+        // WsjtxClient.TxFreqMode). Persisted as ini "txFreqMode"; "bestOffset" still written
+        // too so nothing downstream that keys off it changes.
+        public WsjtxClient.TxFreqMode txFreqMode = WsjtxClient.TxFreqMode.BestFree;
         // Advanced Call Layout display flags now live in Settings (JimmySettings.cs) so
         // they're unit-testable outside a live Form. These are thin pass-through
         // properties, kept under the original field names so the ~65 existing call
@@ -569,6 +575,8 @@ namespace WSJTX_Controller
                     replyLocalCheckBox.Checked = Properties.Settings.Default.enableReplyLocal;
                     replyDxCheckBox.Checked = Properties.Settings.Default.enableReplyDx;
                     freqCheckBox.Checked = Properties.Settings.Default.bestOffset;
+                    txFreqMode = freqCheckBox.Checked
+                        ? WsjtxClient.TxFreqMode.BestFree : WsjtxClient.TxFreqMode.Hold;
                     replyRR73CheckBox.Checked = Properties.Settings.Default.replyRR73;
                     newOnBand = Properties.Settings.Default.newOnBand;
                     cmdPrompts = Properties.Settings.Default.cmdPrompts;
@@ -665,6 +673,11 @@ namespace WSJTX_Controller
                 replyDxCheckBox.Checked = iniFile.Read("enableReplyDx") != "False";     //default: true
                 diagLog = iniFile.Read("diagLog") == "True";
                 freqCheckBox.Checked = iniFile.Read("bestOffset") == "True";
+                // "Transmit frequency" 3-way mode. Back-compat: an existing install with the
+                // box unchecked (bestOffset=False) and no txFreqMode key = Hold, which is
+                // exactly what the unchecked box always did (no SET_TX_OFFSET, Tx stays put).
+                txFreqMode = ParseTxFreqMode(iniFile.Read("txFreqMode"), freqCheckBox.Checked);
+                freqCheckBox.Checked = txFreqMode == WsjtxClient.TxFreqMode.BestFree;
                 replyRR73CheckBox.Checked = iniFile.Read("replyRR73") == "True";
                 cmdPrompts = iniFile.Read("cmdPrompts") != "False";     //default: true
 
@@ -1359,6 +1372,7 @@ namespace WSJTX_Controller
                 iniFile.Write("diagLog", wsjtxClient.diagLog.ToString());
                 // txMode startup is always LISTEN; not persisted across sessions
                 iniFile.Write("bestOffset", freqCheckBox.Checked.ToString());
+                iniFile.Write("txFreqMode", txFreqMode.ToString());
                 iniFile.Write("optimizeTx", optimizeCheckBox.Checked.ToString());
                 if (exceptTextBox.Text == separateBySpaces) exceptTextBox.Clear();
                 iniFile.Write("exceptCalls", exceptTextBox.Text.Trim());
@@ -2256,9 +2270,20 @@ namespace WSJTX_Controller
                 return wsjtxClient.ToggleTxFirst();
             }
 
-            if (keyData == hotkeyConfig[HotkeyAction.HoldTimeout])
+            if (keyData == hotkeyConfig[HotkeyAction.AnnounceFreq] && hotkeyConfig[HotkeyAction.AnnounceFreq] != Keys.None)
+                return wsjtxClient.AnnounceRxTxFrequencies();
+            if (keyData == hotkeyConfig[HotkeyAction.TxFreqUp] && hotkeyConfig[HotkeyAction.TxFreqUp] != Keys.None)
+                return wsjtxClient.NudgeTxFrequency(+1);
+            if (keyData == hotkeyConfig[HotkeyAction.TxFreqDown] && hotkeyConfig[HotkeyAction.TxFreqDown] != Keys.None)
+                return wsjtxClient.NudgeTxFrequency(-1);
+            if (keyData == hotkeyConfig[HotkeyAction.TxFromRx] && hotkeyConfig[HotkeyAction.TxFromRx] != Keys.None)
+                return wsjtxClient.SetTxFromRx();
+            if (keyData == hotkeyConfig[HotkeyAction.RxFromTx] && hotkeyConfig[HotkeyAction.RxFromTx] != Keys.None)
+                return wsjtxClient.SetRxFromTx();
+            if (keyData == hotkeyConfig[HotkeyAction.SetTxFreq] && hotkeyConfig[HotkeyAction.SetTxFreq] != Keys.None)
             {
-                return wsjtxClient.ToggleHoldCheckBox();
+                OpenSetTxFrequencyDialog();
+                return true;
             }
 
             if (keyData == hotkeyConfig[HotkeyAction.PowerSwr])
@@ -3769,12 +3794,16 @@ namespace WSJTX_Controller
                 $"{nl}{K(HotkeyAction.PowerSwr)}: Quick check of output power and SWR (during transmit) or audio input (during receive)." +
                 $"{nl}{K(HotkeyAction.BandUp)}: Select next higher band." +
                 $"{nl}{K(HotkeyAction.BandDown)}: Select next lower band." +
+                $"{nl}{K(HotkeyAction.AnnounceFreq)}: Announce current receive and transmit audio frequencies and mode." +
+                $"{nl}{K(HotkeyAction.TxFreqUp)} / {K(HotkeyAction.TxFreqDown)}: Move transmit audio frequency up / down {WsjtxClient.TxNudgeStepHz} Hz." +
+                $"{nl}{K(HotkeyAction.TxFromRx)}: Set transmit frequency to the current receive frequency." +
+                $"{nl}{K(HotkeyAction.RxFromTx)}: Set receive frequency to the current transmit frequency." +
+                $"{nl}{K(HotkeyAction.SetTxFreq)}: Set the transmit audio frequency to an exact value." +
 
                 $"{nl}{nl}Optional command keys:" +
                 $"{nl}{K(HotkeyAction.DeleteAllCalls)}: Delete all 'Stations calling'." +
                 $"{nl}Delete key: Delete selected call in 'Stations calling'." +
                 $"{nl}{K(HotkeyAction.TxPeriod)}: Toggle transmit period." +
-                $"{nl}{K(HotkeyAction.HoldTimeout)}: Toggle extended timeout." +
                 $"{nl}{K(HotkeyAction.UploadLotw)}: Upload to Logbook of the World." +
                 $"{nl}{K(HotkeyAction.ToggleMode)}: Select operating mode (FT8 or FT4)." +
                 $"{nl}{K(HotkeyAction.Prompts)}: Toggle command prompts in {friendlyName} status." +
@@ -3890,12 +3919,41 @@ namespace WSJTX_Controller
             optionsDlg?.UpdateView();
         }
 
+        // ini "txFreqMode" -> enum. Unrecognised/empty falls back on the legacy bestOffset
+        // flag: box checked = BestFree, box unchecked = Hold (the old unchecked behavior).
+        internal static WsjtxClient.TxFreqMode ParseTxFreqMode(string raw, bool bestOffsetFlag)
+        {
+            if (Enum.TryParse(raw, true, out WsjtxClient.TxFreqMode m) && Enum.IsDefined(typeof(WsjtxClient.TxFreqMode), m))
+                return m;
+            return bestOffsetFlag ? WsjtxClient.TxFreqMode.BestFree : WsjtxClient.TxFreqMode.Hold;
+        }
+
+        // Called by the Options > Transmit "Transmit frequency" radio group. Keeps
+        // freqCheckBox.Checked (the internal "best-free analysis active" flag, and its ~20 call
+        // sites) in lock-step with the chosen mode, then runs the same settings-changed /
+        // AutoFreqChanged path the checkbox used to.
+        public void SetTxFreqMode(WsjtxClient.TxFreqMode mode)
+        {
+            txFreqMode = mode;
+            bool wantBest = mode == WsjtxClient.TxFreqMode.BestFree;
+            if (freqCheckBox.Checked != wantBest)
+            {
+                freqCheckBox.Checked = wantBest;   // fires freqCheckBox_CheckedChanged
+            }
+            else if (formLoaded)
+            {
+                wsjtxClient.WsjtxSettingChanged();
+                wsjtxClient.AutoFreqChanged(freqCheckBox.Checked, false);
+            }
+            wsjtxClient?.OnTxFreqModeChanged();
+            optionsDlg?.UpdateView();
+        }
+
         private void LimitTxHelpLabel_Click(object sender, EventArgs e)
         {
             if (!formLoaded) return;
 
-            string adv = wsjtxClient != null ? $"{nl}{nl}If 'Optimize throughput' is selected, the maximum number of replies and CQs for the current call is automatically adjusted lower than the specified limit (if possible), to help process the call queue faster." +
-                $"{nl}{nl}If 'Hold' is selected, the 'Repeated Tx' limit is ignored, and replies to the current call sign are transmitted a maximum of {wsjtxClient.holdMaxTxRepeat} times." : "";
+            string adv = wsjtxClient != null ? $"{nl}{nl}If 'Optimize throughput' is selected, the maximum number of replies and CQs for the current call is automatically adjusted lower than the specified limit (if possible), to help process the call queue faster." : "";
             ShowHelp($"This will limit the number of times the same message is transmitted." +
                 $"{nl}{nl}For example, it will limit the number of repeated transmitted replies or CQs for the current call. If there is no response to your reply messages when the limit is reached, the next call in the queue is processed (or if the call queue is empty, CQing (or listening) will resume)." +
                 $"{nl}{nl}As the repeat limit is reduced, the number of times a call can be automatically re-added to the call queue is increased, to compensate.{adv}");
@@ -3904,13 +3962,6 @@ namespace WSJTX_Controller
         private void optimizeCheckBox_CheckedChanged(object sender, EventArgs e)
         {
             if (formLoaded) wsjtxClient.TxRepeatChanged();
-        }
-
-        private void holdCheckBox_CheckedChanged(object sender, EventArgs e)
-        {
-            if (!formLoaded) return;
-
-            wsjtxClient.HoldCheckBoxChanged();
         }
 
         private void directedTextBox_KeyPress(object sender, KeyPressEventArgs e)
@@ -5151,6 +5202,19 @@ namespace WSJTX_Controller
             _callCqDlg = new CallCqDlg(this, wsjtxClient);
             _callCqDlg.FormClosed += (s, e) => _callCqDlg = null;
             _callCqDlg.Show();
+        }
+
+        private void OpenSetTxFrequencyDialog()
+        {
+            using (var dlg = new SetTxFreqDlg(
+                wsjtxClient.CurrentTxOffsetHz,
+                wsjtxClient.AudioOffsetMinHz,
+                wsjtxClient.AudioOffsetMaxHz,
+                WsjtxClient.TxNudgeStepHz))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                wsjtxClient.SetTxFrequencyHz(dlg.Hz);
+            }
         }
 
         private void OpenManualCallDialog()

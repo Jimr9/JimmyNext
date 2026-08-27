@@ -38,7 +38,7 @@
     <caption>Command keys</caption>
     <thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead>
     <tbody>
-      <tr><td><kbd>Alt+I</kbd></td><td>Open the stations-available row order editor.</td></tr>
+      <tr><td><kbd>Alt+I</kbd></td><td>Open the row order editor — choose which fields appear in each station row (callsign, reply status, signal report, audio frequency, distance and direction, and more) and in what order, for the Stations calling list, the raw decodes list, and the Spot Watch list.</td></tr>
       <tr><td><kbd>Alt+O</kbd></td><td>Review or change Options.</td></tr>
       <tr><td><kbd>Alt+C</kbd></td><td>Start the selected CQ mode (CQ only / CQ DX only / CQ and CQ DX). Does nothing in Listen mode.</td></tr>
       <tr><td><kbd>Alt+L</kbd></td><td>Select Listen for calls mode.</td></tr>
@@ -46,7 +46,7 @@
       <tr><td><kbd>Alt+H</kbd></td><td>Halt transmit immediately.</td></tr>
       <tr><td><kbd>Alt+N</kbd></td><td>Skip to the next available station — very useful.</td></tr>
       <tr><td><kbd>Alt+J</kbd></td><td>Enter a callsign manually to call.</td></tr>
-      <tr><td><em>unassigned by default</em></td><td>Analyze transmit slot (find the quietest audio frequency for CQ; requires "Use best Tx frequency").</td></tr>
+      <tr><td><em>unassigned by default</em></td><td>Analyze transmit slot (find the quietest audio frequency for CQ; requires the Transmit tab's <strong>Transmit frequency</strong> set to "Best free frequency").</td></tr>
       <tr><td><em>unassigned by default</em></td><td>Look up the focused station, in any list — Stations calling, TX1/TX2, Raw decodes, or Auto-logged calls (callsign, country, state, LoTW status, and more). Checks QRZ live automatically if that callsign isn't already known.</td></tr>
       <tr><td><em>unassigned by default</em></td><td>Open the Ham Radio Center logbook.</td></tr>
       <tr><td><em>unassigned by default</em></td><td>Add a manually-logged QSO — jumps straight to the Add New QSO dialog on the Edit Log tab.</td></tr>
@@ -67,13 +67,26 @@
   </table>
 
   <table class="keys">
+    <caption>Transmit frequency keys</caption>
+    <thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Alt+V</kbd></td><td>Announce the current receive and transmit audio frequencies, and which transmit-frequency mode is active.</td></tr>
+      <tr><td><kbd>Ctrl+Shift+Up</kbd></td><td>Move the transmit audio frequency up 60&nbsp;Hz.</td></tr>
+      <tr><td><kbd>Ctrl+Shift+Down</kbd></td><td>Move the transmit audio frequency down 60&nbsp;Hz.</td></tr>
+      <tr><td><kbd>Ctrl+Shift+Left</kbd></td><td>Set the transmit frequency to the current receive frequency (Tx &larr; Rx).</td></tr>
+      <tr><td><kbd>Ctrl+Shift+Right</kbd></td><td>Set the receive frequency to the current transmit frequency (Rx &larr; Tx).</td></tr>
+      <tr><td><kbd>Alt+W</kbd></td><td>Set the transmit audio frequency to an exact value — type it in.</td></tr>
+    </tbody>
+  </table>
+  <p>Using any of the four transmit keys above during a contact switches that contact to a manual transmit frequency, so Jimmy Next won't automatically pick a different one until you Halt, finish the QSO, change band or mode, or reselect "Best free frequency" in Options. See <a href="using.html#transmit-frequency">Using Jimmy Next</a> for the full picture.</p>
+
+  <table class="keys">
     <caption>Optional command keys</caption>
     <thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead>
     <tbody>
       <tr><td><kbd>Alt+D</kbd></td><td>Delete all stations calling.</td></tr>
       <tr><td><kbd>Delete</kbd></td><td>Delete the selected call in Stations calling. (Fixed — not reassignable.)</td></tr>
       <tr><td><kbd>Alt+F</kbd></td><td>Toggle transmit period.</td></tr>
-      <tr><td><kbd>Alt+X</kbd></td><td>Toggle extended timeout.</td></tr>
       <tr><td><kbd>Alt+U</kbd></td><td>Upload to Logbook of the World (also catches up any pending QRZ/Club Log uploads).</td></tr>
       <tr><td><kbd>Alt+M</kbd></td><td>Select operating mode (FT8 or FT4).</td></tr>
       <tr><td><kbd>Alt+P</kbd></td><td>Toggle command prompts in Jimmy Next's status.</td></tr>

@@ -45,6 +45,15 @@
 
   <h2>Radio</h2>
   <p>The Radio tab is where you point Jimmy Next at your rig for CAT control and PTT/audio — select your radio and audio devices there. Since the bundled engine (based on Nexus — see <a href="index.html#credits">Credits</a>) handles this directly, there's no separate program's radio settings to keep in sync.</p>
+  <p><strong>Split Operation</strong> — None, Rig, or Fake It — also lives here, and works exactly as it does in WSJT-X: it controls how a transmit offset is realized on your radio (true CAT split, or a dial-shift emulation), independent of where in the passband you actually operate. That "where" is on the Transmit tab, below.</p>
+
+  <h2>Transmit</h2>
+  <p>The Transmit tab holds how Jimmy Next replies and where it transmits:</p>
+  <ul>
+    <li><strong>Transmit frequency</strong> — <em>Best free frequency (automatic)</em> (the default; Jimmy Next finds a clear gap in the passband for each CQ and reply), <em>Hold Tx frequency</em> (keep your current transmit frequency, follow the worked station on receive only — WSJT-X's "Hold Tx Freq" on), or <em>Transmit on station's frequency</em> (move both transmit and receive onto the station you answer — classic double-click-to-work). Jimmy Next never changes your transmit frequency in the middle of a contact. See <a href="using.html#transmit-frequency">Using Jimmy Next</a> for how each mode behaves, plus the keyboard commands for setting frequency by hand.</li>
+    <li><strong>Repeat limit</strong> — how many times the same message is repeated to a station that isn't answering before Jimmy Next gives up and moves to the next call. This is now the single control for that; the old "Extended Timeout" / "Hold" toggle has been removed.</li>
+    <li><strong>Optimize throughput</strong>, <strong>Log early</strong>, <strong>Use RR73</strong>, <strong>Skip my grid</strong>, and the transmit-period default also live here.</li>
+  </ul>
 
   <h2>Appearance</h2>
   <p>The Appearance tab controls how the station lists look, for sighted users or anyone using screen magnification:</p>
@@ -55,6 +64,7 @@
     <li><strong>List font size</strong> — 8 to 18 points.</li>
     <li>A <strong>Restore Defaults</strong> button to reset colors and font size back to Jimmy Next's original look.</li>
   </ul>
+  <p>Separately, the <strong>row order editor</strong> (<kbd>Alt</kbd>+<kbd>I</kbd>) chooses which fields each station row shows and in what order — callsign, reply status, alert tag, grid, signal report, <strong>audio frequency</strong> (the hertz the station is transmitting on), country/state, distance and direction, and more — independently for the Stations calling list, the raw decodes list, and the Spot Watch list. Audio frequency is off by default; add it here to see it.</p>
 
   <h2>Sounds</h2>
   <p>Jimmy Next can play a distinct sound for 14 different events — a new call added, a call directed to you, a QSO logged, transmit enabled, a new DXCC (overall or on the current band), an always-wanted call, a directed CQ, POTA or SOTA activity, a wanted call heard anywhere, an interesting call on the opposite period, and a needed-award match. Each one can be turned on or off individually and pointed at your own <code>.wav</code> file, with a Test button to preview it.</p>

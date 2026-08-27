@@ -13,12 +13,12 @@ namespace WSJTX_Controller
     {
         // ── Stations Available (call queue / TX1 / TX2) row fields ──────────────
         public static readonly string[] CallWaitingDefaultFields =
-            { "callp", "pri", "tag", "grid", "snr", "country", "distAz", "oe", "descr", "rankStr" };
+            { "callp", "pri", "tag", "grid", "snr", "freq", "country", "distAz", "oe", "descr", "rankStr" };
 
         public static readonly Dictionary<string, string> CallWaitingFieldLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             { "callp", "Call Sign" }, { "pri", "Reply Status" }, { "tag", "Alert" }, { "grid", "Grid" },
-            { "snr", "SNR" }, { "country", "Country" }, { "distAz", "Distance and Direction" },
+            { "snr", "SNR" }, { "freq", "Audio Frequency" }, { "country", "Country" }, { "distAz", "Distance and Direction" },
             { "oe", "Age" }, { "descr", "Reason" }, { "rankStr", "Rank" }
         };
 
@@ -27,12 +27,12 @@ namespace WSJTX_Controller
         // Decodes list land on a callsign instead of always hitting the TX1:/TX2: side
         // label every row otherwise starts with.
         public static readonly string[] RawDecodeDefaultFields =
-            { "callsign", "side", "tag", "message", "snr", "grid", "country", "distAz" };
+            { "callsign", "side", "tag", "message", "snr", "freq", "grid", "country", "distAz" };
 
         public static readonly Dictionary<string, string> RawDecodeFieldLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             { "callsign", "Call Sign" }, { "side", "TX1/TX2" }, { "tag", "Alert" },
-            { "message", "Raw Message" }, { "snr", "SNR" }, { "grid", "Grid" },
+            { "message", "Raw Message" }, { "snr", "SNR" }, { "freq", "Audio Frequency" }, { "grid", "Grid" },
             { "country", "Country/State" }, { "distAz", "Distance and Direction" }
         };
 

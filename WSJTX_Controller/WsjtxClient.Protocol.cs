@@ -162,30 +162,6 @@ namespace WSJTX_Controller
             return true;
         }
 
-        public bool HoldCheckBoxChanged()
-        {
-            if (callInProg == null) return false;
-
-            DebugOutput($"{Time()} HoldCheckBoxChanged holdCheckBox.Checked:{ctrl.holdCheckBox.Checked} holdCheckBox.Enabled:{ctrl.holdCheckBox.Enabled}");
-            if (ctrl.holdCheckBox.Checked /*|| (mode == "MSK144" && modeSupported)*/)
-            {
-                ctrl.limitLabel.Enabled = false;
-                ctrl.repeatLabel.Enabled = false;
-                ctrl.timeoutNumUpDown.Enabled = false;
-                ctrl.optimizeCheckBox.Enabled = false;
-            }
-            else
-            {
-                ctrl.limitLabel.Enabled = true;
-                ctrl.repeatLabel.Enabled = true;
-                ctrl.timeoutNumUpDown.Enabled = true;
-                ctrl.optimizeCheckBox.Enabled = true;
-            }
-            DebugOutput($"{nl}{Time()} HoldCheckBoxChanged");
-            ShowStatus();
-            return true;
-        }
-
         //log file mode requested to be (possibly) changed
         public void LogModeChanged(bool enable)
         {

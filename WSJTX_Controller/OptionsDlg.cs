@@ -1451,6 +1451,20 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioSplitGroupBox);
             y += 52;
 
+            // Split Operation is HOW an audio offset is realized on the rig (CAT VFO split /
+            // dial-shift emulation), independent of WHERE in the passband Jimmy receives and
+            // transmits -- that is the Transmit tab's "Transmit frequency" chooser and the
+            // Rx/Tx frequency hotkeys.
+            var splitHelp = new System.Windows.Forms.Label
+            {
+                Text = "How the offset reaches the rig; the Rx/Tx audio frequency itself is on the Transmit tab.",
+                Location = new System.Drawing.Point(left, y),
+                AutoSize = true,
+                Font = font,
+            };
+            radioPanel.Controls.Add(splitHelp);
+            y += 24;
+
             _radioHaltTxOnHighSwrCheckBox = new System.Windows.Forms.CheckBox
             {
                 Text = "Halt Tx when SWR >",
@@ -3618,14 +3632,18 @@ namespace WSJTX_Controller
             ReparentTo(ctrl.removeOnWeakSnrCheckBox, rcvBlockListGroupBox, new Point(10, 42));
 
             // Transmit group → Transmit tab
-            ReparentTo(ctrl.freqCheckBox,       rcvTransmitGroupBox, new Point(10, 18));
-            ReparentTo(ctrl.AutoFreqHelpLabel,  rcvTransmitGroupBox, new Point(150, 20));
+            // "Transmit frequency" 3-way mode replaces the old single "Use best Tx frequency"
+            // checkbox (the checkbox itself stays on the Controller form as the hidden internal
+            // "best-free analysis active" flag, kept in sync by ctrl.SetTxFreqMode). One
+            // ComboBox keeps the same one-line footprint the checkbox had and reads cleanly
+            // under a screen reader. WSJT-X/Nexus-familiar wording.
+            BuildTxFreqModeCombo();
+            ReparentTo(ctrl.AutoFreqHelpLabel,  rcvTransmitGroupBox, new Point(330, 18));
             ReparentTo(ctrl.skipGridCheckBox,   rcvTransmitGroupBox, new Point(10, 40));
             ReparentTo(ctrl.useRR73CheckBox,    rcvTransmitGroupBox, new Point(110, 40));
             ReparentTo(ctrl.logEarlyCheckBox,   rcvTransmitGroupBox, new Point(10, 62));
             ReparentTo(ctrl.LogEarlyHelpLabel,  rcvTransmitGroupBox, new Point(140, 64));
             ReparentTo(ctrl.optimizeCheckBox,   rcvTransmitGroupBox, new Point(10, 84));
-            ReparentTo(ctrl.holdCheckBox,       rcvTransmitGroupBox, new Point(90, 84));
             ReparentTo(ctrl.limitLabel,         rcvTransmitGroupBox, new Point(10, 108));
             ReparentTo(ctrl.timeoutNumUpDown,   rcvTransmitGroupBox, new Point(57, 105));
             ctrl.timeoutNumUpDown.TabStop = true;
@@ -3637,6 +3655,54 @@ namespace WSJTX_Controller
 
             // General tab
             ReparentTo(ctrl.showUsStateCheckBox, generalPanel, new Point(10, 61));
+        }
+
+        private System.Windows.Forms.Label _txFreqModeLabel;
+        private System.Windows.Forms.ComboBox _txFreqModeCombo;
+
+        // "Transmit frequency:" chooser on the Transmit tab. OptionsDlg-owned (not a reparented
+        // Controller control) -- created fresh each time Options opens, torn down on close.
+        // Items are in TxFreqMode enum order so SelectedIndex maps straight to (TxFreqMode).
+        private void BuildTxFreqModeCombo()
+        {
+            if (_txFreqModeCombo != null)
+            {
+                rcvTransmitGroupBox.Controls.Remove(_txFreqModeLabel);
+                rcvTransmitGroupBox.Controls.Remove(_txFreqModeCombo);
+                _txFreqModeLabel.Dispose();
+                _txFreqModeCombo.Dispose();
+            }
+
+            _txFreqModeLabel = new System.Windows.Forms.Label
+            {
+                Text = "Transmit frequency:",
+                Location = new Point(10, 19),
+                AutoSize = true,
+                Font = rcvTransmitGroupBox.Font,
+            };
+            _txFreqModeCombo = new System.Windows.Forms.ComboBox
+            {
+                Location = new Point(120, 15),
+                Size = new Size(200, 21),
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Font = rcvTransmitGroupBox.Font,
+                AccessibleName = "Transmit frequency",
+            };
+            _txFreqModeCombo.Items.AddRange(new object[]
+            {
+                "Best free frequency (automatic)",   // TxFreqMode.BestFree
+                "Hold Tx frequency",                 // TxFreqMode.Hold
+                "Transmit on station's frequency",   // TxFreqMode.OnStation
+            });
+            _txFreqModeCombo.SelectedIndex = (int)ctrl.txFreqMode;
+            _txFreqModeCombo.SelectedIndexChanged += (s, e) =>
+            {
+                var mode = (WsjtxClient.TxFreqMode)_txFreqModeCombo.SelectedIndex;
+                ctrl.SetTxFreqMode(mode);
+            };
+
+            rcvTransmitGroupBox.Controls.Add(_txFreqModeLabel);
+            rcvTransmitGroupBox.Controls.Add(_txFreqModeCombo);
         }
 
         private void ReparentTo(Control c, Control newParent, Point newLocation)
@@ -3666,6 +3732,16 @@ namespace WSJTX_Controller
             reparentedControls.Clear();
             originalParents.Clear();
             originalLocations.Clear();
+
+            if (_txFreqModeCombo != null)
+            {
+                rcvTransmitGroupBox.Controls.Remove(_txFreqModeLabel);
+                rcvTransmitGroupBox.Controls.Remove(_txFreqModeCombo);
+                _txFreqModeLabel.Dispose();
+                _txFreqModeCombo.Dispose();
+                _txFreqModeLabel = null;
+                _txFreqModeCombo = null;
+            }
         }
 
         // ===== BASIC TAB WIZARD LOGIC (ported from Guide.cs) =====
@@ -3936,7 +4012,6 @@ namespace WSJTX_Controller
                 HotkeyAction.ManualCall,
                 HotkeyAction.DeleteAllCalls,
                 HotkeyAction.TxPeriod,
-                HotkeyAction.HoldTimeout,
                 HotkeyAction.TuneMode,
                 HotkeyAction.AudioUp,
                 HotkeyAction.AudioDown,
@@ -3944,6 +4019,12 @@ namespace WSJTX_Controller
                 HotkeyAction.BandUp,
                 HotkeyAction.BandDown,
                 HotkeyAction.ToggleMode,
+                HotkeyAction.AnnounceFreq,
+                HotkeyAction.TxFreqUp,
+                HotkeyAction.TxFreqDown,
+                HotkeyAction.TxFromRx,
+                HotkeyAction.RxFromTx,
+                HotkeyAction.SetTxFreq,
                 HotkeyAction.PSKReporter,
                 HotkeyAction.Prompts,
                 HotkeyAction.UploadLotw,

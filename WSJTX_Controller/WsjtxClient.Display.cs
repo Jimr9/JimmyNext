@@ -263,11 +263,15 @@ namespace WSJTX_Controller
             string tagRaw = _awardTagger.CategoryTag(d);
             string tagStr = tagRaw.Length > 0 ? $", {tagRaw}" : "";
 
+            // Station's transmit audio offset (the "hertz they're on") -- opt-in via the Row
+            // Order editor, not in the default row, so existing rows are unchanged.
+            string freq = d.DeltaFrequency > 0 ? $", {d.DeltaFrequency} Hz" : "";
+
             string fallback = $"{callp}{pri}{tagStr}{grid}{snr}{country}{distAz}{oe}{descr}{rankStr}";
             var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 { "callp", callp }, { "pri", pri }, { "tag", tagStr }, { "grid", grid }, { "snr", snr },
-                { "country", country }, { "distAz", distAz }, { "oe", oe },
+                { "freq", freq }, { "country", country }, { "distAz", distAz }, { "oe", oe },
                 { "descr", descr }, { "rankStr", rankStr }
             };
             return RowFormatter.BuildOrderedRow(fieldMap, callWaitingRowOrderFields, fallback);
@@ -364,6 +368,9 @@ namespace WSJTX_Controller
 
                 string snr = ctrl.rawShowSnr ? $", {d.Snr.ToString("+#;-#;0")}dB" : "";
 
+                // Decode's audio offset -- opt-in via the Row Order editor.
+                string freq = d.DeltaFrequency > 0 ? $", {d.DeltaFrequency} Hz" : "";
+
                 string g = WsjtxMessage.Grid(d.Message);
                 string grid = ctrl.rawShowGrid && g != null ? $", {g}" : "";
 
@@ -396,7 +403,7 @@ namespace WSJTX_Controller
                 var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     { "tag", tag }, { "side", $", {side}" }, { "callsign", callsign }, { "message", message },
-                    { "snr", snr }, { "grid", grid }, { "country", country }, { "distAz", distAz },
+                    { "snr", snr }, { "freq", freq }, { "grid", grid }, { "country", country }, { "distAz", distAz },
                 };
                 items.Add(RowFormatter.BuildOrderedRow(fieldMap, rawDecodeRowOrderFields, fallback));
                 keys.Add($"{d.DeCall()}|{d.Message}|{d.SinceMidnight.Ticks}");
@@ -749,7 +756,7 @@ namespace WSJTX_Controller
                             DebugOutput($"{spacer}loggedCall:'{loggedCall}' timedOutCall:'{timedOutCall}' replyFromInProg:{replyFromInProg}");
                             DebugOutput($"{spacer}callInProg:'{callInProg}' txMode:{txMode} qcw:{qcw} transmitting:{transmitting} qsoState:{qsoState}");
                             DebugOutput($"{spacer}curTxMsg:{curTxMsg} curTxPayload:'{curTxPayload}' autoFreqPauseMode:{autoFreqPauseMode}");
-                            DebugOutput($"{spacer}newSelection:{newSelection} uploadResult:'{uploadResult}' newBand:{newBand} newTxFirst:{newTxFirst} holdCheckBox:{ctrl.holdCheckBox.Checked}");
+                            DebugOutput($"{spacer}newSelection:{newSelection} uploadResult:'{uploadResult}' newBand:{newBand} newTxFirst:{newTxFirst}");
                             DebugOutput($"{spacer}modePrompt:{modePrompt} txEnableChanged:{txEnableChanged} tuneResult:{tuneResult} toCallStatus:'{toCallStatus}'");
 
                             string prevRxStr = "";
@@ -759,7 +766,6 @@ namespace WSJTX_Controller
                             string curTxMode = "";
                             string prevRxPayload;
                             string curRxPayload;
-                            string hold = ctrl.holdCheckBox.Checked ? ", timeout extended" : "";
                             string tMode = txMode == TxModes.LISTEN ? "Listen" : "CQ";
                             string tmStr = mode == "FT8" ? "" : $", {mode}";
                             string desc = $", {tMode} mode{tmStr}";
@@ -996,7 +1002,7 @@ namespace WSJTX_Controller
                                 }
                                 else
                                 {
-                                    status = $"{curTxMode}{cond}{inProg}{callsWaiting}{desc}{hold}{prompt}.";
+                                    status = $"{curTxMode}{cond}{inProg}{callsWaiting}{desc}{prompt}.";
                                     foreColor = Color.White;
                                     backColor = Color.Green;
                                 }
@@ -1132,7 +1138,7 @@ namespace WSJTX_Controller
                                 }
                                 else  //not a special case
                                 {
-                                    status = $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{otherStr}{txStr}{callsWaiting}{desc}{hold}{prompt}.";
+                                    status = $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{otherStr}{txStr}{callsWaiting}{desc}{prompt}.";
                                 }
                             }
                             DebugOutput($"{spacer}curCall:'{curCall}' sinceMidnight:{sinceMidnight}");

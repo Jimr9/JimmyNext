@@ -1160,37 +1160,19 @@ namespace WSJTX_Controller
             // NotificationCenter.OnTransmittingChanged's own comment.
             if (transmittingChanged) Notify?.OnTransmittingChanged(transmitting);
 
-            // UDP-to-Direct parity pass, 2026-08-12: port the Tx-hold safety net (the UDP path's
-            // ProcessTxEnd, WsjtxClient.cs -- "too many consecutive transmits without being
-            // heard, in Hold mode" -- consecTxCount/maxConsecTxCount) so it protects Direct-mode
-            // operators too, not just UDP ones. Direct mode had NO equivalent at all before this
-            // -- confirmed by a full UDP-vs-Direct parity audit.
-            //
-            // Deliberately triggered on the same physical transmitting-just-ended edge the UDP
-            // path's ProcessTxEnd reacts to, NOT on the QSO-completion (Is73orRR73) point a few
-            // lines below in this method -- consecTxCount exists specifically to catch a station
-            // that's NEVER replying, so by definition it must count every completed Tx cycle,
-            // not just ones that reach a 73/RR73. Content-independent (doesn't consult txMsg at
-            // all), so it doesn't hit the Qso.TxNow-goes-null-early staleness problem documented
-            // on curTxMsg's own assignment above -- only the fact that a transmission just ended
-            // matters here, not what it said.
+            // Rx/Tx frequency control, 2026-08-27: the old mid-QSO "too many consecutive
+            // transmits without being heard -> disable Tx and re-pick the best free frequency"
+            // behavior is removed. It moved the operator's transmit slot out from under an
+            // in-progress contact, which the frequency-control design explicitly rules out
+            // ("Keep Tx stable during an active QSO"). Automatic best-frequency selection now
+            // happens ONLY at the start of a CQ or a reply, never mid-QSO. consecTxCount is
+            // still maintained (debug/status display) but drives no automatic action.
             if (wasTransmitting && !transmitting)
             {
-                if (ctrl.freqCheckBox.Checked && autoFreqPauseMode == autoFreqPauseModes.DISABLED && ctrl.holdCheckBox.Checked)
-                {
+                if (ctrl.freqCheckBox.Checked)
                     consecTxCount++;
-                    if (consecTxCount >= maxConsecTxCount)
-                    {
-                        DisableTx(true);
-                        autoFreqPauseMode = autoFreqPauseModes.ENABLED;
-                        UpdateCallInProg();
-                        DebugOutput($"{Time()} [DIRECT] auto freq update started (consec Tx), autoFreqPauseMode:{autoFreqPauseMode}");
-                    }
-                }
                 else
-                {
                     consecTxCount = 0;
-                }
             }
 
             // Found live (release blocker follow-up, 2026-08-19): Jimmy's own `txEnabled` field
@@ -1245,6 +1227,16 @@ namespace WSJTX_Controller
             // this, the class-level `tuning` field (AudioLevel()'s own guard, Alt+T's status
             // text) never learned a real Tune (SET_TUNING) was underway in Direct mode.
             tuning = radio.Tuning;
+
+            // Rx/Tx audio offsets: read back the engine's live values every poll so the
+            // accessible frequency controls (Announce Rx/Tx, Tx<->Rx exchange, Set Tx
+            // frequency) always report and act on what the engine is actually doing, not on a
+            // stale value Jimmy last commanded. Jimmy remains the only thing that MOVES them
+            // (DirectSetTxOffset / DirectSetRxOffset). rxOffset/txOffset are 0 until the first
+            // snapshot arrives -- callers treat 0 as "unknown", same as dialFrequency.
+            if (radio.RxOffsetHz > 0) rxOffset = (uint)Math.Round(radio.RxOffsetHz);
+            if (radio.TxOffsetHz > 0) txOffset = (uint)Math.Round(radio.TxOffsetHz);
+            engineHoldTxFreq = radio.HoldTxFreq;
 
             UpdateTrPeriod(smsg);
 
@@ -1930,6 +1922,21 @@ namespace WSJTX_Controller
             EnqueueDirectCommand("SET_TX_OFFSET " + arg, null);
         }
 
+        // Companion to DirectSetTxOffset for the receive marker (Engine::set_rx_offset via the
+        // SET_RX_OFFSET control command, EngineHost/src/main.rs). Jimmy Next's accessible Rx/Tx
+        // frequency controls make Jimmy the single authority on BOTH audio offsets -- ReplyTo
+        // always passes REPLY's dxFreqHz as null and instead calls this to move RX onto the
+        // worked station's decoded audio frequency ("follow the station on receive", every
+        // Hold/Best-mode reply and every caller-answers-our-CQ), and DirectSetTxOffset for the
+        // TX side. Same fire-and-forget contract: a dropped one just leaves the marker where it
+        // was for one more cycle. Engine clamps 200-4000 Hz.
+        public void DirectSetRxOffset(double hz)
+        {
+            if (hz <= 0) return;
+            string arg = hz.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            EnqueueDirectCommand("SET_RX_OFFSET " + arg, null);
+        }
+
         // Alt+M (Toggle Mode) equivalent for direct-engine mode -- see SetOperatingMode's own
         // comment for why classic UDP/CAT mode never needed this (WSJT-X's UDP API has no
         // outbound mode-change command; Jimmy only ever observed WSJT-X's own self-reported
@@ -2259,6 +2266,17 @@ namespace WSJTX_Controller
         // TxStateTests) needs to seed old-band curCmd/replyCmd/replyDecode directly to prove the
         // confirmed-band-change flush clears them, without needing a full real-Reply round trip.
         internal void TestSetCurCmd(string v) => curCmd = v;
+        // internal (not private): Rx/Tx frequency-control tests seed the analyzed best-free
+        // offsets directly (a real slot analysis needs a live decode stream) so ReplyTo's
+        // BestFree branch has a non-zero offset to send.
+        internal void TestSetBestOffsets(int odd, int even)
+        {
+            oddOffset = odd; evenOffset = even;
+            cachedOddOffset = odd; cachedEvenOffset = even;
+        }
+        internal uint TestRxOffset => rxOffset;
+        internal uint TestTxOffset => txOffset;
+        internal bool TestManualFreqThisQso => _manualFreqThisQso;
         internal void TestSetReplyCmd(string v) => replyCmd = v;
         internal void TestSetReplyDecode(EnqueueDecodeMessage v) => replyDecode = v;
         // internal (not private): T14 regression coverage (DiscardCallTwoClockDivergenceTests)
@@ -2335,6 +2353,20 @@ namespace WSJTX_Controller
         public double DialMhz { get; set; }
         public bool Transmitting { get; set; }
         public ulong Slot { get; set; }
+        // Receive / transmit audio offsets in Hz -- the green / red waterfall markers
+        // (tempo-app/src/dto.rs: RadioStatus.rx_offset_hz / tx_offset_hz, both default 1500).
+        // Already present in every SNAPSHOT; Jimmy Next reads them for the accessible Rx/Tx
+        // frequency controls: the "Announce Rx/Tx frequencies" hotkey, the Rx<->Tx exchange
+        // hotkeys, and to notice if the engine's offset has drifted from what Jimmy last
+        // commanded. Jimmy itself is the sole authority that MOVES them, via DirectSetTxOffset /
+        // DirectSetRxOffset; these fields are the read-back.
+        public double RxOffsetHz { get; set; }
+        public double TxOffsetHz { get; set; }
+        // WSJT-X "Hold Tx Freq" (tempo-app/src/dto.rs: RadioStatus.hold_tx_freq). Jimmy drives
+        // every RX/TX move explicitly and always passes REPLY's dxFreqHz as null, so the
+        // engine's own value never changes Jimmy's behavior -- carried here only so the
+        // announce/diagnostic surfaces can report the engine's actual state.
+        public bool HoldTxFreq { get; set; }
         // Null when the engine has no CAT control of the radio at all (Radio.Mode == WsjtxCat) --
         // AppSnapshot's own radio.micGain is nullable for exactly that reason (tempo-app/src/dto.rs).
         // Radio-side (CAT) mic gain -- NOT what F11/F12 uses (see TxLevel below); kept here only

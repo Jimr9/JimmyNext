@@ -750,6 +750,16 @@ fn parse_args() -> Args {
 ///                                          independent of any particular station. No Nexus source
 ///                                          touched -- this just exposes an existing Engine method,
 ///                                          matching every other command above.
+///   SET_RX_OFFSET <hz>                   -- calls Engine::set_rx_offset(f32). Responds "OK" or
+///                                          "ERR <message>". Companion to SET_TX_OFFSET for Jimmy
+///                                          Next's accessible Rx/Tx frequency controls: Jimmy is
+///                                          the sole authority on both audio offsets (REPLY's
+///                                          dx_freq_hz is always null), so "follow the station on
+///                                          receive" -- every Hold/Best-mode reply and every
+///                                          caller-answers-our-CQ -- is one SET_RX_OFFSET with the
+///                                          worked decode's audio Hz. set_rx_offset already exists
+///                                          in Engine (clamped 200-4000 Hz, read by the next
+///                                          poll); no Nexus source touched.
 /// Formats the REPLY command's wire response from `Engine::call_station_ctx`'s own `Result` --
 /// pulled out as a small pure function so this has direct test coverage without needing a live
 /// Engine/TCP round trip. `Ok(())` -> "OK"; `Err(e)` -> "ERR {e}", matching every other fallible
@@ -758,6 +768,20 @@ fn reply_wire_response(result: Result<(), String>) -> String {
     match result {
         Ok(()) => "OK".to_string(),
         Err(e) => format!("ERR {e}"),
+    }
+}
+
+/// Parses the single Hz argument shared by `SET_TX_OFFSET` / `SET_RX_OFFSET`. `Ok(hz)` is
+/// passed straight to `Engine::set_tx_offset` / `set_rx_offset` (which do the 200-4000 Hz
+/// passband clamp themselves); `Err(s)` is the ready-to-write `ERR ...` wire line. Pulled out
+/// as a pure function for the same reason as `reply_wire_response` above -- direct test
+/// coverage of the parse/error contract without a live Engine or TCP round trip. `name` is the
+/// command keyword, echoed into the error so a malformed line is self-identifying in the log.
+fn parse_offset_arg(name: &str, v: &str) -> Result<f32, String> {
+    match v.trim().parse::<f32>() {
+        Ok(hz) if hz.is_finite() => Ok(hz),
+        Ok(_) => Err(format!("ERR bad {name} value: not finite")),
+        Err(e) => Err(format!("ERR bad {name} value: {e}")),
     }
 }
 
@@ -1050,13 +1074,34 @@ fn handle_control_connection(
             engine.lock().unwrap_or_else(|e| e.into_inner()).set_tune(v.trim() == "1");
             let _ = writeln!(stream, "OK");
         } else if let Some(v) = line.strip_prefix("SET_TX_OFFSET ") {
-            match v.trim().parse::<f32>() {
+            match parse_offset_arg("SET_TX_OFFSET", v) {
                 Ok(hz) => {
                     engine.lock().unwrap_or_else(|e| e.into_inner()).set_tx_offset(hz);
                     let _ = writeln!(stream, "OK");
                 }
                 Err(e) => {
-                    let _ = writeln!(stream, "ERR bad SET_TX_OFFSET value: {e}");
+                    let _ = writeln!(stream, "{e}");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_RX_OFFSET ") {
+            // Mirror of SET_TX_OFFSET (just above) for the receive marker. Jimmy Next's
+            // accessible Rx/Tx frequency controls (Options > Transmit "Transmit frequency"
+            // modes, plus the Rx<->Tx and announce hotkeys) make Jimmy the single authority
+            // on BOTH audio offsets: it always passes REPLY's dxFreqHz as null and drives
+            // every RX/TX move explicitly through these two commands, so "follow the station
+            // on receive" (Hold / Best modes, and every caller-answers-our-CQ case) is one
+            // SET_RX_OFFSET with the worked decode's audio Hz -- no reliance on the engine's
+            // own hold_tx_freq default. Engine::set_rx_offset already clamps to the passband
+            // (200-4000 Hz) and is read by the next poll, same as set_tx_offset. Best-effort
+            // like SET_DECODE_DEPTH/SET_TX_OFFSET: a dropped one just means the marker stays
+            // where it was for one more cycle.
+            match parse_offset_arg("SET_RX_OFFSET", v) {
+                Ok(hz) => {
+                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_rx_offset(hz);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "{e}");
                 }
             }
         } else if let Some(json) = line.strip_prefix("SET_FREQUENCY ") {
@@ -1618,6 +1663,29 @@ mod tests {
     #[test]
     fn parse_call_cq_line_recognizes_plain_cq_as_the_bare_command_with_no_directed_token() {
         assert_eq!(parse_call_cq_line("CALL_CQ"), Some(None));
+    }
+
+    #[test]
+    fn parse_offset_arg_accepts_a_plain_hz_value_and_leaves_clamping_to_the_engine() {
+        // 8000 is outside the 200-4000 passband, but that clamp is Engine::set_rx_offset's
+        // job -- this parser only rejects things that aren't a finite number at all.
+        assert_eq!(parse_offset_arg("SET_RX_OFFSET", " 8000 "), Ok(8000.0));
+        assert_eq!(parse_offset_arg("SET_TX_OFFSET", "1500"), Ok(1500.0));
+    }
+
+    #[test]
+    fn parse_offset_arg_rejects_non_numeric_and_non_finite_with_a_self_identifying_err_line() {
+        assert_eq!(
+            parse_offset_arg("SET_RX_OFFSET", "abc"),
+            Err("ERR bad SET_RX_OFFSET value: invalid float literal".to_string())
+        );
+        assert!(parse_offset_arg("SET_TX_OFFSET", "NaN")
+            .unwrap_err()
+            .starts_with("ERR bad SET_TX_OFFSET value:"));
+        assert_eq!(
+            parse_offset_arg("SET_RX_OFFSET", "inf"),
+            Err("ERR bad SET_RX_OFFSET value: not finite".to_string())
+        );
     }
 
     #[test]

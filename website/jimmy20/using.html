@@ -60,9 +60,21 @@
   <ul>
     <li>Select a station from the calling list and Jimmy Next handles the rest of the exchange — signal reports, RR73/73 — automatically.</li>
     <li><strong>Manual Call</strong> (<kbd>Alt</kbd>+<kbd>J</kbd>) lets you type any callsign to call directly, bypassing the queue. If lookups are enabled, Jimmy Next shows a quick confirmation with the station's grid square before actually calling.</li>
-    <li><strong>Toggle Extended Timeout</strong> (<kbd>Alt</kbd>+<kbd>X</kbd>, sometimes called "Hold") gives a marginal or weak station extra transmissions before Jimmy Next would otherwise give up and move on — useful when you can tell a contact is close to completing. It resets automatically once the contact finishes or changes.</li>
+    <li>The <strong>Repeat limit</strong> (Transmit tab) sets how many times Jimmy Next repeats the same message to a station that isn't answering before it gives up and moves to the next call. Raise it for weak or marginal conditions; lower it to work a busy queue faster. (The old "Extended Timeout" / "Hold" toggle is gone — the Repeat limit is now the single control for this.)</li>
     <li><kbd>Escape</kbd> halts transmit, cancels the current QSO, and returns you to Listen mode.</li>
   </ul>
+
+  <h2 id="transmit-frequency">Transmit frequency</h2>
+  <p>A sighted WSJT-X or Nexus operator sets where in the passband they transmit and receive by dragging markers on a waterfall. Jimmy Next gives you the same control through the keyboard, with spoken confirmation and no waterfall required.</p>
+  <p>The <strong>Transmit frequency</strong> setting (Options &gt; Transmit) chooses how Jimmy Next places your transmit audio when it starts a CQ or answers a station:</p>
+  <ul>
+    <li><strong>Best free frequency (automatic)</strong> — the default. Jimmy Next studies recent decodes and transmits in the widest clear gap it can find, so you don't land on top of anyone. Leave this on and you never have to think about frequency.</li>
+    <li><strong>Hold Tx frequency</strong> — Jimmy Next keeps your current transmit frequency and only moves your <em>receive</em> onto the station you're working. This is the equivalent of WSJT-X's "Hold Tx Freq" being on.</li>
+    <li><strong>Transmit on station's frequency</strong> — when you answer a station, both your transmit and receive move to that station's frequency. This is the classic WSJT-X double-click-to-work behavior.</li>
+  </ul>
+  <p>In every mode, once a contact is under way Jimmy Next leaves your transmit frequency alone until the contact ends — it never re-picks a "better" spot in the middle of a QSO. When someone answers your CQ, Jimmy Next holds the frequency you were calling on and simply follows the caller on receive, the way a running operator expects.</p>
+  <p>You can also take over by hand at any time. <kbd>Alt</kbd>+<kbd>W</kbd> sets an exact transmit frequency; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Up</kbd> / <kbd>Down</kbd> nudge it 60&nbsp;Hz at a time; <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Left</kbd> and <kbd>Right</kbd> copy one marker to the other (Tx&nbsp;&larr;&nbsp;Rx and Rx&nbsp;&larr;&nbsp;Tx); and <kbd>Alt</kbd>+<kbd>V</kbd> reads back both frequencies and the current mode. Using one of the transmit keys during a contact pins that contact to your manual frequency — automatic selection resumes after you Halt, finish the QSO, change band or mode, or reselect "Best free frequency."</p>
+  <p><strong>Split Operation</strong> (None / Rig / Fake It, on the Radio tab) is unchanged and separate: it's only <em>how</em> the offset is applied to your radio, not <em>where</em> in the passband you operate.</p>
 
   <h2>DX Spot Watch</h2>
   <p>Press <kbd>Ctrl</kbd>+<kbd>4</kbd> to open a small, personal watch list of specific callsigns. For each one, Jimmy Next shows when and where it was last heard on the air in near real time — even stations you haven't decoded yourself — pulled from PSK Reporter's live spot feed. It's ideal for tracking a specific chase target: a DXpedition, a special-event station, or a POTA/SOTA activator you're waiting for. Spot Watch is intentionally separate from Wanted Calls — adding a callsign here doesn't change queue priority, it's purely "is this station even active right now, and where."</p>
