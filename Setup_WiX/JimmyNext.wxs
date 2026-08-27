@@ -67,6 +67,13 @@
     <Property Id="DESKTOP_SHORTCUT" Value="1" Secure="yes" />
     <Property Id="STARTMENU_SHORTCUT" Value="1" Secure="yes" />
 
+    <!-- "Launch Jimmy Next" checkbox on the Finish page. Setting the TEXT property is what
+         makes WixUI_InstallDir's stock ExitDialog show the optional checkbox at all; the
+         second property defaults it checked. The Finish button's DoAction publish that acts
+         on it is in the JimmyNextUI fragment below. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Jimmy Next" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+
     <!-- No .NET Framework launch-condition check: the self-contained win-x64
          publish carries its own .NET 10 runtime, so there is no prerequisite to
          verify before installing. -->
@@ -111,6 +118,19 @@
                   Execute="deferred"
                   Impersonate="no"
                   Return="ignore" />
+
+    <!-- Launches Jimmy Next when the operator leaves the Finish page with the "Launch Jimmy
+         Next" checkbox ticked. Same Directory plus quoted [INSTALLFOLDER] path shape as
+         PreWarmEngineHostScan above, so no WiX extension is needed. Impersonate="yes" runs it
+         as the logged in user (not elevated; the app must not run as admin). Execute defaults
+         to immediate, which is correct for an ExitDialog action (it fires in the UI sequence,
+         after the install transaction has committed). Return="asyncNoWait" lets the installer
+         window close without waiting on the app. -->
+    <CustomAction Id="LaunchJimmyNext"
+                  Directory="INSTALLFOLDER"
+                  ExeCommand="&quot;[INSTALLFOLDER]Jimmy Next.exe&quot;"
+                  Impersonate="yes"
+                  Return="asyncNoWait" />
 
     <InstallExecuteSequence>
       <Custom Action="PreWarmEngineHostScan" After="InstallFiles" Condition="NOT Installed" />
@@ -290,6 +310,13 @@
       <!-- Route: VerifyReadyDlg Back -> ShortcutsDlg (fresh install only) -->
       <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="ShortcutsDlg" Order="2"
                Condition="NOT Installed AND NOT PATCH" />
+
+      <!-- Finish: launch the app if the ExitDialog "Launch Jimmy Next" checkbox is ticked.
+           Fresh install or major upgrade only (never on repair or remove). The checkbox
+           itself is supplied by WixUI_InstallDir's stock ExitDialog, made visible and
+           labelled by WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT (Package section). -->
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchJimmyNext"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
 
       <!-- ── ShortcutsDlg ──────────────────────────────────────────── -->
       <Dialog Id="ShortcutsDlg" Width="370" Height="270" Title="[ProductName] Setup">

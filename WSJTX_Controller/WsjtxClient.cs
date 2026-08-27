@@ -2986,7 +2986,7 @@ namespace WSJTX_Controller
         {
             processDecodeTimer2.Stop();
             string toCall = WsjtxMessage.ToCall(curTxMsg);
-            DebugOutput($"{nl}{Time()} ProcessDecodeTimer2Tick, processDecodeTimer2 stop, toCall:{toCall} curTxMsg:'{curTxMsg}' cqPaused:{cqPaused} transmitting:{transmitting} restartQueue:{restartQueue}");
+            DebugOutput($"{nl}{Time()} ProcessDecodeTimer2Tick, processDecodeTimer2 stop, toCall:{toCall} lastTxMsg:'{curTxMsg}' cqPaused:{cqPaused} transmitting:{transmitting} restartQueue:{restartQueue}");
             if (toCall == callInProg) _callQueueStore.RemoveCall(toCall);       //late decode caused WSJT-X to transmit a new response after the original transmit started
 
             //           "call CQ" mode and a late 73 may have caused WSJT-X to start calling "CQ" when it should be "CQ DX" or other directed CQ

@@ -755,7 +755,12 @@ namespace WSJTX_Controller
                             DebugOutput($"{nl}{Time()} ShowStatus, txEnabled:{txEnabled} cqPaused:{cqPaused} txTimeout:{txTimeout}");
                             DebugOutput($"{spacer}loggedCall:'{loggedCall}' timedOutCall:'{timedOutCall}' replyFromInProg:{replyFromInProg}");
                             DebugOutput($"{spacer}callInProg:'{callInProg}' txMode:{txMode} qcw:{qcw} transmitting:{transmitting} qsoState:{qsoState}");
-                            DebugOutput($"{spacer}curTxMsg:{curTxMsg} curTxPayload:'{curTxPayload}' autoFreqPauseMode:{autoFreqPauseMode}");
+                            // Label is "lastTxMsg" (the curTxMsg field is only ever overwritten
+                            // with a REAL transmitted message -- see WsjtxClient.Direct.cs -- so
+                            // after an interrupted contact this is the LAST message sent, not a
+                            // current or pending one; reading it as "still sending this" is a
+                            // diagnostic-clarity trap, 2026-08-27). Field name unchanged.
+                            DebugOutput($"{spacer}lastTxMsg:{curTxMsg} curTxPayload:'{curTxPayload}' autoFreqPauseMode:{autoFreqPauseMode}");
                             DebugOutput($"{spacer}newSelection:{newSelection} uploadResult:'{uploadResult}' newBand:{newBand} newTxFirst:{newTxFirst}");
                             DebugOutput($"{spacer}modePrompt:{modePrompt} txEnableChanged:{txEnableChanged} tuneResult:{tuneResult} toCallStatus:'{toCallStatus}'");
 
