@@ -341,6 +341,16 @@ namespace WSJTX_Controller
         // silently short-circuiting into false success.
         private readonly Dictionary<string, bool> _liveLoggedQsoKeys = new Dictionary<string, bool>();
 
+        // Finding 2, 2026-08-28 (read-only audit): the callsign whose local logbook write was
+        // ATTEMPTED and FAILED (SQLite locked, disk full, ...) on its most recent RequestLog.
+        // RequestLog already releases the dedup claim and skips logList.Add on failure, so a
+        // retry is possible -- but DirectApplyStatus used to clear callInProg unconditionally
+        // right after LogQso, so the callInProg-gated completion branch could never re-enter to
+        // retry. Now that branch keeps callInProg set while this matches, so the next poll tick
+        // (curTxMsg is still the 73/RR73/RRR) re-attempts the write. Cleared on a successful
+        // write and whenever callInProg moves to a different call. Null = no pending retry.
+        private string _liveLogWriteFailedCall = null;
+
         private bool ClaimLiveLoggedQso(string dedupKey)
         {
             if (string.IsNullOrEmpty(dedupKey)) return true;
@@ -2185,10 +2195,22 @@ namespace WSJTX_Controller
         //logging is done directly via log file, not via WSJT-X
         private void CheckLateLog(string call, EnqueueDecodeMessage msg)
         {
-            DebugOutput($"{spacer}CheckLateLog: call:'{call}' callInProg:'{CallPriorityString(callInProg)}' txTimeout:{txTimeout} msg:{msg.Message} Is73orRR73:{WsjtxMessage.Is73orRR73(msg.Message)} logList:{logList.Contains(call)} allCallDict:{allCallDict.ContainsKey(call)} sentReport:{sentReportList.Contains(call)}");
-            if (call == null || !WsjtxMessage.Is73orRR73(msg.Message))
+            // Finding 1, 2026-08-28 (read-only audit): "Log early, after RRR" (Options,
+            // logEarlyCheckBox / IsLogEarly) went dead when the UDP ProcessTxEnd() was removed
+            // 2026-08-18 -- IsLogEarly() has had no callers since. A bare RRR from the worked
+            // station means the QSO already meets the minimum definition (both calls + both
+            // signal reports + their roger); if the trailing 73 is never exchanged (operator
+            // Halt, band change, engine restart, Repeat-limit stop) the contact is otherwise
+            // lost -- which matters for contests/awards. So accept a decoded RRR here too, but
+            // ONLY when the operator opted in AND IsLogEarly(call) is true -- IsLogEarly's own
+            // "new DXCC or higher priority still waits for a real 73/RR73" exception is thereby
+            // preserved. 73/RR73 keeps logging unconditionally exactly as before.
+            bool isSignoff = WsjtxMessage.Is73orRR73(msg.Message);
+            bool isEarlyRoger = !isSignoff && WsjtxMessage.IsRogers(msg.Message) && IsLogEarly(call);
+            DebugOutput($"{spacer}CheckLateLog: call:'{call}' callInProg:'{CallPriorityString(callInProg)}' txTimeout:{txTimeout} msg:{msg.Message} Is73orRR73:{isSignoff} isEarlyRoger:{isEarlyRoger} logEarly:{ctrl.logEarlyCheckBox.Checked} logList:{logList.Contains(call)} allCallDict:{allCallDict.ContainsKey(call)} sentReport:{sentReportList.Contains(call)}");
+            if (call == null || (!isSignoff && !isEarlyRoger))
             {
-                DebugOutput($"{spacer}no late log: msg is null or not 73/RR73");
+                DebugOutput($"{spacer}no late log: msg is null, or not 73/RR73 and not an early-log RRR");
                 return;
             }
 
@@ -2354,11 +2376,15 @@ namespace WSJTX_Controller
             // the Still Need cache refresh) are gated on localWriteFailed.
             if (localWriteFailed)
             {
+                // Finding 2, 2026-08-28: remember which call needs a retry so DirectApplyStatus's
+                // own completion branch keeps callInProg set and re-attempts on the next poll.
+                _liveLogWriteFailedCall = call;
                 Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"QSO with {call} NOT saved",
                     "local logbook write failed -- this contact is not yet recorded; check Debug output and available disk space"));
             }
             else
             {
+                if (_liveLogWriteFailedCall == call) _liveLogWriteFailedCall = null;   // this call's write landed (or was already committed)
                 Sounds.PlaySoundEvent(ctrl.loggedCheckBox.Checked, ctrl.soundFile_Logged);
             }
             // Removed 2026-08-10: this used to also Notify.Publish(QsoCompletedEvent(...))
@@ -2837,6 +2863,11 @@ namespace WSJTX_Controller
             if (call != null) lCall = null;     //last logged call is not relevant now
 
             if (call == null) { CancelDiscardCall(); _manualCallInProg = false; }
+
+            // Finding 2, 2026-08-28: a pending failed-write retry only makes sense while that
+            // same call is still in progress -- once we move on (operator picked another call,
+            // Halt cleared it, band change), drop it so it can't wedge a later completion.
+            if (_liveLogWriteFailedCall != null && _liveLogWriteFailedCall != call) _liveLogWriteFailedCall = null;
 
             // Rx/Tx frequency control: a manual Tx-frequency override is scoped to one
             // CQ/QSO. Any callInProg transition -- new contact, contact ended, band change

@@ -1340,6 +1340,23 @@ namespace WSJTX_Controller
                     // callInProg == null (WsjtxClient.Display.cs).
                     if (!logList.Contains(callInProg))
                         LogQso(callInProg);
+
+                    // Finding 2, 2026-08-28 (read-only audit): only tear the QSO down if the
+                    // local logbook write actually landed. RequestLog adds to logList only on a
+                    // successful (or already-committed) write; a failed write leaves logList
+                    // clean, releases the dedup claim, and sets _liveLogWriteFailedCall. Keep
+                    // callInProg set in that case so this branch re-enters on the next poll
+                    // (curTxMsg is still the 73/RR73) and the write is retried, instead of
+                    // clearing callInProg and leaving the contact permanently unlogged with no
+                    // path back. "Nothing to log at all" (no report on record -- a partial
+                    // exchange) is NOT a failed write: fall through and tear down as before so a
+                    // broken exchange can't wedge callInProg forever.
+                    if (!logList.Contains(callInProg) && _liveLogWriteFailedCall == callInProg)
+                    {
+                        DebugOutput($"{Time()} [DIRECT] local log write for '{callInProg}' failed -- keeping callInProg set, will retry next poll");
+                    }
+                    else
+                    {
                     string justWorkedCall = callInProg;
                     SetCallInProg(null);
 
@@ -1384,6 +1401,8 @@ namespace WSJTX_Controller
                         CancelQso();
                         SetupCq(true);
                     }
+                    }   // end Finding-2 "write landed" else -- teardown only when the QSO is on record
+
                     // Note (runaway-RR73 investigation, 2026-08-28): in LISTEN mode the engine's
                     // own QSO sequencer can keep re-sending this RR73 every slot after callInProg
                     // is cleared here, if the worked station never cleanly hears it. An explicit
@@ -1394,6 +1413,22 @@ namespace WSJTX_Controller
                     // reply. The _directOrphanTxOvers backstop in DirectApplyStatus catches the
                     // runaway instead (within ~2 overs) without touching the between-contacts
                     // state -- see its own comment.
+                }
+                else if (WsjtxMessage.IsRogers(curTxMsg) && IsLogEarly(callInProg)
+                         && (RecdReport(callInProg) || RecdRogerReport(callInProg)) && sentReportList.Contains(callInProg))
+                {
+                    // Finding 1, 2026-08-28 (read-only audit): mirrors the removed UDP
+                    // ProcessTxEnd() early-log path. When WE send the roger as a bare RRR
+                    // (engine Settings.prefer_rrr -- NOT wired through from Jimmy today, so this
+                    // stays dormant until it is) with signal reports already exchanged both
+                    // ways, "Log early, after RRR" (IsLogEarly: operator opted in AND not a new
+                    // DXCC / higher priority) logs the QSO now rather than risk losing it if the
+                    // trailing 73 never goes out. Does NOT clear callInProg -- the QSO continues;
+                    // the Is73orRR73 branch above tears it down when the 73 is sent. logList /
+                    // _liveLoggedQsoKeys dedupe so that later 73 cannot double-log. Also retries
+                    // a failed early-RRR write on the next poll, same as Finding 2 above.
+                    if (!logList.Contains(callInProg))
+                        LogQso(callInProg);
                 }
             }
 
@@ -2227,6 +2262,16 @@ namespace WSJTX_Controller
             return false;
         }
 
+        // Marks the ordered command worker as "already started" so EnqueueDirectCommand never
+        // spawns it. Lets the purge-fix regression test inspect exactly what a HALT_TX enqueue
+        // does to the queues, with no background worker racing the assertion by dequeuing the
+        // command first (a real Task.Run scheduling race that varies with overall suite load --
+        // see HaltPurgesQueuedTxArmCommandTests). Call before the first EnqueueDirectCommand.
+        internal void TestSuppressDirectCommandWorker()
+        {
+            lock (_directQueueLock) _directCommandWorkerStarted = true;
+        }
+
         // ── Test-only hooks (JimmyTests, see InternalsVisibleTo in AssemblyInfo.Testing.cs) ──
         // Exercise the exact same DirectApplyStatus/DirectApplyDecodes pipeline the live poll
         // loop calls, without starting _directPollTimer or touching the network/control port --
@@ -2297,6 +2342,10 @@ namespace WSJTX_Controller
         internal void TestSetDirectConnected(bool connected) => _directConnected = connected;
         internal void TestDirectHandlePollFailure() => DirectHandlePollFailure();
         internal int TestDirectConsecutivePollFailures => _directConsecutivePollFailures;
+        // Finding 2, 2026-08-28: the call whose local logbook write failed and is awaiting a
+        // retry (null = none). DirectLogRetryAndEarlyRrrTests asserts it is set after a failed
+        // write, cleared after the retry succeeds, and that callInProg is held meanwhile.
+        internal string TestLiveLogWriteFailedCall => _liveLogWriteFailedCall;
 
         // "Remember F11/F12 audio level per band" regression coverage: bandIdx is private,
         // updated only inside DirectApplyStatus (the real production poll pipeline, exercised

@@ -247,6 +247,7 @@ static class JimmyTests
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
         DirectRunawayRr73HaltsEngineTests();
+        DirectLogRetryAndEarlyRrrTests();
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
@@ -1741,6 +1742,145 @@ static class JimmyTests
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
             try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Read-only audit, 2026-08-28: (1) "Log early, after RRR" went dead when the UDP
+    // ProcessTxEnd() was removed -- IsLogEarly() has had no callers since -- so a QSO with both
+    // reports exchanged plus the DX's bare RRR was only logged if a trailing 73/RR73 later got
+    // exchanged (contest/award loss if it didn't). (2) A failed local logbook write during
+    // completion was never retried in the Direct path, because SetCallInProg(null) ran
+    // unconditionally right after LogQso, so the callInProg-gated completion branch could not
+    // re-enter. ──
+    static void DirectLogRetryAndEarlyRrrTests()
+    {
+        Console.WriteLine("\n── Audit: RRR early-log revived + failed local-write retry (Direct path) ──");
+
+        string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_LogRetry_" + Guid.NewGuid().ToString("N") + ".db");
+        string badDir = Path.Combine(Path.GetTempPath(), "JimmyTest_BadDb_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(badDir);   // a directory path can't be opened as a SQLite file -> write throws -> localWriteFailed
+        string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+
+        const string myCall = "KB0UZT", myGrid = "FN42", dx = "K4YT";  // K4YT: domestic fixture
+
+        WsjtxClient MakeClient(bool logEarly)
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+            ctrl.logEarlyCheckBox.Checked = logEarly;
+            var lm = new LookupManager();
+            lm.RegisterProviderFirst(new TestFixtureLookupProvider());
+            lm.Initialize(useLookupData: true, qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                lotwEnabled: false, lotwDays: 1, clubLogAppKey: null, clubLogDays: 1, fccUlsEnabled: false);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.lookupManager = lm;
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            return wc;
+        }
+
+        // Seed a client mid-QSO with dx: they reported to us, we reported to them.
+        void SeedMidQso(WsjtxClient wc, int dxPriority)
+        {
+            wc.callInProg = dx;
+            wc.allCallDict[dx] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = $"{myCall} {dx} R-07", Snr = -7, Priority = dxPriority,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                },
+            };
+            wc.sentReportList.Add(dx);
+        }
+
+        DirectSnapshot DecodeSnap(ulong slot, string message) => ParseDirectSnapshot(@"{
+            ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+            ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+            ""recentDecodes"": [ { ""from"": """ + dx + @""", ""snr"": -1, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + message + @""" } ]
+        }");
+        DirectSnapshot TxNowSnap(ulong slot, string txNow) => ParseDirectSnapshot(@"{
+            ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+            ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot + @" },
+            ""recentDecodes"": [],
+            ""qso"": { ""state"": ""done"", ""txNow"": """ + txNow + @""" }
+        }");
+
+        try
+        {
+            // ── Part 1 (Finding 1): a decoded bare RRR from the worked station logs early ──
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+
+            var wcOn = MakeClient(logEarly: true);
+            SeedMidQso(wcOn, (int)WsjtxClient.CallPriority.DEFAULT);   // ordinary call -> IsLogEarly true
+            wcOn.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(5000, $"{myCall} {dx} RRR"));
+            Check("THE FIX (Finding 1): decoded RRR + reports exchanged + 'Log early' on -> QSO logged now",
+                  wcOn.logList.Contains(dx), true);
+            Check("THE FIX (Finding 1): callInProg stays set -- the QSO continues until 73/RR73",
+                  wcOn.callInProg == dx, true);
+            // the trailing 73 later tears it down and does NOT double-log
+            wcOn.TestApplyDirectSnapshot(myCall, myGrid, TxNowSnap(5002, $"{dx} {myCall} 73"));
+            Check("THE FIX (Finding 1): the trailing 73 clears callInProg and does not double-log",
+                  wcOn.callInProg == null && wcOn.logList.FindAll(c => c == dx).Count == 1, true);
+
+            var wcOff = MakeClient(logEarly: false);
+            SeedMidQso(wcOff, (int)WsjtxClient.CallPriority.DEFAULT);
+            wcOff.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(5010, $"{myCall} {dx} RRR"));
+            Check("control: 'Log early' OFF -> a decoded RRR does NOT log",
+                  wcOff.logList.Contains(dx), false);
+
+            var wcNewDx = MakeClient(logEarly: true);
+            SeedMidQso(wcNewDx, (int)WsjtxClient.CallPriority.NEW_COUNTRY);   // new DXCC -> IsLogEarly false
+            wcNewDx.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(5020, $"{myCall} {dx} RRR"));
+            Check("THE FIX (Finding 1): the new-DXCC exception is preserved -- RRR does NOT early-log a new country",
+                  wcNewDx.logList.Contains(dx), false);
+            wcNewDx.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(5022, $"{myCall} {dx} RR73"));
+            Check("...but its real RR73 still logs it",
+                  wcNewDx.logList.Contains(dx), true);
+
+            // ── Part 2 (Finding 2): a failed local write is held for retry, not lost ──
+            // Construct + seed while the path is still valid (WsjtxClient's ctor opens its own
+            // LogbookDb); only the COMPLETION write below hits the bad path.
+            var wcFail = MakeClient(logEarly: false);
+            SeedMidQso(wcFail, (int)WsjtxClient.CallPriority.DEFAULT);
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", badDir);   // RequestLog's write now throws
+            wcFail.TestApplyDirectSnapshot(myCall, myGrid, TxNowSnap(6000, $"{dx} {myCall} RR73"));
+            Check("THE FIX (Finding 2): a failed local logbook write leaves the QSO unlogged",
+                  wcFail.logList.Contains(dx), false);
+            Check("THE FIX (Finding 2): callInProg is KEPT so the completion branch can retry",
+                  wcFail.callInProg == dx, true);
+            Check("THE FIX (Finding 2): the failed call is recorded for retry",
+                  wcFail.TestLiveLogWriteFailedCall == dx, true);
+
+            // disk clears; next poll (curTxMsg still the RR73) re-enters the branch and retries
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+            wcFail.TestApplyDirectSnapshot(myCall, myGrid, TxNowSnap(6002, $"{dx} {myCall} RR73"));
+            Check("THE FIX (Finding 2): the next poll retries the write and it succeeds",
+                  wcFail.logList.Contains(dx), true);
+            Check("THE FIX (Finding 2): only then is callInProg cleared",
+                  wcFail.callInProg == null, true);
+            Check("THE FIX (Finding 2): the retry flag is cleared",
+                  wcFail.TestLiveLogWriteFailedCall == null, true);
+            using (var db = new LogbookDb(goodDb))
+                Check("THE FIX (Finding 2): exactly one logbook row for the retried QSO (no duplicate)",
+                      db.SearchQsos(dx, null, null, null).Count == 1, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectLogRetryAndEarlyRrrTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            try { File.Delete(goodDb); } catch { }
+            try { Directory.Delete(badDir, true); } catch { }
         }
     }
 
@@ -7659,6 +7799,12 @@ static class JimmyTests
             // it ran). Stopping it here costs nothing this test itself needs (both assertions
             // above already completed before this point matters).
             wc.TestStopPollTimer();
+            // 2026-08-28: suppress the ordered command worker so it can't dequeue CALL_CQ before
+            // the assertion below reads the queue. That Task.Run scheduling race made this test
+            // intermittently fail as unrelated tests were added and shifted overall suite timing
+            // -- the purge logic under test (PurgePendingTxArmCommands_NoLock) is fully
+            // synchronous under _directQueueLock and needs no worker to exercise.
+            wc.TestSuppressDirectCommandWorker();
 
             wc.DirectSendCq(null);
             Check("CALL_CQ is sitting in the normal queue (isTxArm) right after being sent",
