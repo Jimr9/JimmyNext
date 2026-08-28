@@ -9,8 +9,10 @@ obj/
 *.pdb
 packages/
 
-# MSI build outputs
+# MSI build outputs (the .msi and its zipped form are GitHub Release assets only,
+# never committed -- see CLAUDE.md's Release Versioning checklist)
 *.msi
+Setup_WiX/*.msi.zip
 
 # Documentation ZIP (GitHub Release asset, built from the gitignored
 # "text files/jimmy_documentation/" folder -- never committed)

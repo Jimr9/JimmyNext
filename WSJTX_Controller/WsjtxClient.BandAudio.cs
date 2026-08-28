@@ -375,10 +375,22 @@ namespace WSJTX_Controller
                     return;
                 }
 
+                // "Explain meter readings" (Options > Radio, RadioSettings.ExplainMeterReadings) --
+                // opt-in, default off: adds one short plain-language clause per reading and, while
+                // receiving, the rig's CAT S-meter in S-units. Off = exactly the terse wording
+                // this hotkey always spoke. Read live off ctrl.Radio, no restart needed.
+                bool explain = ctrl.Radio.ExplainMeterReadings;
+
                 if (transmitting || tuning)
                 {
+                    // S-meter is deliberately NOT reported here (read-only audit, 2026-08-28):
+                    // it measures an INCOMING signal, which the rig cannot do while keyed. The
+                    // engine keeps its last receive value in smeter_db through the whole over
+                    // (it only clears it on a CAT drop / radio switch), so anything shown during
+                    // transmit is a stale, meaningless number -- the operators who reported this
+                    // were right that "you can't read an S-meter while transmitting". It belongs
+                    // in the receive branch below, where it is a live reading.
                     var parts = new List<string>();
-                    if (radio.SmeterDb.HasValue) parts.Add($"S-meter {radio.SmeterDb.Value} dB");
                     // Release-audit finding, 2026-08-20: this used to report radio.RfPower -- the raw
                     // 0.0-1.0 Hamlib "l RFPOWER" fraction that disable_rfpower_probe (EngineHost/src/
                     // main.rs, the proven fix for the real 5W-drop hazard, Hamlib/Hamlib#1595)
@@ -390,15 +402,27 @@ namespace WSJTX_Controller
                     // probe -- safe to read here, never involves the hazardous query. Do not revert
                     // this to RfPower/l RFPOWER for any reason.
                     if (radio.TxPoW.HasValue) parts.Add($"power {radio.TxPoW.Value:0.#} W");
-                    if (radio.TxSwr.HasValue) parts.Add($"SWR {radio.TxSwr.Value:0.0}");
-                    if (radio.TxAlc.HasValue) parts.Add($"ALC {radio.TxAlc.Value:0.00}");
+                    if (radio.TxSwr.HasValue)
+                        parts.Add(explain ? $"SWR {radio.TxSwr.Value:0.0}, {SwrHint(radio.TxSwr.Value)}"
+                                          : $"SWR {radio.TxSwr.Value:0.0}");
+                    if (radio.TxAlc.HasValue)
+                        parts.Add(explain ? $"ALC {radio.TxAlc.Value:0.00}, {AlcHint(radio.TxAlc.Value)}"
+                                          : $"ALC {radio.TxAlc.Value:0.00}");
                     StatusView.ShowMessage(parts.Count > 0 ? string.Join(", ", parts) : "Radio: no meter data available.", false);
                     return;
                 }
 
                 // Not transmitting/tuning: the soundcard's own RX audio-in level (see this method's
-                // own top comment for why this differs from S-meter/power/SWR above).
-                StatusView.ShowMessage($"Audio in: {RxLevelToDb(radio.RxLevel):0} dB", false);
+                // own top comment for why this differs from power/SWR above).
+                if (!explain)
+                {
+                    StatusView.ShowMessage($"Audio in: {RxLevelToDb(radio.RxLevel):0} dB", false);
+                    return;
+                }
+                double audioInDb = RxLevelToDb(radio.RxLevel);
+                string rxReport = $"Audio in {audioInDb:0} dB, {AudioInHint(audioInDb)}";
+                if (radio.SmeterDb.HasValue) rxReport += $", S-meter {SmeterToSUnits(radio.SmeterDb.Value)}";
+                StatusView.ShowMessage(rxReport, false);
             });
             return true;
         }
@@ -418,6 +442,55 @@ namespace WSJTX_Controller
         {
             if (double.IsNaN(rms) || rms <= 0) return 0;
             return Math.Max(0, Math.Min(90, 20 * Math.Log10(rms) + 90.3));
+        }
+
+        // Plain-language hints for the "Explain meter readings" option (RadioSettings.
+        // ExplainMeterReadings) -- Alt+Q's optional verbose form. Pure functions so JimmyTests
+        // covers the wording and thresholds directly, same as RxLevelToDb above. The thresholds
+        // are deliberately conservative and rig-agnostic (no station is special-cased); a
+        // screen-reader user gets one short clause, never a sentence.
+
+        // SWR ratio, always >= 1.0. 1.0 is a perfect match; most rigs start folding back power /
+        // an antenna problem is likely by about 3.
+        internal static string SwrHint(double swr)
+        {
+            if (swr <= 1.5) return "good";
+            if (swr <= 2.0) return "acceptable";
+            if (swr <= 3.0) return "high";
+            return "very high, check antenna";
+        }
+
+        // ALC as a 0.0-1.0 fraction of the rig's meter scale. For FT8/FT4 you want it at or near
+        // zero (a clean, linear signal) -- any real ALC action means the transmit audio is too
+        // hot and should come down (F11).
+        internal static string AlcHint(double alc)
+        {
+            if (alc <= 0.05) return "clean";
+            if (alc <= 0.20) return "a little high, reduce audio";
+            return "high, reduce audio";
+        }
+
+        // Soundcard receive audio-in level on RxLevelToDb's own 0-90 scale -- ~15-60 decodes
+        // well, above ~70 is clipping (matches RxLevelToDb's own comment).
+        internal static string AudioInHint(double db)
+        {
+            if (db < 15) return "low";
+            if (db <= 60) return "good";
+            if (db <= 70) return "hot";
+            return "too hot, clipping";
+        }
+
+        // CAT S-meter, reported by Hamlib as dB relative to S9 (S9 = 0 dB, ~6 dB per S-unit).
+        // Spoken the way an operator reads a front panel: "S7", "S9", "S9 plus 20 dB". This is
+        // the number the operators found confusing as a bare "-12 dB".
+        internal static string SmeterToSUnits(int dbRelS9)
+        {
+            if (dbRelS9 >= 0)
+                return dbRelS9 == 0 ? "S9" : $"S9 plus {dbRelS9} dB";
+            int sUnit = 9 + (int)Math.Round(dbRelS9 / 6.0, MidpointRounding.AwayFromZero);
+            if (sUnit < 1) sUnit = 1;
+            if (sUnit > 9) sUnit = 9;
+            return $"S{sUnit}";
         }
 
         // Added 2026-08-10: wired to the native engine's own Engine::set_tune (control port's

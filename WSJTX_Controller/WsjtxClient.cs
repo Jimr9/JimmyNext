@@ -244,6 +244,23 @@ namespace WSJTX_Controller
         // mode change, and whenever the operator re-selects "Best free frequency" in Options.
         // Only meaningful when TxFreqMode == BestFree (the other modes never auto-pick anyway).
         private bool _manualFreqThisQso = false;
+
+        // Read-only audit finding 3, 2026-08-27: rapid Tx/Rx nudge presses must ACCUMULATE even
+        // while earlier SET_TX_OFFSET / SET_RX_OFFSET commands are still in flight -- three +60
+        // presses from 1500 must target 1560, 1620, 1680, not 1560 three times. txOffset/rxOffset
+        // only update from a confirmed SNAPSHOT, so basing the next nudge on them alone made every
+        // press in a burst read the same stale value. These hold the last REQUESTED (not yet
+        // confirmed) offset, so a burst chains off itself; the in-flight counters clear them back
+        // to null once every request in the burst has settled, resynchronizing the next nudge to
+        // the engine's confirmed SNAPSHOT value (txOffset/rxOffset). Cleared on any failure path
+        // too (see ApplyManualTxOffset/ApplyManualRxOffset) so pending state can never permanently
+        // drift from the engine. UI-thread-only, like txOffset/rxOffset -- both the nudge hotkeys
+        // and the marshaled Direct completion callbacks run there, so no locking is needed.
+        private int? _pendingTxOffsetHz;
+        private int? _pendingRxOffsetHz;
+        private int _txOffsetRequestsInFlight;
+        private int _rxOffsetRequestsInFlight;
+
         private string replyCmd = null;     //no "reply to" cmd sent to WSJT-X yet, will not be a CQ
         private string curCmd = null;       //cmd last issed, can be CQ
         private EnqueueDecodeMessage replyDecode = null;
@@ -1107,11 +1124,30 @@ namespace WSJTX_Controller
 
         private int ClampAudioOffset(int hz) => Math.Max(MinAudioOffsetHz, Math.Min(MaxAudioOffsetHz, hz));
 
+        // The offset a NEW Tx nudge should move from: the last requested-but-unconfirmed value if
+        // a burst is still in flight (audit finding 3), otherwise the engine's last confirmed
+        // SNAPSHOT value, otherwise the 1500 Hz default. Rx has an identical companion below.
+        private int PendingOrConfirmedTxBaseHz => _pendingTxOffsetHz ?? (txOffset > 0 ? (int)txOffset : 1500);
+        private int PendingOrConfirmedRxBaseHz => _pendingRxOffsetHz ?? (rxOffset > 0 ? (int)rxOffset : 1500);
+
         // Shared by every manual Tx-frequency hotkey. Marks this CQ/QSO as operator-placed
         // (suppresses the automatic best-free pick until Halt / QSO end / band / mode change),
         // sends the change, and -- audit finding 1, 2026-08-27 -- speaks the result only after
         // the engine confirms it, so a change that never landed (EngineHost restarting /
         // unreachable) is announced as such rather than as success.
+        //
+        // Audit finding 2, 2026-08-27: _manualFreqThisQso is now set ONLY in the confirmed-success
+        // callback and left UNTOUCHED on failure -- a SET_TX_OFFSET the engine never confirmed
+        // must not suppress subsequent automatic Best Free placement (previously it was set true
+        // eagerly, before the command was sent, so a failed request permanently blocked Best Free
+        // for the rest of the QSO). Leaving it untouched on failure both preserves its previous
+        // state (a fresh Best Free QSO stays false) and never clobbers a true set by an earlier
+        // successful press in the same burst.
+        // Audit finding 3, 2026-08-27: _pendingTxOffsetHz is advanced synchronously here (before
+        // the async command is even enqueued) so a rapid follow-up nudge chains off this request,
+        // not off the stale confirmed value; the in-flight counter clears it once the whole burst
+        // settles (success OR failure), resyncing the next nudge to the engine's confirmed
+        // SNAPSHOT value so pending state can never permanently drift from the engine.
         private void ApplyManualTxOffset(int hz, string prefix)
         {
             if (!_directConnected)
@@ -1120,24 +1156,33 @@ namespace WSJTX_Controller
                 return;
             }
             int clamped = ClampAudioOffset(hz);
-            _manualFreqThisQso = true;
-            DebugOutput($"{Time()} {prefix}: manual txOffset request:{clamped} _manualFreqThisQso:true");
+            _pendingTxOffsetHz = clamped;
+            _txOffsetRequestsInFlight++;
+            DebugOutput($"{Time()} {prefix}: manual txOffset request:{clamped} (pending, {_txOffsetRequestsInFlight} in flight)");
             DirectSetTxOffset(clamped, ok =>
             {
+                bool burstSettled = --_txOffsetRequestsInFlight <= 0;
+                if (burstSettled) { _txOffsetRequestsInFlight = 0; _pendingTxOffsetHz = null; }
                 if (ok)
                 {
                     txOffset = (uint)clamped;
+                    _manualFreqThisQso = true;
+                    DebugOutput($"{Time()} {prefix}: manual txOffset confirmed:{clamped} _manualFreqThisQso:true");
                     StatusView.ShowMessage($"{prefix} {clamped} hertz", false);
                 }
                 else
                 {
+                    // Not confirmed -- _manualFreqThisQso deliberately left as-is so this failed
+                    // request cannot suppress Best Free automatic placement.
+                    DebugOutput($"{Time()} {prefix}: manual txOffset NOT confirmed -- _manualFreqThisQso left at {_manualFreqThisQso}");
                     StatusView.ShowMessage($"{prefix} frequency change not confirmed -- engine not responding", false);
                 }
             });
         }
 
         // Same as ApplyManualTxOffset for the receive marker. Moving Rx is "follow the station"
-        // intent, not a Tx placement, so it does NOT set _manualFreqThisQso.
+        // intent, not a Tx placement, so it does NOT set _manualFreqThisQso. Same audit finding 3
+        // pending-offset accumulation as the Tx side.
         private void ApplyManualRxOffset(int hz)
         {
             if (!_directConnected)
@@ -1146,16 +1191,22 @@ namespace WSJTX_Controller
                 return;
             }
             int clamped = ClampAudioOffset(hz);
-            DebugOutput($"{Time()} Receive: manual rxOffset request:{clamped}");
+            _pendingRxOffsetHz = clamped;
+            _rxOffsetRequestsInFlight++;
+            DebugOutput($"{Time()} Receive: manual rxOffset request:{clamped} (pending, {_rxOffsetRequestsInFlight} in flight)");
             DirectSetRxOffset(clamped, ok =>
             {
+                bool burstSettled = --_rxOffsetRequestsInFlight <= 0;
+                if (burstSettled) _rxOffsetRequestsInFlight = 0;
                 if (ok)
                 {
                     rxOffset = (uint)clamped;
+                    if (burstSettled) _pendingRxOffsetHz = null;
                     StatusView.ShowMessage($"Receive {clamped} hertz", false);
                 }
                 else
                 {
+                    if (burstSettled) _pendingRxOffsetHz = null;
                     StatusView.ShowMessage("Receive frequency change not confirmed -- engine not responding", false);
                 }
             });
@@ -1164,16 +1215,14 @@ namespace WSJTX_Controller
         // Shift+F12 / Shift+F11 -- move Tx by the configured Frequency step.
         public bool NudgeTxFrequency(int steps)
         {
-            int baseHz = txOffset > 0 ? (int)txOffset : 1500;
-            ApplyManualTxOffset(baseHz + steps * FreqStepHz, "Transmit");
+            ApplyManualTxOffset(PendingOrConfirmedTxBaseHz + steps * FreqStepHz, "Transmit");
             return true;
         }
 
         // Ctrl+Shift+F12 / Ctrl+Shift+F11 -- move Rx by the configured Frequency step.
         public bool NudgeRxFrequency(int steps)
         {
-            int baseHz = rxOffset > 0 ? (int)rxOffset : 1500;
-            ApplyManualRxOffset(baseHz + steps * FreqStepHz);
+            ApplyManualRxOffset(PendingOrConfirmedRxBaseHz + steps * FreqStepHz);
             return true;
         }
 

@@ -2288,6 +2288,14 @@ namespace WSJTX_Controller
         internal uint TestRxOffset => rxOffset;
         internal uint TestTxOffset => txOffset;
         internal bool TestManualFreqThisQso => _manualFreqThisQso;
+        // internal (not private): audit finding 3, 2026-08-27 -- nudge-accumulation regression
+        // coverage checks the last requested (not yet confirmed) offset a burst chained from, and
+        // that it clears back to null once every request in the burst has settled.
+        internal int? TestPendingTxOffsetHz => _pendingTxOffsetHz;
+        internal int? TestPendingRxOffsetHz => _pendingRxOffsetHz;
+        internal int TestTxOffsetRequestsInFlight => _txOffsetRequestsInFlight;
+        internal int TestRxOffsetRequestsInFlight => _rxOffsetRequestsInFlight;
+        internal void TestSetManualFreqThisQso(bool v) => _manualFreqThisQso = v;
         internal void TestSetReplyCmd(string v) => replyCmd = v;
         internal void TestSetReplyDecode(EnqueueDecodeMessage v) => replyDecode = v;
         // internal (not private): T14 regression coverage (DiscardCallTwoClockDivergenceTests)

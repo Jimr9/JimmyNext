@@ -139,6 +139,16 @@ namespace WSJTX_Controller
         public bool RememberTxLevelPerBand { get; set; } = false;
         public System.Collections.Generic.Dictionary<int, double> TxLevelByBand { get; } = new System.Collections.Generic.Dictionary<int, double>();
 
+        // Alt+Q ("Quick Power / SWR Check", WsjtxClient.BandAudio.cs's ReportPowerSwr) normally
+        // speaks bare numbers (e.g. "SWR 1.4, ALC 0.30"). Opt-in, default off -- keeps the terse
+        // report for operators who prefer it. When on, each reading gets a short plain-language
+        // hint ("SWR 1.4, good", "ALC 0.30, a little high, reduce audio") and the receive report
+        // also includes the rig's CAT S-meter in S-units where the rig provides one. Requested
+        // 2026-08-28 by operators who wanted the meaning spoken, not just the reading. Read live
+        // off ctrl.Radio -- no engine/radio restart needed, same shape as AudioStepPercent /
+        // RememberTxLevelPerBand above.
+        public bool ExplainMeterReadings { get; set; } = false;
+
         public void LoadFromIni(IniFile ini)
         {
             if (Enum.TryParse(ini.Read("radioControlMode"), out RadioControlMode mode))
@@ -175,6 +185,7 @@ namespace WSJTX_Controller
             if (ini.Read("radioLastTier") is string lastTier && (lastTier == "FT8" || lastTier == "FT4"))
                 LastTier = lastTier;
             RememberTxLevelPerBand = ini.Read("radioRememberTxLevelPerBand") == "True";
+            ExplainMeterReadings = ini.Read("radioExplainMeterReadings") == "True";
             TxLevelByBand.Clear();
             string txLevelByBand = ini.Read("radioTxLevelByBand");
             if (!string.IsNullOrEmpty(txLevelByBand))
@@ -214,6 +225,7 @@ namespace WSJTX_Controller
                 ini.Write("radioLastDialFrequencyHz", LastDialFrequencyHz.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (!string.IsNullOrEmpty(LastTier)) ini.Write("radioLastTier", LastTier);
             ini.Write("radioRememberTxLevelPerBand", RememberTxLevelPerBand.ToString());
+            ini.Write("radioExplainMeterReadings", ExplainMeterReadings.ToString());
             ini.Write("radioTxLevelByBand", string.Join(";", System.Linq.Enumerable.Select(TxLevelByBand,
                 kv => $"{kv.Key}={kv.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}")));
         }

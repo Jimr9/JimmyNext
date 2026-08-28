@@ -624,7 +624,18 @@ namespace WSJTX_Controller
         // and sends one HALT_TX line, bounded hard so a hung/absent engine can't stall the
         // crash dialog. Whatever the engine was transmitting (an active CQ or QSO over) stops
         // at the next slot boundary instead of continuing while the operator reads the dialog.
-        // Returns true only if the line was actually written; everything is swallowed.
+        //
+        // Read-only audit finding 1, 2026-08-27: returning true merely because the bytes were
+        // written was wrong -- a write landing in the socket buffer is not proof the engine
+        // received, parsed, or acted on it. Now returns true ONLY after reading back
+        // EngineHost's explicit "OK" line (its HALT_TX handler's response -- see
+        // run_control_server in EngineHost/src/main.rs). A missing, malformed, or "ERR"
+        // response, a closed connection, or a read timeout all mean "not confirmed" -> false,
+        // so the crash dialog only tells the operator TX was halted when it really was. Every
+        // step stays hard-bounded (500 ms connect, 500 ms write, 500 ms read) so a hung or
+        // absent engine can never stall the crash handler -- the crash path's own best-effort
+        // behavior is preserved: it ignores the return value on the fatal-background path and
+        // only softens the dialog wording on the UI path.
         public static bool TryEmergencyHaltTx()
         {
             try
@@ -636,10 +647,22 @@ namespace WSJTX_Controller
                     using (var stream = client.GetStream())
                     {
                         stream.WriteTimeout = 500;
+                        stream.ReadTimeout = 500;
                         byte[] cmd = System.Text.Encoding.ASCII.GetBytes("HALT_TX\n");
                         stream.Write(cmd, 0, cmd.Length);
                         stream.Flush();
-                        return true;
+
+                        // One short bounded line read -- ReadByte honors ReadTimeout and throws
+                        // IOException on expiry, which the catch below turns into false. Cap the
+                        // length defensively so a chatty/garbled peer can't make this loop long.
+                        var sb = new StringBuilder();
+                        int b;
+                        while (sb.Length < 64 && (b = stream.ReadByte()) != -1)
+                        {
+                            if (b == '\n') break;
+                            if (b != '\r') sb.Append((char)b);
+                        }
+                        return sb.ToString().Trim() == "OK";
                     }
                 }
             }

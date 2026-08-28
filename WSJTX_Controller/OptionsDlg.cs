@@ -959,6 +959,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown _radioSwrHaltThresholdUpDown;
         private System.Windows.Forms.NumericUpDown _radioAudioStepUpDown;
         private System.Windows.Forms.CheckBox _radioRememberTxLevelPerBandCheckBox;
+        private System.Windows.Forms.CheckBox _radioExplainMeterReadingsCheckBox;
 
         private System.Windows.Forms.ComboBox _decodeDepthCombo;
         private System.Windows.Forms.NumericUpDown _decodeFLowUpDown;
@@ -1539,12 +1540,26 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioRememberTxLevelPerBandCheckBox);
             y += 32;
 
+            _radioExplainMeterReadingsCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Explain meter readings (Alt+Q)",
+                Checked = ctrl.Radio.ExplainMeterReadings,
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y),
+                Font = font,
+                TabIndex = 28,
+                AccessibleName = "Explain meter readings",
+                AccessibleDescription = "When on, the Alt+Q power and SWR check adds a short plain-language hint to each reading, such as \"good\" or \"reduce audio\", and includes the radio's S-meter in S-units while receiving.",
+            };
+            radioPanel.Controls.Add(_radioExplainMeterReadingsCheckBox);
+            y += 32;
+
             _radioTestButton = new System.Windows.Forms.Button
             {
                 Text = "Test connection",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(120, 24),
-                TabIndex = 28,
+                TabIndex = 29,
                 Font = font,
                 AccessibleName = "Test radio connection",
             };
@@ -3260,6 +3275,9 @@ namespace WSJTX_Controller
             // WsjtxClient.BandAudio.cs's AudioLevel() and WsjtxClient.Direct.cs's band-change
             // restore both read this directly off ctrl.Radio.
             if (_radioRememberTxLevelPerBandCheckBox != null) ctrl.Radio.RememberTxLevelPerBand = _radioRememberTxLevelPerBandCheckBox.Checked;
+            // Same live-read, no-restart-needed shape -- WsjtxClient.BandAudio.cs's ReportPowerSwr()
+            // (Alt+Q) reads this directly off ctrl.Radio on each press.
+            if (_radioExplainMeterReadingsCheckBox != null) ctrl.Radio.ExplainMeterReadings = _radioExplainMeterReadingsCheckBox.Checked;
 
             // Normalize case on entry: this call/grid flows straight into jimmy-engine-host's
             // --mycall (see DecodeMessage.IsCallTo's own comment on the 2026-08-07

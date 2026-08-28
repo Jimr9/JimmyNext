@@ -249,6 +249,7 @@ static class JimmyTests
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
+        MeterReadingHintTests();
         SetOperatingModeFailureDoesNotChangeLocalModeTests();
         TxLevelPerBandRestoreTests();
         DirectPathTxLevelBandTrackingTests();
@@ -295,6 +296,9 @@ static class JimmyTests
         HaltDoesNotConfirmWhenStillTransmittingTests();
         RejectedReplyPreservesQueuedStationTests();
         RxTxFrequencyModeReplyTests();
+        EmergencyHaltTxConfirmationTests();
+        FailedManualTxOffsetPreservesBestFreeTests();
+        RapidFrequencyNudgesAccumulateTests();
         SessionTokenAuthenticationTests();
         RepeatLimitActivelyStopsTxTests();
         CompletedQsoRemovesStaleQueueStateTests();
@@ -1947,6 +1951,52 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  AudioTuningHotkeyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── "Explain meter readings" (Options ▸ Radio, RadioSettings.ExplainMeterReadings), 2026-08-28 ──
+    // Alt+Q's optional verbose form: WsjtxClient.BandAudio.cs's SwrHint / AlcHint / AudioInHint /
+    // SmeterToSUnits are pure functions, tested directly here the same way RxLevelToDb is (they
+    // are the deterministic half of ReportPowerSwr, whose transmit/receive branching needs a live
+    // engine host to exercise). Also documents the read-only-audit fix: the S-meter is a
+    // receive-only reading and no longer belongs in the transmit branch at all.
+    static void MeterReadingHintTests()
+    {
+        Console.WriteLine("\n── Explain meter readings: SWR / ALC / audio-in / S-meter hint wording ──");
+        try
+        {
+            // SWR: 1.0 perfect, folding back / antenna trouble by ~3.
+            Check("SwrHint: 1.0 is good", WsjtxClient.SwrHint(1.0) == "good", true);
+            Check("SwrHint: 1.5 is good", WsjtxClient.SwrHint(1.5) == "good", true);
+            Check("SwrHint: 1.8 is acceptable", WsjtxClient.SwrHint(1.8) == "acceptable", true);
+            Check("SwrHint: 2.7 is high", WsjtxClient.SwrHint(2.7) == "high", true);
+            Check("SwrHint: 4.0 is very high, check antenna", WsjtxClient.SwrHint(4.0) == "very high, check antenna", true);
+
+            // ALC: near zero is the target for FT8/FT4.
+            Check("AlcHint: 0.0 is clean", WsjtxClient.AlcHint(0.0) == "clean", true);
+            Check("AlcHint: 0.05 is clean", WsjtxClient.AlcHint(0.05) == "clean", true);
+            Check("AlcHint: 0.15 is a little high, reduce audio", WsjtxClient.AlcHint(0.15) == "a little high, reduce audio", true);
+            Check("AlcHint: 0.40 is high, reduce audio", WsjtxClient.AlcHint(0.40) == "high, reduce audio", true);
+
+            // Audio-in: RxLevelToDb's own 0-90 scale; ~15-60 decodes well.
+            Check("AudioInHint: 8 dB is low", WsjtxClient.AudioInHint(8) == "low", true);
+            Check("AudioInHint: 31 dB is good", WsjtxClient.AudioInHint(31) == "good", true);
+            Check("AudioInHint: 65 dB is hot", WsjtxClient.AudioInHint(65) == "hot", true);
+            Check("AudioInHint: 80 dB is too hot, clipping", WsjtxClient.AudioInHint(80) == "too hot, clipping", true);
+
+            // S-meter: Hamlib reports dB relative to S9 (S9 = 0 dB, ~6 dB per S-unit). Spoken as
+            // S-units -- the "-12 dB" bare number is exactly what confused the operators.
+            Check("SmeterToSUnits: 0 dB is S9", WsjtxClient.SmeterToSUnits(0) == "S9", true);
+            Check("SmeterToSUnits: -12 dB rel S9 is S7", WsjtxClient.SmeterToSUnits(-12) == "S7", true);
+            Check("SmeterToSUnits: -48 dB rel S9 is about S1", WsjtxClient.SmeterToSUnits(-48) == "S1", true);
+            Check("SmeterToSUnits: an off-scale weak reading clamps to S1, never S0 or negative",
+                  WsjtxClient.SmeterToSUnits(-90) == "S1", true);
+            Check("SmeterToSUnits: +20 dB over S9 is spoken as S9 plus 20 dB", WsjtxClient.SmeterToSUnits(20) == "S9 plus 20 dB", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  MeterReadingHintTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
@@ -7888,6 +7938,243 @@ static class JimmyTests
         finally
         {
             engineListener.Stop();
+        }
+    }
+
+    // ── Read-only audit finding 1, 2026-08-27: NativeEngineClient.TryEmergencyHaltTx must
+    // confirm the engine's explicit "OK" before reporting success ──
+    // The unhandled-exception crash handler (Program.cs) softens its dialog wording ("Transmit
+    // has been halted as a precaution") based purely on this return value, so returning true
+    // just because the bytes were written -- with no proof the engine received or acted on
+    // HALT_TX -- could tell an operator TX was stopped when it wasn't. Drives the real static
+    // method against a stub engine host whose HALT_TX response is varied per case, including a
+    // hung connection and no engine at all -- both must return false quickly, never hang.
+    static void EmergencyHaltTxConfirmationTests()
+    {
+        Console.WriteLine("\n── Read-only audit finding 1: emergency HALT_TX confirmation ──");
+
+        string[] resp = { "OK" };
+        string gotCommand = null;
+        var listener = StartStubEngineHostWithResponses(line =>
+        {
+            gotCommand = line;
+            return resp[0] == "<hang>" ? null : resp[0];
+        });
+        if (listener == null)
+        {
+            Skip("EmergencyHaltTxConfirmationTests", "control port 58239 already in use by another Jimmy/engine-host session");
+            return;
+        }
+        try
+        {
+            resp[0] = "OK";
+            gotCommand = null;
+            bool okResult = NativeEngineClient.TryEmergencyHaltTx();
+            Check("THE FIX: returns true only when the engine answers an explicit OK", okResult, true);
+            Check("...and it actually sent HALT_TX", gotCommand == "HALT_TX", true);
+
+            resp[0] = "ERR something went wrong";
+            Check("an ERR response is not a confirmation -> false", NativeEngineClient.TryEmergencyHaltTx(), false);
+
+            resp[0] = "MAYBE";
+            Check("a malformed / unexpected response is not a confirmation -> false", NativeEngineClient.TryEmergencyHaltTx(), false);
+
+            resp[0] = "<hang>";
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool hungResult = NativeEngineClient.TryEmergencyHaltTx();
+            sw.Stop();
+            Check("a hung engine (no response) -> false", hungResult, false);
+            Check($"...and it gave up within the bounded read budget ({sw.ElapsedMilliseconds}ms, < 2000ms)", sw.ElapsedMilliseconds < 2000, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  EmergencyHaltTxConfirmationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+
+        // No engine listening at all -- the port is free again now that the stub is stopped.
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool noEngine = NativeEngineClient.TryEmergencyHaltTx();
+            sw.Stop();
+            Check("no engine reachable -> false", noEngine, false);
+            Check($"...and it gave up within the bounded connect budget ({sw.ElapsedMilliseconds}ms, < 2000ms)", sw.ElapsedMilliseconds < 2000, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  EmergencyHaltTxConfirmationTests (no-engine) threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
+    // ── Read-only audit finding 2, 2026-08-27: a failed manual Tx-frequency change must not
+    // leave _manualFreqThisQso set ──
+    // _manualFreqThisQso suppresses automatic "Best free frequency" placement for the rest of
+    // the QSO. It used to be set true eagerly, before SET_TX_OFFSET was even sent, so a change
+    // the engine rejected/never answered permanently blocked Best Free. Now it is set only in
+    // the confirmed-success callback and left untouched on failure.
+    static void FailedManualTxOffsetPreservesBestFreeTests()
+    {
+        Console.WriteLine("\n── Read-only audit finding 2: failed manual Tx change preserves Best Free ──");
+
+        string[] resp = { "OK" };
+        var listener = StartStubEngineHostWithResponses(line =>
+            line.StartsWith("SET_TX_OFFSET") ? resp[0] : "OK");
+        if (listener == null)
+        {
+            Skip("FailedManualTxOffsetPreservesBestFreeTests", "control port 58239 already in use by another Jimmy/engine-host session");
+            return;
+        }
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.txFreqMode = WsjtxClient.TxFreqMode.BestFree;
+            ctrl.freqCheckBox.Checked = true;
+            ctrl.freqStepHz = 60;
+            // Force the Form's native handle to exist NOW: the DirectSetTxOffset completion runs
+            // via ctrl.BeginInvoke on a background Task, and without a created handle BeginInvoke
+            // throws off-thread (caught nowhere) and the callback silently never runs -- same fix
+            // SessionTokenAuthenticationTests / HaltPurgesQueuedTxArmCommandTests already apply.
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+
+            Check("precondition: _manualFreqThisQso starts false", wc.TestManualFreqThisQso, false);
+
+            // A SET_TX_OFFSET the engine rejects (ERR) must NOT latch the manual override.
+            resp[0] = "ERR rejected by test stub";
+            wc.NudgeTxFrequency(+1);
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0);
+            Check("THE FIX: a rejected manual Tx change leaves _manualFreqThisQso false", wc.TestManualFreqThisQso, false);
+            Check("...and txOffset was not moved by an unconfirmed change", wc.TestTxOffset == 0, true);
+            Check("...and pending Tx state was cleared, not left drifting", wc.TestPendingTxOffsetHz == null, true);
+
+            // Control: a later CONFIRMED manual change still latches the flag as designed.
+            resp[0] = "OK";
+            wc.NudgeTxFrequency(+1);
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0 && wc.TestManualFreqThisQso);
+            Check("a confirmed manual Tx change sets _manualFreqThisQso true", wc.TestManualFreqThisQso, true);
+            Check("...and txOffset advanced to the confirmed value (1560)", wc.TestTxOffset == 1560, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  FailedManualTxOffsetPreservesBestFreeTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
+    // ── Read-only audit finding 3, 2026-08-27: rapid Tx/Rx nudge presses must ACCUMULATE while
+    // earlier SET_TX_OFFSET / SET_RX_OFFSET commands are still in flight ──
+    // Three +60 presses from 1500 must target 1560, 1620, 1680 -- not 1560 three times -- and a
+    // nudge whose command fails must not leave the pending offset drifted away from the engine:
+    // the next nudge resumes from the confirmed value.
+    static void RapidFrequencyNudgesAccumulateTests()
+    {
+        Console.WriteLine("\n── Read-only audit finding 3: rapid frequency nudges accumulate ──");
+
+        var seen = new System.Collections.Generic.List<string>();
+        var seenLock = new object();
+        string[] resp = { "OK" };
+        var listener = StartStubEngineHostWithResponses(line =>
+        {
+            lock (seenLock) seen.Add(line);
+            if (line.StartsWith("SET_TX_OFFSET") || line.StartsWith("SET_RX_OFFSET")) return resp[0];
+            return "OK";
+        });
+        if (listener == null)
+        {
+            Skip("RapidFrequencyNudgesAccumulateTests", "control port 58239 already in use by another Jimmy/engine-host session");
+            return;
+        }
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.freqStepHz = 60;
+            // Force the Form's native handle to exist NOW -- the DirectSetTxOffset/
+            // DirectSetRxOffset completions run via ctrl.BeginInvoke on a background Task; without
+            // a created handle BeginInvoke throws off-thread (caught nowhere) and the callbacks
+            // silently never run, so the in-flight counters would never decrement.
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+
+            System.Collections.Generic.List<string> OffsetCmds(string prefix)
+            {
+                lock (seenLock) return seen.FindAll(c => c.StartsWith(prefix));
+            }
+
+            // --- Tx: three rapid +60 presses with nothing pumped in between ---
+            lock (seenLock) seen.Clear();
+            wc.NudgeTxFrequency(+1);
+            wc.NudgeTxFrequency(+1);
+            wc.NudgeTxFrequency(+1);
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0 && OffsetCmds("SET_TX_OFFSET").Count >= 3);
+
+            var txCmds = OffsetCmds("SET_TX_OFFSET");
+            Check("THE FIX: three rapid Tx nudges emit exactly three commands", txCmds.Count == 3, true);
+            Check("...targeting 1560 then 1620 then 1680, not 1560 three times",
+                txCmds.Count == 3 && txCmds[0] == "SET_TX_OFFSET 1560" && txCmds[1] == "SET_TX_OFFSET 1620" && txCmds[2] == "SET_TX_OFFSET 1680", true);
+            Check("...and the confirmed Tx offset ends at 1680", wc.TestTxOffset == 1680, true);
+            Check("...and pending Tx state cleared once the burst settled", wc.TestPendingTxOffsetHz == null, true);
+
+            // --- Rx: same accumulation on the receive marker ---
+            lock (seenLock) seen.Clear();
+            wc.NudgeRxFrequency(+1);
+            wc.NudgeRxFrequency(+1);
+            wc.NudgeRxFrequency(+1);
+            PumpUntil(() => wc.TestRxOffsetRequestsInFlight == 0 && OffsetCmds("SET_RX_OFFSET").Count >= 3);
+
+            var rxCmds = OffsetCmds("SET_RX_OFFSET");
+            Check("three rapid Rx nudges accumulate to 1560 / 1620 / 1680",
+                rxCmds.Count == 3 && rxCmds[0] == "SET_RX_OFFSET 1560" && rxCmds[1] == "SET_RX_OFFSET 1620" && rxCmds[2] == "SET_RX_OFFSET 1680", true);
+            Check("...and the confirmed Rx offset ends at 1680", wc.TestRxOffset == 1680, true);
+
+            // --- Recovery after a nudge command fails ---
+            // Confirmed Tx offset is 1680. One failing nudge, then a succeeding one: the retry
+            // must resume from 1680 (SET_TX_OFFSET 1740), NOT from a pending value that drifted
+            // to 1740 during the failure (which would make the retry target 1800).
+            lock (seenLock) seen.Clear();
+            resp[0] = "ERR dropped";
+            wc.NudgeTxFrequency(+1);
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0);
+            Check("a failed nudge does not move the confirmed Tx offset", wc.TestTxOffset == 1680, true);
+            Check("a failed nudge clears pending Tx state (no permanent drift)", wc.TestPendingTxOffsetHz == null, true);
+
+            resp[0] = "OK";
+            wc.NudgeTxFrequency(+1);
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0 && wc.TestTxOffset == 1740);
+            var recoveryCmds = OffsetCmds("SET_TX_OFFSET");
+            Check("THE FIX: after a failed nudge the retry resumes from the confirmed value -- SET_TX_OFFSET 1740, not 1800",
+                recoveryCmds.Count == 2 && recoveryCmds[1] == "SET_TX_OFFSET 1740", true);
+            Check("...and the confirmed Tx offset is exactly one step past 1680", wc.TestTxOffset == 1740, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RapidFrequencyNudgesAccumulateTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
         }
     }
 
