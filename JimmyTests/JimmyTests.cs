@@ -246,6 +246,7 @@ static class JimmyTests
         GeoMathEllipsoidCrossValidationTests();
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
+        DirectRunawayRr73HaltsEngineTests();
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
@@ -1738,6 +1739,112 @@ static class JimmyTests
         }
         finally
         {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Direct-mode runaway-RR73 backstop (CONFIRMED live, 2026-08-28 -- HB9TIH then NE5L in
+    // one session): the engine's own QSO sequencer kept re-sending "<call> KB0UZT RR73" every
+    // transmit slot for ~2 minutes after Jimmy had logged the contact and cleared callInProg,
+    // because in LISTEN mode nothing told the engine to stand down. Only the operator mashing
+    // Escape ~8 times stopped it, and Jimmy was left wedged after. ──
+    // The backstop (_directOrphanTxOvers, DirectApplyStatus) watches for the engine transmitting
+    // over after over with NO call in progress in LISTEN mode: the FIRST orphaned over is
+    // tolerated (it can be the legitimate final RR73 finishing a poll or two after callInProg
+    // was cleared), the SECOND trips HALT_TX + SET_TX_ENABLED 0 and announces.
+    static void DirectRunawayRr73HaltsEngineTests()
+    {
+        Console.WriteLine("\n── Direct-mode runaway RR73: orphaned-Tx backstop halts the engine ──");
+
+        var seen = new System.Collections.Generic.List<string>();
+        var seenLock = new object();
+        var listener = StartStubEngineHostWithResponses(line => { lock (seenLock) seen.Add(line); return "OK"; });
+        if (listener == null)
+        {
+            Skip("DirectRunawayRr73HaltsEngineTests", "control port 58239 already in use by another Jimmy/engine-host session");
+            return;
+        }
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Runaway_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle; // Direct command completions marshal via ctrl.BeginInvoke
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+
+            const string myCall = "KB0UZT", myGrid = "FN42", qsoCall = "HB9TIH";
+            System.Collections.Generic.List<string> Seen() { lock (seenLock) return new System.Collections.Generic.List<string>(seen); }
+            bool SeenCmd(string prefix) => Seen().Exists(c => c.StartsWith(prefix));
+
+            DirectSnapshot TxSnap(bool transmitting, ulong slot, string txNow) => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") + @", ""slot"": " + slot + @" },
+                ""recentDecodes"": []" + (txNow == null ? "" : @",
+                ""qso"": { ""state"": ""done"", ""txNow"": """ + txNow + @""" }") + @"
+            }");
+
+            // ── The contact completes normally on the engine's RR73: logged, callInProg cleared ──
+            wc.callInProg = qsoCall;
+            wc.allCallDict[qsoCall] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage { Message = $"{myCall} {qsoCall} R-05", Snr = -5, RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay },
+            };
+            lock (seenLock) seen.Clear();
+            // Our roger-report goes out first (adds qsoCall to sentReportList, as
+            // DirectModePlumbingParityTests scenario 5 does) so the RR73 step actually logs.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 1999, $"{qsoCall} {myCall} R-05"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 2000, $"{qsoCall} {myCall} RR73"));
+            Check("Setup: the completed QSO is logged", wc.logList.Contains(qsoCall), true);
+            Check("Setup: callInProg is cleared once the RR73 goes out", wc.callInProg == null, true);
+
+            // ── Over A: the engine's RR73 over finishes (transmitting -> not). callInProg is
+            //    null now, mode is LISTEN. This first orphaned over is tolerated. ──
+            lock (seenLock) seen.Clear();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 2001, $"{qsoCall} {myCall} RR73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(false, 2002, null));
+            Check("THE FIX: the FIRST orphaned over is tolerated (could be the real final RR73 finishing)",
+                  wc.TestOrphanTxOvers == 1 && !SeenCmd("HALT_TX"), true);
+
+            // ── Over B: the engine re-keyed the same RR73 entirely on its own -- runaway. ──
+            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 2003, $"{qsoCall} {myCall} RR73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(false, 2004, null));
+            // HaltAndDisableTx enqueues HALT_TX (priority) then SET_TX_ENABLED 0 -- the stub sees
+            // them one at a time on the single ordered worker, so wait for BOTH before asserting.
+            PumpUntil(() => SeenCmd("HALT_TX") && SeenCmd("SET_TX_ENABLED 0"));
+            Check("THE FIX: the SECOND orphaned over trips HALT_TX", SeenCmd("HALT_TX"), true);
+            Check("THE FIX: ...and SET_TX_ENABLED 0", SeenCmd("SET_TX_ENABLED 0"), true);
+            Check("THE FIX: the counter resets after firing so it re-arms for a later episode",
+                  wc.TestOrphanTxOvers == 0, true);
+
+            // ── A normal idle listen (no callInProg, never transmitting) never trips it ──
+            lock (seenLock) seen.Clear();
+            for (ulong s = 2010; s < 2016; s++)
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(false, s, null));
+            Check("a normal idle LISTEN session (never transmitting) does not trip the backstop",
+                  wc.TestOrphanTxOvers == 0 && !SeenCmd("HALT_TX"), true);
+
+            // Stop this instance's Direct command worker so it doesn't sit parked on the
+            // thread pool for the rest of the (~1000-test) run -- same hygiene the other
+            // stub-engine-host tests rely on the process ending to get for free.
+            wc.ShutdownDirectCommandQueue();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectRunawayRr73HaltsEngineTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
             try { File.Delete(tmpDb); } catch { }
         }

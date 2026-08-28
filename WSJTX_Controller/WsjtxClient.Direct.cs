@@ -356,6 +356,17 @@ namespace WSJTX_Controller
         // so this fires HaltTx()/announces once per episode, not every tick while SWR stays high.
         private bool _swrOverThreshold;
 
+        // Direct-mode runaway-Tx backstop, 2026-08-28 (CONFIRMED live -- HB9TIH then NE5L, same
+        // session): count of completed transmit overs observed while Jimmy has NO call in
+        // progress and is in LISTEN mode (not calling CQ). The engine's own QSO sequencer can
+        // keep re-sending an RR73 every slot after Jimmy has cleared callInProg -- if the worked
+        // station never cleanly hears it, or after an engine restart / a SET_TX_ENABLED 0 that
+        // never landed on a flaky control link. The FIRST such over is tolerated (it can be the
+        // legitimate final RR73 finishing in the poll after callInProg was cleared); the SECOND
+        // means the engine re-keyed entirely on its own -> halt it the same way Escape does.
+        // Reset whenever a real contact is in progress again (or the mode is no longer LISTEN).
+        private int _directOrphanTxOvers;
+
         // T17 fix, 2026-08-23: what Jimmy last actually commanded via SET_FREQUENCY's own
         // sideband argument (WsjtxClient.BandAudio.cs's RetuneBand, on CONFIRMED success only --
         // see that method's own DirectSetFrequency completion callback) -- compared every poll
@@ -456,6 +467,7 @@ namespace WSJTX_Controller
             _directConsecutivePollFailures = 0;
             _directLossAnnounced = false;
             _swrOverThreshold = false;
+            _directOrphanTxOvers = 0;
             _lastCatOk = null;
             _lastCommandedSideband = null;
             _lastCommandedSidebandChangedUtc = null;
@@ -1228,6 +1240,39 @@ namespace WSJTX_Controller
             // text) never learned a real Tune (SET_TUNING) was underway in Direct mode.
             tuning = radio.Tuning;
 
+            // Direct-mode runaway-Tx backstop, 2026-08-28 (CONFIRMED live -- HB9TIH then NE5L in
+            // one session). After Jimmy logs a contact and clears callInProg on seeing the
+            // engine's own RR73 (DirectApplyDecodes' Is73orRR73 branch), the engine's QSO
+            // sequencer can keep re-sending that RR73 every transmit slot -- if the worked
+            // station never cleanly hears it and keeps repeating its R-report, or after an
+            // engine restart mid-QSO. Jimmy showed "Transmitting, sending R R 7 3" with no call
+            // in progress and only stopped after the operator mashed Escape ~8 times (~2 minutes
+            // of unsolicited overs on the air). Nothing here caught it: the mid-QSO
+            // consecTxCount/best-frequency safety net that used to live at this spot was removed
+            // in the 2.0.42 frequency work, and it wouldn't have applied to this "no callInProg
+            // at all" case anyway. Count completed orphaned overs on the transmitting-ended
+            // edge: the FIRST is tolerated (it can be a legitimate final RR73 finishing in the
+            // poll or two after callInProg was cleared), the SECOND means the engine re-keyed on
+            // its own -> halt it exactly as Escape does (HALT_TX + SET_TX_ENABLED 0) and tell
+            // the operator. Unconditional -- not gated on ctrl.freqCheckBox or any mode flag
+            // beyond "LISTEN, no contact, not tuning": there is simply no reason to be
+            // transmitting in that state.
+            if (callInProg != null || txMode != TxModes.LISTEN || tuning)
+            {
+                _directOrphanTxOvers = 0;
+            }
+            else if (wasTransmitting && !transmitting)
+            {
+                if (++_directOrphanTxOvers >= 2)
+                {
+                    DebugOutput($"{Time()} [DIRECT] runaway-Tx backstop: {_directOrphanTxOvers} orphaned overs with no callInProg in LISTEN mode -- halting");
+                    HaltAndDisableTx();
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Transmit stopped",
+                        "the radio was transmitting with no contact in progress"));
+                    _directOrphanTxOvers = 0;
+                }
+            }
+
             // Rx/Tx audio offsets: read back the engine's live values every poll so the
             // accessible frequency controls (Announce Rx/Tx, Tx<->Rx exchange, Set Tx
             // frequency) always report and act on what the engine is actually doing, not on a
@@ -1339,6 +1384,16 @@ namespace WSJTX_Controller
                         CancelQso();
                         SetupCq(true);
                     }
+                    // Note (runaway-RR73 investigation, 2026-08-28): in LISTEN mode the engine's
+                    // own QSO sequencer can keep re-sending this RR73 every slot after callInProg
+                    // is cleared here, if the worked station never cleanly hears it. An explicit
+                    // DirectSetTxEnabled(false) here would stop that at the source, but it also
+                    // drops the engine's tx_enabled between every contact -- which silently
+                    // disables ProcessDecodeMsg's own txEnabled-gated "unsolicited 73 -> drop the
+                    // stale queue entry" pruning for the whole gap until the operator's next
+                    // reply. The _directOrphanTxOvers backstop in DirectApplyStatus catches the
+                    // runaway instead (within ~2 overs) without touching the between-contacts
+                    // state -- see its own comment.
                 }
             }
 
@@ -2206,6 +2261,10 @@ namespace WSJTX_Controller
         // exactly where in the real wall-clock period the test happens to run. Reading the
         // pending text directly is deterministic and instant either way.
         internal string TestPendingStatusText => _pendingStatusText;
+
+        // Test-only: runaway-Tx backstop counter (private). DirectRunawayRr73HaltsEngineTests
+        // asserts the first orphaned over is tolerated and the second one trips the halt.
+        internal int TestOrphanTxOvers => _directOrphanTxOvers;
 
         // Test-only: `mode` is private and DirectApplyStatus only ever sets it to "FT8" (its
         // own lazy first-run fallback -- see that method's own comment on why Direct mode has
