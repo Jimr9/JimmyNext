@@ -312,6 +312,7 @@ static class JimmyTests
         DirectInitialConnectResyncsTierAndPeriodTests();
         RepeatLimitStopsBeforeTheDisallowedAttemptKeysTests();
         ToggleTxFirstActuallyTogglesTests();
+        OptimizeReducesOnlyUntilReportExchangedTests();
         RawDecodesIngestsEveryDecodeBothModesTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
@@ -8956,6 +8957,81 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  ToggleTxFirstActuallyTogglesTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── "Optimize throughput" scope fix, 2026-08-28 (from Jim's fix-list discussion after the
+    // KE2ET "stuck after 3 exchanges" log trace): the queue-depth retry trim must stop applying
+    // once the DX has actually answered. Before this, a Call-Next (Alt+N) pick whose QSO had
+    // reached signal-report exchange could still be abandoned after as few as ceil(limit/3)
+    // unanswered overs in a deep pileup, even though it was one over from complete. The trim is
+    // still correct while Jimmy is only trying to GET a Call-Next pick's attention (no report
+    // received yet); operator-selected calls (Space/Enter -> _manualCallInProg) were already
+    // exempt. Pure synchronous test -- UpdateMaxTxRepeat() is invoked directly, exactly as
+    // TxRepeatChanged and the per-decode-cycle boundary do live. ─────────────────────────────────
+    static void OptimizeReducesOnlyUntilReportExchangedTests()
+    {
+        Console.WriteLine("\n── Optimize throughput: the queue-depth retry trim stops once the DX has answered with a report -- THE FIX ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.optimizeCheckBox.Checked = true;      // the feature under test is ON
+            ctrl.timeoutNumUpDown.Value = 12;          // Repeat limit 12 -> 4+ waiting trims to 12/3 = 4
+
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // Deep pileup: 4 calls waiting -> proportional factor 1/3.
+            wc.callQueue.Enqueue("AA1AA");
+            wc.callQueue.Enqueue("BB2BB");
+            wc.callQueue.Enqueue("CC3CC");
+            wc.callQueue.Enqueue("DD4DD");
+
+            // Phase 1: a Call-Next pick Jimmy is still only CALLING -- no report from the DX yet,
+            // not operator-selected. The trim SHOULD apply.
+            wc.TestSetManualCallInProg(false);
+            wc.callInProg = "DX1";
+            wc.UpdateMaxTxRepeat();
+            Check("still only calling an Alt+N pick in a deep pileup: retry budget is trimmed (12 -> 4)",
+                wc.TestMaxTxRepeat == 4, true);
+
+            // Phase 2: same call, same deep pileup, but the DX has now sent us a signal report.
+            wc.allCallDict["DX1"] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = "KB0UZT DX1 -07",
+                    Snr = -7,
+                    RxDate = DateTime.UtcNow.Date,
+                    SinceMidnight = DateTime.UtcNow.TimeOfDay
+                }
+            };
+            wc.UpdateMaxTxRepeat();
+            Check("THE FIX: once the DX has answered with a report, the trim stops -- full Repeat limit (12) restored",
+                wc.TestMaxTxRepeat == 12, true);
+
+            // Phase 3: regression -- an operator-selected call stays exempt regardless of report state.
+            wc.allCallDict.Remove("DX1");
+            wc.TestSetManualCallInProg(true);
+            wc.UpdateMaxTxRepeat();
+            Check("regression: an operator-selected (Space/Enter) call keeps the full Repeat limit even with no report yet",
+                wc.TestMaxTxRepeat == 12, true);
+
+            // Phase 4: regression -- with Optimize throughput OFF the trim never applies at all.
+            ctrl.optimizeCheckBox.Checked = false;
+            wc.TestSetManualCallInProg(false);
+            wc.callInProg = null;
+            wc.UpdateMaxTxRepeat();
+            Check("regression: with Optimize throughput OFF the retry budget is always the full Repeat limit",
+                wc.TestMaxTxRepeat == 12, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  OptimizeReducesOnlyUntilReportExchangedTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

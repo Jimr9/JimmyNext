@@ -2412,6 +2412,12 @@ namespace WSJTX_Controller
         internal int TestDiscardCallCycleCount => discardCallCycleCount;
         internal void TestStartDiscardCall(string call) => StartDiscardCall(call);
         internal void TestTriggerDiscardCall() => DiscardCall();
+        // internal (not private): "Optimize throughput" scope regression coverage
+        // (OptimizeReducesOnlyUntilReportExchangedTests) reads the computed retry budget
+        // after UpdateMaxTxRepeat() to prove the queue-depth trim stops applying once the
+        // DX has answered with a report.
+        internal int TestMaxTxRepeat => maxTxRepeat;
+        internal void TestSetManualCallInProg(bool v) => _manualCallInProg = v;
         // internal (not private): lets a test call ConnectDirectEngine (for its myCall/myGrid/
         // opMode/_directConnected side effects) without the 1s SNAPSHOT poll timer it also
         // starts racing a short, timing-sensitive test's own stub-engine-host expectations.

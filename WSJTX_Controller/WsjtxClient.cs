@@ -3123,7 +3123,19 @@ namespace WSJTX_Controller
         {
             int limit = (int)ctrl.timeoutNumUpDown.Value;
 
-            if (!ctrl.optimizeCheckBox.Checked || _manualCallInProg)
+            // "Optimize throughput" trims the per-call retry budget by how many calls are
+            // waiting, but that trim is only appropriate while Jimmy is still trying to get a
+            // Call-Next (Alt+N) pick's attention. An operator-selected call (Space/Enter/
+            // double-click -> _manualCallInProg) always gets the full Repeat limit -- and so
+            // does ANY call the DX has already answered with a signal report or roger-report:
+            // once the exchange is under way it is a real QSO worth finishing at full
+            // patience, however it started. Only ever raises maxTxRepeat back toward the
+            // operator's own configured limit, never lowers it, so it cannot shorten a QSO or
+            // cause a missed contact.
+            bool reportExchanged = callInProg != null
+                && (RecdReport(callInProg) || RecdRogerReport(callInProg));
+
+            if (!ctrl.optimizeCheckBox.Checked || _manualCallInProg || reportExchanged)
             {
                 maxTxRepeat = limit;
             }
