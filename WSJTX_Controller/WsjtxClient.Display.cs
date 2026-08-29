@@ -667,7 +667,12 @@ namespace WSJTX_Controller
 
                 if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.INITIAL)
                 {
-                    status = $"{pgmName} {pgmVer}. Connecting to WSJT-X{k}.";
+                    // "WSJT-X" wording dropped 2026-08-29: obsolete since Direct engine mode
+                    // (there is no external WSJT-X to connect to -- it's the bundled engine).
+                    // The 2026-08-12 cleanup only caught the NegoState==WAIT branch above; this
+                    // one and the two OpModes cases below were missed and still surfaced on
+                    // every engine restart (Options save, auto-recovery), not just cold start.
+                    status = $"{pgmName} {pgmVer}. Connecting{k}.";
                     foreColor = Color.Black;
                     backColor = Color.Orange;
                 }
@@ -694,14 +699,14 @@ namespace WSJTX_Controller
                             }
                             else
                             {
-                                status = $"{newSel}Connecting to WSJT-X, wait until ready{k}.";
+                                status = $"{newSel}Connecting, wait until ready{k}.";
                             }
                             foreColor = Color.Black;
                             backColor = Color.Orange;
                             newBand = false;
                             return;
                         case (int)OpModes.IDLE:
-                            status = modeSupported ? $"Connecting to WSJT-X, wait until ready{k}." : "WSJT-X operating mode not supported";
+                            status = modeSupported ? $"Connecting, wait until ready{k}." : "operating mode not supported";
                             foreColor = Color.Black;
                             backColor = Color.Orange;
                             return;
@@ -1114,9 +1119,21 @@ namespace WSJTX_Controller
                                 // discarded before ShowStatus ever saw it. Only said while curCall
                                 // == callInProg is actually set (mid-attempt) -- once logged/reset
                                 // this clears along with everything else in SetCallInProg.
-                                otherStr = (curCall != null && otherPartyForCallInProg != null)
-                                    ? $", {Spacify(curCall)} {otherPartyStage} {Spacify(otherPartyForCallInProg)}"
-                                    : "";
+                                // "HB9GWX to W2AAS, R R 7 3" -- the station being worked, who
+                                // it's working, and the literal message it just sent them (see
+                                // otherPartyStage's own field comment). Either half can be
+                                // missing: an unresolved <...> other-call leaves only the
+                                // message, a 2-word short reply leaves only the name.
+                                if (curCall != null && (otherPartyForCallInProg != null || otherPartyStage != null))
+                                {
+                                    string otherWhat = otherPartyStage != null ? SpacifyPayload(otherPartyStage) : "";
+                                    if (otherPartyForCallInProg != null && otherWhat != "")
+                                        otherStr = $", {Spacify(curCall)} to {Spacify(otherPartyForCallInProg)}, {otherWhat}";
+                                    else if (otherPartyForCallInProg != null)
+                                        otherStr = $", {Spacify(curCall)} to {Spacify(otherPartyForCallInProg)}";
+                                    else
+                                        otherStr = $", {Spacify(curCall)}, {otherWhat}";
+                                }
 
                                 if (tuning)
                                 {

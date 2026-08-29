@@ -248,6 +248,7 @@ static class JimmyTests
         DirectModePlumbingParityTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
+        DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
@@ -1882,6 +1883,122 @@ static class JimmyTests
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
             try { File.Delete(goodDb); } catch { }
             try { Directory.Delete(badDir, true); } catch { }
+        }
+    }
+
+    // ── KF4CCG race, 2026-08-29 (CONFIRMED live): the engine's Qso.TxNow flips to the final
+    // RR73 in the SAME ~1s poll that first decodes the DX's roger-report, and DirectApplyStatus
+    // runs before DirectApplyDecodes ingests that decode -- so LogQso() in the Is73orRR73
+    // completion branch finds no report from the DX on record yet and silently no-ops. Before
+    // the fix callInProg was still torn down: the contact then went unlogged until CheckLateLog
+    // rescued it ~60s later on the DX's literal 73, the engine re-sent an orphaned RR73 in
+    // between (runaway backstop had to halt it), and the roger-report was never announced. The
+    // fix holds callInProg for up to MaxDirectRr73LogRetries extra polls while we HAVE sent a
+    // report and it still isn't on record -- the roger normally lands later in that same tick,
+    // so the next poll logs it. ──
+    static void DirectRr73BeforeRogerDecodeHoldsCallInProgTests()
+    {
+        Console.WriteLine("\n── KF4CCG race: RR73 seen before the roger decode is ingested -- hold callInProg, log on the next poll -- THE FIX ──");
+
+        string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Rr73Race_" + Guid.NewGuid().ToString("N") + ".db");
+        string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        const string myCall = "KB0UZT", myGrid = "FN42", dx = "K4YT";
+
+        WsjtxClient MakeClient()
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var lm = new LookupManager();
+            lm.RegisterProviderFirst(new TestFixtureLookupProvider());
+            lm.Initialize(useLookupData: true, qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                lotwEnabled: false, lotwDays: 1, clubLogAppKey: null, clubLogDays: 1, fccUlsEnabled: false);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.lookupManager = lm;
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            return wc;
+        }
+
+        // Mid-QSO but the DX's roger is NOT yet in allCallDict (only their grid reply) -- the
+        // exact state DirectApplyStatus sees when the poll races ahead of decode ingestion.
+        void SeedReportSentRogerNotYetDecoded(WsjtxClient wc)
+        {
+            wc.callInProg = dx;
+            wc.allCallDict[dx] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = $"{dx} {myCall} EM87", Snr = -7, Priority = (int)WsjtxClient.CallPriority.DEFAULT,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                },
+            };
+            wc.sentReportList.Add(dx);   // we have sent our report -> a real, completable QSO
+        }
+
+        void IngestRoger(WsjtxClient wc) =>
+            wc.allCallDict[dx].Add(new EnqueueDecodeMessage
+            {
+                Message = $"{myCall} {dx} R+02", Snr = 2, Priority = (int)WsjtxClient.CallPriority.DEFAULT,
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+            });
+
+        DirectSnapshot Rr73Snap(ulong slot) => ParseDirectSnapshot(@"{
+            ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+            ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot + @" },
+            ""recentDecodes"": [],
+            ""qso"": { ""state"": ""done"", ""txNow"": """ + dx + " " + myCall + @" RR73"" }
+        }");
+
+        try
+        {
+            // ── Case 1: roger arrives on the next poll -> QSO logs then, callInProg held until it does ──
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+
+            var wc = MakeClient();
+            SeedReportSentRogerNotYetDecoded(wc);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(7000));
+            Check("THE FIX: engine RR73 but the DX's roger isn't on record yet -> QSO NOT torn down",
+                  wc.callInProg == dx, true);
+            Check("THE FIX: ...and NOT logged yet (nothing to log)",
+                  wc.logList.Contains(dx), false);
+
+            IngestRoger(wc);   // DirectApplyDecodes would add this later in the same tick
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(7001));
+            Check("THE FIX: next poll, roger now on record -> QSO logs",
+                  wc.logList.Contains(dx), true);
+            Check("THE FIX: ...and only then is callInProg cleared",
+                  wc.callInProg == null, true);
+            using (var db = new LogbookDb(goodDb))
+                Check("THE FIX: exactly one logbook row (CheckLateLog's later 73 can't double-log)",
+                      db.SearchQsos(dx, null, null, null).Count == 1, true);
+
+            // ── Case 2: the roger genuinely never comes -> the hold is bounded, QSO tears down ──
+            var wc2 = MakeClient();
+            SeedReportSentRogerNotYetDecoded(wc2);
+            bool heldThrough4 = true;
+            for (ulong i = 0; i < 4; i++)
+            {
+                wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(7100 + i));
+                if (wc2.callInProg != dx) heldThrough4 = false;
+            }
+            Check("bounded hold: callInProg survives the first MaxDirectRr73LogRetries (4) polls",
+                  heldThrough4, true);
+            wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(7104));
+            Check("bounded hold: the 5th poll with still no roger tears the QSO down (CheckLateLog remains the net)",
+                  wc2.callInProg == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectRr73BeforeRogerDecodeHoldsCallInProgTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            try { File.Delete(goodDb); } catch { }
         }
     }
 

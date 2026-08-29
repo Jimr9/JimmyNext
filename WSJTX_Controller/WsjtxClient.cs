@@ -276,10 +276,11 @@ namespace WSJTX_Controller
         // and a tier switch already commit their own SetCallInProg(null) synchronously on the
         // same thread as this field's readers, so there's no async race for those to guard against.
         private int _bandSessionEpoch;
-        // The callsign callInProg is heard actually working (a report/roger-report/73/RR73
-        // addressed to someone else), and a short verb describing that stage ("working" or
-        // "signing with") -- lets ShowStatus() mention it so the operator knows callInProg is
-        // busy with another station instead of just going quiet. Captured in ProcessDecodeMsg
+        // The callsign callInProg is heard working (a decode addressed to someone else), and
+        // the LITERAL message it sent that station this time -- the raw payload token: a report
+        // ("-15"), a roger-report ("R-15"), "RRR", "73", "RR73", or a grid. ShowStatus() reads
+        // it out verbatim ("HB9GWX to W2AAS, R R 7 3") so the operator hears exactly what that
+        // QSO is doing, not a "working"/"signing with" paraphrase. Captured in ProcessDecodeMsg
         // (before AddAllCallDict's own to-me-or-CQ-only filter would otherwise discard the
         // decode entirely) and cleared whenever callInProg changes or replies to us again.
         private string otherPartyForCallInProg = null;
@@ -1437,11 +1438,18 @@ namespace WSJTX_Controller
                 if (toMyCall)
                 {
                     otherPartyForCallInProg = null;
+                    otherPartyStage = null;
                 }
                 else if (!dmsg.IsCQ() && toCall != null)
                 {
-                    otherPartyForCallInProg = toCall;
-                    otherPartyStage = dmsg.Is73orRR73() ? "signing with" : "working";
+                    string other = WsjtxMessage.RemoveAngleBrackets(toCall);
+                    otherPartyForCallInProg = (string.IsNullOrEmpty(other) || other.Contains(".")) ? null : other;
+                    // The literal payload callInProg just sent that station -- report / roger-
+                    // report / RRR / 73 / RR73 / grid -- read out verbatim by ShowStatus instead
+                    // of Jimmy's own "working"/"signing with" wording. Last whitespace token of a
+                    // TO DE PAYLOAD message; a bare 2-word short reply has no payload token.
+                    string[] w = dmsg.Message.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    otherPartyStage = w.Length >= 3 ? w[w.Length - 1] : null;
                 }
             }
 
@@ -2868,6 +2876,11 @@ namespace WSJTX_Controller
             // same call is still in progress -- once we move on (operator picked another call,
             // Halt cleared it, band change), drop it so it can't wedge a later completion.
             if (_liveLogWriteFailedCall != null && _liveLogWriteFailedCall != call) _liveLogWriteFailedCall = null;
+
+            // KF4CCG race, 2026-08-29: the Is73orRR73 "hold callInProg until the roger decode is
+            // on record" retry counter (WsjtxClient.Direct.cs) is scoped to one contact -- any
+            // callInProg transition starts the next one fresh.
+            if (call != callInProg) _directRr73LogRetries = 0;
 
             // Rx/Tx frequency control: a manual Tx-frequency override is scoped to one
             // CQ/QSO. Any callInProg transition -- new contact, contact ended, band change

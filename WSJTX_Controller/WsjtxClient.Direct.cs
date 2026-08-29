@@ -367,6 +367,17 @@ namespace WSJTX_Controller
         // Reset whenever a real contact is in progress again (or the mode is no longer LISTEN).
         private int _directOrphanTxOvers;
 
+        // KF4CCG race, 2026-08-29 (CONFIRMED live): bounds how many extra polls the Is73orRR73
+        // completion branch (DirectApplyStatus) will HOLD callInProg while LogQso() keeps failing
+        // because the DX's roger-report decode has not been ingested into allCallDict yet -- the
+        // engine's Qso.TxNow flips to the final RR73 in the same ~1s poll the roger first decodes,
+        // and status is applied before decodes. The roger normally lands later in that same tick,
+        // so the very next poll succeeds; the cap only matters for a genuinely one-sided exchange
+        // where the DX never actually reports. Reset on any callInProg transition (SetCallInProg)
+        // and on a successful teardown.
+        private int _directRr73LogRetries;
+        private const int MaxDirectRr73LogRetries = 4;
+
         // T17 fix, 2026-08-23: what Jimmy last actually commanded via SET_FREQUENCY's own
         // sideband argument (WsjtxClient.BandAudio.cs's RetuneBand, on CONFIRMED success only --
         // see that method's own DirectSetFrequency completion callback) -- compared every poll
@@ -468,6 +479,7 @@ namespace WSJTX_Controller
             _directLossAnnounced = false;
             _swrOverThreshold = false;
             _directOrphanTxOvers = 0;
+            _directRr73LogRetries = 0;
             _lastCatOk = null;
             _lastCommandedSideband = null;
             _lastCommandedSidebandChangedUtc = null;
@@ -1351,12 +1363,33 @@ namespace WSJTX_Controller
                     // path back. "Nothing to log at all" (no report on record -- a partial
                     // exchange) is NOT a failed write: fall through and tear down as before so a
                     // broken exchange can't wedge callInProg forever.
-                    if (!logList.Contains(callInProg) && _liveLogWriteFailedCall == callInProg)
+                    bool onRecord = logList.Contains(callInProg);
+                    bool writeFailedRetry = !onRecord && _liveLogWriteFailedCall == callInProg;
+                    // KF4CCG race, 2026-08-29 (CONFIRMED live -- see _directRr73LogRetries's own
+                    // comment): the engine's Qso.TxNow flips to the final RR73 in the SAME ~1s poll
+                    // that first decodes the DX's roger-report, and DirectApplyStatus runs BEFORE
+                    // DirectApplyDecodes ingests that decode -- so LogQso() just above found no
+                    // report from the DX on record yet and silently no-op'd. Before this the QSO
+                    // was still torn down here: it then went unlogged until CheckLateLog rescued it
+                    // ~60s later on the DX's literal 73, the engine kept re-sending an orphaned
+                    // RR73 in between (the runaway backstop had to halt it), and the roger-report
+                    // was never announced (no callInProg to attach it to). Hold callInProg one more
+                    // poll whenever WE have sent a report (a real, completable QSO) and it still is
+                    // not on record: the roger lands later in this same tick, so the next poll's
+                    // LogQso() succeeds and the "logged" cue fires at the right moment. Bounded by
+                    // MaxDirectRr73LogRetries so a genuinely one-sided exchange still tears down;
+                    // CheckLateLog stays the final net for a real trailing 73/RR73.
+                    bool awaitingRogerDecode = !onRecord && !writeFailedRetry
+                        && sentReportList.Contains(callInProg)
+                        && ++_directRr73LogRetries <= MaxDirectRr73LogRetries;
+
+                    if (writeFailedRetry || awaitingRogerDecode)
                     {
-                        DebugOutput($"{Time()} [DIRECT] local log write for '{callInProg}' failed -- keeping callInProg set, will retry next poll");
+                        DebugOutput($"{Time()} [DIRECT] '{callInProg}' not on record yet ({(writeFailedRetry ? "local write failed" : $"awaiting roger decode, poll {_directRr73LogRetries}/{MaxDirectRr73LogRetries}")}) -- keeping callInProg set, will retry next poll");
                     }
                     else
                     {
+                    _directRr73LogRetries = 0;
                     string justWorkedCall = callInProg;
                     SetCallInProg(null);
 
