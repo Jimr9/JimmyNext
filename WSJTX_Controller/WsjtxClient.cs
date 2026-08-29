@@ -2958,6 +2958,14 @@ namespace WSJTX_Controller
         {
             StopDecodeTimers();
             tuning = false;
+            // Direct-mode runaway-Tx backstop interaction, 2026-08-28 (tester report): an
+            // explicit operator Halt (Escape / Alt+H both route through here) is itself the
+            // intervention, so the transmitting-ended edge it produces one poll later must not
+            // be counted as an orphaned "runaway" over. Reset the counter on every deliberate
+            // halt -- the genuine unattended two-over runaway never involves a Halt in between
+            // its two edges, so its protection (DirectApplyStatus) is unaffected. Harmless when
+            // not connected / not in Direct mode.
+            _directOrphanTxOvers = 0;
             // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard HaltTx
             // message (msg type 8, gated on udpClient2 being open) is removed -- route through
             // the control port's own HALT_TX command instead. AutoOnly is explicitly false

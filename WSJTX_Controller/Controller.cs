@@ -3369,6 +3369,31 @@ namespace WSJTX_Controller
                 wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Native engine restart",
                     "could not confirm the previous engine session's transmitter stopped -- forcing it to close"));
             }
+
+            // Engine-restart interrupt handling, 2026-08-28 (approved fix-list item B): a restart
+            // here -- an Options save that bounces the engine, or an unexpected-exit auto-restart
+            // (OnNativeEngineUnexpectedExit routes back through this method) -- leaves the fresh
+            // engine with no knowledge of an in-progress QSO. callInProg/replyDecode survive on
+            // Jimmy's side but nothing re-arms the REPLY, so before this the operator sat silent
+            // mid-exchange with the status still reading "working X" and no signal anything was
+            // wrong. Tear the QSO down exactly as Escape does (re-queue the call so it can be
+            // re-selected as a normal reply to the fresh engine, then clear the in-progress
+            // state) and tell the operator. Deliberately does NOT re-enable TX or re-send REPLY:
+            // an engine restart must never cause an unexpected transmission -- the operator
+            // resumes explicitly. Skipped in test mode (no real restart; keeps the replay
+            // harness's state assertions untouched).
+            if (!TestModeGuard.IsTestMode)
+            {
+                string interruptedCall = wsjtxClient?.callInProg;
+                if (interruptedCall != null)
+                {
+                    wsjtxClient.RequeueAbortedCall();   // must precede CancelQso (needs callInProg/replyDecode)
+                    wsjtxClient.CancelQso();
+                    wsjtxClient.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Contact interrupted",
+                        $"the engine restarted while working {interruptedCall} -- select {interruptedCall} again to resume"));
+                }
+            }
+
             wsjtxClient?.DisconnectDirectEngine();
             // EngineHost ownership / session identity, 2026-08-23: a fresh per-launch nonce so
             // ConnectDirectEngine/DirectPollTick can refuse to trust a stale/orphan process left
@@ -3534,7 +3559,14 @@ namespace WSJTX_Controller
 
         private void RenderSpotWatchList()
         {
-            var snapshot = dxSpotWatcher.Snapshot();
+            // Closing() nulls dxSpotWatcher (and Dispose()s it) while a SafeBeginInvoke(
+            // RenderSpotWatchList) queued from DxSpotWatcher's own Updated event (raised on the
+            // MQTT background thread) can still be pending -- SafeBeginInvoke guards the form
+            // being disposed, but not this field going null between the marshal and the body.
+            // A snapshot of the reference is enough: nothing below re-reads the field.
+            var watcher = dxSpotWatcher;
+            if (watcher == null) return;
+            var snapshot = watcher.Snapshot();
 
             // Snapshot() itself is always alphabetical (a stable base order); apply
             // the user's chosen display sort here, on top of it, so ties (e.g. two
