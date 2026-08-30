@@ -2748,6 +2748,18 @@ static class JimmyTests
 
             Check("Null dictionary -> does not restore, does not throw",
                 WsjtxClient.ShouldRestoreTxLevel(true, 5, null, out _), false);
+
+            // Save-side companion (confirmation-gated remember, 2026-08-30): a just-CONFIRMED
+            // SET_TX_LEVEL is written into the per-band map under the same gate the old inline
+            // AudioLevel() code used -- feature on AND a real band index. DirectSetEngineTxLevel
+            // only calls this on the engine's OK, so nothing is remembered before confirmation.
+            Check("Remember decision: feature off -> not remembered",
+                WsjtxClient.ShouldRememberTxLevelForBand(false, 5, out _), false);
+            Check("Remember decision: no band known -> not remembered",
+                WsjtxClient.ShouldRememberTxLevelForBand(true, null, out _), false);
+            bool remembered = WsjtxClient.ShouldRememberTxLevelForBand(true, 5, out int rememberKey);
+            Check("Remember decision: feature on + known band -> remembered under that band's key",
+                remembered && rememberKey == 5, true);
         }
         catch (Exception ex)
         {

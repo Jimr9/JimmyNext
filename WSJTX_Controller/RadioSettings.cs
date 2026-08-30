@@ -101,11 +101,13 @@ namespace WSJTX_Controller
         // was removed entirely, operator directive: RF power is controlled on the radio itself,
         // full stop -- Jimmy must never write to it, not even once, not even as a workaround.
 
-        // F11/F12 (Audio Level up/down) step size, as a whole-number percentage of the engine's
-        // 0.0-1.0 mic_gain range -- WsjtxClient.BandAudio.cs's AudioLevel() reads this instead of
-        // a hardcoded step. Default 5 matches the step size those hotkeys always used before this
-        // was configurable.
-        public int AudioStepPercent { get; set; } = 5;
+        // F11/F12 (Audio Level up/down) step size, as a percentage of the engine's 0.0-1.0
+        // tx_level range -- WsjtxClient.BandAudio.cs's AudioLevel() reads this instead of a
+        // hardcoded step. Default 5 matches the step size those hotkeys always used before this
+        // was configurable. Fractional since 2026-08-30 (0.5-25 in 0.5% increments) so the F11/F12
+        // step and the Options > Radio "FT8/FT4 transmit tone level" spinner can both move the
+        // level in half-percent steps.
+        public double AudioStepPercent { get; set; } = 5.0;
 
         // Added 2026-08-10: the last confirmed band index (WsjtxClient.bands: 160/80/60/40/30/
         // 20/17/15/12/10/6), persisted across sessions so Direct-mode startup can restore it
@@ -175,7 +177,8 @@ namespace WSJTX_Controller
             HaltTxOnHighSwr = ini.Read("radioHaltTxOnHighSwr") == "True";
             if (double.TryParse(ini.Read("radioSwrHaltThreshold"), out double swrThreshold) && swrThreshold > 0)
                 SwrHaltThreshold = swrThreshold;
-            if (int.TryParse(ini.Read("radioAudioStepPercent"), out int audioStep) && audioStep >= 1 && audioStep <= 25)
+            if (double.TryParse(ini.Read("radioAudioStepPercent"), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double audioStep) && audioStep >= 0.5 && audioStep <= 25)
                 AudioStepPercent = audioStep;
             if (int.TryParse(ini.Read("radioLastBandIdx"), out int lastBandIdx) && lastBandIdx >= 0)
                 LastBandIdx = lastBandIdx;
@@ -219,7 +222,7 @@ namespace WSJTX_Controller
             ini.Write("radioPttSerialPort", PttSerialPort);
             ini.Write("radioHaltTxOnHighSwr", HaltTxOnHighSwr.ToString());
             ini.Write("radioSwrHaltThreshold", SwrHaltThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            ini.Write("radioAudioStepPercent", AudioStepPercent.ToString());
+            ini.Write("radioAudioStepPercent", AudioStepPercent.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (LastBandIdx >= 0) ini.Write("radioLastBandIdx", LastBandIdx.ToString());
             if (LastDialFrequencyHz > 0)
                 ini.Write("radioLastDialFrequencyHz", LastDialFrequencyHz.ToString(System.Globalization.CultureInfo.InvariantCulture));

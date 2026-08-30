@@ -594,17 +594,14 @@ namespace WSJTX_Controller
         // such CAT-read-back field muddying it, so this fix resolves both problems at once --
         // wrong signal-chain point AND stale-reading -- with the same change.
 
-        // Codex Audit 02 finding, 2026-08-21: guards the read-modify-write below (SNAPSHOT to read
-        // TxLevel, then SET_TX_LEVEL to write the stepped value) against two overlapping F11/F12
-        // presses -- without this, a second press's SNAPSHOT could return the SAME pre-change
-        // TxLevel the first press already read (the first press's own SET_TX_LEVEL hasn't even
-        // been enqueued yet, since that only happens once ITS SNAPSHOT completion callback runs),
-        // computing the identical next value twice instead of two real steps -- confirmed live:
-        // pressing F11 twice quickly moved the level by only one step, not two. Same
-        // _xxxRequestInFlight pattern already used for Tune/mode-switch (ToggleTuningProcess/
-        // SetOperatingMode below/above): a second press while one round-trip is still in flight is
-        // simply ignored (handled, no-op), not queued or raced.
-        private bool _audioLevelRequestInFlight;
+        // 2026-08-30: this used to do its own SNAPSHOT read-modify-write here (a read to get the
+        // current TxLevel, then a fire-and-forget SET_TX_LEVEL) with its own _audioLevelRequestInFlight
+        // guard against two overlapping presses. Both concerns now live in DirectSetEngineTxLevel
+        // (WsjtxClient.Direct.cs): the current value comes from _engineTxLevel (the engine's last
+        // CONFIRMED level, refreshed every poll), and the _txLevelChangeInFlight guard there is
+        // SHARED with the modeless Options > Radio "FT8/FT4 transmit tone level" spinner, so F11/F12
+        // and Options cannot race each other onto a stale value either. The announcement, the cache
+        // and the per-band remembered value are all updated only after the engine confirms.
 
         public bool AudioLevel(bool up)
         {
@@ -616,64 +613,53 @@ namespace WSJTX_Controller
             // (see ToggleTuningProcess's own comment); during a real FT8/FT4 transmission this
             // still only takes effect on the next slot, same as before.
             if (!transmitting && !tuning) return false;
-            if (_audioLevelRequestInFlight) return true;
+            if (_txLevelChangeInFlight) return true;
+            if (_engineTxLevel == null)
+            {
+                // No engine-confirmed level to step from -- engine host not reachable, or no
+                // snapshot has arrived yet this session. Report honestly rather than guess.
+                StatusView.ShowMessage("Audio level: engine not available.", false);
+                return true;
+            }
 
             if (!tuning) StartStatusTimer2(false);
 
-            // Operator-configurable (Options > Radio tab), added 2026-08-09 -- previously a
-            // hardcoded 0.05 (5%). Clamped defensively even though the NumericUpDown's own range
-            // should already keep it sane.
-            double step = Math.Max(1, Math.Min(25, ctrl.Radio.AudioStepPercent)) / 100.0;
+            // Operator-configurable (Options > Radio tab) -- 0.5% to 25% in 0.5% increments since
+            // 2026-08-30 (whole-percent before). Clamped defensively even though the NumericUpDown's
+            // own range should already keep it sane.
+            double step = Math.Max(0.5, Math.Min(25.0, ctrl.Radio.AudioStepPercent)) / 100.0;
+            double target = (double)_engineTxLevel + (up ? step : -step);
 
-            // sound:false on every announcement below, deliberately -- this whole method only
-            // ever runs while transmitting is already true (guard above), so EVERY announcement
-            // here fires during a live over. StatusView.ShowMessage's sound:true plays a Windows
-            // SystemSounds.Beep through whatever the OS DEFAULT playback device is -- on a
-            // typical ham setup where the radio's own sound-card interface IS that default
-            // device, that beep would mix straight into the live transmitted audio. Root-caused
-            // live, 2026-08-09, from a report of hearing a Windows beep on every F11/F12 press
-            // while transmitting. The screen-reader announcement itself is unaffected (driven by
-            // ShowMsg's own SendKeys nudge, independent of sound) -- only the audible beep goes.
-            //
-            // Codex Audit 02 finding, 2026-08-21 ("remove the remaining synchronous Direct waits
-            // ... including Alt+Q/F11/F12"): both DirectSendCommand calls below used to run
-            // synchronously on the UI thread -- now routed through the ordered dispatcher
-            // (WsjtxClient.Direct.cs's own class comment), which also serializes them relative to
-            // every other Direct command and makes both exception-safe.
-            _audioLevelRequestInFlight = true;
-            EnqueueDirectCommand("SNAPSHOT", snapJson =>
+            // sound:false on every announcement below, deliberately -- this whole method only ever
+            // runs while transmitting or tuning (guard above), so EVERY announcement here fires
+            // during a live carrier. StatusView.ShowMessage's sound:true plays a Windows
+            // SystemSounds.Beep through whatever the OS DEFAULT playback device is -- on a typical
+            // ham setup where the radio's own sound-card interface IS that default device, that beep
+            // would mix straight into the live transmitted audio. Root-caused live, 2026-08-09. The
+            // screen-reader announcement itself is unaffected (driven by ShowMsg's own SendKeys
+            // nudge, independent of sound) -- only the audible beep goes.
+            DirectSetEngineTxLevel(target, (ok, applied) =>
             {
-                _audioLevelRequestInFlight = false;
-                if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
+                if (!ok)
                 {
-                    try
-                    {
-                        var snap = System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(snapJson, DirectJsonOptions);
-                        // TxLevel is never null (Nexus always defaults it to 0.9, no CAT connection
-                        // needed -- unlike MicGain's Option<f32>), so only the Radio object itself
-                        // needs to exist for this path to apply.
-                        if (snap?.Radio != null)
-                        {
-                            double current = snap.Radio.TxLevel;
-                            double next = Math.Max(0.0, Math.Min(1.0, current + (up ? step : -step)));
-                            EnqueueDirectCommand("SET_TX_LEVEL " + next.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
-                            // Options > Radio "Remember F11/F12 audio level per band" -- see
-                            // RadioSettings.TxLevelByBand's own comment. Restored on the next band
-                            // change by WsjtxClient.Direct.cs's own band-change detection.
-                            if (ctrl.Radio.RememberTxLevelPerBand && bandIdx != null)
-                                ctrl.Radio.TxLevelByBand[(int)bandIdx] = next;
-                            StatusView.ShowMessage($"Audio level {next * 100:0}%", false);
-                            return;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        DebugOutput($"{Time()} AudioLevel: engine SNAPSHOT parse failed: {ex.Message}");
-                    }
+                    StatusView.ShowMessage("Audio level change not confirmed -- engine not responding.", false);
+                    return;
                 }
-
-                StatusView.ShowMessage("Audio level: engine host unreachable.", false);
+                StatusView.ShowMessage($"Audio level {applied * 100:0.0}%", false);
             });
+            return true;
+        }
+
+        // Save-side companion to ShouldRestoreTxLevel below: decides whether a just-CONFIRMED
+        // SET_TX_LEVEL should also be written into the per-band remembered map, and under which
+        // band key. Same gate the old inline AudioLevel() code used -- "Remember F11/F12 audio
+        // level per band" on AND a real confirmed band index. Split out as a pure function so it
+        // is unit-testable without a live engine host (JimmyTests, via InternalsVisibleTo).
+        internal static bool ShouldRememberTxLevelForBand(bool rememberEnabled, int? bandIdx, out int bandKey)
+        {
+            bandKey = 0;
+            if (!rememberEnabled || bandIdx == null) return false;
+            bandKey = (int)bandIdx;
             return true;
         }
 

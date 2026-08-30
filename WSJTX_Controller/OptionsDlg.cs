@@ -428,6 +428,12 @@ namespace WSJTX_Controller
 
         private void OptionsDlg_FormClosed(object sender, FormClosedEventArgs e)
         {
+            if (_radioTxLevelRefreshTimer != null)
+            {
+                _radioTxLevelRefreshTimer.Stop();
+                _radioTxLevelRefreshTimer.Dispose();
+                _radioTxLevelRefreshTimer = null;
+            }
             ReparentControlsBack();
             ctrl.OptionsDlgClosed();
         }
@@ -960,6 +966,15 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown _radioAudioStepUpDown;
         private System.Windows.Forms.CheckBox _radioRememberTxLevelPerBandCheckBox;
         private System.Windows.Forms.CheckBox _radioExplainMeterReadingsCheckBox;
+        private System.Windows.Forms.GroupBox _radioTxLevelGroupBox;
+        private System.Windows.Forms.TextBox _radioConfirmedBandBox;
+        private System.Windows.Forms.NumericUpDown _radioEngineTxLevelUpDown;
+        private AnnouncingLabel _radioEngineTxLevelStatusLabel;
+        private System.Windows.Forms.Timer _radioTxLevelRefreshTimer;
+        private bool _radioEngineTxLevelSuppressChange;
+        private bool _radioEngineTxLevelApplying;
+        private decimal _radioEngineTxLevelLastConfirmedPercent = 90m;
+        private decimal? _radioEngineTxLevelPendingPercent;
 
         private System.Windows.Forms.ComboBox _decodeDepthCombo;
         private System.Windows.Forms.NumericUpDown _decodeFLowUpDown;
@@ -1503,42 +1518,137 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioSwrHaltThresholdUpDown);
             y += 32;
 
-            var audioStepLabel = new System.Windows.Forms.Label
+            // FT8/FT4 transmit tone level -- the engine's own software TX drive level (WSJT-X's
+            // "Pwr" slider equivalent), NOT the Windows per-application Input/Output levels on the
+            // Decode Engine tab. Grouped so the confirmed band, the live level, the F11/F12 step
+            // size and the per-band option read as one thing. The band and the live level refresh
+            // on a 1s timer (RadioTxLevelRefreshTick) because Options is modeless and F11/F12 can
+            // move the level while this is open.
+            _radioTxLevelGroupBox = new System.Windows.Forms.GroupBox
             {
-                Text = "F11/F12 audio level step (%):",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left, y + 3),
+                Text = "FT8/FT4 transmit tone level",
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(390, 176),
+                TabIndex = 26,
+                Font = font,
+                AccessibleName = "FT8 FT4 transmit tone level",
+            };
+
+            var txLevelHelp = new System.Windows.Forms.Label
+            {
+                Text = "The engine's FT8/FT4 transmit tone (drive) level -- the software \"Pwr\" control. " +
+                       "Separate from the Windows Input and Output levels on the Decode Engine tab.",
+                Location = new System.Drawing.Point(10, 18),
+                Size = new System.Drawing.Size(372, 40),
                 Font = font,
                 TabStop = false,
             };
-            radioPanel.Controls.Add(audioStepLabel);
+            _radioTxLevelGroupBox.Controls.Add(txLevelHelp);
+
+            var confirmedBandLabel = new System.Windows.Forms.Label
+            {
+                Text = "Confirmed band:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 65),
+                Font = font,
+                TabStop = false,
+            };
+            _radioTxLevelGroupBox.Controls.Add(confirmedBandLabel);
+
+            _radioConfirmedBandBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true,
+                Text = "(reading...)",
+                Location = new System.Drawing.Point(125, 62),
+                Size = new System.Drawing.Size(150, 21),
+                TabIndex = 0,
+                Font = font,
+                AccessibleName = "Confirmed band",
+            };
+            _radioTxLevelGroupBox.Controls.Add(_radioConfirmedBandBox);
+
+            var engineTxLevelLabel = new System.Windows.Forms.Label
+            {
+                Text = "Current level (%):",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 92),
+                Font = font,
+                TabStop = false,
+            };
+            _radioTxLevelGroupBox.Controls.Add(engineTxLevelLabel);
+
+            _radioEngineTxLevelUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 0m,
+                Maximum = 100m,
+                DecimalPlaces = 1,
+                Increment = 0.5m,
+                Value = 90m,
+                Enabled = false,
+                Location = new System.Drawing.Point(125, 89),
+                Size = new System.Drawing.Size(64, 21),
+                TabIndex = 1,
+                Font = font,
+                AccessibleName = "Engine transmit tone level percent",
+                AccessibleDescription = "The FT8/FT4 transmit tone drive level inside the engine, in 0.5 percent steps. " +
+                    "Separate from the Windows Input and Output levels on the Decode Engine tab. Sent to the " +
+                    "engine live; the shown value only changes once the engine confirms it.",
+            };
+            _radioTxLevelGroupBox.Controls.Add(_radioEngineTxLevelUpDown);
+
+            _radioEngineTxLevelStatusLabel = new AnnouncingLabel
+            {
+                Text = "",
+                AutoSize = true,
+                Location = new System.Drawing.Point(200, 92),
+                Font = font,
+                TabStop = false,
+                AccessibleName = "Engine transmit tone level status",
+            };
+            _radioTxLevelGroupBox.Controls.Add(_radioEngineTxLevelStatusLabel);
+
+            var audioStepLabel = new System.Windows.Forms.Label
+            {
+                Text = "F11/F12 step (%):",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 119),
+                Font = font,
+                TabStop = false,
+            };
+            _radioTxLevelGroupBox.Controls.Add(audioStepLabel);
 
             _radioAudioStepUpDown = new System.Windows.Forms.NumericUpDown
             {
-                Minimum = 1,
-                Maximum = 25,
-                Value = Math.Max(1, Math.Min(25, ctrl.Radio.AudioStepPercent)),
-                Location = new System.Drawing.Point(left + 210, y),
-                Size = new System.Drawing.Size(55, 21),
-                TabIndex = 26,
+                Minimum = 0.5m,
+                Maximum = 25m,
+                DecimalPlaces = 1,
+                Increment = 0.5m,
+                Value = (decimal)Math.Max(0.5, Math.Min(25.0, ctrl.Radio.AudioStepPercent)),
+                Location = new System.Drawing.Point(125, 116),
+                Size = new System.Drawing.Size(64, 21),
+                TabIndex = 2,
                 Font = font,
                 AccessibleName = "F11 F12 audio level step percent",
             };
-            radioPanel.Controls.Add(_radioAudioStepUpDown);
-            y += 32;
+            _radioTxLevelGroupBox.Controls.Add(_radioAudioStepUpDown);
 
             _radioRememberTxLevelPerBandCheckBox = new System.Windows.Forms.CheckBox
             {
                 Text = "Remember F11/F12 audio level per band",
                 Checked = ctrl.Radio.RememberTxLevelPerBand,
                 AutoSize = true,
-                Location = new System.Drawing.Point(left, y),
+                Location = new System.Drawing.Point(10, 145),
                 Font = font,
-                TabIndex = 27,
+                TabIndex = 3,
                 AccessibleName = "Remember F11 F12 audio level per band",
             };
-            radioPanel.Controls.Add(_radioRememberTxLevelPerBandCheckBox);
-            y += 32;
+            _radioTxLevelGroupBox.Controls.Add(_radioRememberTxLevelPerBandCheckBox);
+
+            radioPanel.Controls.Add(_radioTxLevelGroupBox);
+            y += 184;
+
+            _radioEngineTxLevelUpDown.ValueChanged += RadioEngineTxLevelUpDown_ValueChanged;
+            InitRadioEngineTxLevelControl();
 
             _radioExplainMeterReadingsCheckBox = new System.Windows.Forms.CheckBox
             {
@@ -1580,6 +1690,150 @@ namespace WSJTX_Controller
 
             UpdateRadioHostPortEnabled();
             UpdateSwrHaltEnabled();
+        }
+
+        // Engine "FT8/FT4 transmit tone level" group (Radio tab). Seeds the readouts from the
+        // engine's current confirmed state and starts the 1s refresh so F11/F12 presses and band
+        // changes made while this modeless dialog is open stay reflected here.
+        private void InitRadioEngineTxLevelControl()
+        {
+            RadioTxLevelRefreshTick(null, null);
+            if (_radioTxLevelRefreshTimer == null)
+            {
+                _radioTxLevelRefreshTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+                _radioTxLevelRefreshTimer.Tick += RadioTxLevelRefreshTick;
+            }
+            _radioTxLevelRefreshTimer.Start();
+        }
+
+        // Keeps "Confirmed band" and -- only when the operator isn't mid-edit and no change is in
+        // flight -- the displayed engine level in step with the engine's own state. Never steals
+        // focus: updates label text and, when idle, the spinner value only. When the engine has no
+        // confirmed level (not connected / no snapshot yet) the spinner is disabled with an honest
+        // status rather than showing a guessed number.
+        private void RadioTxLevelRefreshTick(object sender, EventArgs e)
+        {
+            if (_radioEngineTxLevelUpDown == null || _radioEngineTxLevelUpDown.IsDisposed
+                || _radioConfirmedBandBox == null) return;
+
+            string band = wsjtxClient?.CurrentBandStr;
+            band = string.IsNullOrEmpty(band) ? "not yet known" : band;
+            if (_radioConfirmedBandBox.Text != band) _radioConfirmedBandBox.Text = band;
+
+            double? level = wsjtxClient?.EngineTxLevel;
+            if (level == null)
+            {
+                if (_radioEngineTxLevelUpDown.Enabled)
+                {
+                    _radioEngineTxLevelSuppressChange = true;
+                    _radioEngineTxLevelUpDown.Enabled = false;
+                    _radioEngineTxLevelSuppressChange = false;
+                }
+                SetRadioEngineTxLevelStatus("Engine not connected -- level unavailable.");
+                return;
+            }
+
+            if (!_radioEngineTxLevelUpDown.Enabled && !_radioEngineTxLevelApplying)
+            {
+                _radioEngineTxLevelSuppressChange = true;
+                _radioEngineTxLevelUpDown.Enabled = true;
+                _radioEngineTxLevelSuppressChange = false;
+            }
+
+            // Don't fight the operator's own edit, and don't clobber a change that's still being
+            // confirmed -- the confirmation callback / next idle tick will reconcile the display.
+            if (_radioEngineTxLevelUpDown.Focused || _radioEngineTxLevelApplying) return;
+
+            decimal pct = Math.Round((decimal)(level.Value * 100.0), 1, MidpointRounding.AwayFromZero);
+            if (pct < 0m) pct = 0m;
+            if (pct > 100m) pct = 100m;
+            if (_radioEngineTxLevelUpDown.Value != pct)
+            {
+                _radioEngineTxLevelSuppressChange = true;
+                _radioEngineTxLevelUpDown.Value = pct;
+                _radioEngineTxLevelSuppressChange = false;
+                _radioEngineTxLevelLastConfirmedPercent = pct;
+                SetRadioEngineTxLevelStatus($"Engine level {pct:0.0}% on {band}.");
+            }
+            else if (string.IsNullOrEmpty(_radioEngineTxLevelStatusLabel.Text))
+            {
+                _radioEngineTxLevelLastConfirmedPercent = pct;
+                SetRadioEngineTxLevelStatus($"Engine level {pct:0.0}% on {band}.");
+            }
+        }
+
+        private void SetRadioEngineTxLevelStatus(string text)
+        {
+            if (_radioEngineTxLevelStatusLabel == null || _radioEngineTxLevelStatusLabel.IsDisposed
+                || _radioEngineTxLevelStatusLabel.Text == text) return;
+            _radioEngineTxLevelStatusLabel.Text = text;
+            _radioEngineTxLevelStatusLabel.AnnounceTextChanged();
+        }
+
+        // Operator moved the engine transmit tone level spinner. Sent live; the shown value, the
+        // cache and (via DirectSetEngineTxLevel) the per-band remembered value update ONLY after
+        // the engine confirms. On failure the spinner snaps back to the last confirmed value and
+        // says why -- never an unconfirmed number left showing.
+        //
+        // The control is deliberately NOT disabled during the round-trip: disabling the focused
+        // NumericUpDown makes WinForms move keyboard focus to the next control (the F11/F12 step
+        // spinner), so every arrow press "jumped" out of the level field. Overlapping presses are
+        // instead serialized by _radioEngineTxLevelApplying and coalesced to one pending value --
+        // whatever number the operator last dialed is what finally gets sent.
+        private void RadioEngineTxLevelUpDown_ValueChanged(object sender, EventArgs e)
+        {
+            if (_radioEngineTxLevelSuppressChange || wsjtxClient == null) return;
+
+            if (_radioEngineTxLevelApplying)
+            {
+                _radioEngineTxLevelPendingPercent = _radioEngineTxLevelUpDown.Value;
+                return;
+            }
+            SendRadioEngineTxLevel(_radioEngineTxLevelUpDown.Value);
+        }
+
+        private void SendRadioEngineTxLevel(decimal targetPercent)
+        {
+            _radioEngineTxLevelApplying = true;
+            _radioEngineTxLevelPendingPercent = null;
+            SetRadioEngineTxLevelStatus("Setting engine level...");
+
+            wsjtxClient.DirectSetEngineTxLevel((double)(targetPercent / 100m), (ok, applied) =>
+            {
+                if (_radioEngineTxLevelUpDown == null || _radioEngineTxLevelUpDown.IsDisposed) return;
+                _radioEngineTxLevelApplying = false;
+
+                // A newer value was dialed while this one was in flight -- chase it rather than
+                // leave the operator's latest intent unsent or snap the spinner back off it.
+                if (_radioEngineTxLevelPendingPercent is decimal pending && pending != targetPercent)
+                {
+                    SendRadioEngineTxLevel(pending);
+                    return;
+                }
+                _radioEngineTxLevelPendingPercent = null;
+
+                if (ok)
+                {
+                    decimal p = Math.Round((decimal)(applied * 100.0), 1, MidpointRounding.AwayFromZero);
+                    if (p < _radioEngineTxLevelUpDown.Minimum) p = _radioEngineTxLevelUpDown.Minimum;
+                    if (p > _radioEngineTxLevelUpDown.Maximum) p = _radioEngineTxLevelUpDown.Maximum;
+                    _radioEngineTxLevelSuppressChange = true;
+                    _radioEngineTxLevelUpDown.Value = p;
+                    _radioEngineTxLevelSuppressChange = false;
+                    _radioEngineTxLevelLastConfirmedPercent = p;
+                    SetRadioEngineTxLevelStatus($"Engine level set to {p:0.0}%.");
+                }
+                else
+                {
+                    string why = wsjtxClient.EngineTxLevel == null
+                        ? "engine not responding"
+                        : "another level change was in progress";
+                    _radioEngineTxLevelSuppressChange = true;
+                    _radioEngineTxLevelUpDown.Value = _radioEngineTxLevelLastConfirmedPercent;
+                    _radioEngineTxLevelSuppressChange = false;
+                    SetRadioEngineTxLevelStatus($"Change not confirmed ({why}) -- level unchanged.");
+                }
+            });
         }
 
         // 2026-08-20: used to gate these on "Read/Display Pwr+SWR" (pollOn), since SWR-halt used
@@ -3270,7 +3524,7 @@ namespace WSJTX_Controller
             // Not part of radioSettingsChanged below -- read live on every AudioLevel() call
             // (WsjtxClient.BandAudio.cs), never baked into the engine's own launch args, so no
             // restart is ever needed for this one to take effect.
-            if (_radioAudioStepUpDown != null) ctrl.Radio.AudioStepPercent = (int)_radioAudioStepUpDown.Value;
+            if (_radioAudioStepUpDown != null) ctrl.Radio.AudioStepPercent = (double)_radioAudioStepUpDown.Value;
             // Same live-read, no-restart-needed shape as AudioStepPercent just above --
             // WsjtxClient.BandAudio.cs's AudioLevel() and WsjtxClient.Direct.cs's band-change
             // restore both read this directly off ctrl.Radio.

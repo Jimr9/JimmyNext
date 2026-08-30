@@ -39,6 +39,22 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Timer _directPollTimer;
         private bool _directConnected;
         private ulong _directLastSlotSeen;
+
+        // Engine's last CONFIRMED TX drive level (0.0-1.0), or null when unknown -- no snapshot
+        // yet this session, or the engine is currently treated as disconnected. Refreshed from
+        // radio.TxLevel on every poll (DirectApplyStatus) and set the instant a SET_TX_LEVEL is
+        // confirmed (DirectSetEngineTxLevel). F11/F12 (WsjtxClient.BandAudio.cs's AudioLevel())
+        // and the Options > Radio "FT8/FT4 transmit tone level" spinner both read this; neither
+        // ever displays a guessed number while it is null.
+        private double? _engineTxLevel;
+        public double? EngineTxLevel => _engineTxLevel;
+
+        // The one shared guard that serializes every SET_TX_LEVEL originator -- F11/F12 and the
+        // (modeless) Options spinner can be driven at the same time, so this keeps exactly one
+        // level change outstanding at a time and guarantees each relative F11/F12 step is computed
+        // from _engineTxLevel as the engine last CONFIRMED it, never from a value a still-unconfirmed
+        // change has already superseded. See DirectSetEngineTxLevel.
+        private bool _txLevelChangeInFlight;
         private readonly HashSet<string> _directSeenDecodeSignatures = new HashSet<string>();
 
         // Codex Audit 02 release blockers, 2026-08-21 ("create ordered/serialized Direct command
@@ -744,6 +760,10 @@ namespace WSJTX_Controller
                 Sounds.PlaySoundEvent(ctrl.soundEnabled_Disconnected, ctrl.soundFile_Disconnected);
             }
             WsjtxMessage.NegoState = WsjtxMessage.NegoStates.WAIT;
+            // Engine is no longer trusted to be answering -- drop the cached TX level so F11/F12
+            // and the Options spinner report "not available" rather than a stale number. The next
+            // successful poll repopulates it from radio.TxLevel.
+            _engineTxLevel = null;
         }
 
         // T16 fix, 2026-08-23 (CONFIRMED bug, CRITICAL -- W5PF, 2026-08-21): tracks which
@@ -761,6 +781,13 @@ namespace WSJTX_Controller
             _completedThisPollTick.Clear();
             var radio = snap.Radio;
             if (radio == null) return;
+
+            // Mirror the engine's live TX drive level so F11/F12 and the Options spinner always
+            // step from / show what the engine actually has. Held while a SET_TX_LEVEL round-trip
+            // is still open (_txLevelChangeInFlight) so an in-flight poll that predates the change
+            // can't momentarily stomp the just-sent value back; a later poll reconciles it within
+            // ~1s regardless.
+            if (!_txLevelChangeInFlight) _engineTxLevel = radio.TxLevel;
 
             // "Radio CAT link lost"/recovered -- see _lastCatOk's own comment. null (not
             // applicable / not yet reported) never fires either branch, so a VOX-only station,
@@ -2131,6 +2158,39 @@ namespace WSJTX_Controller
             EnqueueDirectCommand("SET_RX_OFFSET " + arg,
                 onComplete == null ? (Action<string>)null
                     : resp => onComplete(resp != null && resp.Length > 0 && !resp.StartsWith("ERR")));
+        }
+
+        // The single origin point for SET_TX_LEVEL. Both F11/F12 (WsjtxClient.BandAudio.cs's
+        // AudioLevel(), a relative +/- step) and the Options > Radio "FT8/FT4 transmit tone level"
+        // spinner (an absolute set) come through here. Options is modeless, so the two can be
+        // driven at once; _txLevelChangeInFlight serializes them to one outstanding engine command.
+        //
+        // onDone(true, applied) fires only AFTER the engine returns OK, with `applied` = the
+        // clamped value now in effect; the cached level (_engineTxLevel) and -- when "Remember
+        // F11/F12 audio level per band" is on -- the per-band remembered value are updated at that
+        // same moment and never before. onDone(false, 0) means the change did NOT take: the engine
+        // was unreachable / returned ERR / timed out, or another level change was already in flight
+        // -- callers must not display, cache, or remember a value in that case.
+        public void DirectSetEngineTxLevel(double level01, Action<bool, double> onDone = null)
+        {
+            if (_txLevelChangeInFlight) { onDone?.Invoke(false, 0); return; }
+            double next = Math.Max(0.0, Math.Min(1.0, level01));
+            _txLevelChangeInFlight = true;
+            EnqueueDirectCommand("SET_TX_LEVEL " + next.ToString(System.Globalization.CultureInfo.InvariantCulture), resp =>
+            {
+                bool ok = resp != null && resp.Length > 0 && !resp.StartsWith("ERR");
+                if (ok)
+                {
+                    // Set the cache before clearing the in-flight flag, so a poll that lands in
+                    // this instant (its refresh is gated on !_txLevelChangeInFlight) can't briefly
+                    // overwrite the just-confirmed value with a pre-change snapshot.
+                    _engineTxLevel = next;
+                    if (ShouldRememberTxLevelForBand(ctrl.Radio.RememberTxLevelPerBand, bandIdx, out int bandKey))
+                        ctrl.Radio.TxLevelByBand[bandKey] = next;
+                }
+                _txLevelChangeInFlight = false;
+                onDone?.Invoke(ok, next);
+            });
         }
 
         // Alt+M (Toggle Mode) equivalent for direct-engine mode -- see SetOperatingMode's own
