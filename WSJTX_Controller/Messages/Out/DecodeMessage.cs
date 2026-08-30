@@ -272,29 +272,9 @@ namespace WsjtxUdpLib.Messages.Out
             decodeMessage.Mode = DecodeString(message, ref cur);
             decodeMessage.Message = DecodeString(message, ref cur);
 
-            //this actually happens, because of AP (a priori) set
-            //'W1AW K1HZ FN42                      ? a2'  (long pad before ?)
-            //'KB0UZT LA8ENA +00  ? a3'                   (short pad before ?)
-            //use " ?" as delimiter; "?" is never a valid FT8 message character
-            int idx = decodeMessage.Message.IndexOf(" ?");
-            if (idx != -1)
-            {
-                decodeMessage.Message = decodeMessage.Message.Substring(0, idx).TrimEnd();
-            }
-
-            //WSJT-X 3.0 drops the "?" and appends only the AP suffix, e.g. " a35" or " a3"
-            //'KI4QMB KE9DMW -15 a35'  -> strip to 'KI4QMB KE9DMW -15'
-            {
-                string m = decodeMessage.Message;
-                int i = m.Length - 1;
-                while (i >= 0 && char.IsDigit(m[i])) i--;
-                if (i < m.Length - 1 && i >= 1 && m[i] == 'a' && m[i - 1] == ' ')
-                    decodeMessage.Message = m.Substring(0, i - 1).TrimEnd();
-            }
-
-            //hashed message case, brackets and only two words:
-            // <K1JT> KG6EMU/AG
-            decodeMessage.Message = RemoveAngleBrackets(decodeMessage.Message);
+            // Old AP " ? aN" format, WSJT-X 3.0 " aN" AP suffix, and hashed "<...>" calls --
+            // one shared helper so the Direct-engine decode path normalizes identically.
+            decodeMessage.Message = NormalizeDecodedMessage(decodeMessage.Message);
 
             decodeMessage.UseStdReply = false; //used in ReplyToCq, was: DecodeBool(message, ref cur);
             decodeMessage.OffAir = DecodeBool(message, ref cur);
@@ -492,29 +472,9 @@ namespace WsjtxUdpLib.Messages.Out
             enqueueDecodeMessage.Mode = DecodeString(message, ref cur);
             enqueueDecodeMessage.Message = DecodeString(message, ref cur);
 
-            //this actually happens, because of AP (a priori) set
-            //'W1AW K1HZ FN42                      ? a2'  (long pad before ?)
-            //'KB0UZT LA8ENA +00  ? a3'                   (short pad before ?)
-            //use " ?" as delimiter; "?" is never a valid FT8 message character
-            int idx = enqueueDecodeMessage.Message.IndexOf(" ?");
-            if (idx != -1)
-            {
-                enqueueDecodeMessage.Message = enqueueDecodeMessage.Message.Substring(0, idx).TrimEnd();
-            }
-
-            //WSJT-X 3.0 drops the "?" and appends only the AP suffix, e.g. " a35" or " a3"
-            //'KI4QMB KE9DMW -15 a35'  -> strip to 'KI4QMB KE9DMW -15'
-            {
-                string m = enqueueDecodeMessage.Message;
-                int i = m.Length - 1;
-                while (i >= 0 && char.IsDigit(m[i])) i--;
-                if (i < m.Length - 1 && i >= 1 && m[i] == 'a' && m[i - 1] == ' ')
-                    enqueueDecodeMessage.Message = m.Substring(0, i - 1).TrimEnd();
-            }
-
-            //hashed message case, brackets and only two words:
-            // <K1JT> KG6EMU/AG
-            enqueueDecodeMessage.Message = RemoveAngleBrackets(enqueueDecodeMessage.Message);
+            // Old AP " ? aN" format, WSJT-X 3.0 " aN" AP suffix, and hashed "<...>" calls --
+            // one shared helper so the Direct-engine decode path normalizes identically.
+            enqueueDecodeMessage.Message = NormalizeDecodedMessage(enqueueDecodeMessage.Message);
 
             enqueueDecodeMessage.UseStdReply = false;  //used in ReplyToCq
             enqueueDecodeMessage.IsDx = DecodeBool(message, ref cur);

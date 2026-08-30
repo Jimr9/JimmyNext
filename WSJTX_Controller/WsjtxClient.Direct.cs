@@ -1350,7 +1350,17 @@ namespace WSJTX_Controller
             // for the QSO's actual final 73. Only ever overwrite curTxMsg with a REAL message;
             // once the engine goes quiet, just keep showing whatever it last said until a new
             // callInProg gives it something new to report.
-            string newTxMsg = snap.Qso?.TxNow;
+            // Normalize the engine's TxNow the SAME way incoming decodes are normalized
+            // (WsjtxMessage.NormalizeDecodedMessage) so transmitted and received Direct text
+            // are consistent. In practice TxNow only ever needs the hashed-call unwrap here:
+            // "<W1AW/2> KB0UZT 73" -> "W1AW/2 KB0UZT 73". Left bracketed, every WsjtxMessage
+            // parser used just below -- ToCall, Is73orRR73, IsReport, IsRogerReport, IsRogers --
+            // and Payload (Display) bail on IsInvalid() (true for any '<'/'>'), so ToCall(curTxMsg)
+            // never equals callInProg (stored bracket-free) and the whole completion block below
+            // is skipped: the compound-call QSO is never logged, callInProg wedges until a band
+            // change / Halt / restart, and the operator hears "sending ." with no payload.
+            // CONFIRMED live 2026-08-30 (W1AW/2 stalled ~3 min, unlogged).
+            string newTxMsg = WsjtxMessage.NormalizeDecodedMessage(snap.Qso?.TxNow);
             if (!string.IsNullOrEmpty(newTxMsg) && newTxMsg != curTxMsg)
             {
                 curTxMsg = newTxMsg;
@@ -1657,8 +1667,22 @@ namespace WSJTX_Controller
             foreach (var row in snap.RecentDecodes)
             {
                 if (string.IsNullOrEmpty(row.Message)) continue;
+                // Per-slot "already processed this decode" guard -- deliberately keyed on the
+                // RAW engine text (before normalization), so two engine decodes that only
+                // differ by AP suffix / hash form are still treated as distinct arrivals here,
+                // exactly as before.
                 string sig = $"{row.From}|{row.Message}|{row.Snr}|{row.DtSec:F1}";
-                if (!_directSeenDecodeSignatures.Add(sig)) continue; // already processed this slot
+                if (!_directSeenDecodeSignatures.Add(sig)) continue;
+
+                // Apply the same cleaning the UDP DecodeMessage/EnqueueDecodeMessage byte
+                // parsers always did before shared QSO processing (WsjtxMessage.
+                // NormalizeDecodedMessage): strip AP " ? aN"/" aN" markers and unwrap a hashed
+                // "<W1AW/2>" compound/portable/special-event call to "W1AW/2". An unresolved
+                // "<...>" normalizes to "..." and stays rejected downstream (IsInvalid's own
+                // Contains("...") check). Without this, every bracketed decode from the engine
+                // (~135 in one live session: incoming reports/RRR/RR73/73 from compound
+                // stations) was dropped at ProcessDecodeMsg's deCall/toCall == null gate.
+                string normMsg = WsjtxMessage.NormalizeDecodedMessage(row.Message);
 
                 var dmsg = new DecodeMessage
                 {
@@ -1670,7 +1694,7 @@ namespace WSJTX_Controller
                     DeltaTime = row.DtSec,
                     DeltaFrequency = (int)Math.Round(row.FreqHz),
                     Mode = "~",
-                    Message = row.Message,
+                    Message = normMsg,
                     UseStdReply = false,
                     OffAir = false,
                 };

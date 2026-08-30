@@ -250,6 +250,7 @@ static class JimmyTests
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
+        DirectDecodeNormalizationTests();
         DirectFailedWriteRetryIsBoundedTests();
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
@@ -1996,6 +1997,180 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DirectRr73BeforeRogerDecodeHoldsCallInProgTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            try { File.Delete(goodDb); } catch { }
+        }
+    }
+
+    // ── Direct decode / TxNow normalization (approved fix 2026-08-30). The engine reports a
+    // hashed compound / portable / special-event call in angle-bracket form -- "<W1AW/2> KB0UZT
+    // 73", "KB0UZT <VA3LG/W2> R-05". Every WsjtxMessage parser (ToCall/DeCall/Is73orRR73/
+    // IsReport/IsRogerReport/IsRogers/Payload) bails on IsInvalid(), true for ANY '<'/'>', so
+    // before this fix ProcessDecodeMsg dropped every bracketed incoming decode at its deCall/
+    // toCall == null gate, and DirectApplyStatus's completion block never matched a bracketed
+    // TxNow against a bracket-free callInProg -- CONFIRMED live (W1AW/2 stalled ~3 min,
+    // unlogged). The fix runs the SAME cleaning the mature UDP byte parsers always did
+    // (WsjtxMessage.NormalizeDecodedMessage: " ? aN" / " aN" AP markers + hashed-call unwrap)
+    // on each Direct decode row and on TxNow. An unresolved "<...>" normalizes to "..." and
+    // stays rejected. ──
+    static void DirectDecodeNormalizationTests()
+    {
+        Console.WriteLine("\n── Direct decode/TxNow normalization: hashed <compound> calls + AP suffixes reach the shared QSO paths (mature UDP parity) -- THE FIX ──");
+
+        string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Norm_" + Guid.NewGuid().ToString("N") + ".db");
+        string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        const string myCall = "KB0UZT", myGrid = "FN42";
+
+        WsjtxClient MakeClient(bool logEarly = false)
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+            ctrl.logEarlyCheckBox.Checked = logEarly;
+            var lm = new LookupManager();
+            lm.RegisterProviderFirst(new TestFixtureLookupProvider());
+            lm.Initialize(useLookupData: true, qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                lotwEnabled: false, lotwDays: 1, clubLogAppKey: null, clubLogDays: 1, fccUlsEnabled: false);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.lookupManager = lm;
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            return wc;
+        }
+
+        string Esc(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+        DirectSnapshot DecodesSnap(ulong slot, params string[] messages)
+        {
+            var rows = string.Join(",", System.Linq.Enumerable.Select(messages, m =>
+                @"{ ""from"": ""X"", ""snr"": -5, ""dtSec"": 0.2, ""freqHz"": 1500.0, ""message"": """ + Esc(m) + @""" }"));
+            return ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                ""recentDecodes"": [ " + rows + @" ]
+            }");
+        }
+        DirectSnapshot TxNowSnap(ulong slot, string txNow) => ParseDirectSnapshot(@"{
+            ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+            ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot + @" },
+            ""recentDecodes"": [],
+            ""qso"": { ""state"": ""done"", ""txNow"": """ + Esc(txNow) + @""" }
+        }");
+
+        void SeedMidQso(WsjtxClient wc, string dx)
+        {
+            wc.callInProg = dx;
+            wc.allCallDict[dx] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = $"{myCall} {dx} R-07", Snr = -7, Priority = (int)WsjtxClient.CallPriority.DEFAULT,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                },
+            };
+            wc.sentReportList.Add(dx);
+        }
+
+        try
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+
+            // ── 1. Complete W1AW/2 exchange: our hashed outgoing report -> incoming hashed
+            //       roger-report -> our hashed final 73 -> exactly one logged QSO, callInProg
+            //       cleared, queue entry removed. Nothing is hand-seeded into allCallDict --
+            //       the incoming roger has to arrive through the normalized decode path. ──
+            {
+                var wc = MakeClient();
+                const string dx = "W1AW/2";
+                wc.callInProg = dx;
+
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxNowSnap(100, "<" + dx + "> " + myCall + " -07"));
+                Check("1: our hashed outgoing report is recognized -> sentReportList has W1AW/2",
+                      wc.sentReportList.Contains(dx), true);
+
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodesSnap(101, myCall + " <" + dx + "> R-05"));
+                Check("1: incoming hashed roger-report reaches allCallDict for W1AW/2 (not dropped)",
+                      wc.allCallDict.ContainsKey(dx), true);
+
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxNowSnap(102, "<" + dx + "> " + myCall + " 73"));
+                Check("1: THE FIX: the hashed final 73 completes the QSO -> logged",
+                      wc.logList.Contains(dx), true);
+                Check("1: THE FIX: callInProg is cleared (no wedge)",
+                      wc.callInProg == null, true);
+                using (var db = new LogbookDb(goodDb))
+                    Check("1: THE FIX: exactly one logbook row (no double-log)",
+                          db.SearchQsos(dx, null, null, null).Count == 1, true);
+            }
+
+            // ── 2. Incoming bracketed RRR / RR73 / 73 reach the shared sign-off path
+            //       (CheckLateLog -> RequestLog). Seed a completable mid-QSO, then feed the
+            //       hashed sign-off as a decode. ──
+            foreach (var tail in new[] { "RRR", "RR73", "73" })
+            {
+                var wc = MakeClient(logEarly: true); // RRR needs "Log early" opted in
+                const string dx = "K7ABC/2";
+                SeedMidQso(wc, dx);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodesSnap(210, myCall + " <" + dx + "> " + tail));
+                Check($"2: incoming hashed {tail} from a compound station reaches CheckLateLog -> QSO logged",
+                      wc.logList.Contains(dx), true);
+            }
+
+            // ── 3. Incoming resolved bracketed /P and /M calls are treated as the real call. ──
+            foreach (var dx in new[] { "VE3ABC/P", "K5XYZ/M" })
+            {
+                var wc = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodesSnap(300, myCall + " <" + dx + "> R-03"));
+                Check($"3: incoming hashed {dx} is unwrapped and recorded under '{dx}'",
+                      wc.allCallDict.ContainsKey(dx), true);
+            }
+
+            // ── 4. Unresolved <...> and a partially-hashed line stay rejected -- nothing is
+            //       recorded, callInProg is untouched, no throw. ──
+            {
+                var wc = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid,
+                    DecodesSnap(400, "<...> " + myCall + " R-05", "K7HSR <...> -16", "<...> W1AW/2 RR73"));
+                Check("4: unresolved <...> decodes are still rejected -- allCallDict stays empty",
+                      wc.allCallDict.Count == 0, true);
+                Check("4: ...and callInProg is untouched",
+                      wc.callInProg == null, true);
+            }
+
+            // ── 5. AP suffix / " ? aN" normalization: the stored message has the marker gone. ──
+            {
+                var wc = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodesSnap(500, myCall + " K7ABC -15 a35"));
+                Check("5: ' a35' AP suffix is stripped before shared processing",
+                      wc.allCallDict.ContainsKey("K7ABC") &&
+                      wc.allCallDict["K7ABC"][wc.allCallDict["K7ABC"].Count - 1].Message == myCall + " K7ABC -15", true);
+
+                var wc2 = MakeClient();
+                wc2.TestApplyDirectSnapshot(myCall, myGrid, DecodesSnap(501, myCall + " K7DEF -12  ? a2"));
+                Check("5: old ' ? aN' AP format is stripped too",
+                      wc2.allCallDict.ContainsKey("K7DEF") &&
+                      wc2.allCallDict["K7DEF"][wc2.allCallDict["K7DEF"].Count - 1].Message == myCall + " K7DEF -12", true);
+            }
+
+            // ── 6. An ordinary unbracketed decode with no AP marker is unchanged. ──
+            {
+                var wc = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodesSnap(600, myCall + " K1ABC R-09"));
+                Check("6: an ordinary unbracketed message is stored verbatim",
+                      wc.allCallDict.ContainsKey("K1ABC") &&
+                      wc.allCallDict["K1ABC"][wc.allCallDict["K1ABC"].Count - 1].Message == myCall + " K1ABC R-09", true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectDecodeNormalizationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally

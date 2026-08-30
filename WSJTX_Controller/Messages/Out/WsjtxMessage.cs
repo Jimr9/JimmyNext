@@ -162,6 +162,36 @@ namespace WsjtxUdpLib.Messages.Out
             return s;
         }
 
+        // The exact message cleaning the UDP DecodeMessage/EnqueueDecodeMessage byte parsers
+        // have always applied before any shared QSO processing sees the text -- extracted here
+        // so the Direct-engine decode path (DirectApplyDecodes) and Direct TxNow can apply the
+        // identical normalization instead of feeding raw engine text downstream. Three steps,
+        // in the parsers' original order:
+        //   1. old AP (a priori) format: "W1AW K1JT FN42        ? a2" -- drop " ?" and after.
+        //   2. WSJT-X 3.0 AP suffix: "KI4QMB KE9DMW -15 a35" -> "KI4QMB KE9DMW -15".
+        //   3. hashed compound/portable/special-event call: "<W1AW/2> KB0UZT 73" ->
+        //      "W1AW/2 KB0UZT 73". An UNRESOLVED hash "<...>" becomes "..." and is still
+        //      caught by IsInvalid()'s own Contains("...") check, so this never makes an
+        //      unresolved or malformed decode look like a valid callsign.
+        public static string NormalizeDecodedMessage(string msg)
+        {
+            if (msg == null) return null;
+
+            int qIdx = msg.IndexOf(" ?");
+            if (qIdx != -1)
+                msg = msg.Substring(0, qIdx).TrimEnd();
+
+            {
+                int i = msg.Length - 1;
+                while (i >= 0 && char.IsDigit(msg[i])) i--;
+                if (i < msg.Length - 1 && i >= 1 && msg[i] == 'a' && msg[i - 1] == ' ')
+                    msg = msg.Substring(0, i - 1).TrimEnd();
+            }
+
+            msg = RemoveAngleBrackets(msg);
+            return msg;
+        }
+
         private static bool IsAlphaOnly(string s)
         {
             return !Regex.IsMatch(s, alphaOnly);
