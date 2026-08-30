@@ -228,6 +228,7 @@ static class JimmyTests
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
         RigctldClientListRigModelsTests();
+        RigctldClientBoundedReadTests();
         OptionsDlgSystemDefaultDeviceLabelTests();
         OptionsDlgExtractRigModelIdTests();
         TqslParseFinalStatusTests();
@@ -249,6 +250,7 @@ static class JimmyTests
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
+        DirectFailedWriteRetryIsBoundedTests();
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
@@ -320,6 +322,7 @@ static class JimmyTests
         ReportClockStatusTests();
         SuppressReceiveNotificationsDuringTxTests();
         ResolveActiveIniPathTests();
+        ActiveIniFilePathTests();
         ListNamedProfilesTests();
         BuildWorkingFrequencyEntriesTests();
         DirectSetWorkingFrequenciesSendsCorrectCommandTests();
@@ -1999,6 +2002,139 @@ static class JimmyTests
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
             try { File.Delete(goodDb); } catch { }
+        }
+    }
+
+    // ── Audit finding, 2026-08-30: the Is73orRR73 hold for a FAILED local logbook write
+    // (Finding 2, 2.0.45) had no bound -- a locked/full SQLite file held callInProg forever,
+    // which neutralizes both fast Tx backstops (_directOrphanTxOvers resets while callInProg
+    // is set; DiscardCall can't fire) and re-published the "NOT saved" error every ~1s poll.
+    // Fix: bound the hold (MaxDirectWriteFailRetries, ~10 polls / ~10s), then give up -- tear
+    // the QSO down (backstop re-arms), one final "still not saved" notice. And warn only on the
+    // FIRST failure, not per poll. ──
+    static void DirectFailedWriteRetryIsBoundedTests()
+    {
+        Console.WriteLine("\n── Failed local write: the callInProg hold is bounded, warns once, then gives up -- THE FIX ──");
+
+        string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_WrFailBound_" + Guid.NewGuid().ToString("N") + ".db");
+        string badDir = Path.Combine(Path.GetTempPath(), "JimmyTest_WrFailBad_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(badDir);   // a directory path can't be opened as a SQLite file -> write throws
+        string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        const string myCall = "KB0UZT", myGrid = "FN42", dx = "K4YT";
+
+        (WsjtxClient wc, FakeNotificationDelivery notify) MakeClient()
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var lm = new LookupManager();
+            lm.RegisterProviderFirst(new TestFixtureLookupProvider());
+            lm.Initialize(useLookupData: true, qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                lotwEnabled: false, lotwDays: 1, clubLogAppKey: null, clubLogDays: 1, fccUlsEnabled: false);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.lookupManager = lm;
+            var notify = new FakeNotificationDelivery();
+            wc.Notify = new NotificationCenter(new NotificationSettings(), notify);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            return (wc, notify);
+        }
+
+        void SeedMidQso(WsjtxClient wc)
+        {
+            wc.callInProg = dx;
+            wc.allCallDict[dx] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = $"{myCall} {dx} R-07", Snr = -7, Priority = (int)WsjtxClient.CallPriority.DEFAULT,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                },
+            };
+            wc.sentReportList.Add(dx);
+        }
+
+        DirectSnapshot Rr73Snap(ulong slot) => ParseDirectSnapshot(@"{
+            ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+            ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot + @" },
+            ""recentDecodes"": [],
+            ""qso"": { ""state"": ""done"", ""txNow"": """ + dx + " " + myCall + @" RR73"" }
+        }");
+
+        try
+        {
+            // ── Case 1: write keeps failing -> bounded hold, one warning, then give up ──
+            // Construct + seed while the DB path is valid (the WsjtxClient ctor opens its own
+            // LogbookDb), THEN point at badDir so only the completion write fails.
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+            var (wc, notify) = MakeClient();
+            SeedMidQso(wc);
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", badDir);
+
+            int cap = wc.TestMaxDirectWriteFailRetries;
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9000));
+            Check("first failed write: QSO held for retry (callInProg kept)",
+                  wc.callInProg == dx, true);
+            Check("first failed write: the failed call is recorded",
+                  wc.TestLiveLogWriteFailedCall == dx, true);
+            int warnsAfterFirst = notify.AnnounceCount;
+            Check("first failed write: the operator IS warned",
+                  warnsAfterFirst >= 1, true);
+
+            // Poll through the rest of the retry budget -- still held, and NOT re-warned each poll.
+            for (ulong i = 1; i < (ulong)cap; i++)
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9000 + i));
+            Check("through the whole retry budget: callInProg is still held",
+                  wc.callInProg == dx, true);
+            Check("through the whole retry budget: NOT re-warned every poll (audit finding)",
+                  notify.AnnounceCount == warnsAfterFirst, true);
+
+            // One more poll: budget spent -> give up.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9000 + (ulong)cap));
+            Check("THE FIX: past the retry budget, the QSO is torn down (not held forever)",
+                  wc.callInProg == null, true);
+            Check("THE FIX: never logged (write never landed)",
+                  wc.logList.Contains(dx), false);
+            Check("THE FIX: exactly one more notice -- \"still not saved\" -- on giving up",
+                  notify.AnnounceCount == warnsAfterFirst + 1, true);
+
+            // With callInProg clear, the orphan-Tx backstop is live again: two orphaned overs halt.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (9002 + (ulong)cap) + @" }, ""recentDecodes"": [] }"));
+            Check("THE FIX: with callInProg cleared, the orphan-Tx backstop counts again (was pinned at 0 while held)",
+                  wc.TestOrphanTxOvers >= 1, true);
+
+            // ── Case 2: write recovers within the budget -> logs, no data lost ──
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+            var (wc2, notify2) = MakeClient();
+            SeedMidQso(wc2);
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", badDir);
+            wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9500));
+            Check("recovery: held after the first failure",
+                  wc2.callInProg == dx && !wc2.logList.Contains(dx), true);
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+            wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9501));
+            Check("recovery: the disk clears within the budget -> QSO logs on the next poll",
+                  wc2.logList.Contains(dx), true);
+            Check("recovery: callInProg cleared, retry flag cleared",
+                  wc2.callInProg == null && wc2.TestLiveLogWriteFailedCall == null, true);
+            using (var db = new LogbookDb(goodDb))
+                Check("recovery: exactly one logbook row",
+                      db.SearchQsos(dx, null, null, null).Count == 1, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectFailedWriteRetryIsBoundedTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            try { File.Delete(goodDb); } catch { }
+            try { Directory.Delete(badDir, true); } catch { }
         }
     }
 
@@ -4698,6 +4834,61 @@ static class JimmyTests
 
         Check("no duplicate IDs in the parsed list",
               models.Count == new System.Collections.Generic.HashSet<int>(models.ConvertAll(m => m.Id)).Count, true);
+    }
+
+    // ── RigctldClient.ReadStdoutBounded ─────────────────────────────────────────────
+    // Independent audit finding, 2026-08-30: ListRigModels used proc.StandardOutput.ReadToEnd()
+    // BEFORE proc.WaitForExit(10_000), so the timeout bounded nothing -- a rigctl.exe that hung
+    // or whose stderr pipe filled froze the Options Radio tab until Jimmy was killed. The read
+    // is now raced against the timeout with kill-on-overrun (ReadStdoutBounded). rigctl.exe
+    // itself can't be made to hang on demand, so this drives the helper with cmd.exe stand-ins.
+    static void RigctldClientBoundedReadTests()
+    {
+        Console.WriteLine("\n── RigctldClient.ReadStdoutBounded: the read is actually bounded -- THE FIX ──");
+
+        // ping.exe: a standalone process (no cmd.exe wrapper, so ReadStdoutBounded's plain
+        // proc.Kill() reaps it directly with no orphaned child), it writes to stdout, and
+        // '-n <count>' gives a predictable runtime.
+        string pingExe = System.IO.Path.Combine(Environment.SystemDirectory, "ping.exe");
+        if (!System.IO.File.Exists(pingExe))
+        {
+            Console.WriteLine("  WARN  ping.exe not found -- skipping (non-Windows or unusual environment).");
+            return;
+        }
+
+        System.Diagnostics.ProcessStartInfo Psi(string args) => new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = pingExe,
+            Arguments = args,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+
+        // Fast, well-behaved child: exits on its own well inside the budget, output intact.
+        using (var p = System.Diagnostics.Process.Start(Psi("-n 1 127.0.0.1")))
+        {
+            string outp = RigctldClient.ReadStdoutBounded(p, 10_000);
+            Check("a fast child's stdout is returned intact", outp.Contains("127.0.0.1"), true);
+        }
+
+        // Child that stays alive (holding its stdout handle open) far past the budget:
+        // 'ping -n 20' runs ~19s. A 1s budget must not wait for it -- ReadStdoutBounded returns
+        // whatever partial output was buffered (same as NativeEngineClient.ListDevices), which
+        // ListRigModels then parses harmlessly, rather than freezing the Options tab.
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using (var p = System.Diagnostics.Process.Start(Psi("-n 20 127.0.0.1")))
+        {
+            string outp = RigctldClient.ReadStdoutBounded(p, 1_000);
+            sw.Stop();
+            Check("THE FIX: a hanging child does NOT block past the budget (returned well under the child's ~19s runtime)",
+                  sw.ElapsedMilliseconds < 5_000, true);
+            Check("THE FIX: the overrun killed the child process",
+                  p.HasExited, true);
+            Check("THE FIX: the read was cut short at the budget, not run to completion (far fewer than 20 ping replies captured)",
+                  outp.Split('\n').Length < 20, true);
+        }
     }
 
     // ── OptionsDlg.ExtractRigModelId ─────────────────────────────────────────────
@@ -9700,6 +9891,47 @@ static class JimmyTests
         finally
         {
             try { Directory.Delete(tmpDir, true); } catch { }
+        }
+    }
+
+    // ── Independent audit finding, 2026-08-30: SupportReportBuilder.GetIniPath always returned
+    // the base LocalAppData\<name>\<name>.ini, so a support ZIP from an operator running a named
+    // profile redacted/attached the WRONG settings file. It now delegates to
+    // Controller.ActiveIniFilePath, which applies the same active-profile resolution Form_Load
+    // does (covered end-to-end by ResolveActiveIniPathTests above). This checks the thin wrapper:
+    // the base-path composition matches what the old code produced, and the startup test-mode
+    // skip is honored (so a test context, or any JIMMY_TEST_DB_PATH session, still gets the base
+    // file and never a Profiles path). ──
+    static void ActiveIniFilePathTests()
+    {
+        Console.WriteLine("\n── SupportReport active-profile INI path (Controller.ActiveIniFilePath) -- THE FIX ──");
+        string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", Path.Combine(Path.GetTempPath(), "x.db")); // -> IsTestMode
+
+            // The name Jimmy's OWN assembly reports (Controller.ProgramName / the old
+            // GetIniPath both use Assembly.GetExecutingAssembly from inside that assembly) --
+            // NOT the test assembly's name.
+            string name = typeof(Controller).Assembly.GetName().Name;
+            string expectedBase = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                name, name + ".ini");
+
+            string actual = Controller.ActiveIniFilePath();
+            CheckStr("in test mode: resolves to exactly the base file the old GetIniPath computed",
+                actual, expectedBase);
+            Check("in test mode: never a Profiles path (startup's test-mode skip is honored)",
+                actual.IndexOf("\\Profiles\\", StringComparison.OrdinalIgnoreCase) < 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  ActiveIniFilePathTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
         }
     }
 

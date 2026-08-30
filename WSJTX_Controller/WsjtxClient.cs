@@ -2386,9 +2386,16 @@ namespace WSJTX_Controller
             {
                 // Finding 2, 2026-08-28: remember which call needs a retry so DirectApplyStatus's
                 // own completion branch keeps callInProg set and re-attempts on the next poll.
+                // Audit finding, 2026-08-30: DirectApplyStatus retries via LogQso->this method
+                // every ~1s poll, and the ErrorWarning policy has no throttle -- so warn only on
+                // the FIRST failure for this call, not on every retry poll. The bounded retry
+                // then runs quietly; if it's abandoned, DirectApplyStatus emits one final "still
+                // not saved" notice (see _directWriteFailRetries).
+                bool firstFailureForThisCall = _liveLogWriteFailedCall != call;
                 _liveLogWriteFailedCall = call;
-                Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"QSO with {call} NOT saved",
-                    "local logbook write failed -- this contact is not yet recorded; check Debug output and available disk space"));
+                if (firstFailureForThisCall)
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"QSO with {call} NOT saved",
+                        "local logbook write failed -- this contact is not yet recorded; check Debug output and available disk space"));
             }
             else
             {
@@ -2877,10 +2884,10 @@ namespace WSJTX_Controller
             // Halt cleared it, band change), drop it so it can't wedge a later completion.
             if (_liveLogWriteFailedCall != null && _liveLogWriteFailedCall != call) _liveLogWriteFailedCall = null;
 
-            // KF4CCG race, 2026-08-29: the Is73orRR73 "hold callInProg until the roger decode is
-            // on record" retry counter (WsjtxClient.Direct.cs) is scoped to one contact -- any
-            // callInProg transition starts the next one fresh.
-            if (call != callInProg) _directRr73LogRetries = 0;
+            // KF4CCG race, 2026-08-29 / write-fail bound, 2026-08-30: the two Is73orRR73
+            // "hold callInProg until it's on record" retry counters (WsjtxClient.Direct.cs) are
+            // scoped to one contact -- any callInProg transition starts the next one fresh.
+            if (call != callInProg) { _directRr73LogRetries = 0; _directWriteFailRetries = 0; }
 
             // Rx/Tx frequency control: a manual Tx-frequency override is scoped to one
             // CQ/QSO. Any callInProg transition -- new contact, contact ended, band change

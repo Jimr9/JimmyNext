@@ -1590,6 +1590,18 @@ namespace WSJTX_Controller
         private static string BaseIniFilePath() => ProfilesAppDataPath() + "\\" + ProgramName() + ".ini";
         private static string ProfilesDirectory() => ProfilesAppDataPath() + "\\Profiles";
 
+        // The .ini file that actually governs the running session: the base file, or the named
+        // profile its "activeProfile" key points at. Same resolution Form_Load does at startup
+        // (see the ResolveActiveIniPath call there, incl. its test-mode skip). internal (not
+        // private): SupportReportBuilder.GetIniPath uses this so a support ZIP redacts/attaches
+        // the settings that were really in effect -- independent audit finding, 2026-08-30:
+        // before this it always attached the base file even while a named profile was active.
+        internal static string ActiveIniFilePath()
+        {
+            string baseIni = BaseIniFilePath();
+            return TestModeGuard.IsTestMode ? baseIni : ResolveActiveIniPath(baseIni, ProfilesDirectory());
+        }
+
         // Shown in the Profiles menu's own list alongside real named profiles, and used as the
         // reserved name a new profile may not claim -- never a literal product name (the
         // operator's own explicit requirement: don't design this around "Jimmy Next", since the

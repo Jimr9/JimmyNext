@@ -91,8 +91,14 @@ namespace WSJTX_Controller
                 };
                 using (var proc = Process.Start(psi))
                 {
-                    string stdout = proc.StandardOutput.ReadToEnd();
-                    proc.WaitForExit(10_000);
+                    // Independent audit finding, 2026-08-30: ReadToEnd() blocks until stdout hits
+                    // EOF, so the WaitForExit(10_000) that used to follow it bounded NOTHING -- a
+                    // rigctl.exe that hangs (or whose unread stderr pipe fills and back-pressures
+                    // its stdout writes) froze this call, and with it the Options Radio tab and
+                    // the screen reader, until Jimmy was killed. Bound the read and kill the
+                    // process on overrun so the rig-model list always degrades to free-text
+                    // entry instead. Same shape as NativeEngineClient.ListDevices' own fix.
+                    string stdout = ReadStdoutBounded(proc, 10_000);
 
                     foreach (string rawLine in stdout.Split('\n'))
                     {
@@ -112,6 +118,25 @@ namespace WSJTX_Controller
                 // Degrade to an empty list -- Options falls back to free-text entry.
             }
             return result;
+        }
+
+        // Reads a short-lived child process's stdout with a real upper bound. ReadToEndAsync()
+        // still has no timeout of its own, so it is raced against timeoutMs; on overrun the
+        // process is killed (which lets the read complete) and whatever was captured so far --
+        // usually nothing -- is returned. stderr is left redirected but undrained, matching
+        // NativeEngineClient.ListDevices: rigctl --list writes its table to stdout and is
+        // effectively silent on stderr, and the kill-on-overrun path clears any pipe-fill
+        // deadlock. internal (not private): RigctldClientBoundedReadTests drives it directly
+        // with a deliberately-hanging stand-in process, which the real rigctl.exe can't be.
+        internal static string ReadStdoutBounded(Process proc, int timeoutMs)
+        {
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            if (!stdoutTask.Wait(timeoutMs))
+            {
+                try { proc.Kill(); } catch { }
+            }
+            proc.WaitForExit(1_000);
+            return stdoutTask.Status == TaskStatus.RanToCompletion ? stdoutTask.Result : "";
         }
 
         // Launches Jimmy's own bundled rigctld against the configured rig model/COM port,

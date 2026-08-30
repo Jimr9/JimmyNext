@@ -656,13 +656,12 @@ namespace WSJTX_Controller
                 : Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
         }
 
-        private static string GetIniPath()
-        {
-            string name = Assembly.GetExecutingAssembly().GetName().Name;
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                name, name + ".ini");
-        }
+        // Independent audit finding, 2026-08-30: this used to hard-return LocalAppData\<name>\
+        // <name>.ini -- the base file -- so a support ZIP from an operator running a named
+        // profile redacted and attached settings that were NOT the ones governing the session
+        // that reproduced their problem. Now resolves the same active-profile path Form_Load
+        // does at startup (Controller.ActiveIniFilePath). Redaction downstream is unchanged.
+        private static string GetIniPath() => Controller.ActiveIniFilePath();
 
         private static string GetLogDir()
         {

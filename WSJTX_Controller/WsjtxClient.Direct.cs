@@ -378,6 +378,26 @@ namespace WSJTX_Controller
         private int _directRr73LogRetries;
         private const int MaxDirectRr73LogRetries = 4;
 
+        // Audit finding, 2026-08-30: the parallel Is73orRR73 hold for a FAILED local logbook
+        // write (Finding 2, 2.0.45) had no bound at all. A locked / full / unavailable SQLite
+        // file made LogQso() fail every ~1s poll, holding callInProg indefinitely -- which (a)
+        // neutralizes BOTH fast Tx backstops (the _directOrphanTxOvers runaway catcher resets
+        // while callInProg != null; DiscardCall() can't fire because RequestLog already
+        // CancelDiscardCall()'d), leaving only the 2-11 min engine wall-clock watchdog to stop
+        // a final RR73 the DX keeps triggering, and (b) re-published the "NOT saved" error
+        // every poll (that policy has no throttle). Bounded here: ~10 polls (~10s) covers the
+        // common transient lock (a VSS backup snapshot, an on-access AV scan) -- the 2.0.45
+        // benefit -- then gives up, tears the QSO down (re-arming the orphan backstop and
+        // ending the retry) with one final "still not saved" notice. Chosen short on purpose:
+        // during the hold, if the DX keeps triggering the final RR73, that's unsolicited TX
+        // with the fast backstops disabled, so the worst-case exposure is ~1 over rather than
+        // the minutes the engine watchdog would otherwise allow. CheckLateLog still retries the
+        // write if the DX later re-sends a 73/RR73; a longer outage or a permanent failure
+        // (disk full) loses the contact regardless of how long we hold. Reset like
+        // _directRr73LogRetries.
+        private int _directWriteFailRetries;
+        private const int MaxDirectWriteFailRetries = 10;
+
         // T17 fix, 2026-08-23: what Jimmy last actually commanded via SET_FREQUENCY's own
         // sideband argument (WsjtxClient.BandAudio.cs's RetuneBand, on CONFIRMED success only --
         // see that method's own DirectSetFrequency completion callback) -- compared every poll
@@ -480,6 +500,7 @@ namespace WSJTX_Controller
             _swrOverThreshold = false;
             _directOrphanTxOvers = 0;
             _directRr73LogRetries = 0;
+            _directWriteFailRetries = 0;
             _lastCatOk = null;
             _lastCommandedSideband = null;
             _lastCommandedSidebandChangedUtc = null;
@@ -1364,7 +1385,13 @@ namespace WSJTX_Controller
                     // exchange) is NOT a failed write: fall through and tear down as before so a
                     // broken exchange can't wedge callInProg forever.
                     bool onRecord = logList.Contains(callInProg);
-                    bool writeFailedRetry = !onRecord && _liveLogWriteFailedCall == callInProg;
+                    // Write-fail retry, now BOUNDED (audit finding 2026-08-30 -- see
+                    // _directWriteFailRetries' own comment). ++ only reached once the earlier
+                    // !onRecord / same-failed-call guards pass, so it doesn't tick on a healthy
+                    // completion or for some other call.
+                    bool writeFailedForThisCall = !onRecord && _liveLogWriteFailedCall == callInProg;
+                    bool writeFailedRetry = writeFailedForThisCall
+                        && ++_directWriteFailRetries <= MaxDirectWriteFailRetries;
                     // KF4CCG race, 2026-08-29 (CONFIRMED live -- see _directRr73LogRetries's own
                     // comment): the engine's Qso.TxNow flips to the final RR73 in the SAME ~1s poll
                     // that first decodes the DX's roger-report, and DirectApplyStatus runs BEFORE
@@ -1379,17 +1406,28 @@ namespace WSJTX_Controller
                     // LogQso() succeeds and the "logged" cue fires at the right moment. Bounded by
                     // MaxDirectRr73LogRetries so a genuinely one-sided exchange still tears down;
                     // CheckLateLog stays the final net for a real trailing 73/RR73.
-                    bool awaitingRogerDecode = !onRecord && !writeFailedRetry
+                    // Gated on "no write failure recorded for this call" (not on !writeFailedRetry,
+                    // which flips back to false once the write-fail budget is spent) so the two
+                    // holds stay mutually exclusive by construction -- this one is only ever the
+                    // decode-ingest race, never a disk problem.
+                    bool awaitingRogerDecode = !onRecord && _liveLogWriteFailedCall != callInProg
                         && sentReportList.Contains(callInProg)
                         && ++_directRr73LogRetries <= MaxDirectRr73LogRetries;
 
                     if (writeFailedRetry || awaitingRogerDecode)
                     {
-                        DebugOutput($"{Time()} [DIRECT] '{callInProg}' not on record yet ({(writeFailedRetry ? "local write failed" : $"awaiting roger decode, poll {_directRr73LogRetries}/{MaxDirectRr73LogRetries}")}) -- keeping callInProg set, will retry next poll");
+                        DebugOutput($"{Time()} [DIRECT] '{callInProg}' not on record yet ({(writeFailedRetry ? $"local write failed, poll {_directWriteFailRetries}/{MaxDirectWriteFailRetries}" : $"awaiting roger decode, poll {_directRr73LogRetries}/{MaxDirectRr73LogRetries}")}) -- keeping callInProg set, will retry next poll");
                     }
                     else
                     {
+                    // Reached the else with an unrecovered failed write means the bounded retry
+                    // above is spent -- tell the operator once it's being abandoned, then tear
+                    // down normally (re-arms the orphan-Tx backstop, ends the per-poll retry).
+                    if (writeFailedForThisCall)
+                        Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"QSO with {callInProg} still not saved",
+                            "the local logbook write kept failing -- this contact was not recorded"));
                     _directRr73LogRetries = 0;
+                    _directWriteFailRetries = 0;
                     string justWorkedCall = callInProg;
                     SetCallInProg(null);
 
@@ -2379,6 +2417,10 @@ namespace WSJTX_Controller
         // retry (null = none). DirectLogRetryAndEarlyRrrTests asserts it is set after a failed
         // write, cleared after the retry succeeds, and that callInProg is held meanwhile.
         internal string TestLiveLogWriteFailedCall => _liveLogWriteFailedCall;
+        // Audit finding, 2026-08-30: DirectFailedWriteRetryIsBoundedTests asserts the failed-
+        // write callInProg hold gives up after this many polls instead of holding forever.
+        internal int TestMaxDirectWriteFailRetries => MaxDirectWriteFailRetries;
+        internal int TestDirectWriteFailRetries => _directWriteFailRetries;
 
         // "Remember F11/F12 audio level per band" regression coverage: bandIdx is private,
         // updated only inside DirectApplyStatus (the real production poll pipeline, exercised
