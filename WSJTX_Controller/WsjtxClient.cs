@@ -381,13 +381,8 @@ namespace WSJTX_Controller
             _liveLoggedQsoKeys[dedupKey] = true;
         }
         private static uint defaultAudioOffset = 1500;
-        private string failReason = "Failure reason: Unknown";
-        public static int wsjtxRevision;
-        public static int wsjtxTestVer;
-        public static int lastWsjtx270RcRevision = 185;
 
         public const int maxQueueLines = 8, maxQueueWidth = 19, maxLogWidth = 9;
-        private WsjtxMessage msg = new UnknownMessage();
         private Random rnd = new Random();
         DateTime firstDecodeTime;
         internal const string spacer = "           *";
@@ -548,11 +543,6 @@ namespace WSJTX_Controller
         private string toCallStatus = null;
         private string callInProgLastActivity = null;
         private bool newPskReporter = false;
-
-        public static bool IsWsjtx270Rc()
-        {
-            return WSJTX_Controller.WsjtxClient.wsjtxRevision == WSJTX_Controller.WsjtxClient.lastWsjtx270RcRevision;
-        }
 
         public enum TxModes
         {
@@ -2177,7 +2167,11 @@ namespace WSJTX_Controller
             // engine process that CloseComm() (Controller.cs) is about to kill outright.
             ShutdownDirectCommandQueue();
             ResetOpMode();
-            ShowStatus();
+            // No ShowStatus() here: the window is closing, there is no operator left to inform,
+            // and ResetOpMode() has just parked opMode at IDLE while NegoState is still RECD --
+            // rendering that combination repainted the status line back to "Connecting, wait
+            // until ready.", which a screen reader would speak as a stray parting announcement
+            // on every exit (reported 2026-08-31).
             // UDP transport cleanup, 2026-08-18: heartbeatRecdTimer.Stop() and the udpClient2/
             // CloseAllUdp teardown that used to run here are removed -- both were dead (nothing
             // left ever starts heartbeatRecdTimer or opens udpClient2) even before this pass, and

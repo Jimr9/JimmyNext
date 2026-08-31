@@ -84,80 +84,10 @@ namespace WsjtxUdpLib.Messages.Out
          *    of  the maximum  quint32 value  which implies  the field  is not
          *    applicable.
          */
-        public static new WsjtxMessage Parse(byte[] message)
-        {
-            if (!CheckMagicNumber(message))
-            {
-                return null;
-            }
-
-            var statusMessage = new StatusMessage();
-
-            int cur = MAGIC_NUMBER_LENGTH;
-            statusMessage.SchemaVersion = DecodeQInt32(message, ref cur);
-
-            var messageType = (MessageType)DecodeQInt32(message, ref cur);
-
-            if (messageType != MessageType.STATUS_MESSAGE_TYPE)
-            {
-                return null;
-            }
-
-            statusMessage.Id = DecodeString(message, ref cur);
-            statusMessage.DialFrequency = DecodeQUInt64(message, ref cur);
-            statusMessage.Mode = DecodeString(message, ref cur);
-            statusMessage.DxCall = DecodeString(message, ref cur);
-            statusMessage.Report = DecodeString(message, ref cur);
-            statusMessage.TransmitMode = DecodeString(message, ref cur);
-            statusMessage.TxEnabled = DecodeBool(message, ref cur);
-            statusMessage.Transmitting = DecodeBool(message, ref cur);
-            statusMessage.Decoding = DecodeBool(message, ref cur);
-            statusMessage.RxDF = DecodeQUInt32(message, ref cur);
-            statusMessage.TxDF = DecodeQUInt32(message, ref cur);
-            statusMessage.DeCall = DecodeString(message, ref cur);
-            statusMessage.DeGrid = DecodeString(message, ref cur);
-            if (statusMessage.DeGrid != null && statusMessage.DeGrid.Length > 4)
-            {
-                statusMessage.DeGrid = statusMessage.DeGrid.Substring(0, 4);
-            }
-            statusMessage.Detail = DecodeString(message, ref cur);
-            statusMessage.TxWatchdog = DecodeBool(message, ref cur);
-            statusMessage.Submode = DecodeString(message, ref cur);
-            statusMessage.FastMode = DecodeBool(message, ref cur);
-            statusMessage.SpecialOperationMode = (SpecialOperationMode)DecodeQUInt8(message, ref cur);
-            if (cur < message.Length)
-            {
-                statusMessage.ResultCode = DecodeNullableQUInt32(message, ref cur);
-                statusMessage.TRPeriod = DecodeNullableQUInt32(message, ref cur);
-                statusMessage.ConfigurationName = DecodeString(message, ref cur);
-                // Stage A7 field-testing fix, 2026-07-17: every field from here on is
-                // genuinely optional/trailing and must be individually bounds-checked,
-                // not read as a single all-or-nothing group. Confirmed via a real
-                // WSJT-X Improved 3.1 StatusMessage: it sends LastTxMsg/QsoProgress
-                // (apparently promoted into the real standard protocol at some point --
-                // this file's own header comment calling them "non-std extension" is
-                // stale) but stops there, never sending TxFirst/DblClk/Check/TxHaltClk/
-                // TxEnableButton/TxEnableClk/MyContinent/MetricUnits (genuinely Andy-
-                // fork-specific). The old code bundled LastTxMsg/QsoProgress/TxFirst/
-                // DblClk under one "if (cur < message.Length)" guard, so a message that
-                // includes the first two but not the rest ran the decoder past the end
-                // of the buffer -- every single StatusMessage from this exact build
-                // silently failed to parse (logged, datagram dropped) in every prior
-                // live test against it, not just this one.
-                if (cur < message.Length) statusMessage.LastTxMsg = DecodeString(message, ref cur);
-                if (cur < message.Length) statusMessage.QsoProgress = DecodeQUInt32(message, ref cur);
-                if (cur < message.Length) statusMessage.TxFirst = DecodeBool(message, ref cur);
-                if (cur < message.Length) statusMessage.DblClk = DecodeBool(message, ref cur);
-                if (cur < message.Length) statusMessage.Check = DecodeString(message, ref cur);
-                if (cur < message.Length) statusMessage.TxHaltClk = DecodeBool(message, ref cur);
-                if (cur < message.Length) statusMessage.TxEnableButton = DecodeBool(message, ref cur);
-                if (cur < message.Length) statusMessage.TxEnableClk = DecodeBool(message, ref cur);
-                if (cur < message.Length) statusMessage.MyContinent = DecodeString(message, ref cur);
-                if (cur < message.Length) statusMessage.MetricUnits = !DecodeBool(message, ref cur);
-            }
-
-            return statusMessage;
-        }
+        // The classic-UDP byte Parse() was removed with the WSJT-X wire-codec cleanup
+        // (2026-08-31). The Direct engine transport constructs a StatusMessage directly
+        // from its JSON snapshot (see WsjtxClient.Direct.cs) -- these fields are set via
+        // an object initializer there, not decoded off a datagram.
 
         public int SchemaVersion { get; set; }
         public string Id { get; set; }

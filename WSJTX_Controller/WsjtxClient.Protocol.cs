@@ -316,33 +316,16 @@ namespace WSJTX_Controller
         }
 
 
-        // No response at all from the native engine within the fault window (real WSJT-X-
-        // specific wording and a blocking modal here used to be one root cause of Jimmy's
-        // whole window freezing, confirmed live 2026-08-07/08 in a DIFFERENT but related spot
-        // -- CheckWsjtxRunning's own modal, since removed -- so this stays a non-blocking
-        // notification rather than a MessageBox.Show, and just keeps waiting/retrying instead
-        // of requiring a dialog to be dismissed first.
-        // Found live, since the Direct-only cutover: NegoState==INITIAL is now unreachable in
-        // any real session -- Direct mode's own ConnectDirectEngine/DirectPollTick
-        // (WsjtxClient.Direct.cs) only ever set NegoState to RECD or WAIT, never INITIAL/SENT/
-        // FAIL (those three were exclusively the classic UDP handshake's own states). This
-        // method's own warning-and-retry body has therefore been a no-op in production since
-        // the 2026-08-12 Direct-only parity pass, predating this cleanup pass entirely -- left
-        // as-is rather than "fixed" here: giving Direct mode a genuine "still waiting to
-        // connect" warning is a real, separate feature decision (what should it say, when
-        // should it fire), not a UDP-transport-removal cleanup. Still called from a live,
-        // always-wired site (Controller.cs's initialConnFaultTimer, started from
-        // OptionsDlgClosed/HelpClosed), so the method itself is not dead code -- only this
-        // specific INITIAL check inside it is unreachable today.
+        // initialConnFaultTimer's tick handler (Controller.cs, armed from OptionsDlgClosed/
+        // HelpClosed) calls this to stop that one-shot timer. It used to also re-warn and
+        // re-arm while NegoState==INITIAL, but the Direct engine transport never enters
+        // INITIAL/SENT/FAIL (those were classic-UDP-handshake states) -- ConnectDirectEngine/
+        // DirectPollTick only ever set RECD or WAIT -- so that branch was dead. A genuine
+        // "still waiting to connect" warning for Direct mode is a separate feature decision,
+        // not part of the UDP-vestige cleanup that removed the dead check.
         public void ConnectionDialog()
         {
             ctrl.initialConnFaultTimer.Stop();
-            if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.INITIAL)
-            {
-                Notify.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Native engine",
-                    "no response yet -- still waiting."));
-                ctrl.initialConnFaultTimer.Start();
-            }
         }
 
         // Retunes through the engine's own SET_FREQUENCY command when a real frequency is given

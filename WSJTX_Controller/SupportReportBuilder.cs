@@ -288,7 +288,6 @@ namespace WSJTX_Controller
             sb.AppendLine($"Connection state:     {connState}");
             sb.AppendLine($"WSJT-X program name:  {diag.PgmName ?? "Unknown"}");
             sb.AppendLine($"WSJT-X version:       {diag.PgmVer ?? "Unknown"}");
-            sb.AppendLine($"WSJT-X revision:      {WsjtxClient.wsjtxRevision}");
             // UDP IP address / UDP multicast lines removed 2026-08-18: both were the classic
             // WSJT-X/UDP transport's own listen-address configuration, which no longer exists
             // (WsjtxProtocolAdapter and the rest of that transport are deleted). Port is kept --

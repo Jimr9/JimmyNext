@@ -242,48 +242,6 @@ namespace WsjtxUdpLib.Messages.Out
 
             return sb.ToString();
         }
-
-        public static new WsjtxMessage Parse(byte[] message)
-        {
-            if (!CheckMagicNumber(message))
-            {
-                return null;
-            }
-
-            var decodeMessage = new DecodeMessage();
-
-            int cur = MAGIC_NUMBER_LENGTH;
-            decodeMessage.SchemaVersion = DecodeQInt32(message, ref cur);
-
-            var messageType = (MessageType)DecodeQInt32(message, ref cur);
-
-            if (messageType != MessageType.DECODE_MESSAGE_TYPE)
-            {
-                return null;
-            }
-
-            decodeMessage.Id = DecodeString(message, ref cur);
-            decodeMessage.New = DecodeBool(message, ref cur);
-            decodeMessage.SinceMidnight = DecodeQTime(message, ref cur);
-            decodeMessage.RxDate = DateTime.UtcNow.Date;
-            decodeMessage.Snr = DecodeQInt32(message, ref cur);
-            decodeMessage.DeltaTime = DecodeDouble(message, ref cur);
-            decodeMessage.DeltaFrequency = DecodeQInt32(message, ref cur);
-            decodeMessage.Mode = DecodeString(message, ref cur);
-            decodeMessage.Message = DecodeString(message, ref cur);
-
-            // Old AP " ? aN" format, WSJT-X 3.0 " aN" AP suffix, and hashed "<...>" calls --
-            // one shared helper so the Direct-engine decode path normalizes identically.
-            decodeMessage.Message = NormalizeDecodedMessage(decodeMessage.Message);
-
-            decodeMessage.UseStdReply = false; //used in ReplyToCq, was: DecodeBool(message, ref cur);
-            decodeMessage.OffAir = DecodeBool(message, ref cur);
-            decodeMessage.Priority = (int)WSJTX_Controller.WsjtxClient.CallPriority.DEFAULT;
-
-            //decodeMessage.messageWords = decodeMessage.Message.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-
-            return decodeMessage;
-        }
     }
 
 
@@ -442,71 +400,20 @@ namespace WsjtxUdpLib.Messages.Out
 
             return sb.ToString().Replace("   ", " ").Replace("  ", " ");
         }
-        public static new WsjtxMessage Parse(byte[] message)
-        {
-            if (!CheckMagicNumber(message))
-            {
-                return null;
-            }
 
-            var enqueueDecodeMessage = new EnqueueDecodeMessage();
-
-            int cur = MAGIC_NUMBER_LENGTH;
-            enqueueDecodeMessage.SchemaVersion = DecodeQInt32(message, ref cur);
-
-            var messageType = (MessageType)DecodeQInt32(message, ref cur);
-
-            if ((WSJTX_Controller.WsjtxClient.IsWsjtx270Rc() && messageType != MessageType.ENQUEUE_DECODE_MESSAGE_TYPE_2)
-                || (!WSJTX_Controller.WsjtxClient.IsWsjtx270Rc() && messageType != MessageType.ENQUEUE_DECODE_MESSAGE_TYPE_3))
-            {
-                return null;
-            }
-
-            enqueueDecodeMessage.Id = DecodeString(message, ref cur);
-            enqueueDecodeMessage.AutoGen = DecodeBool(message, ref cur);
-            enqueueDecodeMessage.SinceMidnight = DecodeQTime(message, ref cur);
-            enqueueDecodeMessage.RxDate = DateTime.UtcNow.Date;
-            enqueueDecodeMessage.Snr = DecodeQInt32(message, ref cur);
-            enqueueDecodeMessage.DeltaTime = DecodeDouble(message, ref cur);
-            enqueueDecodeMessage.DeltaFrequency = DecodeQInt32(message, ref cur);
-            enqueueDecodeMessage.Mode = DecodeString(message, ref cur);
-            enqueueDecodeMessage.Message = DecodeString(message, ref cur);
-
-            // Old AP " ? aN" format, WSJT-X 3.0 " aN" AP suffix, and hashed "<...>" calls --
-            // one shared helper so the Direct-engine decode path normalizes identically.
-            enqueueDecodeMessage.Message = NormalizeDecodedMessage(enqueueDecodeMessage.Message);
-
-            enqueueDecodeMessage.UseStdReply = false;  //used in ReplyToCq
-            enqueueDecodeMessage.IsDx = DecodeBool(message, ref cur);
-            enqueueDecodeMessage.Modifier = DecodeBool(message, ref cur);
-            enqueueDecodeMessage.IsNewCallOnBand = DecodeBool(message, ref cur);
-            enqueueDecodeMessage.IsNewCallAnyBand = DecodeBool(message, ref cur);
-            enqueueDecodeMessage.IsNewCountryOnBand = DecodeBool(message, ref cur);
-            enqueueDecodeMessage.IsNewCountry = DecodeBool(message, ref cur);
-            enqueueDecodeMessage.Priority = (int)WSJTX_Controller.WsjtxClient.CallPriority.DEFAULT;      //set here temporarily
-            enqueueDecodeMessage.Country = DecodeString(message, ref cur);
-            enqueueDecodeMessage.Continent = DecodeString(message, ref cur);
-            enqueueDecodeMessage.Azimuth = DecodeQInt32(message, ref cur);
-            enqueueDecodeMessage.Distance = DecodeQInt32(message, ref cur);
-
-            enqueueDecodeMessage.SequenceNumber = 0;
-            enqueueDecodeMessage.SetMsgQuality();
-
-            return enqueueDecodeMessage;
-        }
-
-        // Found via live A7 field testing 2026-07-17: Jimmy's decode-processing code
-        // (WsjtxClient.Protocol.cs's Update()) only ever reacted to this class's own
-        // Parse() above -- the non-standard, Andy-fork-specific EnqueueDecodeMessage
-        // (msg type 18). Stock WSJT-X and WSJT-X Improved never send that message type
-        // at all; they send the plain, standard base-class Decode message (msg type 2,
-        // DecodeMessage.Parse() above) instead. Stage A6 already made every downstream
-        // consumer (ProcessDecodeMsg, CallQueueRanker, AwardTagger, etc.) read computed
+        // Found via live A7 field testing 2026-07-17: Jimmy's old classic-UDP decode-
+        // processing code only ever reacted to a non-standard, Andy-fork-specific
+        // EnqueueDecodeMessage (msg type 18). Stock WSJT-X and WSJT-X Improved never sent
+        // that message type at all; they send the plain, standard base-class Decode
+        // message instead. Stage A6 already made every downstream consumer
+        // (ProcessDecodeMsg, CallQueueRanker, AwardTagger, etc.) read computed
         // classification via EffectiveClassification() rather than this class's own
-        // wire-supplied fields -- so the fix here is narrow: adapt a standard
+        // wire-supplied fields -- so the adaptation here is narrow: turn a standard
         // DecodeMessage into an EnqueueDecodeMessage shell so it can flow through that
         // exact same pipeline unchanged, rather than needing a second, parallel
-        // processing path.
+        // processing path. (This is now the ONLY path that produces an
+        // EnqueueDecodeMessage -- the Direct engine transport hands Jimmy standard
+        // DecodeMessages built from its JSON snapshot; see WsjtxClient.Direct.cs.)
         //
         // Every field below is either (a) copied straight from the base DecodeMessage
         // fields a standard Decode broadcast genuinely carries, (b) safe to leave at

@@ -658,25 +658,12 @@ namespace WSJTX_Controller
                     return;
                 }
 
-                if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.FAIL)
-                {
-                    status = failReason;
-                    backColor = Color.Red;
-                    return;
-                }
-
-                if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.INITIAL)
-                {
-                    // "WSJT-X" wording dropped 2026-08-29: obsolete since Direct engine mode
-                    // (there is no external WSJT-X to connect to -- it's the bundled engine).
-                    // The 2026-08-12 cleanup only caught the NegoState==WAIT branch above; this
-                    // one and the two OpModes cases below were missed and still surfaced on
-                    // every engine restart (Options save, auto-recovery), not just cold start.
-                    status = $"{pgmName} {pgmVer}. Connecting{k}.";
-                    foreColor = Color.Black;
-                    backColor = Color.Orange;
-                }
-                else  //includes NegoState = SENT or RECD
+                // NegoState is now always RECD by the time control reaches here: the WAIT
+                // branch above returns for the pre-connect window, and INITIAL/SENT/FAIL are
+                // classic-UDP-handshake states the Direct engine transport never enters
+                // (ConnectDirectEngine/DirectPollTick only ever set RECD or WAIT). The old
+                // NegoState==INITIAL "Jimmy Next vX. Connecting." and NegoState==FAIL
+                // (failReason) branches were removed with the UDP-vestige cleanup pass.
                 {
                     switch ((int)opMode)
                     {

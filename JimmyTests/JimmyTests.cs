@@ -276,7 +276,6 @@ static class JimmyTests
         FormatNoaaScaleTests();
         SpaceWxMufAndScalesJsonDeserializationTests();
         ClubLogPrefixTableTests();
-        StatusMessageParseTests();
         EnqueueDecodeMessageFromStandardDecodeTests();
         DecodeMessageIsCallToTests();
         DefaultTrPeriodMsTests();
@@ -4793,74 +4792,6 @@ static class JimmyTests
               new DecodeMessage { Message = "KB0UZT K4YT EM63" }.IsCallTo(null), false);
     }
 
-    // ── StatusMessage.Parse ─────────────────────────────────────────────────────
-    // Found via live A7 field testing 2026-07-17: a real WSJT-X Improved 3.1
-    // StatusMessage datagram, captured verbatim during a failed live handshake test,
-    // sends LastTxMsg/QsoProgress but stops there (no TxFirst/DblClk/Check/etc., all
-    // genuinely Andy-fork-specific) -- the old parser bundled those first two fields
-    // under the same "if (cur < message.Length)" guard as the later ones, so it read
-    // past the end of the buffer and threw on every single message from this build.
-    static void StatusMessageParseTests()
-    {
-        Console.WriteLine("\n── StatusMessage.Parse ──");
-
-        // Real captured bytes: WSJT-X Improved 3.1, schema 3, DeCall=KB0UZT,
-        // DeGrid=EN34RN, DxCall=WA3I, Mode=FT8, ConfigurationName="Default",
-        // LastTxMsg=null, QsoProgress=0xFFFFFFFF, nothing beyond that.
-        byte[] realWsjtxImproved31 = new byte[]
-        {
-            0xAD, 0xBC, 0xCB, 0xDA, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
-            0x00, 0x00, 0x00, 0x06, 0x57, 0x53, 0x4A, 0x54, 0x2D, 0x58, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0xD6, 0xC0, 0x90, 0x00, 0x00, 0x00, 0x03, 0x46, 0x54,
-            0x38, 0x00, 0x00, 0x00, 0x04, 0x57, 0x41, 0x33, 0x49, 0x00, 0x00, 0x00,
-            0x03, 0x2D, 0x31, 0x35, 0x00, 0x00, 0x00, 0x03, 0x46, 0x54, 0x38, 0x00,
-            0x00, 0x01, 0x00, 0x00, 0x07, 0x4A, 0x00, 0x00, 0x0A, 0x0C, 0x00, 0x00,
-            0x00, 0x06, 0x4B, 0x42, 0x30, 0x55, 0x5A, 0x54, 0x00, 0x00, 0x00, 0x06,
-            0x45, 0x4E, 0x33, 0x34, 0x52, 0x4E, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0xFF,
-            0xFF, 0xFF, 0xFF, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0x00, 0x00, 0x00, 0x07, 0x44, 0x65, 0x66, 0x61, 0x75, 0x6C, 0x74,
-            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-        };
-
-        StatusMessage parsed = null;
-        Exception thrown = null;
-        try { parsed = (StatusMessage)StatusMessage.Parse(realWsjtxImproved31); }
-        catch (Exception ex) { thrown = ex; }
-
-        Check("WSJT-X Improved 3.1 StatusMessage parses without throwing", thrown == null, true);
-        if (parsed != null)
-        {
-            CheckStr("Mode", parsed.Mode, "FT8");
-            CheckStr("DxCall", parsed.DxCall, "WA3I");
-            CheckStr("DeCall", parsed.DeCall, "KB0UZT");
-            CheckStr("DeGrid", parsed.DeGrid, "EN34");    // truncated to 4 chars, matching existing DeGrid handling
-            CheckStr("ConfigurationName", parsed.ConfigurationName, "Default");
-            Check("TRPeriod stays null (sentinel value, not present)", parsed.TRPeriod == null, true);
-            CheckStr("LastTxMsg stays null (not present)", parsed.LastTxMsg, null);
-            // TxFirst/DblClk/Check never got sent at all -- must default, not throw.
-            Check("TxFirst defaults to false (field never sent)", parsed.TxFirst, false);
-            CheckStr("Check defaults to null (field never sent)", parsed.Check, null);
-        }
-
-        // Positive control: a "full" Andy-fork-style message (every optional field
-        // present, including the genuinely non-standard ones) must still parse
-        // correctly after this fix -- the fix only adds bounds checks, it must not
-        // change behavior when the bytes ARE all present.
-        byte[] full = BuildFullStatusMessage();
-        StatusMessage fullParsed = null;
-        Exception fullThrown = null;
-        try { fullParsed = (StatusMessage)StatusMessage.Parse(full); }
-        catch (Exception ex) { fullThrown = ex; }
-
-        Check("Full (Andy-fork-style) StatusMessage still parses without throwing", fullThrown == null, true);
-        if (fullParsed != null)
-        {
-            CheckStr("Full: Check echoes through", fullParsed.Check, "ABC123");
-            Check("Full: TxFirst reads through", fullParsed.TxFirst, true);
-            CheckStr("Full: MyContinent reads through", fullParsed.MyContinent, "NA");
-        }
-    }
-
     // ── WsjtxClient.DefaultTrPeriodMs ───────────────────────────────────────────
     // Found via live field testing 2026-07-17: WSJT-X Improved 3.1's StatusMessage
     // never reports a real TRPeriod at all -- confirmed directly via a real session's
@@ -4881,50 +4812,6 @@ static class JimmyTests
         Check("FT4 defaults to 7500ms", WsjtxClient.DefaultTrPeriodMs("FT4") == 7500, true);
         Check("Unknown/null mode falls back to the FT8 default (most common case)",
               WsjtxClient.DefaultTrPeriodMs(null) == 15000, true);
-    }
-
-    // Hand-built full-featured StatusMessage (every field including the Andy-fork-
-    // specific trailing ones) for StatusMessageParseTests' positive-control case.
-    static byte[] BuildFullStatusMessage()
-    {
-        using (var ms = new MemoryStream())
-        using (var w = new BinaryWriter(ms))
-        {
-            void WU32(uint v) { var b = BitConverter.GetBytes(v); Array.Reverse(b); w.Write(b); }
-            void WU64(ulong v) { var b = BitConverter.GetBytes(v); Array.Reverse(b); w.Write(b); }
-            void WStr(string s) { var b = System.Text.Encoding.UTF8.GetBytes(s); WU32((uint)b.Length); w.Write(b); }
-            void WBool(bool v) => w.Write((byte)(v ? 1 : 0));
-
-            w.Write(new byte[] { 0xAD, 0xBC, 0xCB, 0xDA });   // magic
-            WU32(3);                                          // schema
-            WU32(1);                                          // type = STATUS
-            WStr("WSJT-X");
-            WU64(14074000);
-            WStr("FT8");
-            WStr("WA3I");
-            WStr("-15");
-            WStr("FT8");
-            WBool(false); WBool(false); WBool(true);
-            WU32(1866); WU32(2572);
-            WStr("KB0UZT"); WStr("EN34RN"); WStr("");
-            WBool(false); WStr(""); WBool(false);
-            w.Write((byte)0);                                 // SpecialOperationMode
-            WU32(0xFFFFFFFF);                                 // ResultCode (N/A)
-            WU32(15000);                                       // TRPeriod
-            WStr("Default");
-            WStr("");                                          // LastTxMsg
-            WU32(0);                                           // QsoProgress
-            WBool(true);                                       // TxFirst
-            WBool(false);                                      // DblClk
-            WStr("ABC123");                                    // Check
-            WBool(false);                                      // TxHaltClk
-            WBool(true);                                       // TxEnableButton
-            WBool(false);                                      // TxEnableClk
-            WStr("NA");                                         // MyContinent
-            WBool(false);                                      // MetricUnits (inverted on read)
-
-            return ms.ToArray();
-        }
     }
 
     // ── QrzLogbookClient.IsDuplicateReason ──────────────────────────────────────
