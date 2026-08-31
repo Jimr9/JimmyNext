@@ -952,16 +952,16 @@ namespace WSJTX_Controller
                 newBand = true;
                 _rawDecodeHistory.Clear();
                 if (ctrl.advShowRaw) ShowRawDecodes();
-                ClearCalls(true);
-                // A confirmed band change makes the whole band context new: end the contact
-                // (ContextReset -- flushes callInProg AND the last-command / last-Tx-text fields,
-                // T16/T19: old-band "73" text must not leak onto the new band) and bump
-                // _contactEpoch so a REPLY/CALL_CQ still in flight for the band just left cannot
-                // resurrect it when its "OK" lands. EndContact's epoch bump covers the case where
-                // callInProg was still null ("REPLY confirmed OK, about to SetCallInProg(nCall)").
+                // The canonical trio -- a confirmed band change makes the whole band context new:
+                //   ClearCalls()      -- the call queue + decode-cycle scratch
+                //   EndContact(ContextReset) -- callInProg AND last-command / last-Tx-text fields
+                //     (T16/T19: old-band "73" text must not leak onto the new band); its
+                //     _contactEpoch bump also invalidates a REPLY/CALL_CQ still in flight for the
+                //     band just left, even if callInProg was still null when the change landed.
+                //   ResetBandSession() -- decode history, sent/report lists, logList, grid cache
+                ClearCalls();
                 EndContact(ContactEndReason.ContextReset);
-                logList.Clear();
-                ShowLogged();
+                ResetBandSession();
                 // dialFrequency must be updated to the new band BEFORE LoadHrcCache()/
                 // RefreshStillNeedCache() run: both rebuild their per-band live-tag caches off
                 // wsjtxClient.CurrentBandStr, which is derived from dialFrequency. Assigning it

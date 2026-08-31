@@ -131,14 +131,13 @@ namespace WSJTX_Controller
                     timeOffset = 0;
                     _rawDecodeHistory.Clear();
                     if (ctrl.advShowRaw) ShowRawDecodes();
-                    ClearCalls(true);
-                    logList.Clear();
-                    ShowLogged();
-                    // A tier switch is a context reset just like a band change -- same teardown,
-                    // same _contactEpoch bump (before 2026-08-31 this path bumped neither of the
-                    // two guards now unified, so a REPLY/CALL_CQ confirmed after Alt+M could still
-                    // commit under the new mode).
+                    // The canonical trio -- a tier switch is a context reset just like a band
+                    // change (same teardown, same _contactEpoch bump; before 2026-08-31 this path
+                    // bumped neither of the two guards now unified, so a REPLY/CALL_CQ confirmed
+                    // after Alt+M could still commit under the new mode).
+                    ClearCalls();
                     EndContact(ContactEndReason.ContextReset);
+                    ResetBandSession();
                     ShowStatus();
                 });
             }

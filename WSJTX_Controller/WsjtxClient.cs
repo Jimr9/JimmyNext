@@ -2178,7 +2178,8 @@ namespace WSJTX_Controller
             decodeCount = 0;
             consecNoDecodes = 0;
             DebugOutput($"{Time()} ResetOpMode, decodeCycle:{decodeCycle}");
-            ClearCalls(true);
+            // The canonical trio: queue, then contact, then band session.
+            ClearCalls();
             cqPaused = true;
             if (WsjtxMessage.NegoState != WsjtxMessage.NegoStates.WAIT) HaltTx();
             opMode = OpModes.IDLE;
@@ -2187,11 +2188,10 @@ namespace WSJTX_Controller
             myCall = null;
             myGrid = null;
             EndContact(ContactEndReason.SessionReset);
+            ResetBandSession();     //logList/history/etc -- can re-log on new mode, band, or session
             restartQueue = false;
             newDirCq = false;
             dxCall = null;
-            logList.Clear();        //can re-log on new mode, band, or session
-            ShowLogged();
             UpdateModeVisible();
             UpdateModeSelection();
             UpdateDebug();
@@ -2201,48 +2201,41 @@ namespace WSJTX_Controller
             DebugOutput($"{nl}{Time()} ResetOpMode, opMode:{opMode} NegoState:{WsjtxMessage.NegoState} cqPaused:{cqPaused}");
         }
 
-        private void ClearCalls(bool clearBandSpecific)             //if only changing Tx period, keep info for the current band, since may return to original Tx period
+        // The call QUEUE and per-decode-cycle scratch state -- nothing else. (Was
+        // ClearCalls(bool clearBandSpecific); the parameter was dead -- every one of the three
+        // callers passed true. The band-session half moved to ResetBandSession(), the contact
+        // half to EndContact(); all three callers now invoke the trio explicitly.)
+        private void ClearCalls()
         {
             callQueue.Clear();
             UpdateMaxTxRepeat();
             callDict.Clear();
-            if (clearBandSpecific)
-            {
-                timeoutCallDict.Clear();
-                allCallDict.Clear();
-                sentCallList.Clear();
-                sentReportList.Clear();
-                unwantedCqList.Clear();
-                // T19 fix, 2026-08-23 (CONFIRMED bug -- W5PF band-change log evidence, 2026-08-21:
-                // curTxMsg remained "W5PF KB0UZT 73" after 20m->17m and again after 17m->15m).
-                // clearBandSpecific is only ever true at a genuine band/mode-context reset (a
-                // confirmed band change -- WsjtxClient.Direct.cs; a tier switch -- WsjtxClient.
-                // Protocol.cs; or a full ResetOpMode), never for a period-only change -- see this
-                // method's own signature comment. curTxMsg/txMsg/curTxPayload were deliberately
-                // never cleared by the completed-QSO path either (T16, DirectApplyStatus's own
-                // comment: "only ever overwrite curTxMsg with a REAL message") specifically so a
-                // confirmed band change remains the one place old-band TX text is flushed, not
-                // silently overwritten by the next unrelated status render. curCmd/replyCmd/
-                // replyDecode describe whatever reply was last sent -- also band-owned, and
-                // ResetOpMode already cleared these separately before this fix; now consistent
-                // across all three ClearCalls(true) call sites. _bandSessionLocationCache (T15)
-                // is explicitly band-session-scoped by design -- cleared here, not on Halt.
-                curTxMsg = null;
-                txMsg = null;
-                curTxPayload = null;
-                curCmd = null;
-                replyCmd = null;
-                replyDecode = null;
-                _bandSessionLocationCache.Clear();
-            }
             decodeNum = 0;
             ShowQueue();
             if (ctrl.advancedCallLayout) ShowAdvancedQueue(null);
-            xmitCycleCount = 0;
-            timedOutCall = null;
-            CancelDiscardCall();
-            DebugOutput($"{Time()} ClearCalls, clearBandSpecific:{clearBandSpecific} decodeNum:{decodeNum} xmitCycleCount:{xmitCycleCount}");
+            DebugOutput($"{Time()} ClearCalls, decodeNum:{decodeNum}");
             StopDecodeTimers();
+        }
+
+        // ── Band-session lifecycle ───────────────────────────────────────────────────────────
+        // A "band session" is everything Jimmy learns and records while parked on one band+mode:
+        // per-station decode history (allCallDict / timeoutCallDict), who we've already
+        // transmitted to / reported (sentCallList / sentReportList), which CQs we've decided are
+        // unwanted (unwantedCqList), the per-band grid/location cache (_bandSessionLocationCache),
+        // and the session's logged-calls list (logList, drives ShowLogged and the already-logged
+        // gate). It ends -- the SAME three occasions a contact ends via ContextReset/SessionReset
+        // -- on a confirmed band change, a tier switch, or a full ResetOpMode. NOT on Halt / a
+        // completed QSO / an operator abort: those keep the band's history intact.
+        private void ResetBandSession()
+        {
+            timeoutCallDict.Clear();
+            allCallDict.Clear();
+            sentCallList.Clear();
+            sentReportList.Clear();
+            unwantedCqList.Clear();
+            _bandSessionLocationCache.Clear();
+            logList.Clear();
+            ShowLogged();
         }
 
         internal string Time()
