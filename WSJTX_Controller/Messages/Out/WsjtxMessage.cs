@@ -47,16 +47,6 @@ namespace WsjtxUdpLib.Messages.Out
         private static int maxBaseCallsignLength = 10;
         private static int maxCallDigits = 3;
 
-        public enum QsoStates
-        {
-            CALLING,
-            REPLYING,
-            REPORT,
-            ROGER_REPORT,
-            ROGERS,
-            SIGNOFF,
-            INVALID
-        }
         public enum NegoStates
         {
             WAIT,

@@ -195,7 +195,6 @@ namespace WSJTX_Controller
         // WsjtxClient.Display.cs's ShowStatus() for the consuming logic.
         private bool _wasTransmittingLastShowStatus = false;
         private bool decoding = false;
-        private WsjtxMessage.QsoStates qsoState = WsjtxMessage.QsoStates.CALLING;
         private string mode = "";
         private bool modeSupported = true;
         internal bool txFirst = false;
@@ -305,15 +304,11 @@ namespace WSJTX_Controller
         private string otherPartyStage = null;
         private bool restartQueue = false;
 
-        private WsjtxMessage.QsoStates lastQsoState = WsjtxMessage.QsoStates.INVALID;
-        private string dxCall = null;
         private ulong? lastDialFrequency = null;
         private string lastTxMsg = null;
         private string lastCallInProgDebug = null;
         private bool? lastTxTimeoutDebug = null;
         private string lastReplyCmdDebug = null;
-        private WsjtxMessage.QsoStates lastQsoStateDebug = WsjtxMessage.QsoStates.INVALID;
-        private string lastDxCallDebug = null;
         private string lastTxMsgDebug = null;
         private string lastLastTxMsgDebug = null;
         private bool lastTransmittingDebug = false;
@@ -1776,7 +1771,7 @@ namespace WSJTX_Controller
                     if ((deCall == callInProg || (txTimeout && deCall == tCall)) && recdPrevSignoff)        //cancel call in progress
                     {
                         restartQueue = true;
-                        DebugOutput($"{spacer}already rec'd signoff, restartQueue:{restartQueue} qsoState:{qsoState}");
+                        DebugOutput($"{spacer}already rec'd signoff, restartQueue:{restartQueue}");
                     }
                     else
                     {
@@ -1794,7 +1789,7 @@ namespace WSJTX_Controller
                                         _callQueueStore.AddCall(deCall, dmsg);
 
                                         //check for high-priority call after decodes "done"
-                                        DebugOutput($"{spacer}transmitting:{transmitting} qsoState:{qsoState}");
+                                        DebugOutput($"{spacer}transmitting:{transmitting}");
                                         if (decodesProcessed && !cqPaused)
                                         {
                                             DebugOutput($"{spacer}late decode(2), restartQueue:{restartQueue}");
@@ -1943,7 +1938,7 @@ namespace WSJTX_Controller
         {
             //can be called anytime, but will be called at least once per decode period shortly before the tx period begins;
             //can result in tx enabled (or disabled)
-            DebugOutput($"{Time()} CheckNextXmit, txTimeout:{txTimeout} callQueue.Count:{callQueue.Count} qsoState:{qsoState}");
+            DebugOutput($"{Time()} CheckNextXmit, txTimeout:{txTimeout} callQueue.Count:{callQueue.Count}");
             DateTime dtNow = DateTime.UtcNow;      //helps with debugging to do this here
 
             //*******************
@@ -2004,7 +1999,7 @@ namespace WSJTX_Controller
             //*************************************
             //Directed CQ / new setting / best freq
             //*************************************
-            if (txMode == TxModes.CALL_CQ && qsoState == WsjtxMessage.QsoStates.CALLING)
+            if (txMode == TxModes.CALL_CQ)
             {
                 DebugOutput($"{spacer}CheckNextXmit(4) start");
                 if (callInProg == null)
@@ -2024,7 +2019,6 @@ namespace WSJTX_Controller
                     if (newDirCq)
                     {
                         string cqMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
-                        qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
                         replyCmd = null;        //invalidate last reply cmd since not replying
                         replyDecode = null;
                         curCmd = cqMsg;
@@ -2191,7 +2185,6 @@ namespace WSJTX_Controller
             ResetBandSession();     //logList/history/etc -- can re-log on new mode, band, or session
             restartQueue = false;
             newDirCq = false;
-            dxCall = null;
             UpdateModeVisible();
             UpdateModeSelection();
             UpdateDebug();
@@ -2380,10 +2373,14 @@ namespace WSJTX_Controller
             return WsjtxMessage.IsCQ(msg.Message);
         }
 
-        //request WSJT-X log a QSO to the WSJT-X .ADI log file and re-broadcast to UDP listeners;
-        //logging done only via WSJT-X because WSJT-X keeps track of 'logged-before' status, 
-        //which is important to processing CQ notification msgs received from WSJT-X
-        //recdMsg null if logging because of a sent msg
+        // Record a completed QSO directly to Jimmy's own logbook (LogbookDb via
+        // AdifRecordBuilder + ImportLiveLoggedQso), fire the configured real-time uploads, add it
+        // to logList / the already-worked gate, and play the logged sound -- all with a dedup
+        // claim (ClaimLiveLoggedQso) so repeated poll-tick triggers for the same exchange write
+        // once. Jimmy owns logging and "worked-before" outright now; the stale note this comment
+        // used to carry ("logging done only via WSJT-X ... WSJT-X keeps track of logged-before")
+        // predates the Direct-engine cutover -- there is no WSJT-X in the loop.
+        // recdMsg is null when logging off a transmitted RRR/73/RR73 rather than a received msg.
         private void RequestLog(string call, EnqueueDecodeMessage reptMsg, EnqueueDecodeMessage recdMsg)
         {
             string qsoDateOff, qsoTimeOff;
@@ -3196,10 +3193,7 @@ namespace WSJTX_Controller
             DebugOutput($"{nl}{Time()} ProcessDecodeTimer2Tick, processDecodeTimer2 stop, toCall:{toCall} lastTxMsg:'{curTxMsg}' cqPaused:{cqPaused} transmitting:{transmitting} restartQueue:{restartQueue}");
             if (toCall == callInProg) _callQueueStore.RemoveCall(toCall);       //late decode caused WSJT-X to transmit a new response after the original transmit started
 
-            //           "call CQ" mode and a late 73 may have caused WSJT-X to start calling "CQ" when it should be "CQ DX" or other directed CQ
-            //TO-DO
-            //bool unwantedCq = (txMode == TxModes.CALL_CQ && (qsoState == WsjtxMessage.QsoStates.CALLING || qsoState == WsjtxMessage.QsoStates.SIGNOFF));
-            DebugOutput($"{spacer}txTimeout:{txTimeout} txMode:{txMode} qsoState:{qsoState}");
+            DebugOutput($"{spacer}txTimeout:{txTimeout} txMode:{txMode}");
         }
 
         // DecodesCompleted() (postDecodeTimer's own Tick target) was removed 2026-08-18 along
@@ -3501,11 +3495,10 @@ namespace WSJTX_Controller
                     DebugOutput($"{Time()} SetupCq: CALL_CQ confirmed but superseded (contact epoch moved) while in flight -- not committing");
                     return;
                 }
-                qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
                 replyCmd = null;        //invalidate last reply cmd since not replying
                 replyDecode = null;
                 curCmd = cqMsg;
-                DebugOutput($"{spacer}qsoState:{qsoState} (was {lastQsoState} replyCmd:'{replyCmd}') newDirCq:{newDirCq}");
+                DebugOutput($"{spacer}replyCmd:'{replyCmd}' newDirCq:{newDirCq}");
                 if (enableTx) EnableTx();             //sets WSJT-X "Enable Tx" button state
             });
         }

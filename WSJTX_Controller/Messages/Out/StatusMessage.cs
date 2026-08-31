@@ -122,12 +122,7 @@ namespace WsjtxUdpLib.Messages.Out
         public string MyContinent { get; set; }
         public bool MetricUnits { get; set; }
 
-        public QsoStates CurQsoState()
-        {
-            return (QsoStates)QsoProgress;
-        } 
-
-        public override string ToString() 
+        public override string ToString()
             => $"Status     {this.ToCompactLine(nameof(Id))}";
     }
 

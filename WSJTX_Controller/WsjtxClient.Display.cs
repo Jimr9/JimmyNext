@@ -746,7 +746,7 @@ namespace WSJTX_Controller
                             TimeSpan sinceMidnight = dt - new DateTime(dt.Year, dt.Month, dt.Day, 0, 0, 0);
                             DebugOutput($"{nl}{Time()} ShowStatus, txEnabled:{txEnabled} cqPaused:{cqPaused} txTimeout:{txTimeout}");
                             DebugOutput($"{spacer}loggedCall:'{loggedCall}' timedOutCall:'{timedOutCall}' replyFromInProg:{replyFromInProg}");
-                            DebugOutput($"{spacer}callInProg:'{callInProg}' txMode:{txMode} qcw:{qcw} transmitting:{transmitting} qsoState:{qsoState}");
+                            DebugOutput($"{spacer}callInProg:'{callInProg}' txMode:{txMode} qcw:{qcw} transmitting:{transmitting}");
                             // Label is "lastTxMsg" (the curTxMsg field is only ever overwritten
                             // with a REAL transmitted message -- see WsjtxClient.Direct.cs -- so
                             // after an interrupted contact this is the LAST message sent, not a
@@ -864,14 +864,13 @@ namespace WSJTX_Controller
                             // just-unsuppressed side's list has had a moment to reflect the real
                             // queue) will include the real count normally.
                             // Item 2, 2026-08-24 (operator request, opt-in/default off): normally
-                            // this clause CAN still appear while transmitting (qsoState==CALLING,
-                            // e.g. calling CQ) -- the one piece of ShowStatus's own text that's
-                            // genuinely receive-side chatter, not TX-critical info (sending/
-                            // logged/expired/timed-out text below is never gated by this). With
-                            // the new setting on, transmitting alone suppresses it outright,
-                            // regardless of qsoState, so transmit-related speech isn't competing
-                            // with a "N available stations" summary for the same utterance.
-                            string callsWaiting = (!transmitting || (qsoState == WsjtxMessage.QsoStates.CALLING && !ctrl.suppressReceiveNotificationsDuringTx)) && callInProg == null
+                            // this clause CAN still appear while transmitting (e.g. calling CQ) --
+                            // the one piece of ShowStatus's own text that's genuinely receive-side
+                            // chatter, not TX-critical info (sending/logged/expired/timed-out text
+                            // below is never gated by this). With the new setting on, transmitting
+                            // alone suppresses it outright, so transmit-related speech isn't
+                            // competing with a "N available stations" summary for the same utterance.
+                            string callsWaiting = (!transmitting || !ctrl.suppressReceiveNotificationsDuringTx) && callInProg == null
                                 && !(justStoppedTransmitting && displayedCount == 0)
                                 ? $", {count} {callsStr}{pri}{cty}{want}{needed}"
                                 : "";
@@ -1294,14 +1293,6 @@ namespace WSJTX_Controller
                 ctrl.label13.Text = $"in-prog: {CallPriorityString(callInProg)}";
                 lastCallInProgDebug = callInProg;
 
-                if (qsoState != lastQsoStateDebug)
-                {
-                    ctrl.label14.ForeColor = Color.Red;
-                    chg = true;
-                }
-                ctrl.label14.Text = $"qso: {qsoState}";
-                lastQsoStateDebug = qsoState;
-
                 if (evenOffset != lastEvenOffsetDebug)
                 {
                     ctrl.label15.ForeColor = Color.Red;
@@ -1365,14 +1356,6 @@ namespace WSJTX_Controller
                 }
                 ctrl.label18.Text = $"last: {lastTxMsg}";
                 lastLastTxMsgDebug = lastTxMsg;
-
-                if (lastDxCallDebug != dxCall)
-                {
-                    ctrl.label4.ForeColor = Color.Red;
-                    chg = true;
-                }
-                ctrl.label4.Text = $"dxCall: {dxCall}";
-                lastDxCallDebug = dxCall;
 
                 ctrl.label21.Text = $"replyCmd: {replyCmd}";
 
