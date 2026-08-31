@@ -311,6 +311,7 @@ static class JimmyTests
         ConfirmedBandChangeFlushesStaleTxStateTests();
         DirectBandChangeRebuildsAwardCacheForNewBandTests();
         DelayedReplyAfterBandChangeDoesNotResurrectStaleQsoTests();
+        DelayedReplyAfterOperatorAbortDoesNotResurrectStaleQsoTests();
         FailedQsoWriteDoesNotFalselyAnnounceSuccessTests();
         DirectInitialConnectAlwaysRestoresLastExactDialTests();
         DirectInitialConnectResyncsTierAndPeriodTests();
@@ -10432,6 +10433,111 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DelayedReplyAfterBandChangeDoesNotResurrectStaleQsoTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            releaseReply.Set();
+            try { engineListener.Stop(); } catch { }
+        }
+    }
+
+    // ── Unified contact-supersede guard (2026-08-31): _contactEpoch replaces the two
+    // single-purpose guards it merges (_bandSessionEpoch = band change only; _haltGeneration =
+    // halt only), which between them left an operator abort at the WsjtxClient layer and a tier
+    // switch guarded by neither. Same in-flight-REPLY harness as the band-change test above, but
+    // the supersede trigger here is AbortContact() (Escape / Alt+H) -- which reaches _contactEpoch
+    // via CancelQso -> SetCallInProg(null). A REPLY confirmed after the operator has aborted must
+    // not resurrect callInProg/curCmd for the station they just walked away from.
+    static void DelayedReplyAfterOperatorAbortDoesNotResurrectStaleQsoTests()
+    {
+        Console.WriteLine("\n── Unified contact epoch: a REPLY confirmed AFTER an operator abort must not resurrect the QSO -- THE FIX ──");
+        var acceptedReply = new System.Threading.ManualResetEventSlim(false);
+        var releaseReply = new System.Threading.ManualResetEventSlim(false);
+        var engineListener = StartStubEngineHostWithResponses(line =>
+        {
+            if (line.StartsWith("REPLY"))
+            {
+                acceptedReply.Set();
+                releaseReply.Wait(5000);
+                return "OK";
+            }
+            return "OK";
+        });
+        if (engineListener == null)
+        {
+            Skip("DelayedReplyAfterOperatorAbortDoesNotResurrectStaleQsoTests", "control port 58239 already in use by another Jimmy/engine-host session");
+            return;
+        }
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+
+            const string myCall = "KB0UZT";
+            const string myGrid = "FN42";
+            const string call = "W5PF";
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 6100 },
+                ""recentDecodes"": []
+            }"));
+
+            var dmsg = new EnqueueDecodeMessage
+            {
+                Message = $"{myCall} {call} EM12",
+                Snr = -10,
+                AutoGen = true,
+                RxDate = DateTime.UtcNow.Date,
+                SinceMidnight = DateTime.UtcNow.TimeOfDay,
+            };
+            wc.callDict[call] = dmsg;
+            wc.callQueue.Enqueue(call);
+
+            wc.NextCall(false, 0);
+            bool accepted = acceptedReply.Wait(3000);
+            if (!accepted)
+            {
+                var sw0 = System.Diagnostics.Stopwatch.StartNew();
+                while (!acceptedReply.Wait(0) && sw0.ElapsedMilliseconds < 3000)
+                {
+                    System.Windows.Forms.Application.DoEvents();
+                    System.Threading.Thread.Sleep(5);
+                }
+                accepted = acceptedReply.Wait(0);
+            }
+            Check("Setup: REPLY was actually dequeued and is blocked mid-flight (stub is holding it)",
+                accepted, true);
+
+            // Operator hits Escape / Alt+H WHILE the REPLY above is still in flight, unconfirmed.
+            wc.AbortContact();
+            Check("Setup: callInProg is null immediately after AbortContact (REPLY hasn't committed anything yet)",
+                wc.callInProg == null, true);
+
+            releaseReply.Set();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < 1500)
+            {
+                System.Windows.Forms.Application.DoEvents();
+                System.Threading.Thread.Sleep(5);
+            }
+
+            Check("THE FIX: the delayed REPLY confirmation does not resurrect callInProg after an operator abort",
+                wc.callInProg == null, true);
+            Check("THE FIX: curCmd is not stomped by the delayed, superseded REPLY completion",
+                wc.TestCurCmd == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DelayedReplyAfterOperatorAbortDoesNotResurrectStaleQsoTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally

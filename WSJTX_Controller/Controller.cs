@@ -2186,9 +2186,7 @@ namespace WSJTX_Controller
                 var focused = this.ActiveControl;
                 if (wsjtxClient.ConnectedToWsjtx())
                 {
-                    wsjtxClient.RequeueAbortedCall();
-                    wsjtxClient.CancelQso();
-                    wsjtxClient.HaltAndDisableTx();
+                    wsjtxClient.AbortContact();
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
                     ShowMsg("Tx halted", true);
@@ -4445,9 +4443,7 @@ namespace WSJTX_Controller
                     bool hadSomethingToHalt =
                         wsjtxClient.IsTransmitting || wsjtxClient.txMode == WsjtxClient.TxModes.CALL_CQ;
 
-                    wsjtxClient.RequeueAbortedCall();   // must precede CancelQso (needs callInProg/replyDecode)
-                    wsjtxClient.CancelQso();
-                    wsjtxClient.HaltAndDisableTx();     // unconditional: works in both CQ and Listen mode
+                    wsjtxClient.AbortContact();         // unconditional: works in both CQ and Listen mode
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
                     if (hadSomethingToHalt) ShowMsg("Tx halted", true);

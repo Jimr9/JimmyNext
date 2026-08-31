@@ -135,6 +135,11 @@ namespace WSJTX_Controller
                     logList.Clear();
                     ShowLogged();
                     SetCallInProg(null);
+                    // Bump the shared contact-supersede epoch -- a tier switch is a contact/
+                    // context reset just like a band change, and previously this path bumped
+                    // NEITHER of the two guards it now unifies, so a REPLY/CALL_CQ confirmed
+                    // after an Alt+M could still commit under the new mode. See _contactEpoch.
+                    System.Threading.Interlocked.Increment(ref _contactEpoch);
                     ShowStatus();
                 });
             }

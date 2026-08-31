@@ -265,17 +265,35 @@ namespace WSJTX_Controller
         private string curCmd = null;       //cmd last issed, can be CQ
         private EnqueueDecodeMessage replyDecode = null;
         public string callInProg = null;
-        // Active QSO survives band change fix, 2026-08-23: bumped by the one place a band change
-        // becomes authoritative (WsjtxClient.Direct.cs's confirmed-band-change handler, right
-        // where it clears callInProg/queue/TX-message state for the band just left). ReplyTo and
-        // SetupCq below each capture this before sending REPLY/CALL_CQ and compare it again in
-        // that command's own completion callback -- a callback landing after the epoch moved on
-        // belongs to a station/band this session no longer considers current, and must not
-        // resurrect callInProg/curCmd/replyCmd for it. Not reset anywhere else (ResetOpMode's own
-        // ClearCalls(true) doesn't bump it): only an actual BAND change needs this -- ResetOpMode
-        // and a tier switch already commit their own SetCallInProg(null) synchronously on the
-        // same thread as this field's readers, so there's no async race for those to guard against.
-        private int _bandSessionEpoch;
+        // Monotonic "the current contact is no longer the one an in-flight async command belongs
+        // to" counter. Explicitly bumped (Interlocked.Increment) at each point a contact/context
+        // deliberately ends:
+        //  - CancelQso() -- operator abort (AbortContact / Escape / Alt+H / Ctrl+W), a retune,
+        //    the engine-restart interrupt, and the post-QSO CALL_CQ re-arm;
+        //  - the confirmed-band-change handler (WsjtxClient.Direct.cs);
+        //  - the tier-switch handler (WsjtxClient.Protocol.cs);
+        //  - every HALT_TX send (DirectSendHaltTx / HaltTxAndWaitForShutdown) -- bare safety
+        //    halts (high-SWR, the runaway-Tx backstop) that stop TX without clearing callInProg.
+        // Deliberately NOT bumped inside SetCallInProg: that also runs during
+        // ConnectDirectEngine's own startup sequence, whose DirectSetTier / DirectSetFrequency /
+        // DirectSetTxEnabled callbacks legitimately capture this epoch and must not be
+        // invalidated out from under themselves.
+        //
+        // Every TX-arming path captures it before sending and re-checks at completion:
+        //  - ReplyTo / SetupCq (WsjtxClient.cs) around their DirectSendReply / DirectSendCq calls;
+        //  - DirectSendReply / DirectSendCq / DirectSetTxEnabled(true) / DirectSetTuning(true)
+        //    (WsjtxClient.Direct.cs).
+        // A callback whose captured value no longer matches belongs to a contact/band/mode this
+        // session has moved on from -- its "OK" must not be allowed to re-arm TX or resurrect
+        // callInProg / curCmd / replyCmd.
+        //
+        // Replaces the two earlier single-purpose guards this unifies: _bandSessionEpoch (band
+        // change only, WsjtxClient-layer) and _haltGeneration (halt only, Direct-layer) -- which
+        // between them left a tier switch and a WsjtxClient-layer operator abort guarded by
+        // neither. Interlocked because HALT_TX bumps can originate off the UI thread
+        // (HaltTxAndWaitForShutdown blocks the UI thread during shutdown); every other access is
+        // UI-thread.
+        private long _contactEpoch;
         // The callsign callInProg is heard working (a decode addressed to someone else), and
         // the LITERAL message it sent that station this time -- the raw payload token: a report
         // ("-15"), a roger-report ("R-15"), "RRR", "73", "RR73", or a grid. ShowStatus() reads
@@ -883,6 +901,32 @@ namespace WSJTX_Controller
             xmitCycleCount = 0;
             txTimeout = false;
             timedOutCall = null;
+            // The current contact is deliberately ending (operator abort via AbortContact /
+            // Escape / Alt+H / Ctrl+W, a retune, an engine-restart interrupt, or the post-QSO
+            // CALL_CQ re-arm). Bump the shared supersede epoch so a REPLY/CALL_CQ still in flight
+            // for the abandoned contact cannot commit when its "OK" lands -- see _contactEpoch's
+            // own comment. NOT put in SetCallInProg: that also runs during ConnectDirectEngine's
+            // own startup sequence, where its DirectSetTier/DirectSetFrequency/DirectSetTxEnabled
+            // callbacks legitimately capture the epoch and must not be invalidated.
+            System.Threading.Interlocked.Increment(ref _contactEpoch);
+        }
+
+        // Operator-initiated abort of the current contact / CQ cycle -- the single ordered
+        // sequence behind Escape and Alt+H (Controller.cs), previously open-coded identically at
+        // both call sites. Order matters: RequeueAbortedCall() must run while callInProg /
+        // replyDecode are still valid (it re-enqueues the in-progress call so the Advanced-layout
+        // TX row stays usable), THEN CancelQso() clears the QSO state, THEN HaltAndDisableTx()
+        // sends HALT_TX + SET_TX_ENABLED 0. Callers own their own UI follow-up (return to Listen
+        // mode, focus restore, the "Tx halted" announcement) -- listenModeButton_Click and the
+        // announcement gating differ between the two hotkeys and stay in Controller.cs.
+        // The engine-restart interrupt path (Controller.ApplyEngineMode) deliberately does NOT
+        // use this -- there is no live engine left to HALT_TX, so it calls RequeueAbortedCall()
+        // + CancelQso() directly without the halt.
+        public void AbortContact()
+        {
+            RequeueAbortedCall();
+            CancelQso();
+            HaltAndDisableTx();
         }
 
         // Must be called BEFORE CancelQso() so callInProg/replyDecode are still valid.
@@ -3382,17 +3426,18 @@ namespace WSJTX_Controller
             // engine has genuinely accepted the command (and, per finding 3, only if a Halt
             // hasn't superseded it while in flight -- see DirectSendCq's own comment,
             // WsjtxClient.Direct.cs). EnableTx() moves here too, for the same reason.
-            int capturedBandSessionEpoch = _bandSessionEpoch;
+            long capturedContactEpoch = System.Threading.Interlocked.Read(ref _contactEpoch);
             DirectSendCq(dirCq.Trim(), ok =>
             {
                 if (!ok) return;
                 // Active QSO survives band change fix, 2026-08-23: see ReplyTo's own identical
                 // check/comment -- curCmd is band-owned (WsjtxClient.cs's ClearCalls own comment),
-                // so a CALL_CQ confirmed after a band change already moved on must not stomp it
-                // back with a CQ message that named the OLD band's now-cleared context.
-                if (capturedBandSessionEpoch != _bandSessionEpoch)
+                // so a CALL_CQ confirmed after the contact/band/mode moved on must not stomp it
+                // back with a CQ message that named the OLD context. _contactEpoch also covers an
+                // operator abort or a tier switch while this was in flight.
+                if (capturedContactEpoch != System.Threading.Interlocked.Read(ref _contactEpoch))
                 {
-                    DebugOutput($"{Time()} SetupCq: CALL_CQ confirmed but superseded by a band change while in flight -- not committing");
+                    DebugOutput($"{Time()} SetupCq: CALL_CQ confirmed but superseded (contact epoch moved) while in flight -- not committing");
                     return;
                 }
                 qsoState = WsjtxMessage.QsoStates.CALLING;      //in case enqueueing call manually right now
@@ -3550,18 +3595,19 @@ namespace WSJTX_Controller
             // was (still visible, still ranked, still selectable) instead of permanently
             // dropping it with no recovery but a fresh decode. Only removed here, once REPLY is
             // confirmed accepted.
-            int capturedBandSessionEpoch = _bandSessionEpoch;
+            long capturedContactEpoch = System.Threading.Interlocked.Read(ref _contactEpoch);
             DirectSendReply(nCall, null, dmsg.Message, dmsg.Snr, null, ok =>
             {
                 if (!ok) return;
                 // Active QSO survives band change fix, 2026-08-23: a confirmed band change while
                 // this REPLY was still in flight already terminally cleared callInProg/queue/
                 // TX-message state for the band nCall was heard on -- committing it now would
-                // resurrect exactly that stale state under the NEW band's session. See
-                // _bandSessionEpoch's own comment.
-                if (capturedBandSessionEpoch != _bandSessionEpoch)
+                // resurrect exactly that stale state under the NEW band's session. _contactEpoch
+                // now also covers an operator abort (Escape/Alt+H/Ctrl+W), a tier switch, or a
+                // give-up while this REPLY was in flight. See its own comment.
+                if (capturedContactEpoch != System.Threading.Interlocked.Read(ref _contactEpoch))
                 {
-                    DebugOutput($"{Time()} ReplyTo: REPLY to '{nCall}' confirmed but superseded by a band change while in flight -- not committing");
+                    DebugOutput($"{Time()} ReplyTo: REPLY to '{nCall}' confirmed but superseded (contact epoch moved) while in flight -- not committing");
                     return;
                 }
                 _callQueueStore.RemoveCall(nCall);

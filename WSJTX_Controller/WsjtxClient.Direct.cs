@@ -965,14 +965,13 @@ namespace WSJTX_Controller
                 // even though the station being worked was on the OLD band and everything else
                 // about that QSO (its queue entry, its TX text) was just erased out from under it.
                 SetCallInProg(null);
-                // Bumped so a REPLY/CALL_CQ enqueued just before this band change, whose
-                // completion callback (ReplyTo/SetupCq, WsjtxClient.cs) lands AFTER this point,
-                // cannot resurrect the callInProg/curCmd/replyCmd this band change just
-                // terminally cleared -- see those callbacks' own capturedBandSessionEpoch check.
-                // Engine-side TX itself isn't touched here (a REPLY already in flight when the
-                // band changes still transmits once; this only stops JIMMY's own LOCAL state from
-                // being re-committed for a station that belongs to the band just left).
-                _bandSessionEpoch++;
+                // Bump the shared contact-supersede epoch so a REPLY/CALL_CQ enqueued just before
+                // this band change, whose completion callback (ReplyTo/SetupCq, WsjtxClient.cs;
+                // DirectSendReply/DirectSendCq here) lands AFTER this point, cannot resurrect
+                // callInProg/curCmd/replyCmd for the band just left -- see _contactEpoch's own
+                // comment. Explicit (not via SetCallInProg) because the race also fires when
+                // callInProg was still null: "REPLY confirmed OK, about to run SetCallInProg(nCall)".
+                System.Threading.Interlocked.Increment(ref _contactEpoch);
                 logList.Clear();
                 ShowLogged();
                 // dialFrequency must be updated to the new band BEFORE LoadHrcCache()/
@@ -1800,16 +1799,15 @@ namespace WSJTX_Controller
         // Codex Audit 04 finding 3, 2026-08-21: HALT_TX's own queue purge
         // (PurgePendingTxArmCommands_NoLock) only reaches a TX-start command still WAITING in the
         // queue -- it cannot cancel one already dequeued and waiting on the engine's response.
-        // Bumped every time HALT_TX is sent (DirectSendHaltTx/HaltTxAndWaitForShutdown below);
-        // DirectSendCq/DirectSendReply/DirectSetTxEnabled(true) capture the current value before
-        // enqueueing and compare it at completion -- if a Halt was sent while their own command
-        // was still in flight, its response (even a real "OK") must not be allowed to re-arm TX
-        // or commit local QSO state. The engine itself stays safe regardless (the single ordered
-        // worker always sends HALT_TX immediately after whatever was already in flight, and
-        // purges anything still queued -- see the dispatcher's own class comment), so this is
-        // specifically about JIMMY'S OWN bookkeeping not falsely committing "started"/"enabled"
-        // after the fact.
-        private long _haltGeneration;
+        // Every HALT_TX send (DirectSendHaltTx/HaltTxAndWaitForShutdown below) bumps the shared
+        // _contactEpoch (WsjtxClient.cs); DirectSendCq/DirectSendReply/DirectSetTxEnabled(true)/
+        // DirectSetTuning(true) capture it before enqueueing and compare it at completion -- if a
+        // Halt (or any other contact-ending event) landed while their own command was still in
+        // flight, its response (even a real "OK") must not be allowed to re-arm TX or commit local
+        // QSO state. The engine itself stays safe regardless (the single ordered worker always
+        // sends HALT_TX immediately after whatever was already in flight, and purges anything
+        // still queued -- see the dispatcher's own class comment), so this is specifically about
+        // JIMMY'S OWN bookkeeping not falsely committing "started"/"enabled" after the fact.
 
         // EngineHost ownership / session identity, 2026-08-23: shared guard for every TX-arming
         // Direct command (DirectSendCq, DirectSendReply, DirectSetTxEnabled(true),
@@ -1849,7 +1847,7 @@ namespace WSJTX_Controller
                 DxFreqHz = dxFreqHz.HasValue ? (float?)dxFreqHz.Value : null,
             };
             string json = JsonSerializer.Serialize(args, DirectJsonOptions);
-            long capturedHaltGeneration = System.Threading.Interlocked.Read(ref _haltGeneration);
+            long capturedContactEpoch = System.Threading.Interlocked.Read(ref _contactEpoch);
             // isTxArm: true -- REPLY arms TX to answer a specific station. See
             // PurgePendingTxArmCommands_NoLock's own comment (Codex Audit 03 release blocker #1).
             EnqueueDirectCommand("REPLY " + json, resp =>
@@ -1861,10 +1859,10 @@ namespace WSJTX_Controller
                     Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Reply to {dxcall} failed",
                         "the engine host did not confirm the reply -- not treated as started"));
                 }
-                else if (capturedHaltGeneration != System.Threading.Interlocked.Read(ref _haltGeneration))
+                else if (capturedContactEpoch != System.Threading.Interlocked.Read(ref _contactEpoch))
                 {
                     // Codex Audit 04 finding 3: superseded by a Halt sent while this REPLY was in
-                    // flight -- see _haltGeneration's own comment.
+                    // flight -- see _contactEpoch's own comment.
                     DebugOutput($"{Time()} [DIRECT] REPLY to '{dxcall}' returned OK but was superseded by a Halt -- not re-arming");
                     ok = false;
                 }
@@ -1878,7 +1876,7 @@ namespace WSJTX_Controller
         // shutdown-only path CloseComm() now uses instead, while the engine host is still alive.
         public void DirectSendHaltTx()
         {
-            System.Threading.Interlocked.Increment(ref _haltGeneration);
+            System.Threading.Interlocked.Increment(ref _contactEpoch);
             // isPriority: true -- see the dispatcher's own class comment above. HALT_TX must jump
             // ahead of any other not-yet-sent queued command (a CALL_CQ or REPLY that hasn't gone
             // out yet, say), never wait behind it.
@@ -1902,7 +1900,7 @@ namespace WSJTX_Controller
         // way; this only gives a graceful halt a real chance to land first.
         internal bool HaltTxAndWaitForShutdown(TimeSpan timeout)
         {
-            System.Threading.Interlocked.Increment(ref _haltGeneration);
+            System.Threading.Interlocked.Increment(ref _contactEpoch);
             using (var done = new System.Threading.ManualResetEventSlim(false))
             {
                 bool ok = false;
@@ -2015,7 +2013,7 @@ namespace WSJTX_Controller
         public void DirectSendCq(string dir, Action<bool> onComplete = null)
         {
             if (!DirectAuthorizedToArmTx("CALL_CQ")) { onComplete?.Invoke(false); return; }
-            long capturedHaltGeneration = System.Threading.Interlocked.Read(ref _haltGeneration);
+            long capturedContactEpoch = System.Threading.Interlocked.Read(ref _contactEpoch);
             // isTxArm: true -- CALL_CQ arms/starts a transmission. See
             // PurgePendingTxArmCommands_NoLock's own comment (Codex Audit 03 release blocker #1):
             // a HALT_TX enqueued while this is still sitting unsent in the normal queue purges it
@@ -2029,10 +2027,10 @@ namespace WSJTX_Controller
                     Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Call CQ failed",
                         "the engine host did not confirm the CQ -- not treated as started"));
                 }
-                else if (capturedHaltGeneration != System.Threading.Interlocked.Read(ref _haltGeneration))
+                else if (capturedContactEpoch != System.Threading.Interlocked.Read(ref _contactEpoch))
                 {
                     // Codex Audit 04 finding 3: superseded by a Halt sent while this CALL_CQ was
-                    // in flight -- see _haltGeneration's own comment.
+                    // in flight -- see _contactEpoch's own comment.
                     DebugOutput($"{Time()} [DIRECT] CALL_CQ '{dir}' returned OK but was superseded by a Halt -- not re-arming");
                     ok = false;
                 }
@@ -2091,7 +2089,7 @@ namespace WSJTX_Controller
         public void DirectSetTuning(bool on, Action<bool> onComplete)
         {
             if (on && !DirectAuthorizedToArmTx("SET_TUNING 1")) { onComplete?.Invoke(false); return; }
-            long capturedHaltGeneration = System.Threading.Interlocked.Read(ref _haltGeneration);
+            long capturedContactEpoch = System.Threading.Interlocked.Read(ref _contactEpoch);
             // isTxArm: only when starting Tune -- a continuous test carrier is exactly the kind
             // of transmission an emergency halt must prevent restarting; turning tuning OFF must
             // never be purged (Codex Audit 03 release blocker #1, see
@@ -2106,8 +2104,8 @@ namespace WSJTX_Controller
                     // check -- a SET_TUNING 1 that was still in flight when HALT_TX ran and only
                     // reports OK afterward must not let ToggleTuningProcess's own onComplete
                     // (WsjtxClient.BandAudio.cs) flip the local `tuning` flag back to true right
-                    // after a halt just confirmed it stopped. See _haltGeneration's own comment.
-                    if (ok && on && capturedHaltGeneration != System.Threading.Interlocked.Read(ref _haltGeneration))
+                    // after a halt just confirmed it stopped. See _contactEpoch's own comment.
+                    if (ok && on && capturedContactEpoch != System.Threading.Interlocked.Read(ref _contactEpoch))
                     {
                         DebugOutput($"{Time()} [DIRECT] SET_TUNING 1 returned OK but was superseded by a Halt -- not re-arming");
                         ok = false;
