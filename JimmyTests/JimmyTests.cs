@@ -204,6 +204,7 @@ static class JimmyTests
         EngineRestartPolicyTests();
         NativeEngineClientGridValidationTests();
         UpdateCheckerDownloadHostValidationTests();
+        UpdateCheckerNotesTests();
         NativeEngineClientDescribeConfigProblemTests();
         NativeEngineClientTxWatchdogFormulaTests();
         OtaSpotAnnotatorTests();
@@ -7127,6 +7128,72 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  UpdateCheckerDownloadHostValidationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    static void UpdateCheckerNotesTests()
+    {
+        Console.WriteLine("\n── UpdateChecker.ParseLatestReleaseJson: accessible \"what's new\" notes ──");
+        try
+        {
+            const string current = "2.0.54";
+            string assets = "\"assets\":[{\"name\":\"JimmyNext.msi\",\"browser_download_url\":"
+                + "\"https://github.com/Jimr9/JimmyNext/releases/download/v2.0.99/JimmyNext.msi\"}]";
+
+            string Json(string bodyClause) =>
+                "{\"tag_name\":\"v2.0.99\",\"published_at\":\"2026-08-31T12:00:00Z\","
+                + bodyClause + assets + "}";
+
+            // body present: notes populated, CRLF normalized, markdown flattened
+            var withBody = UpdateChecker.ParseLatestReleaseJson(
+                Json("\"body\":\"## What's new\\r\\n\\r\\n- Fixed a thing\\r\\n- **Bold** item\\r\\n\\r\\nDone.\","),
+                current);
+            Check("newer release is detected", withBody != null && withBody.Version == "2.0.99", true);
+            Check("Notes is populated when body present", !string.IsNullOrEmpty(withBody?.Notes), true);
+            Check("Notes has no carriage returns (normalized to \\n)", withBody != null && !withBody.Notes.Contains("\r"), true);
+            Check("Notes strips '#' heading markers", withBody != null && !withBody.Notes.Contains("#"), true);
+            Check("Notes keeps heading text", withBody != null && withBody.Notes.Contains("What's new"), true);
+            Check("Notes converts '- ' bullets to '• '", withBody != null && withBody.Notes.Contains("• Fixed a thing"), true);
+            Check("Notes strips '**' bold markers", withBody != null && !withBody.Notes.Contains("**"), true);
+
+            // body absent: UpdateInfo still returned, Notes null
+            var noBody = UpdateChecker.ParseLatestReleaseJson(Json(""), current);
+            Check("update still offered when body absent", noBody != null && noBody.Version == "2.0.99", true);
+            Check("Notes is null when body absent", noBody != null && noBody.Notes == null, true);
+
+            // body empty / whitespace-only: Notes null
+            var emptyBody = UpdateChecker.ParseLatestReleaseJson(Json("\"body\":\"\","), current);
+            Check("Notes is null when body is empty string", emptyBody != null && emptyBody.Notes == null, true);
+            var wsBody = UpdateChecker.ParseLatestReleaseJson(Json("\"body\":\"   \\n  \\n\","), current);
+            Check("Notes is null when body is whitespace only", wsBody != null && wsBody.Notes == null, true);
+
+            // oversized body: truncated with GitHub marker, well under the raw size
+            string huge = new string('x', 20000);
+            var bigBody = UpdateChecker.ParseLatestReleaseJson(Json($"\"body\":\"{huge}\","), current);
+            Check("oversized Notes is truncated", bigBody != null && bigBody.Notes.Length < 20000, true);
+            Check("oversized Notes ends with GitHub marker",
+                bigBody != null && bigBody.Notes.EndsWith("(full notes on GitHub)"), true);
+
+            // malformed JSON: null, no throw
+            bool threw = false;
+            UpdateInfo bad = null;
+            try { bad = UpdateChecker.ParseLatestReleaseJson("{ this is not json", current); }
+            catch { threw = true; }
+            Check("malformed JSON returns null without throwing", !threw && bad == null, true);
+
+            // already up to date: null even though body is present
+            var upToDate = UpdateChecker.ParseLatestReleaseJson(
+                "{\"tag_name\":\"v2.0.54\",\"body\":\"notes\"," + assets + "}", current);
+            Check("no update when already current", upToDate == null, true);
+
+            // SanitizeNotes directly: null/whitespace -> null
+            Check("SanitizeNotes(null) -> null", UpdateChecker.SanitizeNotes(null) == null, true);
+            Check("SanitizeNotes(\"  \") -> null", UpdateChecker.SanitizeNotes("   \n\t ") == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  UpdateCheckerNotesTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

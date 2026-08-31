@@ -1,7 +1,9 @@
 using System;
 using System.IO;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace WSJTX_Controller
@@ -12,6 +14,11 @@ namespace WSJTX_Controller
         public DateTime? Published;
         public string   MsiName;
         public string   MsiUrl;
+        // The GitHub release body ("what's new"), already flattened to plain text and
+        // length-capped by SanitizeNotes -- null when the release had no notes or they
+        // were only whitespace. Only ever displayed in a read-only TextBox; never rendered
+        // as markup, never handed to a browser or Process.Start.
+        public string   Notes;
     }
 
     // Checks GitHub's "latest release" API for a Jimmy Next version newer than the one
@@ -43,6 +50,22 @@ namespace WSJTX_Controller
             try
             {
                 string json = await _http.GetStringAsync(ReleasesApiUrl).ConfigureAwait(false);
+                return ParseLatestReleaseJson(json, currentVersion);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // The pure parse half of CheckForNewerVersionAsync, split out so it can be unit
+        // tested against canned JSON with no network. Returns null when Jimmy is already
+        // up to date, when the response has no usable .msi asset, or when the JSON can't
+        // be parsed -- never throws.
+        internal static UpdateInfo ParseLatestReleaseJson(string json, string currentVersion)
+        {
+            try
+            {
                 using var doc = JsonDocument.Parse(json);
                 JsonElement root = doc.RootElement;
 
@@ -76,18 +99,65 @@ namespace WSJTX_Controller
                     published = pub;
                 }
 
+                string body = root.TryGetProperty("body", out var bodyEl) && bodyEl.ValueKind == JsonValueKind.String
+                    ? bodyEl.GetString() : null;
+
                 return new UpdateInfo
                 {
                     Version   = tag.TrimStart('v', 'V'),
                     Published = published,
                     MsiName   = msi.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : "JimmyUpdate.msi",
                     MsiUrl    = msi.TryGetProperty("browser_download_url", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() : null,
+                    Notes     = SanitizeNotes(body),
                 };
             }
             catch
             {
                 return null;
             }
+        }
+
+        // Longest release-notes string we'll keep. GitHub bodies are normally a few hundred
+        // bytes; this only bites on a pathological one. The dialog scrolls, but an unbounded
+        // string is still a memory / UI-layout hazard from an external source.
+        private const int MaxNotesChars = 8192;
+
+        // Flattens a GitHub release body to plain, screen-reader-friendly text for display in
+        // a read-only TextBox: normalizes line endings, strips the handful of markdown markers
+        // GitHub release notes actually use (headings, bullets, bold, inline code), collapses
+        // runs of blank lines, and caps the length. Returns null for null/whitespace-only
+        // input so callers can show a simple "no notes" line instead. This output is NEVER
+        // rendered as markup or passed to a browser/Process.Start -- it is display text only.
+        internal static string SanitizeNotes(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+
+            string s = raw.Replace("\r\n", "\n").Replace("\r", "\n");
+
+            var sb = new StringBuilder(s.Length);
+            foreach (string lineRaw in s.Split('\n'))
+            {
+                string line = lineRaw;
+                // "## Heading" / "### Heading" -> "Heading"
+                line = Regex.Replace(line, @"^\s{0,3}#{1,6}\s+", "");
+                // "- item" / "* item" / "+ item" -> "• item"
+                line = Regex.Replace(line, @"^(\s*)[-*+]\s+", "$1• ");
+                // strip **bold** / __bold__ / `code` markers (leave the text)
+                line = line.Replace("**", "").Replace("__", "").Replace("`", "");
+                sb.Append(line.TrimEnd());
+                sb.Append('\n');
+            }
+
+            // collapse 3+ consecutive newlines down to a single blank line
+            string flattened = Regex.Replace(sb.ToString(), @"\n{3,}", "\n\n").Trim();
+            if (flattened.Length == 0) return null;
+
+            if (flattened.Length > MaxNotesChars)
+            {
+                flattened = flattened.Substring(0, MaxNotesChars).TrimEnd()
+                    + "\n\n… (full notes on GitHub)";
+            }
+            return flattened;
         }
 
         private static int[] ParseVersion(string v)

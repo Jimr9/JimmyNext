@@ -1278,17 +1278,14 @@ namespace WSJTX_Controller
 
         private void OfferUpdate(UpdateInfo info, string currentVersion)
         {
-            string releaseNote = info.Published.HasValue
-                ? $" (released {info.Published.Value.ToLocalTime():MMMM d, yyyy})"
-                : "";
-            var result = MessageBox.Show(this,
-                $"{friendlyName} {info.Version} is available{releaseNote}. You have {currentVersion}." +
-                $"{nl}{nl}Download and install it now? {friendlyName} will close to complete the install.",
-                "Update Available", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-
-            if (result != DialogResult.Yes) return;
-
-            _ = DownloadAndInstallUpdateAsync(info);
+            using (var dlg = new UpdateAvailableDlg(friendlyName, info, currentVersion))
+            {
+                // Anything other than "Install update" (Remind me later, Esc, close box) does
+                // nothing -- the startup check simply runs again next launch, same as the old
+                // Yes/No prompt's "No".
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                    _ = DownloadAndInstallUpdateAsync(info);
+            }
         }
 
         private async Task DownloadAndInstallUpdateAsync(UpdateInfo info)
