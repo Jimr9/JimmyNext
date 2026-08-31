@@ -310,6 +310,7 @@ static class JimmyTests
         CompletedQsoRemovesStaleQueueStateTests();
         BandSessionLocationSurvivesGridlessMessageTests();
         ConfirmedBandChangeFlushesStaleTxStateTests();
+        DirectBandChangeRebuildsAwardCacheForNewBandTests();
         DelayedReplyAfterBandChangeDoesNotResurrectStaleQsoTests();
         FailedQsoWriteDoesNotFalselyAnnounceSuccessTests();
         DirectInitialConnectAlwaysRestoresLastExactDialTests();
@@ -10341,6 +10342,92 @@ static class JimmyTests
         {
             Console.WriteLine($"  FAIL  ConfirmedBandChangeFlushesStaleTxStateTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
+        }
+    }
+
+    // ── Direct band change rebuilds the per-band award live-tag cache against the NEW band ──
+    // Bug (report 2026-08-31, "Worked All States - 160m Needed" showing on 40m/80m): the Direct
+    // band-change handler (WsjtxClient.Direct.cs) called ctrl.LoadHrcCache()/RefreshStillNeedCache()
+    // while dialFrequency -- and therefore wsjtxClient.CurrentBandStr, which both caches key off --
+    // still pointed at the band just LEFT (dialFrequency wasn't assigned until a few lines after
+    // that block). So after tuning 20m -> 40m, a band-restricted award like WAS_20M ([Match]
+    // Bands=20m) stayed in activeAwardTags and every 40m decode from a still-needed state got
+    // tagged "Worked All States - 20m Needed" until the next band change (which then repeated the
+    // mistake one band later -- "always one band behind"). The fix moves the dialFrequency update
+    // above those two cache-rebuild calls.
+    static void DirectBandChangeRebuildsAwardCacheForNewBandTests()
+    {
+        Console.WriteLine("\n── Direct band change: per-band award live-tag cache is rebuilt against the NEW band, not the one just left -- THE FIX ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_BandChangeAwardCache_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        var def = new RuleDefinition
+        {
+            Id = "TEST_WASBANDLAG_20M", Name = "Worked All States - 20m (test)",
+            FormatVersion = 1, Enabled = true,
+            GroupBy = RuleGroupBy.State, Universe = "US_50_STATES",
+            Confirmation = RuleConfirmation.None, Target = RuleTargetType.All,
+            Bands = new List<string> { "20m" },
+        };
+        bool defRegistered = false;
+        try
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+            using (var db = new LogbookDb(tmpDb))
+            {
+                InsertQso(db, "W6CA", "CA", dxcc: 291, zone: 3, band: "20m");
+
+                RuleLibrary.Definitions.Add(def);
+                defRegistered = true;
+
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                ctrl.wsjtxClient = wc;   // RefreshStillNeedCache() no-ops unless Controller.wsjtxClient is set
+                ctrl.activeAwardRuleIds.Add(def.Id);
+
+                const string myCall = "KB0UZT";
+                const string myGrid = "EN34";
+
+                // On 20m: the 20m-only award is genuinely live-tagging.
+                var snap20m = ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 5000 },
+                    ""recentDecodes"": []
+                }");
+                wc.TestApplyDirectSnapshot(myCall, myGrid, snap20m);
+                CheckStr("Setup: resolves to 20m before the band change under test", wc.CurrentBandStr, "20m");
+                ctrl.RefreshStillNeedCache();
+                Check("Setup: the 20m-only award IS live-tagging while the radio is on 20m",
+                      wc.activeAwardTags.ContainsKey(def.Id), true);
+
+                // Tune 20m -> 40m. The handler rebuilds the award cache internally; with the fix
+                // that rebuild sees CurrentBandStr == "40m", so the 20m-only award drops out.
+                var snap40m = ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 7.074, ""transmitting"": false, ""slot"": 5001 },
+                    ""recentDecodes"": []
+                }");
+                wc.TestApplyDirectSnapshot(myCall, myGrid, snap40m);
+                CheckStr("Confirmed band change actually resolved to the new band (40m)", wc.CurrentBandStr, "40m");
+                Check("THE FIX: after tuning 20m -> 40m the 20m-only award is NO LONGER live-tagging "
+                      + "(its cache was rebuilt against the new band, not the one just left)",
+                      wc.activeAwardTags.ContainsKey(def.Id), false);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectBandChangeRebuildsAwardCacheForNewBandTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            if (defRegistered) RuleLibrary.Definitions.Remove(def);
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
         }
     }
 

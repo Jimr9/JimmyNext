@@ -975,6 +975,16 @@ namespace WSJTX_Controller
                 _bandSessionEpoch++;
                 logList.Clear();
                 ShowLogged();
+                // dialFrequency must be updated to the new band BEFORE LoadHrcCache()/
+                // RefreshStillNeedCache() run: both rebuild their per-band live-tag caches off
+                // wsjtxClient.CurrentBandStr, which is derived from dialFrequency. Assigning it
+                // only after this block (as the code below still does, harmlessly) left both
+                // caches rebuilt against the band just LEFT -- so after e.g. 160m -> 40m, a
+                // WAS_160M-type per-band award stayed live and every 40m decode from a
+                // still-needed state got tagged "Worked All States - 160m Needed" until the
+                // next band change (which then repeated the mistake one band later).
+                dialFrequency = newDialFrequency;
+                lastDialFrequency = dialFrequency;
                 ctrl.LoadHrcCache();
                 ctrl.RefreshStillNeedCache();
                 StatusView.ShowMessage($"Band changed to {FreqToBandStr(newDialFrequency / 1e6)}", false);
