@@ -260,10 +260,23 @@ namespace WSJTX_Controller
         private int _txOffsetRequestsInFlight;
         private int _rxOffsetRequestsInFlight;
 
-        private string replyCmd = null;     //no "reply to" cmd sent to WSJT-X yet, will not be a CQ
-        private string curCmd = null;       //cmd last issed, can be CQ
-        private EnqueueDecodeMessage replyDecode = null;
-        public string callInProg = null;
+        // ── QSO STATE: three lifetimes, three teardowns ──────────────────────────────────────
+        // The state below splits into three scopes, each with ONE canonical reset (2026-08-31 --
+        // before that the resets were open-coded, and drifting, at ~13 sites):
+        //   1. Call QUEUE + per-decode-cycle scratch  -> ClearCalls()        (callQueue, callDict,
+        //      decodeNum, the decode timers).
+        //   2. The CONTACT (one QSO attempt)          -> EndContact(reason)  (callInProg + the
+        //      last-command / last-Tx-text / per-attempt-cycle fields + the _contactEpoch bump;
+        //      see EndContact's own comment for the per-reason table).
+        //   3. The BAND SESSION (what we learned parked on this band+mode) -> ResetBandSession()
+        //      (logList, the decode-history dicts, sent/report lists, the grid cache).
+        // A confirmed band change, a tier switch, and ResetOpMode run all three (the "canonical
+        // trio"). An operator abort / give-up / completed QSO run only EndContact. A Tx-period
+        // tweak runs only ClearCalls. Halt runs none of them (it stops TX, it doesn't end the QSO).
+        private string replyCmd = null;     //"reply to" cmd last sent (REPLY text); null = not replying
+        private string curCmd = null;       //cmd last issued -- a REPLY text or a CQ
+        private EnqueueDecodeMessage replyDecode = null;   //the decode replyCmd/curCmd derived from
+        public string callInProg = null;    //the station this contact is working; null = no contact
         // Monotonic "the current contact is no longer the one an in-flight async command belongs
         // to" counter. Explicitly bumped (Interlocked.Increment) at each point a contact/context
         // deliberately ends:
