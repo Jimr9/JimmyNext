@@ -953,25 +953,13 @@ namespace WSJTX_Controller
                 _rawDecodeHistory.Clear();
                 if (ctrl.advShowRaw) ShowRawDecodes();
                 ClearCalls(true);
-                // Independent audit finding, 2026-08-23 (active QSO survives band change,
-                // CONFIRMED bug): ClearCalls(true) clears queues/dict/TX-message state but was
-                // never the place callInProg itself was cleared -- WsjtxClient.Protocol.cs's own
-                // tier-switch handler and ResetOpMode (WsjtxClient.cs) both already pair every
-                // OTHER ClearCalls(true) call with their own SetCallInProg(null) right next to
-                // it; this was the one ClearCalls(true) call site missing that pairing. Left
-                // uncleared, an active QSO's callInProg (and everything SetCallInProg(null) also
-                // tears down: the discard/retry tracker via CancelDiscardCall, otherParty*
-                // "resume" tracking, _manualCallInProg) survived into the NEW band's session,
-                // even though the station being worked was on the OLD band and everything else
-                // about that QSO (its queue entry, its TX text) was just erased out from under it.
-                SetCallInProg(null);
-                // Bump the shared contact-supersede epoch so a REPLY/CALL_CQ enqueued just before
-                // this band change, whose completion callback (ReplyTo/SetupCq, WsjtxClient.cs;
-                // DirectSendReply/DirectSendCq here) lands AFTER this point, cannot resurrect
-                // callInProg/curCmd/replyCmd for the band just left -- see _contactEpoch's own
-                // comment. Explicit (not via SetCallInProg) because the race also fires when
-                // callInProg was still null: "REPLY confirmed OK, about to run SetCallInProg(nCall)".
-                System.Threading.Interlocked.Increment(ref _contactEpoch);
+                // A confirmed band change makes the whole band context new: end the contact
+                // (ContextReset -- flushes callInProg AND the last-command / last-Tx-text fields,
+                // T16/T19: old-band "73" text must not leak onto the new band) and bump
+                // _contactEpoch so a REPLY/CALL_CQ still in flight for the band just left cannot
+                // resurrect it when its "OK" lands. EndContact's epoch bump covers the case where
+                // callInProg was still null ("REPLY confirmed OK, about to SetCallInProg(nCall)").
+                EndContact(ContactEndReason.ContextReset);
                 logList.Clear();
                 ShowLogged();
                 // dialFrequency must be updated to the new band BEFORE LoadHrcCache()/
@@ -1472,10 +1460,13 @@ namespace WSJTX_Controller
                     if (writeFailedForThisCall)
                         Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"QSO with {callInProg} still not saved",
                             "the local logbook write kept failing -- this contact was not recorded"));
-                    _directRr73LogRetries = 0;
-                    _directWriteFailRetries = 0;
                     string justWorkedCall = callInProg;
-                    SetCallInProg(null);
+                    // EndContact(Completed) = SetCallInProg(null) (which also zeroes the RR73/
+                    // write-fail retry counters on the call transition) + the _contactEpoch bump.
+                    // It deliberately leaves curTxMsg alone (the final 73 still announces as it
+                    // finishes) and leaves curCmd/replyCmd/replyDecode to the conditional clear
+                    // just below, which is completion-specific ("was this the reply that finished").
+                    EndContact(ContactEndReason.Completed);
 
                     // T16 fix, 2026-08-23 (CONFIRMED bug, CRITICAL -- W5PF, 2026-08-21): dequeue
                     // the just-completed call regardless of txMode. Previously RemoveCall only
@@ -1515,7 +1506,12 @@ namespace WSJTX_Controller
                     // not start transmitting on its own.
                     if (txMode == TxModes.CALL_CQ)
                     {
-                        CancelQso();
+                        // CALL_CQ completion also zeroes the per-attempt cycle fields before
+                        // re-arming CQ (LISTEN completion deliberately does not -- preserved from
+                        // the pre-EndContact behavior, where only this branch called CancelQso()).
+                        xmitCycleCount = 0;
+                        txTimeout = false;
+                        timedOutCall = null;
                         SetupCq(true);
                     }
                     }   // end Finding-2 "write landed" else -- teardown only when the QSO is on record

@@ -895,21 +895,104 @@ namespace WSJTX_Controller
             UpdateDebug();          //last before starting loop
         }
 
-        public void CancelQso()
+        // ── Contact lifecycle ────────────────────────────────────────────────────────────────
+        // A "contact" is one QSO attempt: it BEGINS when a REPLY is confirmed accepted (ReplyTo's
+        // success callback sets callInProg + curCmd/replyCmd/replyDecode) and ENDS through exactly
+        // one path below. Every end path routes through EndContact(reason) so the teardown for all
+        // of them is visible and comparable in one switch, instead of open-coded (and drifting)
+        // at each site the way it was before 2026-08-31.
+        //
+        // What EndContact owns:  callInProg (via SetCallInProg(null), which also clears
+        //   otherParty*, _manualCallInProg, _manualFreqThisQso, _liveLogWriteFailedCall, the
+        //   RR73/write-fail retry counters, and the discard tracker via CancelDiscardCall), the
+        //   per-attempt cycle fields (xmitCycleCount / txTimeout / timedOutCall / tCall), the
+        //   last-command fields (curCmd / replyCmd / replyDecode), the last-Tx-text fields
+        //   (curTxMsg / txMsg / curTxPayload), and the _contactEpoch bump that invalidates any
+        //   TX-arming Direct command still in flight for the contact just ended.
+        // What EndContact does NOT own:  the call QUEUE and per-decode-cycle state (ClearCalls),
+        //   band-session history (ResetBandSession -- logList/sentReportList/etc.), engine-side
+        //   TX (HaltTx/HaltAndDisableTx -- callers send that themselves where required), and
+        //   dequeuing the just-worked call / CALL_CQ re-arm (Completed's caller does that, it
+        //   needs the specific callsign).
+        //
+        // The reasons genuinely differ in WHICH of the above they clear -- that is real, current,
+        // deliberately-preserved behavior (a band change flushes the last-Tx text so the final-73
+        // announcement of the OLD band can't leak onto the new one; an operator Escape keeps it
+        // so "Tx halted" is spoken against the message that was actually interrupted; a plain
+        // completion keeps it so the final 73 is still announced as it finishes on the air). The
+        // switch makes those differences auditable rather than scattered.
+        internal enum ContactEndReason
         {
+            Completed,       // QSO logged / finished on the air -- DirectApplyStatus 73/RR73 branch
+            GaveUp,          // repeat limit reached -- DiscardCall
+            OperatorAbort,   // Escape / Alt+H (AbortContact), Ctrl+W (ClearCallQueue), a retune,
+                             // and the ApplyEngineMode mid-QSO restart interrupt -- all via CancelQso()
+            ContextReset,    // confirmed band change / tier switch -- the band's whole context is new
+            SessionReset,    // ResetOpMode -- construction, Closing, full re-negotiation
+        }
+
+        private void EndContact(ContactEndReason reason)
+        {
+            // Common to every end: no call in progress, and any in-flight REPLY/CALL_CQ for the
+            // contact just ended is now stale (see _contactEpoch). SetCallInProg(null) also tears
+            // down the discard tracker, manual-call/-freq scoping, the failed-write retry marker,
+            // and the RR73/write-fail retry counters.
             SetCallInProg(null);
-            xmitCycleCount = 0;
-            txTimeout = false;
-            timedOutCall = null;
-            // The current contact is deliberately ending (operator abort via AbortContact /
-            // Escape / Alt+H / Ctrl+W, a retune, an engine-restart interrupt, or the post-QSO
-            // CALL_CQ re-arm). Bump the shared supersede epoch so a REPLY/CALL_CQ still in flight
-            // for the abandoned contact cannot commit when its "OK" lands -- see _contactEpoch's
-            // own comment. NOT put in SetCallInProg: that also runs during ConnectDirectEngine's
-            // own startup sequence, where its DirectSetTier/DirectSetFrequency/DirectSetTxEnabled
-            // callbacks legitimately capture the epoch and must not be invalidated.
+
+            switch (reason)
+            {
+                case ContactEndReason.Completed:
+                    // Minimal: the DirectApplyStatus completion branch keeps its own curTxMsg
+                    // (so the final 73 still announces as it finishes), does its own dequeue of
+                    // the worked call + _completedThisPollTick + conditional curCmd clear, and in
+                    // CALL_CQ mode resets the cycle fields + re-arms CQ itself. Nothing extra here.
+                    break;
+
+                case ContactEndReason.GaveUp:
+                    // DiscardCall has already captured expiredCall and (LISTEN) Pause()d / sent
+                    // SET_TX_ENABLED 0; SetCallInProg(null) above cleared the discard tracker.
+                    break;
+
+                case ContactEndReason.OperatorAbort:
+                    // Was CancelQso()'s body: also reset the per-attempt cycle fields. Last-command
+                    // and last-Tx-text fields are deliberately left as they were -- the next real
+                    // action (a new REPLY / CALL_CQ / band change) overwrites them, and an
+                    // interrupted-message announcement may still want the interrupted text.
+                    xmitCycleCount = 0;
+                    txTimeout = false;
+                    timedOutCall = null;
+                    break;
+
+                case ContactEndReason.ContextReset:
+                    // Was the contact half of ClearCalls(true): the band/mode context is entirely
+                    // new, so flush the last-command and last-Tx-text fields too (T16/T19 -- old-band
+                    // "73" text must not survive onto the new band).
+                    curCmd = null; replyCmd = null; replyDecode = null;
+                    curTxMsg = null; txMsg = null; curTxPayload = null;
+                    xmitCycleCount = 0;
+                    timedOutCall = null;
+                    break;
+
+                case ContactEndReason.SessionReset:
+                    // ContextReset plus what ResetOpMode also cleared on top of ClearCalls(true).
+                    curCmd = null; replyCmd = null; replyDecode = null;
+                    curTxMsg = null; txMsg = null; curTxPayload = null;
+                    xmitCycleCount = 0;
+                    timedOutCall = null;
+                    txTimeout = false;
+                    tCall = null;
+                    break;
+            }
+
+            // Invalidate any TX-arming Direct command still in flight for the contact that just
+            // ended (ReplyTo / SetupCq / DirectSendReply / DirectSendCq / DirectSetTxEnabled(true)
+            // / DirectSetTuning(true) all capture this before sending and re-check at completion).
+            // Deliberately here and not in SetCallInProg: that also runs during ConnectDirectEngine's
+            // startup sequence, whose own Direct-command callbacks legitimately capture the epoch.
             System.Threading.Interlocked.Increment(ref _contactEpoch);
         }
+
+        public void CancelQso() => EndContact(ContactEndReason.OperatorAbort);
 
         // Operator-initiated abort of the current contact / CQ cycle -- the single ordered
         // sequence behind Escape and Alt+H (Controller.cs), previously open-coded identically at
@@ -1102,20 +1185,11 @@ namespace WSJTX_Controller
                 DisableTx(false);
                 opMode = OpModes.START;
                 UpdateBandComboBox();
-                if (bandOrModeChanged)
-                {
-                    txTimeout = false;
-                    tCall = null;
-                    replyCmd = null;
-                    curCmd = null;
-                    replyDecode = null;
-                    newDirCq = false;
-                    dxCall = null;
-                    xmitCycleCount = 0;
-                    timedOutCall = null;
-                    SetCallInProg(null);
-                    UpdateCallInProg();
-                }
+                // The bandOrModeChanged==true contact teardown that used to live here was
+                // reachable only from ResetOpMode() (the other three AutoFreqChanged call sites
+                // pass autoFreqEnabled==false or bandOrModeChanged==false), and ResetOpMode now
+                // runs EndContact(SessionReset) -- a strict superset -- a dozen lines before it
+                // calls this. Removed as dead duplication.
                 UpdateModeVisible();
                 UpdateModeSelection();
                 DebugOutput($"{Time()} [BAND-AUDIT] AutoFreqChanged enabled:true, bandIdx:{bandIdx} bandOrModeChanged:{bandOrModeChanged} evenOffset:{evenOffset} oddOffset:{oddOffset} opMode:{opMode} NegoState:{WsjtxMessage.NegoState} cqPaused:{cqPaused}");
@@ -2112,16 +2186,10 @@ namespace WSJTX_Controller
             decodesProcessed = false;
             myCall = null;
             myGrid = null;
-            SetCallInProg(null);
-            txTimeout = false;
+            EndContact(ContactEndReason.SessionReset);
             restartQueue = false;
-            replyCmd = null;
-            curCmd = null;
-            replyDecode = null;
-            tCall = null;
             newDirCq = false;
             dxCall = null;
-            xmitCycleCount = 0;
             logList.Clear();        //can re-log on new mode, band, or session
             ShowLogged();
             UpdateModeVisible();
@@ -3942,11 +4010,14 @@ namespace WSJTX_Controller
             // routine per-call give-up).
             if (wasTxEnabled)
                 DirectSetTxEnabled(false);
-            SetCallInProg(null);
-            DebugOutput($"{spacer}callInProg:'{callInProg}' expiredCall:'{expiredCall}' txTimeout:{txTimeout} xmitCycleCount:{xmitCycleCount} timedOutCall:'{timedOutCall}'");
-            discardCall = null;
-            discardCallCycleCount = 0;
-            DebugOutput($"{spacer} now discardCall:'{discardCall}' discardCallCycleCount:{discardCallCycleCount}");
+            // GaveUp: SetCallInProg(null) inside EndContact also disarms the discard tracker
+            // (CancelDiscardCall), so the explicit discardCall/discardCallCycleCount reset that
+            // used to follow here is no longer needed. Also bumps _contactEpoch -- a give-up is a
+            // deliberate contact end, so a REPLY still confirming for this station must not
+            // resurrect it (this path sends SET_TX_ENABLED 0, not HALT_TX, so nothing else bumped
+            // the epoch here before).
+            EndContact(ContactEndReason.GaveUp);
+            DebugOutput($"{spacer}callInProg:'{callInProg}' expiredCall:'{expiredCall}' txTimeout:{txTimeout} xmitCycleCount:{xmitCycleCount} timedOutCall:'{timedOutCall}' discardCall:'{discardCall}'");
         }
 
         private void CancelDiscardCall()
