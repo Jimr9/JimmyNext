@@ -2314,18 +2314,20 @@ static class JimmyTests
         }
     }
 
-    // ── Direct-mode runaway-RR73 backstop (CONFIRMED live, 2026-08-28 -- HB9TIH then NE5L in
-    // one session): the engine's own QSO sequencer kept re-sending "<call> KB0UZT RR73" every
-    // transmit slot for ~2 minutes after Jimmy had logged the contact and cleared callInProg,
-    // because in LISTEN mode nothing told the engine to stand down. Only the operator mashing
-    // Escape ~8 times stopped it, and Jimmy was left wedged after. ──
-    // The backstop (_directOrphanTxOvers, DirectApplyStatus) watches for the engine transmitting
-    // over after over with NO call in progress in LISTEN mode: the FIRST orphaned over is
-    // tolerated (it can be the legitimate final RR73 finishing a poll or two after callInProg
-    // was cleared), the SECOND trips HALT_TX + SET_TX_ENABLED 0 and announces.
+    // ── Direct-mode runaway-RR73 backstop (CONFIRMED live, 2026-08-28 -- HB9TIH then NE5L),
+    // revised 2026-08-31. Original bug: after a logged contact the engine's QSO sequencer kept
+    // re-sending "<call> KB0UZT RR73" every slot for ~2 minutes with nothing telling it to stand
+    // down. First fix halted on the 2nd such over -- too aggressive: Nexus (State::Confirming)
+    // OWNS the legitimate closing exchange -- it re-sends RR73 while the worked station repeats
+    // its R-report, stops on that station's own 73/RR73/RRR, and bounds a silent tail with its
+    // own wall-clock Tx watchdog. Revised: Jimmy enters a "Finishing" state on the log and just
+    // does NOT count the engine's RR73/73 closing overs to that station as orphans. It ends the
+    // moment that station's own 73/RR73/RRR is decoded. An unrelated Tx with no contact --
+    // different call, not 73/RR73, an engine restart re-keying on its own -- is still an ORPHAN:
+    // tolerate the 1st, halt on the 2nd.
     static void DirectRunawayRr73HaltsEngineTests()
     {
-        Console.WriteLine("\n── Direct-mode runaway RR73: orphaned-Tx backstop halts the engine ──");
+        Console.WriteLine("\n── Direct-mode runaway RR73: engine owns the Finishing closing exchange, Jimmy's orphan halt only fires for UNRELATED Tx ──");
 
         var seen = new System.Collections.Generic.List<string>();
         var seenLock = new object();
@@ -2355,56 +2357,100 @@ static class JimmyTests
             System.Collections.Generic.List<string> Seen() { lock (seenLock) return new System.Collections.Generic.List<string>(seen); }
             bool SeenCmd(string prefix) => Seen().Exists(c => c.StartsWith(prefix));
 
-            DirectSnapshot TxSnap(bool transmitting, ulong slot, string txNow) => ParseDirectSnapshot(@"{
-                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
-                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") + @", ""slot"": " + slot + @" },
-                ""recentDecodes"": []" + (txNow == null ? "" : @",
-                ""qso"": { ""state"": ""done"", ""txNow"": """ + txNow + @""" }") + @"
-            }");
-
-            // ── The contact completes normally on the engine's RR73: logged, callInProg cleared ──
-            wc.callInProg = qsoCall;
-            wc.allCallDict[qsoCall] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+            // txNow = the engine's Qso.TxNow; decode = an optional recentDecodes row "from|message".
+            DirectSnapshot Snap(bool transmitting, ulong slot, string txNow, string decodeFrom = null, string decodeMsg = null)
             {
-                new EnqueueDecodeMessage { Message = $"{myCall} {qsoCall} R-05", Snr = -5, RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay },
-            };
+                string decodes = decodeFrom == null ? "" :
+                    @"{ ""from"": """ + decodeFrom + @""", ""snr"": -18, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") + @", ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + "]" + (txNow == null ? "" : @",
+                    ""qso"": { ""state"": ""done"", ""txNow"": """ + txNow + @""" }") + @"
+                }");
+            }
+
+            // Drive a real completion: our roger-report goes out (adds qsoCall to sentReportList),
+            // then the engine's RR73 -> LogQso -> callInProg cleared -> Finishing entered.
+            void CompleteQso(ulong baseSlot)
+            {
+                wc.callInProg = qsoCall;
+                wc.allCallDict[qsoCall] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+                {
+                    new EnqueueDecodeMessage { Message = $"{myCall} {qsoCall} R-05", Snr = -5, RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay },
+                };
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, baseSlot, $"{qsoCall} {myCall} R-05"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, baseSlot + 1, $"{qsoCall} {myCall} RR73"));
+            }
+            // One completed finishing over: engine transmits RR73 to qsoCall, then that over ends.
+            void FinishingOver(ulong slot)
+            {
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, slot, $"{qsoCall} {myCall} RR73"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, slot + 1, null));
+            }
+
+            // ══ 1. Completion enters Finishing ══
             lock (seenLock) seen.Clear();
-            // Our roger-report goes out first (adds qsoCall to sentReportList, as
-            // DirectModePlumbingParityTests scenario 5 does) so the RR73 step actually logs.
-            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 1999, $"{qsoCall} {myCall} R-05"));
-            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 2000, $"{qsoCall} {myCall} RR73"));
+            CompleteQso(2000);
             Check("Setup: the completed QSO is logged", wc.logList.Contains(qsoCall), true);
             Check("Setup: callInProg is cleared once the RR73 goes out", wc.callInProg == null, true);
+            Check("Finishing entered: _finishingCall is the just-worked station", wc.TestFinishingCall == qsoCall, true);
 
-            // ── Over A: the engine's RR73 over finishes (transmitting -> not). callInProg is
-            //    null now, mode is LISTEN. This first orphaned over is tolerated. ──
+            // ══ 2. The engine's RR73 closing tail to the worked station is NEVER halted by Jimmy
+            //       (Nexus owns it; its own wall-clock watchdog bounds a silent run) ══
             lock (seenLock) seen.Clear();
-            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 2001, $"{qsoCall} {myCall} RR73"));
-            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(false, 2002, null));
-            Check("THE FIX: the FIRST orphaned over is tolerated (could be the real final RR73 finishing)",
+            for (ulong s = 2010; s < 2030; s += 2) FinishingOver(s);   // 10 closing overs
+            Check("10 RR73 closing overs to the worked station do NOT halt and never count as orphans",
+                  !SeenCmd("HALT_TX") && wc.TestOrphanTxOvers == 0 && wc.TestFinishingCall == qsoCall, true);
+
+            // ══ 3. A repeated R-report from the worked station is handled entirely by the engine
+            //       -- Jimmy neither halts nor changes state ══
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2040, null, qsoCall, $"{myCall} {qsoCall} R-08"));
+            for (ulong s = 2042; s < 2050; s += 2) FinishingOver(s);
+            Check("a repeated R-report + more RR73 closing overs still do not halt",
+                  !SeenCmd("HALT_TX") && wc.TestFinishingCall == qsoCall, true);
+
+            // ══ 4. The worked station's own closing over (73, RR73, or bare RRR) ends Finishing ══
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2060, null, qsoCall, $"{myCall} {qsoCall} 73"));
+            Check("the worked station's own 73 clears Finishing -- clean close, nothing halted",
+                  wc.TestFinishingCall == null && !SeenCmd("HALT_TX"), true);
+            // ...and a bare RRR does it too (fresh contact -> its RRR).
+            CompleteQso(2100);
+            Check("Setup: Finishing re-entered for the next QSO", wc.TestFinishingCall == qsoCall, true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2110, null, qsoCall, $"{myCall} {qsoCall} RRR"));
+            Check("a bare RRR from the worked station also clears Finishing", wc.TestFinishingCall == null, true);
+
+            // ══ 5. With Finishing cleared, an UNRELATED orphaned Tx still halts fast (at the 2nd) ══
+            lock (seenLock) seen.Clear();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2220, $"W9XYZ {myCall} RR73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2221, null));
+            Check("orphan over #1 (unrelated call, Finishing not active) is tolerated",
                   wc.TestOrphanTxOvers == 1 && !SeenCmd("HALT_TX"), true);
-
-            // ── Over B: the engine re-keyed the same RR73 entirely on its own -- runaway. ──
-            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(true, 2003, $"{qsoCall} {myCall} RR73"));
-            wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(false, 2004, null));
-            // HaltAndDisableTx enqueues HALT_TX (priority) then SET_TX_ENABLED 0 -- the stub sees
-            // them one at a time on the single ordered worker, so wait for BOTH before asserting.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2222, $"W9XYZ {myCall} RR73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2223, null));
             PumpUntil(() => SeenCmd("HALT_TX") && SeenCmd("SET_TX_ENABLED 0"));
-            Check("THE FIX: the SECOND orphaned over trips HALT_TX", SeenCmd("HALT_TX"), true);
-            Check("THE FIX: ...and SET_TX_ENABLED 0", SeenCmd("SET_TX_ENABLED 0"), true);
-            Check("THE FIX: the counter resets after firing so it re-arms for a later episode",
-                  wc.TestOrphanTxOvers == 0, true);
+            Check("orphan over #2 trips HALT_TX + SET_TX_ENABLED 0", SeenCmd("HALT_TX") && SeenCmd("SET_TX_ENABLED 0"), true);
+            Check("orphan counter resets after firing", wc.TestOrphanTxOvers == 0, true);
 
-            // ── A normal idle listen (no callInProg, never transmitting) never trips it ──
+            // ══ 6. A completion re-entering Finishing does NOT resurrect a spent orphan halt for
+            //       a genuinely unrelated over afterward ══
             lock (seenLock) seen.Clear();
-            for (ulong s = 2010; s < 2016; s++)
-                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnap(false, s, null));
-            Check("a normal idle LISTEN session (never transmitting) does not trip the backstop",
+            CompleteQso(2250);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2260, $"W9XYZ {myCall} RR73"));   // unrelated
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2261, null));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2262, $"W9XYZ {myCall} RR73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2263, null));
+            PumpUntil(() => SeenCmd("HALT_TX"));
+            Check("an UNRELATED over during Finishing still halts on the 2nd (Finishing only covers the worked call)",
+                  SeenCmd("HALT_TX"), true);
+
+            // ══ 7. A normal idle listen (no contact, never transmitting) trips neither ══
+            lock (seenLock) seen.Clear();
+            for (ulong s = 2300; s < 2306; s++)
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, s, null));
+            Check("a normal idle LISTEN session does not trip the backstop",
                   wc.TestOrphanTxOvers == 0 && !SeenCmd("HALT_TX"), true);
 
-            // Stop this instance's Direct command worker so it doesn't sit parked on the
-            // thread pool for the rest of the (~1000-test) run -- same hygiene the other
-            // stub-engine-host tests rely on the process ending to get for free.
             wc.ShutdownDirectCommandQueue();
         }
         catch (Exception ex)

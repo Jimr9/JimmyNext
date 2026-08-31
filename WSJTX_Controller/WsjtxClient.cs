@@ -992,6 +992,12 @@ namespace WSJTX_Controller
                     break;
             }
 
+            // Completed is the one reason that ENTERS "Finishing" (the completion branch sets
+            // _finishingCall just before calling this) -- every other reason ends the QSO for
+            // good, so the engine's RR73 tail is no longer expected: clear it.
+            if (reason != ContactEndReason.Completed)
+                _finishingCall = null;
+
             // Invalidate any TX-arming Direct command still in flight for the contact that just
             // ended (ReplyTo / SetupCq / DirectSendReply / DirectSendCq / DirectSetTxEnabled(true)
             // / DirectSetTuning(true) all capture this before sending and re-check at completion).
@@ -2986,6 +2992,10 @@ namespace WSJTX_Controller
 
             if (call != null) lCall = null;     //last logged call is not relevant now
 
+            // A new contact begins -> the previous QSO's "Finishing" RR73 tail is over, whatever
+            // the engine still thinks (Nexus starts a fresh Station on the new call).
+            if (call != null) _finishingCall = null;
+
             if (call == null) { CancelDiscardCall(); _manualCallInProg = false; }
 
             // Finding 2, 2026-08-28: a pending failed-write retry only makes sense while that
@@ -3095,6 +3105,9 @@ namespace WSJTX_Controller
             // its two edges, so its protection (DirectApplyStatus) is unaffected. Harmless when
             // not connected / not in Direct mode.
             _directOrphanTxOvers = 0;
+            // An explicit Halt during a "Finishing" RR73 tail ends it -- the operator (or a
+            // safety halt) has stopped the closing exchange deliberately.
+            _finishingCall = null;
             // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard HaltTx
             // message (msg type 8, gated on udpClient2 being open) is removed -- route through
             // the control port's own HALT_TX command instead. AutoOnly is explicitly false

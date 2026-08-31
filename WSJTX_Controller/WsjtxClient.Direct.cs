@@ -383,6 +383,22 @@ namespace WSJTX_Controller
         // Reset whenever a real contact is in progress again (or the mode is no longer LISTEN).
         private int _directOrphanTxOvers;
 
+        // "Finishing" state, 2026-08-31 (revised runaway design). When Jimmy logs a QSO on the
+        // first RR73/73 and clears callInProg, the engine (Nexus) is still in its own
+        // State::Confirming: it OWNS the legitimate closing exchange -- it re-sends RR73 to this
+        // station while the station repeats its R-report ("DX repeated their report -> re-sending
+        // our closing over", qso.rs), stops the moment that station sends its own 73/RR73/RRR,
+        // and bounds a purely SILENT tail with its own wall-clock Tx watchdog (Jimmy passes
+        // --tx-watchdog-min = ceil((RepeatLimit + 2) * 30s), 2-11 min; evaluated by Nexus on
+        // every TX over and NOT reset during a Confirming tail, so it reliably fires). Jimmy's
+        // only job here is to NOT sever that tail with its own 2-over orphan halt.
+        //   _finishingCall -- the just-logged station whose RR73/73 closing overs must not be
+        //                     counted as orphans; null = not finishing. Set on a real logged
+        //                     completion; cleared by that station's own 73/RR73/RRR decode, a new
+        //                     contact (SetCallInProg non-null), any EndContact reason other than
+        //                     Completed, HaltTx, or a reconnect.
+        private string _finishingCall;
+
         // KF4CCG race, 2026-08-29 (CONFIRMED live): bounds how many extra polls the Is73orRR73
         // completion branch (DirectApplyStatus) will HOLD callInProg while LogQso() keeps failing
         // because the DX's roger-report decode has not been ingested into allCallDict yet -- the
@@ -517,6 +533,7 @@ namespace WSJTX_Controller
             _directOrphanTxOvers = 0;
             _directRr73LogRetries = 0;
             _directWriteFailRetries = 0;
+            _finishingCall = null;
             _lastCatOk = null;
             _lastCommandedSideband = null;
             _lastCommandedSidebandChangedUtc = null;
@@ -1297,24 +1314,23 @@ namespace WSJTX_Controller
             // text) never learned a real Tune (SET_TUNING) was underway in Direct mode.
             tuning = radio.Tuning;
 
-            // Direct-mode runaway-Tx backstop, 2026-08-28 (CONFIRMED live -- HB9TIH then NE5L in
-            // one session). After Jimmy logs a contact and clears callInProg on seeing the
-            // engine's own RR73 (DirectApplyDecodes' Is73orRR73 branch), the engine's QSO
-            // sequencer can keep re-sending that RR73 every transmit slot -- if the worked
-            // station never cleanly hears it and keeps repeating its R-report, or after an
-            // engine restart mid-QSO. Jimmy showed "Transmitting, sending R R 7 3" with no call
-            // in progress and only stopped after the operator mashed Escape ~8 times (~2 minutes
-            // of unsolicited overs on the air). Nothing here caught it: the mid-QSO
-            // consecTxCount/best-frequency safety net that used to live at this spot was removed
-            // in the 2.0.42 frequency work, and it wouldn't have applied to this "no callInProg
-            // at all" case anyway. Count completed orphaned overs on the transmitting-ended
-            // edge: the FIRST is tolerated (it can be a legitimate final RR73 finishing in the
-            // poll or two after callInProg was cleared), the SECOND means the engine re-keyed on
-            // its own -> halt it exactly as Escape does (HALT_TX + SET_TX_ENABLED 0) and tell
-            // the operator. Unconditional -- not gated on ctrl.freqCheckBox or any mode flag
-            // beyond "LISTEN, no contact, not tuning": there is simply no reason to be
-            // transmitting in that state.
-            if (callInProg != null || txMode != TxModes.LISTEN || tuning)
+            // Direct-mode runaway-Tx backstop, 2026-08-28 (CONFIRMED live -- HB9TIH then NE5L),
+            // revised 2026-08-31. After Jimmy logs a contact and clears callInProg on the engine's
+            // RR73, the engine (Nexus State::Confirming) OWNS the legitimate closing exchange:
+            // it re-sends RR73 while the just-worked station repeats its R-report, stops on that
+            // station's own 73/RR73/RRR, and bounds a silent tail with its own wall-clock Tx
+            // watchdog. Jimmy just does NOT count those closing overs against the orphan halt
+            // (finishingTailOver). Anything else with no contact in LISTEN mode -- a different
+            // call, not 73/RR73, an engine restart re-keying on its own -- is an ORPHAN: the
+            // FIRST such over is tolerated, the SECOND trips HALT_TX + SET_TX_ENABLED 0 (exactly
+            // as Escape does) and announces. Not gated on ctrl.freqCheckBox or any mode flag
+            // beyond "LISTEN, no contact, not tuning".
+            bool finishingTailOver = _finishingCall != null
+                && !string.IsNullOrEmpty(curTxMsg)
+                && WsjtxMessage.Is73orRR73(curTxMsg)
+                && string.Equals(WsjtxMessage.ToCall(curTxMsg), _finishingCall, StringComparison.OrdinalIgnoreCase);
+
+            if (callInProg != null || txMode != TxModes.LISTEN || tuning || finishingTailOver)
             {
                 _directOrphanTxOvers = 0;
             }
@@ -1461,6 +1477,14 @@ namespace WSJTX_Controller
                         Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"QSO with {callInProg} still not saved",
                             "the local logbook write kept failing -- this contact was not recorded"));
                     string justWorkedCall = callInProg;
+                    // Enter "Finishing" ONLY for a genuine, logged completion (onRecord) -- NOT
+                    // for an abandoned-unsaved write-fail QSO or a partial exchange with nothing
+                    // to log, which also reach this else. While set, the runaway backstop below
+                    // does not count the engine's RR73/73 closing overs to this station as
+                    // orphans (Nexus owns that exchange and its own wall-clock watchdog bounds a
+                    // silent tail); it is cleared by that station's own 73/RR73/RRR decode.
+                    if (onRecord)
+                        _finishingCall = justWorkedCall;
                     // EndContact(Completed) = SetCallInProg(null) (which also zeroes the RR73/
                     // write-fail retry counters on the call transition) + the _contactEpoch bump.
                     // It deliberately leaves curTxMsg alone (the final 73 still announces as it
@@ -1732,6 +1756,19 @@ namespace WSJTX_Controller
                 };
 
                 EnqueueDecodeMessage enq = EnqueueDecodeMessage.FromStandardDecode(dmsg);
+
+                // Finishing (see _finishingCall): the just-worked station's own closing over --
+                // 73, RR73, or a bare RRR -- means both sides are done, so end Finishing right
+                // away. Its repeated R-reports are handled entirely by the engine (Nexus keeps
+                // re-sending RR73); Jimmy neither counts nor acts on those.
+                if (_finishingCall != null
+                    && string.Equals(enq.DeCall(), _finishingCall, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(WsjtxMessage.ToCall(enq.Message), myCall, StringComparison.OrdinalIgnoreCase)
+                    && (WsjtxMessage.Is73orRR73(enq.Message) || WsjtxMessage.IsRogers(enq.Message)))
+                {
+                    DebugOutput($"{Time()} [DIRECT] finishing: '{_finishingCall}' sent its own closing over -- QSO fully closed");
+                    _finishingCall = null;
+                }
 
                 // Mirrors the UDP path's own raw-decode-history population (WsjtxClient.Protocol.cs)
                 // -- direct mode never did this, so the Raw Decodes panel (Advanced UI tab) has been
@@ -2469,6 +2506,7 @@ namespace WSJTX_Controller
         // Test-only: runaway-Tx backstop counter (private). DirectRunawayRr73HaltsEngineTests
         // asserts the first orphaned over is tolerated and the second one trips the halt.
         internal int TestOrphanTxOvers => _directOrphanTxOvers;
+        internal string TestFinishingCall => _finishingCall;
 
         // Test-only: `mode` is private and DirectApplyStatus only ever sets it to "FT8" (its
         // own lazy first-run fallback -- see that method's own comment on why Direct mode has
