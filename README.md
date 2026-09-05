@@ -64,7 +64,7 @@ Open `WSJTX_Controller\Jimmy.csproj` and build in Release mode (net10.0-windows)
 `build.bat` for a local Debug build. See `ARCHITECTURE.md` for how the C# UI, the bundled Rust
 EngineHost, and Nexus fit together.
 
-To build the installer: `wix build -o Release\JimmyNext.msi JimmyNext.wxs` (from `Setup_WiX\`)
+To build the installer: `wix build -ext WixToolset.UI.wixext -o Release\JimmyNext.msi JimmyNext.wxs` (from `Setup_WiX\`, after `dotnet publish ..\WSJTX_Controller\Jimmy.csproj -c Release -p:AssemblyName="Jimmy Next" -p:SelfContained=true -r win-x64 -o PublishOutputNext`)
 
 ## More Information
 

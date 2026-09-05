@@ -12,8 +12,18 @@ namespace WSJTX_Controller
     public partial class RowDisplayOrderDlg : Form
     {
         // ── Stations Available (call queue / TX1 / TX2) row fields ──────────────
+        // The full field UNIVERSE: the ParseRowOrder whitelist and the "available to add"
+        // list in this dialog. Never trimmed -- shrinking it would silently strip fields an
+        // existing operator has already chosen.
         public static readonly string[] CallWaitingDefaultFields =
             { "callp", "pri", "tag", "grid", "snr", "freq", "country", "distAz", "oe", "descr", "rankStr" };
+
+        // The DEFAULT ORDER (which fields are checked, and in what order) for a fresh install,
+        // a missing INI key, and the "Restore Default" button. Must stay identical to
+        // WsjtxClient.callWaitingRowOrderFields' own initializer and to the master defaults
+        // file's callWaitingRowOrder -- RowOrderDefaultsSyncTests guards that.
+        public static readonly string[] CallWaitingDefaultOrder =
+            { "tag", "pri", "country", "callp", "snr", "distAz" };
 
         public static readonly Dictionary<string, string> CallWaitingFieldLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -28,6 +38,12 @@ namespace WSJTX_Controller
         // label every row otherwise starts with.
         public static readonly string[] RawDecodeDefaultFields =
             { "callsign", "side", "tag", "message", "snr", "freq", "grid", "country", "distAz" };
+
+        // Default order for fresh install / missing key / Restore Default -- see
+        // CallWaitingDefaultOrder's comment. Matches WsjtxClient.rawDecodeRowOrderFields and
+        // the master defaults file's rawDecodeRowOrder (RowOrderDefaultsSyncTests guards it).
+        public static readonly string[] RawDecodeDefaultOrder =
+            { "callsign", "side", "tag", "message", "snr", "grid", "country", "distAz" };
 
         public static readonly Dictionary<string, string> RawDecodeFieldLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -159,7 +175,9 @@ namespace WSJTX_Controller
 
         private void CallWaitingRestoreDefaultButton_Click(object sender, EventArgs e)
         {
-            PopulateList(callWaitingListBox, CallWaitingDefaultFields, CallWaitingFieldLabels, new List<string>(CallWaitingDefaultFields),
+            // Restore to the approved DEFAULT ORDER (subset), not the full field universe --
+            // the other fields stay listed/available-to-add, just unchecked.
+            PopulateList(callWaitingListBox, CallWaitingDefaultFields, CallWaitingFieldLabels, new List<string>(CallWaitingDefaultOrder),
                 callWaitingMoveUpButton, callWaitingMoveDownButton);
         }
 
@@ -178,7 +196,7 @@ namespace WSJTX_Controller
 
         private void RawDecodeRestoreDefaultButton_Click(object sender, EventArgs e)
         {
-            PopulateList(rawDecodeListBox, RawDecodeDefaultFields, RawDecodeFieldLabels, new List<string>(RawDecodeDefaultFields),
+            PopulateList(rawDecodeListBox, RawDecodeDefaultFields, RawDecodeFieldLabels, new List<string>(RawDecodeDefaultOrder),
                 rawDecodeMoveUpButton, rawDecodeMoveDownButton);
         }
 

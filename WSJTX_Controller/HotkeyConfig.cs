@@ -41,6 +41,8 @@ namespace WSJTX_Controller
         SortOrder,
         RowOrder,
         AnalyzeSlot,
+        ReportSlotAnalysis,
+        NotificationHistory,
         ClockStatus,
         LookupStation,
         OpenLogbook,
@@ -57,6 +59,9 @@ namespace WSJTX_Controller
         NavAdvTx2,
         NavAdvRaw,
         NavSpotWatch,
+        // Station Watch (2.0.63).
+        ToggleStationWatch,
+        WorkWatchedStationNow,
     }
 
     public class HotkeyConfig
@@ -110,6 +115,13 @@ namespace WSJTX_Controller
             [HotkeyAction.SortOrder]       = Keys.Alt | Keys.S,
             [HotkeyAction.RowOrder]        = Keys.Alt | Keys.I,
             [HotkeyAction.AnalyzeSlot]     = Keys.Alt | Keys.Z,
+            // 2.0.58: read back the most recent transmit-slot analysis without re-running it.
+            // Ctrl+Z outside an editable text control -- ProcessCmdKey deliberately lets the key
+            // through to a focused TextBox/RichTextBox so normal Undo still works there.
+            [HotkeyAction.ReportSlotAnalysis] = Keys.Control | Keys.Z,
+            // 2.0.58: open the session Notification History window. Ctrl+Shift+H is free of
+            // conflicts with every other default and with default WinForms behavior.
+            [HotkeyAction.NotificationHistory] = Keys.Control | Keys.Shift | Keys.H,
             // Item 4, 2026-08-24 (operator request): on-demand clock sync status, reusing the
             // exact same timeOffset/_clockWasAcceptable state the automatic ClockOutOfSync/
             // ClockSynced notifications already track (WsjtxClient.BandAudio.cs's own
@@ -130,6 +142,10 @@ namespace WSJTX_Controller
             [HotkeyAction.NavAdvTx2]       = Keys.Control | Keys.D2,
             [HotkeyAction.NavAdvRaw]       = Keys.Control | Keys.D3,
             [HotkeyAction.NavSpotWatch]    = Keys.Control | Keys.D4,
+            // Station Watch (2.0.63) -- Codex conflict audit confirmed both free of collisions
+            // with every default above.
+            [HotkeyAction.ToggleStationWatch]     = Keys.Control | Keys.Shift | Keys.W,
+            [HotkeyAction.WorkWatchedStationNow]  = Keys.Control | Keys.Shift | Keys.Return,
         };
 
         public static readonly Dictionary<HotkeyAction, string> DisplayNames = new Dictionary<HotkeyAction, string>
@@ -167,6 +183,8 @@ namespace WSJTX_Controller
             [HotkeyAction.SortOrder]       = "Sort Order Editor",
             [HotkeyAction.RowOrder]        = "Row Order Editor",
             [HotkeyAction.AnalyzeSlot]     = "Analyze Transmit Slot",
+            [HotkeyAction.ReportSlotAnalysis] = "Report Transmit Slot Analysis",
+            [HotkeyAction.NotificationHistory] = "Open Notification History",
             [HotkeyAction.ClockStatus]     = "Report Clock Sync Status",
             [HotkeyAction.LookupStation]   = "Lookup Selected Station",
             [HotkeyAction.OpenLogbook]     = "Open Ham Radio Center Logbook",
@@ -182,12 +200,16 @@ namespace WSJTX_Controller
             [HotkeyAction.NavAdvTx2]       = "Focus TX2 Available Stations List",
             [HotkeyAction.NavAdvRaw]       = "Focus Raw Decodes List",
             [HotkeyAction.NavSpotWatch]    = "Focus Spot Watch List",
+            [HotkeyAction.ToggleStationWatch]    = "Toggle Station Watch",
+            [HotkeyAction.WorkWatchedStationNow] = "Work Watched Station Now",
         };
 
         // Actions that may be left unassigned (Keys.None) without triggering a validation error.
         public static readonly HashSet<HotkeyAction> OptionalActions = new HashSet<HotkeyAction>
         {
             HotkeyAction.AnalyzeSlot,
+            HotkeyAction.ReportSlotAnalysis,
+            HotkeyAction.NotificationHistory,
             HotkeyAction.LookupStation,
             HotkeyAction.OpenLogbook,
             HotkeyAction.AddManualQso,
@@ -207,6 +229,10 @@ namespace WSJTX_Controller
             HotkeyAction.TxFromRx,
             HotkeyAction.RxFromTx,
             HotkeyAction.SetTxFreq,
+            // Station Watch (2.0.63): both have real defaults above, but the operator may still
+            // unassign them (spec: "user may leave them unassigned").
+            HotkeyAction.ToggleStationWatch,
+            HotkeyAction.WorkWatchedStationNow,
         };
 
         private static readonly HashSet<Keys> ReservedKeys = new HashSet<Keys>
@@ -231,6 +257,12 @@ namespace WSJTX_Controller
             HotkeyAction.AnnounceFreq, HotkeyAction.TxFreqUp, HotkeyAction.TxFreqDown,
             HotkeyAction.RxFreqUp, HotkeyAction.RxFreqDown, HotkeyAction.TxFromRx,
             HotkeyAction.RxFromTx, HotkeyAction.SetTxFreq,
+            // 2.0.58 additions -- if an upgrading operator's saved hotkeys already used Ctrl+Z
+            // or Ctrl+Shift+H for something else, that binding wins and the new action is left
+            // unassigned rather than double-bound.
+            HotkeyAction.ReportSlotAnalysis, HotkeyAction.NotificationHistory,
+            // 2.0.63 additions -- same protection for Ctrl+Shift+W / Ctrl+Shift+Enter.
+            HotkeyAction.ToggleStationWatch, HotkeyAction.WorkWatchedStationNow,
         };
 
         // Populated by LoadFromIni: newer actions that were left unassigned because this

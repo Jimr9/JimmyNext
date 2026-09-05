@@ -1,8 +1,84 @@
 diff --git a/src/service.rs b/src/service.rs
-index d4af6ba..ca36fbf 100644
+index 50d8f253..57088ecc 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -725,6 +725,14 @@ pub struct RadioConfig {
+@@ -910,6 +910,75 @@ const CAT_RETRY_MAX_MS: f64 = 30_000.0;
+ /// whereas a rejected FREQUENCY is nearly always a hard fact about the radio's range — and each
+ /// retry costs a full CAT round-trip on a link that is already unhappy.
+ const DIAL_SET_MAX_TRIES: u32 = 3;
++
++/// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the state of a Fake-It dial restore the
++/// loop still owes. Every value is a PHYSICAL fact about the radio (a CAT-confirmed reading),
++/// never a cached/logical engine dial.
++#[derive(Clone, Copy, Debug, PartialEq, Default)]
++enum FakeItRestore {
++    /// Nothing owed — the normal state.
++    #[default]
++    None,
++    /// A shifted over just ended; the ONE immediate restore attempt has not run yet. The
++    /// teardown resolves it on the first safe tick after unkey.
++    Armed {
++        original_hz: u64,
++        shifted_to_hz: u64,
++        /// See [`crate::slot::FakeItShift::shift_confirmed`] — `false` = the shift command's
++        /// outcome was ambiguous (transport error), so the reconciliation runs on the physical
++        /// readback, not on this flag.
++        shift_confirmed: bool,
++    },
++    /// The immediate attempt could not CONFIRM the dial was put back (CAT unhealthy, `F`
++    /// refused, or the read-back did not match). NOT retried on idle ticks — it waits for a
++    /// trustworthy CAT-recovery / heavy-poll reading, gets AT MOST one more corrective `F`
++    /// (`recovery_tried`), and is exposed to Jimmy as a persistent warning meanwhile.
++    Unresolved {
++        original_hz: u64,
++        shifted_to_hz: u64,
++        recovery_tried: bool,
++    },
++}
++
++impl FakeItRestore {
++    fn dials(&self) -> Option<(u64, u64)> {
++        match *self {
++            FakeItRestore::None => None,
++            FakeItRestore::Armed { original_hz, shifted_to_hz, .. }
++            | FakeItRestore::Unresolved { original_hz, shifted_to_hz, .. } => {
++                Some((original_hz, shifted_to_hz))
++            }
++        }
++    }
++    fn is_none(&self) -> bool {
++        matches!(self, FakeItRestore::None)
++    }
++    fn is_unresolved(&self) -> bool {
++        matches!(self, FakeItRestore::Unresolved { .. })
++    }
++}
++
++/// The three-way reconciliation of a pending Fake-It restore against a freshly-read PHYSICAL
++/// dial (Codex correction E). EXACT integer-Hz equality — rigctld frequencies are whole Hz and
++/// Nexus carries no per-rig tuning-resolution that would justify a tolerance.
++enum FakeItReconcile {
++    /// Physical dial is already the pre-shift original — restored, or the shift never took.
++    AlreadyHome,
++    /// Physical dial is still the temporary Fake-It dial — put the original back.
++    Restore,
++    /// Physical dial is neither — a NEWER operator/external frequency. Never overwrite it.
++    OperatorMoved,
++}
++
++fn classify_fake_it(cur_hz: u64, original_hz: u64, shifted_to_hz: u64) -> FakeItReconcile {
++    if cur_hz == original_hz {
++        FakeItReconcile::AlreadyHome
++    } else if cur_hz == shifted_to_hz {
++        FakeItReconcile::Restore
++    } else {
++        FakeItReconcile::OperatorMoved
++    }
++}
+ /// Hamlib func tokens for the Expert DSP toggles, in the engine's
+ /// `[nb, nr, notch, comp, vox, manual_notch]` order.
+ ///
+@@ -1097,6 +1166,18 @@ pub struct RadioConfig {
      pub tx_level: f32,
      /// RX capture gain (≥1.0) applied to received audio before decode.
      pub rx_gain: f32,
@@ -11,86 +87,1124 @@ index d4af6ba..ca36fbf 100644
 +    /// Only meaningful for CAT PTT on a rig whose Hamlib backend supports the mic/data
 +    /// distinction AND whose interface is wired to the rig's rear DATA/ACC port.
 +    pub ptt_data_source: bool,
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X Radio tab "Mode: None" — see
-+    /// `Settings::dont_set_mode`'s doc comment.
-+    pub dont_set_mode: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch, Layer 2. When
++    /// true, the radio loop never issues an RFPOWER drive read/write from ANY of its own call
++    /// sites (heavy telemetry poll, per-mode power ceiling, Tune power) — belt to the Layer-1
++    /// `Rig` chokepoint's braces. Off by default (unchanged upstream behavior); Jimmy always
++    /// sets it on. Safe telemetry meters (`RFPOWER_METER_WATTS`/`SWR`/`ALC`/`COMP_METER`) are
++    /// unaffected.
++    pub disable_rfpower_probe: bool,
  }
  
  impl Default for RadioConfig {
-@@ -757,6 +765,8 @@ impl Default for RadioConfig {
+@@ -1132,6 +1213,8 @@ impl Default for RadioConfig {
              audio_out: String::new(),
              tx_level: 0.9,
              rx_gain: 1.0,
 +            ptt_data_source: false,
-+            dont_set_mode: false,
++            disable_rfpower_probe: false,
          }
      }
  }
-@@ -1139,6 +1149,9 @@ impl Transport {
+@@ -1568,6 +1651,11 @@ impl Transport {
              monitor_enabled: false,
              monitor_device: String::new(),
              monitor_level: 0.5,
-+            // A monitor radio is read-only (PttMode::Vox — see open_monitor), so this is never
-+            // consulted, same reasoning as ptt_serial_port above.
++            // A monitor radio is read-only (`PttMode::Vox`, never keys) — so mic/data PTT is
++            // moot, and it must never emit an RFPOWER drive read/write either (JIMMY COMPAT,
++            // nexus-compat: belt-and-suspenders — the monitor path only ever reads the dial).
 +            ptt_data_source: false,
++            disable_rfpower_probe: true,
          }
      }
  }
-@@ -6925,7 +6938,7 @@ impl RadioLoop {
+@@ -1611,6 +1699,9 @@ fn open_monitor(t: &Transport) -> (Rig, Option<CatDaemon>, Option<bool>) {
+             rig.set_slow_transport(
+                 network || native_civ_addr(t).is_some() || t.is_slow_serial_link(),
+             );
++            // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): stamp the RFPOWER
++            // never-touch chokepoint on the monitor rig too — `from_profile` forces it on.
++            rig.set_rfpower_suppressed(t.disable_rfpower_probe);
+             let ok = probe_cat(&mut rig, t).ok;
+             (rig, Some(proc), ok)
+         }
+@@ -2692,9 +2783,21 @@ struct RadioLoop {
+     /// those readers is the no-RF watch, which must never judge an over whose carrier is
+     /// intermittent. See [`Self::rf_watchable`].
+     cur_section_cw: bool,
+-    /// Fake-It split moved the VFO for the playing over — restore THIS dial
+-    /// (Hz) when the over ends (PTT drop / hard stop).
+-    fake_it_restore: Option<u64>,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a Fake-It dial restore the loop
++    /// still owes — see [`FakeItRestore`]. `Armed` is resolved by the over-end teardown with
++    /// exactly ONE immediate attempt; `Unresolved` waits for a trustworthy CAT-recovery
++    /// reading (never an idle-tick retry loop) and is surfaced to Jimmy as a warning.
++    fake_it_restore: FakeItRestore,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a monotonic id for the CURRENT
++    /// unresolved Fake-It episode, bumped once on each fresh transition INTO `Unresolved`.
++    /// Emitted alongside the warning string on `RadioStatus` so Jimmy dedups per EPISODE
++    /// (paired with the session token) rather than per message text — a Direct reconnect
++    /// re-delivering the same still-unresolved episode must not re-announce it, but a
++    /// genuinely new episode with identical wording must.
++    fake_it_restore_episode: u64,
++    /// Edge tracker for the above — `true` while `fake_it_restore` is `Unresolved`, so the id
++    /// bumps only on the entry edge, not on every `Unresolved → Unresolved` reconcile tick.
++    fake_it_restore_episode_live: bool,
+     /// An audio Rig-mode split engaged VFO B for an over — tear the rig split
+     /// down once no over is pending (unless the cluster split owns VFO B).
+     audio_rig_split: bool,
+@@ -2866,6 +2969,13 @@ struct RadioLoop {
+     level_supported: [Option<bool>; N_LEVELS],
+     /// Consecutive get-miss counters per extended level — same tolerance as `smeter_misses`.
+     level_misses: [u8; N_LEVELS],
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch, Layer 2 —
++    /// mirrors `RadioConfig::disable_rfpower_probe` for this loop's whole lifetime. Gates the
++    /// three RFPOWER drive call sites in this file (heavy telemetry poll `l RFPOWER`, per-mode
++    /// power-ceiling `set_power`, Tune-power `set_power`) so the loop never even forms an
++    /// RFPOWER drive command. The Layer-1 `Rig` chokepoint (rig.rs) is the belt to this
++    /// suspenders; safe telemetry meters are untouched by both.
++    disable_rfpower_probe: bool,
+     /// Whether we last surfaced the "monitor refused — would transmit into the TX
+     /// device" note on the audio-error line, so we clear only our OWN message.
+     /// The monitor block currently OWNS the audio-error line (it wrote either
+@@ -2996,7 +3106,9 @@ impl RadioLoop {
+             cur_dial: 0,
+             cur_md: String::new(),
+             cur_section_cw: false,
+-            fake_it_restore: None,
++            fake_it_restore: FakeItRestore::None,
++            fake_it_restore_episode: 0,
++            fake_it_restore_episode_live: false,
+             audio_rig_split: false,
+             rig_split_restore: None,
+             split_detect: None,
+@@ -3035,6 +3147,7 @@ impl RadioLoop {
+             meter_feed: cfg.meter_feed.clone(),
+             level_supported: [None; N_LEVELS],
+             level_misses: [0; N_LEVELS],
++            disable_rfpower_probe: cfg.disable_rfpower_probe,
+ 
+             clock_offset_ms: 0,
+             decode: DecodeWorker::spawn(),
+@@ -3425,11 +3538,184 @@ impl RadioLoop {
+                 if mode_changed { ", mode changed" } else { "" }
+             ));
+             self.last_dial = dial;
++            // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a freshly COMMANDED dial
++            // supersedes any pending Fake-It restore — the shift was relative to the old dial,
++            // so putting the old dial back after the operator moved would be the wrong answer.
++            self.fake_it_restore = FakeItRestore::None;
++            self.fake_it_restore_episode_live = false;
+         }
+         // (No mode policy yet on the first tick — `md` is empty and nothing is asserted; the
+         // latch stays open so a later tick with a derived policy still fires this once.)
+     }
+ 
++    // ───────────── JIMMY COMPAT (nexus-compat): Fake-It dial-restore reconciliation ─────────────
++
++    /// Resolve a pending Fake-It restore against a freshly-read PHYSICAL dial (Codex
++    /// correction E). The reconciliation is the three-way [`classify_fake_it`]; the only
++    /// difference between the immediate teardown attempt and a later CAT-recovery pass is the
++    /// ONE corrective `F` budget: `may_command` gates it, and `mark_recovery_tried` records
++    /// that the recovery attempt has now been spent (so a rig that refuses `F` is never
++    /// re-commanded on a cadence — Codex correction D).
++    #[allow(clippy::too_many_arguments)]
++    fn resolve_fake_it_against(
++        &mut self,
++        rig: &mut Rig,
++        cur_hz: u64,
++        original_hz: u64,
++        shifted_to_hz: u64,
++        shift_confirmed: bool,
++        may_command: bool,
++        mark_recovery_tried: bool,
++        now: f64,
++    ) -> FakeItRestore {
++        match classify_fake_it(cur_hz, original_hz, shifted_to_hz) {
++            FakeItReconcile::AlreadyHome => {
++                tempo_core::applog::info(
++                    "cat",
++                    &format!(
++                        "Fake It restore: dial already at {:.6} MHz — nothing to do",
++                        original_hz as f64 / 1e6
++                    ),
++                );
++                FakeItRestore::None
++            }
++            FakeItReconcile::OperatorMoved => {
++                // A THIRD frequency. This is a newer operator/external decision — NEVER
++                // overwrite it. The knob-QSY reader adopts `cur_hz` on this same pass now
++                // that the restore is cleared.
++                tempo_core::applog::info(
++                    "cat",
++                    &format!(
++                        "Fake It restore CANCELLED — the dial is now {:.6} MHz, a newer operator \
++                         choice (was going to restore {:.6} MHz)",
++                        cur_hz as f64 / 1e6,
++                        original_hz as f64 / 1e6
++                    ),
++                );
++                FakeItRestore::None
++            }
++            FakeItReconcile::Restore => {
++                if !may_command {
++                    // The one corrective attempt is spent — hold, do NOT re-command.
++                    return FakeItRestore::Unresolved {
++                        original_hz,
++                        shifted_to_hz,
++                        recovery_tried: true,
++                    };
++                }
++                if rig.set_freq(original_hz).is_ok() {
++                    // Truthful readback: EXACT integer-Hz. An accepted `F` the rig will not
++                    // read back to is "sent, not confirmed" — NEVER "verified".
++                    let confirmed = matches!(rig.read_freq(), Ok(back) if back == original_hz);
++                    tempo_core::applog::info(
++                        "cat",
++                        &format!(
++                            "Fake It restore to {:.6} MHz — {}{}",
++                            original_hz as f64 / 1e6,
++                            if confirmed {
++                                "confirmed by read-back"
++                            } else {
++                                "sent, NOT confirmed by read-back"
++                            },
++                            if shift_confirmed {
++                                ""
++                            } else {
++                                " (shift outcome had been ambiguous)"
++                            }
++                        ),
++                    );
++                    if confirmed {
++                        // Settle the poll guards so the knob-QSY detector can't adopt the
++                        // just-restored read-back as an operator QSY.
++                        self.last_dial = original_hz;
++                        self.last_rig_poll = now;
++                        self.last_freq_poll = now + (RIG_POLL_MS - FREQ_POLL_MS);
++                        FakeItRestore::None
++                    } else {
++                        FakeItRestore::Unresolved {
++                            original_hz,
++                            shifted_to_hz,
++                            recovery_tried: mark_recovery_tried,
++                        }
++                    }
++                } else {
++                    tempo_core::applog::info(
++                        "cat",
++                        &format!(
++                            "Fake It restore to {:.6} MHz was refused — dial left unresolved",
++                            original_hz as f64 / 1e6
++                        ),
++                    );
++                    FakeItRestore::Unresolved {
++                        original_hz,
++                        shifted_to_hz,
++                        recovery_tried: mark_recovery_tried,
++                    }
++                }
++            }
++        }
++    }
++
++    /// Reconcile an `Unresolved` Fake-It restore against a trustworthy physical dial reading
++    /// (the heavy poll's own `read_freq`, incl. a tripped-breaker recovery probe). Never
++    /// touched on an idle tick — only when the loop has a real reading in hand. `recovering`
++    /// = this reading is the FIRST after a CAT-health recovery, which unlocks the one
++    /// corrective `F`; a rig that refuses it is then left unresolved and warned about, not
++    /// re-commanded. `Armed` is left to the teardown; `None` is a no-op.
++    fn reconcile_fake_it_on_reading(
++        &mut self,
++        rig: &mut Rig,
++        engine: &Arc<Mutex<Engine>>,
++        cur_hz: u64,
++        recovering: bool,
++        now: f64,
++    ) {
++        if let FakeItRestore::Unresolved {
++            original_hz,
++            shifted_to_hz,
++            recovery_tried,
++        } = self.fake_it_restore
++        {
++            let may_command = recovering && !recovery_tried;
++            self.fake_it_restore = self.resolve_fake_it_against(
++                rig,
++                cur_hz,
++                original_hz,
++                shifted_to_hz,
++                true, // the ambiguity note is only for the immediate attempt
++                may_command,
++                /* mark_recovery_tried */ true,
++                now,
++            );
++            let (w, id) = self.fake_it_restore_status();
++            engine_lock(engine).set_fake_it_restore_status(w, id);
++        }
++    }
++
++    /// The current Fake-It restore status to publish on `RadioStatus`: `(warning, episode_id)`.
++    /// Both `Some` together while a restore is UNRESOLVED, both `None` otherwise (a healthy
++    /// immediate restore is silent). Also advances `fake_it_restore_episode` on each fresh
++    /// transition INTO `Unresolved` (the entry edge) so the id is stable for the life of one
++    /// episode and different for the next — the C# side pairs it with the session token to
++    /// dedup across Direct reconnects. Call once per tick after the fake-it state has settled.
++    fn fake_it_restore_status(&mut self) -> (Option<String>, Option<u64>) {
++        let unresolved = self.fake_it_restore.is_unresolved();
++        if unresolved && !self.fake_it_restore_episode_live {
++            self.fake_it_restore_episode = self.fake_it_restore_episode.wrapping_add(1);
++        }
++        self.fake_it_restore_episode_live = unresolved;
++        match self.fake_it_restore {
++            FakeItRestore::Unresolved { original_hz, .. } => (
++                Some(format!(
++                    "Fake It could not confirm your dial was put back to {:.3} MHz — check your VFO frequency",
++                    original_hz as f64 / 1e6
++                )),
++                Some(self.fake_it_restore_episode),
++            ),
++            _ => (None, None),
++        }
++    }
++
+     /// May the loop START a transmission on the active `rig` this tick?
+     ///
+     /// `false` in the two windows where the `Rig` handle the loop is holding is NOT the
+@@ -3652,6 +3938,10 @@ impl RadioLoop {
+                     dial as f64 / 1e6
+                 ));
+                 self.last_dial = dial;
++                // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a newer commanded dial
++                // wins over any pending Fake-It restore (see the force path above).
++                self.fake_it_restore = FakeItRestore::None;
++                self.fake_it_restore_episode_live = false;
+                 self.dial_fail_count = 0;
+                 // ⚠️ CLEAR THE GIVE-UP ONLY FOR THE DIAL THAT WAS GIVEN UP ON. This used to clear
+                 // on ANY success, which means an HF-only rig that refused 144.390 forgot the
+@@ -3701,6 +3991,12 @@ impl RadioLoop {
+                     let mut eng = engine_lock(engine);
+                     if let Some(hz) = healed {
+                         self.last_dial = hz;
++                        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the operator
++                        // tried to move somewhere the rig refused and we healed to the rig's
++                        // own dial — a pending Fake-It restore to the pre-shift dial is stale.
++                        self.fake_it_restore = FakeItRestore::None;
++                        self.fake_it_restore_episode_live = false;
++                        eng.set_fake_it_restore_status(None, None);
+                         eng.observe_rig_freq(hz);
+                     }
+                     eng.set_rig_refused_dial(Some(mhz));
+@@ -3758,7 +4054,11 @@ impl RadioLoop {
+         self.nr_level_giveup = None;
+         self.comp_level_giveup = None;
+         self.notch_freq_giveup = None;
+-        self.fake_it_restore = None;
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a rig/profile change is a
++        // definitively newer frequency authority — the old Fake-It restore is void. The
++        // snapshot warning + episode id are re-synced from this on the next teardown tick.
++        self.fake_it_restore = FakeItRestore::None;
++        self.fake_it_restore_episode_live = false;
+         self.audio_rig_split = false;
+         self.rig_split_restore = None; // the OLD radio's split is not the new one's to restore
+         self.last_rig_poll = 0.0; // poll the new rig's health/mode/S-meter immediately
+@@ -5068,7 +5368,17 @@ impl RadioLoop {
+                                 );
+                             }
+                         }
+-                        if hz != self.last_dial {
++                        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): reconcile an
++                        // UNRESOLVED Fake-It restore against this trustworthy physical reading
++                        // (Codex correction E). `breaker_probe` = this is the first reading
++                        // after CAT recovered, which unlocks the ONE corrective `F`; otherwise
++                        // classify only (already-home / operator-moved still resolve for free).
++                        self.reconcile_fake_it_on_reading(rig, engine, hz, breaker_probe, now);
++                        // While a Fake-It dial restore is still owed, the rig is sitting at OUR
++                        // temporary shift, not a frequency the operator chose — do not adopt a
++                        // bare dial read as a knob QSY until that restore has landed (or been
++                        // cleared / cancelled above).
++                        if self.fake_it_restore.is_none() && hz != self.last_dial {
+                             self.last_dial = hz;
+                             {
+                                 let mut eng = engine_lock(engine);
+@@ -5123,7 +5433,14 @@ impl RadioLoop {
+                         // one — the K4 via QK4 Remote — doesn't time out and drop+reconnect the CAT
+                         // socket every poll. Only AFTER the dial probe answered, so a half-open link
+                         // can't eat a SECOND 2.5 s timeout on the same dead poll.
+-                        if self.level_supported[LVL_RFPOWER] != Some(false) && have_budget() {
++                        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER
++                        // never-touch, Layer 2 — the loop never forms the `l RFPOWER` drive
++                        // read when suppressed (Layer 1 in rig.rs would refuse it anyway).
++                        // The mic-gain / NR / AGC / COMP mirrors below are untouched.
++                        if !self.disable_rfpower_probe
++                            && self.level_supported[LVL_RFPOWER] != Some(false)
++                            && have_budget()
++                        {
+                             let ok = match rig.read_level("RFPOWER") {
+                                 Ok(frac) => {
+                                     {
+@@ -5619,7 +5936,10 @@ impl RadioLoop {
+             {
+                 self.last_freq_poll = now;
+                 if let Ok(hz) = rig.read_freq() {
+-                    if hz != self.last_dial {
++                    // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): see the matching
++                    // gate on the heavy-poll dial mirror above — a bare dial read is not an
++                    // operator QSY while a Fake-It restore is still owed.
++                    if self.fake_it_restore.is_none() && hz != self.last_dial {
+                         self.last_dial = hz;
+                         {
+                             let mut eng = engine_lock(engine);
+@@ -7239,7 +7559,12 @@ impl RadioLoop {
+                 //
+                 // Nothing is lost by standing down: the ceiling was already applied before the
+                 // tune keyed, and only the heavy poll — also suppressed — could learn otherwise.
+-                if !self.tuning_keyed
++                // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch,
++                // Layer 2 — the per-mode power-ceiling write is one of the two `L RFPOWER`
++                // drive paths new since Jimmy's old Nexus baseline. Suppressed = never form it
++                // (Layer 1 in rig.rs would no-op it anyway). The operator sets power on the rig.
++                if !self.disable_rfpower_probe
++                    && !self.tuning_keyed
+                     && (force || Some(p) != self.last_rf_power)
+                     && self.rf_power_giveup != Some(p)
+                 {
+@@ -7616,18 +7941,57 @@ impl RadioLoop {
+         // was not counted as a live over. Every other end-of-over site in this loop pairs
+         // `tuning_keyed` with `tx_until_ms` — this was the one that did not.
+         //
+-        // Nothing is lost by waiting: `fake_it_restore` is HELD, not dropped, so the dial goes
+-        // back on the first tick after the carrier stops.
+         if self.tx_until_ms.is_none() && !self.manual_ptt_applied && !self.tuning_keyed {
+-            if let Some(hz) = self.fake_it_restore.take() {
+-                let _ = rig.set_freq(hz);
+-                // Settle the poll guards so the knob-QSY detector can't adopt
+-                // a not-yet-restored read-back as an operator QSY (fast mirror deferred a full
+-                // heavy interval, matching the retune path).
+-                self.last_dial = hz;
+-                self.last_rig_poll = now;
+-                self.last_freq_poll = now + (RIG_POLL_MS - FREQ_POLL_MS);
++            // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): Fake-It dial restore —
++            // Nexus owns the temporary shift, so Nexus owns putting the dial back. The rules
++            // (Codex correction pass):
++            //  C. Runs only after TX/tune/manual keying has stopped (the guard above), never
++            //     while keyed.
++            //  D. EXACTLY ONE immediate attempt on a healthy link — on the first safe idle
++            //     tick after unkey. It transitions `Armed` -> `None` (done) or `Unresolved`
++            //     (couldn't confirm). It never stays `Armed`, so this is not an idle-tick
++            //     retry loop. `Unresolved` is NOT touched here — it waits for a trustworthy
++            //     CAT-recovery reading (see `reconcile_fake_it_on_reading`).
++            //  E. Before commanding, the rig is READ and the pending restore is reconciled
++            //     three ways against the physical dial (`classify_fake_it`): already home ->
++            //     clear; still at the temporary shift -> restore; a THIRD frequency -> a newer
++            //     operator/external choice, CANCEL and never overwrite it.
++            if let FakeItRestore::Armed { original_hz, shifted_to_hz, shift_confirmed } =
++                self.fake_it_restore
++            {
++                self.fake_it_restore = if self.cat_ok == Some(false) {
++                    // CAT is down — do not touch the radio and make no claim. Park it; the
++                    // CAT-recovery reading reconciles it, Nexus's own breaker/reopen owns
++                    // reconnect. One recovery attempt is still available.
++                    tempo_core::applog::info(
++                        "cat",
++                        "Fake It restore deferred — CAT is down; will reconcile on recovery",
++                    );
++                    FakeItRestore::Unresolved { original_hz, shifted_to_hz, recovery_tried: false }
++                } else {
++                    match rig.read_freq() {
++                        Ok(cur) => self.resolve_fake_it_against(
++                            rig, cur, original_hz, shifted_to_hz, shift_confirmed,
++                            /* may_command */ true, /* mark_recovery_tried */ false, now,
++                        ),
++                        Err(_) => {
++                            tempo_core::applog::info(
++                                "cat",
++                                "Fake It restore: could not read the dial to confirm — unresolved",
++                            );
++                            FakeItRestore::Unresolved {
++                                original_hz,
++                                shifted_to_hz,
++                                recovery_tried: false,
++                            }
++                        }
++                    }
++                };
+             }
++            // Keep Jimmy's snapshot warning + episode id in step with the state, every idle
++            // tick (the episode id bumps only on the entry edge into `Unresolved`).
++            let (w, id) = self.fake_it_restore_status();
++            eng.set_fake_it_restore_status(w, id);
+             if self.audio_rig_split {
+                 self.audio_rig_split = false;
+                 // The cluster SPLIT-on-Work owns VFO B when active — leave it.
+@@ -7813,7 +8177,12 @@ impl RadioLoop {
+                     d.set_scope_enabled(false);
+                     d.set_data_mode(true);
+                 }
+-                if let Some(p) = tune_power {
++                // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch,
++                // Layer 2 — Tune-power is the second new `L RFPOWER` drive path. Suppressed =
++                // the tune keys at whatever level the operator has the rig set to (Layer 1 in
++                // rig.rs would no-op the write anyway). Carrier reliability is unaffected: this
++                // only skips a CAT write, it does not change the chunk-fed tune loop.
++                if let Some(p) = tune_power.filter(|_| !self.disable_rfpower_probe) {
+                     tempo_core::applog::info(
+                         "cat",
+                         &format!(
+@@ -8156,8 +8525,14 @@ impl RadioLoop {
+                         // move the TX dial before the carrier keys (same as the
+                         // boundary path).
+                         let split = crate::slot::apply_tx_dial_shift(&mut eng, rig);
+-                        if split.fake_it_restore.is_some() {
+-                            self.fake_it_restore = split.fake_it_restore;
++                        if let Some(s) = split.fake_it_shift {
++                            // A fresh Fake-It cycle: overwrite any stale pending restore with
++                            // this over's freshly-read physical original.
++                            self.fake_it_restore = FakeItRestore::Armed {
++                                original_hz: s.original_hz,
++                                shifted_to_hz: s.shifted_to_hz,
++                                shift_confirmed: s.shift_confirmed,
++                            };
+                         }
+                         if split.rig_split_engaged {
+                             self.audio_rig_split = true;
+@@ -8688,8 +9063,15 @@ impl RadioLoop {
+             // disconnect fail-safe can't race the fresh key-up.
+             self.publish_tx_intent_now();
+         }
+-        if action.fake_it_restore.is_some() {
+-            self.fake_it_restore = action.fake_it_restore;
++        if let Some(s) = action.fake_it_shift {
++            // A fresh Fake-It cycle: overwrite any stale pending restore with this over's
++            // freshly-read physical original (Codex correction E — a new cycle cannot inherit
++            // an old restore).
++            self.fake_it_restore = FakeItRestore::Armed {
++                original_hz: s.original_hz,
++                shifted_to_hz: s.shifted_to_hz,
++                shift_confirmed: s.shift_confirmed,
++            };
+         }
+         if action.rig_split_engaged {
+             self.audio_rig_split = true;
+@@ -8839,7 +9221,14 @@ impl RadioLoop {
                      // T/R period (s), mode-driven: FT1 = 4, FT4 ≈ 8, FT8/DX1 = 15.
                      tr_period: eng.active_slot_secs().round() as u32,
                      config_name: "Default",
 -                    tx_message: "",
++                    // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the WSJT-X-protocol
++                    // Status.tx_message field carries the text of the over in progress / just
++                    // sent — the one signal a UDP logger (GridTracker/JTAlert) needs to track
++                    // which callsign and which exchange step is on the air. Hardcoded "" starves
++                    // it. This is the ONLY consumer of the small `Engine::last_own_tx_text`
++                    // accessor; Jimmy's own Direct snapshot path derives own-TX from the
++                    // snapshot's own rows and does not use it.
 +                    tx_message: eng.last_own_tx_text(),
                  });
                  if let Some(fd) = snap.field_day.as_ref() {
                      if fd.qso_count > station.last_fd_qsos {
-@@ -7326,6 +7339,8 @@ struct Transport {
+@@ -9351,6 +9740,15 @@ struct Transport {
      monitor_enabled: bool,
      monitor_device: String,
      monitor_level: f32,
 +    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): see `RadioConfig::ptt_data_source`.
++    /// Threaded through so the per-tick `from_settings` rebuild keeps it and `finish_cat_open`
++    /// re-stamps the Rig on every open/reopen.
 +    ptt_data_source: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): see
++    /// `RadioConfig::disable_rfpower_probe`. Carried here (not just on the startup `RadioConfig`)
++    /// so the per-tick `from_settings` rebuild keeps it — otherwise the first transport rebuild
++    /// after launch would re-open the Rig with the chokepoint OFF.
++    disable_rfpower_probe: bool,
  }
  
  impl Transport {
-@@ -7334,6 +7349,7 @@ impl Transport {
-             ptt_method: c.ptt_method.clone(),
-             rig_model: c.rig_model,
-             serial_port: c.serial_port.clone(),
+@@ -9398,6 +9796,8 @@ impl Transport {
+             monitor_enabled: false,
+             monitor_device: String::new(),
+             monitor_level: 0.5,
 +            ptt_data_source: c.ptt_data_source,
-             // Not part of the per-radio startup seed (it's a GLOBAL keying-line setting):
-             // the live per-tick `from_settings` rebuild supplies the real value, and empty
-             // here just falls back to `serial_port` for the brief pre-first-tick window.
-@@ -7398,6 +7414,7 @@ impl Transport {
++            disable_rfpower_probe: c.disable_rfpower_probe,
+         }
+     }
+ 
+@@ -9451,6 +9851,8 @@ impl Transport {
              monitor_enabled: s.monitor_enabled,
              monitor_device: s.monitor_device.clone(),
              monitor_level: s.monitor_level,
 +            ptt_data_source: s.ptt_data_source,
++            disable_rfpower_probe: s.disable_rfpower_probe,
          }
      }
  
-@@ -7946,6 +7963,7 @@ fn open_cat(
-             rig.set_slow_transport(t.is_network() || t.is_slow_serial_link());
-             // network chains + slow serial links (Xiegu / vintage Kenwood / any rig ≤ 19200
-             // baud) get the long command deadline
-+            rig.set_ptt_data_source(t.ptt_data_source);
-             let mut probe = finish_cat_open(&mut rig, t);
-             probe.detail = format!(
-                 "Sharing the rigctld already on :{} — {}",
-@@ -7994,6 +8012,7 @@ fn open_cat(
-             rig.set_slow_transport(
-                 network || native_civ_addr(t).is_some() || t.is_slow_serial_link(),
-             ); // network chains + the native daemon + slow serial links (Xiegu / vintage Kenwood / any rig ≤ 19200 baud) get the long deadline
-+            rig.set_ptt_data_source(t.ptt_data_source);
-             let mut probe = finish_cat_open(&mut rig, t);
-             // Say WHICH backend this result came from — a native-CI-V radio silently
-             // falling back to rigctld otherwise reads as "native was tested and failed".
-@@ -13558,6 +13577,7 @@ mod tests {
+@@ -10344,6 +10746,13 @@ fn rigctld_launch_failed_for(mac: bool, e: &std::io::Error) -> String {
+ /// silently resurrects one of them (the tests exercise the coexist branch; this shared
+ /// seam is what makes them cover the spawn branch by construction).
+ fn finish_cat_open(rig: &mut Rig, t: &Transport) -> CatProbe {
++    // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the single shared tail of every
++    // CAT open/reopen/recovery is the one place to STAMP per-rig policy so it can never be
++    // bypassed by a freshly-constructed `Rig` — DATA/ACC PTT source, and the RFPOWER
++    // never-touch chokepoint (Layer 1). Both are read off the `Transport`, which the per-tick
++    // `from_settings` rebuild keeps current. Stamped BEFORE `probe_cat`'s first read.
++    rig.set_ptt_data_source(t.ptt_data_source);
++    rig.set_rfpower_suppressed(t.disable_rfpower_probe);
+     // READ-ONLY LAUNCH (operator-approved): the open no longer commands the rig.
+     // The set_freq/set_mode that lived here for every session before 2026-07-21 are
+     // deleted — the probe below READS the rig's own dial+mode and that read seeds the
+@@ -18089,7 +18498,13 @@ mod tests {
+ 
+         // ⚠️ POSITIVE CONTROL: with no carrier up, an outstanding restore DOES get written —
+         // otherwise the assertion below would pass against a scene where nothing was pending.
+-        state.fake_it_restore = Some(14_074_000);
++        // The mock reports the rig at 14.074 (= `shifted_to_hz`), so the teardown restores the
++        // 14.075 `original_hz` with an `F`.
++        state.fake_it_restore = FakeItRestore::Armed {
++            original_hz: 14_075_000,
++            shifted_to_hz: 14_074_000,
++            shift_confirmed: true,
++        };
+         let mark = log.lock().unwrap().len();
+         run(&mut state, &mut rig, 0.0);
+         assert!(
+@@ -18107,7 +18522,11 @@ mod tests {
+         engine.lock().unwrap().set_tune(true);
+         run(&mut state, &mut rig, 200.0);
+         assert!(state.tuning_keyed, "control: the tune keyed");
+-        state.fake_it_restore = Some(14_074_000);
++        state.fake_it_restore = FakeItRestore::Armed {
++            original_hz: 14_075_000,
++            shifted_to_hz: 14_074_000,
++            shift_confirmed: true,
++        };
+         let mark = log.lock().unwrap().len();
+         for i in 1..5 {
+             run(&mut state, &mut rig, 200.0 + f64::from(i) * 20.0);
+@@ -18120,11 +18539,351 @@ mod tests {
+             log.lock().unwrap()
+         );
+         assert!(
+-            state.fake_it_restore.is_some(),
++            !state.fake_it_restore.is_none(),
+             "the restore must be HELD, not dropped — it still has to happen after the tune"
+         );
+     }
+ 
++    /// JIMMY COMPAT (nexus-compat): a stateful rigctld stub whose `f` reflects the last accepted
++    /// `F`, and which can be told to REFUSE `F` (`RPRT -1`) — for the Fake-It restore proofs.
++    fn mock_rigctld_stateful(
++        start_hz: u64,
++        reject_set_freq: std::sync::Arc<std::sync::atomic::AtomicBool>,
++    ) -> (String, Arc<Mutex<Vec<String>>>) {
++        use std::io::{BufRead, BufReader, Write};
++        use std::sync::atomic::Ordering;
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
++        let log = Arc::new(Mutex::new(Vec::<String>::new()));
++        let log2 = Arc::clone(&log);
++        std::thread::spawn(move || {
++            let mut dial = start_hz;
++            for stream in listener.incoming() {
++                let Ok(mut stream) = stream else { break };
++                let mut reader = BufReader::new(match stream.try_clone() {
++                    Ok(r) => r,
++                    Err(_) => continue,
++                });
++                let mut line = String::new();
++                loop {
++                    line.clear();
++                    match reader.read_line(&mut line) {
++                        Ok(0) | Err(_) => break,
++                        Ok(_) => {}
++                    }
++                    let l = line.trim().to_string();
++                    log2.lock().unwrap().push(l.clone());
++                    let reply = if l == "f" {
++                        format!("{dial}\n")
++                    } else if let Some(rest) = l.strip_prefix("F ") {
++                        if reject_set_freq.load(Ordering::SeqCst) {
++                            "RPRT -1\n".to_string()
++                        } else {
++                            if let Ok(v) = rest.trim().parse::<u64>() {
++                                dial = v;
++                            }
++                            "RPRT 0\n".to_string()
++                        }
++                    } else {
++                        "RPRT 0\n".to_string()
++                    };
++                    if stream.write_all(reply.as_bytes()).is_err() {
++                        break;
++                    }
++                }
++            }
++        });
++        (addr, log)
++    }
++
++    // ─────── JIMMY COMPAT (nexus-compat): the corrected Fake-It dial restore (Codex pass) ───────
++
++    struct FakeItScene {
++        engine: Arc<Mutex<Engine>>,
++        log: Arc<Mutex<Vec<String>>>,
++        reject: std::sync::Arc<std::sync::atomic::AtomicBool>,
++        rig: Rig,
++        backend: MockBackend,
++        state: RadioLoop,
++        sinks: Sinks<'static>,
++        ra: Box<dyn FnMut(&Transport) -> Result<MockBackend, String>>,
++        rr: Box<dyn FnMut(&Transport, bool) -> RigOpen>,
++        station: StationSinks,
++    }
++    impl FakeItScene {
++        fn new(start_hz: u64) -> Self {
++            let engine = Arc::new(Mutex::new(Engine::new("W9XYZ", "EN37", 0)));
++            {
++                let mut e = engine.lock().unwrap();
++                e.set_operating_mode("digital", false);
++                e.set_frequency(start_hz as f64 / 1e6, "20m", "USB");
++            }
++            let reject = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
++            let (addr, log) = mock_rigctld_stateful(start_hz, reject.clone());
++            FakeItScene {
++                engine,
++                log,
++                reject,
++                rig: Rig::rigctld(&addr),
++                backend: MockBackend::new(),
++                state: loop_state(),
++                sinks: no_sinks(),
++                ra: Box::new(mock_reopen_audio()),
++                rr: Box::new(mock_reopen_rig()),
++                station: StationSinks::new(),
++            }
++        }
++        fn step(&mut self, t: f64) {
++            self.state
++                .step(
++                    &self.engine,
++                    &mut self.backend,
++                    &mut self.rig,
++                    &self.sinks,
++                    t,
++                    &mut self.ra,
++                    &mut self.rr,
++                    &mut self.station,
++                )
++                .unwrap();
++        }
++        fn f_writes(&self, from: usize) -> Vec<String> {
++            self.log.lock().unwrap()[from..]
++                .iter()
++                .filter(|l| l.starts_with("F "))
++                .cloned()
++                .collect()
++        }
++        fn any_cat(&self, from: usize) -> Vec<String> {
++            self.log.lock().unwrap()[from..]
++                .iter()
++                .filter(|l| *l == "f" || l.starts_with("F "))
++                .cloned()
++                .collect()
++        }
++        fn mark(&self) -> usize {
++            self.log.lock().unwrap().len()
++        }
++        fn armed(&mut self, original_hz: u64, shifted_to_hz: u64, shift_confirmed: bool) {
++            self.state.fake_it_restore = FakeItRestore::Armed { original_hz, shifted_to_hz, shift_confirmed };
++        }
++    }
++
++    /// Case 3 + 14: healthy CAT, restore ONLY after unkey, immediate on the first safe idle
++    /// tick, confirmed by an exact read-back, then the pending state is cleared.
++    #[test]
++    fn jimmy_compat_fake_it_healthy_restore_is_after_unkey_immediate_and_verified() {
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        // The rig is sitting where a shift left it; the pre-shift physical dial was 14.076.
++        let _ = sc.rig.set_freq(14_074_000);
++        // 14: still keyed ⇒ NO restore yet.
++        sc.state.tx_until_ms = Some(9_999_999_999.0);
++        sc.armed(14_076_000, 14_074_000, true);
++        let m = sc.mark();
++        sc.step(100.0);
++        assert!(sc.f_writes(m).is_empty(), "restore must not run while TX is keyed");
++        assert!(!sc.state.fake_it_restore.is_none(), "still Armed while keyed");
++        // Unkey ⇒ the very next idle tick restores 14.076 and clears.
++        sc.state.tx_until_ms = None;
++        let m = sc.mark();
++        sc.step(200.0);
++        assert_eq!(sc.f_writes(m), vec!["F 14076000".to_string()], "immediate restore of the FRESH pre-shift dial");
++        assert!(sc.state.fake_it_restore.is_none(), "a confirmed restore clears the state");
++    }
++
++    /// Case 5: a restore `set_freq` that the rig refuses (or that would not read back) is
++    /// "sent, NOT confirmed" — NEVER "verified". It parks as Unresolved and raises the operator
++    /// warning; it is not silently cleared.
++    #[test]
++    fn jimmy_compat_fake_it_unconfirmed_restore_is_not_verified() {
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        // The rig sits at the shift and will REFUSE the corrective `F` (RPRT -1).
++        let _ = sc.rig.set_freq(14_074_000);
++        sc.reject.store(true, std::sync::atomic::Ordering::SeqCst);
++        sc.armed(14_076_000, 14_074_000, true);
++        sc.step(100.0);
++        assert!(
++            sc.state.fake_it_restore.is_unresolved(),
++            "a restore the rig would not take is Unresolved — not cleared, not 'verified'"
++        );
++        assert!(
++            sc.engine.lock().unwrap().snapshot().radio.fake_it_restore_warning.is_some(),
++            "an unresolved restore raises the persistent operator warning"
++        );
++    }
++
++    /// Cases 7 + 15: CAT is down at teardown ⇒ the loop does NOT touch the radio and does NOT
++    /// hammer — no `f`/`F` on the wire on any idle tick — it parks Unresolved for recovery.
++    #[test]
++    fn jimmy_compat_fake_it_cat_failure_does_not_hammer_the_wire() {
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        sc.state.cat_ok = Some(false);
++        sc.state.freq_misses = 5; // keep the health poll from re-probing this tick
++        sc.state.cat_retry_at = 1_000_000.0; // and the breaker from re-probing
++        sc.armed(14_076_000, 14_073_500, true);
++        let m = sc.mark();
++        for i in 0..6 {
++            sc.step(100.0 + f64::from(i) * 20.0);
++        }
++        assert!(
++            sc.any_cat(m).is_empty(),
++            "CAT down ⇒ not one dial read or write on the wire across six idle ticks: {:?}",
++            sc.log.lock().unwrap()
++        );
++        assert!(sc.state.fake_it_restore.is_unresolved(), "parked Unresolved, awaiting CAT recovery");
++    }
++
++    /// Cases 8 + 9: CAT recovers. Reading == the temporary shift ⇒ one corrective `F`.
++    /// Reading == the original ⇒ clear, with NO retune.
++    #[test]
++    fn jimmy_compat_fake_it_reconciles_on_cat_recovery() {
++        // 8: still at the shift.
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        let _ = sc.rig.set_freq(14_073_500); // physically at the shift
++        sc.state.fake_it_restore = FakeItRestore::Unresolved {
++            original_hz: 14_074_000,
++            shifted_to_hz: 14_073_500,
++            recovery_tried: false,
++        };
++        sc.state.cat_ok = Some(false);
++        sc.state.cat_retry_at = 0.0; // breaker may re-probe now
++        let m = sc.mark();
++        sc.step(1_000.0); // heavy poll fires, breaker recovers, reconcile runs
++        assert_eq!(sc.f_writes(m), vec!["F 14074000".to_string()], "one corrective restore on recovery");
++        assert!(sc.state.fake_it_restore.is_none(), "confirmed ⇒ cleared");
++
++        // 9: already back at the original ⇒ clear, no F.
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        sc.state.fake_it_restore = FakeItRestore::Unresolved {
++            original_hz: 14_074_000,
++            shifted_to_hz: 14_073_500,
++            recovery_tried: false,
++        };
++        sc.state.cat_ok = Some(false);
++        sc.state.cat_retry_at = 0.0;
++        let m = sc.mark();
++        sc.step(1_000.0);
++        assert!(sc.f_writes(m).is_empty(), "already home ⇒ no retune on recovery");
++        assert!(sc.state.fake_it_restore.is_none(), "state cleared");
++    }
++
++    /// Case 10 — THE CRITICAL ONE. Fake-It shifts; CAT fails; the operator manually turns the
++    /// physical VFO to a THIRD frequency; CAT returns. The old restore is CANCELLED — the newer
++    /// physical dial is NEVER overwritten.
++    #[test]
++    fn jimmy_compat_fake_it_never_overwrites_a_newer_manual_dial() {
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        // Shift armed, CAT then fails, restore parked Unresolved.
++        sc.state.fake_it_restore = FakeItRestore::Unresolved {
++            original_hz: 14_074_000, // the pre-Fake-It dial
++            shifted_to_hz: 14_073_500, // the temporary Fake-It dial
++            recovery_tried: false,
++        };
++        sc.state.cat_ok = Some(false);
++        // The operator physically retunes to a THIRD frequency during the blackout.
++        // (mock still refuses nothing; we drive the mock's reported dial with a raw F.)
++        let _ = sc.rig.set_freq(14_100_000);
++        sc.state.cat_retry_at = 0.0;
++        let m = sc.mark();
++        sc.step(1_000.0); // CAT recovers, reconcile sees 14.100
++
++        let wire = sc.log.lock().unwrap()[m..].to_vec();
++        assert!(
++            !wire.iter().any(|l| l == "F 14074000"),
++            "the stale restore MUST NOT be written over the operator's newer 14.100 dial: {wire:?}"
++        );
++        assert!(sc.state.fake_it_restore.is_none(), "the stale restore is CANCELLED");
++        assert!(
++            sc.engine.lock().unwrap().snapshot().radio.fake_it_restore_warning.is_none(),
++            "a cancelled restore leaves no lingering warning — the operator's dial is authoritative"
++        );
++    }
++
++    /// Case 11: a Jimmy-commanded dial supersedes and clears any pending Fake-It restore.
++    #[test]
++    fn jimmy_compat_fake_it_superseded_by_a_commanded_dial() {
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        sc.armed(14_076_000, 14_073_500, true);
++        {
++            let mut e = sc.engine.lock().unwrap();
++            e.set_frequency(14.100, "20m", "USB"); // operator/Jimmy commands a new dial
++        }
++        sc.step(200.0);
++        sc.step(220.0);
++        assert!(sc.state.fake_it_restore.is_none(), "a commanded retune clears the pending restore");
++    }
++
++    /// Case 12: a fresh Fake-It cycle cannot inherit an old restore — the loop's assign sites
++    /// overwrite unconditionally with the NEW over's freshly-read physical original.
++    #[test]
++    fn jimmy_compat_fake_it_new_cycle_replaces_the_old_restore() {
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        // A stale unresolved restore from a previous QSO on a different dial.
++        sc.state.fake_it_restore = FakeItRestore::Unresolved {
++            original_hz: 14_070_000,
++            shifted_to_hz: 14_069_000,
++            recovery_tried: true,
++        };
++        // A new FakeIt over: drive the real pre-key shift path.
++        {
++            let mut e = sc.engine.lock().unwrap();
++            let mut s = e.settings().clone();
++            s.split_mode = tempo_app::settings::SplitMode::FakeIt;
++            e.apply_settings(s);
++            e.set_tier(tempo_app::dto::Tier::Ft8);
++            e.set_tx_enabled(true);
++            e.set_tx_offset(750.0); // out of the 1500-2000 window ⇒ a real dial shift
++            e.broadcast("CQ W9XYZ EN37");
++        }
++        let mut rx = RxRing::new();
++        let action = crate::slot::slot_tx_phase(
++            &mut sc.engine.lock().unwrap(),
++            &mut sc.rig,
++            &mut sc.backend,
++            &mut rx,
++            0,
++            1000.0,
++            false,
++            None,
++            None,
++        );
++        let s = action.fake_it_shift.expect("the new over armed a Fake-It shift");
++        // The loop's assign site (unconditional overwrite):
++        sc.state.fake_it_restore = FakeItRestore::Armed {
++            original_hz: s.original_hz,
++            shifted_to_hz: s.shifted_to_hz,
++            shift_confirmed: s.shift_confirmed,
++        };
++        match sc.state.fake_it_restore {
++            FakeItRestore::Armed { original_hz, .. } => assert_eq!(
++                original_hz, 14_074_000,
++                "the NEW cycle's fresh physical original (14.074), not the stale 14.070"
++            ),
++            other => panic!("expected a fresh Armed cycle, got {other:?}"),
++        }
++    }
++
++    /// Case 13: no Fake-It operation ⇒ no restore state, and the teardown writes nothing.
++    #[test]
++    fn jimmy_compat_fake_it_no_operation_creates_no_state() {
++        let mut sc = FakeItScene::new(14_074_000);
++        sc.step(0.0);
++        assert!(sc.state.fake_it_restore.is_none(), "no shift ⇒ no restore state");
++        let m = sc.mark();
++        for i in 0..4 {
++            sc.step(100.0 + f64::from(i) * 20.0);
++        }
++        assert!(sc.f_writes(m).is_empty(), "the teardown writes no dial when nothing is owed");
++    }
++
+     /// ⭐ TUNE POWER: a tune-up keys at its own level, and the operator's level comes back on
+     /// EVERY exit path — including the ones that never reach the tune-release branch.
+     ///
+@@ -18291,6 +19050,164 @@ mod tests {
+         );
+     }
+ 
++    // ───────────────────────────── JIMMY COMPAT (nexus-compat) ─────────────────────────────
++    // Deterministic scripted proofs for the downstream compatibility patches. See
++    // EngineHost/nexus-compat/README.md.
++
++    fn loop_state_cfg(mutate: impl FnOnce(&mut RadioConfig)) -> RadioLoop {
++        let mut cfg = RadioConfig::default();
++        mutate(&mut cfg);
++        RadioLoop::new(Transport::from_cfg(&cfg), None, &cfg)
++    }
++
++    /// Both transport builders carry the DATA/ACC-PTT and RFPOWER-suppression flags, so the
++    /// per-tick `from_settings` rebuild keeps re-stamping the Rig and a reopen never loses them.
++    #[test]
++    fn jimmy_compat_transport_threads_ptt_data_source_and_rfpower_suppression() {
++        let mut s = test_settings();
++        s.ptt_data_source = true;
++        s.disable_rfpower_probe = true;
++        let t = Transport::from_settings(&s);
++        assert!(t.ptt_data_source, "from_settings must carry ptt_data_source");
++        assert!(t.disable_rfpower_probe, "from_settings must carry disable_rfpower_probe");
++
++        let cfg = RadioConfig {
++            ptt_data_source: true,
++            disable_rfpower_probe: true,
++            ..RadioConfig::default()
++        };
++        let tc = Transport::from_cfg(&cfg);
++        assert!(tc.ptt_data_source && tc.disable_rfpower_probe, "from_cfg must carry both");
++    }
++
++    /// `finish_cat_open` is the single shared tail of every CAT open/reopen/recovery — it must
++    /// STAMP the Rig with the DATA-PTT source and the RFPOWER never-touch chokepoint before the
++    /// first read, so no freshly-built `Rig` can bypass policy.
++    #[test]
++    fn jimmy_compat_finish_cat_open_stamps_data_ptt_and_rfpower_suppression() {
++        let (addr, log) = mock_rigctld_on(14_074_000, false);
++        let mut t = cat_transport(4599, None);
++        t.disable_rfpower_probe = true;
++        t.ptt_data_source = true;
++        let mut rig = Rig::rigctld(&addr);
++        let _ = finish_cat_open(&mut rig, &t);
++
++        // RFPOWER drive: read refused, write silently no-op — nothing on the wire.
++        assert!(rig.read_level("RFPOWER").is_err(), "l RFPOWER must be refused after the stamp");
++        assert!(rig.set_power(0.4).is_ok(), "set_power must be a silent Ok after the stamp");
++        // DATA-PTT: a CAT key emits T 3, an unkey T 0 — never T 1.
++        let mark = log.lock().unwrap().len();
++        let _ = rig.ptt(true);
++        let _ = rig.ptt(false);
++        let wire = log.lock().unwrap()[mark..].to_vec();
++        assert!(wire.iter().any(|l| l == "T 3"), "DATA-source key must be T 3: {wire:?}");
++        assert!(wire.iter().any(|l| l == "T 0"), "unkey must be T 0: {wire:?}");
++        assert!(!wire.iter().any(|l| l == "T 1"), "a DATA-source rig must never emit T 1: {wire:?}");
++        assert!(
++            !wire.iter().any(|l| l == "l RFPOWER" || l.starts_with("L RFPOWER")),
++            "no RFPOWER drive command may reach the wire: {wire:?}"
++        );
++    }
++
++    /// The radio loop's OWN three RFPOWER drive call sites (heavy telemetry poll `l RFPOWER`,
++    /// per-mode power ceiling, Tune power) never form a command when the probe is disabled —
++    /// Layer 2, belt to the Rig chokepoint's braces. Positive control: with the flag OFF the
++    /// heavy poll DOES issue `l RFPOWER`, so this is measuring the gate, not a dead path.
++    #[test]
++    fn jimmy_compat_disable_rfpower_probe_keeps_all_rfpower_drive_off_the_wire() {
++        let drive_cmds = |suppress: bool| -> Vec<String> {
++            let engine = Arc::new(Mutex::new(Engine::new("W9XYZ", "EN37", 0)));
++            {
++                let mut e = engine.lock().unwrap();
++                let mut s = e.settings().clone();
++                s.tune_power_pct = Some(10); // arm the Tune-power write path too
++                e.apply_settings(s);
++                e.set_rf_power(0.8);
++            }
++            let (addr, log) = mock_rigctld_on(14_074_000, false);
++            let mut rig = Rig::rigctld(&addr);
++            let mut backend = MockBackend::new();
++            let mut state = loop_state_cfg(|c| c.disable_rfpower_probe = suppress);
++            let (sinks, mut ra, mut rr) = (no_sinks(), mock_reopen_audio(), mock_reopen_rig());
++            let mut station = StationSinks::new();
++            let mut run = |state: &mut RadioLoop, rig: &mut Rig, t: f64| {
++                state
++                    .step(&engine, &mut backend, rig, &sinks, t, &mut ra, &mut rr, &mut station)
++                    .unwrap();
++            };
++            let mark = log.lock().unwrap().len();
++            run(&mut state, &mut rig, 0.0);
++            run(&mut state, &mut rig, 1_000.0); // force a heavy telemetry poll
++            engine.lock().unwrap().set_tune(true);
++            run(&mut state, &mut rig, 1_020.0); // key a tune → Tune-power write path
++            for i in 1..6 {
++                run(&mut state, &mut rig, 1_020.0 + f64::from(i) * 20.0);
++            }
++            let out: Vec<String> = log.lock().unwrap()[mark..]
++                .iter()
++                .filter(|l| l.as_str() == "l RFPOWER" || l.starts_with("L RFPOWER"))
++                .cloned()
++                .collect();
++            out
++        };
++        assert_eq!(
++            drive_cmds(true),
++            Vec::<String>::new(),
++            "suppressed: NOTHING RFPOWER-drive may reach rigctld from any loop call site"
++        );
++        assert!(
++            !drive_cmds(false).is_empty(),
++            "positive control: with the flag off the loop DOES touch RFPOWER drive"
++        );
++    }
++
++    /// Do-not-set-mode: when the operator has picked WSJT-X "Mode: None", the loop issues no
++    /// `M` CAT command at all, for any mode. Positive control: without it, a retune commands `M`.
++    #[test]
++    fn jimmy_compat_dont_set_mode_emits_no_mode_command() {
++        let m_cmds = |dont_set_mode: bool| -> Vec<String> {
++            let engine = Arc::new(Mutex::new(Engine::new("W9XYZ", "EN37", 0)));
++            {
++                let mut e = engine.lock().unwrap();
++                let mut s = e.settings().clone();
++                s.dont_set_mode = dont_set_mode;
++                e.apply_settings(s);
++                e.set_operating_mode("digital", false);
++                e.set_frequency(14.074, "20m", "USB");
++            }
++            let (addr, log) = mock_rigctld_on(14_074_000, false);
++            let mut rig = Rig::rigctld(&addr);
++            let mut backend = MockBackend::new();
++            let mut state = loop_state();
++            let (sinks, mut ra, mut rr) = (no_sinks(), mock_reopen_audio(), mock_reopen_rig());
++            let mut station = StationSinks::new();
++            let mut run = |state: &mut RadioLoop, rig: &mut Rig, t: f64| {
++                state
++                    .step(&engine, &mut backend, rig, &sinks, t, &mut ra, &mut rr, &mut station)
++                    .unwrap();
++            };
++            let mark = log.lock().unwrap().len();
++            for i in 0..4 {
++                run(&mut state, &mut rig, f64::from(i) * 300.0);
++            }
++            let out: Vec<String> = log.lock().unwrap()[mark..]
++                .iter()
++                .filter(|l| l.starts_with("M "))
++                .cloned()
++                .collect();
++            out
++        };
++        assert_eq!(
++            m_cmds(true),
++            Vec::<String>::new(),
++            "Mode: None must leave the rig's mode entirely alone"
++        );
++        assert!(
++            !m_cmds(false).is_empty(),
++            "positive control: without Mode: None a retune DOES command the rig mode"
++        );
++    }
++
+     fn cat_transport(rigctld_port: u16, broker_self_port: Option<u16>) -> Transport {
+         Transport {
+             radio_label: LogLabel(radio_label("", 1035)),
+@@ -18316,6 +19233,11 @@ mod tests {
              monitor_enabled: false,
              monitor_device: String::new(),
              monitor_level: 0.5,
 +            ptt_data_source: false,
++            // Left OFF here so the upstream per-mode power-ceiling / tune-power tests that assert
++            // an `L RFPOWER` write still exercise that path. The Jimmy-compat suppression tests
++            // set it explicitly.
++            disable_rfpower_probe: false,
          }
      }
  

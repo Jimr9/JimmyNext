@@ -9,8 +9,8 @@ in `pin.txt`, with a small number of source patches applied on top by `scripts/p
 (run automatically as part of the normal build -- see that script). Those patches are the
 **only** difference between what Jimmy actually builds and official upstream Nexus, and they
 exist for exactly one reason: to carry functionality Jimmy Next genuinely requires that official
-Nexus, at the pinned revision, does not yet provide (or, for one patch, to work around a Windows
-build-toolchain interaction bug in Nexus's own build script).
+Nexus, at the pinned revision, does not yet provide (or, for two patches, to work around Windows
+build/test-toolchain interactions in Nexus's own build script and test suite).
 
 Every patch here is small, isolated to one file, and removed the moment official Nexus provides
 equivalent functionality -- see "Checking a patch against a newer Nexus" below.
@@ -28,129 +28,207 @@ equivalent functionality -- see "Checking a patch against a newer Nexus" below.
   Jimmy moves to the official implementation. These patches are meant to shrink toward zero
   over time, not accumulate.
 
-## Current patches (against Nexus `v1.6.0`, commit `de01be9d`)
+## Current pin
 
-### `patches/tempo-app-engine.patch` -- 3 behaviors
+`pin.txt` points at an **exact commit on `main`**, not a release tag:
 
-| Behavior | Why Jimmy needs it | What's missing upstream |
+```
+NEXUS_TAG=main
+NEXUS_COMMIT=44bca866856ae0e684203197238dd56897f54ceb
+```
+
+`44bca866` is 7 commits past the newest stable tag `v1.10.0` (`c19e658b`). Those 7 commits are
+Connect-TV work, a stale-decode alert guard, a Confirm-tier opt-out, a Linux capture-buffer
+fix, and optional dB-report log comments -- **no** radio-control, Fake-It, Tune-meter, RFPOWER,
+FT8/FT4 decoder, or QSO-sequencer change. `prepare-nexus.ps1` handles the `main` case by cloning
+`main` and then `git checkout --detach`-ing exactly `NEXUS_COMMIT`, and still verifies the
+resolved `HEAD` equals it.
+
+## Current patches (against Nexus `main`, commit `44bca866`)
+
+Seven patches, **one source file each**. Jimmy's downstream behavior these preserve is the
+**Jimmy Next 2.0.55 operator experience** -- that is the compatibility baseline.
+
+### `patches/tempo-app-engine.patch` -- 5 behaviors, `crates/tempo-app/src/engine.rs`
+
+| Behavior | Why Jimmy needs it | What's missing / wrong upstream |
 |---|---|---|
-| Early-pass decode accumulation | Without this, a QSO reply caught only on a slot's early decode pass is used by Nexus's own sequencer to drive the next transmission, but never reaches Jimmy's decode feed -- silently breaking **auto-logging** for a QSO that otherwise completed normally. | `Engine::observe`'s decode-recording path overwrites `last_wire_decodes`/`last_decodes` on every call instead of accumulating within the same slot. |
-| `Engine::set_pskreporter(bool)` | Jimmy's Options UI has a live PSK Reporter on/off toggle that must not require a restart. | No live setter exists; only a start-of-session `Settings.pskreporter` field. |
-| `Engine::last_own_tx_text()` | Feeds the WSJT-X-protocol `Status.tx_message` field (see the service.rs patch) so external tools that parse Jimmy's UDP status (GridTracker, JTAlert, etc.) can track which over is in progress. | No accessor for the most recent transmitted text exists. |
+| Same-slot decode accumulation | A QSO reply caught only on a slot's EARLY decode pass drives Nexus's own sequencer's next over, but a plain overwrite of `last_wire_decodes`/`last_decodes` on the boundary pass drops it from `AppSnapshot.recent_decodes` -- silently breaking Jimmy's **auto-logging** for a QSO that otherwise completed. The fix accumulates when `last_decode_slot == Some(slot)` (early-pass dupes are already removed by `drop_early_dupes`), and still replaces on a genuinely newer slot. | `process_decodes` ends with an unconditional `self.last_wire_decodes = ...; self.last_decodes = ...`. |
+| `Engine::set_pskreporter(bool)` | Jimmy's Options UI has a live PSK Reporter on/off toggle that must not require a restart. | No live setter; only a start-of-session `Settings.pskreporter` field. |
+| `Engine::last_own_tx_text()` | The **only** consumer is the WSJT-X-protocol `Status.tx_message` field (see the service.rs patch) -- the one signal a UDP logger (GridTracker/JTAlert) needs to track which callsign / exchange step is on the air. Jimmy's own Direct snapshot path derives own-TX from the snapshot's own rows and does **not** use this accessor. | No accessor for the most recent transmitted text. |
+| `dont_set_mode` guard in `rig_mode_effective()` | WSJT-X Radio tab "Mode: None" -- when set, the radio loop must never command the rig's mode. `rig_mode_effective()` returns `String::new()` first thing, which every mode-set call site already treats as "nothing to do". | No native "leave the mode alone" gate. |
+| `Engine::set_fake_it_restore_status` + `RadioStatus.fake_it_restore_warning` / `fake_it_restore_warning_id` snapshot emit | Codex correction G (+ Audit #10): an UNRESOLVED Fake-It dial restore must reach the operator. The radio loop sets a concise string + a monotonic per-episode id while unresolved and clears both (`None`) the moment it reconciles; Jimmy dedups per `(id + session token)` so the same episode announces once even across a Direct reconnect. `None` in normal operation. | No engine-side path to surface Fake-It restore state. |
 
-**Obsoleted when:** official Nexus accumulates same-slot decodes across an early + boundary pass,
-and/or adds a live PSK-Reporter setter and a "last transmitted text" accessor to `Engine`.
-**How to check:** `grep -n "last_decode_slot ==" crates/tempo-app/src/engine.rs` in a clean
-checkout of the new revision -- if the overwrite (`self.last_wire_decodes = wire_copy...`) is
-now conditioned on the slot rather than unconditional, the decode-accumulation part is fixed.
-`grep -n "fn set_pskreporter\|fn last_own_tx_text"` for the other two.
+**Obsoleted when:** upstream accumulates same-slot decodes across the early + boundary pass;
+adds a live PSK-Reporter setter; adds a `dont_set_mode`-equivalent `Settings` gate; and its own
+Fake-It restore verifies + exposes an unresolved state.
+**How to check:** `grep -n "last_decode_slot ==" crates/tempo-app/src/engine.rs` (is the
+overwrite now slot-conditioned?); `grep -n "fn set_pskreporter\|fn last_own_tx_text"`;
+`grep -n "dont_set_mode" crates/tempo-app/src/settings.rs`.
 
-### `patches/tempo-app-settings.patch` -- 2 behaviors
+### `patches/tempo-app-settings.patch` -- 3 fields, `crates/tempo-app/src/settings.rs`
 
-Adds `Settings.ptt_data_source: bool` and `Settings.dont_set_mode: bool`, both `#[serde(default)]`
-(off), mirroring WSJT-X's Radio tab "Transmit Audio Source: Data" and "Mode: None".
+Adds `Settings.ptt_data_source`, `Settings.dont_set_mode`, and `Settings.disable_rfpower_probe`,
+all `#[serde(default)]` (off). `ptt_data_source`/`dont_set_mode` mirror WSJT-X's Radio tab
+"Transmit Audio Source: Data" and "Mode: None". `disable_rfpower_probe` lives on `Settings` (not
+only the startup `RadioConfig`) so the per-tick `Transport::from_settings` rebuild keeps it and
+`finish_cat_open` keeps re-stamping the Rig-level RFPOWER chokepoint after any CAT reopen.
 
-**Why Jimmy needs it:** Jimmy's Options > Radio tab exposes both as operator settings (parity
-with WSJT-X); EngineHost's CLI (`--ptt-data-source`, `--dont-set-mode`) sets them at launch.
-**Obsoleted when:** official Nexus's `Settings` struct gains fields with equivalent meaning.
-**How to check:** `grep -n "ptt_data_source\|dont_set_mode" crates/tempo-app/src/settings.rs`.
+**Why Jimmy needs it:** Jimmy's Options > Radio tab exposes the first two; EngineHost sets all
+three at launch (`--ptt-data-source`, `--dont-set-mode`, and `settings.disable_rfpower_probe = true`
+unconditionally).
+**Obsoleted when:** upstream `Settings` gains fields with equivalent meaning.
+**How to check:** `grep -n "ptt_data_source\|dont_set_mode\|disable_rfpower_probe" crates/tempo-app/src/settings.rs`.
 
-### `patches/tempo-audio-rig.patch` -- part of `ptt_data_source`
+### `patches/tempo-app-snapshot.patch` -- Fake-It restore visible to Jimmy, `crates/tempo-app/src/dto.rs` + `src/lib.rs` + `tests/fixtures/*_snapshot.json`
 
-Changes `rig::ptt_line(on: bool)` to `ptt_line(on: bool, data_source: bool)`, sending Hamlib's
-`RIG_PTT_ON_DATA` (`T 3`) instead of plain `RIG_PTT_ON` (`T 1`) when the operator has selected
-the rig's DATA/ACC port for transmit audio. Adds `Rig::set_ptt_data_source`/a `ptt_data_source`
-field to carry the setting through to the actual PTT command.
+Codex correction G (+ Audit #10). Adds `RadioStatus.fake_it_restore_warning: Option<String>`
+**and `fake_it_restore_warning_id: Option<u64>`** (both `#[serde(default)]`), their `None` init
+in the `AppSnapshot` literal (`lib.rs`), and re-baselines the two golden snapshot fixtures
+(`station_identity` / `watch_identity`), which now carry `"fakeItRestoreWarning": null` +
+`"fakeItRestoreWarningId": null`. The engine sets both via `Engine::set_fake_it_restore_status`
+(see `tempo-app-engine.patch`). The `_id` is a monotonic per-EPISODE counter (bumped once on
+each fresh transition into `Unresolved` in the radio loop) -- Jimmy's `DirectApplyStatus`
+dedups the warning on `(episode id + snapshot session token)` so the SAME still-unresolved
+episode is announced only once even across a Direct transport reconnect, while a genuinely new
+episode (identical wording, or a new EngineHost's new token) announces again.
 
-**Why Jimmy needs it:** without this, a station wired to the rig's rear DATA port (rather than
-the front mic jack) cannot select that at the CAT level -- this is a real-station wiring case,
-not a cosmetic setting.
-**Obsoleted when:** `rig::ptt_line`'s signature (or equivalent) gains a mic/data distinction.
-**How to check:** `grep -n "fn ptt_line" crates/tempo-audio/src/rig.rs` -- if it already takes
-more than a plain `on: bool`, compare its behavior against WSJT-X's `TXAudioSource`.
+**Obsoleted when:** the engine-side accessor is obsoleted, or upstream exposes an equivalent
+Fake-It restore state on `RadioStatus`.
+**How to check:** `grep -n "fake_it_restore_warning" crates/tempo-app/src/dto.rs`. The fixture
+re-baseline is regenerated with `cargo test -p tempo-app --test station_identity
+regenerate_station_fixture -- --ignored` and the `watch_identity` sibling -- and is *only* the
+one new `null` field; anything else in the diff is a real change to find.
 
-### `patches/tempo-audio-service.patch` -- wiring for `ptt_data_source`/`dont_set_mode` + `tx_message`
+### `patches/tempo-audio-rig.patch` -- DATA/ACC PTT + RFPOWER chokepoint, `crates/tempo-audio/src/rig.rs`
 
-Threads `ptt_data_source`/`dont_set_mode` from `RadioConfig` through the private `Transport`
-struct to the `Rig` built in `open_cat` (both spawn paths), and changes the outbound WSJT-X UDP
-`Status` message's `tx_message` field from a hardcoded `""` to `eng.last_own_tx_text()`.
+Two concerns, both "how this `Rig` talks to the radio":
 
-**Obsoleted when:** the corresponding `tempo-app-engine.patch`/`tempo-app-settings.patch`/
-`tempo-audio-rig.patch` items are obsoleted -- this patch only wires those through, it carries
-no independent behavior of its own. Re-derive it against whichever of those three still apply.
+1. **DATA/ACC PTT.** `rig::ptt_line(on: bool)` -> `ptt_line(on: bool, data_source: bool)`,
+   emitting Hamlib `RIG_PTT_ON_DATA` (`T 3`) instead of plain `RIG_PTT_ON` (`T 1`) when the
+   operator has selected the rig's rear DATA/ACC port for transmit audio. `unkey` is `T 0`
+   either way. Plus a `Rig::set_ptt_data_source` / `ptt_data_source` field.
+2. **RFPOWER never-touch chokepoint (Layer 1).** A `Rig::rfpower_suppressed` field +
+   `Rig::set_rfpower_suppressed`. When set: `read_level("RFPOWER")` returns `Err` with **no
+   bytes on the wire** (EXACT token match -- `RFPOWER_METER_WATTS` and every `read_meter_f32`
+   telemetry read are a different Hamlib level and stay allowed), and `set_power(..)` returns
+   `Ok` having sent **nothing**. This covers every present and future caller that reaches these
+   two chokepoints. Layer 2 is the call-site gating in the service.rs patch.
 
-### `patches/tempo-audio-telemetry.patch` -- suppress the radio loop's own RFPOWER probe
+**Why Jimmy needs it:** DATA-port wiring is a real-station case, not cosmetic. RFPOWER
+suppression: an `l RFPOWER` on a freshly-spawned `rigctld` can trip a destructive
+calibration-sweep bug in Hamlib's Kenwood backend (Hamlib/Hamlib#1595) on first touch, dropping
+the operator's actual transmit power; and Jimmy's own policy is that a read must never be able
+to change anything on the radio, and the engine never adjusts the operator's drive. **No
+operator override.**
+**Obsoleted when:** `rig::ptt_line` gains a mic/data distinction; AND upstream gives a real way
+to forbid RFPOWER drive read/write per rig (or Hamlib #1595 is fixed in the bundled backend).
+**How to check:** `grep -n "fn ptt_line\|fn read_level\|fn set_power\|rfpower_suppressed" crates/tempo-audio/src/rig.rs`.
 
-Adds `RadioConfig.disable_rfpower_probe: bool` (default `false`, unchanged upstream behavior)
-and a matching `RadioLoop` field copied from it at construction. When true, the radio loop's
-routine telemetry poll (`service.rs`'s heavy-poll block) never issues an `RFPOWER` level read at
-all -- the read site's gate becomes `!self.disable_rfpower_probe && self.level_supported[LVL_RFPOWER]
-!= Some(false)` instead of just the second half. EngineHost's `main.rs` sets this unconditionally
-(`disable_rfpower_probe: true` in the `RadioConfig` literal) -- it is not operator-configurable
-and has no CLI flag, because there is no scenario where Jimmy should ever risk it.
+### `patches/tempo-audio-service.patch` -- radio-loop wiring, `crates/tempo-audio/src/service.rs`
 
-**Why Jimmy needs it (confirmed live, 2026-08-20, twice):** on Kenwood rigs, Hamlib's own Kenwood
-backend keeps a "did the mode change" cache as a process-lifetime `static` that starts unset on
-every fresh `rigctld.exe` process. The FIRST `RFPOWER` read (or write) of that process's lifetime
-trips a destructive calibration sweep (Hamlib/Hamlib#1595) that silently drops the rig's actual
-transmit power (e.g. 100W -> 5W). Since `jimmy-engine-host.exe` spawns a fresh `rigctld.exe` on
-every single Jimmy Next launch, this fired on every single restart. Real WSJT-X never hits this
-bug at all -- it has no live power/SWR/ALC/wattage meters feature and never queries `RFPOWER`,
-only `SWR` (for its own "Halt Tx when SWR > 2.5"); the RFPOWER telemetry read is new functionality
-Nexus added beyond what WSJT-X's own CAT usage ever needed. Jimmy's own broader policy (operator
-directive, 2026-08-20) is that reading radio state must never be able to change anything on the
-radio -- since RFPOWER is the one Hamlib query where that isn't true, on this rig family, the only
-way to actually guarantee it is to never issue that query, not merely to reduce how often a fresh
-process sees it (an earlier, now-reverted Jimmy-side mitigation kept a rigctld process warm across
-restarts, which only reduced exposure to "once per reboot" -- this patch is the real fix).
+One file, one concern (the radio loop / CAT service). Carries:
 
-**What Jimmy loses:** the `rfPower`/`txPoW` SNAPSHOT telemetry fields (`DirectRadioStatus.RfPower`/
-`TxPoW` in Jimmy's own C#) go permanently null/absent for every rig, not just Kenwood -- there is
-no way to detect "this specific rig is vulnerable" from Nexus's own Settings/CLI surface, so the
-suppression is blanket. Jimmy doesn't display these today (Alt+Q reports S-meter/power/SWR when
-transmitting, so `RfPower` specifically stops showing there) and never wrote to RF power at all,
-so this is an accepted, deliberate tradeoff, not a regression anyone needs to chase.
+- **`ptt_data_source` + `disable_rfpower_probe` threading.** New fields on `RadioConfig` and
+  the private `Transport` struct; carried through `Transport::from_cfg` / `from_settings` /
+  `from_profile`; **stamped onto the `Rig` in `finish_cat_open`** -- the single shared tail of
+  every CAT open/reopen/recovery (`open_monitor` stamps the RFPOWER flag on its own read-only
+  rig too). `from_profile` (monitor radios) forces both safe (`ptt_data_source: false`,
+  `disable_rfpower_probe: true`).
+- **RFPOWER never-touch (Layer 2).** A `RadioLoop.disable_rfpower_probe` lifetime mirror gates
+  the loop's own three RFPOWER **drive** call sites so the loop never even forms the command:
+  the heavy-poll `l RFPOWER` read, the per-mode power-ceiling `set_power`, and the Tune-power
+  `set_power` (the last two are `L RFPOWER` **writes** that did not exist in Jimmy's old v1.6.0
+  Nexus baseline). Safe meters (`RFPOWER_METER_WATTS`/`SWR`/`ALC`/`COMP_METER`) are untouched.
+- **`Status.tx_message`** changes from a hardcoded `""` to `eng.last_own_tx_text()`.
+- **Corrected Fake-It dial restore** (rewritten in the Codex correction pass; the state model
+  now lives in the `FakeItRestore` enum -- `None` / `Armed` / `Unresolved`):
+  - **Physical capture (A).** `slot::apply_tx_dial_shift`'s `FakeIt` arm does a FRESH
+    `rig.read_freq()` immediately before the shift and uses *that* as the restore target --
+    never the cached engine dial. If a trustworthy read cannot be had it **FAILS CLOSED**: no
+    shift, no `FakeItShift`, the over transmits un-shifted.
+  - **Non-binary shift outcome (B).** The shift's `set_freq` result is carried as
+    `shift_confirmed`; an `Err` (transport lost) does **not** mean "no restore needed" -- the
+    `Armed` state is still armed and reconciled on the physical readback.
+  - **Unkey first (C).** The teardown runs only under `tx_until_ms.is_none() &&
+    !manual_ptt_applied && !tuning_keyed` -- unchanged.
+  - **Exactly one immediate attempt (D).** The `Armed` teardown makes ONE attempt (read →
+    reconcile → maybe one `set_freq` → verify) and transitions to `None` or `Unresolved`. It
+    never stays `Armed`, so there is no idle-tick retry loop. `Unresolved` is **not touched**
+    on idle ticks -- only when the heavy poll has a trustworthy physical reading in hand
+    (`reconcile_fake_it_on_reading`), and the ONE corrective `set_freq` there is unlocked only
+    on the first reading after a CAT-health recovery.
+  - **Reconciliation (E).** `classify_fake_it(cur, original, shifted_to)` -- EXACT integer-Hz:
+    `cur == original` → already home, clear; `cur == shifted_to` → still shifted, restore;
+    anything **else** → a newer operator/external dial, **CANCEL** (never overwritten). Plus
+    the knob-QSY readers are gated while a restore is owed, and a commanded retune / reopen /
+    a fresh Fake-It cycle each clear or replace it.
+  - **Verification tolerance (F).** EXACT `==` -- rigctld frequencies are whole Hz and Nexus
+    carries no per-rig tuning-resolution to justify a tolerance. An accepted set that will not
+    read back is "sent, NOT confirmed" -- **never** "verified".
+  - **Visible to Jimmy (G + Audit #10).** `Unresolved` sets `RadioStatus.fake_it_restore_warning`
+    + `fake_it_restore_warning_id` (a per-episode counter, bumped on the entry edge into
+    `Unresolved`; see `tempo-app-snapshot.patch`). Jimmy announces once per `(episode id +
+    session token)` -- surviving a Direct reconnect. A healthy immediate restore is silent.
 
-**Obsoleted when:** official Nexus adds a real way to suppress or scope the RFPOWER probe itself
-(e.g. a rig-model-aware skip, or its own operator-facing "don't poll power" toggle wired into the
-same read site), OR upstream Hamlib actually fixes Hamlib/Hamlib#1595 in the Kenwood backend
-Nexus's bundled `rigctld.exe` ships (unlikely to land inside this project's own control, but
-would make the whole gate moot -- see "How to check" below either way).
-**How to check:** `grep -n "disable_rfpower_probe\|fn read_level" crates/tempo-audio/src/service.rs`
-in a clean checkout of the new revision -- if Nexus's own code already gates that RFPOWER read
-behind something equivalent (a Settings field, a capability flag, a rig-model check), delete this
-patch and wire EngineHost's `main.rs` to that instead. **If a Nexus upstream merge is ever done
-without checking this first:** the read site this patches (`service.rs`'s heavy-poll block, search
-`LVL_RFPOWER`) is exactly the kind of code a routine merge could touch or move without anyone
-thinking about Hamlib #1595 at all -- `prepare-nexus.ps1`'s own `--dry-run` check will fail loudly
-and name this patch if the surrounding lines shift, which is the actual backstop; but if a future
-revision happens to leave enough context lines intact for the patch to apply cleanly while
-otherwise restructuring how/when RFPOWER gets read (e.g. moving it earlier, adding a second read
-site), a clean patch apply would NOT catch that -- re-read the diff by hand against the new
-revision's real `read_level("RFPOWER")` call sites (plural -- grep, don't assume there's still
-only one) before trusting this patch still does its job.
+**Not carried forward (deliberately -- these were experimental, never in 2.0.55):** the
+`5 x 1000 ms` Fake-It retry loop, and the `600 ms` synchronous Tune-meter poll. Upstream's
+`meters_now = keyed_now && !self.tuning_keyed` Tune-meter suppression is **kept as-is** (not
+patched); live meters are intentionally unavailable during a chunk-fed Tune carrier.
+
+**Obsoleted when:** the engine/settings/rig patch items are obsoleted (the threading follows
+them); AND upstream's Fake-It teardown itself verifies the restore and does not consume state
+on failure.
+**How to check:** `grep -n "disable_rfpower_probe\|fake_it_restore\|last_own_tx_text\|ptt_data_source" crates/tempo-audio/src/service.rs`
+-- and re-read the Fake-It teardown block and every `read_level("RFPOWER")` / `set_power` call
+site by hand (grep -- do not assume the counts are unchanged).
+
+### `patches/tempo-audio-slot.patch` -- Fake-It physical capture + Rig-split do-not-set-mode
+
+`crates/tempo-audio/src/slot.rs`, `apply_tx_dial_shift`:
+
+- **`SplitMode::FakeIt`** now returns a `FakeItShift { original_hz, shifted_to_hz,
+  shift_confirmed }` (was a bare `Option<u64>`). `original_hz` is a FRESH `rig.read_freq()`
+  taken immediately before the shift -- fail closed (no shift, `None`) if it errors.
+  `shift_confirmed` records whether the shift's own `set_freq` returned `Ok` (ambiguous ≠ "no
+  restore needed"). This is the pre-shift-authority half of the corrected Fake-It design (see
+  the service.rs patch).
+- **`SplitMode::Rig`** now gates the TX-VFO mode set (`rig.set_split_mode`) on
+  `!eng.settings().dont_set_mode` -- "Do not set mode" must stop the Rig-split mode command
+  too, not just the RX-VFO `M`. Only the mode set is gated; `set_split` + `set_split_freq`
+  (the frequency split) still run. (`rig_mode_effective()` already returns `""` under
+  `dont_set_mode` and `set_split_mode` no-ops on `""`, but the explicit gate stops the path
+  regressing on its own.)
+
+**Obsoleted when:** upstream captures a fresh physical dial for Fake-It and honours a
+do-not-set-mode option on the Rig-split path.
+**How to check:** `grep -n "read_freq\|FakeItShift\|dont_set_mode" crates/tempo-audio/src/slot.rs`.
+
+### `patches/tempo-audio-rigctld-test-portability.patch` -- test-only Windows fixes
+
+`crates/tempo-audio/src/rigctld_proc.rs`, **`#[cfg(test)]` module only -- no production code**:
+
+- `run_bounded_returns_the_output_of_a_command_that_finishes` spawned bare `echo`, a cmd.exe
+  builtin -> on Windows, `cmd /C echo hello`.
+- `rigctl_is_found_beside_rigctld` hard-coded `/usr/bin/rigctl` on the EXPECTED side, making it
+  a test of Windows' path-separator rules -> build both input and expected with the same
+  `Path::join`.
+
+**Obsoleted when:** upstream makes these two tests platform-neutral.
+**How to check:** `grep -n "\"echo\"\|/usr/bin/rigctl" crates/tempo-audio/src/rigctld_proc.rs`.
 
 ### `patches/tempo-fast-sys-build.patch` -- Windows `\\?\`-path / gfortran build fix
 
-Strips the `\\?\` extended-length-path prefix that `Path::canonicalize()` produces on Windows
-before handing the path to CMake, whose generated Ninja/Makefile rules get mis-split by
-MSYS2/MinGW gfortran's own path handling. Without this, a full rebuild from a fresh build
-directory fails every Fortran compile step in `tempo-fast-sys`'s native `libtempo` build.
+`crates/tempo-fast-sys/build.rs`: strips the `\\?\` extended-length-path prefix that
+`Path::canonicalize()` produces on Windows before handing the path to CMake, whose generated
+Ninja/Makefile rules get mis-split by MSYS2/MinGW gfortran's own path handling. Without this, a
+full rebuild from a **fresh** build directory fails every Fortran compile step in
+`tempo-fast-sys`'s native `libtempo` build. Byte-identical to the v1.6.0 version of this patch
+(`build.rs` is unchanged upstream). Build-environment only -- no runtime behavior.
 
-This is **not** one of the 5 behaviors reported to the operator -- it's a build-environment
-compatibility fix, unrelated to Jimmy's runtime behavior. It is carried here (not as a separate
-vendored crate copy) because `tempo-app`/`tempo-audio`/`tempo-core` all transitively depend on
-`tempo-fast-sys`, and once those three are sourced from the same prepared checkout as this patch
-set (see `prepare-nexus.ps1`), a separately-patched standalone copy of `tempo-fast-sys` would
-either conflict or silently stop being used -- keeping every patch in one place, applied to one
-consistent checkout, avoids that class of bug entirely.
-
-**Obsoleted when:** official Nexus's own `tempo-fast-sys/build.rs` strips or avoids the
-`\\?\` prefix itself (or the underlying Rust/CMake/MinGW interaction is fixed upstream in one of
-those tools, making the workaround moot).
-**How to check:** `grep -n "canonicalize" crates/tempo-fast-sys/build.rs` in a clean checkout of
-the new revision, and try a build from a **fresh** build directory (`cargo clean` first) --
-the bug does not reproduce on an incremental build, only a fresh one.
+**Obsoleted when:** upstream's own `build.rs` strips/avoids the `\\?\` prefix.
+**How to check:** `grep -n "canonicalize\|strip_verbatim" crates/tempo-fast-sys/build.rs`, and
+try a build after `cargo clean` (the bug does not reproduce on an incremental build).
 
 ## Checking a patch against a newer Nexus
 
@@ -164,16 +242,18 @@ Whenever Jimmy deliberately updates to a newer official Nexus revision:
    with `patch --dry-run` first and fails loudly, naming the patch, if upstream has drifted
    enough that a patch no longer applies cleanly. That failure means: re-derive the patch by
    hand against the new revision (locate the same anchor/function, reapply the same conceptual
-   change), not force it through.
+   change), not force it through. **A clean apply is not proof the patch still does its job** --
+   for the RFPOWER and Fake-It patches especially, re-read the real call sites by hand.
 4. Re-run the EngineHost test suite (`cargo test`, from `EngineHost/`) before committing the
-   revision bump.
+   revision bump -- including the `jimmy_compat_*` tests in `tempo-audio`'s `service.rs` /
+   `rig.rs` test modules, which are the deterministic RFPOWER / Fake-It / DATA-PTT /
+   do-not-set-mode proofs.
 
 ## Retired
 
-`vendor/tempo-fast-sys-patched/` (a full local copy of the `tempo-fast-sys` crate with only the
-`\\?\` fix applied, wired in via a Cargo `[patch]` section) served this same purpose before this
-directory existed, and has been removed. It is superseded by `patches/tempo-fast-sys-build.patch`
-above -- keeping it would have meant two different `\\?\` fixes, one of which (the Cargo
-`[patch]` redirect) would have silently stopped applying once `tempo-app`/`tempo-audio` moved to
-building from `prepare-nexus.ps1`'s prepared checkout instead of the developer's raw Nexus
-clone, since the patched source URL would no longer match.
+- `patches/tempo-audio-telemetry.patch` (v1.6.0-era): its one behavior -- suppressing the
+  heavy-poll `l RFPOWER` read -- is folded into `tempo-audio-rig.patch` (Layer 1 chokepoint) +
+  `tempo-audio-service.patch` (Layer 2 call-site gates), which additionally cover the two
+  `L RFPOWER` **write** paths that are new since v1.6.0.
+- `vendor/tempo-fast-sys-patched/` (a full local copy of the crate wired in via Cargo
+  `[patch]`) -- superseded by `patches/tempo-fast-sys-build.patch`.

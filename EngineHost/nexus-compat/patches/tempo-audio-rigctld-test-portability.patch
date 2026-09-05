@@ -1,0 +1,50 @@
+diff --git a/src/rigctld_proc.rs b/src/rigctld_proc.rs
+index 1903a854..6eb01c22 100644
+--- a/src/rigctld_proc.rs
++++ b/src/rigctld_proc.rs
+@@ -3508,6 +3508,14 @@ mod tests {
+     /// that DOES finish comes back with its output intact.
+     #[test]
+     fn run_bounded_returns_the_output_of_a_command_that_finishes() {
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): test-only Windows portability.
++        // `echo` is a cmd.exe builtin on Windows, not a spawnable binary — spell the same
++        // "print hello and exit" through the platform's real shell. Production `run_bounded`
++        // is unchanged; this only feeds it a command that exists on the host running the test.
++        #[cfg(windows)]
++        let out = run_bounded(std::ffi::OsStr::new("cmd"), &["/C", "echo", "hello"], 10)
++            .expect("a command that exits must produce output");
++        #[cfg(not(windows))]
+         let out = run_bounded(std::ffi::OsStr::new("echo"), &["hello"], 10)
+             .expect("a command that exits must produce output");
+         assert!(out.status.success());
+@@ -3524,9 +3532,14 @@ mod tests {
+     #[test]
+     fn rigctl_is_found_beside_rigctld() {
+         use std::ffi::OsString;
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): test-only Windows portability.
++        // Build the input path and the expected path with the SAME `Path` join so the
++        // separator matches the host — hard-coding `/usr/bin/rigctl` on the expected side made
++        // this assert a test of Windows' path rules, not of `rigctl_beside`.
++        let bin_dir = std::path::Path::new("/usr/bin");
+         assert_eq!(
+-            rigctl_beside(OsString::from("/usr/bin/rigctld")),
+-            OsString::from("/usr/bin/rigctl")
++            rigctl_beside(bin_dir.join("rigctld").into_os_string()),
++            bin_dir.join("rigctl").into_os_string()
+         );
+         // The .exe arm, as a bare name: a Windows-style path with backslashes is a single
+         // file_name on Unix (only `/` separates there), so spelling one here would test the host's
+@@ -3535,9 +3548,11 @@ mod tests {
+             rigctl_beside(OsString::from("rigctld.exe")),
+             OsString::from("rigctl.exe")
+         );
++        // Same host-separator fix as the /usr/bin arm above (JIMMY COMPAT, nexus-compat).
++        let opt_dir = std::path::Path::new("/opt/hamlib/bin");
+         assert_eq!(
+-            rigctl_beside(OsString::from("/opt/hamlib/bin/rigctld.exe")),
+-            OsString::from("/opt/hamlib/bin/rigctl.exe")
++            rigctl_beside(opt_dir.join("rigctld.exe").into_os_string()),
++            opt_dir.join("rigctl.exe").into_os_string()
+         );
+         // A bare name (nothing resolved) is left alone rather than rewritten into a guess.
+         assert_eq!(

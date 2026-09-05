@@ -408,7 +408,40 @@ namespace WSJTX_Controller
                     if (radio.TxAlc.HasValue)
                         parts.Add(explain ? $"ALC {radio.TxAlc.Value:0.00}, {AlcHint(radio.TxAlc.Value)}"
                                           : $"ALC {radio.TxAlc.Value:0.00}");
-                    StatusView.ShowMessage(parts.Count > 0 ? string.Join(", ", parts) : "Radio: no meter data available.", false);
+
+                    // 2.0.58 (item 13) / Item 4 (2026-09-02) -- diagnostic only, no behavioral
+                    // change: record exactly which TX meter fields THIS fresh SNAPSHOT carried
+                    // (Alt+Q always pulls a new one -- Jimmy caches no ALC), plus transmit/tune
+                    // state, the snapshot slot as a sequence proxy, CAT health and the bundled
+                    // Hamlib version. tx_alc=null (field absent) is logged distinctly from
+                    // tx_alc=0.00 (present, genuine zero) so a hardware test can tell "the rig/
+                    // backend stopped supplying ALC" from "ALC is really reading zero". Does NOT
+                    // probe RFPOWER or anything else -- reads only what is already in the snapshot.
+                    DebugOutput($"{Time()} [ALC-DIAG] on-demand (Alt+Q): transmitting={radio.Transmitting} localTx={transmitting} tuning={radio.Tuning} slot={radio.Slot} " +
+                                $"catOk={radio.CatOk?.ToString() ?? "null"} " +
+                                $"tx_po_w={(radio.TxPoW.HasValue ? radio.TxPoW.Value.ToString("0.##") : "null")} " +
+                                $"tx_swr={(radio.TxSwr.HasValue ? radio.TxSwr.Value.ToString("0.##") : "null")} " +
+                                $"tx_alc={(radio.TxAlc.HasValue ? radio.TxAlc.Value.ToString("0.###") : "null")} " +
+                                $"tx_level={radio.TxLevel:0.###} " +
+                                $"smeter_db={(radio.SmeterDb.HasValue ? radio.SmeterDb.Value.ToString() : "null")} " +
+                                $"hamlib={RigctldClient.GetBundledHamlibVersion() ?? "unknown"}");
+
+                    if (parts.Count > 0)
+                    {
+                        StatusView.ShowMessage(string.Join(", ", parts), false);
+                    }
+                    else if (radio.CatOk == false)
+                    {
+                        // General CAT failure -- the rig isn't answering at all.
+                        StatusView.ShowMessage("Radio: CAT link is down, no meter data.", false);
+                    }
+                    else
+                    {
+                        // CAT is up (or health not reported), but this rig/backend supplied no
+                        // transmit meter values. The TS-590SG, for example, multiplexes PWR/SWR/
+                        // ALC onto one CAT meter register that can read back inactive.
+                        StatusView.ShowMessage("Radio: CAT connected, but this rig or backend reported no transmit meter data.", false);
+                    }
                     return;
                 }
 
@@ -788,6 +821,9 @@ namespace WSJTX_Controller
                 analysisCompleted = true;
                 _manualAnalysisRequested = false;
                 _slotAnalysisWatchdog?.Stop();
+                // 2.0.58: record the terminal outcome so "report latest transmit-slot analysis"
+                // can read it back later without re-running.
+                RecordSlotAnalysisFromCurrentOffsets(SlotAnalysisState.Complete);
                 StatusView.ShowMessage(
                     $"Transmit slot analysis complete. Even period: {evenOffset} Hz, odd period: {oddOffset} Hz.",
                     true);

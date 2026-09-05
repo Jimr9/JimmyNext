@@ -5,7 +5,10 @@
 # it. See README.md in this directory for how the compatibility patches below relate to this
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
+#
+# This integration pins an exact commit on `main` (7 commits past tag v1.10.0), NOT a tag.
+# prepare-nexus.ps1 fetches NEXUS_COMMIT directly when NEXUS_TAG is the literal "main".
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.6.0
-NEXUS_COMMIT=de01be9d0bcd9e5ec4736d1afbdfd683def920ee
+NEXUS_TAG=main
+NEXUS_COMMIT=44bca866856ae0e684203197238dd56897f54ceb

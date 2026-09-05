@@ -56,11 +56,45 @@ namespace WSJTX_Controller
         // priority/dedup/throttle/wording). See WSJTX_Controller/Notify/ -- NotificationCenter
         // (constructed in WsjtxClient's constructor) is the only consumer of this.
         public NotificationSettings Notifications = new NotificationSettings();
+        // 2.0.58: session-only, bounded record of what Jimmy actually announced -- fed from the
+        // one final delivery seam (ShowMsg, which every delivered NotificationCenter notification
+        // and every direct ShowMessage/ShowUploadStatus already funnels through) and, when
+        // notificationHistoryIncludeRoutineStatus is set, the routine status render path too.
+        // Viewed in the modeless NotificationHistoryWindow (Ctrl+Shift+H). Not persisted.
+        public NotificationHistory NotificationHistory = new NotificationHistory();
+        // "Include routine status messages" in the Notification History window. Default true for
+        // the 2.0.58 testing phase (collect routine status so we can decide what belongs where).
+        // Persisted as notificationHistoryIncludeRoutineStatus.
+        public bool notificationHistoryIncludeRoutineStatus = true;
+        // Item 1/2 (2026-09-03): the operator's global "when to speak the routine RX/TX/QSO
+        // status line" choice, applied by WsjtxClient.ShowStatus() when it hands each render to
+        // SpeechCoordinator.SubmitRoutineStatus. Default Now = today's behaviour (spoken as soon
+        // as it renders, minus the near-duplicate suppression). A plain "N available stations"
+        // summary is ALWAYS at least AfterRx (batched to the real end-of-decode-pass, coalesced)
+        // regardless of this; this setting can defer it further -- whichever is more deferred
+        // wins. Persisted as routineStatusSpeakWhen.
+        public SpeakWhen routineStatusSpeakWhen = SpeakWhen.Now;
+        // 2026-09-04: the operator's global speech-eligibility choice for the routine RX/TX/QSO
+        // status line -- see the SpeakCondition enum. Always (default) = no change on upgrade;
+        // OutsideQsoOnly = go silent on routine status during a contact (Notification History
+        // still records it); DuringQsoOnly / Never are also available. Persisted as
+        // routineStatusCondition. Migrated on load from the legacy routineStatusDuringQso key
+        // (Suppress -> OutsideQsoOnly).
+        public SpeakCondition routineStatusCondition = SpeakCondition.Always;
+        // The configured hotkey label ("Alt+Z", "Ctrl+Shift+H", ...) of the command currently
+        // being handled in ProcessCmdKey, or null. Read by ShowMsg so a message produced
+        // synchronously inside a hotkey handler is tagged with its origin in Notification
+        // History. Deliberately scoped to the ProcessCmdKey call (set on entry, restored on
+        // exit) -- not a persistent "last key pressed", which would misattribute a later
+        // asynchronous completion.
+        private string _activeHotkeyOrigin;
         public bool advancedCallLayout { get => Settings.AdvancedCallLayout; set => Settings.AdvancedCallLayout = value; }
         public bool advShowTx1 { get => Settings.AdvShowTx1; set => Settings.AdvShowTx1 = value; }
         public bool advShowTx2 { get => Settings.AdvShowTx2; set => Settings.AdvShowTx2 = value; }
         public bool advShowRaw { get => Settings.AdvShowRaw; set => Settings.AdvShowRaw = value; }
         public bool showSpotWatch { get => Settings.ShowSpotWatch; set => Settings.ShowSpotWatch = value; }
+        public bool smartQsoStartEnabled { get => Settings.SmartQsoStartEnabled; set => Settings.SmartQsoStartEnabled = value; }
+        public int smartStartSilencePeriods { get => Settings.SmartStartSilencePeriods; set => Settings.SmartStartSilencePeriods = value; }
         public bool rawShowCq = true;
         public bool rawShowDirected = true;
         public bool rawShowReports = true;
@@ -224,6 +258,8 @@ namespace WSJTX_Controller
         public int  clubLogLogbookRefreshDays      = 7;
         private System.Windows.Forms.Timer logbookAutoSyncTimer;
 
+        private NotificationHistoryWindow _notificationHistoryWindow;
+        private Control _notificationHistoryReturnFocus;
         private LogbookWindow _logbookWindow;
         private System.Windows.Forms.Button logbookButton;
         private OtaSpotsWindow _otaSpotsWindow;
@@ -700,7 +736,9 @@ namespace WSJTX_Controller
                 cqOnlyRadioButton.Checked = iniFile.Read("cqOnly") != "False";              //default: true
                 newOnBand = iniFile.Read("newOnBand") != "False";      //default: true
                 bandComboBox.SelectedIndex = newOnBand ? 1 : 0;
-                if (iniFile.KeyExists("myContinent")) myContinent = iniFile.Read("myContinent");    //required to be null if not set
+                // 2.0.58: validate a hand-edited value -- only a real 2-letter code survives,
+                // anything else falls back to null ("not specified"), same as an absent key.
+                if (iniFile.KeyExists("myContinent")) myContinent = WsjtxClient.NormalizeContinent(iniFile.Read("myContinent"));
                 // Stage A6 emergency rollback valve (Classification/ClassificationCutover.cs) --
                 // intentionally undocumented/not exposed in OptionsDlg; default true (new
                 // ClassificationEngine-computed path). Set useClassificationEngine=False by
@@ -789,6 +827,28 @@ namespace WSJTX_Controller
                 moveFocusToStatusOnCallSelect = iniFile.Read("moveFocusToStatusOnCallSelect") == "True";
                 checkForUpdatesOnStartup = iniFile.Read("checkForUpdatesOnStartup") == "True";
                 announceImportantAlertsWhenFocusElsewhere = iniFile.Read("announceImportantAlertsWhenFocusElsewhere") == "True";
+                // 2.0.58: default true (== "False" test, so a missing/blank key stays true) --
+                // the testing-phase default; the operator can turn it off in the Notification
+                // History window and that choice is persisted.
+                notificationHistoryIncludeRoutineStatus = iniFile.Read("notificationHistoryIncludeRoutineStatus") != "False";
+                if (System.Enum.TryParse(iniFile.Read("routineStatusSpeakWhen"), out SpeakWhen rsw))
+                {
+                    // Never is no longer a timing -- it moved to routineStatusCondition. Keep the
+                    // timing sane and let the condition carry the "never" intent.
+                    if (rsw == SpeakWhen.Never) routineStatusCondition = SpeakCondition.Never;
+                    else routineStatusSpeakWhen = rsw;
+                }
+                // routineStatusCondition (2026-09-04): explicit key wins; else migrate the
+                // legacy routineStatusDuringQso (Suppress -> OutsideQsoOnly, SpeakNormally ->
+                // Always).
+                if (System.Enum.TryParse(iniFile.Read("routineStatusCondition"), out SpeakCondition rsc))
+                    routineStatusCondition = rsc;
+                else
+                {
+                    string legacyRsdq = iniFile.Read("routineStatusDuringQso");
+                    if (legacyRsdq == "Suppress") routineStatusCondition = SpeakCondition.OutsideQsoOnly;
+                    else if (legacyRsdq == "SpeakNormally") routineStatusCondition = SpeakCondition.Always;
+                }
 
                 // Sound settings: migrate old enabled keys for backward compat
                 // Enabled state for CallAdded/CallingMe/Logged already read above from playCallAdded/playMyCall/playLogged
@@ -1402,7 +1462,7 @@ namespace WSJTX_Controller
                 iniFile.Write("skipLevelPrompt", skipLevelPrompt.ToString());
                 iniFile.Write("cqOnly", cqOnlyRadioButton.Checked.ToString());
                 iniFile.Write("newOnBand", (bandComboBox.SelectedIndex == 1).ToString());
-                iniFile.Write("myContinent", wsjtxClient.myContinent);
+                iniFile.Write("myContinent", wsjtxClient.myContinent ?? "");   // blank = not specified; never a friendly name
                 // T4 fix, 2026-08-23: rankMethod is legacy migration-compatibility data --
                 // Controller only ever READS it as a fallback when modern rankOrder/rankBeam are
                 // absent (see this method's own rankMethodIdx load above). Once the operator has
@@ -1463,6 +1523,11 @@ namespace WSJTX_Controller
                 iniFile.Write("moveFocusToStatusOnCallSelect", moveFocusToStatusOnCallSelect.ToString());
                 iniFile.Write("checkForUpdatesOnStartup", checkForUpdatesOnStartup.ToString());
                 iniFile.Write("announceImportantAlertsWhenFocusElsewhere", announceImportantAlertsWhenFocusElsewhere.ToString());
+                iniFile.Write("notificationHistoryIncludeRoutineStatus", notificationHistoryIncludeRoutineStatus.ToString());
+                iniFile.Write("routineStatusSpeakWhen", routineStatusSpeakWhen.ToString());
+                iniFile.Write("routineStatusCondition", routineStatusCondition.ToString());
+                iniFile.Write("routineStatusDuringQso",
+                    routineStatusCondition == SpeakCondition.OutsideQsoOnly ? "Suppress" : "SpeakNormally");
                 // Sound settings
                 iniFile.Write("soundFile_CallAdded",        soundFile_CallAdded   ?? "");
                 iniFile.Write("soundFile_CallingMe",        soundFile_CallingMe   ?? "");
@@ -1934,6 +1999,7 @@ namespace WSJTX_Controller
             if (helpDlg != null) helpDlg.Close();
             _logbookWindow?.Close();
             _otaSpotsWindow?.Close();
+            _notificationHistoryWindow?.Close();
         }
 
         public void SaveHotkeyConfig()
@@ -1958,6 +2024,38 @@ namespace WSJTX_Controller
         // session-state save) and OptionsDlg's okButton_Click (right after its own Save*Tab()
         // calls) -- redundant on a normal clean-OK-then-later-clean-close session, which is
         // fine; an extra INI write of already-correct data is cheap and harmless.
+        // 2.0.58: set + immediately persist the operator continent (Options > Receive / Auto
+        // Reply). code is a 2-letter continent code or "" / null; anything invalid normalizes
+        // to null ("not specified"), which keeps the existing conservative DX-classification
+        // fallback. Written straight to the ini so it survives even an unclean shutdown.
+        public void SetAndPersistMyContinent(string code)
+        {
+            string norm = WsjtxClient.NormalizeContinent(code);
+            if (wsjtxClient != null) wsjtxClient.myContinent = norm;
+            if (iniFile != null) iniFile.Write("myContinent", norm ?? "");
+        }
+
+        // Item 1/2 (2026-09-03): persist the global routine-status speech-timing choice the
+        // moment the operator changes it in Options (it also lands in SaveAllSettingsToIniFile
+        // on clean shutdown; this makes it durable immediately, matching the History window's
+        // own "Include routine status" live-write).
+        public void PersistRoutineStatusSpeakWhen()
+        {
+            try
+            {
+                iniFile?.Write("routineStatusSpeakWhen", routineStatusSpeakWhen.ToString());
+                iniFile?.Write("routineStatusCondition", routineStatusCondition.ToString());
+                // Legacy key kept in sync for a clean rollback to a pre-2026-09-04 build.
+                iniFile?.Write("routineStatusDuringQso",
+                    routineStatusCondition == SpeakCondition.OutsideQsoOnly ? "Suppress" : "SpeakNormally");
+                // 2026-09-05: the two receive-side role scopes are edited on the same Options
+                // page as the routine timing/condition -- make them durable immediately too.
+                iniFile?.Write("notifyReceiveSideIdScope", Notifications.ReceiveSideIdScope.ToString());
+                iniFile?.Write("notifyReceiveCountScope", Notifications.ReceiveCountScope.ToString());
+            }
+            catch { }
+        }
+
         public void SaveOptionsRelatedSettings()
         {
             if (iniFile == null) return;
@@ -2072,6 +2170,31 @@ namespace WSJTX_Controller
 #endif
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            // Tag any message a hotkey handler produces synchronously with that hotkey's
+            // configured label, for Notification History -- scoped strictly to this call
+            // (restored, not just cleared, so a nested ProcessCmdKey is handled too). An
+            // asynchronous completion that fires later runs with _activeHotkeyOrigin back to
+            // whatever it was, never a stale hotkey label.
+            string prevOrigin = _activeHotkeyOrigin;
+            _activeHotkeyOrigin = ResolveHotkeyOrigin(keyData);
+            try { return ProcessCmdKeyCore(ref msg, keyData); }
+            finally { _activeHotkeyOrigin = prevOrigin; }
+        }
+
+        // The configured hotkey label ("Alt+Z", "Ctrl+Shift+H") for keyData if it is bound to a
+        // Jimmy command, else null. Only genuine configured hotkeys get an origin -- a plain
+        // Delete/Escape/typing key does not fabricate one.
+        private string ResolveHotkeyOrigin(Keys keyData)
+        {
+            if (keyData == Keys.None) return null;
+            foreach (HotkeyAction action in Enum.GetValues(typeof(HotkeyAction)))
+                if (hotkeyConfig[action] != Keys.None && hotkeyConfig[action] == keyData)
+                    return HotkeyConfig.FormatKeys(keyData);
+            return null;
+        }
+
+        private bool ProcessCmdKeyCore(ref Message msg, Keys keyData)
+        {
             if (!formLoaded) return false;
 
             if (keyData == hotkeyConfig[HotkeyAction.Help])
@@ -2116,6 +2239,26 @@ namespace WSJTX_Controller
             if (keyData == hotkeyConfig[HotkeyAction.OpenOtaSpots] && hotkeyConfig[HotkeyAction.OpenOtaSpots] != Keys.None)
             {
                 OpenOtaSpotsWindow();
+                return true;
+            }
+
+            // 2.0.58: Open Notification History (default Ctrl+Shift+H). Self-contained session
+            // window, no WSJT-X/engine dependency -- like OpenLogbook above, it must not sit
+            // behind the connecting gate.
+            if (keyData == hotkeyConfig[HotkeyAction.NotificationHistory] && hotkeyConfig[HotkeyAction.NotificationHistory] != Keys.None)
+            {
+                OpenNotificationHistoryWindow();
+                return true;
+            }
+
+            // 2.0.58: Report the latest transmit-slot analysis (default Ctrl+Z). Ctrl+Z is
+            // normal Undo inside an editable text control, so when one has focus this key is
+            // deliberately NOT consumed here -- it falls through to WinForms' own Undo handling.
+            if (keyData == hotkeyConfig[HotkeyAction.ReportSlotAnalysis]
+                && hotkeyConfig[HotkeyAction.ReportSlotAnalysis] != Keys.None
+                && !IsEditableTextControlFocused(msg.HWnd))
+            {
+                wsjtxClient.ReportLatestSlotAnalysis();
                 return true;
             }
 
@@ -2186,12 +2329,30 @@ namespace WSJTX_Controller
                 var focused = this.ActiveControl;
                 if (wsjtxClient.ConnectedToWsjtx())
                 {
+                    // Captured BEFORE the halt sequence (which clears these) and gated the same
+                    // way Escape is -- Alt+H used to announce "Tx halted" unconditionally, even
+                    // in idle Listen mode with nothing to halt. Actions stay unconditional.
+                    bool hadSomethingToHalt = wsjtxClient.HasActiveTxOrCycle;
                     wsjtxClient.AbortContact();
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
-                    ShowMsg("Tx halted", true);
+                    if (hadSomethingToHalt) ShowMsg("Tx halted", true);
                 }
                 BeginInvoke((Action)(() => RestoreFocus(focused)));
+                return true;
+            }
+
+            // Station Watch (2.0.63). No focus change either way -- Toggle captures whichever
+            // station currently has focus/selection without moving it; Work Now uses the stored
+            // watched target, never current list focus.
+            if (keyData == hotkeyConfig[HotkeyAction.ToggleStationWatch] && hotkeyConfig[HotkeyAction.ToggleStationWatch] != Keys.None)
+            {
+                wsjtxClient.ToggleStationWatch(ResolveFocusedOrSelectedCall());
+                return true;
+            }
+            if (keyData == hotkeyConfig[HotkeyAction.WorkWatchedStationNow] && hotkeyConfig[HotkeyAction.WorkWatchedStationNow] != Keys.None)
+            {
+                wsjtxClient.WorkWatchedStationNow();
                 return true;
             }
 
@@ -2364,6 +2525,15 @@ namespace WSJTX_Controller
             }
 
             return base.ProcessCmdKey(ref msg, keyData); // Let other keys be processed normally
+        }
+
+        // True when the control that currently has focus is an editable (non-read-only) text
+        // field -- a TextBox / RichTextBox / MaskedTextBox etc. In that case Ctrl+Z must stay
+        // as WinForms' built-in Undo and NOT be swallowed as the "report latest transmit-slot
+        // analysis" hotkey. hwnd is ProcessCmdKey's msg.HWnd, i.e. the focused control's handle.
+        private static bool IsEditableTextControlFocused(IntPtr hwnd)
+        {
+            return Control.FromHandle(hwnd) is TextBoxBase tb && !tb.ReadOnly;
         }
 
         // UdpLoop() (the classic WSJT-X UDP transport's own per-tick pump) was removed
@@ -2817,6 +2987,42 @@ namespace WSJTX_Controller
             }
         }
 
+        public void OpenNotificationHistoryWindow()
+        {
+            if (_notificationHistoryWindow != null && !_notificationHistoryWindow.IsDisposed)
+            {
+                _notificationHistoryWindow.Activate();
+                return;
+            }
+            try
+            {
+                _notificationHistoryReturnFocus = this.ActiveControl;
+                _notificationHistoryWindow = new NotificationHistoryWindow(
+                    NotificationHistory,
+                    () => notificationHistoryIncludeRoutineStatus,
+                    v =>
+                    {
+                        notificationHistoryIncludeRoutineStatus = v;
+                        try { iniFile.Write("notificationHistoryIncludeRoutineStatus", v.ToString()); } catch { }
+                    });
+                // Deliberately no Owner -- matches _logbookWindow / _otaSpotsWindow; the window
+                // is closed explicitly in Controller_FormClosing.
+                _notificationHistoryWindow.FormClosed += (s, e) =>
+                {
+                    _notificationHistoryWindow = null;
+                    RestoreFocus(_notificationHistoryReturnFocus);
+                    _notificationHistoryReturnFocus = null;
+                };
+                _notificationHistoryWindow.Show();
+            }
+            catch (Exception ex)
+            {
+                _notificationHistoryWindow = null;
+                MessageBox.Show(ex.GetType().Name + ": " + ex.Message + "\r\n\r\n" + ex.StackTrace,
+                    "Notification History Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
         public void optionsButton_Click(object sender, EventArgs e)
         {
             if (!formLoaded) return;
@@ -2864,12 +3070,15 @@ namespace WSJTX_Controller
             wsjtxClient.SortCallsPublic();  // re-rank if LoTW boost changed
         }
 
-        public void LookupFocusedCall()
+        // Whichever list currently has keyboard focus wins, so the caller always matches what's
+        // actually selected -- works the same in every list (normal, TX1, TX2, Raw, Logged).
+        // Extracted from LookupFocusedCall (2.0.63) so Toggle Station Watch can share the exact
+        // same "current normal list, TX1, TX2, and Raw where current Jimmy semantics allow
+        // selection" resolution instead of duplicating it.
+        private string ResolveFocusedOrSelectedCall()
         {
             string call = null;
 
-            // Whichever list currently has keyboard focus wins, so the lookup always
-            // matches what's actually selected -- works the same in every list.
             if (callListBox.Visible && callListBox.Focused)
             {
                 int idx = callListBox.SelectedIndex;
@@ -2915,6 +3124,12 @@ namespace WSJTX_Controller
                     if (idx >= 0) call = wsjtxClient.GetCallAtTx2Index(idx);
                 }
             }
+            return call;
+        }
+
+        public void LookupFocusedCall()
+        {
+            string call = ResolveFocusedOrSelectedCall();
             if (string.IsNullOrEmpty(call)) return;
             using (var dlg = new LookupInfoDlg(call, lookupManager))
             {
@@ -2972,6 +3187,14 @@ namespace WSJTX_Controller
             wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}] '{text}'");
             if (announced)
                 SendKeys.Send("{UP}");
+
+            // 2.0.58 Notification History: this is the single final seam every direct operator
+            // message AND every delivered NotificationCenter notification funnels through
+            // (StatusViewNotificationDelivery.Announce -> ShowMessage -> here). A
+            // policy-suppressed notification never reaches this point, so it is correctly not
+            // recorded. _activeHotkeyOrigin tags a message produced synchronously inside a
+            // hotkey handler; it is null otherwise.
+            NotificationHistory?.Record(text, _activeHotkeyOrigin);
         }
 
         // QRZ/Club Log upload progress (catch-up loop, real-time circuit breaker)
@@ -3040,7 +3263,13 @@ namespace WSJTX_Controller
         private string _lastAnnouncedStatusText;
         private DateTime _lastAnnouncedStatusTime = DateTime.MinValue;
 
-        public void RenderStatus(string headingText, string statusText, Color foreColor, Color backColor)
+        // Item 1/2 split, 2026-09-03: this is now VISIBLE + HISTORY only -- it never nudges the
+        // screen reader. WsjtxClient.ShowStatus() calls this every time (so the on-screen status
+        // is always live) and separately hands the text to SpeechCoordinator.SubmitRoutineStatus,
+        // which owns the WHEN of speech and drives CoordinatedSpeak() below. Returns whether
+        // Jimmy is really foregrounded/focused right now, for the coordinator's "would this have
+        // been spoken now" hint.
+        public bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor)
         {
             statusHeadingLabel.Text = headingText;
             this.statusText.AccessibleName = headingText;
@@ -3049,36 +3278,54 @@ namespace WSJTX_Controller
             this.statusText.Text = statusText;
             this.statusText.SelectionStart = 0;
             this.statusText.SelectionLength = 0;
-            // Guard: only send if Jimmy is actually the active application.
-            // SendKeys.Send uses SendInput(), which delivers to the real OS foreground window;
-            // without this guard a timer tick during focus-loss can send to Notepad. Hardened
-            // 2026-08-19 (release-blocker follow-up, same fix as ShowMsg's identical guard --
-            // see its own comment for the full root-cause writeup): the two WinForms-internal
-            // properties alone are not sufficient evidence of real OS foreground state, so this
-            // now also requires GetForegroundWindow() == this.Handle.
-            bool announced = this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
-            // Added 2026-08-10: suppress the screen-reader nudge for a near-immediate repeat
-            // of the exact same text -- root-caused live from a real QSO with W4MAA, where a
-            // decode arriving milliseconds after a transmit-start event triggered a SECOND
-            // ShowStatus()->RenderStatus() call with identical "Transmitting, W4MAA, sending
-            // EN34." text (one from the transmit-start transition, one from the shared
-            // decode-processing pipeline's own routine ShowStatus() call), 269ms apart.
-            // SendKeys.Send("{UP}") below always fired regardless of whether anything
-            // actually changed, so the operator heard the same status spoken twice, which
-            // read as a doubled/garbled "Transmit... Transmitting...". Text/colors are still
-            // applied every time above (cheap, idempotent) -- only the redundant nudge is
-            // skipped, and only within this short window; a legitimate periodic repeat of
-            // the same text (e.g. still "Receiving..." a full T/R period later) is far
-            // outside RepeatStatusAnnounceSuppressWindow and still announces normally.
-            bool isNearImmediateRepeat = announced && statusText == _lastAnnouncedStatusText
+
+            // 2.0.58 Notification History: the routine status render path -- recorded HERE,
+            // immediately and independent of whether/when the line is spoken. Opt-in (default on
+            // for the testing phase) and deduplicated on change inside RecordRoutineStatus (this
+            // is called with identical text every poll tick; the history must not fill with dups).
+            if (notificationHistoryIncludeRoutineStatus)
+                NotificationHistory?.RecordRoutineStatus(statusText);
+
+            return this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
+        }
+
+        // Item 1/2, 2026-09-03: the ONE screen-reader nudge seam. Called only by
+        // SpeechCoordinator (routine status via SubmitRoutineStatus, typed notifications via
+        // NotificationCenter -> StatusViewNotificationDelivery). Sets statusText.Text if it isn't
+        // already showing `text` (idempotent -- a routine render already set it; a notification's
+        // text is set here), applies the real OS-foreground guard AND the 3-second exact/
+        // near-immediate duplicate suppression (both refactored here from the old inline
+        // RenderStatus path -- they are accessibility-load-bearing, not cosmetic), then
+        // SendKeys("{UP}"). Records NO history. Does NOT raise the off-focus UIA alert -- that
+        // stays UiaAlertNotificationDelivery's job, so it decorates this exactly as before.
+        public void CoordinatedSpeak(string text)
+        {
+            if (text == null) return;
+            if (this.statusText.Text != text)
+            {
+                this.statusText.Text = text;
+                this.statusText.SelectionStart = 0;
+                this.statusText.SelectionLength = 0;
+            }
+            // Real OS foreground state, not just the two WinForms-internal properties -- see
+            // ShowMsg's own comment for the 2026-08-19 root cause (SendKeys.Send targets whatever
+            // Windows currently considers foreground; firing it while that isn't this window can
+            // leave keyboard input going nowhere for the rest of the session).
+            bool foreground = this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
+            // Suppress the nudge for a near-immediate repeat of the exact same text -- root-caused
+            // live from a real QSO with W4MAA (a decode arriving ~269ms after a transmit-start
+            // event produced two RenderStatus() calls with identical "Transmitting, W4MAA,
+            // sending EN34." text, heard as a doubled/garbled announcement). Now that both the
+            // routine-status and typed-notification paths land here, this one shared window also
+            // stops a notification and an identical routine line from running into each other.
+            bool nearImmediateRepeat = foreground && text == _lastAnnouncedStatusText
                 && (DateTime.UtcNow - _lastAnnouncedStatusTime) < RepeatStatusAnnounceSuppressWindow;
-            if (isNearImmediateRepeat) announced = false;
-            // [ANNOUNCE] tag: see ShowMsg's identical logging for what this is for.
-            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}]{(isNearImmediateRepeat ? " (repeat suppressed)" : "")} '{statusText}'");
+            bool announced = foreground && !nearImmediateRepeat;
+            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}]{(nearImmediateRepeat ? " (repeat suppressed)" : "")} '{text}'");
             if (announced)
             {
                 SendKeys.Send("{UP}");  //triggers screen reader
-                _lastAnnouncedStatusText = statusText;
+                _lastAnnouncedStatusText = text;
                 _lastAnnouncedStatusTime = DateTime.UtcNow;
             }
         }
@@ -3846,8 +4093,11 @@ namespace WSJTX_Controller
                 $"{nl}{K(HotkeyAction.HaltTx)}: Halt transmit immediately." +
                 $"{nl}{K(HotkeyAction.NextCall)}: Skip to the next available station, very useful!" +
                 $"{nl}{K(HotkeyAction.ManualCall)}: Enter a callsign manually to call." +
+                $"{nl}{K(HotkeyAction.ToggleStationWatch)}: Start or stop watching the currently selected station (receive-only; never transmits)." +
+                $"{nl}{K(HotkeyAction.WorkWatchedStationNow)}: Work the watched station now, using its most recent decode." +
 
                 $"{nl}{K(HotkeyAction.AnalyzeSlot)}: Analyze transmit slot (find quietest audio frequency for CQ; requires 'Use best Tx frequency' enabled)." +
+                $"{nl}{K(HotkeyAction.ReportSlotAnalysis)}: Report the latest transmit slot analysis result without re-running it (normal Undo inside a text field)." +
                 $"{nl}{K(HotkeyAction.LookupStation)}: Look up selected station (shows callsign, country, state, LoTW status, and more)." +
                 $"{nl}{K(HotkeyAction.OpenLogbook)}: Open the Ham Radio Center logbook." +
                 $"{nl}{K(HotkeyAction.AddManualQso)}: Add a manually-logged QSO (e.g. worked on another mode or rig)." +
@@ -3878,6 +4128,7 @@ namespace WSJTX_Controller
                 $"{nl}{K(HotkeyAction.UpdateCheck)}: Check for update to {friendlyName}." +
                 $"{nl}{K(HotkeyAction.PSKReporter)}: Toggle sending spots to PSKReporter (leave 'Enabled' to help other hams)" +
                 $"{nl}{K(HotkeyAction.SortOrder)}: Open stations available sort order editor." +
+                $"{nl}{K(HotkeyAction.NotificationHistory)}: Open Notification History (time-stamped list of what {friendlyName} has announced this session)." +
                 $"{nl}{K(HotkeyAction.ResetWindowSize)}: Reset window size and position to default." +
                 $"{nl}{K(HotkeyAction.Help)}: Read the list of shortcut keys." +
 
@@ -4291,13 +4542,6 @@ namespace WSJTX_Controller
             // since Alt+<letter> combos with nothing consuming them are treated as a menu
             // shortcut lookup. Every matched branch below now suppresses further processing of
             // that keystroke, the same way the rest of this codebase's key handlers already do.
-            if (e.Control && e.KeyCode == Keys.Y)
-            {
-                e.SuppressKeyPress = true;
-                if (wsjtxClient.ConnectedToWsjtx()) wsjtxClient.HaltTuning();
-                DemoSounds();
-            }
-
             if (e.Control && e.Shift && e.KeyCode == Keys.O)
             {
                 e.SuppressKeyPress = true;
@@ -4434,14 +4678,14 @@ namespace WSJTX_Controller
                     // on every Escape press, even already in Listen mode with nothing
                     // transmitting -- misleading (there was nothing to halt) and exactly the
                     // kind of redundant announcement this project's own accessibility rules
-                    // call out. Captured BEFORE the halt sequence below, which changes both of
-                    // these -- CALL_CQ mode is itself "something to halt" (Escape's job also
-                    // includes stopping the CQ cycle) even at an instant transmitting happens
-                    // to read false between cycles. The halt/reset actions themselves stay
+                    // call out. Captured BEFORE the halt sequence below, which changes these.
+                    // The predicate (shared with Alt+H) prefers the fresh engine-snapshot
+                    // facts and cross-checks Jimmy's CQ/QSO intent against `txEnabled` so a
+                    // stale mirror after a reconnect/completion can't speak -- see
+                    // WsjtxClient.HasActiveTxOrCycle. The halt/reset actions themselves stay
                     // fully unconditional (safety net, same as before) -- only the spoken
                     // announcement is gated.
-                    bool hadSomethingToHalt =
-                        wsjtxClient.IsTransmitting || wsjtxClient.txMode == WsjtxClient.TxModes.CALL_CQ;
+                    bool hadSomethingToHalt = wsjtxClient.HasActiveTxOrCycle;
 
                     wsjtxClient.AbortContact();         // unconditional: works in both CQ and Listen mode
                     wsjtxClient.ResetTxToCq();
@@ -5178,33 +5422,6 @@ namespace WSJTX_Controller
             if (!formLoaded || !wsjtxClient.ConnectedToWsjtx()) return "me";
 
             return wsjtxClient.SpacifyMyCall();
-        }
-
-        // Independent audit finding 11, 2026-08-23 (CLEANUP / ACCESSIBILITY POLISH): used to
-        // call Thread.Sleep(750)/Thread.Sleep(250) directly on the UI thread between sound-event
-        // handlers -- during that ~1s window the whole application's message loop couldn't
-        // process keyboard input, repaint, or screen-reader interaction. Task.Delay (awaited,
-        // not blocking) keeps the exact same sequencing/timing while the message loop keeps
-        // pumping. _demoSoundsRunning guards re-entrancy (Ctrl+Y is a plain hotkey, not a button
-        // that can be disabled while its own demo plays) -- a second press mid-sequence is
-        // simply ignored rather than overlapping two demo sequences' timers.
-        private bool _demoSoundsRunning;
-        private async void DemoSounds()
-        {
-            if (_demoSoundsRunning) return;
-            _demoSoundsRunning = true;
-            try
-            {
-                callAddedCheckBox_CheckedChanged(null, null);
-                await Task.Delay(750);
-                mycallCheckBox_CheckedChanged(null, null);
-                await Task.Delay(250);
-                loggedCheckBox_CheckedChanged(null, null);
-            }
-            finally
-            {
-                _demoSoundsRunning = false;
-            }
         }
 
         private void CallListBox_KeyDown(object sender, KeyEventArgs e)

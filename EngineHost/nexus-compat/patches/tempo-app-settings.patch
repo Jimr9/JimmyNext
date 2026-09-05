@@ -1,8 +1,8 @@
 diff --git a/src/settings.rs b/src/settings.rs
-index 8dd5630..c060f5b 100644
+index 9b6397a9..48000ecf 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
-@@ -756,6 +756,22 @@ pub struct Settings {
+@@ -909,6 +909,29 @@ pub struct Settings {
      /// (flat mirror — see [`RadioProfile::data_modes_plain_ssb`]). Default off.
      #[serde(default)]
      pub data_modes_plain_ssb: bool,
@@ -22,15 +22,23 @@ index 8dd5630..c060f5b 100644
 +    /// mode-set call site already treats an empty string as "nothing to do".
 +    #[serde(default)]
 +    pub dont_set_mode: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch, Layer 2.
++    /// Carried on `Settings` (not only the startup `RadioConfig`) so the per-tick
++    /// `Transport::from_settings` rebuild keeps it and `finish_cat_open` keeps re-stamping the
++    /// Rig-level chokepoint after any transport reopen. Default off (unchanged upstream
++    /// behavior); Jimmy's EngineHost always sets it on. No operator override.
++    #[serde(default)]
++    pub disable_rfpower_probe: bool,
      /// DEPRECATED / ignored. Digital now ALWAYS forces the DATA submode (like Phone/CW
      /// force their mode), so this opt-out is no longer consulted by
      /// [`rig_mode`](Self::rig_mode). Kept only so older settings files still deserialize.
-@@ -2553,6 +2569,8 @@ impl Default for Settings {
-             rig_addr: String::new(),
-             icom_native_cat: false,
+@@ -3143,6 +3166,9 @@ impl Default for Settings {
+             split_detect_enabled: false,
+             icom_data_mode: 1,
              data_modes_plain_ssb: false,
 +            ptt_data_source: false,
 +            dont_set_mode: false,
++            disable_rfpower_probe: false,
              set_rig_mode: true, // force the DATA submode for digital, so sections set the rig
              operating_mode: OperatingMode::Digital, // digital obeys; phone/CW force
              license_class: LicenseClass::Open, // no TX lockout until the operator declares a class

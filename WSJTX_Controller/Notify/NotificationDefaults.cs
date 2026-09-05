@@ -19,39 +19,108 @@ namespace WSJTX_Controller
         public static readonly Dictionary<NotificationEventType, NotificationPolicy> Policies =
             new Dictionary<NotificationEventType, NotificationPolicy>
         {
-            // Wave 2 (not yet wired to a call site). DeferWhileTransmitting=true: this fires
-            // right as an over starts, so without deferring it would announce mid-Tx every
-            // single time -- see NotificationPolicy.DeferWhileTransmitting's own comment.
+            // Routine-status wording rows (2026-09-04). NOT published -- WsjtxClient.ShowStatus
+            // formats each of these as a CLAUSE of the one routine RX/TX/QSO status line from
+            // its Template. The default templates below reproduce today's exact woven wording;
+            // SpeakWhen / Condition on these rows are ignored (the line's timing follows the
+            // global "Routine status speech" controls). Enabled=false drops the clause.
+
+            // The idle "N available stations" summary line. The default template composes to
+            // byte-identically what ShowStatus builds today. See ReceiveCycleSummaryEvent /
+            // NotificationVariableRegistry for what each token expands to.
+            [NotificationEventType.ReceiveCycleSummary] = new NotificationPolicy
+            {
+                Enabled = true,
+                // 2026-09-05: just the counts now. The state verb and the operating-mode
+                // descriptor became their own rows (ReceiveStateSummary / OperatingModeSummary)
+                // so each can be turned off or retimed on its own -- ShowStatus composes all
+                // three (plus any beginner prompt hint) back into ONE utterance, so the default
+                // spoken line is unchanged: "Receiving, no available stations, Listen mode."
+                Template = "{AvailableCount} {Stations}{ToYou}{NewDxcc}{Wanted}{Awards}",
+                // Batched to the end of the receive-decode pass, coalesced to the latest count --
+                // the same cadence ShowStatus has always used for this summary so it doesn't
+                // announce "3 available" then "19 available" seconds apart.
+                SpeakWhen = SpeakWhen.AfterRx,
+                Condition = SpeakCondition.Always,
+            },
+
+            // The state verb of the idle receive line. Default template = the bare word, so it
+            // composes to byte-identically today's line; Enabled=false removes "Receiving" /
+            // "Transmitting" from BOTH the spoken utterance and the visible status line.
+            [NotificationEventType.ReceiveStateSummary] = new NotificationPolicy
+            {
+                Enabled = true,
+                Template = "{State}",
+                SpeakWhen = SpeakWhen.AfterRx,
+                Condition = SpeakCondition.Always,
+            },
+
+            // The operating-mode descriptor of the idle receive line ("Listen mode" / "CQ mode",
+            // plus ", FT4" on FT4). Default template composes to today's exact phrase;
+            // Enabled=false removes it from the utterance and the visible line.
+            [NotificationEventType.OperatingModeSummary] = new NotificationPolicy
+            {
+                Enabled = true,
+                Template = "{Mode} mode{SubMode}",
+                SpeakWhen = SpeakWhen.AfterRx,
+                Condition = SpeakCondition.Always,
+            },
+
+            // The advanced-call-layout side name ("RX1" / "TX2") of the idle receive line. Split
+            // out of the counts clause 2026-09-05 so the operator can word it, and role-scope it
+            // (Options > Notifications > Global speech behaviour: "Receive side name"), on its
+            // own. Same AfterRx cadence as the count so the two coalesce into one utterance;
+            // default "{Side}" + Both scope reproduces today's "RX1, N available stations" line.
+            [NotificationEventType.ReceiveSideId] = new NotificationPolicy
+            {
+                Enabled = true,
+                Template = "{Side}",
+                SpeakWhen = SpeakWhen.AfterRx,
+                Condition = SpeakCondition.Always,
+            },
+
+            // Clean semantic phrases -- NO leading/trailing structural punctuation. ShowStatus
+            // adds the ", " separators when it weaves them into the visible line; the composer
+            // (SpeechCoordinator.Compose) re-joins them naturally for speech, so each also reads
+            // correctly when the operator retimes it to speak on its own boundary
+            // ("K4YT logged.", "sending 73.").
+
+            // Shown when Jimmy starts answering a station.
             [NotificationEventType.QsoStarted] = new NotificationPolicy
             {
                 Enabled = true,
-                Priority = NotificationPriority.Normal,
-                RepeatSeconds = 5,
-                ThrottleMilliseconds = 0,
-                Template = "Working {Callsign}",
-                Timing = NotificationTiming.Immediate,
-                DeferWhileTransmitting = true,
+                Template = "Working {Callsign}, replying.",
             },
 
-            // Wave 1. Matches WsjtxClient.cs's RequestLog: ShowMessage($"Logged QSO with
-            // {call}", false) exactly.
+            // The moment a QSO is logged.
             [NotificationEventType.QsoCompleted] = new NotificationPolicy
             {
                 Enabled = true,
-                Priority = NotificationPriority.Normal,
-                RepeatSeconds = 0,
-                ThrottleMilliseconds = 0,
-                Template = "Logged QSO with {Callsign}",
+                Template = "{Callsign} logged",
             },
 
-            // Wave 2 (not yet wired to a call site).
+            // What is going out on this transmission.
             [NotificationEventType.TxMessageChanged] = new NotificationPolicy
             {
                 Enabled = true,
-                Priority = NotificationPriority.Normal,
-                RepeatSeconds = 0,
-                ThrottleMilliseconds = 0,
-                Template = "Sending {Message}",
+                Template = "sending {Message}",
+            },
+
+            // The "received R minus 12, previous R R 7 3" QSO-progress detail. {Received} is a
+            // pre-built clean phrase (formatter code, like AwardsNeeded's AwardSummary) covering
+            // received + previous together; the default template just speaks it. Enabled=false
+            // drops it.
+            [NotificationEventType.ReceivedReply] = new NotificationPolicy
+            {
+                Enabled = true,
+                Template = "{Received}",
+            },
+
+            // Appended when several receive periods pass with nothing decoded.
+            [NotificationEventType.NoDecodeWarning] = new NotificationPolicy
+            {
+                Enabled = true,
+                Template = "no decodes, check time, frequency, audio in",
             },
 
             // Wave 2 (not yet wired to a call site). RepeatSeconds/ThrottleMilliseconds
@@ -70,29 +139,12 @@ namespace WSJTX_Controller
                 RepeatSeconds = 60,
                 ThrottleMilliseconds = 3000,
                 Template = "{Callsign}, {AwardSummary}",
+                // "Batch, don't interrupt" -- SpeakWhen.AfterRx, spoken once the receive cycle's
+                // decodes are in, coalescing to the latest during a pileup. (Equivalent to the
+                // old NextPeriodBoundary + DeferWhileTransmitting=true.)
+                SpeakWhen = SpeakWhen.AfterRx,
                 Timing = NotificationTiming.NextPeriodBoundary,
                 DeferWhileTransmitting = true,
-            },
-
-            // Wave 1. Originally matched WsjtxClient.Protocol.cs:54's classic-UDP-path wording
-            // (ShowMessage("WSJT-X closed", true)) -- that whole UDP dispatcher, and this event's
-            // only publisher, were removed in the 2026-08-18 Direct-only cutover (see
-            // WsjtxClient.Direct.cs's own class comment); nothing publishes ConnectionClosed
-            // today. Kept as a defined type for the notification system's own completeness
-            // (JimmyTests's "every NotificationEventType has a default template/DisplayName"
-            // guard depends on it existing) rather than removed outright -- see this project's
-            // own dead-code-cleanup rule (only remove what's proven to have no live OR test
-            // dependency). Codex Audit 02 finding, 2026-08-21: wording corrected to the current
-            // Direct/Nexus architecture regardless -- it's still user-visible/editable in
-            // Options > Notifications even while unused live, and "WSJT-X" is simply wrong now
-            // (Jimmy has no WSJT-X UDP connection to close in this build at all).
-            [NotificationEventType.ConnectionClosed] = new NotificationPolicy
-            {
-                Enabled = true,
-                Priority = NotificationPriority.Important,
-                RepeatSeconds = 0,
-                ThrottleMilliseconds = 0,
-                Template = "Native engine closed",
             },
 
             // Wave 1. Originally matched WsjtxClient.Protocol.cs's classic-UDP-path
@@ -107,7 +159,9 @@ namespace WSJTX_Controller
             [NotificationEventType.ConnectionLost] = new NotificationPolicy
             {
                 Enabled = true,
-                Priority = NotificationPriority.Normal,
+                // Item 1: three consecutive failed SNAPSHOT polls -- the engine is unreachable.
+                // Critical so it is never held behind routine RX/TX speech.
+                Priority = NotificationPriority.Critical,
                 RepeatSeconds = 0,
                 ThrottleMilliseconds = 0,
                 Template = "Native engine disconnected",
@@ -179,7 +233,113 @@ namespace WSJTX_Controller
                 Priority = NotificationPriority.Normal,
                 RepeatSeconds = 0,
                 ThrottleMilliseconds = 0,
-                Template = "Radio CAT link is back",
+                // Reworded 2026-09-02 (2.0.58 CAT-notification pass): "restored" reads as the
+                // clean counterpart to "lost" below.
+                Template = "Radio CAT link restored.",
+            },
+
+            // Added 2026-09-02 (2.0.58): the rig's CAT link going down, as its own typed event
+            // instead of a generic ErrorWarningEvent carrying Nexus/Hamlib's raw cat_detail
+            // ("RPRT -20", escaped newlines, rigctld backend wording) straight into speech.
+            // Important (the audible cue + off-focus UIA alert), matching the ErrorSeverity.Error
+            // this replaces at the WsjtxClient.Direct.cs DirectApplyStatus call site. The default
+            // wording is concise and rig-brand-neutral, built from the CONFIGURED connection
+            // (COM port / baud) via the {Connection} phrase -- the full cat_detail stays in the
+            // diagnostic log and is still available as {Detail} for a hand-edited template.
+            [NotificationEventType.RadioCatLost] = new NotificationPolicy
+            {
+                Enabled = true,
+                // Item 1: the operator's radio has effectively gone dark -- Critical, spoken at
+                // once regardless of any configured SpeakWhen on other notification types.
+                Priority = NotificationPriority.Critical,
+                RepeatSeconds = 0,
+                ThrottleMilliseconds = 0,
+                Template = "Radio CAT link lost. The radio{Connection} is not responding. " +
+                           "Check that the radio is on and the CAT connection is available.",
+            },
+
+            // Added 2026-09-04: replaces the bare ShowMessage("WSJT-X resumed calling {call}
+            // automatically") in WsjtxClient.HandleUnsolicitedTxResume. Important (audible cue /
+            // off-focus alert) because a blind operator needs to know transmission restarted on
+            // its own; spoken immediately, whether or not other routine speech is pending, but
+            // NOT Critical -- it is not a safety fault. Only ever fires with a QSO in progress.
+            [NotificationEventType.AutoTxResume] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Important,
+                RepeatSeconds = 5,
+                ThrottleMilliseconds = 0,
+                Template = "Resumed calling {Callsign} automatically.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
+            },
+
+            // ── Station Watch / Smart QSO Start (2.0.63) ────────────────────────────────────
+            [NotificationEventType.StationWatchStarted] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "Watching {Target}.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
+            },
+            [NotificationEventType.StationWatchStopped] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "Stopped watching {Target}.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
+            },
+            // One generic activity type for the CQ/addressing/report/RRR/RR73/73/peer-observed
+            // family -- {Phrase} is TargetMonitor's own already-worded natural phrase for the
+            // observation ("K4YT working W1ABC, minus 8.", "K4YT RR73.", "W1ABC 73."); {Target}/
+            // {Peer}/{Value}/{Kind} are also available for an operator who wants their own wording.
+            [NotificationEventType.StationWatchActivity] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "{Phrase}",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
+            },
+            // Heard the watched target, but the payload didn't parse into a known form --
+            // history/status only by default (Enabled so it still shows in Notification History
+            // and the visible status line; Condition.Never so it is not spoken unless the
+            // operator opts in).
+            [NotificationEventType.StationWatchAmbiguous] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "{Target}, unclear.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Never,
+            },
+            // "Target not heard, waiting 1 of 2." -- speech OFF by default (spec); still visible/
+            // recorded so the operator can check progress without turning speech on for it.
+            [NotificationEventType.SmartStartWaiting] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "{Target} not heard, waiting {Progress}.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Never,
+            },
+            [NotificationEventType.SmartStartTargetAvailable] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "{Target} appears available.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Never,
+            },
+            [NotificationEventType.SmartStartCallStarting] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "Calling {Target}.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
             },
         };
 
@@ -188,16 +348,30 @@ namespace WSJTX_Controller
         public static readonly Dictionary<NotificationEventType, string> DisplayNames =
             new Dictionary<NotificationEventType, string>
         {
-            [NotificationEventType.QsoStarted] = "Starting a QSO",
+            [NotificationEventType.ReceiveCycleSummary] = "Receive cycle summary",
+            [NotificationEventType.ReceiveStateSummary] = "Receive or transmit state",
+            [NotificationEventType.OperatingModeSummary] = "Operating mode announcement",
+            [NotificationEventType.ReceiveSideId] = "Receive side name",
+            [NotificationEventType.QsoStarted] = "QSO started",
             [NotificationEventType.QsoCompleted] = "QSO logged",
-            [NotificationEventType.TxMessageChanged] = "Transmit message changed",
-            [NotificationEventType.AwardsNeeded] = "Award needed",
-            [NotificationEventType.ConnectionClosed] = "Native engine closed",
+            [NotificationEventType.TxMessageChanged] = "Transmit message",
+            [NotificationEventType.ReceivedReply] = "Received reply detail",
+            [NotificationEventType.NoDecodeWarning] = "No decodes warning",
+            [NotificationEventType.AwardsNeeded] = "Award needed on a spotted station",
             [NotificationEventType.ConnectionLost] = "Native engine disconnected",
-            [NotificationEventType.ErrorWarning] = "Error or warning",
+            [NotificationEventType.ErrorWarning] = "Operating error or warning",
             [NotificationEventType.ClockOutOfSync] = "Computer clock out of sync",
             [NotificationEventType.ClockSynced] = "Computer clock back in sync",
             [NotificationEventType.RadioCatRecovered] = "Radio CAT link recovered",
+            [NotificationEventType.RadioCatLost] = "Radio CAT link lost",
+            [NotificationEventType.AutoTxResume] = "Automatic transmit resume",
+            [NotificationEventType.StationWatchStarted] = "Station Watch started",
+            [NotificationEventType.StationWatchStopped] = "Station Watch stopped",
+            [NotificationEventType.StationWatchActivity] = "Station Watch target activity",
+            [NotificationEventType.StationWatchAmbiguous] = "Station Watch target, unclear decode",
+            [NotificationEventType.SmartStartWaiting] = "Smart Start waiting progress",
+            [NotificationEventType.SmartStartTargetAvailable] = "Smart Start target appears available",
+            [NotificationEventType.SmartStartCallStarting] = "Smart Start calling target",
         };
     }
 }

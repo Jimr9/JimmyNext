@@ -1,5 +1,5 @@
 diff --git a/src/rig.rs b/src/rig.rs
-index 4d3711d..32fd7db 100644
+index 822d9445..c0eeefea 100644
 --- a/src/rig.rs
 +++ b/src/rig.rs
 @@ -46,8 +46,18 @@ pub enum PttMode {
@@ -23,7 +23,7 @@ index 4d3711d..32fd7db 100644
  }
  /// rigctld command line to set the dial frequency (Hz).
  pub fn freq_line(hz: u64) -> String {
-@@ -313,6 +323,10 @@ pub struct Rig {
+@@ -313,6 +323,23 @@ pub struct Rig {
      /// uses a much shorter per-command deadline — a stalled serial read then can't hold the radio
      /// loop (and the fast dial poll) for 2.5 s. Default false (serial / local).
      slow_transport: bool,
@@ -31,18 +31,32 @@ index 4d3711d..32fd7db 100644
 +    /// Source: Data" (see [`ptt_line`]) — operator-configured, default false (matches WSJT-X's
 +    /// own `TX_audio_source_front` default).
 +    ptt_data_source: bool,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch chokepoint —
++    /// Layer 1 of the two-layer RFPOWER suppression (Layer 2 = `RadioLoop::disable_rfpower_probe`
++    /// gating the individual call sites in service.rs). When true, this `Rig` will not emit
++    /// Hamlib `l RFPOWER` (drive read → `Err`) or `L RFPOWER <value>` (drive write → silent
++    /// no-op returning `Ok`) on the wire for ANY caller, present or future. Stamped on every
++    /// open/reopen/recovery via [`Rig::set_rfpower_suppressed`]. Does NOT touch the safe
++    /// telemetry meters (`RFPOWER_METER_WATTS` / `SWR` / `ALC` / `COMP_METER`) — those go
++    /// through [`Rig::read_meter_f32`], a different Hamlib level token, and are explicitly
++    /// allowed. Jimmy always sets this on: an `l RFPOWER` on a freshly-spawned rigctld can trip
++    /// a destructive calibration-sweep bug in Hamlib's Kenwood backend (Hamlib/Hamlib#1595) on
++    /// first touch, and Jimmy's own policy is that a read must never be able to change anything
++    /// on the radio. No operator override.
++    rfpower_suppressed: bool,
  }
  
- impl Rig {
-@@ -328,6 +342,7 @@ impl Rig {
+ /// Does this read error mean "nothing was read, try again" rather than "the stream is broken"?
+@@ -346,6 +373,8 @@ impl Rig {
              serial: None,
              keyed: false,
              slow_transport: false,
 +            ptt_data_source: false,
++            rfpower_suppressed: false,
          }
      }
  
-@@ -337,6 +352,13 @@ impl Rig {
+@@ -355,6 +384,20 @@ impl Rig {
      pub fn set_slow_transport(&mut self, slow: bool) {
          self.slow_transport = slow;
      }
@@ -53,10 +67,17 @@ index 4d3711d..32fd7db 100644
 +    pub fn set_ptt_data_source(&mut self, data_source: bool) {
 +        self.ptt_data_source = data_source;
 +    }
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): stamp the RFPOWER never-touch
++    /// chokepoint (see the `rfpower_suppressed` field). Call on every rig open / reopen /
++    /// recovery so the policy survives a transport rebuild and can never be bypassed by a
++    /// freshly-constructed `Rig`.
++    pub fn set_rfpower_suppressed(&mut self, suppressed: bool) {
++        self.rfpower_suppressed = suppressed;
++    }
      /// Change how this rig is keyed WITHOUT touching its (already-open) CAT control channel. Used by
      /// the dual-radio handoff: a monitor rig is opened read-only (`PttMode::Vox`), so when it's adopted
      /// as the ACTIVE radio it must be switched to the profile's real PTT mode (`Cat`/`Serial`) or
-@@ -581,7 +603,7 @@ impl Rig {
+@@ -616,7 +659,7 @@ impl Rig {
                  } else {
                      // PTT is time-critical: a fixed 700 ms deadline (not the slow-transport
                      // 2.5 s read window) so the un-key can't hang the radio loop.
@@ -65,7 +86,39 @@ index 4d3711d..32fd7db 100644
                          Ok(reply) if reply_ok(&reply) || reply.is_empty() => Ok(()),
                          Ok(reply) => Err(std::io::Error::other(format!(
                              "rigctld PTT error: {reply:?}"
-@@ -1023,8 +1045,10 @@ mod tests {
+@@ -793,6 +836,16 @@ impl Rig {
+     /// Read a rig LEVEL (e.g. "RFPOWER" → 0.0–1.0) via rigctld `l NAME`.
+     /// CAT-only; errors on FakeIt/none like `read_freq`.
+     pub fn read_level(&mut self, name: &str) -> std::io::Result<f32> {
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch chokepoint,
++        // Layer 1. Refuse an `l RFPOWER` drive-level read outright — no bytes on the wire — so
++        // no present or future caller can trip Hamlib/Hamlib#1595 on a fresh rigctld. EXACT
++        // token match: `RFPOWER_METER_WATTS` and every `read_meter_f32` telemetry read are a
++        // different Hamlib level and stay allowed.
++        if self.rfpower_suppressed && name == "RFPOWER" {
++            return Err(std::io::Error::other(
++                "RFPOWER drive read suppressed by Jimmy policy (nexus-compat)",
++            ));
++        }
+         if self.control.is_none() {
+             return Err(std::io::Error::other("not a CAT rig"));
+         }
+@@ -1008,6 +1061,14 @@ impl Rig {
+     }
+     /// Set RF output power as a 0.0–1.0 fraction (Hamlib `RFPOWER`).
+     pub fn set_power(&mut self, frac: f32) -> std::io::Result<()> {
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch chokepoint,
++        // Layer 1. A suppressed rig silently drops an `L RFPOWER <value>` drive write — nothing
++        // on the wire — and reports `Ok` so callers proceed exactly as if the command had been
++        // sent. Jimmy never wants the engine adjusting the operator's transmit drive; the
++        // operator sets power on the radio. No override.
++        if self.rfpower_suppressed {
++            return Ok(());
++        }
+         self.cat(&level_line(
+             "RFPOWER",
+             &format!("{:.3}", frac.clamp(0.0, 1.0)),
+@@ -1116,8 +1177,10 @@ mod tests {
  
      #[test]
      fn command_lines_match_rigctld_protocol() {
@@ -78,3 +131,58 @@ index 4d3711d..32fd7db 100644
          assert_eq!(freq_line(14_074_000), "F 14074000\n");
          assert_eq!(mode_line("USB", 0), "M USB 0\n");
          assert_eq!(mode_line("FM", 0), "M FM 0\n");
+@@ -1131,6 +1194,54 @@ mod tests {
+         assert!(!reply_ok("RPRT -1\n"));
+     }
+ 
++    // JIMMY COMPAT (nexus-compat): RFPOWER never-touch chokepoint, Layer 1. A rig stamped
++    // `set_rfpower_suppressed(true)` must put NOTHING RFPOWER-drive on the wire — not the
++    // `l RFPOWER` read, not the `L RFPOWER` write — for any caller. Safe telemetry meters and
++    // every other level are untouched.
++    #[test]
++    fn jimmy_compat_rfpower_drive_is_never_put_on_the_wire_when_suppressed() {
++        let (addr, log) = mock_rigctld(|line: &str| {
++            if line.starts_with('l') { "0.750\n".to_string() } else { "RPRT 0\n".to_string() }
++        });
++        let mut rig = Rig::with_control(Some(addr), PttMode::Cat);
++        rig.set_rfpower_suppressed(true);
++
++        // Drive READ: refused outright, no bytes sent.
++        assert!(rig.read_level("RFPOWER").is_err(), "l RFPOWER must be refused when suppressed");
++        // Drive WRITE: silently accepted, no bytes sent.
++        assert!(rig.set_power(0.5).is_ok(), "set_power must return Ok (no-op) when suppressed");
++
++        // Safe telemetry and unrelated levels still go through.
++        let _ = rig.read_meter_f32("RFPOWER_METER_WATTS");
++        let _ = rig.read_level("MICGAIN");
++
++        let sent = log.lock().unwrap().clone();
++        assert!(
++            !sent.iter().any(|c| c == "l RFPOWER" || c.starts_with("L RFPOWER")),
++            "no RFPOWER drive command may reach rigctld: {sent:?}"
++        );
++        assert!(
++            sent.iter().any(|c| c == "l RFPOWER_METER_WATTS"),
++            "the safe watts meter read must still be sent: {sent:?}"
++        );
++    }
++
++    // Positive control: with suppression OFF, the same calls DO reach the wire — proving the
++    // test above is measuring the gate, not a broken mock.
++    #[test]
++    fn jimmy_compat_rfpower_drive_flows_normally_when_not_suppressed() {
++        let (addr, log) = mock_rigctld(|line: &str| {
++            if line.starts_with('l') { "0.750\n".to_string() } else { "RPRT 0\n".to_string() }
++        });
++        let mut rig = Rig::with_control(Some(addr), PttMode::Cat);
++        // rfpower_suppressed defaults false.
++        let _ = rig.read_level("RFPOWER");
++        let _ = rig.set_power(0.5);
++        let sent = log.lock().unwrap().clone();
++        assert!(sent.iter().any(|c| c == "l RFPOWER"), "expected l RFPOWER: {sent:?}");
++        assert!(sent.iter().any(|c| c.starts_with("L RFPOWER 0.500")), "expected L RFPOWER write: {sent:?}");
++    }
++
+     /// ISSUE #86 — the closing K of every CW macro was silently never keyed.
+     ///
+     /// Hamlib's Yaesu `newcat_send_morse` reads a ONE-character message as a keyer-memory

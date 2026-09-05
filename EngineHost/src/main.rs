@@ -1487,6 +1487,16 @@ fn main() {
     };
     settings.wsjtx_udp = true;
     settings.wsjtx_udp_addr = args.jimmy_addr.clone();
+    // JIMMY COMPAT (nexus-compat patch tempo-audio-*): RFPOWER never-touch, always on,
+    // unconditionally -- not operator-configurable, no CLI flag. Set on BOTH Settings (so the
+    // per-tick Transport::from_settings rebuild keeps re-stamping the Rig-level chokepoint after
+    // any CAT reopen) and RadioConfig below (the startup seed + the RadioLoop lifetime mirror
+    // that gates the loop's own three RFPOWER call sites). Reading RFPOWER on a freshly-spawned
+    // rigctld can trip a destructive calibration-sweep bug in Hamlib's Kenwood backend
+    // (Hamlib/Hamlib#1595) on first touch; more broadly, Jimmy's policy is that a read must
+    // never be able to change anything on the radio, and the engine never adjusts the
+    // operator's transmit drive. Safe telemetry meters (watts/SWR/ALC/COMP) are unaffected.
+    settings.disable_rfpower_probe = true;
 
     // Decode tab settings -- `if let Some` rather than folding these into the struct literal
     // above so an operator who hasn't touched Options at all gets Nexus's own Settings::default()

@@ -1,8 +1,35 @@
 diff --git a/src/engine.rs b/src/engine.rs
-index 4561f89..3ce8591 100644
+index 3f3ca64c..9452201c 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
-@@ -5494,6 +5494,15 @@ impl Engine {
+@@ -2410,6 +2410,17 @@ pub struct Engine {
+     /// Set by the radio loop when the sound card failed to open, so the UI can
+     /// explain a blank waterfall instead of failing silently.
+     audio_error: Option<String>,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a concise operator-facing warning
++    /// set by the radio loop when a Fake-It dial restore is UNRESOLVED (CAT failed after a
++    /// temporary shift and the loop cannot confirm the dial was put back) — so Jimmy can warn
++    /// the operator persistently and accessibly instead of leaving them on an unknown dial.
++    /// `None` in the normal case; a healthy immediate restore never sets it.
++    fake_it_restore_warning: Option<String>,
++    /// JIMMY COMPAT: a monotonic id for the CURRENT unresolved Fake-It episode (see
++    /// `RadioLoop::fake_it_restore_status` in tempo-audio). Emitted alongside the warning on
++    /// `RadioStatus` so Jimmy dedups per EPISODE across a Direct reconnect, not per message
++    /// text. `Some` iff `fake_it_restore_warning` is `Some`.
++    fake_it_restore_warning_id: Option<u64>,
+     /// The last per-QSO recording that failed, with the path. Set by the shell (which owns the
+     /// file write), carried out in the snapshot, cleared by the next recording that succeeds.
+     recording_warning: Option<String>,
+@@ -4095,6 +4106,8 @@ impl Engine {
+             amp_live: std::collections::HashMap::new(),
+             cat_reprobe: false,
+             audio_error: None,
++            fake_it_restore_warning: None,
++            fake_it_restore_warning_id: None,
+             recording_warning: None,
+             qsy,
+             rtty_armed: false,
+@@ -6485,6 +6498,15 @@ impl Engine {
      /// The mode the radio loop should COMMAND: the operator's transient Phone override when set,
      /// else the band-derived policy (`settings.rig_mode`). Write-side canon for the rig `M` verb.
      pub fn rig_mode_effective(&self) -> String {
@@ -18,7 +45,7 @@ index 4561f89..3ce8591 100644
          // APRS parks the rig in FM regardless of the operating section it was navigated from — a
          // 2 m packet signal demodulated as USB is garbage, so this is a correctness gate, not a
          // preference. Gated on STILL being on 2 m: a knob-QSY (`observe_rig_freq`) or a manual
-@@ -5877,6 +5886,14 @@ impl Engine {
+@@ -6871,6 +6893,14 @@ impl Engine {
          self.settings.decode_depth = depth.clamp(1, 3);
      }
  
@@ -33,7 +60,7 @@ index 4561f89..3ce8591 100644
      /// Operator CW decode sensitivity in [0, 1] (0.5 = the original gates; higher catches
      /// weaker/off-pitch marks like the skimmer, lower rejects more noise).
      pub fn set_cw_sensitivity(&mut self, s: f32) {
-@@ -7899,6 +7916,18 @@ impl Engine {
+@@ -9584,6 +9614,18 @@ impl Engine {
          }
      }
  
@@ -52,7 +79,34 @@ index 4561f89..3ce8591 100644
      /// Send the delivery ACKs we owe: a 1-frame RR73 to each sender whose directed
      /// message we just fully received. Queued onto the chat broadcast path; the receiver
      /// (the original sender) sees it and marks the message delivered, ending the resend.
-@@ -14265,8 +14294,24 @@ impl Engine {
+@@ -14522,6 +14564,17 @@ impl Engine {
+         self.cat_probe_gen = self.cat_probe_gen.wrapping_add(1);
+     }
+ 
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the radio loop reports here when a
++    /// Fake-It dial restore is UNRESOLVED (`(Some(reason), Some(episode_id))`) or
++    /// resolved/absent (`(None, None)`). Carried out on `RadioStatus.fake_it_restore_warning` /
++    /// `fake_it_restore_warning_id` so Jimmy can raise a persistent accessible warning and
++    /// dedup it per EPISODE across a Direct reconnect. Idempotent — the loop sets it every idle
++    /// tick to match its own state.
++    pub fn set_fake_it_restore_status(&mut self, warning: Option<String>, id: Option<u64>) {
++        self.fake_it_restore_warning = warning;
++        self.fake_it_restore_warning_id = id;
++    }
++
+     /// Ask the radio loop to re-probe the current rig and refresh the CAT status
+     /// (the "Test CAT" button). The loop consumes this via [`Self::take_cat_reprobe`].
+     pub fn request_cat_reprobe(&mut self) {
+@@ -15168,6 +15221,8 @@ impl Engine {
+         }
+         .to_string();
+         s.radio.audio_error = self.audio_error.clone();
++        s.radio.fake_it_restore_warning = self.fake_it_restore_warning.clone();
++        s.radio.fake_it_restore_warning_id = self.fake_it_restore_warning_id;
+         // A map lookup and a clone: no I/O and no second lock. `Engine::snapshot` runs under
+         // the engine mutex on the UI's 300 ms poll, and work done inside it has twice stalled
+         // the radio loop.
+@@ -16990,8 +17045,25 @@ impl Engine {
          while self.decode_history.len() > 240 {
              self.decode_history.pop_front();
          }
@@ -63,12 +117,13 @@ index 4561f89..3ce8591 100644
 +        // (the boundary pass, following an earlier early-pass call) — ACCUMULATE rather than
 +        // replace. `decodes` here has already had the early pass's messages dropped by
 +        // `drop_early_dupes` (correct: `observe`/the sequencer must not act on the same message
-+        // twice), but a plain overwrite of `last_wire_decodes` would ALSO drop them from the UDP
-+        // Decode broadcast, even though the sequencer already used them. A QSO partner's reply,
-+        // caught only by the early pass, correctly drives the next transmitted over, but never
-+        // reaches Jimmy's own decode tracking over the Direct/UDP boundary — its QSO-progress
-+        // state silently never sees the message the engine itself already acted on, breaking
-+        // auto-logging for a QSO that otherwise completed normally.
++        // twice), but a plain overwrite of `last_wire_decodes` would ALSO drop them from the
++        // snapshot / UDP Decode broadcast, even though the sequencer already used them. A QSO
++        // partner's reply, caught only by the early pass, correctly drives the next transmitted
++        // over, but never reaches Jimmy's own decode tracking over the Direct/UDP boundary — its
++        // QSO-progress state silently never sees the message the engine itself already acted on,
++        // breaking auto-logging for a QSO that otherwise completed normally. A genuinely newer
++        // slot still replaces (the `else`); stale prior-slot rows are never carried.
 +        if self.last_decode_slot == Some(slot) {
 +            self.last_wire_decodes.extend(fresh_wire);
 +            self.last_decodes.extend(decodes);

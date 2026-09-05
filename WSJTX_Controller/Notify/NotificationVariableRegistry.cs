@@ -42,33 +42,63 @@ namespace WSJTX_Controller
         private static readonly Dictionary<NotificationEventType, List<NotificationVariable>> ByEventType =
             new Dictionary<NotificationEventType, List<NotificationVariable>>
         {
+            // The counts portion only, since 2026-09-05. The state verb moved to
+            // ReceiveStateSummary ({State}) and the mode descriptor to OperatingModeSummary
+            // ({Mode}/{SubMode}); the beginner action hint is structural and is appended by
+            // ShowStatus after this clause, not a template variable here.
+            [NotificationEventType.ReceiveCycleSummary] = new List<NotificationVariable>
+            {
+                new NotificationVariable("AvailableCount", "How many stations are available to call, e.g. \"3\" (\"no\" when none in the simple layout). The RX1/TX2 side name is its own row (\"Receive side name\") now, not part of this."),
+                new NotificationVariable("Stations", "\"available stations\" / \"available station\" (pluralized). Replace with your own word, e.g. \"calls\"."),
+                new NotificationVariable("ToYou", "\", N to you, CALL first\" when stations are calling you, otherwise empty."),
+                new NotificationVariable("NewDxcc", "\", N new DXCC\" when any, otherwise empty."),
+                new NotificationVariable("Wanted", "\", N wanted\" when any, otherwise empty."),
+                new NotificationVariable("Awards", "\", N <award>\" for each award still needed on a spotted station, otherwise empty."),
+                new NotificationVariable("NewDxccCount", "Bare count of new-DXCC stations (renders \"0\" when none)."),
+                new NotificationVariable("WantedCount", "Bare count of wanted stations (renders \"0\" when none)."),
+                new NotificationVariable("AwardCount", "Bare count of distinct awards still needed (renders \"0\" when none)."),
+                new NotificationVariable("Band", "The band you're operating on, e.g. 20m."),
+            },
+            [NotificationEventType.ReceiveStateSummary] = new List<NotificationVariable>
+            {
+                new NotificationVariable("State", "\"Receiving\" or \"Transmitting\"."),
+            },
+            [NotificationEventType.OperatingModeSummary] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Mode", "\"Listen\" or \"CQ\"."),
+                new NotificationVariable("SubMode", "\", FT4\" on FT4, otherwise empty."),
+            },
+            [NotificationEventType.ReceiveSideId] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Side", "The advanced-call-layout side name for the slot whose receive period just ended: \"RX1\", \"RX2\", \"TX1\" or \"TX2\", following the current transmit side."),
+            },
             [NotificationEventType.QsoStarted] = new List<NotificationVariable>
             {
-                new NotificationVariable("Callsign", "The station's callsign."),
+                new NotificationVariable("Callsign", "The station you're now working."),
                 new NotificationVariable("Band", "The band you're operating on, e.g. 20m."),
                 new NotificationVariable("Mode", "FT8 or FT4."),
-                new NotificationVariable("Grid", "The station's grid square, if known."),
-                new NotificationVariable("Country", "The station's DXCC country, if known."),
-                new NotificationVariable("Distance", "Distance to the station in miles, if known."),
-                new NotificationVariable("Bearing", "Compass bearing to the station in degrees, if known."),
             },
             [NotificationEventType.QsoCompleted] = new List<NotificationVariable>
             {
-                new NotificationVariable("Callsign", "The station's callsign."),
+                new NotificationVariable("Callsign", "The station just logged."),
                 new NotificationVariable("Band", "The band the QSO was made on."),
                 new NotificationVariable("Mode", "FT8 or FT4."),
-                new NotificationVariable("Grid", "The station's grid square, if known."),
-                new NotificationVariable("Country", "The station's DXCC country, if known."),
-                new NotificationVariable("Distance", "Distance to the station in miles, if known."),
-                new NotificationVariable("Bearing", "Compass bearing to the station in degrees, if known."),
-                new NotificationVariable("SignalReportSent", "The signal report you sent."),
-                new NotificationVariable("SignalReportReceived", "The signal report you received."),
             },
             [NotificationEventType.TxMessageChanged] = new List<NotificationVariable>
             {
                 new NotificationVariable("Callsign", "Who your current transmission is addressed to (or CQ)."),
-                new NotificationVariable("Message", "The full text being transmitted."),
+                new NotificationVariable("Message", "The message text being transmitted, e.g. \"R minus 12\"."),
                 new NotificationVariable("Band", "The band you're operating on."),
+                new NotificationVariable("Mode", "FT8 or FT4."),
+            },
+            [NotificationEventType.ReceivedReply] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Received", "\", received <message>\" (or \" no response\" / a short activity note) for the reply that just came in this receive cycle, otherwise empty."),
+                new NotificationVariable("Previous", "\", previous <message>\" for the reply before that, otherwise empty."),
+                new NotificationVariable("Callsign", "The station you are working."),
+            },
+            [NotificationEventType.NoDecodeWarning] = new List<NotificationVariable>
+            {
                 new NotificationVariable("Mode", "FT8 or FT4."),
             },
             [NotificationEventType.AwardsNeeded] = new List<NotificationVariable>
@@ -78,14 +108,46 @@ namespace WSJTX_Controller
                 new NotificationVariable("AwardList", "The award names, comma-separated."),
                 new NotificationVariable("Country", "The station's DXCC country, if known."),
             },
-            [NotificationEventType.ConnectionClosed] = new List<NotificationVariable>
-            {
-                // WSJT-X closing carries no data of its own -- {Time} (added by every type
-                // below) is the only variable this one has anything to offer.
-            },
             [NotificationEventType.ConnectionLost] = new List<NotificationVariable>
             {
                 new NotificationVariable("Detail", "Why the connection was considered lost, if known."),
+            },
+            [NotificationEventType.AutoTxResume] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Callsign", "The station Jimmy has automatically resumed working."),
+            },
+            [NotificationEventType.StationWatchStarted] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The callsign now being watched."),
+            },
+            [NotificationEventType.StationWatchStopped] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The callsign that was being watched."),
+            },
+            [NotificationEventType.StationWatchActivity] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Phrase", "A ready-made natural phrase for the observation, e.g. \"K4YT working W1ABC, minus 8.\""),
+                new NotificationVariable("Target", "The watched callsign."),
+                new NotificationVariable("Peer", "The other station involved, if any."),
+                new NotificationVariable("Value", "The report value, if this observation carries one (e.g. \"-08\", \"R-05\")."),
+                new NotificationVariable("Kind", "The observation kind, e.g. \"TargetCq\", \"TargetRr73\"."),
+            },
+            [NotificationEventType.StationWatchAmbiguous] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The watched callsign."),
+            },
+            [NotificationEventType.SmartStartWaiting] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The captured Smart Start target callsign."),
+                new NotificationVariable("Progress", "\"N of M\" -- how many appropriate receive opportunities have elapsed of the configured threshold."),
+            },
+            [NotificationEventType.SmartStartTargetAvailable] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The Smart Start target callsign."),
+            },
+            [NotificationEventType.SmartStartCallStarting] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The station Jimmy is now calling."),
             },
             [NotificationEventType.ErrorWarning] = new List<NotificationVariable>
             {
@@ -105,6 +167,14 @@ namespace WSJTX_Controller
             [NotificationEventType.RadioCatRecovered] = new List<NotificationVariable>
             {
                 // Carries no data of its own -- {Time} (added by every type) is all it offers.
+            },
+            [NotificationEventType.RadioCatLost] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Connection", "A pre-worded phrase for the configured CAT connection, e.g. \" on COM4 at 115200 baud\"."),
+                new NotificationVariable("ComPort", "The configured CAT serial port, if any."),
+                new NotificationVariable("BaudRate", "The configured CAT baud rate, if any."),
+                new NotificationVariable("RigModel", "The configured Hamlib rig-model id, if any."),
+                new NotificationVariable("Detail", "The raw Nexus/Hamlib diagnostic text -- verbose; omitted from the default wording."),
             },
         };
 

@@ -10,14 +10,13 @@ namespace WSJTX_Controller
     // always meant to make possible -- it wraps StatusViewNotificationDelivery (composition, not
     // replacement: the existing status-field behavior stays byte-identical) and additionally
     // raises a UI Automation Notification event (System.Windows.Forms.AccessibleObject.
-    // RaiseAutomationNotification) for Important-priority notifications, so they can be heard
+    // RaiseAutomationNotification) for Important/Critical notifications, so they can be heard
     // even while keyboard focus is elsewhere -- without moving focus, without self-voicing,
-    // without calling JAWS/NVDA directly. Gated behind a General-tab option, off by default:
-    // live JAWS and NVDA confirmation is still required before this should ever default to on
-    // (see Controller.RaiseAccessibleAlert's own comment).
+    // without calling JAWS/NVDA directly. There is NO beep here: Jimmy plays only its own
+    // configured Options > Sounds WAV cues, fired at their own call sites.
     public interface INotificationDelivery
     {
-        void Announce(string text, bool important);
+        void Announce(string text, AlertCue cue);
     }
 
     public class StatusViewNotificationDelivery : INotificationDelivery
@@ -29,26 +28,23 @@ namespace WSJTX_Controller
             _statusView = statusView;
         }
 
-        public void Announce(string text, bool important) => _statusView.ShowMessage(text, important);
+        // Routes through CoordinatedSpeak, the one screen-reader nudge seam shared with routine
+        // RX/TX/QSO status -- NOT ShowMessage/ShowMsg (that stays the path for direct one-shot
+        // operator feedback). The cue is not used here (the nudge is the same regardless); it is
+        // the UiaAlertNotificationDelivery decorator's concern.
+        public void Announce(string text, AlertCue cue) => _statusView.CoordinatedSpeak(text);
     }
 
-    // Decorator, not a replacement -- always delivers through `inner` first (preserving
-    // StatusViewNotificationDelivery's existing behavior exactly, unconditionally), then
-    // ADDITIONALLY raises a UIA notification when all three hold:
-    //   1. `important` is true -- this is NotificationCenter.Deliver's own already-resolved
-    //      policy.Priority (or the forced-Important ErrorSeverity.Error escalation), not a
-    //      second, separately-maintained list of "which events count" -- see NotificationCenter.
-    //      Deliver's own comment. Adding a new Important-by-default event type (or an operator
-    //      raising an existing type's Priority via the notifyPriority_{Type} INI key) is
-    //      automatically covered with no change here.
-    //   2. `isEnabled()` is true -- the General-tab "Announce important notifications when focus
-    //      is elsewhere" checkbox (Controller.announceImportantAlertsWhenFocusElsewhere), off by
-    //      default.
-    //   3. `statusView.WouldAnnounce` is false -- if the normal ShowMessage path is ALREADY going
-    //      to announce this (statusText is focused and this is the active form), raising a
-    //      second UIA notification for the same text would be a duplicate announcement, not a
-    //      genuinely off-focus one. This is the ONE and only duplicate-avoidance check -- no
-    //      separate suppression/cooldown state of its own.
+    // Decorator, not a replacement -- always delivers through `inner` first, then ADDITIONALLY
+    // raises the off-focus UIA notification when:
+    //   * cue == Critical  -> ALWAYS attempt it (regardless of the operator option): a safety
+    //                         event must reach the operator even when Jimmy is backgrounded.
+    //   * cue == Important  -> only when `isEnabled()` is true -- the "Announce Important and
+    //                         Critical events when focus is elsewhere" option
+    //                         (Controller.announceImportantAlertsWhenFocusElsewhere).
+    //   * cue == None       -> never.
+    // In all cases `statusView.WouldAnnounce` is checked first: if the normal spoken path is
+    // already going to say this (Jimmy focused), a second UIA notification would just double it.
     public class UiaAlertNotificationDelivery : INotificationDelivery
     {
         private readonly INotificationDelivery _inner;
@@ -62,11 +58,11 @@ namespace WSJTX_Controller
             _isEnabled = isEnabled;
         }
 
-        public void Announce(string text, bool important)
+        public void Announce(string text, AlertCue cue)
         {
-            _inner.Announce(text, important);
-            if (!important) return;
-            if (!_isEnabled()) return;
+            _inner.Announce(text, cue);
+            if (cue == AlertCue.None) return;
+            if (cue == AlertCue.Important && !_isEnabled()) return;
             if (_statusView.WouldAnnounce) return;
             _statusView.RaiseAccessibleAlert(text);
         }

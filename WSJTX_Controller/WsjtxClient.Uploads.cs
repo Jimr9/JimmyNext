@@ -125,9 +125,14 @@ namespace WSJTX_Controller
                         }
                         else
                         {
+                            // Only an unambiguous TQSL status code 0 gets here with LastError
+                            // null -- LastUploadedCount is then the real signed/uploaded count
+                            // (or 0 if nothing was pending). Ambiguous codes 8/9/14 take the
+                            // branch above with LastError set, so they never present a count.
+                            string msg = FormatLotwUploadCompleteMessage(client.LastUploadedCount);
                             ctrl.BeginInvoke(new Action(() =>
                             {
-                                ctrl.ShowUploadStatus("LoTW (TQSL) upload complete.", false);
+                                ctrl.ShowUploadStatus(msg, false);
                                 ctrl.RefreshLogbookWindowIfOpen();
                             }));
                         }
@@ -138,6 +143,17 @@ namespace WSJTX_Controller
                     DebugOutput($"{Time()} RunTqslUpload error: {ex.Message}");
                 }
             });
+        }
+
+        // Alt+U success wording (2.0.58). uploadedCount comes from TqslUploadClient.
+        // LastUploadedCount: >0 = the unambiguous code-0 signed/uploaded count (correct
+        // singular/plural), 0 = nothing was pending, null = the outcome was ambiguous or
+        // failed and NO count may be presented.
+        internal static string FormatLotwUploadCompleteMessage(int? uploadedCount)
+        {
+            if (uploadedCount == null) return "LoTW (TQSL) upload complete.";
+            if (uploadedCount.Value == 0) return "LoTW (TQSL) upload complete. No QSOs were pending.";
+            return $"LoTW (TQSL) upload complete. {NotificationTemplateEngine.Pluralize(uploadedCount.Value, "QSO")} uploaded.";
         }
 
         // Sends every QSO not yet uploaded to QRZ/Club Log. This is the batch

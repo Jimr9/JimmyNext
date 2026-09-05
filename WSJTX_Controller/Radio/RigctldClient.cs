@@ -52,6 +52,32 @@ namespace WSJTX_Controller
             return File.Exists(path) ? path : null;
         }
 
+        // The Hamlib release Jimmy bundles. Kept in lockstep with fetch-hamlib.ps1's own $Ver
+        // by RigctldClient's own sync test (BundledHamlibVersionMatchesFetchScriptTests). The
+        // MinGW libhamlib-4.dll carries no embedded version resource, so this constant is the
+        // authoritative record; GetBundledHamlibVersion prefers the DLL's resource if a future
+        // build ever adds one, and falls back to this.
+        public const string BundledHamlibVersion = "4.7.1";
+
+        // The Hamlib version Jimmy actually ships. Returns null only when the bundled runtime
+        // isn't present next to the executable (e.g. a bare dev/test tree). Diagnostics only --
+        // used for the engine-launch log line and Alt+Q's meter-data diagnostic, never for any
+        // behavioral decision, and never a Hamlib upgrade trigger.
+        public static string GetBundledHamlibVersion()
+        {
+            try
+            {
+                string exeDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+                if (string.IsNullOrEmpty(exeDir)) return null;
+                string dll = Path.Combine(exeDir, "Resources", "hamlib", "libhamlib-4.dll");
+                if (!File.Exists(dll)) return null;
+                var fvi = System.Diagnostics.FileVersionInfo.GetVersionInfo(dll);
+                string v = fvi.ProductVersion ?? fvi.FileVersion;
+                return string.IsNullOrWhiteSpace(v) ? BundledHamlibVersion : v.Trim();
+            }
+            catch { return null; }
+        }
+
         // One row of the bundled rigctl.exe's own --list output -- the live-supported rig
         // catalog for whichever Hamlib version Jimmy actually ships, not a separately
         // maintained/hardcoded list that could silently drift out of sync with it.

@@ -26,6 +26,17 @@ namespace WSJTX_Controller
         // (DX Spot Watch), not part of the Advanced Call Layout display. Opt-in, default off.
         public bool ShowSpotWatch { get; set; } = false;
 
+        // Smart QSO Start (2.0.63): OFF preserves today's Enter behaviour exactly (reply
+        // immediately). ON means "work this station when it is appropriate" instead -- see
+        // TargetMonitor/WsjtxClient.StationWatch.cs. Opt-in, default off so nothing changes for
+        // an operator who never visits Options for it.
+        public bool SmartQsoStartEnabled { get; set; } = false;
+
+        // "Start after target not heard for: N receive periods" -- 1-10, default 2. Counts
+        // completed, appropriate-parity receive opportunities, not wall-clock seconds (see
+        // TargetMonitor.OnReceivePeriodComplete's own comment for exactly what counts).
+        public int SmartStartSilencePeriods { get; set; } = 2;
+
         // Appearance (list font size + colors) -- defaults match the app's original
         // hardcoded look exactly, so nothing changes for anyone who never opens the
         // new Appearance tab. Colors are stored as ARGB ints (unambiguous, no named-
@@ -86,6 +97,9 @@ namespace WSJTX_Controller
             AdvShowTx2 = ini.Read("advShowTx2") != "False";
             AdvShowRaw = ini.Read("advShowRaw") != "False";
             ShowSpotWatch = ini.Read("showSpotWatch") == "True";
+            SmartQsoStartEnabled = ini.Read("smartQsoStartEnabled") == "True";
+            if (int.TryParse(ini.Read("smartStartSilencePeriods"), out int silencePeriods) && silencePeriods >= 1 && silencePeriods <= 10)
+                SmartStartSilencePeriods = silencePeriods;
 
             if (int.TryParse(ini.Read("listFontSize"), out int fontSize) && fontSize >= 8 && fontSize <= 18)
                 ListFontSize = fontSize;
@@ -107,6 +121,8 @@ namespace WSJTX_Controller
             ini.Write("advShowTx2", AdvShowTx2.ToString());
             ini.Write("advShowRaw", AdvShowRaw.ToString());
             ini.Write("showSpotWatch", ShowSpotWatch.ToString());
+            ini.Write("smartQsoStartEnabled", SmartQsoStartEnabled.ToString());
+            ini.Write("smartStartSilencePeriods", SmartStartSilencePeriods.ToString());
 
             ini.Write("listFontSize", ListFontSize.ToString());
             ini.Write("listBackColor", ListBackColor.ToArgb().ToString());

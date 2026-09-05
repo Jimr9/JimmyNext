@@ -148,11 +148,19 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox   _showSpotWatchCheckBox;
         private System.Windows.Forms.ComboBox   _spotWatchSortCb;
 
+        // Receive / Auto Reply tab -- 2.0.58 operator continent selector (persisted as a
+        // 2-letter code: "" / AF / AN / AS / EU / NA / OC / SA).
+        private System.Windows.Forms.ComboBox _myContinentCombo;
+        private static readonly string[] _continentDisplay =
+            { "Not specified", "Africa", "Antarctica", "Asia", "Europe", "North America", "Oceania", "South America" };
+        private static readonly string[] _continentCode = { "", "AF", "AN", "AS", "EU", "NA", "OC", "SA" };
+
         // General tab
         private System.Windows.Forms.CheckBox pskReporterCheckBox;
         private System.Windows.Forms.CheckBox moveFocusToStatusCheckBox;
         private System.Windows.Forms.CheckBox checkForUpdatesCheckBox;
-        private System.Windows.Forms.CheckBox announceImportantAlertsCheckBox;
+        private System.Windows.Forms.CheckBox _smartQsoStartCheckBox;
+        private System.Windows.Forms.NumericUpDown _smartStartSilencePeriodsNumeric;
 
         // Appearance tab
         private System.Windows.Forms.ComboBox appearanceThemeCombo;
@@ -381,22 +389,47 @@ namespace WSJTX_Controller
             };
             generalPanel.Controls.Add(checkForUpdatesCheckBox);
 
-            // Added 2026-08-19 (accessibility-notification feature): gates
-            // UiaAlertNotificationDelivery (WSJTX_Controller/Notify/NotificationDelivery.cs).
-            // Off by default -- must stay off until live JAWS and NVDA testing confirms the
-            // announcement, timing, and interruption behavior actually work well; see
-            // Controller.RaiseAccessibleAlert's own comment for the exact UIA call this makes.
-            announceImportantAlertsCheckBox = new System.Windows.Forms.CheckBox
+            // "Announce important notifications when focus is elsewhere" moved to
+            // Options > Notifications > Global speech behaviour (2026-09-04) so all automatic-
+            // speech behaviour is configured in one place. Same Controller setting / INI key.
+
+            // Smart QSO Start (2.0.63). OFF preserves today's Enter behaviour exactly; ON means
+            // "work this station when it is appropriate" instead of transmitting immediately --
+            // see TargetMonitor/WsjtxClient.StationWatch.cs.
+            _smartQsoStartCheckBox = new System.Windows.Forms.CheckBox
             {
-                Text                  = "Announce important notifications when focus is elsewhere",
-                AccessibleName        = "Announce important notifications when focus is elsewhere",
+                Text                  = "Smart QSO Start (Enter means \"work when appropriate\", not immediately)",
+                AccessibleName        = "Smart QSO Start",
                 AutoSize              = true,
-                Location              = new System.Drawing.Point(10, 140),
-                TabIndex              = 5,
-                Checked               = ctrl.announceImportantAlertsWhenFocusElsewhere,
+                Location              = new System.Drawing.Point(10, 195),
+                TabIndex              = 7,
+                Checked               = ctrl.smartQsoStartEnabled,
                 Font                  = font,
             };
-            generalPanel.Controls.Add(announceImportantAlertsCheckBox);
+            generalPanel.Controls.Add(_smartQsoStartCheckBox);
+
+            var smartStartSilenceLabel = new System.Windows.Forms.Label
+            {
+                Text     = "Smart Start: start after target not heard for (receive periods):",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 222),
+                Font     = font,
+                TabStop  = false,
+            };
+            generalPanel.Controls.Add(smartStartSilenceLabel);
+
+            _smartStartSilencePeriodsNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Smart Start silence periods",
+                Location       = new System.Drawing.Point(360, 219),
+                Size           = new System.Drawing.Size(50, 20),
+                TabIndex       = 8,
+                Minimum        = 1,
+                Maximum        = 10,
+                Value          = Math.Max(1, Math.Min(10, ctrl.smartStartSilencePeriods)),
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_smartStartSilencePeriodsNumeric);
         }
 
         private void ApplyGeneralSettings()
@@ -409,7 +442,11 @@ namespace WSJTX_Controller
 
             ctrl.moveFocusToStatusOnCallSelect = moveFocusToStatusCheckBox?.Checked ?? false;
             ctrl.checkForUpdatesOnStartup = checkForUpdatesCheckBox?.Checked ?? false;
-            ctrl.announceImportantAlertsWhenFocusElsewhere = announceImportantAlertsCheckBox?.Checked ?? false;
+            // announceImportantAlertsWhenFocusElsewhere is applied by SaveNotificationsTab now.
+
+            ctrl.smartQsoStartEnabled = _smartQsoStartCheckBox?.Checked ?? false;
+            int silencePeriods = (int)(_smartStartSilencePeriodsNumeric?.Value ?? 2);
+            ctrl.smartStartSilencePeriods = Math.Max(1, Math.Min(10, silencePeriods));
 
             int maxAge = (int)(_maxCallQueueAgeNumeric?.Value ?? 16);
             ctrl.maxCallQueueAgePeriods = Math.Max(4, Math.Min(200, maxAge));
@@ -452,6 +489,7 @@ namespace WSJTX_Controller
         {
             if (!ValidateHotkeys()) return;
             ApplyGeneralSettings();
+            SaveReceiveReplyTab();
             SaveHotkeysTab();
             SaveAdvancedUiTab();
             SaveWantedCallsTab();
@@ -481,6 +519,17 @@ namespace WSJTX_Controller
         private void cancelButton_Click(object sender, EventArgs e)
         {
             Close();
+        }
+
+        // 2.0.58: persist the operator continent selector. Stored as a 2-letter code (never a
+        // friendly display string); index 0 ("Not specified") stores blank. Jimmy does NOT
+        // derive the operator's continent when it is blank -- the wording says exactly that.
+        private void SaveReceiveReplyTab()
+        {
+            if (_myContinentCombo == null) return;
+            int i = _myContinentCombo.SelectedIndex;
+            string code = (i >= 0 && i < _continentCode.Length) ? _continentCode[i] : "";
+            ctrl.SetAndPersistMyContinent(code);
         }
 
         // ===== ADVANCED UI TAB =====
@@ -1014,26 +1063,78 @@ namespace WSJTX_Controller
         private Dictionary<NotificationEventType, NotificationPolicy> _pendingNotifyPolicies;
         private List<NotificationEventType> _notifyTypeOrder;
         private System.Windows.Forms.CheckedListBox _notifyTypesListBox;
-        private System.Windows.Forms.CheckedListBox _notifyVarsListBox;
+        // 2026-09-04 rebuild: a plain (single-select) list of the fields VALID for the selected
+        // event -- "Insert field" adds one to the template, Move Earlier/Later reorder it within
+        // the template. Replaces the old CheckedListBox where "checked" meant "used in template"
+        // (confusing with JAWS).
+        private System.Windows.Forms.ListBox _notifyVarsListBox;
         private List<NotificationVariable> _notifyVarsListEntries;   // parallel to _notifyVarsListBox.Items
+        private System.Windows.Forms.Button _notifyInsertFieldButton;
         private System.Windows.Forms.Button _notifyVarMoveUpButton;
         private System.Windows.Forms.Button _notifyVarMoveDownButton;
         private System.Windows.Forms.TextBox _notifyTemplateTextBox;
-        private System.Windows.Forms.RadioButton _notifyTimingImmediateRadio;
-        private System.Windows.Forms.RadioButton _notifyTimingDeferredRadio;
-        private System.Windows.Forms.CheckBox _notifyDeferWhileTxCheckBox;
-        // Item 2, 2026-08-24: global (not per-notification-type) toggle -- see Controller.cs's
-        // own suppressReceiveNotificationsDuringTx field comment.
+        // Per-event delivery-timing combo. Backed by NotificationPolicy.SpeakWhen.
+        private System.Windows.Forms.ComboBox _notifySpeakWhenComboBox;
+        // The GLOBAL "when to speak the routine RX/TX/QSO status line" combo -- routine status is
+        // not a NotificationEventType. Backed by Controller.routineStatusSpeakWhen.
+        private System.Windows.Forms.ComboBox _notifyRoutineStatusSpeakWhenComboBox;
+        // Per-event speech-eligibility (Always / During a QSO only / Outside a QSO only / Never),
+        // backed by NotificationPolicy.Condition; and the global routine-status one backed by
+        // Controller.routineStatusCondition.
+        private System.Windows.Forms.ComboBox _notifyDuringQsoComboBox;
+        private System.Windows.Forms.ComboBox _notifyRoutineStatusDuringQsoComboBox;
         private System.Windows.Forms.CheckBox _suppressReceiveDuringTxCheckBox;
+        // Moved here from the General tab (2026-09-04) so all automatic-speech behaviour is in
+        // one place. Same Controller.announceImportantAlertsWhenFocusElsewhere setting/key.
+        private System.Windows.Forms.CheckBox _notifyAnnounceOffFocusCheckBox;
         private System.Windows.Forms.NumericUpDown _notifyRepeatSecondsUpDown;
         private System.Windows.Forms.NumericUpDown _notifyThrottleMsUpDown;
         private System.Windows.Forms.CheckBox _notifySuppressUnchangedCheckBox;
         private System.Windows.Forms.ComboBox _notifyPriorityComboBox;
         private AnnouncingLabel _notifyValidationLabel;
+        // Plain-language explanation of the current condition + timing + priority combination,
+        // and (for a routine-status wording row) a note that those controls don't apply.
+        private System.Windows.Forms.Label _notifyDeliveryExplainLabel;
+        private System.Windows.Forms.Label _notifyClauseNoteLabel;
+        // The routine-status wording rows -- their per-event condition/timing/priority/repeat are
+        // not meaningful (they are clauses of the one routine status utterance).
+        private static readonly HashSet<NotificationEventType> _routineClauseTypes = new HashSet<NotificationEventType>
+        {
+            NotificationEventType.ReceiveCycleSummary, NotificationEventType.ReceiveStateSummary,
+            NotificationEventType.OperatingModeSummary, NotificationEventType.QsoStarted,
+            NotificationEventType.QsoCompleted, NotificationEventType.TxMessageChanged,
+            NotificationEventType.ReceivedReply, NotificationEventType.NoDecodeWarning,
+        };
         // Re-entrancy guard, same role as _freqUpdatingFields above: true while code is
         // populating fields from a newly-selected type/re-synced template, so those
         // programmatic changes never get mistaken for operator edits.
         private bool _notifyUpdatingFields;
+
+        // Codex #7: the Global speech behaviour controls are now PENDING until OK, like the
+        // per-event policies -- Cancel discards them. Seeded from ctrl.* in BuildNotificationsTab,
+        // committed by SaveNotificationsTab. (The two checkboxes were already pending via
+        // SaveNotificationsTab; these two combos used to mutate Controller + persist immediately.)
+        private SpeakWhen _pendingRoutineStatusSpeakWhen;
+        private SpeakCondition _pendingRoutineStatusCondition;
+        // 2026-09-05: the two receive-side role scopes (advanced call layout). Pending until OK,
+        // like the routine combos above. Seeded from ctrl.Notifications in BuildNotificationsTab.
+        private System.Windows.Forms.ComboBox _notifyReceiveSideIdScopeComboBox;
+        private System.Windows.Forms.ComboBox _notifyReceiveCountScopeComboBox;
+        private ReceiveSideScope _pendingReceiveSideIdScope;
+        private ReceiveSideScope _pendingReceiveCountScope;
+        // Combo position -> ReceiveSideScope. Order matches the enum so position == (int)value.
+        private static readonly ReceiveSideScope[] _receiveSideScopeValues =
+        {
+            ReceiveSideScope.Both, ReceiveSideScope.RxSideOnly,
+            ReceiveSideScope.TxSideOnly, ReceiveSideScope.Neither,
+        };
+        private static readonly string[] _receiveSideScopeLabels =
+        {
+            "Both sides", "Current RX side only", "Current TX side only", "Neither side",
+        };
+        // Position -> SpeakWhen for the GLOBAL routine timing combo (Codex #5: "After the QSO
+        // ends" is dropped when the global condition is "Only during a QSO").
+        private SpeakWhen[] _routineTimingComboValues = System.Array.Empty<SpeakWhen>();
 
         private void BuildRadioTab()
         {
@@ -2709,365 +2810,514 @@ namespace WSJTX_Controller
                 ctrl.wsjtxClient?.DirectSetWorkingFrequencies(newEntries, null);
         }
 
-        // ===== NOTIFICATIONS TAB =====
+        // ===== NOTIFICATIONS TAB (rebuilt 2026-09-04 for a linear, accessible layout) =====
         //
-        // Same overall shape as the Hotkeys/Frequencies panels: one flat list you arrow
-        // through (here, every configurable notification type, checked = enabled), a small
-        // fixed set of controls to the right/below that always reflect whichever type is
-        // currently selected. Two things are specific to this panel:
+        // Top-to-bottom, tab order == visual order, no overlapping controls:
+        //   A. Intro
+        //   B. Automatic speech events (the list -- checked = enabled)
+        //   C. Selected event: speech condition, spoken message template, available fields,
+        //      Insert / Move Earlier / Move Later, validation, Reset this event
+        //   D. Delivery: when to deliver, priority, plain-language explanation
+        //   E. Repeats: don't-repeat-if-unchanged, minimum seconds, minimum gap
+        //   F. Global speech behaviour (only what can't be modelled per event)
+        //   G. Reset all events / Reset global speech settings
         //
-        // 1. A SECOND list -- the variables applicable to the selected type, checked = present
-        //    in its template, with Move Up/Down to reorder. Checking/unchecking/reordering here
-        //    edits the Template text box live; typing directly into the Template box re-syncs
-        //    this list's checked state and order on the way out. The template STRING is always
-        //    the single source of truth (see NotificationVariableRegistry.Validate) -- this
-        //    list is a view onto it, never a second place the same information is stored.
-        //
-        // 2. An Advanced section (Timing/Defer-while-transmitting/Repeat/Throttle/Suppress-
-        //    unchanged/Priority) -- reachable by Tab for anyone who wants it, but a simple
-        //    operator only ever needs the first list's checkboxes and can leave everything
-        //    else at its default.
-        private void BuildNotificationsTab()
+        // The routine-status wording rows (Receive cycle summary / QSO started / QSO logged /
+        // Transmit message) are clauses of the ONE routine status line: only their Enabled flag
+        // and template apply, so D and E are disabled for them with a note pointing at F.
+        internal void BuildNotificationsTab()   // internal: OptionsDlg tests (matches BuildFrequenciesTab)
         {
             notificationsPanel.Controls.Clear();
+            notificationsPanel.AutoScroll = true;
 
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
             int tabIdx = 0;
+            const int L = 12;
+            const int W = 640;
+            int y = 10;
 
-            var instrBox = new System.Windows.Forms.TextBox
+            // ── A. Intro ──────────────────────────────────────────────────────────────────────
+            notificationsPanel.Controls.Add(new System.Windows.Forms.Label
             {
-                ReadOnly = true,
-                Multiline = true,
-                BorderStyle = System.Windows.Forms.BorderStyle.None,
-                BackColor = notificationsPanel.BackColor,
-                ForeColor = System.Drawing.SystemColors.ControlText,
-                Location = new System.Drawing.Point(8, 8),
-                Size = new System.Drawing.Size(660, 34),
-                Text = "Check a notification to enable it. Choose one to edit what it says and, further down, when and how it announces.",
-                TabStop = false,
-                Font = font,
-            };
-            notificationsPanel.Controls.Add(instrBox);
+                Text = "Control Jimmy's automatic operating and alert speech. Choose an event, "
+                     + "then set what it says and when.",
+                Location = new System.Drawing.Point(L, y), Size = new System.Drawing.Size(W, 32),
+                Font = font, TabStop = false,
+            });
+            y += 38;
 
-            // Deep-clone into a working copy -- every control below only ever touches this;
-            // SaveNotificationsTab (OK button only) commits it back to ctrl.Notifications.
-            // Cancel just discards this OptionsDlg instance.
+            // Working copy -- every control below only touches this; SaveNotificationsTab (OK)
+            // commits it back to ctrl.Notifications, Cancel discards this dialog instance.
             _pendingNotifyPolicies = new Dictionary<NotificationEventType, NotificationPolicy>();
             foreach (var kv in ctrl.Notifications.Policies) _pendingNotifyPolicies[kv.Key] = kv.Value.Clone();
-            // Stable, deliberate order (not Enum.GetValues' declaration order) -- groups the
-            // currently-live types together, first, since they're the ones an operator is
-            // most likely to actually hear today; the four parked types follow. Both groups are
-            // fully configurable either way (see NotificationEvents.cs's own comment on why
-            // configurability and "is anything publishing this yet" are separate questions).
-            // RadioCatRecovered added 2026-08-19 (notification-system-consistency pass) --
-            // recovery companion to ErrorWarning's "Radio CAT link lost", so it's placed
-            // immediately after it.
+
+            // Every entry is a LIVE event whose settings control real behaviour. Alerts first
+            // (independent spoken notifications), then the routine-status wording rows.
             _notifyTypeOrder = new List<NotificationEventType>
             {
-                NotificationEventType.ConnectionLost,
-                NotificationEventType.ConnectionClosed,
                 NotificationEventType.ErrorWarning,
+                NotificationEventType.ConnectionLost,
+                NotificationEventType.RadioCatLost,
                 NotificationEventType.RadioCatRecovered,
                 NotificationEventType.ClockOutOfSync,
                 NotificationEventType.ClockSynced,
+                NotificationEventType.AutoTxResume,
+                NotificationEventType.ReceiveStateSummary,
+                NotificationEventType.ReceiveCycleSummary,
+                NotificationEventType.OperatingModeSummary,
                 NotificationEventType.QsoStarted,
                 NotificationEventType.QsoCompleted,
                 NotificationEventType.TxMessageChanged,
-                NotificationEventType.AwardsNeeded,
+                NotificationEventType.ReceivedReply,
+                NotificationEventType.NoDecodeWarning,
+                NotificationEventType.StationWatchStarted,
+                NotificationEventType.StationWatchStopped,
+                NotificationEventType.StationWatchActivity,
+                NotificationEventType.StationWatchAmbiguous,
+                NotificationEventType.SmartStartWaiting,
+                NotificationEventType.SmartStartTargetAvailable,
+                NotificationEventType.SmartStartCallStarting,
             };
 
+            // ── B. Event list ────────────────────────────────────────────────────────────────
+            notificationsPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Automatic speech events (check to enable):",
+                Location = new System.Drawing.Point(L, y), Size = new System.Drawing.Size(W, 18),
+                Font = font, TabStop = false,
+            });
+            y += 20;
             _notifyTypesListBox = new System.Windows.Forms.CheckedListBox
             {
-                Location = new System.Drawing.Point(8, 50),
-                Size = new System.Drawing.Size(230, 150),
-                TabIndex = tabIdx++,
-                Font = font,
-                CheckOnClick = true,
-                AccessibleName = "Notifications",
+                Location = new System.Drawing.Point(L, y), Size = new System.Drawing.Size(W, 156),
+                TabIndex = tabIdx++, Font = font, CheckOnClick = true,
+                AccessibleName = "Automatic speech events",
             };
             foreach (var type in _notifyTypeOrder)
                 _notifyTypesListBox.Items.Add(NotificationDefaults.DisplayNames[type], _pendingNotifyPolicies[type].Enabled);
             _notifyTypesListBox.SelectedIndexChanged += (s, e) => LoadSelectedNotifyType();
             _notifyTypesListBox.ItemCheck += (s, e) =>
             {
-                // ItemCheck fires BEFORE the box's own state updates -- e.NewValue is
-                // authoritative for what it's about to become.
                 var type = _notifyTypeOrder[e.Index];
                 _pendingNotifyPolicies[type].Enabled = e.NewValue == System.Windows.Forms.CheckState.Checked;
             };
             notificationsPanel.Controls.Add(_notifyTypesListBox);
+            y += 156 + 8;
 
-            notificationsPanel.Controls.Add(new System.Windows.Forms.Label
+            // ── C. Selected event ───────────────────────────────────────────────────────────
+            var selGroup = new System.Windows.Forms.GroupBox
             {
-                Text = "Variables for this notification (check to include):",
-                Location = new System.Drawing.Point(246, 50),
-                Size = new System.Drawing.Size(260, 18),
+                Text = "Selected event",
+                Location = new System.Drawing.Point(L, y), Size = new System.Drawing.Size(W, 250),
                 Font = font,
-                TabStop = false,
+            };
+            notificationsPanel.Controls.Add(selGroup);
+            int gx = 12, gy = 22, gw = W - 24;
+
+            selGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Speak this event:", Location = new System.Drawing.Point(gx, gy + 2),
+                Size = new System.Drawing.Size(150, 18), Font = font, TabStop = false,
             });
-
-            _notifyVarsListBox = new System.Windows.Forms.CheckedListBox
-            {
-                Location = new System.Drawing.Point(246, 68),
-                Size = new System.Drawing.Size(260, 132),
-                TabIndex = tabIdx++,
-                Font = font,
-                CheckOnClick = true,
-                AccessibleName = "Template variables",
-            };
-            _notifyVarsListBox.ItemCheck += (s, e) => NotifyVarCheckChanged(e);
-            notificationsPanel.Controls.Add(_notifyVarsListBox);
-
-            _notifyVarMoveUpButton = new System.Windows.Forms.Button
-            {
-                Text = "Move Up",
-                Location = new System.Drawing.Point(514, 68),
-                Size = new System.Drawing.Size(90, 24),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Move selected variable earlier in the template",
-            };
-            _notifyVarMoveUpButton.Click += (s, e) => MoveNotifyVar(-1);
-            notificationsPanel.Controls.Add(_notifyVarMoveUpButton);
-
-            _notifyVarMoveDownButton = new System.Windows.Forms.Button
-            {
-                Text = "Move Down",
-                Location = new System.Drawing.Point(514, 96),
-                Size = new System.Drawing.Size(90, 24),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Move selected variable later in the template",
-            };
-            _notifyVarMoveDownButton.Click += (s, e) => MoveNotifyVar(1);
-            notificationsPanel.Controls.Add(_notifyVarMoveDownButton);
-
-            notificationsPanel.Controls.Add(new System.Windows.Forms.Label
-            {
-                Text = "Template:",
-                Location = new System.Drawing.Point(8, 210),
-                Size = new System.Drawing.Size(120, 18),
-                Font = font,
-                TabStop = false,
-            });
-
-            _notifyTemplateTextBox = new System.Windows.Forms.TextBox
-            {
-                Location = new System.Drawing.Point(8, 228),
-                Size = new System.Drawing.Size(596, 22),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Template text",
-            };
-            _notifyTemplateTextBox.Leave += (s, e) => CommitNotifyTemplateText();
-            notificationsPanel.Controls.Add(_notifyTemplateTextBox);
-
-            _notifyValidationLabel = new AnnouncingLabel
-            {
-                Text = "",
-                Location = new System.Drawing.Point(8, 252),
-                Size = new System.Drawing.Size(660, 18),
-                Font = font,
-                ForeColor = System.Drawing.Color.Firebrick,
-                AccessibleName = "Template validation result",
-                TabStop = false,
-            };
-            notificationsPanel.Controls.Add(_notifyValidationLabel);
-
-            var advancedGroup = new System.Windows.Forms.GroupBox
-            {
-                Text = "Advanced (timing and repeat behavior)",
-                Location = new System.Drawing.Point(8, 278),
-                Size = new System.Drawing.Size(596, 168),
-                Font = font,
-            };
-            notificationsPanel.Controls.Add(advancedGroup);
-
-            var whenLabel = new System.Windows.Forms.Label
-            {
-                Text = "When to announce it:",
-                Location = new System.Drawing.Point(10, 22),
-                Size = new System.Drawing.Size(160, 18),
-                Font = font,
-                TabStop = false,
-            };
-            advancedGroup.Controls.Add(whenLabel);
-
-            _notifyTimingImmediateRadio = new System.Windows.Forms.RadioButton
-            {
-                Text = "Immediately, the moment it happens",
-                Location = new System.Drawing.Point(10, 42),
-                Size = new System.Drawing.Size(280, 20),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Announce immediately",
-            };
-            advancedGroup.Controls.Add(_notifyTimingImmediateRadio);
-
-            _notifyTimingDeferredRadio = new System.Windows.Forms.RadioButton
-            {
-                Text = "Wait for the next receive cycle (batches repeats)",
-                Location = new System.Drawing.Point(10, 64),
-                Size = new System.Drawing.Size(320, 20),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Announce at the next receive cycle",
-            };
-            advancedGroup.Controls.Add(_notifyTimingDeferredRadio);
-            _notifyTimingImmediateRadio.CheckedChanged += (s, e) => CommitNotifyTiming();
-            _notifyTimingDeferredRadio.CheckedChanged += (s, e) => CommitNotifyTiming();
-
-            _notifyDeferWhileTxCheckBox = new System.Windows.Forms.CheckBox
-            {
-                Text = "Wait until transmitting stops",
-                Location = new System.Drawing.Point(10, 88),
-                Size = new System.Drawing.Size(280, 20),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Defer while transmitting",
-            };
-            _notifyDeferWhileTxCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
-            advancedGroup.Controls.Add(_notifyDeferWhileTxCheckBox);
-
-            _notifySuppressUnchangedCheckBox = new System.Windows.Forms.CheckBox
-            {
-                Text = "Don't repeat if nothing changed",
-                Location = new System.Drawing.Point(10, 110),
-                Size = new System.Drawing.Size(280, 20),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Suppress unchanged repeats",
-            };
-            _notifySuppressUnchangedCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
-            advancedGroup.Controls.Add(_notifySuppressUnchangedCheckBox);
-
-            var repeatLabel = new System.Windows.Forms.Label
-            {
-                Text = "Don't repeat within (seconds, 0 = no limit):",
-                Location = new System.Drawing.Point(300, 42),
-                Size = new System.Drawing.Size(240, 18),
-                Font = font,
-                TabStop = false,
-            };
-            advancedGroup.Controls.Add(repeatLabel);
-
-            _notifyRepeatSecondsUpDown = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum = 0,
-                Maximum = 600,
-                Location = new System.Drawing.Point(300, 60),
-                Size = new System.Drawing.Size(70, 22),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Minimum seconds between repeats",
-            };
-            _notifyRepeatSecondsUpDown.ValueChanged += (s, e) => CommitNotifyNumeric();
-            advancedGroup.Controls.Add(_notifyRepeatSecondsUpDown);
-
-            var throttleLabel = new System.Windows.Forms.Label
-            {
-                Text = "Minimum gap between any two (ms, 0 = none):",
-                Location = new System.Drawing.Point(300, 88),
-                Size = new System.Drawing.Size(250, 18),
-                Font = font,
-                TabStop = false,
-            };
-            advancedGroup.Controls.Add(throttleLabel);
-
-            _notifyThrottleMsUpDown = new System.Windows.Forms.NumericUpDown
-            {
-                Minimum = 0,
-                Maximum = 60000,
-                Increment = 100,
-                Location = new System.Drawing.Point(300, 106),
-                Size = new System.Drawing.Size(80, 22),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Minimum milliseconds between any two announcements of this type",
-            };
-            _notifyThrottleMsUpDown.ValueChanged += (s, e) => CommitNotifyNumeric();
-            advancedGroup.Controls.Add(_notifyThrottleMsUpDown);
-
-            var priorityLabel = new System.Windows.Forms.Label
-            {
-                Text = "Priority:",
-                Location = new System.Drawing.Point(300, 134),
-                Size = new System.Drawing.Size(60, 18),
-                Font = font,
-                TabStop = false,
-            };
-            advancedGroup.Controls.Add(priorityLabel);
-
-            _notifyPriorityComboBox = new System.Windows.Forms.ComboBox
+            _notifyDuringQsoComboBox = new System.Windows.Forms.ComboBox
             {
                 DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
-                Location = new System.Drawing.Point(360, 130),
-                Size = new System.Drawing.Size(110, 21),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Play alert tone",
+                Location = new System.Drawing.Point(gx + 160, gy), Size = new System.Drawing.Size(300, 22),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "Speak this event",
             };
-            _notifyPriorityComboBox.Items.Add("Normal");
-            _notifyPriorityComboBox.Items.Add("Important");
-            _notifyPriorityComboBox.SelectedIndexChanged += (s, e) => CommitNotifyCheckboxes();
-            advancedGroup.Controls.Add(_notifyPriorityComboBox);
+            _notifyDuringQsoComboBox.Items.AddRange(new object[]
+            {
+                "Always speak", "Only during a QSO", "Only when not in a QSO",
+                "Never speak (show on screen/history only)",
+            });
+            _notifyDuringQsoComboBox.SelectedIndexChanged += (s, e) => CommitNotifyCheckboxes();
+            selGroup.Controls.Add(_notifyDuringQsoComboBox);
+            gy += 28;
+
+            selGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Spoken message template (type any wording; use {Field} names from the list):",
+                Location = new System.Drawing.Point(gx, gy), Size = new System.Drawing.Size(gw, 18),
+                Font = font, TabStop = false,
+            });
+            gy += 18;
+            _notifyTemplateTextBox = new System.Windows.Forms.TextBox
+            {
+                Location = new System.Drawing.Point(gx, gy), Size = new System.Drawing.Size(gw, 22),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "Spoken message template",
+            };
+            _notifyTemplateTextBox.Leave += (s, e) => CommitNotifyTemplateText();
+            selGroup.Controls.Add(_notifyTemplateTextBox);
+            gy += 26;
+            _notifyValidationLabel = new AnnouncingLabel
+            {
+                Text = "", Location = new System.Drawing.Point(gx, gy), Size = new System.Drawing.Size(gw, 16),
+                Font = font, ForeColor = System.Drawing.Color.Firebrick,
+                AccessibleName = "Template validation result", TabStop = false,
+            };
+            selGroup.Controls.Add(_notifyValidationLabel);
+            gy += 18;
+
+            selGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Available fields for this event:", Location = new System.Drawing.Point(gx, gy),
+                Size = new System.Drawing.Size(gw, 18), Font = font, TabStop = false,
+            });
+            gy += 18;
+            _notifyVarsListBox = new System.Windows.Forms.ListBox
+            {
+                Location = new System.Drawing.Point(gx, gy), Size = new System.Drawing.Size(gw - 130, 84),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "Available fields for this event",
+            };
+            selGroup.Controls.Add(_notifyVarsListBox);
+            _notifyInsertFieldButton = new System.Windows.Forms.Button
+            {
+                Text = "Insert field", Location = new System.Drawing.Point(gx + gw - 122, gy),
+                Size = new System.Drawing.Size(118, 24), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Insert the selected field into the template",
+            };
+            _notifyInsertFieldButton.Click += (s, e) => InsertNotifyField();
+            selGroup.Controls.Add(_notifyInsertFieldButton);
+            _notifyVarMoveUpButton = new System.Windows.Forms.Button
+            {
+                Text = "Move earlier", Location = new System.Drawing.Point(gx + gw - 122, gy + 28),
+                Size = new System.Drawing.Size(118, 24), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Move the selected field earlier in the template",
+            };
+            _notifyVarMoveUpButton.Click += (s, e) => MoveNotifyVar(-1);
+            selGroup.Controls.Add(_notifyVarMoveUpButton);
+            _notifyVarMoveDownButton = new System.Windows.Forms.Button
+            {
+                Text = "Move later", Location = new System.Drawing.Point(gx + gw - 122, gy + 56),
+                Size = new System.Drawing.Size(118, 24), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Move the selected field later in the template",
+            };
+            _notifyVarMoveDownButton.Click += (s, e) => MoveNotifyVar(1);
+            selGroup.Controls.Add(_notifyVarMoveDownButton);
+            gy += 90;
+
+            _notifyClauseNoteLabel = new System.Windows.Forms.Label
+            {
+                Text = "A clause of the one routine status line. It has its own condition and "
+                     + "timing, but no priority or repeat control -- clauses sharing a boundary "
+                     + "are still spoken as one announcement.",
+                Location = new System.Drawing.Point(gx, gy), Size = new System.Drawing.Size(gw - 210, 32),
+                Font = font, ForeColor = System.Drawing.SystemColors.GrayText, TabStop = false, Visible = false,
+            };
+            selGroup.Controls.Add(_notifyClauseNoteLabel);
 
             var resetThisButton = new System.Windows.Forms.Button
             {
-                Text = "Reset This Notification to Default",
-                Location = new System.Drawing.Point(8, 454),
-                Size = new System.Drawing.Size(220, 27),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Reset this notification to default",
+                Text = "Reset this event to default", Location = new System.Drawing.Point(gx + gw - 200, gy),
+                Size = new System.Drawing.Size(200, 26), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Reset this event to default",
             };
             resetThisButton.Click += ResetThisNotification_Click;
-            notificationsPanel.Controls.Add(resetThisButton);
+            selGroup.Controls.Add(resetThisButton);
+            selGroup.Height = gy + 36;
+            y += selGroup.Height + 8;
 
-            var resetAllButton = new System.Windows.Forms.Button
+            // ── D. Delivery ─────────────────────────────────────────────────────────────────
+            var deliveryGroup = new System.Windows.Forms.GroupBox
             {
-                Text = "Reset All Notification Settings to Defaults",
-                Location = new System.Drawing.Point(236, 454),
-                Size = new System.Drawing.Size(260, 27),
-                TabIndex = tabIdx++,
-                Font = font,
-                AccessibleName = "Reset all notification settings to defaults",
+                Text = "Delivery", Location = new System.Drawing.Point(L, y),
+                Size = new System.Drawing.Size(W, 120), Font = font,
             };
-            resetAllButton.Click += ResetAllNotifications_Click;
-            notificationsPanel.Controls.Add(resetAllButton);
+            notificationsPanel.Controls.Add(deliveryGroup);
+            deliveryGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "When to deliver:", Location = new System.Drawing.Point(12, 26),
+                Size = new System.Drawing.Size(110, 18), Font = font, TabStop = false,
+            });
+            _notifySpeakWhenComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(126, 24), Size = new System.Drawing.Size(230, 22),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "When to deliver this event",
+            };
+            RebuildTimingComboItems(SpeakCondition.Always);
+            _notifySpeakWhenComboBox.SelectedIndexChanged += (s, e) => CommitNotifyCheckboxes();
+            deliveryGroup.Controls.Add(_notifySpeakWhenComboBox);
 
-            // Item 2, 2026-08-24 (operator request): a GLOBAL toggle, unlike everything above it
-            // in this tab (which all edit ONE selected notification type's own policy) -- applies
-            // regardless of which type is selected. Deliberately separate from the per-type "Wait
-            // until transmitting stops" checkbox further up: that one defers a NotificationCenter
-            // event until Tx ends; this one is read directly by ShowStatus() (WsjtxClient.
-            // Display.cs) to omit the routine "N available stations" summary specifically while
-            // transmitting -- the live, actually-spoken source of receive-side chatter today
-            // (QsoStarted/AwardsNeeded, the NotificationCenter events this tab's DeferWhileTx
-            // checkbox would otherwise apply to, aren't wired to any live call site yet).
-            var suppressReceiveGroup = new System.Windows.Forms.GroupBox
+            deliveryGroup.Controls.Add(new System.Windows.Forms.Label
             {
-                Text = "Transmit speech priority",
-                Location = new System.Drawing.Point(8, 490),
-                Size = new System.Drawing.Size(596, 50),
-                Font = font,
+                Text = "Priority:", Location = new System.Drawing.Point(378, 26),
+                Size = new System.Drawing.Size(56, 18), Font = font, TabStop = false,
+            });
+            _notifyPriorityComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(436, 24), Size = new System.Drawing.Size(180, 22),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "Priority",
             };
-            notificationsPanel.Controls.Add(suppressReceiveGroup);
+            // Positions match the NotificationPriority enum (Normal=0, Important=1, Critical=2).
+            _notifyPriorityComboBox.Items.AddRange(new object[] { "Standard", "Important", "Critical" });
+            _notifyPriorityComboBox.SelectedIndexChanged += (s, e) => CommitNotifyCheckboxes();
+            deliveryGroup.Controls.Add(_notifyPriorityComboBox);
+
+            _notifyDeliveryExplainLabel = new System.Windows.Forms.Label
+            {
+                Text = "", Location = new System.Drawing.Point(12, 52), Size = new System.Drawing.Size(W - 24, 60),
+                Font = font, ForeColor = System.Drawing.SystemColors.GrayText, TabStop = false,
+            };
+            deliveryGroup.Controls.Add(_notifyDeliveryExplainLabel);
+            y += deliveryGroup.Height + 8;
+
+            // ── E. Repeats ──────────────────────────────────────────────────────────────────
+            var repeatsGroup = new System.Windows.Forms.GroupBox
+            {
+                Text = "Repeats", Location = new System.Drawing.Point(L, y),
+                Size = new System.Drawing.Size(W, 80), Font = font,
+            };
+            notificationsPanel.Controls.Add(repeatsGroup);
+            _notifySuppressUnchangedCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Don't repeat if nothing changed",
+                Location = new System.Drawing.Point(12, 22), Size = new System.Drawing.Size(280, 20),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "Don't repeat if nothing changed",
+            };
+            _notifySuppressUnchangedCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
+            repeatsGroup.Controls.Add(_notifySuppressUnchangedCheckBox);
+            repeatsGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Minimum seconds between repeats (0 = no limit):",
+                Location = new System.Drawing.Point(12, 50), Size = new System.Drawing.Size(300, 18),
+                Font = font, TabStop = false,
+            });
+            _notifyRepeatSecondsUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 0, Maximum = 600, Location = new System.Drawing.Point(316, 48),
+                Size = new System.Drawing.Size(64, 22), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Minimum seconds between repeats",
+            };
+            _notifyRepeatSecondsUpDown.ValueChanged += (s, e) => CommitNotifyNumeric();
+            repeatsGroup.Controls.Add(_notifyRepeatSecondsUpDown);
+            repeatsGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Minimum gap between any two (ms):",
+                Location = new System.Drawing.Point(392, 50), Size = new System.Drawing.Size(210, 18),
+                Font = font, TabStop = false,
+            });
+            _notifyThrottleMsUpDown = new System.Windows.Forms.NumericUpDown
+            {
+                Minimum = 0, Maximum = 60000, Increment = 100,
+                Location = new System.Drawing.Point(560, 48), Size = new System.Drawing.Size(70, 22),
+                TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Minimum milliseconds between any two announcements of this event",
+            };
+            _notifyThrottleMsUpDown.ValueChanged += (s, e) => CommitNotifyNumeric();
+            repeatsGroup.Controls.Add(_notifyThrottleMsUpDown);
+            y += repeatsGroup.Height + 8;
+
+            // ── F. Global speech behaviour ─────────────────────────────────────────────────
+            var globalGroup = new System.Windows.Forms.GroupBox
+            {
+                Text = "Global speech behaviour", Location = new System.Drawing.Point(L, y),
+                Size = new System.Drawing.Size(W, 192), Font = font,
+            };
+            notificationsPanel.Controls.Add(globalGroup);
+            globalGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Routine RX / TX / QSO status line -- when to speak:",
+                Location = new System.Drawing.Point(12, 24), Size = new System.Drawing.Size(320, 18),
+                Font = font, TabStop = false,
+            });
+            _pendingRoutineStatusSpeakWhen = ctrl.routineStatusSpeakWhen;
+            _pendingRoutineStatusCondition = ctrl.routineStatusCondition;
+            _notifyRoutineStatusSpeakWhenComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(336, 22), Size = new System.Drawing.Size(288, 22),
+                TabIndex = tabIdx++, Font = font,
+                AccessibleName = "When to speak the routine RX, TX and QSO status line",
+            };
+            RebuildRoutineTimingComboItems(_pendingRoutineStatusCondition);
+            _notifyRoutineStatusSpeakWhenComboBox.SelectedIndex = RoutineTimingIndexOf(_pendingRoutineStatusSpeakWhen);
+            _notifyRoutineStatusSpeakWhenComboBox.SelectedIndexChanged += (s, e) =>
+            {
+                if (_notifyUpdatingFields) return;
+                int i = _notifyRoutineStatusSpeakWhenComboBox.SelectedIndex;
+                if (i >= 0 && i < _routineTimingComboValues.Length)
+                    _pendingRoutineStatusSpeakWhen = _routineTimingComboValues[i];
+            };
+            globalGroup.Controls.Add(_notifyRoutineStatusSpeakWhenComboBox);
+
+            globalGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Routine status line -- operating condition:",
+                Location = new System.Drawing.Point(12, 50), Size = new System.Drawing.Size(320, 18),
+                Font = font, TabStop = false,
+            });
+            _notifyRoutineStatusDuringQsoComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(336, 48), Size = new System.Drawing.Size(288, 22),
+                TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Operating condition for the routine RX, TX and QSO status line",
+            };
+            _notifyRoutineStatusDuringQsoComboBox.Items.AddRange(new object[]
+            {
+                "Always speak", "Only during a QSO", "Only when not in a QSO", "Never speak",
+            });
+            _notifyRoutineStatusDuringQsoComboBox.SelectedIndex = (int)_pendingRoutineStatusCondition;
+            _notifyRoutineStatusDuringQsoComboBox.SelectedIndexChanged += (s, e) =>
+            {
+                if (_notifyUpdatingFields) return;
+                _pendingRoutineStatusCondition = (SpeakCondition)_notifyRoutineStatusDuringQsoComboBox.SelectedIndex;
+                // Codex #5: keep the global timing list consistent with the condition.
+                SpeakWhen prev = _pendingRoutineStatusSpeakWhen;
+                _notifyUpdatingFields = true;
+                RebuildRoutineTimingComboItems(_pendingRoutineStatusCondition);
+                if (_pendingRoutineStatusCondition == SpeakCondition.DuringQsoOnly && prev == SpeakWhen.AfterQso)
+                    _pendingRoutineStatusSpeakWhen = SpeakWhen.Now;
+                _notifyRoutineStatusSpeakWhenComboBox.SelectedIndex = RoutineTimingIndexOf(_pendingRoutineStatusSpeakWhen);
+                _notifyUpdatingFields = false;
+            };
+            globalGroup.Controls.Add(_notifyRoutineStatusDuringQsoComboBox);
 
             _suppressReceiveDuringTxCheckBox = new System.Windows.Forms.CheckBox
             {
-                Text = "While transmitting, suppress the receive-side \"available stations\" summary",
-                AccessibleName = "While transmitting, suppress the receive-side available stations summary",
-                Location = new System.Drawing.Point(10, 20),
-                Size = new System.Drawing.Size(576, 20),
-                TabIndex = tabIdx++,
-                Font = font,
-                Checked = ctrl.suppressReceiveNotificationsDuringTx,
+                Text = "While transmitting, don't speak the receive-side \"available stations\" summary",
+                AccessibleName = "While transmitting, do not speak the receive-side available stations summary",
+                Location = new System.Drawing.Point(12, 76), Size = new System.Drawing.Size(W - 24, 20),
+                TabIndex = tabIdx++, Font = font, Checked = ctrl.suppressReceiveNotificationsDuringTx,
             };
-            suppressReceiveGroup.Controls.Add(_suppressReceiveDuringTxCheckBox);
+            globalGroup.Controls.Add(_suppressReceiveDuringTxCheckBox);
+
+            // 2026-09-05: the two receive-side role scopes. Advanced call layout has two
+            // alternating slots that BOTH receive/listen; these choose which slot's routine
+            // receive speech Jimmy produces, following the current RX/TX roles when they flip.
+            // "Current TX side" still means that slot's RECEIVE information -- physical transmit
+            // speech ("sending 73") is a separate clause and is never affected here.
+            _pendingReceiveSideIdScope = ctrl.Notifications.ReceiveSideIdScope;
+            _pendingReceiveCountScope = ctrl.Notifications.ReceiveCountScope;
+
+            globalGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Receive side name (RX1 / TX2) -- speak for:",
+                Location = new System.Drawing.Point(12, 102), Size = new System.Drawing.Size(320, 18),
+                Font = font, TabStop = false,
+            });
+            _notifyReceiveSideIdScopeComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(336, 100), Size = new System.Drawing.Size(288, 22),
+                TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Which side to speak the receive side name for",
+            };
+            _notifyReceiveSideIdScopeComboBox.Items.AddRange(_receiveSideScopeLabels);
+            _notifyReceiveSideIdScopeComboBox.SelectedIndex = (int)_pendingReceiveSideIdScope;
+            _notifyReceiveSideIdScopeComboBox.SelectedIndexChanged += (s, e) =>
+            {
+                if (_notifyUpdatingFields) return;
+                int i = _notifyReceiveSideIdScopeComboBox.SelectedIndex;
+                if (i >= 0 && i < _receiveSideScopeValues.Length)
+                    _pendingReceiveSideIdScope = _receiveSideScopeValues[i];
+            };
+            globalGroup.Controls.Add(_notifyReceiveSideIdScopeComboBox);
+
+            globalGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Available-station count -- speak for:",
+                Location = new System.Drawing.Point(12, 128), Size = new System.Drawing.Size(320, 18),
+                Font = font, TabStop = false,
+            });
+            _notifyReceiveCountScopeComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(336, 126), Size = new System.Drawing.Size(288, 22),
+                TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Which side to speak the available-station count for",
+            };
+            _notifyReceiveCountScopeComboBox.Items.AddRange(_receiveSideScopeLabels);
+            _notifyReceiveCountScopeComboBox.SelectedIndex = (int)_pendingReceiveCountScope;
+            _notifyReceiveCountScopeComboBox.SelectedIndexChanged += (s, e) =>
+            {
+                if (_notifyUpdatingFields) return;
+                int i = _notifyReceiveCountScopeComboBox.SelectedIndex;
+                if (i >= 0 && i < _receiveSideScopeValues.Length)
+                    _pendingReceiveCountScope = _receiveSideScopeValues[i];
+            };
+            globalGroup.Controls.Add(_notifyReceiveCountScopeComboBox);
+
+            _notifyAnnounceOffFocusCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Announce Important and Critical events when Jimmy's window is not focused",
+                AccessibleName = "Announce important and critical events when focus is elsewhere",
+                Location = new System.Drawing.Point(12, 158), Size = new System.Drawing.Size(W - 24, 20),
+                TabIndex = tabIdx++, Font = font, Checked = ctrl.announceImportantAlertsWhenFocusElsewhere,
+            };
+            globalGroup.Controls.Add(_notifyAnnounceOffFocusCheckBox);
+            y += globalGroup.Height + 10;
+
+            // ── G. Reset ────────────────────────────────────────────────────────────────────
+            var resetAllButton = new System.Windows.Forms.Button
+            {
+                Text = "Reset all events to defaults", Location = new System.Drawing.Point(L, y),
+                Size = new System.Drawing.Size(210, 27), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Reset all events to defaults",
+            };
+            resetAllButton.Click += ResetAllNotifications_Click;
+            notificationsPanel.Controls.Add(resetAllButton);
+            var resetGlobalButton = new System.Windows.Forms.Button
+            {
+                Text = "Reset global speech settings", Location = new System.Drawing.Point(L + 222, y),
+                Size = new System.Drawing.Size(210, 27), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Reset global speech settings to defaults",
+            };
+            resetGlobalButton.Click += ResetGlobalSpeech_Click;
+            notificationsPanel.Controls.Add(resetGlobalButton);
 
             _notifyTypesListBox.SelectedIndex = 0;
         }
+
+        // Timing-combo items depend on the chosen condition: "After the QSO ends" is dropped for
+        // "Only during a QSO" -- at that boundary the condition can never hold (a genuine
+        // contradiction). Positions map to SpeakWhen via _timingComboValues.
+        private SpeakWhen[] _timingComboValues = System.Array.Empty<SpeakWhen>();
+        private void RebuildTimingComboItems(SpeakCondition condition)
+        {
+            var vals = new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.TxStart, SpeakWhen.AfterRx, SpeakWhen.AfterTx };
+            if (condition != SpeakCondition.DuringQsoOnly) vals.Add(SpeakWhen.AfterQso);
+            _timingComboValues = vals.ToArray();
+            _notifySpeakWhenComboBox.Items.Clear();
+            foreach (var v in vals) _notifySpeakWhenComboBox.Items.Add(TimingLabel(v));
+        }
+        private static string TimingLabel(SpeakWhen w)
+        {
+            switch (w)
+            {
+                case SpeakWhen.TxStart:  return "When transmit starts";
+                case SpeakWhen.AfterRx:  return "After the receive cycle";
+                case SpeakWhen.AfterTx:  return "After transmit ends";
+                case SpeakWhen.AfterQso: return "After the QSO ends";
+                default:                 return "Immediately";
+            }
+        }
+        private int IndexOfTiming(SpeakWhen w)
+        {
+            for (int i = 0; i < _timingComboValues.Length; i++) if (_timingComboValues[i] == w) return i;
+            return 0;
+        }
+        // GLOBAL routine-status timing combo items. Immediately / After the receive cycle /
+        // After transmit ends, plus "After the QSO ends" UNLESS the global condition is
+        // "Only during a QSO" (that pair necessarily discards speech -- Codex #5, matching the
+        // per-event rule). Selection preserved where still valid; a now-invalid "After the QSO
+        // ends" falls back to "Immediately".
+        private void RebuildRoutineTimingComboItems(SpeakCondition condition)
+        {
+            var vals = new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.AfterRx, SpeakWhen.AfterTx };
+            if (condition != SpeakCondition.DuringQsoOnly) vals.Add(SpeakWhen.AfterQso);
+            _routineTimingComboValues = vals.ToArray();
+            _notifyRoutineStatusSpeakWhenComboBox.Items.Clear();
+            foreach (var v in vals) _notifyRoutineStatusSpeakWhenComboBox.Items.Add(TimingLabel(v));
+        }
+        private int RoutineTimingIndexOf(SpeakWhen w)
+        {
+            for (int i = 0; i < _routineTimingComboValues.Length; i++) if (_routineTimingComboValues[i] == w) return i;
+            return 0;
+        }
+
 
         private NotificationPolicy CurrentNotifyPolicy()
         {
@@ -3079,70 +3329,133 @@ namespace WSJTX_Controller
         {
             var policy = CurrentNotifyPolicy();
             bool has = policy != null;
+            NotificationEventType type = has ? _notifyTypeOrder[_notifyTypesListBox.SelectedIndex] : default;
+            bool isClause = has && _routineClauseTypes.Contains(type);
+
+            // Template + fields + speech condition + delivery timing apply to EVERY row.
+            // Priority and the repeat/gap controls apply only to the independent alert rows: a
+            // routine-status wording row is a clause of the one composed status line, not a
+            // NotificationCenter event, so it has no priority or per-identity dedup of its own.
             _notifyVarsListBox.Enabled = has;
+            _notifyInsertFieldButton.Enabled = has;
             _notifyVarMoveUpButton.Enabled = has;
             _notifyVarMoveDownButton.Enabled = has;
             _notifyTemplateTextBox.Enabled = has;
-            _notifyTimingImmediateRadio.Enabled = has;
-            _notifyTimingDeferredRadio.Enabled = has;
-            _notifyDeferWhileTxCheckBox.Enabled = has;
-            _notifySuppressUnchangedCheckBox.Enabled = has;
-            _notifyRepeatSecondsUpDown.Enabled = has;
-            _notifyThrottleMsUpDown.Enabled = has;
-            _notifyPriorityComboBox.Enabled = has;
-            if (!has) return;
+            _notifyDuringQsoComboBox.Enabled = has;
+            _notifySpeakWhenComboBox.Enabled = has;
+            _notifyPriorityComboBox.Enabled = has && !isClause;
+            _notifySuppressUnchangedCheckBox.Enabled = has && !isClause;
+            _notifyRepeatSecondsUpDown.Enabled = has && !isClause;
+            _notifyThrottleMsUpDown.Enabled = has && !isClause;
+            _notifyClauseNoteLabel.Visible = isClause;
+            if (!has) { _notifyDeliveryExplainLabel.Text = ""; return; }
 
             _notifyUpdatingFields = true;
             try
             {
                 _notifyTemplateTextBox.Text = policy.Template;
-                _notifyValidationLabel.Text = "";
-                _notifyTimingImmediateRadio.Checked = policy.Timing == NotificationTiming.Immediate;
-                _notifyTimingDeferredRadio.Checked = policy.Timing == NotificationTiming.NextPeriodBoundary;
-                _notifyDeferWhileTxCheckBox.Checked = policy.DeferWhileTransmitting;
+                // Codex #8: if the saved wording for this event failed validation at load, say
+                // so -- Jimmy is showing/using the default, not the rejected text.
+                _notifyValidationLabel.Text =
+                    (ctrl.Notifications.RejectedTemplates != null
+                     && ctrl.Notifications.RejectedTemplates.ContainsKey(type))
+                        ? "Your saved wording for this event was not valid and Jimmy is using the "
+                          + "default shown. Edit and save to replace it."
+                        : "";
+                _notifyDuringQsoComboBox.SelectedIndex = (int)policy.Condition;
+                RebuildTimingComboItems(policy.Condition);
+                _notifySpeakWhenComboBox.SelectedIndex = IndexOfTiming(policy.SpeakWhen);
                 _notifySuppressUnchangedCheckBox.Checked = policy.SuppressUnchanged;
                 _notifyRepeatSecondsUpDown.Value = System.Math.Max(_notifyRepeatSecondsUpDown.Minimum, System.Math.Min(_notifyRepeatSecondsUpDown.Maximum, policy.RepeatSeconds));
                 _notifyThrottleMsUpDown.Value = System.Math.Max(_notifyThrottleMsUpDown.Minimum, System.Math.Min(_notifyThrottleMsUpDown.Maximum, policy.ThrottleMilliseconds));
-                _notifyPriorityComboBox.SelectedIndex = policy.Priority == NotificationPriority.Important ? 1 : 0;
+                _notifyPriorityComboBox.SelectedIndex = (int)policy.Priority;
                 RefreshNotifyVarsList();
             }
             finally
             {
                 _notifyUpdatingFields = false;
             }
+            UpdateNotifyDeliveryExplain(policy, isClause);
         }
 
-        // Rebuilds the variables checklist from the CURRENT template text -- the template
-        // string is the single source of truth (see this method's own header comment on the
-        // class), so this is the one and only place that reads it back into checked/order form.
-        // Called after every edit path (checkbox, move, or direct typing), never the reverse.
+        // Plain-language read-out of what the current condition + timing + priority actually do,
+        // and how a contradictory combination is resolved.
+        private void UpdateNotifyDeliveryExplain(NotificationPolicy policy, bool isClause)
+        {
+            string clausePrefix = isClause
+                ? "This wording is a clause of the one routine status line. Clauses that share a "
+                  + "boundary are spoken together as one announcement. "
+                : "";
+            string cond;
+            switch (policy.Condition)
+            {
+                case SpeakCondition.DuringQsoOnly:  cond = "only while a QSO is active"; break;
+                case SpeakCondition.OutsideQsoOnly: cond = "only when no QSO is active"; break;
+                case SpeakCondition.Never:          cond = "never (shown on screen and in history only)"; break;
+                default:                            cond = "whether or not a QSO is active"; break;
+            }
+            string timing;
+            switch (policy.SpeakWhen)
+            {
+                case SpeakWhen.TxStart:  timing = "when transmission physically starts"; break;
+                case SpeakWhen.AfterRx:  timing = "after the receive cycle's decodes are processed"; break;
+                case SpeakWhen.AfterTx:  timing = "after transmission physically ends"; break;
+                case SpeakWhen.AfterQso: timing = "after the QSO ends"; break;
+                default:                 timing = "immediately"; break;
+            }
+            string text;
+            if (policy.Condition == SpeakCondition.Never)
+                text = clausePrefix + "Spoken " + cond + ".";
+            else
+            {
+                text = clausePrefix + "Spoken " + cond + ", delivered " + timing + ".";
+                if (policy.Condition == SpeakCondition.OutsideQsoOnly && policy.SpeakWhen == SpeakWhen.AfterQso)
+                    text += " (Can occur during a QSO, held, then spoken once the QSO ends.)";
+                if (!isClause && policy.Priority == NotificationPriority.Critical)
+                    text = "Critical: spoken the instant it happens, overriding the condition and timing above, "
+                         + "and always announced to your screen reader even when Jimmy's window is not focused. "
+                         + "Safety events should not be set to \"Never speak\". (No beep -- Jimmy plays only its "
+                         + "own Options > Sounds cues.)";
+                else if (!isClause && policy.Priority == NotificationPriority.Important)
+                    text += " Important: also announced to your screen reader while Jimmy's window is not "
+                          + "focused, when \"Announce Important and Critical events when focus is elsewhere\" "
+                          + "is on below. No beep.";
+            }
+            _notifyDeliveryExplainLabel.Text = text;
+        }
+
+        // Rebuilds the Available-fields list from the CURRENT template text -- the template
+        // string is the single source of truth. Fields already used in the template are listed
+        // first, in template order (so Move earlier / Move later track sensibly); the rest
+        // follow in registry order. A plain list -- selection, not check state.
         private void RefreshNotifyVarsList()
         {
             var type = _notifyTypeOrder[_notifyTypesListBox.SelectedIndex];
             var applicable = NotificationVariableRegistry.For(type);
             var present = NotificationTemplateEngine.ExtractVariableNames(_notifyTemplateTextBox.Text);
 
-            // Present-and-known variables first, in their real template order (so the list's
-            // top-to-bottom order matches Move Up/Down's own effect); any applicable variable
-            // not yet used follows, alphabetical-by-declaration-order from the registry.
             _notifyVarsListEntries = new List<NotificationVariable>();
             foreach (string key in present)
             {
                 NotificationVariable found = null;
                 foreach (var x in applicable) { if (x.Key == key) { found = x; break; } }
-                if (found != null) _notifyVarsListEntries.Add(found);
+                if (found != null && !_notifyVarsListEntries.Contains(found)) _notifyVarsListEntries.Add(found);
             }
             foreach (var v in applicable)
                 if (!_notifyVarsListEntries.Contains(v)) _notifyVarsListEntries.Add(v);
 
+            var presentSet = new HashSet<string>(present);
             _notifyUpdatingFields = true;
             _notifyVarsListBox.BeginUpdate();
             try
             {
                 _notifyVarsListBox.Items.Clear();
-                var presentSet = new HashSet<string>(present);
                 foreach (var v in _notifyVarsListEntries)
-                    _notifyVarsListBox.Items.Add($"{v.Key} — {v.Description}", presentSet.Contains(v.Key));
+                {
+                    // Codex: plain words, not a symbol -- JAWS/NVDA read "In use:" reliably.
+                    string mark = presentSet.Contains(v.Key) ? "In use: " : "Not used: ";
+                    _notifyVarsListBox.Items.Add($"{mark}{{{v.Key}}} — {v.Description}");
+                }
             }
             finally
             {
@@ -3151,57 +3464,41 @@ namespace WSJTX_Controller
             }
         }
 
-        private void NotifyVarCheckChanged(System.Windows.Forms.ItemCheckEventArgs e)
+        // Insert the selected field's {Token} into the template at the caret (or append it,
+        // comma-separated, when the caret is at the end). Literal text is never disturbed.
+        private void InsertNotifyField()
         {
-            if (_notifyUpdatingFields) return;
             var policy = CurrentNotifyPolicy();
-            if (policy == null) return;
-            var variable = _notifyVarsListEntries[e.Index];
-            bool nowChecked = e.NewValue == System.Windows.Forms.CheckState.Checked;
+            if (policy == null || _notifyVarsListBox.SelectedIndex < 0
+                || _notifyVarsListBox.SelectedIndex >= _notifyVarsListEntries.Count) return;
+            string token = "{" + _notifyVarsListEntries[_notifyVarsListBox.SelectedIndex].Key + "}";
 
-            var components = NotificationTemplateEngine.ParseComponents(policy.Template);
-            if (nowChecked)
-            {
-                // Append at the end, space-separated from whatever's already there -- literal
-                // text already in the template is never touched.
-                string sep = components.Count > 0 && !string.IsNullOrEmpty(policy.Template) && !policy.Template.EndsWith(" ") ? ", " : "";
-                policy.Template = policy.Template + sep + "{" + variable.Key + "}";
-            }
-            else
-            {
-                // Remove every occurrence of just this variable's own token -- literal text
-                // (including any the operator typed around it) is left exactly where it is.
-                var sb = new System.Text.StringBuilder();
-                foreach (var c in components)
-                {
-                    if (c.IsVariable && c.Text == variable.Key) continue;
-                    sb.Append(c.IsVariable ? "{" + c.Text + "}" : c.Text);
-                }
-                policy.Template = sb.ToString();
-            }
+            string cur = _notifyTemplateTextBox.Text ?? "";
+            int caret = _notifyTemplateTextBox.SelectionStart;
+            if (caret < 0 || caret > cur.Length) caret = cur.Length;
+            string insert = token;
+            if (caret == cur.Length && cur.Length > 0 && !cur.EndsWith(" ") && !cur.EndsWith(","))
+                insert = ", " + token;   // appending -> separate from the preceding word
+            string next = cur.Substring(0, caret) + insert + cur.Substring(caret);
 
+            var type = _notifyTypeOrder[_notifyTypesListBox.SelectedIndex];
+            string error = NotificationVariableRegistry.Validate(next, type);
+            if (error != null) { _notifyValidationLabel.Text = error; return; }
+
+            policy.Template = next;
             _notifyUpdatingFields = true;
-            _notifyTemplateTextBox.Text = policy.Template;
+            _notifyTemplateTextBox.Text = next;
+            _notifyTemplateTextBox.SelectionStart = caret + insert.Length;
             _notifyValidationLabel.Text = "";
             _notifyUpdatingFields = false;
-
-            // Deliberately do NOT touch _notifyVarsListBox.Items here. WinForms itself already
-            // applies this item's own checked bit (CheckOnClick) once this handler returns --
-            // nothing left for us to do there -- and _notifyVarsListEntries' existing order is
-            // still valid since nothing's position has changed. Re-sorting the checklist into
-            // true template order (checked items first, in template order) is deferred to the
-            // next real structural change -- switching notification type, Move Up/Down, or
-            // committing a hand-typed template edit -- all of which already call
-            // RefreshNotifyVarsList() at a moment when this box isn't mid-toggle. Rebuilding
-            // Items on every single Space-press used to tear down and recreate every item's
-            // accessibility identity right as the screen reader was announcing the toggle it
-            // just fired, which is what caused the live-reported silent/stale-announce bug.
+            RefreshNotifyVarsList();
         }
 
         private void MoveNotifyVar(int direction)
         {
             var policy = CurrentNotifyPolicy();
-            if (policy == null || _notifyVarsListBox.SelectedIndex < 0) return;
+            if (policy == null || _notifyVarsListBox.SelectedIndex < 0
+                || _notifyVarsListBox.SelectedIndex >= _notifyVarsListEntries.Count) return;
             var variable = _notifyVarsListEntries[_notifyVarsListBox.SelectedIndex];
 
             var components = NotificationTemplateEngine.ParseComponents(policy.Template);
@@ -3209,10 +3506,15 @@ namespace WSJTX_Controller
             for (int i = 0; i < components.Count; i++) if (components[i].IsVariable) varIndexes.Add(i);
             int thisPos = varIndexes.FindIndex(i => components[i].Text == variable.Key);
             int swapWith = thisPos + direction;
-            if (thisPos < 0 || swapWith < 0 || swapWith >= varIndexes.Count) return;   // already checked not-present/not-movable by the button's Enabled state, but stay safe
+            if (thisPos < 0 || swapWith < 0 || swapWith >= varIndexes.Count)
+            {
+                _notifyValidationLabel.Text = "That field is not in the template, or is already at the "
+                    + (direction < 0 ? "start" : "end") + ".";
+                return;
+            }
 
-            // Swap just the two variable TOKENS' text in place -- every literal-text component
-            // stays exactly where it is, so nothing an operator typed around them ever moves.
+            // Swap just the two variable TOKENS in place -- every literal-text component stays
+            // exactly where it is, so nothing an operator typed around them ever moves.
             int a = varIndexes[thisPos], b = varIndexes[swapWith];
             var tmp = components[a];
             components[a] = components[b];
@@ -3223,7 +3525,6 @@ namespace WSJTX_Controller
             policy.Template = sb.ToString();
 
             ApplyNotifyTemplateChange(policy, resyncVars: true);
-            // Re-select the moved variable so repeated Move Up/Down presses keep tracking it.
             int newIdx = _notifyVarsListEntries.FindIndex(v => v.Key == variable.Key);
             if (newIdx >= 0) _notifyVarsListBox.SelectedIndex = newIdx;
         }
@@ -3239,9 +3540,8 @@ namespace WSJTX_Controller
             string error = NotificationVariableRegistry.Validate(_notifyTemplateTextBox.Text, type);
             if (error != null)
             {
-                // Do NOT touch policy.Template or the text box's own text -- the operator's
-                // edit stays exactly as typed so they can fix it, per the feature's own
-                // "never destroy the user's edit on validation failure" requirement.
+                // Do NOT touch policy.Template or the text box's own text -- the operator's edit
+                // stays exactly as typed so they can fix it.
                 _notifyValidationLabel.Text = error;
                 return;
             }
@@ -3251,11 +3551,9 @@ namespace WSJTX_Controller
             RefreshNotifyVarsList();
         }
 
-        // Shared tail for both the checklist-driven and Move-Up/Down-driven template edits:
-        // both already know the new template text is well-formed (built from real components,
-        // never hand-typed), so there's nothing to validate -- just push it into the text box
-        // and, when the edit could have changed presence/order (a move; a checklist add/remove
-        // already IS the list, so it skips this), resync the checklist from it.
+        // Shared tail for the Move earlier / Move later edits: the new text is well-formed
+        // (built from real components), so there's nothing to validate -- push it into the text
+        // box and resync the field list from it.
         private void ApplyNotifyTemplateChange(NotificationPolicy policy, bool resyncVars)
         {
             _notifyUpdatingFields = true;
@@ -3271,22 +3569,52 @@ namespace WSJTX_Controller
             if (resyncVars) RefreshNotifyVarsList();
         }
 
-        private void CommitNotifyTiming()
-        {
-            if (_notifyUpdatingFields) return;
-            var policy = CurrentNotifyPolicy();
-            if (policy == null) return;
-            policy.Timing = _notifyTimingDeferredRadio.Checked ? NotificationTiming.NextPeriodBoundary : NotificationTiming.Immediate;
-        }
-
         private void CommitNotifyCheckboxes()
         {
             if (_notifyUpdatingFields) return;
             var policy = CurrentNotifyPolicy();
             if (policy == null) return;
-            policy.DeferWhileTransmitting = _notifyDeferWhileTxCheckBox.Checked;
+
+            var condition = (SpeakCondition)_notifyDuringQsoComboBox.SelectedIndex;   // 0..3 map directly
+
+            // Contradiction handling: "Only during a QSO" cannot pair with "After the QSO ends".
+            // Rebuild the timing list to add/remove that option, keeping the current pick where
+            // it is still valid (falling back to Immediately if it was the now-invalid one).
+            bool afterQsoAllowed = condition != SpeakCondition.DuringQsoOnly;
+            bool afterQsoListed = System.Array.IndexOf(_timingComboValues, SpeakWhen.AfterQso) >= 0;
+            if (afterQsoAllowed != afterQsoListed)
+            {
+                SpeakWhen prev = _notifySpeakWhenComboBox.SelectedIndex >= 0
+                    && _notifySpeakWhenComboBox.SelectedIndex < _timingComboValues.Length
+                    ? _timingComboValues[_notifySpeakWhenComboBox.SelectedIndex] : SpeakWhen.Now;
+                _notifyUpdatingFields = true;
+                RebuildTimingComboItems(condition);
+                _notifySpeakWhenComboBox.SelectedIndex =
+                    IndexOfTiming((!afterQsoAllowed && prev == SpeakWhen.AfterQso) ? SpeakWhen.Now : prev);
+                _notifyUpdatingFields = false;
+            }
+
+            SpeakWhen timing = _notifySpeakWhenComboBox.SelectedIndex >= 0
+                && _notifySpeakWhenComboBox.SelectedIndex < _timingComboValues.Length
+                ? _timingComboValues[_notifySpeakWhenComboBox.SelectedIndex] : SpeakWhen.Now;
+
+            policy.Condition = condition;
+            policy.SpeakWhen = timing;
+            // Keep the legacy fields loosely in step for a clean rollback to a pre-SpeakWhen build.
+            policy.Timing = timing == SpeakWhen.AfterRx
+                ? NotificationTiming.NextPeriodBoundary : NotificationTiming.Immediate;
+            policy.DeferWhileTransmitting = timing == SpeakWhen.AfterTx;
             policy.SuppressUnchanged = _notifySuppressUnchangedCheckBox.Checked;
-            policy.Priority = _notifyPriorityComboBox.SelectedIndex == 1 ? NotificationPriority.Important : NotificationPriority.Normal;
+            int pi = _notifyPriorityComboBox.SelectedIndex;
+            policy.Priority = pi == 2 ? NotificationPriority.Critical
+                            : pi == 1 ? NotificationPriority.Important
+                            : NotificationPriority.Normal;
+
+            // Codex #6: keep the explanation accurate for a routine-status wording row, not
+            // just for an independent alert.
+            bool isClause = _notifyTypesListBox.SelectedIndex >= 0
+                && _routineClauseTypes.Contains(_notifyTypeOrder[_notifyTypesListBox.SelectedIndex]);
+            UpdateNotifyDeliveryExplain(policy, isClause);
         }
 
         private void CommitNotifyNumeric()
@@ -3312,7 +3640,9 @@ namespace WSJTX_Controller
         private void ResetAllNotifications_Click(object sender, EventArgs e)
         {
             var result = MessageBox.Show(
-                "Reset every notification's template, timing, and repeat settings to Jimmy's built-in defaults?",
+                "Reset every event's template, condition, timing, priority and repeat settings to "
+                + "Jimmy's built-in defaults? (This does not touch the Global speech behaviour "
+                + "settings -- use \"Reset global speech settings\" for those.)",
                 ctrl.friendlyName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (result != DialogResult.Yes) return;
 
@@ -3326,6 +3656,35 @@ namespace WSJTX_Controller
             LoadSelectedNotifyType();
         }
 
+        // Section F -- the global controls. Like every other Options setting these are PENDING
+        // until OK (Codex #7): this only resets the pending values + widgets; nothing reaches
+        // Controller / the INI unless the operator then presses OK.
+        private void ResetGlobalSpeech_Click(object sender, EventArgs e)
+        {
+            var result = MessageBox.Show(
+                "Reset the Global speech behaviour settings (routine status timing and condition, "
+                + "the receive side name and available-station count scopes, the transmit-time "
+                + "summary suppression, and the off-focus announcement) to defaults? This takes "
+                + "effect when you press OK.",
+                ctrl.friendlyName, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (result != DialogResult.Yes) return;
+
+            _pendingRoutineStatusSpeakWhen = SpeakWhen.Now;
+            _pendingRoutineStatusCondition = SpeakCondition.Always;
+            _pendingReceiveSideIdScope = ReceiveSideScope.Both;
+            _pendingReceiveCountScope = ReceiveSideScope.Both;
+
+            _notifyUpdatingFields = true;
+            RebuildRoutineTimingComboItems(_pendingRoutineStatusCondition);
+            _notifyRoutineStatusSpeakWhenComboBox.SelectedIndex = RoutineTimingIndexOf(_pendingRoutineStatusSpeakWhen);
+            _notifyRoutineStatusDuringQsoComboBox.SelectedIndex = (int)_pendingRoutineStatusCondition;
+            _notifyReceiveSideIdScopeComboBox.SelectedIndex = (int)_pendingReceiveSideIdScope;
+            _notifyReceiveCountScopeComboBox.SelectedIndex = (int)_pendingReceiveCountScope;
+            _suppressReceiveDuringTxCheckBox.Checked = false;
+            _notifyAnnounceOffFocusCheckBox.Checked = false;
+            _notifyUpdatingFields = false;
+        }
+
         private void SaveNotificationsTab()
         {
             if (_pendingNotifyPolicies == null) return;
@@ -3334,8 +3693,21 @@ namespace WSJTX_Controller
             CommitNotifyTemplateText();
             foreach (var kv in _pendingNotifyPolicies)
                 ctrl.Notifications.Policies[kv.Key] = kv.Value;
+            // On OK the committed policies ARE the accepted state -- clear the load-time
+            // rejected-template notices so a reopen doesn't keep warning about wording the
+            // operator has now seen (and possibly replaced).
+            ctrl.Notifications.RejectedTemplates?.Clear();
+
+            // Global speech behaviour -- committed here (Codex #7), not by the live handlers.
             ctrl.suppressReceiveNotificationsDuringTx = _suppressReceiveDuringTxCheckBox?.Checked ?? false;
+            ctrl.announceImportantAlertsWhenFocusElsewhere = _notifyAnnounceOffFocusCheckBox?.Checked ?? false;
+            ctrl.routineStatusSpeakWhen = _pendingRoutineStatusSpeakWhen;
+            ctrl.routineStatusCondition = _pendingRoutineStatusCondition;
+            ctrl.Notifications.ReceiveSideIdScope = _pendingReceiveSideIdScope;
+            ctrl.Notifications.ReceiveCountScope = _pendingReceiveCountScope;
+            ctrl.PersistRoutineStatusSpeakWhen();
         }
+
 
         private void UpdateRadioHostPortEnabled()
         {
@@ -3874,6 +4246,31 @@ namespace WSJTX_Controller
             ReparentTo(ctrl.replyNormCqLabel,   rcvReplyingGroupBox, new Point(8, 22));
             ReparentTo(ctrl.replyDxCheckBox,    rcvReplyingGroupBox, new Point(185, 20));
             ReparentTo(ctrl.replyLocalCheckBox, rcvReplyingGroupBox, new Point(240, 20));
+
+            // 2.0.58: operator continent selector -- affects DX classification only when set
+            // (a blank value keeps the existing conservative "not DX unless known" fallback).
+            var continentLabel = new System.Windows.Forms.Label
+            {
+                Text = "My continent:",
+                AutoSize = true,
+                Location = new Point(410, 22),
+                Font = rcvReplyingGroupBox.Font,
+                TabStop = false,
+            };
+            _myContinentCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new Point(492, 19),
+                Size = new Size(150, 21),
+                Font = rcvReplyingGroupBox.Font,
+                AccessibleName = "My continent",
+            };
+            _myContinentCombo.Items.AddRange(_continentDisplay);
+            int curContinentIdx = System.Array.IndexOf(_continentCode,
+                WsjtxClient.NormalizeContinent(ctrl.wsjtxClient?.myContinent) ?? "");
+            _myContinentCombo.SelectedIndex = curContinentIdx >= 0 ? curContinentIdx : 0;
+            rcvReplyingGroupBox.Controls.Add(continentLabel);
+            rcvReplyingGroupBox.Controls.Add(_myContinentCombo);
             ReparentTo(ctrl.bandComboBox,        rcvReplyingGroupBox, new Point(112, 43));
             ReparentTo(ctrl.forLabel,            rcvReplyingGroupBox, new Point(190, 46));
             ReparentTo(ctrl.ExcludeHelpLabel,    rcvReplyingGroupBox, new Point(215, 46));

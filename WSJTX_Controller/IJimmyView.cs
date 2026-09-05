@@ -15,12 +15,25 @@ namespace WSJTX_Controller
 
     public interface IJimmyStatusView
     {
-        // Mirrors WsjtxClient.ShowStatus()'s former `finally` block exactly, including the
-        // SendKeys.Send("{UP}") screen-reader re-announce guard -- an accessibility-load-bearing
-        // detail, not a cosmetic one, so it is preserved verbatim rather than "improved" here.
-        void RenderStatus(string headingText, string statusText, Color foreColor, Color backColor);
+        // Item 1/2 split (2026-09-03): the visible status line + Notification History entry ONLY.
+        // Both immediate and unconditional -- NEVER gated on whether the line will be spoken.
+        // Returns whether Jimmy is really foregrounded/focused right now (statusText.Focused &&
+        // ActiveForm == this && GetForegroundWindow() == handle) -- the caller passes that to
+        // SpeechCoordinator.SubmitRoutineStatus as the "would this have nudged the screen reader"
+        // hint. The screen-reader nudge itself is CoordinatedSpeak below, driven by the coordinator.
+        bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor);
 
-        // Wraps the existing (currently no-op) Controller.ShowMsg.
+        // The ONE screen-reader nudge seam, driven only by SpeechCoordinator -- for BOTH a
+        // coordinated typed notification and a coordinated routine-status line. Idempotently
+        // ensures statusText shows `text`, applies the real OS-foreground guard and the 3-second
+        // exact/near-immediate duplicate suppression, then SendKeys("{UP}"). Records NO history
+        // (that already happened upstream, at render / deliver time). Never self-voices, never
+        // moves focus, never calls a screen-reader API directly.
+        void CoordinatedSpeak(string text);
+
+        // Wraps the existing (currently no-op) Controller.ShowMsg -- direct one-shot operator
+        // feedback (hotkey results, upload status, "not in queue", ...). NOT the routine-status
+        // or typed-notification path; those go through CoordinatedSpeak via the coordinator.
         void ShowMessage(string text, bool sound);
 
         // Added 2026-08-19 for the off-focus accessibility-alert feature (UiaAlertNotification

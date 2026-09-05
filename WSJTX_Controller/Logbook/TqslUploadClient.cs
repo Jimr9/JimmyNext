@@ -33,6 +33,15 @@ namespace WSJTX_Controller
     {
         public string LastError { get; private set; }
 
+        // Number of QSOs this run marked uploaded, set only when the outcome is UNAMBIGUOUS:
+        //   - 0  : nothing was pending (nothing to upload)
+        //   - >0 : TQSL final status code 0 ("all qsos submitted were signed and saved or
+        //          signed and uploaded"); every submitted pending record was marked uploaded
+        //   - null: an ambiguous (codes 8/9/14) or failed outcome -- the count is genuinely
+        //          not known, and callers must NOT present a "N QSOs uploaded" number.
+        // Reset to null at the top of each UploadPendingAsync call.
+        public int? LastUploadedCount { get; private set; }
+
         // Checks the standard install paths first, falling back to a registry uninstall-key
         // lookup. Returns null (not an exception) if TQSL isn't installed; callers must degrade
         // to a clear status message, not a crash.
@@ -97,6 +106,7 @@ namespace WSJTX_Controller
         public async Task<bool> UploadPendingAsync(string stationLocation, LogbookDb db)
         {
             LastError = null;
+            LastUploadedCount = null;
             if (TestModeGuard.IsTestMode)
             {
                 LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real TQSL invocation allowed.";
@@ -127,7 +137,11 @@ namespace WSJTX_Controller
             // every genuinely pending QSO is at least offered to TQSL each run, not just
             // whichever 1000 happen to sort oldest.
             var pending = db.GetPendingUploads("LOTW", limit: 10000);
-            if (pending.Count == 0) return true;   // nothing to do -- not a failure
+            if (pending.Count == 0)
+            {
+                LastUploadedCount = 0;             // unambiguous: there was nothing to upload
+                return true;                        // nothing to do -- not a failure
+            }
 
             var sb = new StringBuilder();
             sb.Append(AdifExporter.Header());
@@ -240,6 +254,9 @@ namespace WSJTX_Controller
                 {
                     case FinalStatusOutcome.MarkAllUploaded:
                         foreach (var q in pending) db.MarkUploaded(q.DedupKey, "LOTW", DateTime.UtcNow);
+                        // Code 0 is unambiguous: every submitted pending record was signed and
+                        // saved/uploaded, so the pending count IS the uploaded count.
+                        LastUploadedCount = pending.Count;
                         return true;
 
                     case FinalStatusOutcome.AmbiguousLeaveUnmarked:

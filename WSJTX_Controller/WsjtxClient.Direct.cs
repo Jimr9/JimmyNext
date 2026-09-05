@@ -40,6 +40,76 @@ namespace WSJTX_Controller
         private bool _directConnected;
         private ulong _directLastSlotSeen;
 
+        // The loopback TCP port every Direct command (DirectSendCommand) and the SNAPSHOT poll
+        // connect to. Defaults to the real production control port (NativeEngineClient.ControlPort,
+        // 58239) -- production NEVER changes it, so live behaviour is byte-identical to a plain
+        // hard-coded constant. Item 5 (test-infra stabilisation, 2026-09-02): JimmyTests points
+        // each Direct network test at its OWN OS-assigned ephemeral port via
+        // TestSetDirectControlPort, so a delayed worker/poll from one test can only ever reconnect
+        // to its own (by then closed) StubEngineHost -- never another test's fixture on a shared
+        // fixed port. IPAddress.Loopback is unchanged; only the port is injectable.
+        private int _directControlPort = TestDirectControlPortOverride ?? NativeEngineClient.ControlPort;
+
+        // Process-wide default for _directControlPort, captured by each WsjtxClient AT
+        // CONSTRUCTION. Null in production, always -- only JimmyTests' StubEngineHost sets it (to
+        // its own ephemeral port) for the lifetime of one Direct network test, then clears it.
+        // Because the value is captured per instance at construction, a client built during test
+        // A keeps A's port even if its worker fires late during test B -- it reconnects to A's
+        // (closed) listener and fails fast, never B's fixture. Sequential test execution
+        // (JimmyTests runs methods one at a time) makes a single shared slot sufficient; the
+        // instance setter TestSetDirectControlPort covers a client built before its fixture.
+        internal static int? TestDirectControlPortOverride;
+
+        // Test-only registry of every WsjtxClient whose Direct SNAPSHOT poll loop is currently
+        // live under a StubEngineHost. A JimmyTests method rarely has its `wc` in `finally` scope,
+        // and a leaked-but-still-Started _directPollTimer fires on EVERY later Application.DoEvents
+        // on this thread -- dozens of them across a full suite each spawn a Task.Run that burns a
+        // thread-pool thread connecting to a now-dead port, starving the CURRENT test's own poll.
+        // StubEngineHost.Dispose() calls TestQuiesceAllDirectClients() so each test's Direct
+        // transport is actually shut down when that test's fixture goes away. Empty/untouched in
+        // production (TestDirectControlPortOverride is null, so nothing ever registers).
+        internal static readonly System.Collections.Generic.List<WsjtxClient> TestLiveDirectClients
+            = new System.Collections.Generic.List<WsjtxClient>();
+
+        // True only when the JimmyTests harness is the entry assembly -- gates the live-client
+        // registry above so production never touches it at all (there, GetEntryAssembly() is
+        // "Jimmy Next").
+        private static readonly bool _isJimmyTestsHost =
+            string.Equals(System.Reflection.Assembly.GetEntryAssembly()?.GetName()?.Name,
+                          "JimmyTests", System.StringComparison.Ordinal);
+
+        internal static void TestQuiesceAllDirectClients()
+        {
+            WsjtxClient[] live;
+            lock (TestLiveDirectClients)
+            {
+                live = TestLiveDirectClients.ToArray();
+                TestLiveDirectClients.Clear();
+            }
+            foreach (var c in live)
+            {
+                try { c.TestQuiesceDirectTransportAsync().GetAwaiter().GetResult(); } catch { }
+            }
+        }
+
+        // The single ordered Direct command worker's Task (RunDirectCommandWorkerAsync), captured
+        // when it is first started so a bounded test teardown can actually AWAIT its exit rather
+        // than leave it parked on the semaphore for the rest of the process. Null until the first
+        // EnqueueDirectCommand. Production never needs this (one WsjtxClient for the app lifetime).
+        private System.Threading.Tasks.Task _directCommandWorkerTask;
+
+        // The most recent SNAPSHOT poll's background Task (DirectPollTick's Task.Run), captured so
+        // the same bounded test teardown can await outstanding network I/O settling. Its
+        // BeginInvoke continuation self-cancels once _directConnected is cleared / the epoch moves.
+        private volatile System.Threading.Tasks.Task _directLastPollTask;
+
+        // Test-only hard stop. Set ONLY by TestQuiesceDirectTransportAsync -- distinct from
+        // _directQueueShutdown (production's Closing() path, which deliberately leaves the worker
+        // loop alive because the process is exiting anyway). When set, the worker returns from its
+        // loop instead of awaiting the next signal, so a test can prove the transport is fully
+        // quiescent before it disposes its StubEngineHost.
+        private volatile bool _directTransportQuiesced;
+
         // Engine's last CONFIRMED TX drive level (0.0-1.0), or null when unknown -- no snapshot
         // yet this session, or the engine is currently treated as disconnected. Refreshed from
         // radio.TxLevel on every poll (DirectApplyStatus) and set the instant a SET_TX_LEVEL is
@@ -250,7 +320,13 @@ namespace WSJTX_Controller
                 if (!_directCommandWorkerStarted)
                 {
                     _directCommandWorkerStarted = true;
-                    System.Threading.Tasks.Task.Run(RunDirectCommandWorkerAsync);
+                    // Under JimmyTests: register so a StubEngineHost teardown quiesces this
+                    // worker too -- a test that drives DirectApplyStatus directly (via
+                    // TestApplyDirectSnapshot) never calls ConnectDirectEngine, so this is the
+                    // only place its command worker gets tracked for cleanup.
+                    if (_isJimmyTestsHost)
+                        lock (TestLiveDirectClients) { if (!TestLiveDirectClients.Contains(this)) TestLiveDirectClients.Add(this); }
+                    _directCommandWorkerTask = System.Threading.Tasks.Task.Run(RunDirectCommandWorkerAsync);
                 }
             }
             _directQueueSignal.Release();
@@ -276,6 +352,10 @@ namespace WSJTX_Controller
             while (true)
             {
                 await _directQueueSignal.WaitAsync().ConfigureAwait(false);
+                // Test-only bounded teardown (Item 5): exit the loop instead of parking here
+                // forever, so TestQuiesceDirectTransportAsync can await this Task's real
+                // completion. Never set in production (see _directTransportQuiesced's comment).
+                if (_directTransportQuiesced) return;
                 DirectCommandRequest req = null;
                 lock (_directQueueLock)
                 {
@@ -347,6 +427,18 @@ namespace WSJTX_Controller
         // later (e.g. a momentary CAT hiccup).
         private bool _directStartupBandResolved;
 
+        // 2.0.58: the prior-session dial/band/tier to restore on startup, snapshotted on the
+        // FIRST authenticated poll of this connection -- BEFORE DirectApplyStatus's own "persist
+        // confirmed snapshot" block overwrites ctrl.Radio.LastDialFrequencyHz/LastBandIdx/
+        // LastTier with the live current dial. The startup retune itself can be deferred for
+        // several polls (it waits for a healthy CAT link -- see startupRetuneSafe), by which
+        // time those settings fields no longer hold the prior session's values; the deferred
+        // retune reads these captured fields instead. Reset per connection in ConnectDirectEngine.
+        private bool _startupRestoreCaptured;
+        private double _startupRestoreDialHz;
+        private int _startupRestoreBandIdx = -1;
+        private string _startupRestoreTier = "";
+
         // How often to ask the engine for a fresh snapshot. Cheap (one short-lived TCP
         // connection, one JSON round-trip) and independent of the FT8 slot period -- polling
         // faster than new data can arrive just re-reads the same slot's decodes, which
@@ -371,6 +463,21 @@ namespace WSJTX_Controller
         // DirectApplyStatus's own check below. Edge-triggered (tracks the PREVIOUS poll's state)
         // so this fires HaltTx()/announces once per episode, not every tick while SWR stays high.
         private bool _swrOverThreshold;
+
+        // Item 4 (2026-09-02) -- ALC lifecycle diagnostics. Jimmy holds NO ALC state of its own
+        // (Alt+Q/ReportPowerSwr pulls a fresh SNAPSHOT every press and displays radio.TxAlc
+        // verbatim; DirectApplyStatus never stores it), so a stuck 0.00 that a Jimmy RESTART
+        // clears is not a Jimmy-side lifecycle bug -- restarting Jimmy also kills+respawns
+        // jimmy-engine-host.exe, which kills its child rigctld.exe (KILL_ON_JOB_CLOSE) and starts
+        // a fresh Hamlib CAT session + a fresh Nexus TX-meter round-robin. The fault lives in the
+        // EngineHost->Nexus->rigctld->radio segment (consistent with the known TS-590SG shared
+        // PWR/SWR/ALC CAT-meter behaviour). Until a hardware test with [ALC-DIAG] enabled pins
+        // down WHERE the value goes to zero / stops refreshing, this logs the full TX-meter
+        // picture Jimmy can see -- every Alt+Q, and a bounded trace across each transmit over so
+        // a fresh 0.00 can be told from a value that fell and never recovered.
+        private string _alcDiagLastKey;
+        private int _alcDiagTxPollRun;
+        private bool _alcDiagWasTransmitting;
 
         // Direct-mode runaway-Tx backstop, 2026-08-28 (CONFIRMED live -- HB9TIH then NE5L, same
         // session): count of completed transmit overs observed while Jimmy has NO call in
@@ -487,6 +594,40 @@ namespace WSJTX_Controller
         // so this doesn't fire on startup or misreport a VOX-only station as a lost CAT link.
         private bool? _lastCatOk;
 
+        // Session-scoped latch, hardened 2026-09-02 (2.0.58): true once a genuine CAT outage
+        // (radio.CatOk == Some(false)) has been observed at any point this Jimmy session. A
+        // Direct transport/engine reconnect resets _lastCatOk to null (ConnectDirectEngine), so
+        // without this latch the first healthy reading AFTER a reconnect-that-followed-an-outage
+        // looks identical to a clean startup and the "Radio CAT link restored" notification is
+        // silently skipped -- exactly what 2.0.57 hardware testing hit. DELIBERATELY NOT reset
+        // on a Direct reconnect (see ConnectDirectEngine): the outage was real and the operator
+        // is still owed the recovery announcement once CAT actually comes back. Only a full
+        // process restart clears it.
+        private bool _catOutageObservedThisSession;
+
+        // Diagnostics only (2.0.59): wall-clock of the last observed CAT-down edge, so the diag
+        // log can report how long CAT stayed down as Jimmy actually saw it (down edge -> the
+        // snapshot poll that first reports cat_ok true again -> the recovery announcement, which
+        // is published on that same tick). Jimmy polls the EngineHost snapshot ~1 Hz; it has no
+        // visibility into Nexus/Hamlib's own circuit-breaker retry schedule (2s/4s/8s/16s/30s...),
+        // so the gap between the physical radio becoming CAT-ready and the next breaker retry is
+        // NOT observable here without changing Nexus. This timestamp bounds the total only.
+        private DateTime? _catLostAtUtc;
+
+        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): identity of the LAST-ANNOUNCED
+        // unresolved Fake-It restore episode, so the SAME episode is announced only once even
+        // across a Direct transport reconnect (the engine keeps the episode alive; the C#
+        // connection restarting is not a new episode). Identity is the engine's monotonic
+        // episode id (radio.fakeItRestoreWarningId) PAIRED with that snapshot's per-launch
+        // SessionToken -- so a *new* EngineHost whose id happens to collide numerically is
+        // still a new episode. A genuinely new episode (higher id, or new token) announces
+        // again even with identical wording. `_lastAnnouncedFakeItEpisodeId == null` = nothing
+        // announced yet. These are DELIBERATELY NOT reset on a Direct reconnect (see
+        // ConnectDirectEngine); a resolved episode leaves the id in place, harmlessly, since
+        // the next real episode's id differs.
+        private long? _lastAnnouncedFakeItEpisodeId;
+        private string _lastAnnouncedFakeItEpisodeToken;
+
         // Starts polling the engine host's control port directly. Call once the engine host
         // process is known to be starting -- there is no socket to "open" here at all, every
         // request is its own short-lived TCP connection, matching the control server's own
@@ -527,6 +668,10 @@ namespace WSJTX_Controller
             _directLastSlotSeen = 0;
             _directFirstStatusShown = false;
             _directStartupBandResolved = false;
+            _startupRestoreCaptured = false;
+            _startupRestoreDialHz = 0;
+            _startupRestoreBandIdx = -1;
+            _startupRestoreTier = "";
             _directConsecutivePollFailures = 0;
             _directLossAnnounced = false;
             _swrOverThreshold = false;
@@ -534,7 +679,21 @@ namespace WSJTX_Controller
             _directRr73LogRetries = 0;
             _directWriteFailRetries = 0;
             _finishingCall = null;
+            if (_lastCatOk == false || _catLostAtUtc.HasValue)
+                DebugOutput($"{Time()} [CAT-DIAG] Direct reconnect clearing the live CAT latch while CAT was down " +
+                    $"(prevLatch={(_lastCatOk?.ToString() ?? "null")}); the next cat_ok=true will be reported as a post-reconnect recovery");
             _lastCatOk = null;
+            // NOTE: _catOutageObservedThisSession is DELIBERATELY NOT reset here -- a Direct
+            // transport reconnect does not un-happen an earlier real CAT outage, and the
+            // operator is still owed the "Radio CAT link restored" announcement once CAT comes
+            // back. See that field's own comment.
+            // NOTE: _lastAnnouncedFakeItEpisodeId / _lastAnnouncedFakeItEpisodeToken are
+            // DELIBERATELY NOT reset here -- a Direct transport reconnect is not a new Fake-It
+            // restore episode, and the engine keeps the same unresolved episode (same id +
+            // session token) alive across it. Resetting them would re-announce the SAME
+            // still-unresolved episode on the first post-reconnect snapshot. A genuinely new
+            // episode carries a different id (or a new EngineHost a different token), so
+            // keeping the last-announced identity is safe.
             _lastCommandedSideband = null;
             _lastCommandedSidebandChangedUtc = null;
             _sidebandMismatchAnnounced = false;
@@ -574,8 +733,11 @@ namespace WSJTX_Controller
                 _directPollTimer = new System.Windows.Forms.Timer { Interval = DirectPollIntervalMs };
                 _directPollTimer.Tick += (s, e) => DirectPollTick();
             }
+            _directTransportQuiesced = false;
             _directPollTimer.Start();
-            DebugOutput($"{Time()} [DIRECT] connected -- polling control port {NativeEngineClient.ControlPort} every {DirectPollIntervalMs}ms");
+            if (_isJimmyTestsHost)
+                lock (TestLiveDirectClients) { if (!TestLiveDirectClients.Contains(this)) TestLiveDirectClients.Add(this); }
+            DebugOutput($"{Time()} [DIRECT] connected -- polling control port {_directControlPort} every {DirectPollIntervalMs}ms");
         }
 
         public void DisconnectDirectEngine()
@@ -633,7 +795,7 @@ namespace WSJTX_Controller
             _directPollInFlight = true;
             int epoch = _directConnectionEpoch;
 
-            System.Threading.Tasks.Task.Run(() =>
+            _directLastPollTask = System.Threading.Tasks.Task.Run(() =>
             {
                 DirectSnapshot snap = null;
                 string failMessage = null;
@@ -793,6 +955,51 @@ namespace WSJTX_Controller
         // that legitimately calls again in a LATER tick must still be admitted normally.
         private readonly HashSet<string> _completedThisPollTick = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+        // "Radio CAT link lost" / "Radio CAT link restored" -- edge-triggered off the engine's
+        // own radio.catOk (Some(true)/Some(false)/None). None (no CAT configured, VOX-only, not
+        // yet reported) fires nothing. The LOST edge publishes a concise, rig-brand-neutral
+        // RadioCatLostEvent built from the configured connection and latches
+        // _catOutageObservedThisSession; the raw Nexus/Hamlib catDetail goes only to the diag
+        // log. The RESTORED edge publishes RadioCatRecoveredEvent, but only if a genuine outage
+        // was actually seen this session -- _lastCatOk == false is the direct signal, and the
+        // session latch additionally covers a Direct transport/engine reconnect having reset
+        // _lastCatOk back to null in between (ConnectDirectEngine). A clean startup (no outage
+        // ever observed) announces nothing.
+        private void ApplyCatHealthNotification(bool? catOk, string catDetail)
+        {
+            if (!catOk.HasValue || _lastCatOk == catOk) return;
+
+            if (catOk.Value)
+            {
+                // Diagnostics only: bound how long CAT was down as Jimmy saw it. _lastCatOk ==
+                // false is a same-session recovery; _lastCatOk == null with the session latch
+                // set is a recovery seen only after a Direct reconnect cleared the live latch.
+                string downFor = _catLostAtUtc.HasValue
+                    ? $"{(DateTime.UtcNow - _catLostAtUtc.Value).TotalSeconds:F1}s (Jimmy-observed, down edge -> this snapshot)"
+                    : "(down edge not seen this transport session)";
+                DebugOutput($"{Time()} [CAT-DIAG] cat_ok -> true; was down for {downFor}; " +
+                    $"prevLatch={( _lastCatOk?.ToString() ?? "null")} outageSeenThisSession={_catOutageObservedThisSession}; " +
+                    $"recovery announcement published on this tick");
+                _catLostAtUtc = null;
+                if (_lastCatOk == false || _catOutageObservedThisSession)
+                    Notify?.Publish(new RadioCatRecoveredEvent());
+            }
+            else
+            {
+                _catOutageObservedThisSession = true;
+                _catLostAtUtc = DateTime.UtcNow;
+                DebugOutput($"{Time()} [CAT-DIAG] cat_ok -> false; cat_detail: {catDetail ?? "(none)"}; " +
+                    $"CAT-lost notification published on this tick; Nexus/Hamlib breaker retry schedule is not visible to Jimmy");
+                Notify?.Publish(new RadioCatLostEvent(
+                    ctrl.Radio.RigModel, ctrl.Radio.ComPort, ctrl.Radio.BaudRate, catDetail));
+                // Station Watch / Smart QSO Start (2.0.63): Smart Start must not transmit later
+                // from stale readiness once CAT is confirmed lost -- a receive-only Station
+                // Watch is untouched (see TargetMonitor.OnSmartStartNonActionable's own comment).
+                NotifyTargetMonitorsNonActionable();
+            }
+            _lastCatOk = catOk;
+        }
+
         private void DirectApplyStatus(DirectSnapshot snap)
         {
             _completedThisPollTick.Clear();
@@ -806,24 +1013,40 @@ namespace WSJTX_Controller
             // ~1s regardless.
             if (!_txLevelChangeInFlight) _engineTxLevel = radio.TxLevel;
 
-            // "Radio CAT link lost"/recovered -- see _lastCatOk's own comment. null (not
-            // applicable / not yet reported) never fires either branch, so a VOX-only station,
-            // or the very first snapshot of a session, announces nothing.
-            if (radio.CatOk.HasValue && _lastCatOk != radio.CatOk)
+            // "Radio CAT link lost"/recovered -- extracted to its own method 2026-09-02 so the
+            // false -> reconnect-reset -> true recovery path is unit-testable directly (see
+            // TestApplyCatHealth / ApplyCatHealthNotification).
+            ApplyCatHealthNotification(radio.CatOk, radio.CatDetail);
+
+            // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a Fake-It dial restore the
+            // engine could not confirm (CAT failed after a temporary Fake-It shift). The engine
+            // sets radio.fakeItRestoreWarning (+ radio.fakeItRestoreWarningId) while it stays
+            // unresolved and clears both (null) the moment it reconciles the dial. Announced
+            // ONCE per EPISODE -- identity is the engine's monotonic episode id PAIRED with the
+            // snapshot's per-launch SessionToken, remembered across a Direct reconnect (which is
+            // not a new episode). The clearing is silent -- a resolved dial isn't news. Goes
+            // through the normal accessible notification path; does not steal focus.
+            string fakeItWarn = radio.FakeItRestoreWarning;
+            long? fakeItId = radio.FakeItRestoreWarningId;
+            if (!string.IsNullOrEmpty(fakeItWarn) && fakeItId.HasValue)
             {
-                if (radio.CatOk.Value)
+                bool sameEpisode = _lastAnnouncedFakeItEpisodeId.HasValue
+                                   && fakeItId.Value == _lastAnnouncedFakeItEpisodeId.Value
+                                   && string.Equals(snap.SessionToken ?? "",
+                                                    _lastAnnouncedFakeItEpisodeToken ?? "",
+                                                    StringComparison.Ordinal);
+                if (!sameEpisode)
                 {
-                    // Only announce a RECOVERY, not the very first successful reading of a
-                    // session (that's just normal startup, not news).
-                    if (_lastCatOk == false)
-                        Notify?.Publish(new RadioCatRecoveredEvent());
+                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Fake It dial not restored", fakeItWarn));
+                    _lastAnnouncedFakeItEpisodeId = fakeItId.Value;
+                    _lastAnnouncedFakeItEpisodeToken = snap.SessionToken;
                 }
-                else
-                {
-                    Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Radio CAT link lost", radio.CatDetail ?? "no response"));
-                }
-                _lastCatOk = radio.CatOk;
             }
+            // No `else` that wipes the remembered identity: a resolved episode (warn == null)
+            // is silent, and leaving the last-announced id in place is what stops the SAME
+            // still-unresolved episode re-announcing after a transport reconnect. The next
+            // genuine episode carries a different id (or, on a new EngineHost, a different
+            // token) and announces normally.
 
             // "Halt Tx when SWR > threshold" -- matches WSJT-X's own Radio-tab safety feature.
             // Used to run off RigctldClient's own periodic "l SWR" poll (Controller.cs's
@@ -843,6 +1066,33 @@ namespace WSJTX_Controller
                     $"SWR {radio.TxSwr.Value:F1} exceeds threshold {ctrl.Radio.SwrHaltThreshold:F1}"));
             }
             _swrOverThreshold = swrOver;
+
+            // Item 4 -- bounded ALC/TX-meter trace across each transmit over. Only while the
+            // engine reports transmitting; logs on the rising edge, whenever the TX-meter picture
+            // changes, and at least once every ~5 polls so a value stuck at 0.00 is still visibly
+            // sampled. `tx_alc=null` (field absent) is reported distinctly from `tx_alc=0.00`
+            // (present, genuine zero) -- never conflated. Diagnostic only; changes nothing.
+            bool txNow = radio.Transmitting;
+            if (txNow)
+            {
+                _alcDiagTxPollRun = _alcDiagWasTransmitting ? _alcDiagTxPollRun + 1 : 0;
+                string key = $"alc={(radio.TxAlc.HasValue ? radio.TxAlc.Value.ToString("0.###") : "null")}"
+                           + $" po={(radio.TxPoW.HasValue ? radio.TxPoW.Value.ToString("0.#") : "null")}"
+                           + $" swr={(radio.TxSwr.HasValue ? radio.TxSwr.Value.ToString("0.##") : "null")}"
+                           + $" lvl={radio.TxLevel:0.###}"
+                           + $" cat={(radio.CatOk?.ToString() ?? "null")} tuning={radio.Tuning}";
+                if (key != _alcDiagLastKey || (_alcDiagTxPollRun % 5) == 0)
+                {
+                    _alcDiagLastKey = key;
+                    DebugOutput($"{Time()} [ALC-DIAG] tx over poll#{_alcDiagTxPollRun} slot={radio.Slot} localTx={transmitting} {key}");
+                }
+            }
+            else if (_alcDiagWasTransmitting)
+            {
+                DebugOutput($"{Time()} [ALC-DIAG] tx over ended after {_alcDiagTxPollRun + 1} polls; last {_alcDiagLastKey ?? "(none)"}");
+                _alcDiagLastKey = null;
+            }
+            _alcDiagWasTransmitting = txNow;
 
             // T17 fix, 2026-08-23: reconcile the rig's own CAT-reported mode readback against
             // what Jimmy last commanded -- see radio.RigMode's own comment for the full defect
@@ -1032,7 +1282,39 @@ namespace WSJTX_Controller
             // which the UDP path never had either. Gated on _directStartupBandResolved so this
             // never fires again later in the same connection if the band transiently reads as
             // unknown again (e.g. a momentary CAT hiccup) -- only the first attempt counts.
-            if (!_directStartupBandResolved)
+            //
+            // 2.0.58 hardening (2.0.57 hardware miss -- rig left on the wrong frequency): this
+            // block only ever runs ONCE per connection, so if it spends that one shot issuing a
+            // SET_FREQUENCY while the rig's CAT link isn't up yet, the engine rejects it and the
+            // exact-dial restore is lost for the whole session. Wait for the rig to be actually
+            // reachable and idle first -- CAT healthy, not transmitting, not tuning. Under
+            // Hamlib rigctld that means radio.CatOk == true; under WSJT-X CAT radio mode there
+            // is no Jimmy-side CAT-health signal and RetuneBand can't drive the rig anyway, so
+            // the CAT gate is skipped there and behavior is unchanged. This never tunes before
+            // an authenticated Direct session either -- DirectPollTick only reaches
+            // DirectApplyStatus after the session-token check passes. It is still bounded: the
+            // instant CAT comes up (or immediately, in WSJT-X CAT mode) it fires exactly once;
+            // if CAT never comes up it never tunes, which is correct -- there is no rig to move.
+            // radio.CatOk == false means the engine has explicitly reported the CAT link down
+            // (rig off, wrong port/baud, cable out) -- defer. null (health not yet reported by
+            // this poll) or true both proceed: under Hamlib rigctld catOk goes non-null within a
+            // poll or two of a healthy start, and the unknown-band fallback below still needs to
+            // run when telemetry is merely sparse. WSJT-X CAT radio mode has no Jimmy-side CAT
+            // health signal at all and RetuneBand can't drive the rig there anyway.
+            bool startupRetuneSafe =
+                (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld || radio.CatOk != false)
+                && !radio.Transmitting && !radio.Tuning;
+            // Capture the prior-session restore targets on the first poll of this connection,
+            // before the "persist confirmed snapshot" block lower in this method overwrites them
+            // with the live current dial -- the retune below may not run for several more polls.
+            if (!_startupRestoreCaptured)
+            {
+                _startupRestoreCaptured = true;
+                _startupRestoreDialHz = ctrl.Radio.LastDialFrequencyHz;
+                _startupRestoreBandIdx = ctrl.Radio.LastBandIdx;
+                _startupRestoreTier = ctrl.Radio.LastTier;
+            }
+            if (!_directStartupBandResolved && startupRetuneSafe)
             {
                 _directStartupBandResolved = true;
 
@@ -1077,10 +1359,14 @@ namespace WSJTX_Controller
                 // below had already run, in this same synchronous call), those fields no longer
                 // held the prior-session values they needed -- they held whatever this poll just
                 // wrote. Capturing both here, before the persist block runs, is the fix:
-                // ApplyStartupBandFallback below reads these captured locals instead of the live
-                // (by-then-overwritten) settings fields.
-                double capturedLastDialHz = ctrl.Radio.LastDialFrequencyHz;
-                int capturedLastBandIdx = ctrl.Radio.LastBandIdx;
+                // ApplyStartupBandFallback below reads these captured values instead of the live
+                // (by-then-overwritten) settings fields. 2.0.58: the capture now happens once at
+                // the first poll of the connection (see _startupRestoreCaptured above), not here
+                // -- the retune can be deferred several polls waiting on CAT, and the persist
+                // block would have run on each of those, so reading the settings fields even here
+                // is no longer soon enough.
+                double capturedLastDialHz = _startupRestoreDialHz;
+                int capturedLastBandIdx = _startupRestoreBandIdx;
 
                 void ApplyStartupBandFallback()
                 {
@@ -1131,9 +1417,9 @@ namespace WSJTX_Controller
                     }
                 }
 
-                if (!string.IsNullOrEmpty(ctrl.Radio.LastTier) && ctrl.Radio.LastTier != this.mode)
+                if (!string.IsNullOrEmpty(_startupRestoreTier) && _startupRestoreTier != this.mode)
                 {
-                    string targetTier = ctrl.Radio.LastTier;
+                    string targetTier = _startupRestoreTier;
                     // Codex Audit 02 follow-up, 2026-08-21: DirectSetTier now routes through the
                     // ordered dispatcher (WsjtxClient.Direct.cs's own class comment, near the top of
                     // this file) instead of this call site opening its own independent Task.Run --
@@ -1244,6 +1530,9 @@ namespace WSJTX_Controller
             // Direct mode's own real transmitting-flag transition -- edge-triggered (only on an
             // actual change), matching the UDP path's ProcessTxStart/ProcessTxEnd exactly. See
             // NotificationCenter.OnTransmittingChanged's own comment.
+            // Item 2: the physical radio.Transmitting edge is what SpeechCoordinator uses to
+            // release AfterTx items and to DROP a still-pending AfterRx routine summary (stale RX
+            // chatter must not be spoken once an over has begun) -- see OnPhysicalTxChanged.
             if (transmittingChanged) Notify?.OnTransmittingChanged(transmitting);
 
             // Rx/Tx frequency control, 2026-08-27: the old mid-QSO "too many consecutive
@@ -1590,8 +1879,14 @@ namespace WSJTX_Controller
             }
         }
 
+        // Set in the new-slot block below; consumed once at the END of DirectApplyDecodes after
+        // this tick's decodes have been ingested. That is the real "AfterRx" point -- the
+        // receive period finished AND Jimmy has processed its decodes -- for SpeechCoordinator.
+        private bool _directReceiveCycleCompletedThisTick;
+
         private void DirectApplyDecodes(DirectSnapshot snap)
         {
+            _directReceiveCycleCompletedThisTick = false;
             if (snap.RecentDecodes == null || myCall == null) return;
 
             // AppSnapshot.recentDecodes is "signals decoded in the most recent RX slot" -- a
@@ -1603,12 +1898,7 @@ namespace WSJTX_Controller
             {
                 _directLastSlotSeen = snap.Radio.Slot;
                 _directSeenDecodeSignatures.Clear();
-
-                // Direct mode's own real "a receive period just completed" transition -- see
-                // NotificationCenter.OnPeriodBoundary's own comment. Same real per-period
-                // boundary this block's own comment below already establishes for queue-age
-                // expiry, reused here rather than inventing a second one.
-                Notify?.OnPeriodBoundary();
+                _directReceiveCycleCompletedThisTick = true;
 
                 // Root-caused live, 2026-08-12: timeOffsets (WsjtxClient.cs) was already being
                 // populated in Direct mode (ProcessDecodeMsg -- the exact same shared method the
@@ -1720,6 +2010,12 @@ namespace WSJTX_Controller
                 }
             }
 
+            // Station Watch / Smart QSO Start (2.0.63): the real per-period parity Jimmy heard
+            // this whole batch of decodes on -- RadioStatus.Slot is the engine's own monotonic
+            // slot counter, so this is a real fact, not a wall-clock guess. Shared by every
+            // decode in this poll's RecentDecodes (they all belong to the slot that just ended).
+            bool directTargetMonitorEvenSlot = snap.Radio != null && (snap.Radio.Slot % 2UL) == 0UL;
+
             foreach (var row in snap.RecentDecodes)
             {
                 if (string.IsNullOrEmpty(row.Message)) continue;
@@ -1784,6 +2080,7 @@ namespace WSJTX_Controller
                 if (!enq.Message.Contains(";"))
                 {
                     ProcessDecodeMsg(enq, false);
+                    FeedTargetMonitors(enq, directTargetMonitorEvenSlot);
                 }
                 else
                 {
@@ -1795,9 +2092,23 @@ namespace WSJTX_Controller
                     EnqueueDecodeMessage enq2 = enq.DeepCopy();
                     enq.Message = $"{words[0]} {words[3]} {words[1]}";
                     ProcessDecodeMsg(enq, true);
+                    FeedTargetMonitors(enq, directTargetMonitorEvenSlot);
                     enq2.Message = $"{words[2]} {words[3]} {words[4]}";
                     ProcessDecodeMsg(enq2, true);
+                    FeedTargetMonitors(enq2, directTargetMonitorEvenSlot);
                 }
+            }
+
+            // AfterRx: the receive period just ended AND its decodes are now processed. Fire the
+            // coordinator's receive-cycle signal HERE (end of the pass), not at the new-slot
+            // edge above -- an AfterRx-timed notification/status must wait for the decode/QSO
+            // information that becomes available in this same pass, not pre-empt it. FT8 and FT4
+            // alike: this is driven by the engine's own slot number advancing, no fixed timing.
+            if (_directReceiveCycleCompletedThisTick)
+            {
+                _directReceiveCycleCompletedThisTick = false;
+                Notify?.OnPeriodBoundary();
+                FeedTargetMonitorsPeriodComplete(_directLastSlotSeen, directTargetMonitorEvenSlot, transmitting);
             }
         }
 
@@ -2383,7 +2694,7 @@ namespace WSJTX_Controller
                 _directInFlightClient = client;
                 try
                 {
-                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
+                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, _directControlPort);
                     if (!connectTask.Wait(1000) || !client.Connected) return null;
 
                     using (var stream = client.GetStream())
@@ -2495,13 +2806,35 @@ namespace WSJTX_Controller
         // TestRawDecodeHistory directly with entries carrying whatever exact SinceMidnight it
         // needs, then render deterministically.
         internal void TestShowRawDecodes() => ShowRawDecodes();
-        // Test-only (item 5, 2026-08-24): a status render can be batched (ScheduleStatusAnnounce,
-        // WsjtxClient.cs) rather than delivered immediately -- its own real interval runs up to a
-        // full trPeriod plus statusBatchDelayMs (as long as ~15.5s for FT8), which would make a
-        // test that waits for the real Timer slow and, worse, timing-dependent/flaky depending on
-        // exactly where in the real wall-clock period the test happens to run. Reading the
-        // pending text directly is deterministic and instant either way.
-        internal string TestPendingStatusText => _pendingStatusText;
+        // Retired 2026-09-03: routine status is now ALWAYS rendered to the view immediately
+        // (RenderStatusVisible) -- there is no pending/batched visible text any more, so this
+        // always returns null. Kept as a harmless no-op so the few tests that still fall back to
+        // `?? wc.TestPendingStatusText` compile unchanged.
+        internal string TestPendingStatusText => null;
+
+        // Test-only: force a routine status render right now, using the current field state
+        // (DirectApplyStatus only calls ShowStatus itself on the first tick / a band or
+        // transmitting change -- see its own comment). Lets a test check the composed routine
+        // status after a plain state change like CAT dropping, exactly as a later decode tick
+        // would produce it in the field.
+        internal void TestShowStatus() => ShowStatus();
+
+        // Test-only: the receive-side role-scope regression coverage
+        // (RoutineReceiveSideRoleScopeTests, JimmyTests) needs to drive the exact slot state
+        // ShowStatus reads -- which slot is Jimmy's transmit side (txFirst), which slot's receive
+        // period just ended (lastDecodeEvenPeriod), and each side's snapshot count -- without a
+        // full real decode round trip through DirectApplyDecodes/ShowAdvancedQueue.
+        internal void TestSetTxFirst(bool v) => txFirst = v;
+        internal void TestSetLastDecodeEvenPeriod(bool? v) => lastDecodeEvenPeriod = v;
+        internal void TestSetAdvSnapshotCounts(int tx1, int tx2)
+        {
+            _tx1SnapshotRows  = new System.Collections.Generic.List<string>();
+            _tx1SnapshotCalls = new System.Collections.Generic.List<string>();
+            _tx2SnapshotRows  = new System.Collections.Generic.List<string>();
+            _tx2SnapshotCalls = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < tx1; i++) _tx1SnapshotRows.Add($"row{i}");
+            for (int i = 0; i < tx2; i++) _tx2SnapshotRows.Add($"row{i}");
+        }
 
         // Test-only: runaway-Tx backstop counter (private). DirectRunawayRr73HaltsEngineTests
         // asserts the first orphaned over is tolerated and the second one trips the halt.
@@ -2515,6 +2848,24 @@ namespace WSJTX_Controller
         // process this test harness deliberately never starts. This lets the clock-sync
         // notification's own FT4 test exercise a real "FT4" Mode token without one.
         internal void TestSetMode(string m) => mode = m;
+
+        // Test-only: otherPartyForCallInProg / otherPartyStage are private and only ever set by
+        // ProcessDecodeMsg ingesting a real "callInProg working someone else" decode. Status-
+        // composition regression coverage (the duplicate-active-callsign fix, WsjtxClient.
+        // Display.cs) needs to drive that captured state directly for a table of cases without
+        // reconstructing the whole selection/reply pipeline for each row. forCall == null leaves
+        // only the stage payload (a bare short reply / RRR); stage == null leaves only the name.
+        internal void TestSetOtherParty(string forCall, string stage)
+        {
+            otherPartyForCallInProg = string.IsNullOrEmpty(forCall) ? null : forCall;
+            otherPartyStage = string.IsNullOrEmpty(stage) ? null : stage;
+        }
+
+        // Test-only: newSelection is private, set true only by the real select-a-call paths
+        // (double-click / Alt+N / queue Enter). The status-composition regression table needs
+        // the " selected" marker present for one row to prove the duplicate-call fix folds it
+        // into the other-party text rather than losing it. Consumed/reset by ShowStatus().
+        internal void TestSetNewSelection(bool v) => newSelection = v;
 
         // Test-only: mirrors the timeOffsets/timeOffset/_rawDecodeHistory clearing
         // SetOperatingMode's own successful tier-switch branch performs, for the same reason
@@ -2607,6 +2958,9 @@ namespace WSJTX_Controller
         internal void TestSetManualFreqThisQso(bool v) => _manualFreqThisQso = v;
         internal void TestSetReplyCmd(string v) => replyCmd = v;
         internal void TestSetReplyDecode(EnqueueDecodeMessage v) => replyDecode = v;
+        // Puts ShowStatus into the "just decided to reply to callInProg" render (the QSO-start
+        // clause branch) -- for the QsoStarted enabled/edited/disabled end-to-end test.
+        internal void TestSetReplyingToCall(string call) { callInProg = call; replyFromInProg = true; }
         // internal (not private): T14 regression coverage (DiscardCallTwoClockDivergenceTests)
         // proves the discard tracker stays ARMED (not disarmed) while txEnabled is still true.
         internal string TestDiscardCall => discardCall;
@@ -2623,6 +2977,55 @@ namespace WSJTX_Controller
         // opMode/_directConnected side effects) without the 1s SNAPSHOT poll timer it also
         // starts racing a short, timing-sensitive test's own stub-engine-host expectations.
         internal void TestStopPollTimer() => _directPollTimer?.Stop();
+
+        // ── Item 5 (test-infra stabilisation, 2026-09-02) ──────────────────────────────────────
+        // Point this client's Direct transport at a caller-chosen loopback port. Production never
+        // calls this (see _directControlPort's own comment) -- a Direct network test uses it to
+        // bind to its OWN StubEngineHost's OS-assigned ephemeral port, so no two tests ever share
+        // a control port and delayed work from one can never reach another's fixture.
+        internal void TestSetDirectControlPort(int port) => _directControlPort = port;
+        internal int TestDirectControlPort => _directControlPort;
+
+        // Bounded, test-only teardown of just the Direct transport -- NOT production Closing()
+        // (which also HALTs, logs, closes the DB and tears down the app). Returns only once the
+        // Direct transport is genuinely quiescent: the poll timer is stopped, the write queue is
+        // permanently closed and drained, any in-flight command socket is aborted, the ordered
+        // worker Task has actually exited its loop, and the most recent poll's background I/O has
+        // settled (or a bounded wait elapsed). A test calls this in its finally BEFORE disposing
+        // its StubEngineHost, so a late worker/poll can't connect into a half-torn-down fixture.
+        internal async System.Threading.Tasks.Task TestQuiesceDirectTransportAsync(int timeoutMs = 4000)
+        {
+            lock (TestLiveDirectClients) TestLiveDirectClients.Remove(this);
+            _directPollTimer?.Stop();
+            _directConnected = false;                 // any late poll continuation self-cancels
+            _directConnectionEpoch++;                 // ...belt-and-braces via the epoch guard too
+            _directTransportQuiesced = true;
+            lock (_directQueueLock)
+            {
+                _directQueueShutdown = true;
+                PurgeAllDirectQueues_NoLock();
+            }
+            AbortInFlightDirectCommand();
+            try { _directQueueSignal.Release(); } catch { /* worker may never have started */ }
+
+            var worker = _directCommandWorkerTask;
+            if (worker != null)
+                await System.Threading.Tasks.Task.WhenAny(
+                    worker, System.Threading.Tasks.Task.Delay(timeoutMs)).ConfigureAwait(false);
+
+            var poll = _directLastPollTask;
+            if (poll != null)
+                await System.Threading.Tasks.Task.WhenAny(
+                    poll, System.Threading.Tasks.Task.Delay(timeoutMs)).ConfigureAwait(false);
+        }
+
+        // Synchronous convenience for the sync JimmyTests methods -- blocks (bounded) on the
+        // async teardown above. Safe on a WsjtxClient that never connected Direct at all.
+        internal void TestQuiesceDirectTransport(int timeoutMs = 4000)
+        {
+            try { TestQuiesceDirectTransportAsync(timeoutMs).GetAwaiter().GetResult(); }
+            catch { /* best-effort teardown -- never fail a test on cleanup */ }
+        }
         // internal (not private): EngineHost ownership / session identity regression coverage
         // (SessionTokenAuthenticationTests) drives a real SNAPSHOT round trip against a stub
         // engine host -- TestStopPollTimer above is used to stop the automatic 1s timer racing
@@ -2638,6 +3041,16 @@ namespace WSJTX_Controller
         // already internal and needs no accessor.
         internal void TestSetLastCommandedSidebandChangedUtc(DateTime utc) => _lastCommandedSidebandChangedUtc = utc;
         internal int TestSidebandMismatchStreak => _sidebandMismatchStreak;
+
+        // CAT-health notification coverage (2.0.58): drive the exact edge logic
+        // DirectApplyStatus runs, without a full synthetic snapshot.
+        internal void TestApplyCatHealth(bool? catOk, string catDetail) => ApplyCatHealthNotification(catOk, catDetail);
+        // Mirrors ConnectDirectEngine's own `_lastCatOk = null;` reset line -- and, like it,
+        // deliberately leaves _catOutageObservedThisSession alone, which is the whole point of
+        // the recovery-across-reconnect regression test.
+        internal void TestResetCatHealthLikeDirectReconnect() => _lastCatOk = null;
+        internal bool? TestLastCatOk => _lastCatOk;
+        internal bool TestCatOutageObservedThisSession => _catOutageObservedThisSession;
     }
 
     // JSON shapes matching AppSnapshot/RadioStatus/DecodeRow's own camelCase serde output
@@ -2753,6 +3166,18 @@ namespace WSJTX_Controller
         // Human-readable detail paired with CatOk above (tempo-app/src/dto.rs: RadioStatus.
         // cat_detail), e.g. "rigctld not reachable..." -- used as the failure reason text.
         public string CatDetail { get; set; }
+        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): non-null while a Fake-It dial
+        // restore is UNRESOLVED -- CAT failed after a temporary Fake-It shift and the engine's
+        // radio loop cannot confirm the operating dial was put back (tempo-app/src/dto.rs:
+        // RadioStatus.fake_it_restore_warning). A concise operator string; null in normal
+        // operation (a healthy immediate restore is silent). DirectApplyStatus edge-triggers a
+        // one-per-episode accessible warning off it.
+        public string FakeItRestoreWarning { get; set; }
+        // Monotonic id for the CURRENT unresolved Fake-It episode (tempo-app/src/dto.rs:
+        // RadioStatus.fake_it_restore_warning_id) -- non-null iff FakeItRestoreWarning is.
+        // DirectApplyStatus dedups per EPISODE (this id + snap.SessionToken) so the SAME
+        // still-unresolved episode is announced only once even across a Direct reconnect.
+        public long? FakeItRestoreWarningId { get; set; }
         // T17 fix, 2026-08-23 (PARTIAL/CONFIRMED -- radio ended up in LSB on 30m FT4, reported
         // 2026-08-21): the rig's own CAT-reported mode readback (tempo-app/src/dto.rs:
         // RadioStatus.rig_mode -- "the rig's actual mode read back over CAT... Display-only --

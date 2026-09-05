@@ -404,6 +404,11 @@ namespace WSJTX_Controller
                         args += $" --split-mode {radio.SplitMode.ToString().ToLowerInvariant()}";
                 }
 
+                // 2.0.58 (item 13) -- record the bundled Hamlib/rigctld runtime version once per
+                // engine launch, so a hardware tester's diag log shows exactly which Hamlib the
+                // rig's CAT/meter behaviour was seen against. Diagnostic only.
+                debugOutput?.Invoke($"[NativeEngine] bundled Hamlib version: {RigctldClient.GetBundledHamlibVersion() ?? "unknown"}");
+
                 _process = new Process
                 {
                     StartInfo = new ProcessStartInfo
@@ -636,13 +641,19 @@ namespace WSJTX_Controller
         // absent engine can never stall the crash handler -- the crash path's own best-effort
         // behavior is preserved: it ignores the return value on the fatal-background path and
         // only softens the dialog wording on the UI path.
-        public static bool TryEmergencyHaltTx()
+        public static bool TryEmergencyHaltTx() => TryEmergencyHaltTx(ControlPort);
+
+        // Item 5 (test-infra stabilisation, 2026-09-02): endpoint-taking overload so the
+        // EmergencyHaltTx confirmation test can drive this against its own StubEngineHost's
+        // ephemeral port instead of the fixed 58239. Production always calls the no-arg entry
+        // point above -- behaviour is byte-identical.
+        internal static bool TryEmergencyHaltTx(int controlPort)
         {
             try
             {
                 using (var client = new TcpClient())
                 {
-                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, controlPort);
                     if (!connectTask.Wait(500) || !client.Connected) return false;
                     using (var stream = client.GetStream())
                     {

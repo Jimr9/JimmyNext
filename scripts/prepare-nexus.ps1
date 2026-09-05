@@ -88,10 +88,27 @@ $expectedHash = [System.BitConverter]::ToString(
 if (-not $Force -and (Test-Path $InfoFile)) {
     try {
         $existing = Get-Content $InfoFile -Raw | ConvertFrom-Json
-        if ($existing.stateHash -eq $expectedHash -and (Test-Path $StagingDir)) {
-            Write-Host "Staging checkout at $StagingDir already matches pin + patch set. Nothing to do."
+        # The state hash covers the pin COMMIT string + every patch file's SHA-256. But a hash
+        # match plus "the directory exists" is not proof the staged tree is actually AT the
+        # pinned revision -- a half-finished prior run, a manual `git checkout` inside
+        # .nexus-src, or a stray edit could leave it elsewhere. Independently confirm the staged
+        # HEAD still equals the exact pin before trusting the fast path; any doubt -> rebuild.
+        $stagedHead = $null
+        if (Test-Path (Join-Path $StagingDir ".git")) {
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            $stagedHead = (& git -C $StagingDir rev-parse HEAD 2>$null | Out-String).Trim()
+            $ErrorActionPreference = $prevEAP
+        }
+        if ($existing.stateHash -eq $expectedHash `
+                -and (Test-Path $StagingDir) `
+                -and $stagedHead -eq $Pin.NEXUS_COMMIT) {
+            Write-Host "Staging checkout at $StagingDir already matches pin + patch set (HEAD $stagedHead). Nothing to do."
             Write-Host "(Use -Force to rebuild anyway.)"
             exit 0
+        }
+        if ($stagedHead -and $stagedHead -ne $Pin.NEXUS_COMMIT) {
+            Write-Host "Staged Nexus HEAD is $stagedHead, expected $($Pin.NEXUS_COMMIT) -- rebuilding from scratch."
         }
     } catch {
         # Info file unreadable/stale -- fall through and rebuild.
@@ -105,38 +122,62 @@ if (Test-Path $StagingDir) {
 }
 if (Test-Path $InfoFile) { Remove-Item -Force $InfoFile }
 
-Write-Host "Cloning official Nexus ($($Pin.NEXUS_TAG)) into $StagingDir ..."
-& git clone --branch $Pin.NEXUS_TAG --single-branch $Pin.NEXUS_REPO $StagingDir
-if ($LASTEXITCODE -ne 0) { throw "git clone failed (exit $LASTEXITCODE)" }
+# git writes progress + "From <url>" to stderr even on success; under $ErrorActionPreference =
+# "Stop" that stderr, once it reaches the pipeline, is wrapped as a terminating NativeCommandError.
+# Drop to Continue only around the native git calls (their real outcome is $LASTEXITCODE).
+$prevEAP = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+if ($Pin.NEXUS_TAG -eq "main") {
+    # This integration pins an exact COMMIT on main, not a tag. A full clone of `main` always
+    # contains NEXUS_COMMIT (it is an ancestor of main's tip); detach onto it exactly. The
+    # rev-parse check below is the real guarantee we are on the intended revision.
+    Write-Host "Cloning official Nexus (main) into $StagingDir, then pinning to $($Pin.NEXUS_COMMIT) ..."
+    & git clone --quiet --branch main --single-branch $Pin.NEXUS_REPO $StagingDir
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw "git clone failed (exit $LASTEXITCODE)" }
+    & git -C $StagingDir checkout --quiet --detach $Pin.NEXUS_COMMIT
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw "git checkout $($Pin.NEXUS_COMMIT) failed (exit $LASTEXITCODE) -- commit not reachable from official Nexus main." }
+} else {
+    Write-Host "Cloning official Nexus ($($Pin.NEXUS_TAG)) into $StagingDir ..."
+    & git clone --quiet --branch $Pin.NEXUS_TAG --single-branch $Pin.NEXUS_REPO $StagingDir
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw "git clone failed (exit $LASTEXITCODE)" }
+}
+$ErrorActionPreference = $prevEAP
 
 $actualCommit = (& git -C $StagingDir rev-parse HEAD).Trim()
 if ($actualCommit -ne $Pin.NEXUS_COMMIT) {
-    throw "Pinned tag $($Pin.NEXUS_TAG) resolved to $actualCommit, expected $($Pin.NEXUS_COMMIT). " +
-          "Someone moved the tag upstream, or pin.txt is wrong -- stopping rather than building against an unverified revision."
+    throw "Pinned revision $($Pin.NEXUS_TAG) resolved to $actualCommit, expected $($Pin.NEXUS_COMMIT). " +
+          "Someone moved the ref upstream, or pin.txt is wrong -- stopping rather than building against an unverified revision."
 }
 Write-Host "Verified: $($Pin.NEXUS_TAG) = $actualCommit"
 
 # --- Apply each compatibility patch, dry-run first --------------------------------------
 # Maps each patch file to the directory (relative to $StagingDir) it must be applied from.
 $PatchTargets = @{
-    "tempo-app-engine.patch"     = "crates\tempo-app"
-    "tempo-app-settings.patch"   = "crates\tempo-app"
-    "tempo-audio-rig.patch"      = "crates\tempo-audio"
-    "tempo-audio-service.patch"  = "crates\tempo-audio"
-    "tempo-audio-telemetry.patch" = "crates\tempo-audio"
-    "tempo-fast-sys-build.patch" = "crates\tempo-fast-sys"
+    "tempo-app-engine.patch"                     = "crates\tempo-app"
+    "tempo-app-settings.patch"                   = "crates\tempo-app"
+    "tempo-app-snapshot.patch"                   = "crates\tempo-app"
+    "tempo-audio-rig.patch"                      = "crates\tempo-audio"
+    "tempo-audio-service.patch"                  = "crates\tempo-audio"
+    "tempo-audio-slot.patch"                     = "crates\tempo-audio"
+    "tempo-audio-rigctld-test-portability.patch" = "crates\tempo-audio"
+    "tempo-fast-sys-build.patch"                 = "crates\tempo-fast-sys"
 }
 
+# patch.exe writes "checking file ..." to stdout but any warning/failure detail to stderr;
+# same PS5.1 native-stderr-under-Stop hazard as the git calls above.
+$ErrorActionPreference = "Continue"
 foreach ($patchFile in $patchFiles) {
     if (-not $PatchTargets.ContainsKey($patchFile.Name)) {
+        $ErrorActionPreference = $prevEAP
         throw "$($patchFile.Name) has no entry in `$PatchTargets in this script -- add one before proceeding."
     }
     $targetDir = Join-Path $StagingDir $PatchTargets[$patchFile.Name]
     $patchPath = $patchFile.FullName
     Write-Host "Applying $($patchFile.Name) to $targetDir ..."
 
-    & $PatchExe -p1 --dry-run "--directory=$targetDir" "--input=$patchPath" 2>&1 | Out-Null
+    & $PatchExe -p1 --dry-run "--directory=$targetDir" "--input=$patchPath" | Out-Null
     if ($LASTEXITCODE -ne 0) {
+        $ErrorActionPreference = $prevEAP
         throw @"
 Compatibility patch '$($patchFile.Name)' no longer applies cleanly against Nexus $($Pin.NEXUS_TAG).
 This means official Nexus has changed the surrounding code since this patch was written.
@@ -148,8 +189,9 @@ Do NOT force it. Instead:
 "@
     }
     & $PatchExe -p1 "--directory=$targetDir" "--input=$patchPath"
-    if ($LASTEXITCODE -ne 0) { throw "Patch '$($patchFile.Name)' passed --dry-run but failed for real -- investigate before continuing." }
+    if ($LASTEXITCODE -ne 0) { $ErrorActionPreference = $prevEAP; throw "Patch '$($patchFile.Name)' passed --dry-run but failed for real -- investigate before continuing." }
 }
+$ErrorActionPreference = $prevEAP
 
 # --- Record state for the fast-path check on future runs --------------------------------
 @{

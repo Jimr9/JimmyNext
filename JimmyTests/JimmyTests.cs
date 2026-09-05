@@ -1,7 +1,12 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+using System.Threading.Tasks;
 using WsjtxUdpLib.Messages.Out;
 using WSJTX_Controller;
 
@@ -122,7 +127,17 @@ static class JimmyTests
         // floor (test-process-only; production Jimmy never runs anywhere near this many
         // concurrent WsjtxClient instances) -- this fixes the actual root cause, not just a wider
         // per-test timeout.
-        System.Threading.ThreadPool.SetMinThreads(64, 64);
+        //
+        // Raised 64 -> 200, 2026-09-02 (Item 5): with the ephemeral-port StubEngineHost, the
+        // Direct network tests actually exercise DirectSendCommand's real socket path (they used
+        // to collide on the fixed control port and skip). DirectSendCommand blocks a pool thread
+        // in connectTask.Wait(1000) -- a sync wait whose ConnectAsync completion ALSO needs a
+        // pool thread. Late in a full run (~100 pool threads already parked in the WinForms/async
+        // machinery), that completion queued behind the ~1/sec growth limiter, so a loopback
+        // connect that should take <5ms was hitting the product's real 1000ms budget and
+        // returning null -- reproduced directly: bumping this floor dropped a representative
+        // command from ~7000ms to ~30ms and took three full-suite runs from 5-12 failures to 0.
+        System.Threading.ThreadPool.SetMinThreads(200, 200);
 
         if (args.Length > 0 && args[0] == "--verify-clublog")
         {
@@ -167,6 +182,7 @@ static class JimmyTests
 
         ApStripTests();
         ReportTests();
+        StubEngineHostInfraTests();
         FinalAckTests();
         CqTests();
         ContestTests();
@@ -223,6 +239,7 @@ static class JimmyTests
         RuleEngineBandOverrideIntersectEndToEndTests();
         RowFormatterBuildOrderedRowTests();
         ParseRowOrderTests();
+        RowOrderDefaultsSyncTests();
         HotkeyConfigNewActionConflictTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
@@ -233,6 +250,7 @@ static class JimmyTests
         OptionsDlgExtractRigModelIdTests();
         TqslParseFinalStatusTests();
         TqslClassifyFinalStatusTests();
+        TqslUploadCompleteMessageTests();
         ResolveUsStateTests();
         StateSetContainsTests();
         AdifImporterLiveLoggedStateFallbackTests();
@@ -242,6 +260,8 @@ static class JimmyTests
         FccUlsProviderParseLineTests();
         FccUlsProviderShouldPreferNameTests();
         FccUlsProviderLooksIncompleteTests();
+        ContinentSettingTests();
+        BundledHamlibVersionTests();
         ClassificationEngineTests();
         GeoMathTests();
         GeoMathEllipsoidCrossValidationTests();
@@ -255,6 +275,7 @@ static class JimmyTests
         StartupStatusMessageTests();
         OptionsDlgConstructionTests();
         AudioTuningHotkeyTests();
+        SlotAnalysisResultAndReportTests();
         MeterReadingHintTests();
         SetOperatingModeFailureDoesNotChangeLocalModeTests();
         TxLevelPerBandRestoreTests();
@@ -287,14 +308,32 @@ static class JimmyTests
         UiaAlertNotificationDeliveryTests();
         NotificationTemplateComponentParserTests();
         NotificationVariableRegistryTests();
+        NotificationHistoryServiceTests();
         NotificationDefaultsAllTemplatesValidTests();
         NotificationPolicyExtendedFieldsTests();
         NotificationCenterDeferredDeliveryTests();
+        SpeechCoordinatorTests();
+        SpeakWhenMigrationTests();
+        RenderStatusSpeechCoordinationTests();
+        RoutineClauseTemplateTests();
+        RoutineCycleSummarySplitTests();
+        RoutineCycleSummarySplitMigrationTests();
+        RoutineReceiveSideRoleScopeTests();
+        RoutinePunctuationOnlyRemnantTests();
+        ActiveQsoBareCallsignSuppressionTests();
+        RoutineCompositeTests();
+        NotificationCorrectionPassTests();
+        DuringQsoSuppressionTests();
+        SpeakConditionAndTimingTests();
+        SpeakConditionMigrationTests();
         NotificationParkedEventTypesGuardTests();
         ClockSyncNotificationTests();
         ClockSyncDirectPathStateHygieneTests();
         DirectTxHoldSafetyNetTests();
         DirectPollFailureNotificationTests();
+        DirectCatHealthNotificationTests();
+        DirectCatDownIdleStatusCompositionTests();
+        DirectActiveQsoStatusNoDuplicateCallTests();
         HaltPurgesQueuedTxArmCommandTests();
         HaltAbortsInFlightCommandTests();
         HaltConfirmsStoppedStateViaFollowUpSnapshotTests();
@@ -302,6 +341,8 @@ static class JimmyTests
         RejectedReplyPreservesQueuedStationTests();
         RxTxFrequencyModeReplyTests();
         EmergencyHaltTxConfirmationTests();
+        EscapeAltHAnnouncementGateTests();
+        FakeItRestoreWarningSurfacesOnceThenClearsSilentlyTests();
         FailedManualTxOffsetPreservesBestFreeTests();
         RapidFrequencyNudgesAccumulateTests();
         SessionTokenAuthenticationTests();
@@ -314,6 +355,7 @@ static class JimmyTests
         DelayedReplyAfterOperatorAbortDoesNotResurrectStaleQsoTests();
         FailedQsoWriteDoesNotFalselyAnnounceSuccessTests();
         DirectInitialConnectAlwaysRestoresLastExactDialTests();
+        DirectStartupRetuneWaitsForHealthyCatTests();
         DirectInitialConnectResyncsTierAndPeriodTests();
         RepeatLimitStopsBeforeTheDisallowedAttemptKeysTests();
         ToggleTxFirstActuallyTogglesTests();
@@ -332,6 +374,12 @@ static class JimmyTests
         PowerShellSingleQuoteLiteralRoundTripsThroughRealPowerShellTests();
         BeginnerModeOnlyAccessibilityTests();
         CrashLoggerTests();
+        TargetMonitorClassificationTests();
+        TargetMonitorSilenceAndParityTests();
+        TargetMonitorSmartStartReadinessTests();
+        TargetMonitorLifecycleTests();
+        SpeechCoordinatorStationWatchSuppressionTests();
+        StationWatchHotkeyDefaultsTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -1051,6 +1099,86 @@ static class JimmyTests
     // replay-capture comparisons and the existing --verify-clublog tooling. The
     // LogbookDb.HasWorkedDxcc query itself (the part ClassificationEngine would
     // call once a DXCC number is available) is still exercised directly below.
+    // ── 2.0.58 (item 13): bundled Hamlib version is discoverable for diagnostics ──
+    static void BundledHamlibVersionTests()
+    {
+        Console.WriteLine("\n── RigctldClient.GetBundledHamlibVersion (diagnostics) ──");
+        string v = null;
+        bool threw = false;
+        try { v = RigctldClient.GetBundledHamlibVersion(); } catch { threw = true; }
+        Check("GetBundledHamlibVersion never throws", threw, false);
+        // In a dev/test tree the bundled runtime may not sit next to the test exe -> null is OK;
+        // when it IS present it must be a non-empty version string.
+        Check("returns either null (runtime not staged here) or a non-empty version string",
+            v == null || v.Trim().Length > 0, true);
+        if (v != null) Console.WriteLine($"    bundled Hamlib version seen: {v}");
+
+        // The recorded constant must match what fetch-hamlib.ps1 actually stages.
+        string fetchScript = FindRepoFile("fetch-hamlib.ps1");
+        if (fetchScript != null && File.Exists(fetchScript))
+        {
+            var m = System.Text.RegularExpressions.Regex.Match(File.ReadAllText(fetchScript), "\\$Ver\\s*=\\s*\"([0-9.]+)\"");
+            Check("fetch-hamlib.ps1 $Ver line was found", m.Success, true);
+            if (m.Success)
+                CheckStr("RigctldClient.BundledHamlibVersion matches fetch-hamlib.ps1 $Ver",
+                    RigctldClient.BundledHamlibVersion, m.Groups[1].Value);
+        }
+        else
+        {
+            Skip("BundledHamlibVersion vs fetch-hamlib.ps1", "fetch-hamlib.ps1 not found from this binary");
+        }
+    }
+
+    // ── 2.0.58: operator continent setting -- validation + safe fallback ──
+    static void ContinentSettingTests()
+    {
+        Console.WriteLine("\n── myContinent: validate hand-edited value, blank preserves fallback ──");
+        CheckStr("lowercase code is normalized", WsjtxClient.NormalizeContinent("eu"), "EU");
+        CheckStr("surrounding whitespace is trimmed", WsjtxClient.NormalizeContinent("  na  "), "NA");
+        Check("blank -> null (not specified)", WsjtxClient.NormalizeContinent("") == null, true);
+        Check("null -> null", WsjtxClient.NormalizeContinent(null) == null, true);
+        Check("a friendly name accidentally in the ini -> null, never kept",
+            WsjtxClient.NormalizeContinent("Europe") == null, true);
+        Check("an unknown 2-letter token -> null", WsjtxClient.NormalizeContinent("XX") == null, true);
+        foreach (var c in new[] { "AF", "AN", "AS", "EU", "NA", "OC", "SA" })
+            CheckStr($"valid code {c} passes through", WsjtxClient.NormalizeContinent(c), c);
+
+        // 2.0.59 wording: the blank choice is shown as "Not specified" (Jimmy does NOT derive
+        // the operator continent when blank, so the old "Automatic / not specified" text was
+        // misleading). The persisted value for it stays "" -- codes are unchanged.
+        var displayField = typeof(OptionsDlg).GetField("_continentDisplay",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        var codeField = typeof(OptionsDlg).GetField("_continentCode",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Check("OptionsDlg continent display/code arrays are reachable for the wording check",
+            displayField != null && codeField != null, true);
+        if (displayField != null && codeField != null)
+        {
+            var display = (string[])displayField.GetValue(null);
+            var codes = (string[])codeField.GetValue(null);
+            CheckStr("blank choice now displays 'Not specified'", display[0], "Not specified");
+            Check("the old 'Automatic / not specified' wording is gone",
+                System.Array.IndexOf(display, "Automatic / not specified") < 0, true);
+            CheckStr("blank choice still persists as an empty code", codes[0], "");
+            Check("continent code set is unchanged (blank + 7 codes)",
+                codes.Length == 8 && codes[1] == "AF" && codes[7] == "SA", true);
+        }
+
+        // Blank myContinent must preserve the conservative "not DX unless both continents known"
+        // fallback -- ClassificationEngine only compares when both sides are non-empty.
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Continent_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                var engine = new ClassificationEngine(db, lookupManager: null);
+                var blank = engine.Classify("K4YT", "20m", "CQ K4YT EM73", myGrid: "FN42", myContinent: null);
+                Check("blank myContinent -> IsDx stays false (fallback preserved)", blank.IsDx, false);
+            }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
     static void ClassificationEngineTests()
     {
         Console.WriteLine("\n── ClassificationEngine (Stage A1) ──");
@@ -2331,12 +2459,7 @@ static class JimmyTests
 
         var seen = new System.Collections.Generic.List<string>();
         var seenLock = new object();
-        var listener = StartStubEngineHostWithResponses(line => { lock (seenLock) seen.Add(line); return "OK"; });
-        if (listener == null)
-        {
-            Skip("DirectRunawayRr73HaltsEngineTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
 
         string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Runaway_" + Guid.NewGuid().ToString("N") + ".db");
         string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
@@ -2469,134 +2592,434 @@ static class JimmyTests
     static DirectSnapshot ParseDirectSnapshot(string json) =>
         System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(json, WsjtxClient.DirectJsonOptions);
 
-    // Minimal stub engine host: binds the REAL fixed control port (NativeEngineClient.
-    // ControlPort) -- unlike RigctldClient, DirectSendCommand's target host/port is not
-    // injectable, so exercising DirectSetFrequency's SUCCESS path needs a listener on the
-    // literal port jimmy-engine-host.exe would use. Accepts connections in a loop on a
-    // background thread (one connection per command, matching jimmy-engine-host's own
-    // run_control_server -- DirectSendCommand opens a fresh TcpClient per call, unlike
-    // RigctldClient's one persistent connection) and replies "OK" to whatever line it reads.
-    // Returns null instead of throwing if the port is already bound (e.g. a real engine host
-    // already running on this machine) -- callers should skip their success-path assertions
-    // rather than fail the whole suite over a collision with the developer's own live session.
-    // Caller must Stop() a non-null returned listener when done.
+    // ── Item 5 (test-infra stabilisation, 2026-09-02) ──────────────────────────────────────────
+    // One OWNED fake EngineHost control-server fixture, replacing the two fire-and-forget
+    // StartStubEngineHost* helpers (deleted) for the Direct network-stub test family.
     //
-    // onCommandReceived (release-audit finding, 2026-08-20, "real validation/coverage for the
-    // SET_FREQUENCY Direct contract"): every caller used to only prove "a wire round-trip
-    // happened and got OK back", never that the actual JSON payload DirectSetFrequency sent was
-    // correct -- a field-name/unit mismatch between WsjtxClient.Direct.cs's DirectSetFrequencyArgs
-    // and EngineHost/src/main.rs's SetFrequencyArgs would have passed every one of these tests
-    // while silently mistuning the radio in the field. Optional so existing callers that only
-    // care about the success path (not the payload) don't need to change.
-    static System.Net.Sockets.TcpListener StartStubEngineHost(Action<string> onCommandReceived = null)
+    // Why it exists: JimmyTests runs test METHODS sequentially, but a Direct command worker /
+    // SNAPSHOT-poll Task / TCP accept thread / accepted socket / response thread from one test
+    // could survive after that method returned. The old helpers all bound the SAME fixed control
+    // port (NativeEngineClient.ControlPort, 58239), so delayed work from test A could connect to
+    // the fixture test B had just started -- the real cause of the intermittent failures across
+    // the SNAPSHOT / SET_WORKING_FREQUENCIES / tier-restore / held-REPLY / SET_FREQUENCY / HALT
+    // family.
+    //
+    // This fixture:
+    //   * binds 127.0.0.1:0 and exposes the OS-assigned ephemeral Port (no two live fixtures ever
+    //     share a port; never SO_REUSEADDR). While it is alive it also installs that port as
+    //     WsjtxClient.TestDirectControlPortOverride, so a WsjtxClient built during this test aims
+    //     its Direct transport here and NOWHERE ELSE;
+    //   * owns its TcpListener plus a DEDICATED accept thread and a dedicated thread per accepted
+    //     connection (not the thread pool -- a full-suite run leaves the pool busy enough that a
+    //     Task.Run accept/handler can miss a 3s PumpUntil window; the real EngineHost control
+    //     server is thread-per-connection too);
+    //   * lets a responder return null to hold a connection open on a gate the fixture OWNS
+    //     (_releaseHeld, Set() on dispose), bounded so it can never truly hang;
+    //   * records every command line; WaitForCommandAsync(predicate, timeout) is the deterministic
+    //     way to observe one arriving, instead of a race on a shared bool;
+    //   * surfaces any unexpected responder/handler exception out of disposal;
+    //   * Dispose()/DisposeAsync() return only once the fixture is genuinely dead: stop listener,
+    //     signal + close every accepted socket, release held responses, JOIN the accept thread
+    //     and every handler thread (bounded), clear the port override, then rethrow surfaced
+    //     faults.
+    //
+    // Each converted test does, in its finally: wc.TestQuiesceDirectTransport(); then host.Stop().
+    // The Direct client is quiesced (its worker Task exited, its poll settled) BEFORE the fixture
+    // goes away, so nothing can connect into a half-torn-down listener.
+    sealed class StubEngineHost : IAsyncDisposable, IDisposable
     {
-        System.Net.Sockets.TcpListener listener;
-        try
+        readonly TcpListener _listener;
+        readonly Thread _acceptThread;
+        readonly Func<string, string> _respond;
+        readonly ManualResetEventSlim _releaseHeld = new ManualResetEventSlim(false);
+
+        readonly object _lock = new object();
+        readonly List<Thread> _handlerThreads = new List<Thread>();
+        readonly List<TcpClient> _accepted = new List<TcpClient>();
+        readonly List<string> _commands = new List<string>();
+        readonly List<(Func<string, bool> pred, TaskCompletionSource<string> tcs)> _waiters
+            = new List<(Func<string, bool>, TaskCompletionSource<string>)>();
+        readonly List<Exception> _surfaced = new List<Exception>();
+        volatile bool _stopped;
+        int _disposed;
+
+        public int Port { get; }
+
+        // respond(line) -> the reply text; return "" for an empty reply; return null to hold the
+        // connection open (released on dispose) without answering -- a hung/stuck command.
+        public StubEngineHost(Func<string, string> respond)
         {
-            listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
-            listener.Start();
+            // Tear down any Direct transport a PRIOR test left running before this one starts --
+            // its leaked _directPollTimer would otherwise keep firing on our PumpUntil pumps and
+            // starve this test's own poll. (Converted tests create their wc AFTER the fixture, so
+            // nothing of this test's is registered yet.) Dispose() does the same on the way out.
+            WsjtxClient.TestQuiesceAllDirectClients();
+            _respond = respond ?? (_ => "OK");
+            _listener = new TcpListener(IPAddress.Loopback, 0);
+            _listener.Start();
+            Port = ((IPEndPoint)_listener.LocalEndpoint).Port;
+            WsjtxClient.TestDirectControlPortOverride = Port;
+            _acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "StubEngineHost.accept:" + Port };
+            _acceptThread.Start();
         }
-        catch (System.Net.Sockets.SocketException)
+
+        // Alias so the many existing `listener.Stop();` teardown lines keep working unchanged.
+        public void Stop() => Dispose();
+
+        public IReadOnlyList<string> Commands { get { lock (_lock) return _commands.ToArray(); } }
+
+        public bool SawCommand(Func<string, bool> predicate) { lock (_lock) return _commands.Any(predicate); }
+
+        public async Task<string> WaitForCommandAsync(Func<string, bool> predicate, TimeSpan timeout)
         {
-            return null;
+            Task<string> wait;
+            lock (_lock)
+            {
+                string existing = _commands.FirstOrDefault(predicate);
+                if (existing != null) return existing;
+                var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+                _waiters.Add((predicate, tcs));
+                wait = tcs.Task;
+            }
+            var done = await Task.WhenAny(wait, Task.Delay(timeout)).ConfigureAwait(false);
+            if (done != wait) throw new TimeoutException($"StubEngineHost: no matching command within {timeout.TotalMilliseconds:0} ms");
+            return await wait.ConfigureAwait(false);
         }
-        var t = new System.Threading.Thread(() =>
+
+        public string WaitForCommand(Func<string, bool> predicate, int timeoutMs = 3000)
+            => WaitForCommandAsync(predicate, TimeSpan.FromMilliseconds(timeoutMs)).GetAwaiter().GetResult();
+
+        void AcceptLoop()
         {
             try
             {
-                while (true)
+                while (!_stopped)
                 {
-                    using (var client = listener.AcceptTcpClient())
-                    using (var stream = client.GetStream())
-                    using (var reader = new System.IO.StreamReader(stream))
-                    using (var writer = new System.IO.StreamWriter(stream) { AutoFlush = true, NewLine = "\n" })
-                    {
-                        string line = reader.ReadLine();
-                        if (line != null)
-                        {
-                            onCommandReceived?.Invoke(line);
-                            writer.WriteLine("OK");
-                        }
-                    }
+                    TcpClient client = _listener.AcceptTcpClient();
+                    var t = new Thread(() => Handle(client)) { IsBackground = true, Name = "StubEngineHost.conn:" + Port };
+                    lock (_lock) { _accepted.Add(client); _handlerThreads.Add(t); }
+                    t.Start();
                 }
             }
-            catch { /* listener.Stop() during teardown breaks AcceptTcpClient -- harmless */ }
-        });
-        t.IsBackground = true;
-        t.Start();
-        return listener;
+            catch (SocketException) { /* listener.Stop() during teardown -- expected */ }
+            catch (ObjectDisposedException) { /* listener disposed during teardown -- expected */ }
+            catch (Exception ex) { if (!_stopped) Surface(ex); }
+        }
+
+        void Handle(TcpClient client)
+        {
+            try
+            {
+                client.NoDelay = true;
+                using (client)
+                using (var stream = client.GetStream())
+                {
+                    stream.ReadTimeout = 10000;
+                    string line = ReadLine(stream);
+                    if (line == null) return;
+                    RecordCommand(line);
+
+                    string response;
+                    try { response = _respond(line); }
+                    catch (Exception ex) { Surface(ex); return; }
+
+                    if (response == null)
+                    {
+                        // Hung command: hold this connection open until the fixture is disposed
+                        // (or a hard bound, so nothing can wedge forever).
+                        _releaseHeld.Wait(30000);
+                        return;
+                    }
+
+                    byte[] outBytes = System.Text.Encoding.UTF8.GetBytes(response + "\n");
+                    stream.Write(outBytes, 0, outBytes.Length);
+                    stream.Flush();
+                    try { client.Client.Shutdown(SocketShutdown.Send); } catch { }
+                }
+            }
+            catch (IOException) { /* socket closed/reset by dispose or the client aborting -- expected */ }
+            catch (ObjectDisposedException) { /* client closed by dispose -- expected */ }
+            catch (Exception ex) { if (!_stopped) Surface(ex); }
+        }
+
+        // One line, LF- or CRLF-terminated, read byte by byte so a half-close after the command
+        // (DirectSendCommand does exactly that) ends the read cleanly. null only on immediate EOF.
+        static string ReadLine(NetworkStream stream)
+        {
+            var sb = new System.Text.StringBuilder();
+            bool any = false;
+            try
+            {
+                int b;
+                while ((b = stream.ReadByte()) != -1)
+                {
+                    any = true;
+                    if (b == '\n') break;
+                    if (b != '\r') sb.Append((char)b);
+                }
+            }
+            catch (IOException) { }
+            return any ? sb.ToString() : null;
+        }
+
+        void RecordCommand(string line)
+        {
+            List<TaskCompletionSource<string>> ready = null;
+            lock (_lock)
+            {
+                _commands.Add(line);
+                for (int i = _waiters.Count - 1; i >= 0; i--)
+                {
+                    if (!_waiters[i].pred(line)) continue;
+                    (ready ??= new List<TaskCompletionSource<string>>()).Add(_waiters[i].tcs);
+                    _waiters.RemoveAt(i);
+                }
+            }
+            if (ready != null) foreach (var tcs in ready) tcs.TrySetResult(line);
+        }
+
+        void Surface(Exception ex) { lock (_lock) _surfaced.Add(ex); }
+
+        public ValueTask DisposeAsync() { Dispose(); return default; }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+            // Shut down any Direct transport this test spun up FIRST -- a leaked, still-Started
+            // _directPollTimer otherwise fires on every later Application.DoEvents and starves
+            // unrelated tests' own polls. See WsjtxClient.TestLiveDirectClients.
+            WsjtxClient.TestQuiesceAllDirectClients();
+
+            _stopped = true;
+            _releaseHeld.Set();
+            try { _listener.Stop(); } catch { }
+
+            List<Thread> threads;
+            lock (_lock)
+            {
+                foreach (var c in _accepted) { try { c.Close(); } catch { } }
+                threads = new List<Thread>(_handlerThreads);
+            }
+            _acceptThread.Join(5000);
+            foreach (var t in threads) t.Join(5000);
+
+            lock (_lock)
+            {
+                foreach (var w in _waiters) w.tcs.TrySetCanceled();
+                _waiters.Clear();
+            }
+            _releaseHeld.Dispose();
+
+            if (WsjtxClient.TestDirectControlPortOverride == Port)
+                WsjtxClient.TestDirectControlPortOverride = null;
+
+            List<Exception> unexpected;
+            lock (_lock) unexpected = _surfaced.Where(e => !(e is OperationCanceledException)).ToList();
+            if (unexpected.Count > 0)
+                throw new AggregateException("StubEngineHost: responder/handler faulted", unexpected);
+        }
     }
 
-    // T7/T8 regression coverage: like StartStubEngineHost above, but each connection's response
-    // is computed per command line via `respond` (e.g. to make one specific command return ERR
-    // while everything else returns OK) and connections are handled concurrently, one thread
-    // each -- matching the real EngineHost's own per-connection-thread accept loop (main.rs's
-    // run_control_server) rather than the serial accept loop above. `respond` returning null
-    // holds that one connection open without ever answering or closing it, simulating a
-    // stuck/hung command -- the caller must eventually Stop() the listener to release it.
-    static System.Net.Sockets.TcpListener StartStubEngineHostWithResponses(Func<string, string> respond)
+    // One short-lived raw client round trip to a StubEngineHost, exactly like DirectSendCommand:
+    // connect, write "<cmd>\n", half-close send, read the reply to EOF.
+    static string StubRoundTrip(int port, string cmd, int timeoutMs = 2000)
     {
-        System.Net.Sockets.TcpListener listener;
-        try
+        using (var client = new TcpClient())
         {
-            listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
-            listener.Start();
-        }
-        catch (System.Net.Sockets.SocketException)
-        {
-            return null;
-        }
-        var acceptThread = new System.Threading.Thread(() =>
-        {
-            try
+            if (!client.ConnectAsync(IPAddress.Loopback, port).Wait(timeoutMs) || !client.Connected)
+                return null;
+            using (var stream = client.GetStream())
             {
-                while (true)
+                stream.WriteTimeout = timeoutMs;
+                stream.ReadTimeout = timeoutMs;
+                byte[] b = System.Text.Encoding.UTF8.GetBytes(cmd + "\n");
+                stream.Write(b, 0, b.Length);
+                client.Client.Shutdown(SocketShutdown.Send);
+                using (var ms = new MemoryStream())
                 {
-                    var client = listener.AcceptTcpClient();
-                    var connThread = new System.Threading.Thread(() =>
-                    {
-                        try
-                        {
-                            using (client)
-                            using (var stream = client.GetStream())
-                            using (var reader = new System.IO.StreamReader(stream))
-                            {
-                                string line = reader.ReadLine();
-                                string response = line != null ? respond(line) : null;
-                                if (response != null)
-                                {
-                                    using (var writer = new System.IO.StreamWriter(stream) { AutoFlush = true, NewLine = "\n" })
-                                        writer.WriteLine(response);
-                                }
-                                else
-                                {
-                                    // Hold open long enough for the test to exercise whatever
-                                    // "stuck command" behavior it needs (well past any bounded
-                                    // wait a test itself uses), but bounded -- not
-                                    // Timeout.Infinite -- so this thread and its socket always
-                                    // clean up on their own shortly after, rather than leaking
-                                    // for the rest of the whole ~1000-test process's lifetime
-                                    // and adding ambient thread/socket load to unrelated later
-                                    // tests. listener.Stop() during the test's own teardown
-                                    // still breaks this early via exception, caught below.
-                                    System.Threading.Thread.Sleep(6000);
-                                }
-                            }
-                        }
-                        catch { /* connection aborted by AbortInFlightDirectCommand or teardown -- expected */ }
-                    });
-                    connThread.IsBackground = true;
-                    connThread.Start();
+                    byte[] buf = new byte[4096];
+                    int n;
+                    try { while ((n = stream.Read(buf, 0, buf.Length)) > 0) ms.Write(buf, 0, n); }
+                    catch (IOException) { }
+                    return System.Text.Encoding.UTF8.GetString(ms.ToArray()).TrimEnd('\r', '\n');
                 }
             }
-            catch { /* listener.Stop() during teardown breaks AcceptTcpClient -- harmless */ }
-        });
-        acceptThread.IsBackground = true;
-        acceptThread.Start();
-        return listener;
+        }
+    }
+
+    // ── Item 5: infrastructure-level assertions for the owned StubEngineHost fixture ──
+    static void StubEngineHostInfraTests()
+    {
+        Console.WriteLine("\n── StubEngineHost fixture: ownership, isolation, bounded teardown ──");
+        try
+        {
+            // Two live fixtures -> two different, non-zero ephemeral ports; a plain round trip works.
+            using (var a = new StubEngineHost(_ => "A-OK"))
+            using (var b = new StubEngineHost(_ => "B-OK"))
+            {
+                Check("fixture A got a non-zero ephemeral port", a.Port > 0, true);
+                Check("fixture B got a non-zero ephemeral port", b.Port > 0, true);
+                Check("two fixtures never share a port", a.Port != b.Port, true);
+                CheckStr("round trip reaches fixture A only", StubRoundTrip(a.Port, "CMD-A"), "A-OK");
+                CheckStr("round trip reaches fixture B only", StubRoundTrip(b.Port, "CMD-B"), "B-OK");
+                Check("each command is recorded only by the fixture that received it",
+                    a.SawCommand(l => l == "CMD-A") && !a.SawCommand(l => l == "CMD-B")
+                    && b.SawCommand(l => l == "CMD-B") && !b.SawCommand(l => l == "CMD-A"), true);
+            }
+
+            // A WsjtxClient constructed while a fixture is live points its Direct transport at it;
+            // once the fixture is disposed the process-wide override is cleared again.
+            int livePort;
+            using (var host = new StubEngineHost(_ => "OK"))
+            {
+                livePort = host.Port;
+                Check("process-wide override is set while the fixture is live",
+                    WsjtxClient.TestDirectControlPortOverride == host.Port, true);
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                Check("a WsjtxClient built while the fixture is live adopts its port",
+                    wc.TestDirectControlPort == host.Port, true);
+            }
+            Check("override is cleared once the fixture is disposed",
+                WsjtxClient.TestDirectControlPortOverride == null, true);
+            Check("disposal actually stops the listener (a later connect is refused)",
+                StubRoundTrip(livePort, "SNAPSHOT", 500) == null, true);
+
+            // A held (null-response) connection is released by disposal, not left hung for 6s.
+            {
+                var held = new StubEngineHost(l => l == "HANG" ? null : "OK");
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                var bg = Task.Run(() => StubRoundTrip(held.Port, "HANG", 8000));
+                held.WaitForCommand(l => l == "HANG", 3000);   // deterministic: the hang was received
+                held.Dispose();
+                bg.Wait(3000);
+                sw.Stop();
+                Check("disposal releases a held response promptly (< 3s, not the old 6s sleep)",
+                    sw.ElapsedMilliseconds < 3000, true);
+            }
+
+            // WaitForCommandAsync resolves for a command that arrives after the wait began.
+            {
+                using var host = new StubEngineHost(_ => "OK");
+                var wait = host.WaitForCommandAsync(l => l.StartsWith("SET_"), TimeSpan.FromSeconds(3));
+                Task.Run(() => StubRoundTrip(host.Port, "SET_FREQUENCY {}"));
+                Check("WaitForCommandAsync resolves once a matching command arrives",
+                    wait.Wait(3000) && wait.Result == "SET_FREQUENCY {}", true);
+            }
+
+            // A responder that throws surfaces the fault out of disposal, never swallowed.
+            {
+                bool surfaced = false;
+                var faulting = new StubEngineHost(_ => throw new InvalidOperationException("boom"));
+                Task.Run(() => StubRoundTrip(faulting.Port, "SNAPSHOT"));
+                Thread.Sleep(300);
+                try { faulting.Dispose(); }
+                catch (AggregateException ex) { surfaced = ex.InnerExceptions.Any(e => e is InvalidOperationException); }
+                Check("a responder exception is surfaced out of disposal, not swallowed", surfaced, true);
+            }
+
+            // The bounded Direct-transport teardown returns and the worker Task is really gone.
+            {
+                using var host = new StubEngineHost(_ => "OK");
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var _ = ctrl.Handle;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.ConnectDirectEngine("KB0UZT", "FN42");
+                wc.TestStopPollTimer();
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                wc.TestQuiesceDirectTransport();
+                sw.Stop();
+                Check("TestQuiesceDirectTransport returns within its bound", sw.ElapsedMilliseconds < 5000, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  StubEngineHostInfraTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
     }
 
     // ── Alt+Q / Tune / F11-F12 fix, 2026-08-10 ──────────────────────────────────────────────
+    // ── 2.0.58: transmit-slot analysis always reaches a terminal result + report-latest ──
+    static void SlotAnalysisResultAndReportTests()
+    {
+        Console.WriteLine("\n── Transmit-slot analysis: terminal result + report-latest ──");
+
+        // Describe(): the three states, each a single concise sentence.
+        var complete = new WsjtxClient.SlotAnalysisResult
+        { State = WsjtxClient.SlotAnalysisState.Complete, EvenOffsetHz = 1500, OddOffsetHz = 1800, Band = "20m", Mode = "FT8" };
+        CheckStr("Describe(): complete result names both offsets and the band/mode",
+            complete.Describe(), "Transmit slot analysis for 20m FT8: even period 1500 Hz, odd period 1800 Hz.");
+
+        var partialOdd = new WsjtxClient.SlotAnalysisResult
+        { State = WsjtxClient.SlotAnalysisState.Partial, EvenOffsetHz = 0, OddOffsetHz = 1800, Mode = "FT4" };
+        CheckStr("Describe(): partial result says which period had data",
+            partialOdd.Describe(), "Transmit slot analysis for FT4 incomplete: only the odd period had usable data, 1800 Hz.");
+
+        var unavailable = new WsjtxClient.SlotAnalysisResult { State = WsjtxClient.SlotAnalysisState.Unavailable };
+        CheckStr("Describe(): unavailable result says 'not enough decodes'",
+            unavailable.Describe(), "Transmit slot analysis incomplete: not enough decodes to analyze the transmit slot.");
+
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.freqCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var view = new FakeStatusView();
+        wc.StatusView = view;
+
+        // Report before any analysis: says so plainly, no crash, does not invent a result.
+        wc.ReportLatestSlotAnalysis();
+        Check("Report-latest with no analysis yet says none has been done",
+            view.LastShowMessageText != null && view.LastShowMessageText.StartsWith("No transmit-slot analysis has been done"), true);
+        Check("...and no result object was fabricated", wc.TestLastSlotAnalysis == null, true);
+
+        // Standalone Alt+Z on a quiet band: watchdog forces a terminal 'unavailable' result and
+        // must NEVER start CQ.
+        wc.TestSetMode("FT8");
+        wc.StartSlotAnalysis(false);
+        Check("StartSlotAnalysis(false) marks a manual analysis in progress", wc.TestManualAnalysisRequested, true);
+        wc.TestSetSlotAnalysisElapsedSeconds(60);   // SlotAnalysisTimeoutSeconds; next tick trips it
+        wc.TestSlotAnalysisWatchdogTick();
+        Check("Standalone analysis timeout produces a terminal result object",
+            wc.TestLastSlotAnalysis != null && wc.TestLastSlotAnalysis.State == WsjtxClient.SlotAnalysisState.Unavailable, true);
+        Check("...clears the in-progress flag (analysis is over)", wc.TestManualAnalysisRequested == false, true);
+        Check("...and Jimmy is still in Listen mode -- a standalone timeout NEVER starts CQ",
+            wc.txMode == WsjtxClient.TxModes.LISTEN, true);
+        Check("...and the spoken result is the 'not enough decodes' wording",
+            view.LastShowMessageText != null && view.LastShowMessageText.Contains("not enough decodes"), true);
+
+        // Report-latest now reads that stored result back verbatim, without re-running.
+        view.LastShowMessageText = null;
+        wc.ReportLatestSlotAnalysis();
+        CheckStr("Report-latest reads the stored result back",
+            view.LastShowMessageText, wc.TestLastSlotAnalysis.Describe());
+
+        // Partial: one period got an offset before the timeout.
+        var wc2 = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        wc2.StatusView = new FakeStatusView();
+        wc2.TestSetMode("FT8");
+        wc2.StartSlotAnalysis(false);
+        wc2.TestSetBestOffsets(odd: 0, even: 1600);   // even period only
+        wc2.TestSetSlotAnalysisElapsedSeconds(60);
+        wc2.TestSlotAnalysisWatchdogTick();
+        Check("A timeout with one period's offset known reports a PARTIAL result",
+            wc2.TestLastSlotAnalysis != null && wc2.TestLastSlotAnalysis.State == WsjtxClient.SlotAnalysisState.Partial
+            && wc2.TestLastSlotAnalysis.EvenOffsetHz == 1600 && wc2.TestLastSlotAnalysis.OddOffsetHz == 0, true);
+        Check("Partial timeout still does not start CQ", wc2.txMode == WsjtxClient.TxModes.LISTEN, true);
+    }
+
     // Covers the parts of that fix that are deterministic and testable without a live
     // jimmy-engine-host.exe process: DirectApplyStatus wiring the engine's own `tuning` flag
     // through, AudioLevel()'s new tuning-OR-transmitting guard, RxLevelToDb's dB conversion, and
@@ -2962,7 +3385,7 @@ static class JimmyTests
         // below can check the real JSON payload's hz/band/mode fields, not just that a wire
         // round-trip happened and came back OK.
         var lastCommand = new string[1];
-        var engineListener = StartStubEngineHost(line => lastCommand[0] = line);
+        var engineListener = new StubEngineHost(line => { lastCommand[0] = line; return "OK"; });
         if (engineListener == null)
         {
             Skip("DirectPathPendingBandIdxClearedOnConfirmationTests", "engine control port already in use on this machine");
@@ -3090,7 +3513,7 @@ static class JimmyTests
     {
         Console.WriteLine("\n── DirectInitialConnect: always restore last exact confirmed dial, even over a recognized band -- THE FIX ──");
         var lastCommand = new string[1];
-        var engineListener = StartStubEngineHost(line => lastCommand[0] = line);
+        var engineListener = new StubEngineHost(line => { lastCommand[0] = line; return "OK"; });
         if (engineListener == null)
         {
             Skip("DirectInitialConnectAlwaysRestoresLastExactDialTests", "engine control port already in use on this machine");
@@ -3167,6 +3590,87 @@ static class JimmyTests
         }
     }
 
+    // ── 2.0.58: the one-shot startup exact-dial restore must WAIT for a healthy CAT link ──
+    // 2.0.57 hardware miss: Jimmy was on 14.074, closed; rig moved to 14.200; Jimmy restarted;
+    // UI showed 20m FT8 but the rig stayed on 14.200. The exact-dial restore block runs only
+    // once per connection, so if it spends that shot on a SET_FREQUENCY while CAT is still down
+    // (radio.catOk == false), the engine rejects it and the restore is lost for the session.
+    // The gate now defers until radio.catOk != false (and the rig is idle), then fires once.
+    static void DirectStartupRetuneWaitsForHealthyCatTests()
+    {
+        Console.WriteLine("\n── DirectInitialConnect: startup exact-dial restore waits for healthy CAT ──");
+        var lastCommand = new string[1];
+        var engineListener = new StubEngineHost(line => { if (line != null && line.StartsWith("SET_FREQUENCY")) lastCommand[0] = line; return "OK"; });
+        if (engineListener == null)
+        {
+            Skip("DirectStartupRetuneWaitsForHealthyCatTests", "engine control port already in use on this machine");
+            return;
+        }
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            ctrl.Radio.LastDialFrequencyHz = 14074000;
+            ctrl.Radio.LastTier = "FT8";
+            ctrl.Radio.LastBandIdx = 5;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // First snapshot: CAT is DOWN. The block must not spend its one shot.
+            var snapCatDown = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.200, ""transmitting"": false, ""tuning"": false, ""catOk"": false, ""slot"": 3000 }
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapCatDown);
+            PumpUntil(() => lastCommand[0] != null, timeoutMs: 1200);
+            Check("CAT down on first snapshot -> NO startup SET_FREQUENCY issued yet",
+                lastCommand[0] == null, true);
+
+            // Next snapshot: CAT is healthy. Now the restore fires -- exactly once -- to the
+            // last confirmed dial.
+            var snapCatUp = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.200, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 3001 }
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapCatUp);
+            PumpUntil(() => lastCommand[0] != null, timeoutMs: 8000);
+            string cmd = lastCommand[0];
+            Check("Once CAT is healthy -> startup SET_FREQUENCY IS issued", cmd != null && cmd.StartsWith("SET_FREQUENCY "), true);
+            if (cmd != null && cmd.StartsWith("SET_FREQUENCY "))
+            {
+                using (var doc = System.Text.Json.JsonDocument.Parse(cmd.Substring("SET_FREQUENCY ".Length)))
+                {
+                    double hz = doc.RootElement.GetProperty("hz").GetDouble();
+                    Check("...restoring the exact confirmed dial, 14.074 MHz", Math.Abs(hz - 14074000) < 1.0, true);
+                }
+            }
+
+            // And it does not fire a second time on a later healthy snapshot.
+            lastCommand[0] = null;
+            var snapLater = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 3002 }
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapLater);
+            PumpUntil(() => lastCommand[0] != null, timeoutMs: 1200);
+            Check("Startup restore does not repeat on later snapshots (bounded, one shot)",
+                lastCommand[0] == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectStartupRetuneWaitsForHealthyCatTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            engineListener.Stop();
+        }
+    }
+
     // ── Startup/restart mode-sync fix, 2026-08-24 (independent audit finding, CONFIRMED live):
     // a startup tier restore (FT8 -> FT4) must also reset trPeriod, not just `mode`/newMode ──
     // jimmy-engine-host always starts hardcoded to FT8 (main.rs's own startup set_tier call), so
@@ -3186,7 +3690,7 @@ static class JimmyTests
     static void DirectInitialConnectResyncsTierAndPeriodTests()
     {
         Console.WriteLine("\n── Startup/restart mode-sync fix: tier restore also re-derives trPeriod and announces the corrected mode -- THE FIX ──");
-        var engineListener = StartStubEngineHostWithResponses(line => "OK");
+        var engineListener = new StubEngineHost(line => "OK");
         if (engineListener == null)
         {
             Skip("DirectInitialConnectResyncsTierAndPeriodTests", "engine control port already in use on this machine");
@@ -3337,7 +3841,7 @@ static class JimmyTests
     {
         Console.WriteLine("\n── DirectSetWorkingFrequencies: sends the real SET_WORKING_FREQUENCIES wire command -- THE FIX ──");
         string capturedLine = null;
-        var engineListener = StartStubEngineHostWithResponses(line =>
+        var engineListener = new StubEngineHost(line =>
         {
             if (line.StartsWith("SET_WORKING_FREQUENCIES ")) capturedLine = line;
             return "OK";
@@ -3551,7 +4055,7 @@ static class JimmyTests
 
             // SUCCESS case, right after a failure: a real accept + wire round-trip against a stub
             // engine host must still work normally -- "successful behavior remains unchanged".
-            var engineListener = StartStubEngineHost();
+            var engineListener = new StubEngineHost(_ => "OK");
             if (engineListener == null)
             {
                 Skip("RetuneBandFailureDoesNotLeakPendingBandIdxTests success case", "engine control port already in use on this machine");
@@ -3599,7 +4103,7 @@ static class JimmyTests
         // test needs a real accept + wire round-trip for its TestPendingBandIdx assertions below
         // to mean anything. RetuneBand's gate is just RadioControlMode.HamlibRigctld (set below);
         // ctrl.rigctldClient itself is retired, so no client instance is needed to satisfy it.
-        var engineListener = StartStubEngineHost();
+        var engineListener = new StubEngineHost(_ => "OK");
         if (engineListener == null)
         {
             Skip("SelectFrequencyHotkeyModeStaysPutTests", "engine control port already in use on this machine");
@@ -3713,7 +4217,7 @@ static class JimmyTests
     {
         Console.WriteLine("\n── T18 fix: SelectFrequencyHotkey sends the entry's configured sideband -- THE FIX ──");
         var lastCommand = new string[1];
-        var engineListener = StartStubEngineHost(line => lastCommand[0] = line);
+        var engineListener = new StubEngineHost(line => { lastCommand[0] = line; return "OK"; });
         if (engineListener == null)
         {
             Skip("SelectFrequencyHotkeySendsConfiguredSidebandTests", "engine control port already in use on this machine");
@@ -4542,6 +5046,51 @@ static class JimmyTests
             Console.WriteLine($"  FAIL  BuildFrequenciesTab threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
+
+        // Codex #5 + #7: Notifications tab -- Global speech behaviour.
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+            ctrl.routineStatusCondition = SpeakCondition.Always;
+
+            using (var dlg = new OptionsDlg(wc, ctrl))
+            {
+                dlg.BuildNotificationsTab();
+                var t = typeof(OptionsDlg);
+                var condCombo = (System.Windows.Forms.ComboBox)t.GetField("_notifyRoutineStatusDuringQsoComboBox",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg);
+                var timeCombo = (System.Windows.Forms.ComboBox)t.GetField("_notifyRoutineStatusSpeakWhenComboBox",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg);
+
+                bool HasAfterQso() { foreach (var it in timeCombo.Items) if ((string)it == "After the QSO ends") return true; return false; }
+
+                Check("global timing offers 'After the QSO ends' when condition is 'Always'", HasAfterQso(), true);
+                condCombo.SelectedIndex = 1;   // "Only during a QSO"
+                Check("Codex #5: global timing drops 'After the QSO ends' for 'Only during a QSO'", !HasAfterQso(), true);
+                condCombo.SelectedIndex = 2;   // "Only when not in a QSO"
+                Check("Codex #5: 'After the QSO ends' comes back for a non-contradictory condition", HasAfterQso(), true);
+
+                // Codex #7: changing the global combos must NOT mutate Controller (pending until OK).
+                timeCombo.SelectedIndex = timeCombo.Items.Count - 1;
+                condCombo.SelectedIndex = 3;   // "Never speak"
+                Check("Codex #7: editing global combos does not mutate ctrl.routineStatusSpeakWhen",
+                    ctrl.routineStatusSpeakWhen == SpeakWhen.Now, true);
+                Check("Codex #7: ...nor ctrl.routineStatusCondition",
+                    ctrl.routineStatusCondition == SpeakCondition.Always, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  Notifications-tab global-speech test threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
     }
 
     // ── ClubLogProvider: prefixes/exceptions tables ─────────────────────────────
@@ -5125,6 +5674,25 @@ static class JimmyTests
               TqslUploadClient.ClassifyFinalStatus(11) == TqslUploadClient.FinalStatusOutcome.Failure, true);
         Check("null code (no parseable status line) -> real failure, never assumed success",
               TqslUploadClient.ClassifyFinalStatus(null) == TqslUploadClient.FinalStatusOutcome.Failure, true);
+    }
+
+    // ── 2.0.58: Alt+U reports a confirmed uploaded count only for the unambiguous code-0 case ──
+    static void TqslUploadCompleteMessageTests()
+    {
+        Console.WriteLine("\n── Alt+U LoTW upload-complete wording (count only when unambiguous) ──");
+        CheckStr("code-0 success, 1 QSO -> singular grammar",
+            WsjtxClient.FormatLotwUploadCompleteMessage(1), "LoTW (TQSL) upload complete. 1 QSO uploaded.");
+        CheckStr("code-0 success, 5 QSOs -> plural grammar",
+            WsjtxClient.FormatLotwUploadCompleteMessage(5), "LoTW (TQSL) upload complete. 5 QSOs uploaded.");
+        CheckStr("nothing was pending -> reports that, not a count",
+            WsjtxClient.FormatLotwUploadCompleteMessage(0), "LoTW (TQSL) upload complete. No QSOs were pending.");
+        CheckStr("ambiguous/failed outcome (null count) -> no manufactured number",
+            WsjtxClient.FormatLotwUploadCompleteMessage(null), "LoTW (TQSL) upload complete.");
+
+        // The result model itself: LastUploadedCount starts null and is only ever set to a
+        // real number by an unambiguous outcome inside UploadPendingAsync.
+        Check("TqslUploadClient.LastUploadedCount defaults to null (no count claimed yet)",
+            new TqslUploadClient().LastUploadedCount == null, true);
     }
 
     // ── WsjtxClient.ResolveUsState ───────────────────────────────────────────────
@@ -7359,8 +7927,8 @@ static class JimmyTests
 
             // A type not explicitly touched must still round-trip its own (code-default) values,
             // proving SaveToIni writes every type, not just ones the caller modified.
-            var untouched = loaded.Policies[NotificationEventType.ConnectionClosed];
-            var untouchedDefault = NotificationDefaults.Policies[NotificationEventType.ConnectionClosed];
+            var untouched = loaded.Policies[NotificationEventType.RadioCatRecovered];
+            var untouchedDefault = NotificationDefaults.Policies[NotificationEventType.RadioCatRecovered];
             CheckStr("Untouched type's template still round-trips", untouched.Template, untouchedDefault.Template);
         }
         finally
@@ -7406,13 +7974,15 @@ static class JimmyTests
     private class FakeNotificationDelivery : INotificationDelivery
     {
         public string LastText;
-        public bool? LastImportant;
+        public AlertCue LastCue;
+        public bool? LastImportant;   // convenience: LastCue != None
         public int AnnounceCount;
 
-        public void Announce(string text, bool important)
+        public void Announce(string text, AlertCue cue)
         {
             LastText = text;
-            LastImportant = important;
+            LastCue = cue;
+            LastImportant = cue != AlertCue.None;
             AnnounceCount++;
         }
     }
@@ -7425,15 +7995,30 @@ static class JimmyTests
     private class FakeStatusView : IJimmyStatusView
     {
         public bool WouldAnnounceValue;
+        public bool ForegroundValue = true;   // what RenderStatusVisible returns
         public string LastAccessibleAlert;
         public int AccessibleAlertCount;
-        public string LastStatusText;
+        public string LastStatusText;         // last VISIBLE status line
         public int RenderStatusCount;
+        public string LastSpokenText;         // last text CoordinatedSpeak was asked to say
+        public int CoordinatedSpeakCount;
 
-        public void RenderStatus(string headingText, string statusText, System.Drawing.Color foreColor, System.Drawing.Color backColor)
+        public bool RenderStatusVisible(string headingText, string statusText, System.Drawing.Color foreColor, System.Drawing.Color backColor)
         {
             LastStatusText = statusText;
             RenderStatusCount++;
+            return ForegroundValue;
+        }
+        public int CoordinatedSpeakInvokeCount;   // times the seam was called at all
+        public void CoordinatedSpeak(string text)
+        {
+            CoordinatedSpeakInvokeCount++;
+            // Model Controller.CoordinatedSpeak's real foreground gate: it only actually nudges
+            // the screen reader when Jimmy is foregrounded (see its own comment). A background
+            // call sets nothing "spoken".
+            if (!ForegroundValue) return;
+            LastSpokenText = text;
+            CoordinatedSpeakCount++;
         }
         public string LastShowMessageText;
         public int ShowMessageCount;
@@ -7469,26 +8054,35 @@ static class JimmyTests
             var decorator = new UiaAlertNotificationDelivery(inner, statusView, () => enabled);
 
             statusView.WouldAnnounceValue = false;
-            decorator.Announce("Normal message", false);
+            decorator.Announce("Normal message", AlertCue.None);
             Check("Inner delivery always receives the announcement (status field preserved)", inner.AnnounceCount == 1, true);
-            Check("Not important -> no accessible alert raised", statusView.AccessibleAlertCount == 0, true);
+            Check("cue None -> no accessible alert raised", statusView.AccessibleAlertCount == 0, true);
 
-            decorator.Announce("Important message", true);
+            decorator.Announce("Important message", AlertCue.Important);
             Check("Important + enabled + focus elsewhere -> raises the accessible alert", statusView.AccessibleAlertCount == 1, true);
-            CheckStr("...with the same text ShowMessage would have shown", statusView.LastAccessibleAlert, "Important message");
+            CheckStr("...with the same text", statusView.LastAccessibleAlert, "Important message");
 
             enabled = false;
-            decorator.Announce("Important message 2", true);
-            Check("Important but the General-tab option is off (default) -> no accessible alert", statusView.AccessibleAlertCount == 1, true);
+            decorator.Announce("Important message 2", AlertCue.Important);
+            Check("Important but the option is off (default) -> no accessible alert", statusView.AccessibleAlertCount == 1, true);
+
+            // Codex #1: a Critical cue ALWAYS attempts the off-focus announcement, regardless of
+            // the option -- a safety event must reach the operator when Jimmy is backgrounded.
+            decorator.Announce("CAT link lost", AlertCue.Critical);
+            Check("Critical + option OFF + focus elsewhere -> STILL raises the accessible alert",
+                statusView.AccessibleAlertCount == 2, true);
+            CheckStr("...with the Critical text", statusView.LastAccessibleAlert, "CAT link lost");
             enabled = true;
 
             statusView.WouldAnnounceValue = true;
-            decorator.Announce("Important message 3", true);
-            Check("Important + enabled but statusText would already announce it -> no duplicate", statusView.AccessibleAlertCount == 1, true);
+            decorator.Announce("Important message 3", AlertCue.Important);
+            Check("Important + enabled but the spoken path already says it -> no duplicate", statusView.AccessibleAlertCount == 2, true);
+            decorator.Announce("Critical while focused", AlertCue.Critical);
+            Check("Critical but the spoken path already says it -> no duplicate", statusView.AccessibleAlertCount == 2, true);
             statusView.WouldAnnounceValue = false;
 
-            Check("Inner delivery received every one of the 4 Announce calls regardless of the above",
-                inner.AnnounceCount == 4, true);
+            Check("Inner delivery received every one of the 6 Announce calls regardless of the above",
+                inner.AnnounceCount == 6, true);
         }
         catch (Exception ex)
         {
@@ -7505,28 +8099,30 @@ static class JimmyTests
         var delivery = new FakeNotificationDelivery();
         var center = new NotificationCenter(settings, delivery);
 
+        // QsoCompleted is a routine-status wording row now (not normally published), but the
+        // Publish pipeline still formats it from its template -- exercise that here.
         center.Publish(new QsoCompletedEvent("K4YT", "20m", "FT8"));
-        CheckStr("QsoCompleted uses its default template", delivery.LastText, "Logged QSO with K4YT");
-        Check("QsoCompleted default priority is Normal (no beep)", delivery.LastImportant == false, true);
+        CheckStr("QsoCompleted uses its default template", delivery.LastText, "K4YT logged");
+        Check("QsoCompleted default priority is Standard -> AlertCue.None", delivery.LastCue == AlertCue.None, true);
 
         settings.Policies[NotificationEventType.QsoStarted].Enabled = false;
         int before = delivery.AnnounceCount;
         center.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));
         Check("Disabled event type never reaches delivery", delivery.AnnounceCount == before, true);
 
-        // ErrorSeverity.Error forces the beep regardless of the configured policy Priority
-        // (default Normal) -- see NotificationCenter.Publish's own comment; this is what lets
-        // both existing migrated error call sites (one historically sound:false at
-        // Warning-equivalent severity, one sound:true) share one policy.
+        // ErrorSeverity.Error is escalated to Critical regardless of the configured policy
+        // Priority (default Normal) -- so it always carries the Critical alert cue.
         center.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Radio", "CAT link lost"));
-        Check("ErrorSeverity.Error always sets Important, regardless of policy default", delivery.LastImportant == true, true);
+        Check("ErrorSeverity.Error escalates to the Critical alert cue, regardless of policy default",
+            delivery.LastCue == AlertCue.Critical, true);
 
         center.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "launch failed"));
         Check("ErrorSeverity.Warning respects the policy's configured Priority (default Normal)", delivery.LastImportant == false, true);
 
-        // Dedup: QsoStarted defaults to RepeatSeconds=5 (see NotificationDefaults.cs), so an
-        // immediate re-publish for the same callsign must not reach delivery a second time.
+        // Dedup: with RepeatSeconds > 0, an immediate re-publish for the same callsign must not
+        // reach delivery a second time.
         settings.Policies[NotificationEventType.QsoStarted].Enabled = true;
+        settings.Policies[NotificationEventType.QsoStarted].RepeatSeconds = 5;
         center.Publish(new QsoStartedEvent("W1AW", "20m", "FT8"));
         int afterFirst = delivery.AnnounceCount;
         center.Publish(new QsoStartedEvent("W1AW", "20m", "FT8"));
@@ -7590,16 +8186,116 @@ static class JimmyTests
             NotificationTemplateEngine.Format("{Callsign} {Countri}", tokens), "K4YT {Countri}");
     }
 
+    // ── 2.0.58: NotificationHistory session service ──
+    static void NotificationHistoryServiceTests()
+    {
+        Console.WriteLine("\n── NotificationHistory: bounded session record ──");
+
+        var h = new NotificationHistory(capacity: 3);
+        int changed = 0;
+        h.Changed += () => changed++;
+
+        h.Record("first");
+        h.Record("second", "Alt+Z");
+        Check("Changed fires on each Record", changed == 2, true);
+
+        var snap = h.Snapshot();
+        Check("Snapshot is newest-first", snap.Count == 2 && snap[0].Text == "second" && snap[1].Text == "first", true);
+
+        // Exact block shape, 2.0.59: an automatic (non-hotkey) entry is two physical lines --
+        //   <time>
+        //   <message>
+        CheckStr("Automatic entry block: time then message, no hotkey line",
+            snap[1].Block, snap[1].TimeText + "\r\n" + "first");
+        // A hotkey-triggered entry is three physical lines --
+        //   <time>
+        //   <configured hotkey>
+        //   <message>
+        CheckStr("Hotkey entry block: time, configured hotkey, then message",
+            snap[0].Block, snap[0].TimeText + "\r\n" + "Alt+Z" + "\r\n" + "second");
+        CheckStr("TimeText is the bare local time", snap[1].TimeText, snap[1].TimeLocal.ToString("h:mm:ss tt"));
+        CheckStr("ToString() is the block", snap[0].ToString(), snap[0].Block);
+        Check("Block never carries an em-dash time/hotkey combined line",
+            !snap[0].Block.Contains(" — "), true);
+
+        // Bounded: capacity 3, add a 4th -> oldest ("first") is evicted.
+        h.Record("third");
+        h.Record("fourth");
+        snap = h.Snapshot();
+        Check("Over capacity evicts the OLDEST entry", snap.Count == 3 && snap[2].Text == "second", true);
+
+        // Routine-status dedup: identical consecutive text is not re-recorded; a change is.
+        var r = new NotificationHistory();
+        r.RecordRoutineStatus("Receiving, 3 available stations");
+        r.RecordRoutineStatus("Receiving, 3 available stations");
+        r.RecordRoutineStatus("Receiving, 4 available stations");
+        var rsnap = r.Snapshot();
+        Check("RecordRoutineStatus records only on meaningful change", rsnap.Count == 2, true);
+        Check("...and marks the entry as routine status", rsnap[0].IsRoutineStatus && rsnap[1].IsRoutineStatus, true);
+        r.RecordRoutineStatus("");
+        Check("Empty routine status text is ignored", r.Snapshot().Count == 2, true);
+
+        // The window at least constructs cleanly with the real service + accessors.
+        try
+        {
+            using (var win = new NotificationHistoryWindow(h, () => true, _ => { }))
+                Check("NotificationHistoryWindow constructs without throwing", win != null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NotificationHistoryWindow ctor threw: {ex.Message}");
+            failed++;
+        }
+
+        // The window text is the entry blocks, newest-first, one blank line between them, and
+        // Windows newlines throughout -- the single read-only multiline edit control the screen
+        // reader navigates as plain text.
+        var fmt = new NotificationHistory(capacity: 10);
+        fmt.Record("older automatic message");
+        fmt.Record("clock sync good, offset 0.2 seconds.", "Alt+Y");
+        var built = NotificationHistoryWindow.BuildAll(fmt.Snapshot());
+        var expected =
+            fmt.Snapshot()[0].TimeText + "\r\n" + "Alt+Y" + "\r\n" + "clock sync good, offset 0.2 seconds." +
+            "\r\n\r\n" +
+            fmt.Snapshot()[1].TimeText + "\r\n" + "older automatic message";
+        CheckStr("Window text: newest-first blocks, blank line between, Windows newlines", built, expected);
+        Check("Window text: no lone \\n without \\r", built.Replace("\r\n", "").IndexOf('\n') < 0, true);
+
+        // Caret-shift math: when new entries are prepended (and, at the 300-entry cap, old ones
+        // fall off the back), PrependLength is how far right the caret / selection must move so
+        // the reader stays on the same logical text.
+        const string sep = "\r\n\r\n";
+        string block(string t, string h, string m) => h == null ? t + "\r\n" + m : t + "\r\n" + h + "\r\n" + m;
+        string e2 = block("7:14:00 AM", null, "second");
+        string e1 = block("7:13:00 AM", null, "first");
+        string oldTxt = e2 + sep + e1;
+        // One new entry prepended, nothing evicted.
+        string e3 = block("7:15:00 AM", "Alt+Y", "third");
+        string newTxt = e3 + sep + oldTxt;
+        Check("PrependLength: new entry at the front shifts by exactly its block + separator",
+            NotificationHistoryWindow.PrependLength(oldTxt, newTxt) == (e3.Length + sep.Length), true);
+        // Prepend AND evict the oldest (cap churn): old text's tail is gone, but the anchor
+        // (old newest block) still locates the boundary.
+        string newTxtEvict = e3 + sep + e2;
+        Check("PrependLength: survives simultaneous prepend + oldest-entry eviction",
+            NotificationHistoryWindow.PrependLength(oldTxt, newTxtEvict) == (e3.Length + sep.Length), true);
+        // Nothing changed at the front (only a bottom eviction) -> no shift.
+        Check("PrependLength: pure tail eviction shifts the caret by 0",
+            NotificationHistoryWindow.PrependLength(oldTxt, e2) == 0, true);
+        Check("PrependLength: empty old text -> whole new length",
+            NotificationHistoryWindow.PrependLength("", newTxt) == newTxt.Length, true);
+    }
+
     // ── NotificationVariableRegistry ──
     static void NotificationVariableRegistryTests()
     {
         Console.WriteLine("\n── NotificationVariableRegistry ──");
 
         Check("Validate: a template using only known variables passes",
-            NotificationVariableRegistry.Validate("Working {Callsign} in {Country}", NotificationEventType.QsoStarted) == null, true);
+            NotificationVariableRegistry.Validate("Working {Callsign} on {Band} {Mode}", NotificationEventType.QsoStarted) == null, true);
 
         Check("Validate: pure literal text (no variables at all) passes",
-            NotificationVariableRegistry.Validate("Listening", NotificationEventType.ConnectionClosed) == null, true);
+            NotificationVariableRegistry.Validate("Listening", NotificationEventType.RadioCatRecovered) == null, true);
 
         string error = NotificationVariableRegistry.Validate("{Callsign} {Countri}", NotificationEventType.QsoStarted);
         CheckStr("Validate: unknown keyword produces the exact required error message",
@@ -7609,7 +8305,7 @@ static class JimmyTests
             NotificationVariableRegistry.Validate("{AwardSummary}", NotificationEventType.ConnectionLost) != null, true);
 
         Check("Every type offers the universal {Time} variable",
-            NotificationVariableRegistry.Validate("{Time}", NotificationEventType.ConnectionClosed) == null, true);
+            NotificationVariableRegistry.Validate("{Time}", NotificationEventType.RadioCatRecovered) == null, true);
 
         // Keeps the registry honest: constructs a representative instance of every event class
         // and diffs its REAL ToTokens().Keys against what the registry claims is available for
@@ -7619,14 +8315,21 @@ static class JimmyTests
         // operator discovering a "valid" template that renders with a literal {Typo}.
         var sampleEvents = new Dictionary<NotificationEventType, INotificationEvent>
         {
-            [NotificationEventType.QsoStarted] = new QsoStartedEvent("K4YT", "20m", "FT8", "EM79", "USA", 500, 90),
-            [NotificationEventType.QsoCompleted] = new QsoCompletedEvent("K4YT", "20m", "FT8", "EM79", "USA", 500, 90, "-05", "+02"),
+            [NotificationEventType.ReceiveCycleSummary] = new ReceiveCycleSummaryEvent(),
+            [NotificationEventType.ReceiveStateSummary] = new ReceiveStateSummaryEvent(),
+            [NotificationEventType.OperatingModeSummary] = new OperatingModeSummaryEvent(),
+            [NotificationEventType.ReceiveSideId] = new ReceiveSideIdEvent(),
+            [NotificationEventType.ReceivedReply] = new ReceivedReplyEvent(),
+            [NotificationEventType.NoDecodeWarning] = new NoDecodeWarningEvent(),
+            [NotificationEventType.QsoStarted] = new QsoStartedEvent("K4YT", "20m", "FT8"),
+            [NotificationEventType.QsoCompleted] = new QsoCompletedEvent("K4YT", "20m", "FT8"),
             [NotificationEventType.TxMessageChanged] = new TxMessageChangedEvent("K4YT", "K4YT KB0UZT -05", "20m", "FT8"),
             [NotificationEventType.AwardsNeeded] = new AwardsNeededEvent("K4YT", 2, new[] { "WAS", "DXCC" }, "2 awards needed", "USA"),
-            [NotificationEventType.ConnectionClosed] = new ConnectionClosedEvent(),
             [NotificationEventType.ConnectionLost] = new ConnectionLostEvent("heartbeat timeout"),
             [NotificationEventType.ErrorWarning] = new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "CAT link lost"),
             [NotificationEventType.RadioCatRecovered] = new RadioCatRecoveredEvent(),
+            [NotificationEventType.RadioCatLost] = new RadioCatLostEvent("2043", "COM4", "115200", "RPRT -20"),
+            [NotificationEventType.AutoTxResume] = new AutoTxResumeEvent("K4YT"),
         };
         foreach (var kv in sampleEvents)
         {
@@ -7723,6 +8426,1847 @@ static class JimmyTests
         }
     }
 
+    // ── SpeechCoordinator: SpeakWhen deferral, obsolescence/coalescing, Critical bypass ──────
+    // The one speech-coordination authority (Items 1 & 2). Drives it directly with a capture
+    // sink -- no NotificationCenter, no WsjtxClient -- so the timing/obsolescence rules are
+    // pinned independently of everything upstream.
+    static void SpeechCoordinatorTests()
+    {
+        Console.WriteLine("\n── SpeechCoordinator: SpeakWhen, obsolescence, coalescing, Critical bypass ──");
+
+        var said = new List<string>();
+        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+
+        // Now -> speak immediately.
+        var c = NewCoord();
+        c.SubmitNotification("id.a", "now please", SpeakWhen.Now, NotificationPriority.Normal);
+        Check("Now: spoken immediately", said.Count == 1 && said[0] == "now please", true);
+
+        // Never -> recorded elsewhere, never spoken.
+        c = NewCoord();
+        c.SubmitNotification("id.b", "history only", SpeakWhen.Never, NotificationPriority.Normal);
+        Check("Never: not spoken", said.Count == 0, true);
+
+        // AfterTx while idle -> condition already met -> speak now.
+        c = NewCoord();
+        c.SubmitNotification("id.c", "after tx idle", SpeakWhen.AfterTx, NotificationPriority.Normal);
+        Check("AfterTx while not transmitting: spoken now", said.Count == 1, true);
+
+        // AfterTx while transmitting -> held, released on the TX falling edge.
+        c = NewCoord();
+        c.OnPhysicalTxChanged(true);
+        c.SubmitNotification("id.d", "after tx held", SpeakWhen.AfterTx, NotificationPriority.Normal);
+        Check("AfterTx during TX: held", said.Count == 0, true);
+        c.OnPhysicalTxChanged(false);
+        Check("AfterTx: released when physical TX ends", said.Count == 1 && said[0] == "after tx held", true);
+
+        // Critical bypasses deferral even mid-TX.
+        c = NewCoord();
+        c.OnPhysicalTxChanged(true);
+        c.SubmitNotification("id.e", "CAT lost", SpeakWhen.AfterQso, NotificationPriority.Critical);
+        Check("Critical: spoken at once even while transmitting and AfterQso-configured",
+            said.Count == 1 && said[0] == "CAT lost", true);
+
+        // Notification coalescing: re-submitting the same identity replaces the held text.
+        c = NewCoord();
+        c.OnPhysicalTxChanged(true);
+        c.SubmitNotification("id.f", "K4YT -12", SpeakWhen.AfterTx, NotificationPriority.Normal);
+        c.SubmitNotification("id.f", "K4YT -08", SpeakWhen.AfterTx, NotificationPriority.Normal);
+        c.OnPhysicalTxChanged(false);
+        Check("Notification coalesce: only the newest text of an identity is spoken",
+            said.Count == 1 && said[0] == "K4YT -08", true);
+
+        // Routine status: newest held wins (coalesce), then AfterRx flush.
+        c = NewCoord();
+        c.SubmitRoutineStatus("Receiving, 3 available stations", true, SpeakWhen.AfterRx);
+        c.SubmitRoutineStatus("Receiving, 19 available stations", true, SpeakWhen.AfterRx);
+        Check("Routine AfterRx: held, nothing spoken yet", said.Count == 0, true);
+        c.OnReceiveCycleComplete();
+        Check("Routine AfterRx: only the newest snapshot is spoken",
+            said.Count == 1 && said[0] == "Receiving, 19 available stations", true);
+
+        // Item 2: a pending AfterRx routine status is DROPPED when physical TX starts -- stale
+        // receive status must not be spoken after transmission begins.
+        c = NewCoord();
+        c.SubmitRoutineStatus("Receiving, K9RRW selected", true, SpeakWhen.AfterRx);
+        c.OnPhysicalTxChanged(true);
+        c.OnReceiveCycleComplete();      // even if a boundary lands mid-over
+        c.OnPhysicalTxChanged(false);
+        Check("Item 2: stale AfterRx receive status is not replayed after TX", said.Count == 0, true);
+
+        // Item 2: a routine status rendered WHILE transmitting is not uttered after TX has ended.
+        c = NewCoord();
+        c.OnPhysicalTxChanged(true);
+        c.SubmitRoutineStatus("Transmitting, sending EN34", true, SpeakWhen.AfterTx);
+        c.OnPhysicalTxChanged(false);
+        Check("Item 2: a stale 'Transmitting' routine line is dropped once TX is over", said.Count == 0, true);
+
+        // AfterQso: held across alternating RX/TX until callInProg clears.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.g", "worked K4YT", SpeakWhen.AfterQso, NotificationPriority.Normal);
+        c.OnPhysicalTxChanged(true); c.OnPhysicalTxChanged(false);
+        c.OnReceiveCycleComplete();
+        Check("AfterQso: still held through an RX/TX cycle while the QSO is active", said.Count == 0, true);
+        c.OnQsoActiveChanged(false);
+        Check("AfterQso: released when the QSO ends", said.Count == 1 && said[0] == "worked K4YT", true);
+
+        // ── Stage 1 bug fixes (Codex #10 / #11 / #12) ───────────────────────────────────────
+
+        // #10: an AfterQso NOTIFICATION must not be spoken over a live over when the QSO ends
+        // mid-transmission -- it waits for the physical TX falling edge.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.h", "worked K4YT", SpeakWhen.AfterQso, NotificationPriority.Normal);
+        c.OnPhysicalTxChanged(true);
+        c.OnQsoActiveChanged(false);          // QSO ends while still physically transmitting
+        Check("#10: AfterQso notification held while TX still active after QSO end", said.Count == 0, true);
+        c.OnPhysicalTxChanged(false);
+        Check("#10: AfterQso notification released on the TX falling edge", said.Count == 1 && said[0] == "worked K4YT", true);
+
+        // #11: an AfterQso ROUTINE status left pending when the QSO ends mid-over must still be
+        // released -- previously nothing flushed it and it stuck until overwritten.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.OnPhysicalTxChanged(true);
+        c.SubmitRoutineStatus("Working K4YT, sending 73", true, SpeakWhen.AfterQso);
+        c.OnQsoActiveChanged(false);          // QSO ends during the over
+        Check("#11: AfterQso routine still held during the over", said.Count == 0, true);
+        c.OnPhysicalTxChanged(false);
+        Check("#11: AfterQso routine released on TX falling edge, not stuck",
+            said.Count == 1 && said[0] == "Working K4YT, sending 73", true);
+
+        // #10 companion: when the QSO ends while idle (no TX), AfterQso still releases at once.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.i", "worked N6S", SpeakWhen.AfterQso, NotificationPriority.Normal);
+        c.OnQsoActiveChanged(false);
+        Check("#10 companion: AfterQso released immediately when QSO ends idle",
+            said.Count == 1 && said[0] == "worked N6S", true);
+
+        // #12: onSpoken fires only on real speech. Never -> never; QSO-suppressed -> never;
+        // spoken / deferred-then-flushed -> exactly once.
+        int spokenCbs = 0;
+        c = NewCoord();
+        bool r1 = c.SubmitNotification("id.j", "never me", SpeakWhen.Never,
+            NotificationPriority.Normal, SpeakCondition.Always, () => spokenCbs++);
+        Check("#12: Never returns discarded (false)", !r1 && spokenCbs == 0, true);
+
+        c.OnQsoActiveChanged(true);
+        bool r2 = c.SubmitNotification("id.k", "spot", SpeakWhen.Now,
+            NotificationPriority.Normal, SpeakCondition.OutsideQsoOnly, () => spokenCbs++);
+        Check("#12: QSO-active Suppress returns discarded, no onSpoken", !r2 && spokenCbs == 0, true);
+        c.OnQsoActiveChanged(false);
+
+        bool r3 = c.SubmitNotification("id.l", "spot now", SpeakWhen.Now,
+            NotificationPriority.Normal, SpeakCondition.Always, () => spokenCbs++);
+        Check("#12: immediate speak fires onSpoken once", r3 && spokenCbs == 1, true);
+
+        c.OnPhysicalTxChanged(true);
+        c.SubmitNotification("id.m", "held then flushed", SpeakWhen.AfterTx,
+            NotificationPriority.Normal, SpeakCondition.Always, () => spokenCbs++);
+        Check("#12: deferred item has not fired onSpoken yet", spokenCbs == 1, true);
+        c.OnPhysicalTxChanged(false);
+        Check("#12: flushed item fires onSpoken exactly once", spokenCbs == 2 && said.Contains("held then flushed"), true);
+
+        // #12: a deferred item that becomes QSO-suppressed by flush time is discarded silently
+        // and does NOT fire onSpoken.
+        spokenCbs = 0;
+        c = NewCoord();
+        c.OnPhysicalTxChanged(true);
+        c.SubmitNotification("id.n", "spot", SpeakWhen.AfterTx,
+            NotificationPriority.Normal, SpeakCondition.OutsideQsoOnly, () => spokenCbs++);
+        c.OnQsoActiveChanged(true);           // QSO starts before the item can flush
+        c.OnPhysicalTxChanged(false);         // flush attempt -- QsoSuppressed now
+        Check("#12: deferred item QSO-suppressed at flush is not spoken and no onSpoken",
+            said.Count == 0 && spokenCbs == 0, true);
+    }
+
+    // ── SpeakWhen migration from the legacy Timing / DeferWhileTransmitting INI keys ──
+    static void SpeakWhenMigrationTests()
+    {
+        Console.WriteLine("\n── SpeakWhen: migration from legacy notifyTiming_ / notifyDeferWhileTx_ keys ──");
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_SpeakWhenMig_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // A pre-SpeakWhen INI (written via IniFile so the section name matches what
+            // LoadFromIni reads): NextPeriodBoundary on one type, DeferWhileTransmitting on
+            // another, and NO notifySpeakWhen_ key on any of them. ClockSynced's code default is
+            // already Now with neither legacy flag, so overwrite AwardsNeeded/QsoStarted's own
+            // legacy keys to prove the migration branch actually runs off the INI value.
+            var ini = new IniFile(tmpIni);
+            ini.Write("notifyTiming_AwardsNeeded", "NextPeriodBoundary");
+            ini.Write("notifyDeferWhileTx_AwardsNeeded", "False");
+            ini.Write("notifyTiming_QsoStarted", "Immediate");
+            ini.Write("notifyDeferWhileTx_QsoStarted", "True");
+            ini.Write("notifyTiming_ClockSynced", "Immediate");
+            ini.Write("notifyDeferWhileTx_ClockSynced", "False");
+
+            var s = new NotificationSettings();
+            s.LoadFromIni(ini);
+            Check("migrate: NextPeriodBoundary -> AfterRx",
+                s.Policies[NotificationEventType.AwardsNeeded].SpeakWhen == SpeakWhen.AfterRx, true);
+            Check("migrate: DeferWhileTransmitting -> AfterTx",
+                s.Policies[NotificationEventType.QsoStarted].SpeakWhen == SpeakWhen.AfterTx, true);
+            Check("migrate: neither legacy flag -> code default (Now)",
+                s.Policies[NotificationEventType.ClockSynced].SpeakWhen == SpeakWhen.Now, true);
+
+            // An explicit notifySpeakWhen_ key wins over the legacy pair.
+            ini.Write("notifySpeakWhen_AwardsNeeded", "AfterQso");
+            s = new NotificationSettings();
+            s.LoadFromIni(ini);
+            Check("explicit notifySpeakWhen_ wins over legacy Timing",
+                s.Policies[NotificationEventType.AwardsNeeded].SpeakWhen == SpeakWhen.AfterQso, true);
+        }
+        finally { try { File.Delete(tmpIni); } catch { } }
+    }
+
+    // ── RenderStatus -> SpeechCoordinator integration: routine RX/TX/QSO status speech now
+    // flows through the SAME one coordinator as typed notifications ──────────────────────────
+    // Drives the real WsjtxClient.ShowStatus() path with a FakeStatusView + a real
+    // NotificationCenter/SpeechCoordinator, and asserts: the visible line + history are set on
+    // every render regardless of speech disposition; the nudge (CoordinatedSpeak) is gated by
+    // the coordinator's SpeakWhen and by real foreground state; Never is silent-but-visible; a
+    // held routine line releases on the right lifecycle edge; and a typed notification and a
+    // routine line land in the SAME CoordinatedSpeak sink (one authority).
+    static void RenderStatusSpeechCoordinationTests()
+    {
+        Console.WriteLine("\n── RenderStatus -> SpeechCoordinator: routine status speech is coordinated ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_RenderCoord_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            WsjtxClient MakeWc(FakeStatusView view, out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                wc.StatusView = view;
+                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                    new StatusViewNotificationDelivery(view));
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 500 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+
+            // Visible + history ALWAYS immediate; Never = silent.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Never;
+                view.RenderStatusCount = 0; view.CoordinatedSpeakCount = 0; view.LastStatusText = null;
+                wc.TestShowStatus();
+                Check("Never: the visible status line is still rendered", view.LastStatusText != null && view.RenderStatusCount >= 1, true);
+                Check("Never: nothing is spoken", view.CoordinatedSpeakCount == 0, true);
+            }
+
+            // Now + foreground -> spoken (after flushing any AfterRx batch of the summary).
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();   // release an AfterRx-batched "N available stations" summary if that's what it was
+                Check("Now + foreground: the routine line reaches CoordinatedSpeak", view.CoordinatedSpeakCount >= 1, true);
+                Check("Now: the spoken text is the rendered status line", view.LastSpokenText == view.LastStatusText, true);
+            }
+
+            // Now + NOT foreground -> visible only, never spoken.
+            {
+                var view = new FakeStatusView { ForegroundValue = false };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                view.CoordinatedSpeakCount = 0; view.LastStatusText = null;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("Now + background: still rendered visibly", view.LastStatusText != null, true);
+                Check("Now + background: never spoken (foreground gate)", view.CoordinatedSpeakCount == 0, true);
+            }
+
+            // Global routineStatusSpeakWhen = AfterTx: a routine line rendered WHILE transmitting
+            // is never spoken -- it's stale "Transmitting..." once the over ends and is
+            // superseded by the fresh post-over render.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.routineStatusSpeakWhen = SpeakWhen.AfterTx;
+                wc.Notify.OnTransmittingChanged(true);
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                Check("global AfterTx: routine line rendered mid-over is held, not spoken", view.CoordinatedSpeakCount == 0, true);
+                wc.Notify.OnTransmittingChanged(false);
+                Check("global AfterTx: the stale mid-over line is dropped on TX end, not spoken late", view.CoordinatedSpeakCount == 0, true);
+
+                // Fresh idle render: the whole line IS the Receive-cycle-summary clause, so it
+                // delivers at THAT clause's own boundary (after the receive cycle) -- not
+                // "immediately" via any ordinal comparison of AfterTx vs AfterRx (Codex #3).
+                // Nothing is spoken earlier than a real boundary.
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                Check("global AfterTx + idle summary render: still held until a real boundary", view.CoordinatedSpeakCount == 0, true);
+                wc.Notify.OnPeriodBoundary();
+                Check("global AfterTx + idle summary render: spoken at the receive-cycle boundary", view.CoordinatedSpeakCount >= 1, true);
+            }
+
+            // One authority: a typed notification and a routine line both land in CoordinatedSpeak.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                view.CoordinatedSpeakCount = 0;
+                wc.Notify.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "test warning"));
+                int afterNotif = view.CoordinatedSpeakCount;
+                Check("typed notification reaches CoordinatedSpeak (same sink)", afterNotif >= 1, true);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("routine status reaches the SAME CoordinatedSpeak sink", view.CoordinatedSpeakCount > afterNotif, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RenderStatusSpeechCoordinationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Routine-status wording rows: the Receive cycle summary / QSO started clauses are
+    //    driven by their editable Template, stay ONE coalesced utterance, and honour Enabled ──
+    static void RoutineClauseTemplateTests()
+    {
+        Console.WriteLine("\n── Routine-status wording rows: template, one-utterance, Enabled ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_RoutineClause_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            WsjtxClient MakeWc(FakeStatusView view, out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                wc.StatusView = view;
+                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                    new StatusViewNotificationDelivery(view));
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 500 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+
+            // 1. Default ReceiveCycleSummary template -> the exact hard-coded idle line, and it
+            //    is spoken as ONE utterance (one CoordinatedSpeak per render, spoken == visible).
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.advancedCallLayout = false;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("default template -> the familiar idle line",
+                    view.LastStatusText, "Receiving, no available stations, Listen mode.");
+                Check("spoken exactly once for the render (one coalesced utterance)",
+                    view.CoordinatedSpeakCount == 1, true);
+                Check("the one spoken utterance IS the whole visible line",
+                    view.LastSpokenText == view.LastStatusText, true);
+            }
+
+            // 2. Editing the counts template (the RCV example) is honoured -- fields AND literal
+            //    words. State + mode rows off here so the counts template IS the whole line.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.advancedCallLayout = false;
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveStateSummary].Enabled = false;
+                ctrl.Notifications.Policies[NotificationEventType.OperatingModeSummary].Enabled = false;
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template =
+                    "RCV, {AvailableCount} calls, {NewDxccCount} new DXCC, listen mode.";
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("edited counts template drives the real line",
+                    view.LastStatusText, "RCV, no calls, 0 new DXCC, listen mode.");
+                Check("still exactly one utterance", view.CoordinatedSpeakCount == 1, true);
+            }
+
+            // 3. A pure-literal counts template (no fields at all) works.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.advancedCallLayout = false;   // isolate the counts clause -- no advanced side-name row
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveStateSummary].Enabled = false;
+                ctrl.Notifications.Policies[NotificationEventType.OperatingModeSummary].Enabled = false;
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template = "Listening";
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("pure-literal counts template renders verbatim", view.LastStatusText, "Listening.");
+            }
+
+            // 4. Disabling the Receive cycle summary row drops ONLY the counts clause; the
+            //    now-separate state ("Receiving") and operating-mode ("Listen mode") rows are
+            //    untouched, so the line is still spoken -- just without the counts.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.advancedCallLayout = false;   // isolate the counts clause -- no advanced side-name row
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Enabled = false;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("counts row disabled -> counts clause gone, state + mode kept",
+                    view.LastStatusText, "Receiving, Listen mode.");
+            }
+
+            // 5. The QsoStarted / QsoCompleted / TxMessageChanged clause templates: default
+            //    wording reproduces today's woven fragments; the fields substitute; and arbitrary
+            //    literal text survives. (Pure template-level -- the ShowStatus wiring for these
+            //    is exercised by the replay suite and by JimmyDirectReplay's status assertions.)
+            {
+                var defs = NotificationDefaults.Policies;
+                CheckStr("QsoStarted default template output",
+                    NotificationTemplateEngine.Format(defs[NotificationEventType.QsoStarted].Template,
+                        new Dictionary<string, string> { ["Callsign"] = "W4MAA" }),
+                    "Working W4MAA, replying.");
+                CheckStr("QsoCompleted default template output (clean phrase, no structural punctuation)",
+                    NotificationTemplateEngine.Format(defs[NotificationEventType.QsoCompleted].Template,
+                        new Dictionary<string, string> { ["Callsign"] = "W4MAA" }),
+                    "W4MAA logged");
+                CheckStr("TxMessageChanged default template output (clean phrase)",
+                    NotificationTemplateEngine.Format(defs[NotificationEventType.TxMessageChanged].Template,
+                        new Dictionary<string, string> { ["Message"] = "R minus 12" }),
+                    "sending R minus 12");
+                CheckStr("arbitrary literal text + field is honoured",
+                    NotificationTemplateEngine.Format("On air with {Callsign} now!!!",
+                        new Dictionary<string, string> { ["Callsign"] = "W4MAA" }),
+                    "On air with W4MAA now!!!");
+                Check("the shipped clause templates all validate against their registries",
+                    NotificationVariableRegistry.Validate(defs[NotificationEventType.QsoStarted].Template, NotificationEventType.QsoStarted) == null
+                    && NotificationVariableRegistry.Validate(defs[NotificationEventType.QsoCompleted].Template, NotificationEventType.QsoCompleted) == null
+                    && NotificationVariableRegistry.Validate(defs[NotificationEventType.TxMessageChanged].Template, NotificationEventType.TxMessageChanged) == null
+                    && NotificationVariableRegistry.Validate(defs[NotificationEventType.ReceiveCycleSummary].Template, NotificationEventType.ReceiveCycleSummary) == null
+                    && NotificationVariableRegistry.Validate(defs[NotificationEventType.ReceivedReply].Template, NotificationEventType.ReceivedReply) == null
+                    && NotificationVariableRegistry.Validate(defs[NotificationEventType.NoDecodeWarning].Template, NotificationEventType.NoDecodeWarning) == null,
+                    true);
+                CheckStr("ReceivedReply default template speaks the pre-built clean {Received} phrase",
+                    NotificationTemplateEngine.Format(defs[NotificationEventType.ReceivedReply].Template,
+                        new Dictionary<string, string> { ["Received"] = "received R minus 12, previous R R 7 3" }),
+                    "received R minus 12, previous R R 7 3");
+                CheckStr("NoDecodeWarning default template is the clean nudge phrase",
+                    NotificationTemplateEngine.Format(defs[NotificationEventType.NoDecodeWarning].Template, new Dictionary<string, string>()),
+                    "no decodes, check time, frequency, audio in");
+            }
+
+            // 6. Per-clause RE-TIMING through the real ShowStatus path: retiming ONLY the counts
+            //    row to "Immediately" moves ONLY that phrase to the render; the state and mode
+            //    phrases still wait for the receive-cycle boundary. Same-boundary clauses still
+            //    coalesce -- "Receiving" and "Listen mode" are spoken together at the boundary.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.advancedCallLayout = false;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].SpeakWhen = SpeakWhen.Now;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                Check("counts row retimed to Immediately -> spoken on the render (before any boundary)",
+                    view.CoordinatedSpeakCount == 1, true);
+                CheckStr("...just the counts phrase, not the whole line",
+                    view.LastSpokenText, "no available stations");
+                wc.Notify.OnPeriodBoundary();
+                Check("state + mode still delivered at the receive-cycle boundary",
+                    view.CoordinatedSpeakCount == 2, true);
+                CheckStr("...coalesced into one announcement",
+                    view.LastSpokenText, "Receiving, Listen mode.");
+            }
+
+            // 7. Default summary timing is still batched (AfterRx): nothing until the boundary.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.advancedCallLayout = false;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                Check("default: idle summary held until the receive cycle completes", view.CoordinatedSpeakCount == 0, true);
+                wc.Notify.OnPeriodBoundary();
+                Check("default: idle summary spoken once at the receive-cycle boundary", view.CoordinatedSpeakCount == 1, true);
+            }
+
+            // 8. Codex #2 -- QSO started: enabled default / edited / DISABLED, through the real
+            //    ShowStatus "replying to callInProg" render.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.advancedCallLayout = false;
+                wc.TestSetReplyingToCall("W4MAA");
+                wc.TestShowStatus();
+                CheckStr("QsoStarted enabled -> default wording",
+                    view.LastStatusText, "Working W 4 M A A, replying.");
+
+                ctrl.Notifications.Policies[NotificationEventType.QsoStarted].Template = "Now answering {Callsign}.";
+                wc.TestSetReplyingToCall("W4MAA");
+                wc.TestShowStatus();
+                CheckStr("QsoStarted edited template -> edited wording",
+                    view.LastStatusText, "Now answering W 4 M A A.");
+
+                ctrl.Notifications.Policies[NotificationEventType.QsoStarted].Enabled = false;
+                wc.TestSetReplyingToCall("W4MAA");
+                wc.TestShowStatus();
+                Check("QsoStarted DISABLED -> no 'Working'/'replying' clause spoken (no hard-coded fallback)",
+                    (view.LastStatusText == null || (!view.LastStatusText.Contains("replying")
+                        && !view.LastStatusText.Contains("Working W 4 M A A"))), true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RoutineClauseTemplateTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Receive-cycle-summary split into three independently toggleable routine clauses ──
+    // Live JAWS finding (2026-09-05): with "Receive cycle summary" unchecked, Jimmy still spoke
+    // "Receiving, Listen mode." from the hard-coded _base skeleton. The state verb and the
+    // operating-mode descriptor are now their OWN clauses (ReceiveStateSummary /
+    // OperatingModeSummary) alongside the counts (ReceiveCycleSummary); each independently
+    // enable/disable/retime-able; same-boundary clauses still compose into ONE utterance; no
+    // hidden phrase survives a disable.
+    static void RoutineCycleSummarySplitTests()
+    {
+        Console.WriteLine("\n── Receive-cycle-summary split: state / counts / mode clauses ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_RcsSplit_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            WsjtxClient MakeWc(FakeStatusView view, out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.advancedCallLayout = false;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                wc.StatusView = view;
+                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                    new StatusViewNotificationDelivery(view));
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 500 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+            void Off(Controller ctrl, NotificationEventType t) => ctrl.Notifications.Policies[t].Enabled = false;
+            int Occur(string hay, string needle)
+            {
+                if (hay == null) return 0;
+                int n = 0, i = 0;
+                while ((i = hay.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+                return n;
+            }
+
+            // A. Default: still exactly today's line, one utterance at the receive-cycle boundary,
+            //    each phrase said once.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                Check("A: default idle summary held until the boundary", view.CoordinatedSpeakCount == 0, true);
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("A: default combined line unchanged",
+                    view.LastSpokenText, "Receiving, no available stations, Listen mode.");
+                Check("A: one utterance", view.CoordinatedSpeakCount == 1, true);
+                Check("A: no duplicated phrase",
+                    Occur(view.LastSpokenText, "Receiving") == 1 && Occur(view.LastSpokenText, "Listen mode") == 1, true);
+            }
+
+            // B. All three rows off -> nothing spoken, nothing on the status line.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                Off(ctrl, NotificationEventType.ReceiveStateSummary);
+                Off(ctrl, NotificationEventType.ReceiveCycleSummary);
+                Off(ctrl, NotificationEventType.OperatingModeSummary);
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("B: all routine receive clauses off -> nothing spoken", view.CoordinatedSpeakCount == 0, true);
+                CheckStr("B: ...and the status line is empty", view.LastStatusText ?? "", "");
+            }
+
+            // C. Only the state verb off.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                Off(ctrl, NotificationEventType.ReceiveStateSummary);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("C: state off -> counts + mode only", view.LastStatusText, "no available stations, Listen mode.");
+                Check("C: 'Receiving' not spoken", Occur(view.LastSpokenText, "Receiving") == 0, true);
+            }
+
+            // D. Only the mode descriptor off.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                Off(ctrl, NotificationEventType.OperatingModeSummary);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("D: mode off -> state + counts only", view.LastStatusText, "Receiving, no available stations.");
+                Check("D: 'Listen mode' not spoken", Occur(view.LastSpokenText, "Listen mode") == 0, true);
+            }
+
+            // E. Two clauses sharing the boundary compose into ONE utterance (counts off).
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                Off(ctrl, NotificationEventType.ReceiveCycleSummary);
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("E: state + mode compose to one line", view.LastSpokenText, "Receiving, Listen mode.");
+                Check("E: exactly one utterance", view.CoordinatedSpeakCount == 1, true);
+            }
+
+            // F. This is the ORIGINAL bug string -- now a deliberate 2-of-3 config, not a leak:
+            //    with the counts row unchecked the operator still gets state + mode by choice.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                Off(ctrl, NotificationEventType.ReceiveCycleSummary);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("F: counts off -> 'Receiving, Listen mode.' is now a chosen 2-clause line",
+                    view.LastStatusText, "Receiving, Listen mode.");
+            }
+
+            // G. Conditioning one clause to "Never" mutes just that phrase; it stays on the
+            //    visible line; the unrelated clauses are untouched.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveStateSummary].Condition = SpeakCondition.Never;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("G: 'Never' state -> still on the visible line",
+                    view.LastStatusText, "Receiving, no available stations, Listen mode.");
+                Check("G: 'Never' state -> not spoken, unrelated clauses still spoken",
+                    view.LastSpokenText != null && !view.LastSpokenText.Contains("Receiving")
+                    && view.LastSpokenText.Contains("no available stations")
+                    && view.LastSpokenText.Contains("Listen mode"), true);
+            }
+
+            // H. A retimed clause splits to its own boundary; the physical transmit-start edge
+            //    still releases a TxStart clause. The rest stay batched to the receive cycle.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveStateSummary].SpeakWhen = SpeakWhen.TxStart;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("H: counts + mode delivered at the receive-cycle boundary",
+                    view.LastSpokenText, "no available stations, Listen mode.");
+                Check("H: state clause still held (waiting for transmit start)", view.CoordinatedSpeakCount == 1, true);
+                wc.Notify.Speech.OnPhysicalTxChanged(true);
+                CheckStr("H: state clause released at the physical transmit-start edge",
+                    view.LastSpokenText, "Receiving");
+                Check("H: ...as its own second utterance", view.CoordinatedSpeakCount == 2, true);
+            }
+
+            // I. Per-clause during/outside-QSO condition still works through the real ShowStatus.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.Notifications.Policies[NotificationEventType.OperatingModeSummary].Condition = SpeakCondition.OutsideQsoOnly;
+
+                wc.Notify.Speech.OnQsoActiveChanged(false);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("I: OutsideQsoOnly + no QSO -> mode clause spoken",
+                    view.LastSpokenText != null && view.LastSpokenText.Contains("Listen mode"), true);
+
+                view.CoordinatedSpeakCount = 0;
+                wc.Notify.Speech.OnQsoActiveChanged(true);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("I: OutsideQsoOnly + QSO active -> mode clause held back, the rest still spoken",
+                    view.LastSpokenText != null && !view.LastSpokenText.Contains("Listen mode")
+                    && view.LastSpokenText.Contains("Receiving"), true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RoutineCycleSummarySplitTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Receive-cycle-summary split: settings migration ──
+    // A pre-split saved copy of the OLD combined default is migrated to the new counts-only
+    // default (else "Receiving" / "Listen mode" would double against the two new rows); an
+    // operator's OWN edited wording that still uses the retired {Status}/{Mode} is surfaced,
+    // not silently changed; the new rows need no INI keys.
+    static void RoutineCycleSummarySplitMigrationTests()
+    {
+        Console.WriteLine("\n── Receive-cycle-summary split: settings migration ──");
+        var mk = new List<string>();
+        string NewIni()
+        {
+            string p = Path.Combine(Path.GetTempPath(), $"jimmy_rcssplit_{System.Guid.NewGuid():N}.ini");
+            mk.Add(p);
+            return p;
+        }
+        try
+        {
+            const string legacy = "{Status}, {AvailableCount} {Stations}{ToYou}{NewDxcc}{Wanted}{Awards}{Mode}{Prompt}.";
+            string newDefault = NotificationDefaults.Policies[NotificationEventType.ReceiveCycleSummary].Template;
+
+            var ini = new IniFile(NewIni());
+            ini.Write($"notifyTemplate_{NotificationEventType.ReceiveCycleSummary}", legacy);
+            var s = new NotificationSettings();
+            s.LoadFromIni(ini);
+            CheckStr("pre-split default -> migrated to the new counts-only default",
+                s.Policies[NotificationEventType.ReceiveCycleSummary].Template, newDefault);
+            Check("...silently (not flagged as a rejected template)",
+                !s.RejectedTemplates.ContainsKey(NotificationEventType.ReceiveCycleSummary), true);
+            Check("new ReceiveStateSummary row enabled by default with no INI key",
+                s.Policies[NotificationEventType.ReceiveStateSummary].Enabled, true);
+            Check("new OperatingModeSummary row enabled by default with no INI key",
+                s.Policies[NotificationEventType.OperatingModeSummary].Enabled, true);
+
+            var ini2 = new IniFile(NewIni());
+            ini2.Write($"notifyTemplate_{NotificationEventType.ReceiveCycleSummary}",
+                "{Status} here: {AvailableCount} {Stations}{Mode}.");
+            var s2 = new NotificationSettings();
+            s2.LoadFromIni(ini2);
+            Check("edited template still using retired {Status}/{Mode} -> rejected, code default used",
+                s2.RejectedTemplates.ContainsKey(NotificationEventType.ReceiveCycleSummary)
+                && s2.Policies[NotificationEventType.ReceiveCycleSummary].Template == newDefault, true);
+
+            var ini3 = new IniFile(NewIni());
+            ini3.Write($"notifyTemplate_{NotificationEventType.ReceiveCycleSummary}", newDefault);
+            var s3 = new NotificationSettings();
+            s3.LoadFromIni(ini3);
+            CheckStr("a saved copy of the NEW default loads unchanged",
+                s3.Policies[NotificationEventType.ReceiveCycleSummary].Template, newDefault);
+            Check("...and is not flagged rejected",
+                !s3.RejectedTemplates.ContainsKey(NotificationEventType.ReceiveCycleSummary), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RoutineCycleSummarySplitMigrationTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            foreach (var p in mk) { try { File.Delete(p); } catch { } }
+        }
+    }
+
+    // ── Receive-side role scopes: the RX1/TX2 side name and the "N available stations" count are
+    // two independently role-scoped routine clauses, and the scope follows the CURRENT RX/TX
+    // roles automatically when the slots flip (advanced call layout) ─────────────────────────
+    // Live JAWS finding (2026-09-05): with "Receive or transmit state", "Receive cycle summary"
+    // and "Operating mode announcement" all unchecked, Jimmy still spoke slot-side text like
+    // "RX1 11 available stations." from the ungated callsWaiting splice in the non-idle status
+    // assemblies. Both slots receive/listen; the side name + count are now split, scoped, and
+    // gated on every path.
+    static void RoutineReceiveSideRoleScopeTests()
+    {
+        Console.WriteLine("\n── Receive-side role scopes: side name / count follow RX-TX roles on a flip ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_RxSideScope_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            WsjtxClient MakeWc(FakeStatusView view, out Controller ctrlOut, bool advanced)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.advancedCallLayout = advanced;
+                ctrl.advShowTx1 = true;
+                ctrl.advShowTx2 = true;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                wc.StatusView = view;
+                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                    new StatusViewNotificationDelivery(view));
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 500 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+
+            string Render(WsjtxClient wc, FakeStatusView view, bool? evenEnded)
+            {
+                wc.TestSetLastDecodeEvenPeriod(evenEnded);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                return view.LastStatusText;
+            }
+
+            // A. Default (Both / Both), advanced layout: today's line, now comma-composed --
+            //    "RX1, N available stations" -- and it alternates between the two slots.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, advanced: true);
+                wc.TestSetAdvSnapshotCounts(11, 13);
+                wc.TestSetTxFirst(false);   // Jimmy TX on the odd slot -> slot1 = RX1, slot2 = TX2
+                CheckStr("A: even period ended, default scopes -> RX1 side name + count",
+                    Render(wc, view, true), "Receiving, RX1, 11 available stations, Listen mode.");
+                CheckStr("A: odd period ended -> the TX2 slot's receive summary still speaks (it is listening)",
+                    Render(wc, view, false), "Receiving, TX2, 13 available stations, Listen mode.");
+            }
+
+            // B. Side name RxSideOnly, count RxSideOnly: the classic role-flip case. RX slot
+            //    speaks; the other slot is silent; NO settings change across the flip.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, advanced: true);
+                wc.TestSetAdvSnapshotCounts(11, 13);
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.RxSideOnly;
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.RxSideOnly;
+
+                wc.TestSetTxFirst(false);   // slot1 = RX1 (RX role), slot2 = TX2 (TX role)
+                CheckStr("B: RX1 slot (RX role) speaks",
+                    Render(wc, view, true), "Receiving, RX1, 11 available stations, Listen mode.");
+                CheckStr("B: TX2 slot (TX role) is silent for receive summary",
+                    Render(wc, view, false), "Receiving, Listen mode.");
+
+                wc.TestSetTxFirst(true);    // FLIP: slot1 = TX1 (TX role), slot2 = RX2 (RX role)
+                CheckStr("B: after flip, TX1 slot (now TX role) is silent -- config unchanged",
+                    Render(wc, view, true), "Receiving, Listen mode.");
+                CheckStr("B: after flip, RX2 slot (now RX role) speaks -- config followed the roles",
+                    Render(wc, view, false), "Receiving, RX2, 13 available stations, Listen mode.");
+            }
+
+            // C. Opposite: both scopes TxSideOnly -- the CURRENT TX slot's RECEIVE info speaks
+            //    (it is listening when not transmitting); the RX slot is silent. Follows the flip.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, advanced: true);
+                wc.TestSetAdvSnapshotCounts(11, 13);
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.TxSideOnly;
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.TxSideOnly;
+
+                wc.TestSetTxFirst(false);   // slot2 = TX2 is the TX role
+                CheckStr("C: TX2 slot (TX role) receive summary speaks",
+                    Render(wc, view, false), "Receiving, TX2, 13 available stations, Listen mode.");
+                CheckStr("C: RX1 slot (RX role) is silent",
+                    Render(wc, view, true), "Receiving, Listen mode.");
+
+                wc.TestSetTxFirst(true);    // FLIP: slot1 = TX1 is now the TX role
+                CheckStr("C: after flip, TX1 slot (now TX role) receive summary speaks",
+                    Render(wc, view, true), "Receiving, TX1, 11 available stations, Listen mode.");
+                CheckStr("C: after flip, RX2 slot (now RX role) is silent",
+                    Render(wc, view, false), "Receiving, Listen mode.");
+            }
+
+            // D. Independent: side name Both, count RxSideOnly -> name on both slots, count only
+            //    on the RX slot.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, advanced: true);
+                wc.TestSetAdvSnapshotCounts(11, 13);
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.Both;
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.RxSideOnly;
+                wc.TestSetTxFirst(false);
+                CheckStr("D: RX slot -> name + count",
+                    Render(wc, view, true), "Receiving, RX1, 11 available stations, Listen mode.");
+                CheckStr("D: TX slot -> name only, no count",
+                    Render(wc, view, false), "Receiving, TX2, Listen mode.");
+            }
+
+            // E. Neither on both -> no side name, no count, ever; state + mode still there.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, advanced: true);
+                wc.TestSetAdvSnapshotCounts(11, 13);
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.Neither;
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.Neither;
+                CheckStr("E: even ended -> nothing but state + mode",
+                    Render(wc, view, true), "Receiving, Listen mode.");
+                CheckStr("E: odd ended -> nothing but state + mode",
+                    Render(wc, view, false), "Receiving, Listen mode.");
+            }
+
+            // F. Non-idle path (a role flip sets newTxFirst, so ShowStatus takes the "not a
+            //    special case" branch, not the idle one): the count clause must STILL be gated by
+            //    the scope -- this is the exact leak the live finding hit.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, advanced: true);
+                wc.TestSetAdvSnapshotCounts(11, 13);
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.Neither;
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.Neither;
+                wc.TestSetTxFirst(false);
+                wc.TestSetNewSelection(true);   // one-off flag -> non-idle assembly
+                wc.TestSetLastDecodeEvenPeriod(true);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("F: non-idle branch -> 'available stations' NOT spliced in when scoped out",
+                    view.LastStatusText != null && !view.LastStatusText.Contains("available stations"), true);
+            }
+
+            // G. Simple (beginner) layout: no side concept, scopes do not apply, count kept.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, advanced: false);
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.Neither;
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.Neither;
+                CheckStr("G: simple layout unaffected by the scopes",
+                    Render(wc, view, true), "Receiving, no available stations, Listen mode.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RoutineReceiveSideRoleScopeTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── A fully-disabled routine line must yield NOTHING, never a lone "." ────────────────────
+    // Live JAWS finding (2026-09-05): with ReceiveStateSummary + ReceiveCycleSummary +
+    // OperatingModeSummary all disabled AND both receive-side scopes at Neither, Jimmy spoke
+    // "." -- the non-idle status assemblies (cqPaused / "not a special case") append their own
+    // trailing "." unconditionally, so with every clause in front of it empty the whole status
+    // collapsed to that one punctuation mark, which then reached the status area and the
+    // SpeechCoordinator. Fixed at the common boundary: NormalizeStatusLine (visible + fragment
+    // source) and SpeechCoordinator.Compose (speech) now collapse a separator/punctuation-only
+    // remnant to "". No special-casing of any screen reader; the "." is not hidden, it is gone.
+    static void RoutinePunctuationOnlyRemnantTests()
+    {
+        Console.WriteLine("\n── Fully-disabled routine line -> empty, never a lone '.' ──");
+
+        // 1. The pure predicate: real words vs. separator/punctuation-only remnants.
+        Check("HasSpeakableContent: '.' is not speakable", WsjtxClient.HasSpeakableContent("."), false);
+        Check("HasSpeakableContent: ',' is not speakable", WsjtxClient.HasSpeakableContent(","), false);
+        Check("HasSpeakableContent: ', .' is not speakable", WsjtxClient.HasSpeakableContent(", ."), false);
+        Check("HasSpeakableContent: '  , . ' is not speakable", WsjtxClient.HasSpeakableContent("  , . "), false);
+        Check("HasSpeakableContent: '' is not speakable", WsjtxClient.HasSpeakableContent(""), false);
+        Check("HasSpeakableContent: 'Receiving, Listen mode.' IS speakable",
+            WsjtxClient.HasSpeakableContent("Receiving, Listen mode."), true);
+        Check("HasSpeakableContent: '3' IS speakable", WsjtxClient.HasSpeakableContent("3"), true);
+
+        // 2. SpeechCoordinator.Compose (exercised via SubmitRoutineStatus): a punctuation-only
+        //    routine line is never spoken; a real one keeps its trailing period.
+        var said = new List<string>();
+        var co = new SpeechCoordinator((t, imp) => said.Add(t));
+        foreach (var junk in new[] { ".", ",", ",.", ", .", "   .", "  " })
+        {
+            said.Clear();
+            co.SubmitRoutineStatus(junk, true, SpeakWhen.Now);
+            Check($"Compose: routine line \"{junk}\" -> nothing spoken", said.Count == 0, true);
+        }
+        said.Clear();
+        co.SubmitRoutineStatus("Receiving, Listen mode.", true, SpeakWhen.Now);
+        Check("Compose: a real routine line IS spoken", said.Count == 1, true);
+        CheckStr("Compose: ...with its trailing period intact", said.Count == 1 ? said[0] : "", "Receiving, Listen mode.");
+
+        // 3. End-to-end ShowStatus with the EXACT reported configuration, routed through a
+        //    non-idle status assembly (cqPaused) so the hard-coded trailing "." is in play.
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_PunctRemnant_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            WsjtxClient MakeWc(FakeStatusView view, out Controller ctrlOut, bool cqPaused)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.advancedCallLayout = true;
+                ctrl.advShowTx1 = true;
+                ctrl.advShowTx2 = true;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = cqPaused;
+                wc.StatusView = view;
+                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                    new StatusViewNotificationDelivery(view));
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 500 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+            void Off(Controller ctrl, NotificationEventType t) => ctrl.Notifications.Policies[t].Enabled = false;
+
+            // 3a. The exact reported config -> empty status, no speech.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, cqPaused: true);
+                Off(ctrl, NotificationEventType.ReceiveStateSummary);
+                Off(ctrl, NotificationEventType.ReceiveCycleSummary);
+                Off(ctrl, NotificationEventType.OperatingModeSummary);
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.Neither;
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.Neither;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("reported config -> status area is empty, NOT '.'", view.LastStatusText ?? "", "");
+                Check("reported config -> no routine speech submitted", view.CoordinatedSpeakCount == 0, true);
+            }
+
+            // 3b. Same but idle (not cqPaused) path -> also empty, also silent.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, cqPaused: false);
+                Off(ctrl, NotificationEventType.ReceiveStateSummary);
+                Off(ctrl, NotificationEventType.ReceiveCycleSummary);
+                Off(ctrl, NotificationEventType.OperatingModeSummary);
+                ctrl.Notifications.ReceiveSideIdScope = ReceiveSideScope.Neither;
+                ctrl.Notifications.ReceiveCountScope = ReceiveSideScope.Neither;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("reported config, idle path -> status area empty", view.LastStatusText ?? "", "");
+                Check("reported config, idle path -> no routine speech", view.CoordinatedSpeakCount == 0, true);
+            }
+
+            // 3c. Sanity: a NORMAL enabled combination still renders with its trailing period.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl, cqPaused: false);
+                ctrl.advancedCallLayout = false;   // simple layout -> the familiar idle line
+                view.CoordinatedSpeakCount = 0;
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                CheckStr("normal enabled combo still keeps its final period",
+                    view.LastStatusText, "Receiving, no available stations, Listen mode.");
+                Check("normal enabled combo is still spoken", view.CoordinatedSpeakCount >= 1, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RoutinePunctuationOnlyRemnantTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── An active QSO must never speak/record the bare callsign alone ─────────────────────────
+    // Live JAWS finding (2026-09-06), WA4VLC: with ReceiveStateSummary / ReceiveCycleSummary /
+    // OperatingModeSummary disabled and QsoStarted / QsoCompleted / TxMessageChanged /
+    // ReceivedReply / NoDecodeWarning enabled, Jimmy's history/speech alternated
+    //   "Replying next to WA4VLC" -> "WA4VLC, Sending EN34" -> "WA4VLC" -> "WA4VLC, Sending EN34"
+    //   -> "WA4VLC" -> "Tx halted"
+    // The bare "WA4VLC." entries are `inProg` -- the raw "name the active station" `_base`
+    // fragment (WsjtxClient.Display.cs) -- surviving alone on every receive-only poll where
+    // nothing else on the line has content (curTxMode/cond/curRxStr/prevRxStr/otherStr/txStr/
+    // desc/prompt all empty because the three idle-line rows are off and no fresh decode/tx
+    // event landed this render). It fires at "Now" (routineStatusSpeakWhen's default; the
+    // AfterRx-forcing idle branch never applies while callInProg != null) whenever the composed
+    // text differs from the LAST recorded one -- i.e. every time the line reverts from a real
+    // event back to just the name. Recorded to history because Controller.RenderStatusVisible
+    // always calls RecordRoutineStatus with whatever ShowStatus composed, was never told this
+    // one wasn't meaningful.
+    //
+    // Fix: DropBareCallsignFragment (WsjtxClient.Display.cs) drops `inProg` to "" ONLY when it
+    // is still the untouched bare fragment (an expired/timed-out reassignment carries its own
+    // real wording and is left alone) AND every other piece that would combine with it into a
+    // real phrase is also empty. callInProg/curCall themselves are never touched -- QsoStarted /
+    // ReceivedReply / TxMessageChanged / QsoCompleted all still compose their own real
+    // utterances from the raw callsign independently of this fragment.
+    static void ActiveQsoBareCallsignSuppressionTests()
+    {
+        Console.WriteLine("\n── Active QSO: the bare callsign never stands alone ──");
+
+        // 1. The pure predicate, directly: bare + nothing else -> dropped; bare + ANY real
+        //    content alongside it (received detail, tx message, CQ-enable note, mode descriptor,
+        //    a prompt) -> kept; REASSIGNED (expired/timed-out) wording -> always kept regardless.
+        const string bare = ", W A 4 V L C";
+        Check("bare + nothing else -> dropped",
+            WsjtxClient.DropBareCallsignFragment(bare, bare) == "", true);
+        Check("bare + nothing else (all-empty otherParts) -> dropped",
+            WsjtxClient.DropBareCallsignFragment(bare, bare, "", "", "", "") == "", true);
+        Check("bare + received-reply detail present -> kept",
+            WsjtxClient.DropBareCallsignFragment(bare, bare, "", "", ", no response") == bare, true);
+        Check("bare + transmit-message event present -> kept",
+            WsjtxClient.DropBareCallsignFragment(bare, bare, "", "", "", "", "", ", sending E N 3 4") == bare, true);
+        Check("bare + mode descriptor present -> kept",
+            WsjtxClient.DropBareCallsignFragment(bare, bare, "", "", "", "", "", "", "", ", Listen mode") == bare, true);
+        Check("REASSIGNED (expired) wording -> kept even with nothing else",
+            WsjtxClient.DropBareCallsignFragment(", W A 4 V L C expired", bare) == ", W A 4 V L C expired", true);
+        Check("bare + QSO-logged phrase present (carried in curTxMode) -> kept",
+            WsjtxClient.DropBareCallsignFragment(bare, bare, "W A 4 V L C logged, ") == bare, true);
+
+        // 2. End-to-end ShowStatus with the EXACT reported configuration.
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_BareCallsign_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            int Occurrences(string hay, string needle)
+            {
+                if (string.IsNullOrEmpty(hay)) return 0;
+                int n = 0, i = 0;
+                while ((i = hay.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+                return n;
+            }
+
+            WsjtxClient MakeWc(out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.replyDxCheckBox.Checked = true;
+                ctrl.replyLocalCheckBox.Checked = true;
+                ctrl.advancedCallLayout = false;   // irrelevant to this bug -- keep it out of the way
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                // The exact reported live configuration.
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveStateSummary].Enabled = false;
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Enabled = false;
+                ctrl.Notifications.Policies[NotificationEventType.OperatingModeSummary].Enabled = false;
+                // QsoStarted / QsoCompleted / TxMessageChanged / ReceivedReply / NoDecodeWarning
+                // stay at their shipped default (Enabled = true) -- not touched.
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                // Real Controller stays wired as StatusView (constructor default) -- NOT a fake
+                // -- so RenderStatusVisible/NotificationHistory run for real; a separate
+                // FakeNotificationDelivery under NotificationCenter tracks spoken-utterance
+                // COUNT independently of the StatusView, so both halves of the requirement
+                // (status area + history, and "no routine speech submitted") are checked for
+                // real rather than through a test double that might not mirror production wiring.
+                wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 500 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+
+            // A. THE EXACT REPORTED BUG: active QSO, nothing new to report this render -> no
+            //    bare "WA4VLC." on the status line, and no new history entry for it.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "WA4VLC";
+                int histBefore = ctrl.NotificationHistory.Count;
+                wc.TestShowStatus();
+                CheckStr("A: active QSO, nothing new -> status area is empty, NOT 'WA4VLC.'",
+                    ctrl.statusText.Text, "");
+                Check("A: no new Notification History entry for the bare callsign",
+                    ctrl.NotificationHistory.Count == histBefore, true);
+            }
+
+            // B. QSO start still produces "Working WA4VLC" when configured.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.TestSetReplyingToCall("WA4VLC");
+                wc.TestShowStatus();
+                CheckStr("B: QSO start still says 'Working WA4VLC'",
+                    ctrl.statusText.Text, "Working W A 4 V L C, replying.");
+            }
+
+            // C. A transmit-message event still produces "sending ..." -- and the callsign is
+            //    named exactly once alongside it, never a bare "WA4VLC." on its own.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "WA4VLC";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""tuning"": false, ""catOk"": true, ""slot"": 501 },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""awaitReport"", ""txNow"": ""WA4VLC KB0UZT EN34"" } }"));
+                wc.callInProg = "WA4VLC";   // TestApplyDirectSnapshot doesn't touch it; belt-and-suspenders
+                wc.TestShowStatus();
+                string s = ctrl.statusText.Text;
+                Check("C: transmit-message event -> 'sending' present, callsign named once, not bare",
+                    s.Contains("sending") && Occurrences(s, "WA4VLC") == 0 && Occurrences(s, "W A 4 V L C") == 1
+                    && s != "W A 4 V L C.", true);
+            }
+
+            // D. Received-reply detail still produces its configured wording, with the callsign
+            //    named exactly once alongside it.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "WA4VLC";
+                wc.sentCallList.Add("WA4VLC");   // no allCallDict entry -> recClean falls to "no response"
+                wc.TestShowStatus();
+                CheckStr("D: received-reply detail (no response) composes with the callsign once",
+                    ctrl.statusText.Text, "W A 4 V L C, no response.");
+            }
+
+            // E. QSO logged still produces its configured wording (case D + the unit case above
+            //    already prove the general mechanism -- inProg is kept whenever ANY other clause,
+            //    including the QsoCompleted phrase carried in curTxMode, is present). This drives
+            //    the REAL LogQso path end to end (Direct qso.txNow "done"+73) as a regression
+            //    guard that logging itself, and the overall composition, are unaffected: the QSO
+            //    is genuinely logged, and whatever the status composes to never regresses to a
+            //    bare, duplicated, or empty-but-for-punctuation callsign.
+            {
+                var wc = MakeWc(out var ctrl);
+                const string call = "WA4VLC";
+                wc.callInProg = call;
+                wc.allCallDict[call] = new List<EnqueueDecodeMessage>
+                {
+                    new EnqueueDecodeMessage
+                    {
+                        Message = $"KB0UZT {call} R-15", Snr = -15,
+                        RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                    },
+                };
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 900 },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""awaitReport"", ""txNow"": """ + call + @" KB0UZT -12"" } }"));
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 901 },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""done"", ""txNow"": """ + call + @" KB0UZT 73"" } }"));
+                Check("E: the QSO actually logged (real LogQso path)", wc.logList.Contains(call), true);
+                string s = ctrl.statusText.Text;
+                Check("E: composed status names the callsign at most once, never bare-alone",
+                    Occurrences(s, "W A 4 V L C") <= 1 && s != "W A 4 V L C." && WsjtxClient.HasSpeakableContent(s), true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  ActiveQsoBareCallsignSuppressionTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── QSO speech profile: SpeakCondition.OutsideQsoOnly silences an occurrence WHILE a QSO is active,
+    // keeps the fact in history, never replays it after the QSO, and never blocks Critical ────
+    static void DuringQsoSuppressionTests()
+    {
+        Console.WriteLine("\n── QSO speech profile: SpeakCondition.OutsideQsoOnly (keep quiet during a contact) ──");
+
+        var said = new List<string>();
+        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+
+        // 1. No QSO active -> a normal notification speaks normally.
+        var c = NewCoord();
+        c.SubmitNotification("id.a", "spot alert", SpeakWhen.Now, NotificationPriority.Normal, SpeakCondition.OutsideQsoOnly);
+        Check("1: SpeakCondition.OutsideQsoOnly but NO QSO active -> spoken normally", said.Count == 1, true);
+
+        // 2. QSO active + SpeakCondition.OutsideQsoOnly -> not spoken.  3. (history is recorded upstream --
+        // NotificationCenter.Deliver / RenderStatusVisible -- not by the coordinator, so this
+        // test asserts only the speech half; the history half is covered by test 10b below and
+        // by NotificationHistoryServiceTests.)
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.b", "spot alert", SpeakWhen.Now, NotificationPriority.Normal, SpeakCondition.OutsideQsoOnly);
+        Check("2: QSO active + Suppress -> NOT spoken", said.Count == 0, true);
+        Check("3: ...and NOT held for later (no pending notification)", c.PendingNotificationCount == 0, true);
+
+        // 4. QSO ends -> the suppressed occurrence is NOT replayed.
+        c.OnQsoActiveChanged(false);
+        Check("4: QSO ends -> the suppressed occurrence is not dumped", said.Count == 0, true);
+
+        // 5. A future occurrence after the QSO speaks normally again.
+        c.SubmitNotification("id.b", "spot alert", SpeakWhen.Now, NotificationPriority.Normal, SpeakCondition.OutsideQsoOnly);
+        Check("5: after the QSO ends -> future occurrences speak normally", said.Count == 1, true);
+
+        // 6. SpeakCondition.Always + SpeakWhen.AfterQso -> held, spoken when the QSO ends.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.c", "worked K4YT", SpeakWhen.AfterQso, NotificationPriority.Normal, SpeakCondition.Always);
+        Check("6a: AfterQso + SpeakNormally -> held during the QSO", said.Count == 0 && c.PendingNotificationCount == 1, true);
+        c.OnQsoActiveChanged(false);
+        Check("6b: ...spoken once the QSO ends", said.Count == 1 && said[0] == "worked K4YT", true);
+
+        // 7. Critical cuts through QSO suppression immediately.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.d", "CAT link lost", SpeakWhen.AfterTx, NotificationPriority.Critical, SpeakCondition.OutsideQsoOnly);
+        Check("7: Critical + Suppress + QSO active -> still spoken at once", said.Count == 1 && said[0] == "CAT link lost", true);
+
+        // 8. "Important" alone does NOT bypass suppression.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.e", "clock drifting", SpeakWhen.Now, NotificationPriority.Important, SpeakCondition.OutsideQsoOnly);
+        Check("8: Important (not Critical) + Suppress + QSO active -> NOT spoken", said.Count == 0, true);
+
+        // 9. SpeakWhen.Never stays history-only regardless of the QSO setting.
+        c = NewCoord();
+        c.SubmitNotification("id.f", "never me", SpeakWhen.Never, NotificationPriority.Normal, SpeakCondition.Always);
+        c.OnQsoActiveChanged(true);
+        c.SubmitNotification("id.f", "never me", SpeakWhen.Never, NotificationPriority.Normal, SpeakCondition.Always);
+        Check("9: SpeakWhen.Never -> never spoken, QSO or not", said.Count == 0, true);
+
+        // 10. Routine RX/TX/QSO status can stay ON during the QSO while another notification is
+        //     suppressed -- the two settings are independent.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitRoutineStatus("Receiving, K4YT, R -12", true, SpeakWhen.Now, SpeakCondition.Always);
+        c.SubmitNotification("id.g", "3 more spots", SpeakWhen.Now, NotificationPriority.Normal, SpeakCondition.OutsideQsoOnly);
+        Check("10: routine status spoken during the QSO...", said.Contains("Receiving, K4YT, R -12"), true);
+        Check("10: ...while the informational notification is suppressed", !said.Contains("3 more spots"), true);
+
+        // 10b. Routine status SpeakCondition.OutsideQsoOnly -> silent during the QSO, normal after.
+        c = NewCoord();
+        c.OnQsoActiveChanged(true);
+        c.SubmitRoutineStatus("Receiving, K4YT, R -12", true, SpeakWhen.Now, SpeakCondition.OutsideQsoOnly);
+        Check("10b: routine status Suppress -> silent while the QSO is active", said.Count == 0, true);
+        c.OnQsoActiveChanged(false);
+        c.SubmitRoutineStatus("Receiving, N6S, -09", true, SpeakWhen.Now, SpeakCondition.OutsideQsoOnly);
+        Check("10b: ...and normal again once the QSO ends", said.Count == 1 && said[0] == "Receiving, N6S, -09", true);
+
+        // 11. Active-QSO state is callInProg-driven (OnQsoActiveChanged), NOT physical TX --
+        //     transmitting alone must not trigger QSO suppression.
+        c = NewCoord();
+        c.OnPhysicalTxChanged(true);   // transmitting, but no QSO
+        c.SubmitNotification("id.h", "spot while calling CQ", SpeakWhen.Now, NotificationPriority.Normal, SpeakCondition.OutsideQsoOnly);
+        Check("11: transmitting without a QSO -> Suppress does NOT bite (spoken)", said.Count == 1, true);
+
+        // 12. Existing AfterRx / stale-RX / stale-TX obsolescence still works with the new field.
+        c = NewCoord();
+        c.SubmitRoutineStatus("Receiving, 3 available", true, SpeakWhen.AfterRx, SpeakCondition.Always);
+        c.SubmitRoutineStatus("Receiving, 19 available", true, SpeakWhen.AfterRx, SpeakCondition.Always);
+        c.OnReceiveCycleComplete();
+        Check("12a: AfterRx routine still coalesces to the newest snapshot", said.Count == 1 && said[0] == "Receiving, 19 available", true);
+        c = NewCoord();
+        c.SubmitRoutineStatus("Receiving, K9RRW selected", true, SpeakWhen.AfterRx, SpeakCondition.Always);
+        c.OnPhysicalTxChanged(true);
+        c.OnReceiveCycleComplete();
+        Check("12b: stale AfterRx routine still dropped when physical TX starts", said.Count == 0, true);
+        c = NewCoord();
+        c.OnPhysicalTxChanged(true);
+        c.SubmitRoutineStatus("Transmitting, sending EN34", true, SpeakWhen.AfterTx, SpeakCondition.Always);
+        c.OnPhysicalTxChanged(false);
+        Check("12c: stale 'Transmitting' routine still dropped once TX ends", said.Count == 0, true);
+
+        // Full path through NotificationCenter: policy.DuringQso is honored, history still recorded,
+        // and an ErrorSeverity.Error still cuts through.
+        {
+            var settings = new NotificationSettings();
+            settings.Policies[NotificationEventType.ErrorWarning].Condition = SpeakCondition.OutsideQsoOnly;
+            settings.Policies[NotificationEventType.ErrorWarning].RepeatSeconds = 0;
+            var delivery = new FakeNotificationDelivery();
+            var history = new List<string>();
+            var nc = new NotificationCenter(settings, delivery, t => history.Add(t));
+            nc.OnQsoActiveChanged(true);
+            nc.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "antenna warning"));
+            Check("full path: Warning + Suppress + QSO active -> not spoken", delivery.AnnounceCount == 0, true);
+            Check("full path: ...but the fact IS recorded in Notification History", history.Contains("Radio: antenna warning"), true);
+
+            // Still inside the QSO: an ErrorSeverity.Error on the SAME (Suppress) policy cuts through.
+            nc.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Radio", "PTT stuck"));
+            Check("full path: an ErrorSeverity.Error cuts through SpeakCondition.OutsideQsoOnly mid-QSO",
+                delivery.AnnounceCount >= 1 && delivery.LastText == "Radio: PTT stuck", true);
+
+            nc.OnQsoActiveChanged(false);
+            Check("full path: QSO end does not replay the suppressed warning",
+                delivery.AnnounceCount == 1, true);
+        }
+
+        // Codex #12 end-to-end: a QSO-suppressed occurrence must NOT advance the RepeatSeconds
+        // window, so a later occurrence that genuinely should be heard is not wrongly silenced.
+        {
+            var settings = new NotificationSettings();
+            settings.Policies[NotificationEventType.ErrorWarning].Condition = SpeakCondition.OutsideQsoOnly;
+            settings.Policies[NotificationEventType.ErrorWarning].RepeatSeconds = 3600;   // long window
+            var delivery = new FakeNotificationDelivery();
+            var nc = new NotificationCenter(settings, delivery, _ => { });
+
+            nc.OnQsoActiveChanged(true);
+            nc.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "SWR high"));   // suppressed
+            Check("#12 e2e: suppressed occurrence not spoken", delivery.AnnounceCount == 0, true);
+            nc.OnQsoActiveChanged(false);
+            nc.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "SWR high"));   // must speak
+            Check("#12 e2e: later valid occurrence still speaks (repeat window not poisoned)",
+                delivery.AnnounceCount == 1 && delivery.LastText == "Radio: SWR high", true);
+            // And now the window IS armed -- an immediate identical repeat is suppressed.
+            nc.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "SWR high"));
+            Check("#12 e2e: genuine repeat within the window is still suppressed after real delivery",
+                delivery.AnnounceCount == 1, true);
+        }
+
+        // Codex #12 (Never): a SpeakWhen.Never occurrence must not arm RepeatSeconds either.
+        {
+            var settings = new NotificationSettings();
+            settings.Policies[NotificationEventType.ClockOutOfSync].SpeakWhen = SpeakWhen.Never;
+            settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 3600;
+            var delivery = new FakeNotificationDelivery();
+            var nc = new NotificationCenter(settings, delivery, _ => { });
+            nc.Publish(new ClockOutOfSyncEvent(2.4, "FT8"));                 // Never -> silent
+            settings.Policies[NotificationEventType.ClockOutOfSync].SpeakWhen = SpeakWhen.Now;
+            nc.Publish(new ClockOutOfSyncEvent(2.4, "FT8"));                 // now must speak
+            Check("#12 e2e: a Never occurrence does not poison the repeat window",
+                delivery.AnnounceCount == 1, true);
+        }
+    }
+
+    // ── SpeakCondition (Always / DuringQsoOnly / OutsideQsoOnly / Never) x SpeakWhen timing,
+    //    including TxStart and the contradictory-combination handling ─────────────────────────
+    static void SpeakConditionAndTimingTests()
+    {
+        Console.WriteLine("\n── SpeakCondition x SpeakWhen (4-way eligibility, TxStart, contradictions) ──");
+
+        var said = new List<string>();
+        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+        void Sub(SpeechCoordinator c, string id, string text, SpeakWhen w, SpeakCondition cond,
+                 NotificationPriority pri = NotificationPriority.Normal)
+            => c.SubmitNotification(id, text, w, pri, cond);
+
+        // ── Eligibility at submit time (SpeakWhen.Now) ──
+        var c = NewCoord();
+        Sub(c, "a", "always idle", SpeakWhen.Now, SpeakCondition.Always);
+        Check("Always + Now, idle -> spoken", said.Count == 1, true);
+
+        c = NewCoord(); c.OnQsoActiveChanged(true);
+        Sub(c, "b", "always in qso", SpeakWhen.Now, SpeakCondition.Always);
+        Check("Always + Now, in QSO -> spoken", said.Count == 1, true);
+
+        c = NewCoord();
+        Sub(c, "c", "during only, idle", SpeakWhen.Now, SpeakCondition.DuringQsoOnly);
+        Check("DuringQsoOnly + Now, idle -> discarded", said.Count == 0 && c.PendingNotificationCount == 0, true);
+
+        c = NewCoord(); c.OnQsoActiveChanged(true);
+        Sub(c, "d", "during only, in qso", SpeakWhen.Now, SpeakCondition.DuringQsoOnly);
+        Check("DuringQsoOnly + Now, in QSO -> spoken", said.Count == 1, true);
+
+        c = NewCoord(); c.OnQsoActiveChanged(true);
+        Sub(c, "e", "outside only, in qso", SpeakWhen.Now, SpeakCondition.OutsideQsoOnly);
+        Check("OutsideQsoOnly + Now, in QSO -> discarded (now is inside a QSO)", said.Count == 0, true);
+
+        c = NewCoord();
+        Sub(c, "f", "outside only, idle", SpeakWhen.Now, SpeakCondition.OutsideQsoOnly);
+        Check("OutsideQsoOnly + Now, idle -> spoken", said.Count == 1, true);
+
+        c = NewCoord();
+        Sub(c, "g", "never", SpeakWhen.Now, SpeakCondition.Never);
+        Check("Never -> discarded regardless", said.Count == 0, true);
+
+        // ── The USEFUL non-contradiction: OutsideQsoOnly + AfterQso ──
+        // Fires during a QSO, HELD (not discarded), spoken once the QSO ends.
+        c = NewCoord(); c.OnQsoActiveChanged(true);
+        Sub(c, "h", "worked K4YT, summary", SpeakWhen.AfterQso, SpeakCondition.OutsideQsoOnly);
+        Check("OutsideQsoOnly + AfterQso, fired in QSO -> HELD, not discarded",
+            said.Count == 0 && c.PendingNotificationCount == 1, true);
+        c.OnQsoActiveChanged(false);
+        Check("OutsideQsoOnly + AfterQso -> spoken when the QSO ends (QSO state now satisfies it)",
+            said.Count == 1 && said[0] == "worked K4YT, summary", true);
+
+        // ── The GENUINE contradiction: DuringQsoOnly + AfterQso ──
+        // At the AfterQso boundary the QSO is over, so DuringQsoOnly can never hold -> discard.
+        c = NewCoord(); c.OnQsoActiveChanged(true);
+        Sub(c, "i", "during-only after-qso", SpeakWhen.AfterQso, SpeakCondition.DuringQsoOnly);
+        c.OnQsoActiveChanged(false);
+        Check("DuringQsoOnly + AfterQso -> discarded at the boundary (contradiction)", said.Count == 0, true);
+
+        // ── TxStart: real physical transmit-start edge ──
+        c = NewCoord();
+        Sub(c, "j", "tx starting", SpeakWhen.TxStart, SpeakCondition.Always);
+        Check("TxStart -> held until the physical TX rising edge", said.Count == 0 && c.PendingNotificationCount == 1, true);
+        c.OnReceiveCycleComplete();                 // an RX boundary must NOT release it
+        Check("TxStart -> not released by a receive-cycle boundary", said.Count == 0, true);
+        c.OnPhysicalTxChanged(false);               // a spurious 'still not transmitting' must not release it
+        Check("TxStart -> not released by a non-edge", said.Count == 0, true);
+        c.OnPhysicalTxChanged(true);                // the real false->true edge
+        Check("TxStart -> spoken on the physical radio.Transmitting false->true edge",
+            said.Count == 1 && said[0] == "tx starting", true);
+
+        // TxStart routine status too.
+        c = NewCoord();
+        c.SubmitRoutineStatus("Transmitting shortly", true, SpeakWhen.TxStart, SpeakCondition.Always);
+        Check("TxStart routine -> held", said.Count == 0, true);
+        c.OnPhysicalTxChanged(true);
+        Check("TxStart routine -> spoken on the TX rising edge", said.Count == 1, true);
+
+        // TxStart + DuringQsoOnly, TX starts with no QSO -> not eligible -> discarded.
+        c = NewCoord();
+        Sub(c, "k", "tx start during-only", SpeakWhen.TxStart, SpeakCondition.DuringQsoOnly);
+        c.OnPhysicalTxChanged(true);
+        Check("TxStart + DuringQsoOnly, TX starts outside a QSO -> discarded at the edge", said.Count == 0, true);
+
+        // ── Critical bypasses eligibility gate (During/Outside) but NOT Never ──
+        c = NewCoord(); c.OnQsoActiveChanged(true);
+        Sub(c, "l", "SWR halt", SpeakWhen.AfterQso, SpeakCondition.OutsideQsoOnly, NotificationPriority.Critical);
+        Check("Critical + OutsideQsoOnly + AfterQso, in QSO -> spoken NOW (bypass)", said.Count == 1, true);
+
+        c = NewCoord();
+        Sub(c, "m", "silenced safety", SpeakWhen.Now, SpeakCondition.Never, NotificationPriority.Critical);
+        Check("Critical + Condition.Never -> still not spoken (explicit silence honoured)", said.Count == 0, true);
+
+        // ── AfterRx eligibility re-check at the boundary ──
+        c = NewCoord();
+        Sub(c, "n", "rx summary", SpeakWhen.AfterRx, SpeakCondition.OutsideQsoOnly);
+        c.OnQsoActiveChanged(true);                 // a QSO starts before the RX boundary
+        c.OnReceiveCycleComplete();
+        Check("AfterRx + OutsideQsoOnly, QSO started before the boundary -> discarded at flush", said.Count == 0, true);
+
+        c = NewCoord();
+        Sub(c, "o", "rx summary 2", SpeakWhen.AfterRx, SpeakCondition.OutsideQsoOnly);
+        c.OnReceiveCycleComplete();
+        Check("AfterRx + OutsideQsoOnly, still idle at the boundary -> spoken", said.Count == 1, true);
+    }
+
+    // ── SubmitRoutineComposite: per-clause condition/timing that still composes to ONE
+    //    coordinated utterance per boundary ───────────────────────────────────────────────────
+    static void RoutineCompositeTests()
+    {
+        Console.WriteLine("\n── SpeechCoordinator: routine composite (per-clause timing, one utterance per boundary) ──");
+        var said = new List<string>();
+        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+        RoutineFragment F(string key, int order, string text, SpeakWhen w, SpeakCondition c = SpeakCondition.Always, bool sticky = false)
+            => new RoutineFragment { Key = key, Order = order, Text = text, When = w, Condition = c, Sticky = sticky };
+
+        // 1. All fragments share the boundary (the shipped default) -> exactly one utterance,
+        //    composed in Order.
+        var co = NewCoord();
+        co.SubmitRoutineComposite(new[]
+        {
+            F("_base.0", 0, "Receiving, K4YT", SpeakWhen.Now),
+            F("TxMessageChanged", 1, ", sending 73", SpeakWhen.Now),
+            F("_base.1", 2, ", Listen mode.", SpeakWhen.Now),
+        }, speakNow: true);
+        Check("1: same-boundary fragments compose into ONE utterance",
+            said.Count == 1 && said[0] == "Receiving, K4YT, sending 73, Listen mode.", true);
+
+        // 2. A clause given a different (later) boundary is delivered separately, at that
+        //    boundary; the rest speak now. The clause phrase is clean so it reads correctly
+        //    standalone -- no leading/trailing separators (Codex #4).
+        co = NewCoord();
+        co.OnQsoActiveChanged(true);
+        co.SubmitRoutineComposite(new[]
+        {
+            F("_base.0", 0, "Transmitting, K4YT", SpeakWhen.Now),
+            F("TxMessageChanged", 1, ", sending 73", SpeakWhen.Now),
+            F("QsoCompleted", 2, "K4YT logged", SpeakWhen.AfterQso, SpeakCondition.Always, sticky: true),
+        }, speakNow: true);
+        Check("2a: the now-boundary fragments speak immediately, without the deferred clause",
+            said.Count == 1 && said[0] == "Transmitting, K4YT, sending 73", true);
+        co.OnQsoActiveChanged(false);
+        Check("2b: the AfterQso clause speaks by itself once the QSO ends, worded cleanly",
+            said.Count == 2 && said[1] == "K4YT logged", true);
+
+        // 3. Two clauses that BOTH defer to the same boundary compose into one utterance there.
+        co = NewCoord();
+        co.SubmitRoutineComposite(new[]
+        {
+            F("_base.0", 0, "Receiving", SpeakWhen.Now),
+            F("ReceiveCycleSummary", 1, ", 12 available stations", SpeakWhen.AfterRx),
+            F("Awards", 2, ", 2 new DXCC", SpeakWhen.AfterRx),
+        }, speakNow: true);
+        Check("3a: 'Receiving' spoken now; the two AfterRx clauses held", said.Count == 1 && said[0] == "Receiving", true);
+        co.OnReceiveCycleComplete();
+        Check("3b: the two AfterRx clauses become ONE composed utterance, joined cleanly",
+            said.Count == 2 && said[1] == "12 available stations, 2 new DXCC", true);
+
+        // 4. A one-shot (Sticky) clause survives a render that omits it and still flushes.
+        co = NewCoord();
+        co.OnQsoActiveChanged(true);
+        co.SubmitRoutineComposite(new[] { F("QsoCompleted", 0, "K4YT logged", SpeakWhen.AfterQso, SpeakCondition.Always, sticky: true) }, speakNow: true);
+        co.SubmitRoutineComposite(new[] { F("_base", 0, "Receiving, N6S", SpeakWhen.Now) }, speakNow: true);   // no QsoCompleted this render
+        Check("4a: Sticky clause not dropped by an omitting render", co.PendingRoutineCount == 1, true);
+        co.OnQsoActiveChanged(false);
+        Check("4b: Sticky clause still flushes at its boundary", said.Contains("K4YT logged"), true);
+
+        // 5. A non-Sticky held clause IS dropped when a later render omits it (stale snapshot).
+        co = NewCoord();
+        co.SubmitRoutineComposite(new[] { F("ReceiveCycleSummary", 0, ", 3 available", SpeakWhen.AfterRx) }, speakNow: true);
+        co.SubmitRoutineComposite(new[] { F("_base", 0, "Working K4YT, replying.", SpeakWhen.Now) }, speakNow: true);   // summary gone
+        co.OnReceiveCycleComplete();
+        Check("5: a stale non-Sticky summary is not spoken after an omitting render",
+            !said.Contains(", 3 available"), true);
+
+        // 6. Per-clause condition filters that clause out of the composition, base still speaks.
+        co = NewCoord();
+        co.OnQsoActiveChanged(true);
+        co.SubmitRoutineComposite(new[]
+        {
+            F("_base", 0, "Transmitting, K4YT, Listen mode.", SpeakWhen.Now),
+            F("ReceiveCycleSummary", 1, ", 5 available", SpeakWhen.Now, SpeakCondition.OutsideQsoOnly),
+        }, speakNow: true);
+        Check("6: an OutsideQsoOnly clause is omitted during a QSO; the base still speaks",
+            said.Count == 1 && said[0] == "Transmitting, K4YT, Listen mode.", true);
+
+        // 7. allowSpeech:false suppresses this render's utterance but does not lose a clause
+        //    already held from an earlier render.
+        co = NewCoord();
+        co.SubmitRoutineComposite(new[] { F("ReceiveCycleSummary", 0, ", 9 available", SpeakWhen.AfterRx) }, speakNow: true);
+        co.SubmitRoutineComposite(new[] { F("_base", 0, "Radio CAT link lost, Listen mode.", SpeakWhen.Now) }, speakNow: true, allowSpeech: false);
+        Check("7a: allowSpeech:false -> nothing spoken this render", said.Count == 0, true);
+        co.OnReceiveCycleComplete();
+        Check("7b: ...but a clause held before it still flushes", said.Count == 1 && said[0] == "9 available", true);
+
+        // 8. Empty composed text never speaks.
+        co = NewCoord();
+        co.SubmitRoutineComposite(new[] { F("_base", 0, "", SpeakWhen.Now) }, speakNow: true);
+        Check("8: an empty line never nudges", said.Count == 0, true);
+    }
+
+    // ── Correction pass: timing composition is boundary-based not ordinal (Codex #3); clauses
+    //    are clean phrases the composer joins (Codex #4); invalid saved templates are surfaced
+    //    (Codex #8) ──────────────────────────────────────────────────────────────────────────
+    static void NotificationCorrectionPassTests()
+    {
+        Console.WriteLine("\n── Correction pass: boundary-based timing, clause composition, invalid-template notice ──");
+
+        var said = new List<string>();
+        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, cue) => said.Add(t)); }
+        RoutineFragment F(string key, int order, string text, SpeakWhen w, SpeakCondition c = SpeakCondition.Always, bool sticky = false)
+            => new RoutineFragment { Key = key, Order = order, Text = text, When = w, Condition = c, Sticky = sticky };
+
+        // ── Codex #3: no ordinal Math.Max. A clause at AfterRx must NOT speak early just
+        //    because some other constraint "looks later". ──
+
+        // base Now + clause AfterRx: base now, clause held to the receive cycle (NOT immediate).
+        var c1 = NewCoord();
+        c1.SubmitRoutineComposite(new[] { F("_base", 0, "Receiving", SpeakWhen.Now), F("ReceiveCycleSummary", 1, ", 3 calls", SpeakWhen.AfterRx) }, speakNow: true);
+        Check("base Now + clause AfterRx: base spoken now, clause NOT", said.Count == 1 && said[0] == "Receiving", true);
+        c1.OnReceiveCycleComplete();
+        Check("base Now + clause AfterRx: clause spoken at the receive-cycle boundary", said.Count == 2 && said[1] == "3 calls", true);
+
+        // base AfterTx (idle) + clause AfterRx: the AfterRx clause still waits for the receive
+        // cycle; it is NOT dragged out with the base just because AfterTx "looks later".
+        var c2 = NewCoord();
+        c2.SubmitRoutineComposite(new[] { F("_base", 0, "Receiving", SpeakWhen.AfterTx), F("ReceiveCycleSummary", 1, ", 5 calls", SpeakWhen.AfterRx) }, speakNow: true);
+        Check("base AfterTx (idle) speaks now; AfterRx clause still held",
+            said.Count == 1 && said[0] == "Receiving", true);
+        c2.OnReceiveCycleComplete();
+        Check("AfterRx clause released only at the receive-cycle boundary", said.Count == 2 && said[1] == "5 calls", true);
+
+        // base AfterRx + clause AfterTx: mirror -- the AfterTx clause waits for TX end, not RX.
+        var c3 = NewCoord();
+        c3.OnPhysicalTxChanged(true);
+        c3.SubmitRoutineComposite(new[] { F("_base", 0, "Transmitting", SpeakWhen.AfterRx), F("TxMessageChanged", 1, ", sending 73", SpeakWhen.AfterTx) }, speakNow: true);
+        c3.OnReceiveCycleComplete();   // while transmitting -> RX-complete drops the AfterRx base, does NOT touch the AfterTx clause
+        Check("base AfterRx clause dropped over a live over; AfterTx clause still held", said.Count == 0, true);
+        c3.OnPhysicalTxChanged(false);
+        Check("AfterTx clause released at TX end", said.Count == 1 && said[0] == "sending 73", true);
+
+        // TxStart is a real edge, not "later than" anything: held until the physical rising edge.
+        var c4 = NewCoord();
+        c4.SubmitRoutineComposite(new[] { F("QsoStarted", 0, "Working K4YT", SpeakWhen.TxStart) }, speakNow: true);
+        c4.OnReceiveCycleComplete();   // not a TX start
+        c4.OnPhysicalTxChanged(false); // not a rising edge
+        Check("TxStart clause not released by RX-complete or a non-edge", said.Count == 0, true);
+        c4.OnPhysicalTxChanged(true);
+        Check("TxStart clause released on the physical transmit rising edge", said.Count == 1 && said[0] == "Working K4YT", true);
+
+        // AfterQso, QSO ends while TX still active: held until the TX falling edge (no early speech).
+        var c5 = NewCoord();
+        c5.OnQsoActiveChanged(true); c5.OnPhysicalTxChanged(true);
+        c5.SubmitRoutineComposite(new[] { F("QsoCompleted", 0, "K4YT logged", SpeakWhen.AfterQso, SpeakCondition.Always, sticky: true) }, speakNow: true);
+        c5.OnQsoActiveChanged(false);
+        Check("AfterQso clause: QSO ended mid-over -> still held", said.Count == 0, true);
+        c5.OnPhysicalTxChanged(false);
+        Check("AfterQso clause: released on the TX falling edge, spoken cleanly", said.Count == 1 && said[0] == "K4YT logged", true);
+
+        // A boundary that has already passed at submit time: AfterTx while NOT transmitting ->
+        // eligible now (not stuck waiting for a TX that isn't coming).
+        var c6 = NewCoord();
+        c6.SubmitRoutineComposite(new[] { F("_base", 0, "Receiving, Listen mode.", SpeakWhen.AfterTx) }, speakNow: true);
+        Check("AfterTx while idle: the boundary is already behind us -> spoken now",
+            said.Count == 1 && said[0] == "Receiving, Listen mode.", true);
+
+        // ── Codex #4: shipped clauses are clean phrases; the composer joins them naturally and
+        //    each also reads well standalone. ──
+        {
+            var defs = NotificationDefaults.Policies;
+            string[] cleanClauses =
+            {
+                NotificationTemplateEngine.Format(defs[NotificationEventType.QsoCompleted].Template, new Dictionary<string,string>{["Callsign"]="K4YT"}),
+                NotificationTemplateEngine.Format(defs[NotificationEventType.TxMessageChanged].Template, new Dictionary<string,string>{["Message"]="73"}),
+                NotificationTemplateEngine.Format(defs[NotificationEventType.ReceivedReply].Template, new Dictionary<string,string>{["Received"]="received R minus 12"}),
+                NotificationTemplateEngine.Format(defs[NotificationEventType.NoDecodeWarning].Template, new Dictionary<string,string>()),
+                NotificationTemplateEngine.Format(defs[NotificationEventType.QsoStarted].Template, new Dictionary<string,string>{["Callsign"]="K4YT"}),
+            };
+            bool noEdgeSeparators = true;
+            foreach (var s in cleanClauses)
+                if (s.Length > 0 && (s[0] == ',' || s[0] == ' ' || s[s.Length-1] == ',' || s[s.Length-1] == ' '))
+                    noEdgeSeparators = false;
+            Check("every shipped clause phrase is free of leading/trailing structural punctuation", noEdgeSeparators, true);
+
+            // Standalone: one clause on its own boundary reads as itself.
+            var cc = NewCoord();
+            cc.SubmitRoutineComposite(new[] { F("TxMessageChanged", 0, "sending 73", SpeakWhen.Now) }, speakNow: true);
+            Check("standalone clause spoken as its own clean phrase", said.Count == 1 && said[0] == "sending 73", true);
+
+            // Two clean clauses sharing a boundary -> the composer inserts a natural join.
+            cc = NewCoord();
+            cc.SubmitRoutineComposite(new[]
+            {
+                F("ReceivedReply", 0, "received R minus 12", SpeakWhen.AfterRx),
+                F("QsoCompleted", 1, "K4YT logged", SpeakWhen.AfterRx),
+            }, speakNow: true);
+            cc.OnReceiveCycleComplete();
+            Check("two clean clauses at one boundary -> ONE naturally joined utterance",
+                said.Count == 1 && said[0] == "received R minus 12, K4YT logged", true);
+
+            // Default composite: base + clean clauses concatenated by the split reconstruct the
+            // familiar line, unchanged.
+            cc = NewCoord();
+            cc.SubmitRoutineComposite(new[]
+            {
+                F("QsoCompleted", 0, "K4YT logged", SpeakWhen.Now),
+                F("_base.a", 1, ", Transmitting, K4YT", SpeakWhen.Now),
+                F("TxMessageChanged", 2, "sending 73", SpeakWhen.Now),
+                F("_base.b", 3, ", Listen mode.", SpeakWhen.Now),
+            }, speakNow: true);
+            Check("default composite stays the familiar joined sentence",
+                said.Count == 1 && said[0] == "K4YT logged, Transmitting, K4YT, sending 73, Listen mode.", true);
+
+            // A disabled neighbour clause leaves no gap / double separator.
+            cc = NewCoord();
+            cc.SubmitRoutineComposite(new[]
+            {
+                F("_base.a", 0, "Transmitting, K4YT", SpeakWhen.Now),
+                F("_base.b", 1, ", ", SpeakWhen.Now),              // the separator that had wrapped a now-disabled clause
+                F("TxMessageChanged", 2, "sending 73", SpeakWhen.Now),
+                F("_base.c", 3, ", Listen mode.", SpeakWhen.Now),
+            }, speakNow: true);
+            Check("a removed neighbour clause leaves no doubled separator",
+                said.Count == 1 && said[0] == "Transmitting, K4YT, sending 73, Listen mode.", true);
+        }
+
+        // ── Codex #8: an invalid saved template is recorded so the UI can surface it. ──
+        {
+            string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_BadTmpl_" + Guid.NewGuid().ToString("N") + ".ini");
+            try
+            {
+                var ini = new IniFile(tmpIni);
+                ini.Write("notifyTemplate_ErrorWarning", "{Source}: {Nonexistent}");   // {Nonexistent} not a valid field
+                var s = new NotificationSettings();
+                s.LoadFromIni(ini);
+                Check("invalid saved template -> falls back to the code default",
+                    s.Policies[NotificationEventType.ErrorWarning].Template
+                        == NotificationDefaults.Policies[NotificationEventType.ErrorWarning].Template, true);
+                Check("invalid saved template -> recorded in RejectedTemplates for the UI",
+                    s.RejectedTemplates.ContainsKey(NotificationEventType.ErrorWarning), true);
+                CheckStr("...with the operator's rejected text kept for reference",
+                    s.RejectedTemplates[NotificationEventType.ErrorWarning], "{Source}: {Nonexistent}");
+
+                ini.Write("notifyTemplate_ErrorWarning", "{Source}: {Detail}");   // now valid
+                var s2 = new NotificationSettings();
+                s2.LoadFromIni(ini);
+                Check("a valid saved template -> no rejected-template notice",
+                    !s2.RejectedTemplates.ContainsKey(NotificationEventType.ErrorWarning), true);
+            }
+            finally { try { File.Delete(tmpIni); } catch { } }
+        }
+    }
+
+    // ── SpeakCondition migration from the legacy notifyDuringQso_ / notifySpeakWhen_==Never keys ──
+    static void SpeakConditionMigrationTests()
+    {
+        Console.WriteLine("\n── SpeakCondition: migration from legacy notifyDuringQso_ / notifySpeakWhen_==Never ──");
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_CondMig_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            var ini = new IniFile(tmpIni);
+            ini.Write("notifyDuringQso_ErrorWarning", "Suppress");        // -> OutsideQsoOnly
+            ini.Write("notifyDuringQso_ClockOutOfSync", "SpeakNormally"); // -> Always
+            ini.Write("notifySpeakWhen_ClockSynced", "Never");            // -> Condition.Never, timing falls to default
+            ini.Write("notifyDuringQso_RadioCatLost", "Suppress");        // legacy present...
+            ini.Write("notifyCondition_RadioCatLost", "DuringQsoOnly");   // ...but explicit key wins
+
+            var s = new NotificationSettings();
+            s.LoadFromIni(ini);
+            Check("migrate: notifyDuringQso_==Suppress -> OutsideQsoOnly",
+                s.Policies[NotificationEventType.ErrorWarning].Condition == SpeakCondition.OutsideQsoOnly, true);
+            Check("migrate: notifyDuringQso_==SpeakNormally -> Always",
+                s.Policies[NotificationEventType.ClockOutOfSync].Condition == SpeakCondition.Always, true);
+            Check("migrate: legacy notifySpeakWhen_==Never -> SpeakCondition.Never",
+                s.Policies[NotificationEventType.ClockSynced].Condition == SpeakCondition.Never, true);
+            Check("migrate: ...and the timing is NOT left as Never",
+                s.Policies[NotificationEventType.ClockSynced].SpeakWhen != SpeakWhen.Never, true);
+            Check("migrate: an explicit notifyCondition_ key wins over the legacy notifyDuringQso_",
+                s.Policies[NotificationEventType.RadioCatLost].Condition == SpeakCondition.DuringQsoOnly, true);
+
+            // Round-trip: SaveToIni writes notifyCondition_ and a legacy-compatible notifyDuringQso_.
+            s.SaveToIni(ini);
+            var reloaded = new NotificationSettings();
+            reloaded.LoadFromIni(ini);
+            Check("round-trip: Condition survives Save/Load",
+                reloaded.Policies[NotificationEventType.ErrorWarning].Condition == SpeakCondition.OutsideQsoOnly, true);
+            CheckStr("round-trip: legacy notifyDuringQso_ mirror is written for rollback",
+                ini.Read("notifyDuringQso_ErrorWarning"), "Suppress");
+        }
+        finally { try { File.Delete(tmpIni); } catch { } }
+    }
+
     // ── NotificationCenter: deferred delivery (Timing + DeferWhileTransmitting) ──
     // Configurable-notification-timing feature. FT8/FT4-agnostic by design (see
     // NotificationCenter.OnPeriodBoundary's own comment) -- these methods take no period-length
@@ -7773,8 +10317,8 @@ static class JimmyTests
         // for OnTransmittingChanged(false), not deliver from Publish, and not wait for a period
         // boundary either (that's NextPeriodBoundary's job, a separate axis).
         var txSettings = new NotificationSettings();
-        txSettings.Policies[NotificationEventType.QsoStarted].Timing = NotificationTiming.Immediate;
-        txSettings.Policies[NotificationEventType.QsoStarted].DeferWhileTransmitting = true;
+        // SpeakWhen.AfterTx is the modern equivalent of Immediate + DeferWhileTransmitting.
+        txSettings.Policies[NotificationEventType.QsoStarted].SpeakWhen = SpeakWhen.AfterTx;
         txSettings.Policies[NotificationEventType.QsoStarted].RepeatSeconds = 0;
         var txDelivery = new FakeNotificationDelivery();
         var txCenter = new NotificationCenter(txSettings, txDelivery);
@@ -7939,8 +10483,8 @@ static class JimmyTests
             delivery.AnnounceCount == 1, true);
         CheckStr("...with the exact required wording and the real measured offset",
             delivery.LastText, "Computer clock is out of sync, offset 2.0 seconds.");
-        Check("...delivered as Important (audible cue) -- operationally significant on both FT8 and FT4",
-            delivery.LastImportant == true, true);
+        Check("...delivered with an Important alert cue (off-focus accessible announcement)",
+            delivery.LastCue == AlertCue.Important, true);
 
         // Stays bad for several more periods -- transition-gated, so no repeat chatter.
         PublishDt(2.0);
@@ -8275,7 +10819,7 @@ static class JimmyTests
         // could delay an unrelated LATER test's own timing-sensitive dispatcher assertions (see
         // Main()'s own SetMinThreads comment on this exact class of cross-test interaction).
         var releaseHungConnection = new System.Threading.ManualResetEventSlim(false);
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
         {
             if (line.StartsWith("SET_TX_ENABLED"))
             {
@@ -8291,11 +10835,6 @@ static class JimmyTests
             }
             return "OK"; // HALT_TX (and anything else) gets a normal confirmed response
         });
-        if (listener == null)
-        {
-            Skip("HaltAbortsInFlightCommandTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -8355,7 +10894,7 @@ static class JimmyTests
     {
         Console.WriteLine("\n── HALT/restart stopped-state confirmation: a follow-up SNAPSHOT, not just HALT_TX's OK, proves TX/Tune actually stopped -- THE FIX ──");
         int snapshotCallCount = 0;
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
         {
             if (line == "HALT_TX") return "OK";
             if (line == "SNAPSHOT")
@@ -8370,11 +10909,6 @@ static class JimmyTests
             }
             return "OK";
         });
-        if (listener == null)
-        {
-            Skip("HaltConfirmsStoppedStateViaFollowUpSnapshotTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -8410,18 +10944,13 @@ static class JimmyTests
     static void HaltDoesNotConfirmWhenStillTransmittingTests()
     {
         Console.WriteLine("\n── HALT/restart stopped-state confirmation: bounded give-up when the engine keeps reporting still-transmitting -- THE FIX ──");
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
         {
             if (line == "HALT_TX") return "OK";
             if (line == "SNAPSHOT")
                 return "{\"mycall\":\"KB0UZT\",\"mygrid\":\"FN42\",\"radio\":{\"dialMhz\":14.074,\"transmitting\":true,\"tuning\":false,\"slot\":1}}";
             return "OK";
         });
-        if (listener == null)
-        {
-            Skip("HaltDoesNotConfirmWhenStillTransmittingTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -8466,13 +10995,8 @@ static class JimmyTests
         Console.WriteLine("\n── T8 fix: rejected Reply preserves the selected station -- THE FIX ──");
         // Only REPLY gets ERR -- everything else (e.g. a stray SET_TX_OFFSET) gets a plain OK,
         // so this only targets the exact command under test.
-        var engineListener = StartStubEngineHostWithResponses(line =>
+        var engineListener = new StubEngineHost(line =>
             line.StartsWith("REPLY") ? "ERR rejected by test stub" : "OK");
-        if (engineListener == null)
-        {
-            Skip("RejectedReplyPreservesQueuedStationTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -8534,16 +11058,11 @@ static class JimmyTests
 
         var seen = new System.Collections.Generic.List<string>();
         var seenLock = new object();
-        var engineListener = StartStubEngineHostWithResponses(line =>
+        var engineListener = new StubEngineHost(line =>
         {
             lock (seenLock) seen.Add(line);
             return "OK";
         });
-        if (engineListener == null)
-        {
-            Skip("RxTxFrequencyModeReplyTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             const int theirHz = 1234;
@@ -8639,33 +11158,28 @@ static class JimmyTests
 
         string[] resp = { "OK" };
         string gotCommand = null;
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
         {
             gotCommand = line;
             return resp[0] == "<hang>" ? null : resp[0];
         });
-        if (listener == null)
-        {
-            Skip("EmergencyHaltTxConfirmationTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             resp[0] = "OK";
             gotCommand = null;
-            bool okResult = NativeEngineClient.TryEmergencyHaltTx();
+            bool okResult = NativeEngineClient.TryEmergencyHaltTx(listener.Port);
             Check("THE FIX: returns true only when the engine answers an explicit OK", okResult, true);
             Check("...and it actually sent HALT_TX", gotCommand == "HALT_TX", true);
 
             resp[0] = "ERR something went wrong";
-            Check("an ERR response is not a confirmation -> false", NativeEngineClient.TryEmergencyHaltTx(), false);
+            Check("an ERR response is not a confirmation -> false", NativeEngineClient.TryEmergencyHaltTx(listener.Port), false);
 
             resp[0] = "MAYBE";
-            Check("a malformed / unexpected response is not a confirmation -> false", NativeEngineClient.TryEmergencyHaltTx(), false);
+            Check("a malformed / unexpected response is not a confirmation -> false", NativeEngineClient.TryEmergencyHaltTx(listener.Port), false);
 
             resp[0] = "<hang>";
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            bool hungResult = NativeEngineClient.TryEmergencyHaltTx();
+            bool hungResult = NativeEngineClient.TryEmergencyHaltTx(listener.Port);
             sw.Stop();
             Check("a hung engine (no response) -> false", hungResult, false);
             Check($"...and it gave up within the bounded read budget ({sw.ElapsedMilliseconds}ms, < 2000ms)", sw.ElapsedMilliseconds < 2000, true);
@@ -8696,6 +11210,188 @@ static class JimmyTests
         }
     }
 
+    // ── Escape / Alt+H "Tx halted" announcement gate (WsjtxClient.HasActiveTxOrCycle) ──
+    // Hardened per the Codex Nexus audit (Pass 9): the announce-gate must prefer the FRESH
+    // engine-snapshot facts (transmitting / tuning, reconciled every poll) and only trust
+    // Jimmy's own CQ/QSO intent (txMode==CALL_CQ / callInProg) when the equally-fresh txEnabled
+    // fact agrees a cycle is actually armed -- so a stale mirror left over from a completed
+    // contact or an engine reconnect can't produce a phantom "Tx halted". The six operator
+    // cases from the brief:
+    //   active transmission        -> announce
+    //   active QSO between TX slots -> announce (txEnabled && callInProg)
+    //   active CQ cycle            -> announce (txEnabled && CALL_CQ)
+    //   Tune                       -> announce
+    //   truly idle Listen          -> SILENT
+    //   stale callInProg/CALL_CQ after the engine disarmed TX -> SILENT (the hardening)
+    static void EscapeAltHAnnouncementGateTests()
+    {
+        Console.WriteLine("\n── Escape / Alt+H: 'Tx halted' announcement gate (HasActiveTxOrCycle) ──");
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42";
+            WsjtxClient MakeClient()
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                return new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            }
+            DirectSnapshot Snap(bool transmitting, bool tuning, bool txEnabled, ulong slot) =>
+                ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") +
+                        @", ""tuning"": " + (tuning ? "true" : "false") +
+                        @", ""txEnabled"": " + (txEnabled ? "true" : "false") + @", ""slot"": " + slot + @" },
+                    ""recentDecodes"": [] }");
+
+            // 1. Active transmission -> announce.
+            var wc = MakeClient();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: true, tuning: false, txEnabled: true, 1));
+            Check("active transmission -> announce", wc.HasActiveTxOrCycle, true);
+
+            // 2. Active QSO, listening between TX slots (not transmitting, TX armed, callInProg set).
+            wc = MakeClient();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: false, txEnabled: true, 2));
+            wc.callInProg = "W1AW";
+            Check("active QSO between slots -> announce", wc.HasActiveTxOrCycle, true);
+
+            // 3. Active CQ cycle (CALL_CQ, TX armed, not transmitting this instant).
+            wc = MakeClient();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: false, txEnabled: true, 3));
+            wc.txMode = WsjtxClient.TxModes.CALL_CQ;
+            Check("active CQ cycle -> announce", wc.HasActiveTxOrCycle, true);
+
+            // 4. Tune carrier up.
+            wc = MakeClient();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: true, txEnabled: false, 4));
+            Check("Tune -> announce", wc.HasActiveTxOrCycle, true);
+
+            // 5. Truly idle Listen -> SILENT.
+            wc = MakeClient();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: false, txEnabled: false, 5));
+            Check("truly idle Listen -> silent", wc.HasActiveTxOrCycle, false);
+
+            // 6. THE HARDENING: a stale callInProg / CALL_CQ after the engine disarmed TX on its
+            //    own (completion / watchdog / reconnect) -> SILENT, because the fresh snapshot
+            //    reports txEnabled=false.
+            wc = MakeClient();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: false, txEnabled: false, 6));
+            wc.callInProg = "W1AW";
+            wc.txMode = WsjtxClient.TxModes.CALL_CQ;
+            Check("stale callInProg + CALL_CQ but engine disarmed TX -> silent (hardened gate)",
+                  wc.HasActiveTxOrCycle, false);
+
+            // 7. …and it recovers the moment a snapshot reports TX armed again.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: false, txEnabled: true, 7));
+            Check("…and re-announces once the engine re-arms TX with the QSO still up",
+                  wc.HasActiveTxOrCycle, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  EscapeAltHAnnouncementGateTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── JIMMY COMPAT (nexus-compat): the Fake-It unresolved-restore warning is announced ONCE
+    // PER EPISODE, and that identity survives a Direct transport reconnect (Codex Audit #10) ──
+    // The engine sets RadioStatus.fake_it_restore_warning + .fake_it_restore_warning_id while a
+    // Fake-It dial restore is UNRESOLVED and clears both (null) when it reconciles.
+    // DirectApplyStatus dedups on (episode id + snapshot SessionToken) -- NOT message text --
+    // and does NOT reset that identity on a reconnect, so the SAME still-unresolved episode is
+    // announced only once total. A genuinely new episode (higher id, or a new EngineHost's new
+    // token) announces again even with identical wording. The clearing is silent.
+    static void FakeItRestoreWarningSurfacesOnceThenClearsSilentlyTests()
+    {
+        Console.WriteLine("\n── Fake It: unresolved-restore warning is once-per-episode across a Direct reconnect ──");
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42";
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var notify = new FakeNotificationDelivery();
+            wc.Notify = new NotificationCenter(new NotificationSettings(), notify);
+            void Reconnect() { wc.DisconnectDirectEngine(); wc.ConnectDirectEngine(myCall, myGrid); }
+            wc.ConnectDirectEngine(myCall, myGrid);
+            wc.TestSetMode("FT8");
+
+            const string warn = "Fake It could not confirm your dial was put back to 14.074 MHz -- check your VFO frequency";
+
+            // fakeItId == null / warn == null => a healthy or absent restore (no id emitted).
+            DirectSnapshot Snap(ulong slot, string fakeItWarn, long? fakeItId, string token) =>
+                ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    " + (token == null ? "" : @"""sessionToken"": """ + token + @""", ") + @"
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": " + slot +
+                        (fakeItWarn == null ? "" : @", ""fakeItRestoreWarning"": """ + fakeItWarn + @"""") +
+                        (fakeItId == null ? "" : @", ""fakeItRestoreWarningId"": " + fakeItId.Value) + @" },
+                    ""recentDecodes"": [] }");
+
+            // 7. Healthy / no restore -> nothing announced.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1, null, null, "A"));
+            int c = notify.AnnounceCount;
+
+            // Episode #1 becomes unresolved -> announced ONCE.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2, warn, 1, "A"));
+            Check("unresolved episode #1 raises an accessible warning", notify.AnnounceCount == c + 1, true);
+            Check("...with the engine's operator wording",
+                  notify.LastText != null && notify.LastText.Contains("check your VFO frequency"), true);
+
+            // 1. Same episode, repeated snapshots -> not re-announced.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(3, warn, 1, "A"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(4, warn, 1, "A"));
+            Check("repeated snapshots of the SAME episode do not re-announce", notify.AnnounceCount == c + 1, true);
+
+            // 2. Direct transport reconnect, SAME episode still unresolved -> STILL only once total.
+            Reconnect(); // simulated reconnect: DisconnectDirectEngine + ConnectDirectEngine (full reset)
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(5, warn, 1, "A"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(6, warn, 1, "A"));
+            Check("THE FIX: a Direct reconnect does NOT re-announce the same still-unresolved episode",
+                  notify.AnnounceCount == c + 1, true);
+
+            // 3. Same wording + same target frequency, but a genuinely NEW episode (id bumped).
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(7, warn, 2, "A"));
+            Check("a genuinely NEW episode with identical wording announces again", notify.AnnounceCount == c + 2, true);
+
+            // 4. Episode #2 resolves -> clears SILENTLY.
+            int beforeClear = notify.AnnounceCount;
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(8, null, null, "A"));
+            Check("a resolved episode clears the warning silently", notify.AnnounceCount == beforeClear, true);
+            // ...and a reconnect after the clear does not resurrect it.
+            Reconnect();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(9, null, null, "A"));
+            Check("a reconnect after resolution stays silent", notify.AnnounceCount == beforeClear, true);
+
+            // 5. A later new episode after resolution -> announces once.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(10, warn, 3, "A"));
+            Check("a later new unresolved episode announces once", notify.AnnounceCount == beforeClear + 1, true);
+
+            // 6. New EngineHost / session (different SessionToken) reports an episode whose local
+            //    id (3) COLLIDES with the last one announced -> treated as NEW, announces.
+            int beforeSessionChange = notify.AnnounceCount;
+            Reconnect();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(11, warn, 3, "B"));
+            Check("a colliding episode id from a DIFFERENT session token announces (not suppressed)",
+                  notify.AnnounceCount == beforeSessionChange + 1, true);
+            // ...and that one is then also once-per-episode.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(12, warn, 3, "B"));
+            Check("the new-session episode is itself announced only once", notify.AnnounceCount == beforeSessionChange + 1, true);
+
+            wc.DisconnectDirectEngine(); // stop the poll timer this test started
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  FakeItRestoreWarningSurfacesOnceThenClearsSilentlyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
     // ── Read-only audit finding 2, 2026-08-27: a failed manual Tx-frequency change must not
     // leave _manualFreqThisQso set ──
     // _manualFreqThisQso suppresses automatic "Best free frequency" placement for the rest of
@@ -8707,13 +11403,8 @@ static class JimmyTests
         Console.WriteLine("\n── Read-only audit finding 2: failed manual Tx change preserves Best Free ──");
 
         string[] resp = { "OK" };
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
             line.StartsWith("SET_TX_OFFSET") ? resp[0] : "OK");
-        if (listener == null)
-        {
-            Skip("FailedManualTxOffsetPreservesBestFreeTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -8773,17 +11464,12 @@ static class JimmyTests
         var seen = new System.Collections.Generic.List<string>();
         var seenLock = new object();
         string[] resp = { "OK" };
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
         {
             lock (seenLock) seen.Add(line);
             if (line.StartsWith("SET_TX_OFFSET") || line.StartsWith("SET_RX_OFFSET")) return resp[0];
             return "OK";
         });
-        if (listener == null)
-        {
-            Skip("RapidFrequencyNudgesAccumulateTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -8886,7 +11572,7 @@ static class JimmyTests
         // ---- Part 1: matching token authenticates and allows a TX-arming command through ----
         bool snapshotSeen = false;
         bool callCqReachedStub = false;
-        var matchListener = StartStubEngineHostWithResponses(line =>
+        var matchListener = new StubEngineHost(line =>
         {
             if (line == "SNAPSHOT")
             {
@@ -8896,11 +11582,6 @@ static class JimmyTests
             if (line.StartsWith("CALL_CQ")) { callCqReachedStub = true; return "OK"; }
             return "OK";
         });
-        if (matchListener == null)
-        {
-            Skip("SessionTokenAuthenticationTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -8949,7 +11630,7 @@ static class JimmyTests
         WsjtxMessage.NegoState = WsjtxMessage.NegoStates.WAIT; // reset from Part 1 before reusing the shared static
         bool snapshotSeenMismatch = false;
         bool callCqReachedStubMismatch = false;
-        var mismatchListener = StartStubEngineHostWithResponses(line =>
+        var mismatchListener = new StubEngineHost(line =>
         {
             if (line == "SNAPSHOT")
             {
@@ -8959,11 +11640,6 @@ static class JimmyTests
             if (line.StartsWith("CALL_CQ")) { callCqReachedStubMismatch = true; return "OK"; }
             return "OK";
         });
-        if (mismatchListener == null)
-        {
-            Skip("SessionTokenAuthenticationTests (mismatch part)", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -9025,7 +11701,7 @@ static class JimmyTests
         // session just launched. ----
         WsjtxMessage.NegoState = WsjtxMessage.NegoStates.WAIT;
         bool snapshotSeenOutdated = false;
-        var outdatedListener = StartStubEngineHostWithResponses(line =>
+        var outdatedListener = new StubEngineHost(line =>
         {
             if (line == "SNAPSHOT")
             {
@@ -9037,11 +11713,6 @@ static class JimmyTests
             }
             return "OK";
         });
-        if (outdatedListener == null)
-        {
-            Skip("SessionTokenAuthenticationTests (outdated-binary part)", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -9108,7 +11779,7 @@ static class JimmyTests
         Console.WriteLine("\n── Repeat limit authoritative-stop fix: reaching the limit actively sends SET_TX_ENABLED 0, proving no further transmission -- THE FIX ──");
         bool setTxDisabledSent = false;
         bool txArmCommandSentAfterStop = false;
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
         {
             if (line.StartsWith("SET_TX_ENABLED 0"))
             {
@@ -9126,11 +11797,6 @@ static class JimmyTests
             }
             return "OK";
         });
-        if (listener == null)
-        {
-            Skip("RepeatLimitActivelyStopsTxTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -9189,16 +11855,11 @@ static class JimmyTests
         // nothing else stops TX for it -- the explicit SET_TX_ENABLED 0 send is the ONLY thing
         // that does) ----
         bool setTxDisabledSentCq = false;
-        var cqListener = StartStubEngineHostWithResponses(line =>
+        var cqListener = new StubEngineHost(line =>
         {
             if (line.StartsWith("SET_TX_ENABLED 0")) { setTxDisabledSentCq = true; return "OK"; }
             return "OK";
         });
-        if (cqListener == null)
-        {
-            Skip("RepeatLimitActivelyStopsTxTests (CALL_CQ part)", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -9257,7 +11918,7 @@ static class JimmyTests
         Console.WriteLine("\n── Repeat-limit timing fix: the halt fires on attempt 3's own transmitting-ended edge, before a 4th attempt could key -- THE FIX ──");
         bool setTxDisabledSent = false;
         bool txArmCommandSent = false;
-        var listener = StartStubEngineHostWithResponses(line =>
+        var listener = new StubEngineHost(line =>
         {
             if (line.StartsWith("SET_TX_ENABLED 0")) { setTxDisabledSent = true; return "OK"; }
             // Anything that could actually key the radio again for this call.
@@ -10383,7 +13044,7 @@ static class JimmyTests
         Console.WriteLine("\n── Active QSO survives band change: a REPLY confirmed AFTER the band already changed must not resurrect the old-band QSO -- THE FIX ──");
         var acceptedReply = new System.Threading.ManualResetEventSlim(false);
         var releaseReply = new System.Threading.ManualResetEventSlim(false);
-        var engineListener = StartStubEngineHostWithResponses(line =>
+        var engineListener = new StubEngineHost(line =>
         {
             if (line.StartsWith("REPLY"))
             {
@@ -10393,11 +13054,6 @@ static class JimmyTests
             }
             return "OK";
         });
-        if (engineListener == null)
-        {
-            Skip("DelayedReplyAfterBandChangeDoesNotResurrectStaleQsoTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -10500,7 +13156,7 @@ static class JimmyTests
         Console.WriteLine("\n── Unified contact epoch: a REPLY confirmed AFTER an operator abort must not resurrect the QSO -- THE FIX ──");
         var acceptedReply = new System.Threading.ManualResetEventSlim(false);
         var releaseReply = new System.Threading.ManualResetEventSlim(false);
-        var engineListener = StartStubEngineHostWithResponses(line =>
+        var engineListener = new StubEngineHost(line =>
         {
             if (line.StartsWith("REPLY"))
             {
@@ -10510,11 +13166,6 @@ static class JimmyTests
             }
             return "OK";
         });
-        if (engineListener == null)
-        {
-            Skip("DelayedReplyAfterOperatorAbortDoesNotResurrectStaleQsoTests", "control port 58239 already in use by another Jimmy/engine-host session");
-            return;
-        }
         try
         {
             var ctrl = new Controller();
@@ -10688,6 +13339,312 @@ static class JimmyTests
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
             try { File.Delete(workingDbPath); } catch { }
             try { File.Delete(blockerFile); } catch { }
+        }
+    }
+
+    // ── 2.0.58: CAT-loss / CAT-recovery notification, including recovery across a reconnect ──
+    // Hardening for a real 2.0.57 hardware-test miss: automatic CAT recovery worked but no
+    // "restored" notification was heard, because a Direct transport/engine reconnect resets
+    // _lastCatOk to null, making the next healthy reading look like a clean startup. The session
+    // latch (_catOutageObservedThisSession, NOT reset on reconnect) fixes that.
+    static void DirectCatHealthNotificationTests()
+    {
+        Console.WriteLine("\n── Direct-path CAT-loss / CAT-recovery notification ──");
+
+        (WsjtxClient wc, FakeNotificationDelivery delivery) MakeClient()
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.RigModel = "2043";
+            ctrl.Radio.ComPort = "COM4";
+            ctrl.Radio.BaudRate = "115200";
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var delivery = new FakeNotificationDelivery();
+            wc.Notify = new NotificationCenter(new NotificationSettings(), delivery);
+            return (wc, delivery);
+        }
+
+        // Clean startup: first healthy reading is not "recovery", says nothing.
+        {
+            var (wc, delivery) = MakeClient();
+            wc.TestApplyCatHealth(true, null);
+            Check("First healthy CAT reading on a clean startup announces nothing",
+                delivery.AnnounceCount == 0, true);
+        }
+
+        // Loss edge: concise generic wording built from the configured connection, no raw
+        // cat_detail, and it carries the Critical alert cue (RadioCatLost is Critical).
+        {
+            var (wc, delivery) = MakeClient();
+            wc.TestApplyCatHealth(false, "RPRT -20\\nrigctld: get_freq: error");
+            Check("CAT loss is announced once", delivery.AnnounceCount == 1, true);
+            Check("CAT-loss speech is the concise generic wording",
+                delivery.LastText != null && delivery.LastText.StartsWith("Radio CAT link lost.") &&
+                delivery.LastText.Contains("on COM4 at 115200 baud"), true);
+            Check("CAT-loss speech never leaks the raw Nexus/Hamlib cat_detail",
+                delivery.LastText != null && !delivery.LastText.Contains("RPRT") && !delivery.LastText.Contains("rigctld"), true);
+            Check("CAT loss carries the Critical alert cue", delivery.LastCue == AlertCue.Critical, true);
+
+            int afterLoss = delivery.AnnounceCount;
+            wc.TestApplyCatHealth(false, "still down");
+            Check("A repeated false reading does not re-announce", delivery.AnnounceCount == afterLoss, true);
+        }
+
+        // Direct-path recovery (no reconnect): false -> true announces "restored".
+        {
+            var (wc, delivery) = MakeClient();
+            wc.TestApplyCatHealth(false, "down");
+            wc.TestApplyCatHealth(true, null);
+            Check("CAT false -> true announces recovery", delivery.AnnounceCount == 2, true);
+            CheckStr("Recovery wording is the reworded 'restored' text", delivery.LastText, "Radio CAT link restored.");
+        }
+
+        // The 2.0.57 hardware-test case: false -> Direct reconnect/reset -> true still recovers.
+        {
+            var (wc, delivery) = MakeClient();
+            wc.TestApplyCatHealth(false, "down");
+            int afterLoss = delivery.AnnounceCount;
+            wc.TestResetCatHealthLikeDirectReconnect();
+            Check("A reconnect clears _lastCatOk...", wc.TestLastCatOk == null, true);
+            Check("...but the session outage latch survives it", wc.TestCatOutageObservedThisSession, true);
+            wc.TestApplyCatHealth(true, null);
+            Check("CAT false -> reconnect reset -> true STILL announces recovery",
+                delivery.AnnounceCount == afterLoss + 1, true);
+            CheckStr("...with the 'restored' wording", delivery.LastText, "Radio CAT link restored.");
+        }
+
+        // A reconnect with no prior outage must not manufacture a false "restored".
+        {
+            var (wc, delivery) = MakeClient();
+            wc.TestResetCatHealthLikeDirectReconnect();
+            wc.TestApplyCatHealth(true, null);
+            Check("Reconnect + first-ever healthy reading (no outage seen) announces nothing",
+                delivery.AnnounceCount == 0, true);
+        }
+    }
+
+    // ── 2.0.59: CAT-down routine status composition ──
+    // Hardware testing showed a routine idle status of "Radio CAT link lost. Decoding continues,
+    // RX1 16 available stations, Listen mode." while the physical radio was powered OFF. To the
+    // operator the radio is simply off; the routine status must not read like normal reception.
+    // This is status COMPOSITION only -- the dedicated edge-triggered RadioCatLost notification
+    // (DirectCatHealthNotificationTests above) is unchanged, and a genuine engine-reported
+    // Transmitting/Tune state must still be shown.
+    static void DirectCatDownIdleStatusCompositionTests()
+    {
+        Console.WriteLine("\n── CAT-down idle status is concise, not fake 'still receiving' text ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_CatDownStatus_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetMode("FT8");
+            // cqPaused defaults true (WsjtxClient field default); left true it routes ShowStatus
+            // through its own separate cqPaused-branch template. Real idle Listen operation has
+            // already cleared it -- match that so this exercises the main composition path (same
+            // reasoning as FinalQsoLoggedAndSendingAnnounceTogetherTests).
+            wc.cqPaused = false;
+            var fakeStatusView = new FakeStatusView();
+            wc.StatusView = fakeStatusView;
+            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+
+            const string myCall = "KB0UZT";
+            const string myGrid = "FN42";
+
+            // The routine idle render can be delivered immediately OR batched into
+            // _pendingStatusText (callInProg == null + deferEligible + trPeriod set). Null the
+            // fake view's last text before each phase so this reads whichever one this phase
+            // actually produced, never a stale earlier render.
+            string RenderedStatus() => fakeStatusView.LastStatusText ?? wc.TestPendingStatusText ?? "";
+
+            DirectSnapshot IdleSnap(ulong slot, bool catOk) => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": " + (catOk ? "true" : "false") + @", ""slot"": " + slot + @" },
+                ""recentDecodes"": []
+            }");
+
+            // Baseline: CAT healthy, idle Listen mode -> the normal "Receiving" wording.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, IdleSnap(1000, catOk: true));
+            fakeStatusView.LastStatusText = null;
+            wc.TestShowStatus();
+            string healthy = RenderedStatus();
+            Check("CAT healthy idle status leads with 'Receiving'",
+                healthy.IndexOf("Receiving", StringComparison.OrdinalIgnoreCase) >= 0, true);
+
+            // CAT goes down while sitting idle in Listen mode (soundcard decoding still runs, so
+            // a later decode tick re-renders the routine status -- forced here directly).
+            wc.TestApplyDirectSnapshot(myCall, myGrid, IdleSnap(1001, catOk: false));
+            fakeStatusView.LastStatusText = null;
+            wc.TestShowStatus();
+            string down = RenderedStatus();
+            CheckStr("CAT-down idle status is exactly the concise CAT-lost line", down, "Radio CAT link lost, Listen mode.");
+            Check("CAT-down idle status names the lost CAT link",
+                down.IndexOf("Radio CAT link lost", StringComparison.OrdinalIgnoreCase) >= 0, true);
+            Check("CAT-down idle status says 'Listen mode'",
+                down.IndexOf("Listen mode", StringComparison.OrdinalIgnoreCase) >= 0, true);
+            Check("CAT-down idle status does NOT claim 'Decoding continues'",
+                down.IndexOf("Decoding continues", StringComparison.OrdinalIgnoreCase) < 0, true);
+            Check("CAT-down idle status does NOT report an available-station count",
+                down.IndexOf("available station", StringComparison.OrdinalIgnoreCase) < 0, true);
+            Check("CAT-down idle status does NOT report wanted/new-DXCC counts",
+                down.IndexOf("wanted", StringComparison.OrdinalIgnoreCase) < 0 &&
+                down.IndexOf("new DXCC", StringComparison.OrdinalIgnoreCase) < 0, true);
+            Check("CAT-down idle status does NOT read as normal reception ('Receiving')",
+                down.IndexOf("Receiving", StringComparison.OrdinalIgnoreCase) < 0, true);
+
+            // Safety exception: a genuine engine-reported transmit must NOT be masked by the
+            // CAT-down wording.
+            var txSnap = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""tuning"": false, ""catOk"": false, ""slot"": 1002 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, txSnap);
+            fakeStatusView.LastStatusText = null;
+            wc.TestShowStatus();
+            string txText = RenderedStatus();
+            Check("Engine-reported Transmitting is still shown even with CAT down",
+                txText.IndexOf("Transmitting", StringComparison.OrdinalIgnoreCase) >= 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectCatDownIdleStatusCompositionTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Active-QSO status must not name the worked station twice ──
+    // Proven composition bug (Item 3): ShowStatus built the standalone "name the active call"
+    // fragment (inProg) AND the richer "<call> to <other>, <what>" fragment (otherStr), which
+    // ALSO opens with that same call, then concatenated both -- producing
+    //   "Transmitting, K9RRW, K9RRW to N6S, -20, sending EN34."
+    //   "Receiving, J38DX, J38DX to KB1RCC, RR73, Listen mode."
+    // The fix drops the standalone fragment (folding its " selected" marker into otherStr)
+    // whenever the other-party text is present. Table-driven so CQ / compound / stage-only /
+    // selected / plain-active-QSO all stay covered against a regression.
+    static void DirectActiveQsoStatusNoDuplicateCallTests()
+    {
+        Console.WriteLine("\n── Active-QSO status names the worked station once, not twice ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_DupCallStatus_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+
+        // Mirror WsjtxClient.Spacify: every non-space char followed by a space, trimmed.
+        string Spac(string s)
+        {
+            string r = "";
+            foreach (char c in s) if (c != ' ') r += c + " ";
+            return r.TrimEnd();
+        }
+        int Occurrences(string hay, string needle)
+        {
+            int n = 0, i = 0;
+            while ((i = hay.IndexOf(needle, i, StringComparison.Ordinal)) >= 0) { n++; i += needle.Length; }
+            return n;
+        }
+
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetMode("FT8");
+            wc.cqPaused = false;
+            var fakeStatusView = new FakeStatusView();
+            wc.StatusView = fakeStatusView;
+            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+
+            const string myCall = "KB0UZT";
+            const string myGrid = "FN42";
+
+            DirectSnapshot Snap(ulong slot, bool transmitting) => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") + @", ""tuning"": false, ""catOk"": true, ""slot"": " + slot + @" },
+                ""recentDecodes"": []
+            }");
+
+            string RenderedStatus() => fakeStatusView.LastStatusText ?? wc.TestPendingStatusText ?? "";
+
+            ulong slotSeq = 2000;
+
+            void Row(string call, string other, string stage, bool transmitting, bool selected,
+                     string mode, bool expectOther)
+            {
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slotSeq++, transmitting));
+                wc.callInProg = call;
+                wc.TestSetOtherParty(other, stage);
+                if (selected) wc.TestSetNewSelection(true);
+                fakeStatusView.LastStatusText = null;
+                wc.TestShowStatus();
+                string s = RenderedStatus();
+
+                string sc = Spac(call);
+                string label = $"[{mode}] {call}"
+                             + (other != null ? $" to {other}" : "")
+                             + (stage != null ? $" ({stage})" : "")
+                             + (selected ? " selected" : "");
+
+                Check($"{label}: worked station named exactly once",
+                      Occurrences(s, sc) == 1, true);
+                Check($"{label}: no ', {call}, {call}' doubling",
+                      s.IndexOf($", {sc}, {sc}", StringComparison.Ordinal) < 0, true);
+                Check($"{label}: status leads with '{mode}'",
+                      s.IndexOf(mode, StringComparison.Ordinal) == 0, true);
+                if (expectOther && other != null)
+                {
+                    string head = selected ? $"{sc} selected to {Spac(other)}" : $"{sc} to {Spac(other)}";
+                    Check($"{label}: keeps the '{call} to {other}' description",
+                          s.IndexOf(head, StringComparison.Ordinal) >= 0, true);
+                }
+                if (selected)
+                    Check($"{label}: keeps the ' selected' marker",
+                          s.IndexOf(" selected", StringComparison.Ordinal) >= 0, true);
+            }
+
+            // call, other, stage, transmitting, selected, leading word, expect "to <other>"
+            Row("K9RRW", "N6S", "-20", true, false, "Transmitting", true);      // the exact reported TX case
+            Row("J38DX", "KB1RCC", "RR73", false, false, "Receiving", true);    // the exact reported RX case
+            Row("W1AW/2", "DL1ABC", "73", false, false, "Receiving", true);     // compound call, still once
+            Row("HB9GWX", null, "RRR", false, false, "Receiving", false);       // stage only, no other-call
+            Row("K9RRW", "N6S", "-20", false, true, "Receiving", true);         // " selected" folded in, not lost
+            Row("VP2EIH", null, null, false, false, "Receiving", false);        // plain active QSO: unchanged, single mention
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectActiveQsoStatusNoDuplicateCallTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
         }
     }
 
@@ -11153,6 +14110,79 @@ static class JimmyTests
     }
 
     // ── Controller.ParseRowOrder: INI parsing for both row-order settings ─────────
+    // ── 2.0.58: fresh-install / missing-key fallback / Restore Defaults / master file agree ──
+    static void RowOrderDefaultsSyncTests()
+    {
+        Console.WriteLine("\n── Row-order defaults: every layer agrees ──");
+
+        var approvedCallWaiting = new[] { "tag", "pri", "country", "callp", "snr", "distAz" };
+        var approvedRawDecode = new[] { "callsign", "side", "tag", "message", "snr", "grid", "country", "distAz" };
+
+        // The approved default ORDER, as published in the master defaults spec.
+        Check("RowDisplayOrderDlg.CallWaitingDefaultOrder == approved value",
+            RowDisplayOrderDlg.CallWaitingDefaultOrder.SequenceEqual(approvedCallWaiting), true);
+        Check("RowDisplayOrderDlg.RawDecodeDefaultOrder == approved value",
+            RowDisplayOrderDlg.RawDecodeDefaultOrder.SequenceEqual(approvedRawDecode), true);
+
+        // Missing-key fallback (WsjtxClient field initializer) must match the Restore-Defaults order.
+        var wc = new WsjtxClient(NewMinimalCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        Check("WsjtxClient.callWaitingRowOrderFields (missing-key fallback) == CallWaitingDefaultOrder",
+            wc.callWaitingRowOrderFields.SequenceEqual(RowDisplayOrderDlg.CallWaitingDefaultOrder), true);
+        Check("WsjtxClient.rawDecodeRowOrderFields (missing-key fallback) == RawDecodeDefaultOrder",
+            wc.rawDecodeRowOrderFields.SequenceEqual(RowDisplayOrderDlg.RawDecodeDefaultOrder), true);
+
+        // Every default-order field must exist in the (never-trimmed) field universe, so an
+        // upgrading user who added other fields keeps them.
+        foreach (var f in RowDisplayOrderDlg.CallWaitingDefaultOrder)
+            Check($"call-waiting default field '{f}' is in the field universe",
+                RowDisplayOrderDlg.CallWaitingDefaultFields.Contains(f, StringComparer.OrdinalIgnoreCase), true);
+        foreach (var f in RowDisplayOrderDlg.RawDecodeDefaultOrder)
+            Check($"raw-decode default field '{f}' is in the field universe",
+                RowDisplayOrderDlg.RawDecodeDefaultFields.Contains(f, StringComparer.OrdinalIgnoreCase), true);
+
+        // SpotWatch already uses one array for both fallback and reset -- assert it still matches
+        // the approved spec so a future edit can't split them apart.
+        var approvedSpotWatch = new[] { "callsign", "age", "band", "frequency", "mode", "evenOdd", "snr",
+            "senderGrid", "country", "spottercall", "spottercountry", "spottergrid" };
+        Check("RowDisplayOrderDlg.SpotWatchDefaultFields == approved value",
+            RowDisplayOrderDlg.SpotWatchDefaultFields.SequenceEqual(approvedSpotWatch), true);
+
+        // If the master defaults file is present on this machine, cross-check the row-order keys
+        // against it too. Skipped (not failed) elsewhere -- it lives outside the repo.
+        string master = @"C:\Users\Jim\Dropbox\amateur radio\Keys_private\Jimmy Next defaults.ini";
+        if (File.Exists(master))
+        {
+            var lines = File.ReadAllLines(master);
+            string Val(string key) => lines.FirstOrDefault(l => l.StartsWith(key + "="))?.Substring(key.Length + 1);
+            CheckStr("master file callWaitingRowOrder matches the approved default order",
+                Val("callWaitingRowOrder"), string.Join(",", RowDisplayOrderDlg.CallWaitingDefaultOrder));
+            CheckStr("master file rawDecodeRowOrder matches the approved default order",
+                Val("rawDecodeRowOrder"), string.Join(",", RowDisplayOrderDlg.RawDecodeDefaultOrder));
+            CheckStr("master file spotWatchRowOrder matches the approved default order",
+                Val("spotWatchRowOrder"), string.Join(",", RowDisplayOrderDlg.SpotWatchDefaultFields));
+            CheckStr("master file notificationHistoryIncludeRoutineStatus default is True",
+                Val("notificationHistoryIncludeRoutineStatus"), "True");
+            CheckStr("master file RadioCatRecovered template is the reworded 'restored' text",
+                Val("notifyTemplate_RadioCatRecovered"), "Radio CAT link restored.");
+            CheckStr("master file has the RadioCatLost notification priority",
+                Val("notifyPriority_RadioCatLost"), "Important");
+        }
+        else
+        {
+            Skip("RowOrderDefaultsSyncTests master-file cross-check", "master defaults file not present on this machine");
+        }
+    }
+
+    static Controller NewMinimalCtrl()
+    {
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        return ctrl;
+    }
+
     static void ParseRowOrderTests()
     {
         Console.WriteLine("\n── Controller.ParseRowOrder ──");
@@ -11235,6 +14265,20 @@ static class JimmyTests
                 clean.UnassignedDueToConflict.Count == 0, true);
             Check("Fresh install: TxFreqUp has its Shift+F12 default",
                 clean[HotkeyAction.TxFreqUp] == (System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F12), true);
+
+            // 2.0.59: the old hard-coded Ctrl+Y sound-demo branch is gone. Ctrl+Y was never a
+            // reserved key, so an operator may still bind it to a real Jimmy command through the
+            // normal hotkey system.
+            Check("Ctrl+Y is not a reserved key -- it stays freely assignable",
+                HotkeyConfig.IsReserved(System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Y), false);
+            var withCtrlY = new IniFile(System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "JimmyHotkeyCtrlY_" + Guid.NewGuid().ToString("N") + ".ini"));
+            int ctrlY = (int)(System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Y);
+            withCtrlY.Write("ClockStatus", ctrlY.ToString(), "Hotkeys");
+            var cfgCtrlY = new HotkeyConfig();
+            cfgCtrlY.LoadFromIni(withCtrlY);
+            Check("An operator can deliberately bind Ctrl+Y to a command (no demo left to block it)",
+                cfgCtrlY[HotkeyAction.ClockStatus] == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Y), true);
         }
         catch (Exception ex)
         {
@@ -11367,5 +14411,371 @@ static class JimmyTests
             }
         }
         return null;
+    }
+
+    // ── Station Watch / Smart QSO Start (2.0.63) ────────────────────────────────────────────────
+    // TargetMonitor has zero WinForms/engine/notification dependency (StationWatch/
+    // TargetMonitor.cs's own class comment), so these are plain unit tests: no StubEngineHost, no
+    // WsjtxClient instance needed. MY_CALL/THEIR_CALL are this file's own top-of-file constants;
+    // a third callsign (a "peer") is introduced per test as needed.
+
+    static EnqueueDecodeMessage D(string msg) => new EnqueueDecodeMessage { Message = msg };
+
+    static void TargetMonitorClassificationTests()
+    {
+        Console.WriteLine("\n── TargetMonitor: observation classification ──");
+
+        List<TargetObservation> obs;
+        TargetMonitor NewWatch()
+        {
+            var m = new TargetMonitor(TargetPurpose.StationWatch);
+            m.Observed += o => obs.Add(o);
+            return m;
+        }
+
+        // CallingCq.
+        obs = new List<TargetObservation>();
+        var tm = NewWatch();
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        obs.Clear();
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        Check("CQ observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetCq, true);
+
+        // ReportTo(peer, value) -- "K4YT working W1ABC, minus 8." shape.
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);
+        Check("Report observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetReport
+            && obs[0].Peer == "W1ABC" && obs[0].Value == "-08", true);
+
+        // RReportTo.
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} R-05"), true, MY_CALL);
+        Check("RReport observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetRReport
+            && obs[0].Value == "R-05", true);
+
+        // RrrTo -- RRR is distinct from, and not equivalent to, RR73/73.
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RRR"), true, MY_CALL);
+        Check("RRR observed as its own kind (not RR73/73)", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetRrr, true);
+
+        // Rr73To.
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);
+        Check("RR73 observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetRr73, true);
+
+        // SeventyThreeTo.
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} 73"), true, MY_CALL);
+        Check("73 observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.Target73, true);
+
+        // AddressingUs.
+        obs.Clear();
+        tm.ObserveDecode(D($"{MY_CALL} {THEIR_CALL} EM63"), true, MY_CALL);
+        Check("AddressingUs observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetAddressingUs, true);
+
+        // HeardAmbiguous -- ToCall doesn't parse (e.g. only 2 tokens after the sender, or an
+        // invalid-shaped call) but DeCall (the target) is still confidently the watched call.
+        obs.Clear();
+        tm.ObserveDecode(D($"{THEIR_CALL} 73"), true, MY_CALL);   // "<call> 73" -- only 2 words, ToCall/DeCall need >=2 AND <=4 -- forces ambiguous shape below instead
+        // A genuinely ambiguous shape: garbage after the target's own call as sender that ToCall
+        // rejects outright (bad "to" callsign) while DeCall (words[1] here is nonsense so this
+        // isn't quite right) -- use a message where DeCall resolves to the target but ToCall
+        // returns null: a 3-word CQ-shaped oddity is already covered above, so exercise directly
+        // via a message whose first token is not a valid callsign shape.
+        obs.Clear();
+        tm.ObserveDecode(D($"1234 {THEIR_CALL} -08"), true, MY_CALL);
+        Check("Ambiguous payload (unparseable addressee) observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetAmbiguous, true);
+
+        // AddressingOther -- a recognized payload shape that isn't CQ/report/RRR/RR73/73 (e.g. a
+        // plain grid reply) directed at a third party.
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} EM63"), true, MY_CALL);
+        Check("AddressingOther observed", obs.Count == 1 && obs[0].Kind == TargetObservationKind.TargetAddressingOther, true);
+
+        // OtherPartyObserved -- the target's own apparent peer replying TO the target. Never
+        // invents the unseen half: only fires because W1ABC was ALREADY the tracked ApparentPeer
+        // from a prior target decode, and only reports what THIS decode actually said.
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);   // (re)establish ApparentPeer=W1ABC
+        obs.Clear();
+        tm.ObserveDecode(D($"{THEIR_CALL} W1ABC R-05"), true, MY_CALL);
+        Check("OtherPartyObserved carries the peer's own value", obs.Count == 1
+            && obs[0].Kind == TargetObservationKind.OtherPartyObserved
+            && obs[0].Peer == "W1ABC" && obs[0].Value == "R-05", true);
+
+        // Free-text ending in 73 is NOT a validated signoff unless the callsign/word-count
+        // structure confirms it (reuses WsjtxMessage.Is73's own exact-3-word rule).
+        obs.Clear();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} GOOD LUCK 73"), true, MY_CALL);
+        Check("Free-text-with-73 tail is not treated as a validated 73",
+            !obs.Any(o => o.Kind == TargetObservationKind.Target73), true);
+    }
+
+    static void TargetMonitorSilenceAndParityTests()
+    {
+        Console.WriteLine("\n── TargetMonitor: silence counting, parity, period completion ──");
+
+        TargetMonitor tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+        var events = new List<TargetObservation>();
+        tm.Observed += o => events.Add(o);
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+
+        // Parity unknown until the first confident target decode -- opportunities before that
+        // never count.
+        Check("No parity yet -> period does not count", tm.SilenceCount == 0, true);
+        tm.OnReceivePeriodComplete(1, true, "20m", "FT8", "tok1", false);
+        Check("Unknown parity: still zero", tm.SilenceCount == 0, true);
+
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);   // establishes even parity
+        tm.ConsumeReadyToStart();   // CQ itself bypasses silence -- consume that unrelated readiness
+        events.Clear();
+
+        // Opposite parity never counts.
+        tm.OnReceivePeriodComplete(2, false, "20m", "FT8", "tok1", false);
+        Check("Opposite-parity period does not increment silence", tm.SilenceCount == 0, true);
+
+        // Our own TX period never counts.
+        tm.OnReceivePeriodComplete(3, true, "20m", "FT8", "tok1", true);
+        Check("Jimmy TX period does not increment silence", tm.SilenceCount == 0, true);
+
+        // Wrong band/mode/session -- a stale/foreign opportunity never counts.
+        tm.OnReceivePeriodComplete(4, true, "40m", "FT8", "tok1", false);
+        tm.OnReceivePeriodComplete(4, true, "20m", "FT4", "tok1", false);
+        tm.OnReceivePeriodComplete(4, true, "20m", "FT8", "tok2", false);
+        Check("Band/mode/session mismatch does not increment silence", tm.SilenceCount == 0, true);
+
+        // A genuine matching completed opportunity increments once.
+        tm.OnReceivePeriodComplete(5, true, "20m", "FT8", "tok1", false);
+        Check("Matching completed opportunity #1", tm.SilenceCount == 1, true);
+        Check("Waiting notification fired at 1 of 2", events.Any(o => o.Kind == TargetObservationKind.SmartStartWaiting && o.Value == "1 of 2"), true);
+
+        // Any confident decode from the target resets silence to zero, including ambiguous ones.
+        tm.ObserveDecode(D("### garbage ###"), true, MY_CALL);
+        Check("Non-target decode does not reset silence", tm.SilenceCount == 1, true);
+        tm.ObserveDecode(D($"1234 {THEIR_CALL} -08"), true, MY_CALL);  // ambiguous, but from the target
+        Check("Ambiguous target decode resets silence to zero", tm.SilenceCount == 0, true);
+
+        // Reaching the threshold signals ready.
+        tm.OnReceivePeriodComplete(6, true, "20m", "FT8", "tok1", false);
+        Check("One opportunity after reset: not yet ready", tm.SilenceCount == 1 && !tm.ReadyToStart, true);
+        tm.OnReceivePeriodComplete(7, true, "20m", "FT8", "tok1", false);
+        Check("Threshold reached -> ReadyToStart", tm.ReadyToStart, true);
+        Check("ConsumeReadyToStart reads and clears exactly once", tm.ConsumeReadyToStart() && !tm.ConsumeReadyToStart(), true);
+
+        // Target changes peer -- resets (via the any-decode-resets-silence rule) and updates peer.
+        tm.OnReceivePeriodComplete(8, true, "20m", "FT8", "tok1", false);
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);
+        Check("Peer captured from target's own traffic", tm.ApparentPeer == "W1ABC", true);
+        Check("New target decode resets silence", tm.SilenceCount == 0, true);
+        tm.ObserveDecode(D($"K9ZZZ {THEIR_CALL} -05"), true, MY_CALL);
+        Check("Target changes peer -> ApparentPeer updates", tm.ApparentPeer == "K9ZZZ", true);
+
+        // Target changes parity -- adopts the newly observed parity; count does not carry across.
+        tm.OnReceivePeriodComplete(9, false, "20m", "FT8", "tok1", false);   // opposite of current (even) -- ignored
+        Check("Opposite parity still ignored before the flip", tm.SilenceCount == 0, true);
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), false, MY_CALL);       // heard on ODD slot now
+        tm.ConsumeReadyToStart();   // CQ bypass again -- not what this test is checking
+        Check("Target's newly observed parity adopted", tm.TargetEvenParity == false, true);
+        tm.OnReceivePeriodComplete(10, true, "20m", "FT8", "tok1", false);  // now the OLD (even) parity is ignored
+        Check("Old parity ignored after the flip", tm.SilenceCount == 0, true);
+        tm.OnReceivePeriodComplete(11, false, "20m", "FT8", "tok1", false);
+        Check("New parity counts after the flip", tm.SilenceCount == 1, true);
+    }
+
+    static void TargetMonitorSmartStartReadinessTests()
+    {
+        Console.WriteLine("\n── TargetMonitor: Smart Start CQ/73/RR73 readiness rules ──");
+
+        // CQ immediate readiness -- bypasses silence waiting entirely.
+        var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        Check("CQ -> immediately ready, bypassing silence threshold", tm.ReadyToStart, true);
+        tm.ConsumeReadyToStart();
+
+        // Ordinary validated 73 -> immediate readiness (strong final completion evidence).
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        tm.ConsumeReadyToStart();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} 73"), true, MY_CALL);
+        Check("Ordinary 73 -> immediately ready", tm.ReadyToStart, true);
+        tm.ConsumeReadyToStart();
+
+        // Ordinary RR73 -> NOT immediately ready; waits one additional appropriate opportunity.
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        tm.ConsumeReadyToStart();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);
+        Check("Ordinary RR73 does NOT immediately signal ready", !tm.ReadyToStart, true);
+        tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false);
+        Check("...but IS ready after exactly one more appropriate opportunity", tm.ReadyToStart, true);
+        tm.ConsumeReadyToStart();
+
+        // Fox/Hound (multiplex) RR73 -- the /H suffix marks a Hound; must NOT use the generic
+        // one-extra-opportunity rule at all (spec: preserve existing protocol distinction).
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        tm.ConsumeReadyToStart();
+        tm.ObserveDecode(D($"W1ABC/H {THEIR_CALL} RR73"), true, MY_CALL);
+        tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false);
+        Check("Fox/Hound RR73 does not arm the generic one-opportunity rule", !tm.ReadyToStart, true);
+
+        // A clearer event (target CQ) supersedes a pending ordinary-RR73 wait.
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        tm.ConsumeReadyToStart();
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        Check("A fresh CQ supersedes the pending RR73 wait with immediate readiness", tm.ReadyToStart, true);
+
+        // Target working another station -- do not transmit, keep monitoring.
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);
+        Check("Target busy with a peer -> not ready", !tm.ReadyToStart, true);
+    }
+
+    static void TargetMonitorLifecycleTests()
+    {
+        Console.WriteLine("\n── TargetMonitor: Station Watch lifecycle, cancel, non-actionable ──");
+
+        var obs = new List<TargetObservation>();
+        var tm = new TargetMonitor(TargetPurpose.StationWatch);
+        tm.Observed += o => obs.Add(o);
+
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        Check("Start announces WatchStarted", obs.Count == 1 && obs[0].Kind == TargetObservationKind.WatchStarted && obs[0].Target == THEIR_CALL, true);
+
+        // List focus changes elsewhere must never retarget an active watch -- there is simply no
+        // API surface here that could do that; TargetCall only ever changes via Start/Stop.
+        Check("Captured target is sticky", tm.TargetCall == THEIR_CALL, true);
+
+        // Explicit replace -- exactly ONE announcement for the new target (not "stopped" then
+        // "started").
+        obs.Clear();
+        tm.Start("W1ABC", "20m", "FT8", "tok1");
+        Check("Explicit replace: single WatchStarted for the new target", obs.Count == 1
+            && obs[0].Kind == TargetObservationKind.WatchStarted && obs[0].Target == "W1ABC", true);
+        Check("Replace actually swaps the target", tm.TargetCall == "W1ABC", true);
+
+        obs.Clear();
+        tm.Stop();
+        Check("Stop announces WatchStopped with the right callsign", obs.Count == 1
+            && obs[0].Kind == TargetObservationKind.WatchStopped && obs[0].Target == "W1ABC", true);
+        Check("Stop clears IsActive", !tm.IsActive, true);
+
+        // CancelPendingStart (Escape/Halt): clears a pending ready flag without touching
+        // IsActive -- Station Watch itself keeps running.
+        var smart = new TargetMonitor(TargetPurpose.SmartStart);
+        smart.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        smart.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        Check("Smart Start armed ready before cancel", smart.ReadyToStart, true);
+        smart.CancelPendingStart();
+        Check("CancelPendingStart clears ReadyToStart", !smart.ReadyToStart, true);
+
+        // CAT loss / TX disabled: Smart Start becomes non-actionable (silence + ready cleared);
+        // untouched for a Station Watch instance (receive-only, may continue regardless).
+        var smart2 = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+        smart2.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        smart2.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        smart2.ConsumeReadyToStart();   // CQ bypass -- not what this section is checking
+        smart2.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false);
+        Check("Silence progressing before CAT loss", smart2.SilenceCount == 1, true);
+        smart2.OnSmartStartNonActionable();
+        Check("CAT loss / TX disabled resets Smart Start silence", smart2.SilenceCount == 0, true);
+        Check("CAT loss / TX disabled clears any pending ready", !smart2.ReadyToStart, true);
+
+        var watch2 = new TargetMonitor(TargetPurpose.StationWatch);
+        watch2.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        watch2.OnSmartStartNonActionable();
+        Check("A Station Watch instance is untouched by OnSmartStartNonActionable (no-op, purpose guard)", watch2.IsActive, true);
+    }
+
+    static void SpeechCoordinatorStationWatchSuppressionTests()
+    {
+        Console.WriteLine("\n── SpeechCoordinator: Station Watch routine-suppression gate ──");
+
+        var said = new List<string>();
+        var c = new SpeechCoordinator((t, cue) => said.Add(t));
+
+        // Routine speech is normal before the watch starts.
+        c.SubmitRoutineStatus("Receiving, 3 available stations", true, SpeakWhen.Now);
+        Check("Routine speech flows normally before Station Watch", said.Count == 1, true);
+
+        // Turning suppression on drops (does not hold) whatever was already pending, and mutes
+        // every further non-Watch submission -- Critical still bypasses.
+        said.Clear();
+        c.OnPhysicalTxChanged(true);   // genuinely mid-transmission, so AfterTx really holds below
+        c.SubmitRoutineStatus("Receiving, K9RRW selected", true, SpeakWhen.AfterRx);   // AfterRx always holds
+        c.SubmitNotification("id.a", "Logged K9RRW", SpeakWhen.AfterTx, NotificationPriority.Normal); // held while transmitting
+        Check("Two items held before suppression begins", c.PendingRoutineCount == 1 && c.PendingNotificationCount == 1, true);
+        c.SetStationWatchSuppression(true);
+        c.OnPhysicalTxChanged(false);
+        c.OnReceiveCycleComplete();
+        Check("Old held routine/notification speech does not spill out after entering Watch", said.Count == 0, true);
+
+        c.SubmitRoutineStatus("Receiving, 5 available stations", true, SpeakWhen.Now);
+        Check("Routine speech is muted while Station Watch is active", said.Count == 0, true);
+
+        c.SubmitNotification("id.b", "Logged K4YT", SpeakWhen.Now, NotificationPriority.Normal);
+        Check("Ordinary (non-Watch) notification speech is muted while Station Watch is active", said.Count == 0, true);
+
+        c.SubmitNotification("id.c", "Watching K4YT.", SpeakWhen.Now, NotificationPriority.Normal, isWatchCategory: true);
+        Check("Watch-category speech is NOT suppressed while Station Watch is active", said.Count == 1 && said[0] == "Watching K4YT.", true);
+
+        said.Clear();
+        c.SubmitNotification("id.d", "CAT lost", SpeakWhen.Now, NotificationPriority.Critical);
+        Check("Critical still bypasses Station Watch suppression", said.Count == 1 && said[0] == "CAT lost", true);
+
+        // Turning suppression off resumes normal policy for anything submitted AFTER that point.
+        said.Clear();
+        c.SetStationWatchSuppression(false);
+        c.SubmitRoutineStatus("Receiving, 2 available stations", true, SpeakWhen.Now);
+        Check("Routine speech resumes once Station Watch suppression is lifted", said.Count == 1, true);
+    }
+
+    static void StationWatchHotkeyDefaultsTests()
+    {
+        Console.WriteLine("\n── Station Watch: hotkey defaults, conflict-free, unassignable ──");
+
+        var hk = new HotkeyConfig();
+        Check("Toggle Station Watch default is Ctrl+Shift+W",
+            hk[HotkeyAction.ToggleStationWatch] == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.W), true);
+        Check("Work Watched Station Now default is Ctrl+Shift+Enter",
+            hk[HotkeyAction.WorkWatchedStationNow] == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.Return), true);
+        Check("Toggle Station Watch default conflicts with no other action",
+            hk.FindConflict(hk[HotkeyAction.ToggleStationWatch], HotkeyAction.ToggleStationWatch) == null, true);
+        Check("Work Watched Station Now default conflicts with no other action",
+            hk.FindConflict(hk[HotkeyAction.WorkWatchedStationNow], HotkeyAction.WorkWatchedStationNow) == null, true);
+        Check("Both Station Watch hotkeys may be left unassigned",
+            HotkeyConfig.OptionalActions.Contains(HotkeyAction.ToggleStationWatch)
+            && HotkeyConfig.OptionalActions.Contains(HotkeyAction.WorkWatchedStationNow), true);
+
+        // Upgrade protection: an operator whose EXISTING saved hotkeys already used Ctrl+Shift+W
+        // for something else keeps that binding; the new action is left unassigned instead of
+        // double-bound (HotkeyConfig.NewerActions' own established convention).
+        var tmpIni = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllLines(tmpIni, new[]
+            {
+                "[Hotkeys]",
+                $"{HotkeyAction.OpenLogbook}={(int)(System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.W)}",
+            });
+            var ini = new IniFile(tmpIni);
+            var hk2 = new HotkeyConfig();
+            hk2.LoadFromIni(ini);
+            Check("Pre-existing custom binding on the same key wins", hk2[HotkeyAction.OpenLogbook] == (System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.W), true);
+            Check("Toggle Station Watch left unassigned rather than double-bound", hk2[HotkeyAction.ToggleStationWatch] == System.Windows.Forms.Keys.None, true);
+            Check("Reported as unassigned-due-to-conflict", hk2.UnassignedDueToConflict.Contains(HotkeyAction.ToggleStationWatch), true);
+        }
+        finally
+        {
+            File.Delete(tmpIni);
+        }
     }
 }

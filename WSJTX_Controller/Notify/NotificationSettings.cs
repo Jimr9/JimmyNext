@@ -22,6 +22,24 @@ namespace WSJTX_Controller
         public Dictionary<NotificationEventType, NotificationPolicy> Policies { get; }
             = ClonePolicies(NotificationDefaults.Policies);
 
+        // Codex #8: a saved notifyTemplate_ that no longer validates (hand-edited INI, or a
+        // Jimmy update renamed a variable) is dropped for the code default at load time --
+        // previously silently. LoadFromIni records the rejected text here so the Options UI can
+        // tell the operator their wording was not accepted and Jimmy is using the default.
+        public Dictionary<NotificationEventType, string> RejectedTemplates { get; }
+            = new Dictionary<NotificationEventType, string>();
+
+        // 2026-09-05: which of Jimmy's two alternating slots the routine receive-side clauses are
+        // spoken for -- resolved against the CURRENT role of the slot whose period just ended
+        // (see ReceiveSideScope), so RxSideOnly/TxSideOnly follow a role flip with no settings
+        // change. Two independent scopes: one for the side name (ReceiveSideId), one for the
+        // "N available stations" count (ReceiveCycleSummary). Default Both on each = today's
+        // behaviour (both slots announce), so an existing INI with neither key loads unchanged.
+        // Only meaningful in the advanced call layout; the simple layout has one list and always
+        // keeps its count.
+        public ReceiveSideScope ReceiveSideIdScope { get; set; } = ReceiveSideScope.Both;
+        public ReceiveSideScope ReceiveCountScope { get; set; } = ReceiveSideScope.Both;
+
         private static Dictionary<NotificationEventType, NotificationPolicy> ClonePolicies(
             Dictionary<NotificationEventType, NotificationPolicy> source)
         {
@@ -32,6 +50,7 @@ namespace WSJTX_Controller
 
         public void LoadFromIni(IniFile ini)
         {
+            RejectedTemplates.Clear();
             foreach (NotificationEventType type in Enum.GetValues(typeof(NotificationEventType)))
             {
                 // Clone the code default fresh each load (not the possibly-already-overridden
@@ -54,16 +73,30 @@ namespace WSJTX_Controller
                     policy.ThrottleMilliseconds = throttleMs;
 
                 string template = ini.Read($"notifyTemplate_{type}");
+
+                // 2026-09-05 split migration: a saved copy of the PRE-split "Receive cycle
+                // summary" default (which carried the state verb {Status} and the mode
+                // descriptor {Mode} inline) is treated as "unedited" -- dropped so the new
+                // three-clause default takes over. Keeping it would double "Receiving" /
+                // "Listen mode" against the new ReceiveStateSummary / OperatingModeSummary
+                // rows. An operator's OWN edited wording is left untouched; its now-unknown
+                // {Status}/{Mode} tokens then surface through RejectedTemplates like any other
+                // stale reference, so the change is visible rather than silent.
+                if (type == NotificationEventType.ReceiveCycleSummary
+                    && template == "{Status}, {AvailableCount} {Stations}{ToYou}{NewDxcc}{Wanted}{Awards}{Mode}{Prompt}.")
+                    template = null;
+
                 if (!string.IsNullOrWhiteSpace(template))
                 {
                     // A saved template that no longer validates against this type's variable
-                    // registry (e.g. hand-edited ini, or a future Jimmy version renames a
-                    // variable) falls back to the code default rather than shipping a broken
-                    // announcement -- "bad configuration must fail safely" per the
-                    // configurable-notifications feature's own requirement. The code default is
-                    // authored and tested against the current registry, so it's always valid.
+                    // registry (e.g. hand-edited ini, or a Jimmy update renamed a variable)
+                    // falls back to the code default rather than shipping a broken announcement.
+                    // The rejected text is recorded (Codex #8) so the UI can surface it -- the
+                    // operator should not believe a bad template was accepted.
                     if (NotificationVariableRegistry.Validate(template, type) == null)
                         policy.Template = template;
+                    else
+                        RejectedTemplates[type] = template;
                 }
 
                 if (Enum.TryParse(ini.Read($"notifyTiming_{type}"), out NotificationTiming timing))
@@ -72,11 +105,63 @@ namespace WSJTX_Controller
                 if (ini.KeyExists($"notifyDeferWhileTx_{type}"))
                     policy.DeferWhileTransmitting = ini.Read($"notifyDeferWhileTx_{type}") == "True";
 
+                // SpeakWhen (2026-09-02, Item 1) is the delivery-timing control. An explicit
+                // notifySpeakWhen_ key wins. Otherwise migrate a pre-existing user's legacy
+                // Timing/DeferWhileTransmitting pair to the equivalent SpeakWhen so their
+                // configured behaviour carries over rather than silently resetting to Now:
+                //   NextPeriodBoundary  -> AfterRx   (batched to the receive-cycle grid)
+                //   DeferWhileTransmitting (Immediate) -> AfterTx
+                //   neither             -> the code default (usually Now)
+                // A legacy notifySpeakWhen_==Never is NOT a timing any more (2026-09-04):
+                // "never spoken" moved to SpeakCondition.Never below. Drop the timing to the code
+                // default and let the Condition migration pick up the "never" intent.
+                bool legacySpeakWhenNever = false;
+                if (Enum.TryParse(ini.Read($"notifySpeakWhen_{type}"), out SpeakWhen speakWhen))
+                {
+                    if (speakWhen == SpeakWhen.Never) legacySpeakWhenNever = true;
+                    else policy.SpeakWhen = speakWhen;
+                }
+                else if (policy.Timing == NotificationTiming.NextPeriodBoundary)
+                    policy.SpeakWhen = SpeakWhen.AfterRx;
+                else if (policy.DeferWhileTransmitting)
+                    policy.SpeakWhen = SpeakWhen.AfterTx;
+
+                // SpeakCondition (2026-09-04): the 4-way eligibility control. An explicit
+                // notifyCondition_ key wins. Otherwise migrate:
+                //   legacy notifySpeakWhen_==Never       -> SpeakCondition.Never
+                //   legacy notifyDuringQso_==Suppress    -> SpeakCondition.OutsideQsoOnly
+                //   legacy notifyDuringQso_==SpeakNormally-> SpeakCondition.Always
+                //   nothing on disk                     -> code default (Always)
+                if (Enum.TryParse(ini.Read($"notifyCondition_{type}"), out SpeakCondition condition))
+                    policy.Condition = condition;
+                else if (legacySpeakWhenNever)
+                    policy.Condition = SpeakCondition.Never;
+                else
+                {
+                    string legacyDuringQso = ini.Read($"notifyDuringQso_{type}");
+                    if (legacyDuringQso == "Suppress")
+                        policy.Condition = SpeakCondition.OutsideQsoOnly;
+                    else if (legacyDuringQso == "SpeakNormally")
+                        policy.Condition = SpeakCondition.Always;
+                }
+
                 if (ini.KeyExists($"notifySuppressUnchanged_{type}"))
                     policy.SuppressUnchanged = ini.Read($"notifySuppressUnchanged_{type}") == "True";
 
                 Policies[type] = policy;
             }
+
+            // Receive-side role scopes (2026-09-05). Missing / unparseable key -> the code
+            // default (Both), so a pre-2026-09-05 INI keeps today's behaviour untouched.
+            if (Enum.TryParse(ini.Read("notifyReceiveSideIdScope"), out ReceiveSideScope sideScope))
+                ReceiveSideIdScope = sideScope;
+            else
+                ReceiveSideIdScope = ReceiveSideScope.Both;
+
+            if (Enum.TryParse(ini.Read("notifyReceiveCountScope"), out ReceiveSideScope countScope))
+                ReceiveCountScope = countScope;
+            else
+                ReceiveCountScope = ReceiveSideScope.Both;
         }
 
         public void SaveToIni(IniFile ini)
@@ -90,10 +175,20 @@ namespace WSJTX_Controller
                 ini.Write($"notifyRepeatSeconds_{type}", policy.RepeatSeconds.ToString());
                 ini.Write($"notifyThrottleMs_{type}", policy.ThrottleMilliseconds.ToString());
                 ini.Write($"notifyTemplate_{type}", policy.Template);
+                ini.Write($"notifySpeakWhen_{type}", policy.SpeakWhen.ToString());
+                ini.Write($"notifyCondition_{type}", policy.Condition.ToString());
+                // Legacy key kept in sync for a clean rollback to a pre-2026-09-04 build
+                // (which only understands Suppress / SpeakNormally). DuringQsoOnly and Never
+                // have no legacy equivalent and map to the nearest ("speak normally").
+                ini.Write($"notifyDuringQso_{type}",
+                    policy.Condition == SpeakCondition.OutsideQsoOnly ? "Suppress" : "SpeakNormally");
                 ini.Write($"notifyTiming_{type}", policy.Timing.ToString());
                 ini.Write($"notifyDeferWhileTx_{type}", policy.DeferWhileTransmitting.ToString());
                 ini.Write($"notifySuppressUnchanged_{type}", policy.SuppressUnchanged.ToString());
             }
+
+            ini.Write("notifyReceiveSideIdScope", ReceiveSideIdScope.ToString());
+            ini.Write("notifyReceiveCountScope", ReceiveCountScope.ToString());
         }
     }
 }

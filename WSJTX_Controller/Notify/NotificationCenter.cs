@@ -10,28 +10,42 @@ namespace WSJTX_Controller
     // NotificationDedupThrottle/NotificationTemplateEngine/INotificationDelivery, each
     // independently testable.
     //
-    // Deferred-delivery addition, 2026-08-12 (configurable notification timing): a policy whose
-    // Timing is NextPeriodBoundary, or whose DeferWhileTransmitting is true while a transmission
-    // is in progress, doesn't deliver from Publish() at all -- it's held in _pending (keyed by
-    // (EventType, DedupKey), latest publish of the same identity simply overwrites the held one)
-    // until WsjtxClient calls OnPeriodBoundary()/OnTransmittingChanged() from a REAL FT8/FT4
-    // state transition it already tracks (never a new arbitrary timer -- see those methods' own
-    // comments for exactly which transitions). This is the one and only place a notification can
-    // be released, so there is no way for the same pending entry to be delivered twice.
+    // Speech coordination, 2026-09-02 (Items 1 & 2): Publish() formats an eligible event and
+    // hands it to the one SpeechCoordinator (this.Speech) with the policy's SpeakWhen and an
+    // effective priority. The coordinator -- shared with WsjtxClient's routine RX/TX/QSO status
+    // speech -- owns every deferral, obsolescence and coalescing decision from that point, and
+    // is released only by WsjtxClient's real state transitions forwarded through
+    // OnPeriodBoundary() (a receive cycle completed) / OnTransmittingChanged() (physical TX
+    // edge) / OnQsoActiveChanged() (callInProg cleared). Never a timer.
     public class NotificationCenter
     {
         private readonly NotificationSettings _settings;
         private readonly INotificationDelivery _delivery;
         private readonly NotificationDedupThrottle _dedupThrottle = new NotificationDedupThrottle();
 
-        private readonly Dictionary<(NotificationEventType, string), (INotificationEvent evt, NotificationPolicy policy)> _pending
-            = new Dictionary<(NotificationEventType, string), (INotificationEvent, NotificationPolicy)>();
-        private bool _transmitting;
+        // 2026-09-02 (Items 1 & 2): the ONE speech-coordination authority. Every delivered
+        // notification -- and, via WsjtxClient, every routine RX/TX/QSO status line -- goes
+        // through this single coordinator, which owns SpeakWhen deferral, obsolescence/
+        // coalescing, and the Critical-priority bypass. The old per-NotificationCenter
+        // NextPeriodBoundary/DeferWhileTransmitting hold-queue was removed with this change; its
+        // public entry points (OnPeriodBoundary / OnTransmittingChanged) now simply forward to
+        // the coordinator, so there is exactly one deferral mechanism, not two.
+        private readonly SpeechCoordinator _coordinator;
+        public SpeechCoordinator Speech => _coordinator;
 
-        public NotificationCenter(NotificationSettings settings, INotificationDelivery delivery)
+        // Notification History sink, 2026-09-03 (Item 1): a delivered notification's fact is
+        // recorded HERE, immediately, before the coordinator decides whether/when to speak it --
+        // so a deferred/Never notification still shows in Ctrl+Shift+H. (Routine status records
+        // its own history in Controller.RenderStatusVisible.) Null in tests that don't care.
+        private readonly Action<string> _recordHistory;
+
+        public NotificationCenter(NotificationSettings settings, INotificationDelivery delivery,
+            Action<string> recordHistory = null)
         {
             _settings = settings;
             _delivery = delivery;
+            _recordHistory = recordHistory;
+            _coordinator = new SpeechCoordinator((text, cue) => _delivery.Announce(text, cue));
         }
 
         public void Publish(INotificationEvent evt)
@@ -39,65 +53,36 @@ namespace WSJTX_Controller
             if (evt == null) return;
             if (!_settings.Policies.TryGetValue(evt.EventType, out NotificationPolicy policy)) return;
             if (!policy.Enabled) return;
-            // Time/count-based dedup and throttle run BEFORE any formatting or deferral --
-            // an event this gate rejects never even gets held in _pending, so it can't leak
-            // out later at a period boundary either.
+            // Time/count-based dedup and throttle run BEFORE any formatting -- an event this gate
+            // rejects never even reaches the coordinator, so it can't leak out later at a flush.
             if (!_dedupThrottle.ShouldAnnounce(evt.EventType, evt.DedupKey, policy)) return;
-
-            if (policy.Timing == NotificationTiming.NextPeriodBoundary || (policy.DeferWhileTransmitting && _transmitting))
-            {
-                _pending[(evt.EventType, evt.DedupKey ?? "")] = (evt, policy);
-                return;
-            }
 
             Deliver(evt, policy);
         }
 
-        // Call exactly when a receive period has just completed -- WsjtxClient.
-        // NotifyPeriodBoundary() is the one place that should call this, itself driven by a
-        // real state transition (the UDP path's decoding-flag flip, or Direct mode's new-slot
-        // detection), not a timer, and not FT8/FT4-duration-specific -- both modes' transports
-        // already resolve "a period just ended" to this same signal regardless of whether that
-        // period was 15s (FT8) or 7.5s (FT4). Releases every NextPeriodBoundary-timed pending
-        // entry that isn't ALSO still waiting out an in-progress transmission.
-        public void OnPeriodBoundary()
-        {
-            FlushWhere(p => !p.DeferWhileTransmitting || !_transmitting);
-        }
+        // Forwarded to the one coordinator. Kept as the public names WsjtxClient already calls;
+        // OnPeriodBoundary now means "a receive cycle completed" (SpeakWhen.AfterRx).
+        public void OnPeriodBoundary() => _coordinator.OnReceiveCycleComplete();
+        public void OnTransmittingChanged(bool transmitting) => _coordinator.OnPhysicalTxChanged(transmitting);
+        public void OnQsoActiveChanged(bool active) => _coordinator.OnQsoActiveChanged(active);
 
-        // Call on every real transmitting-flag transition (ProcessTxStart/ProcessTxEnd on the
-        // UDP path, DirectApplyStatus's transmittingChanged on the Direct path). Only
-        // Immediate-timed entries are released here when transmitting just ended -- a
-        // NextPeriodBoundary entry keeps waiting for the next real OnPeriodBoundary() call even
-        // if Tx happens to end first, so a "batched" notification's cadence is always the
-        // period grid, never incidentally shortened by however long that particular over ran.
-        public void OnTransmittingChanged(bool transmitting)
-        {
-            _transmitting = transmitting;
-            if (!transmitting)
-                FlushWhere(p => p.Timing == NotificationTiming.Immediate);
-        }
+        // Station Watch (2.0.63): forwarded to the coordinator's routine-suppression gate --
+        // see SpeechCoordinator.SetStationWatchSuppression's own comment.
+        public void SetStationWatchActive(bool active) => _coordinator.SetStationWatchSuppression(active);
 
-        private void FlushWhere(Func<NotificationPolicy, bool> ready)
+        // Every notification type whose speech should bypass the Station-Watch suppression gate
+        // (Station Watch/Smart Start's own observations) -- everything else is routine/ordinary
+        // notification speech and is muted while a receive-only watch is active.
+        private static readonly HashSet<NotificationEventType> WatchEventTypes = new HashSet<NotificationEventType>
         {
-            List<(NotificationEventType, string)> toFlush = null;
-            foreach (var kv in _pending)
-            {
-                if (!ready(kv.Value.policy)) continue;
-                (toFlush ?? (toFlush = new List<(NotificationEventType, string)>())).Add(kv.Key);
-            }
-            if (toFlush == null) return;
-
-            // Remove before delivering, not after -- a policy edited mid-flush (e.g. Options
-            // closed with OK between two pending entries) can never see a half-updated _pending,
-            // and nothing here can observe or re-flush an entry that's already been handed off.
-            foreach (var key in toFlush)
-            {
-                var (evt, policy) = _pending[key];
-                _pending.Remove(key);
-                Deliver(evt, policy);
-            }
-        }
+            NotificationEventType.StationWatchStarted,
+            NotificationEventType.StationWatchStopped,
+            NotificationEventType.StationWatchActivity,
+            NotificationEventType.StationWatchAmbiguous,
+            NotificationEventType.SmartStartWaiting,
+            NotificationEventType.SmartStartTargetAvailable,
+            NotificationEventType.SmartStartCallStarting,
+        };
 
         private void Deliver(INotificationEvent evt, NotificationPolicy policy)
         {
@@ -117,20 +102,40 @@ namespace WSJTX_Controller
             if (policy.SuppressUnchanged && _dedupThrottle.IsUnchanged(evt.EventType, evt.DedupKey, text))
                 return;   // identical to the last thing actually said for this identity -- stay quiet, don't touch RecordFired/RecordText either
 
-            bool important = policy.Priority == NotificationPriority.Important;
-            // ErrorSeverity.Error always gets the audible cue regardless of the configured
-            // policy Priority -- Warning respects the policy. This is what lets both of
-            // ErrorWarning's existing migrated call sites (one historically sound:false, one
-            // sound:true) share a single policy row and still reproduce their exact prior
-            // behavior -- see NotificationDefaults.cs's ErrorWarning entry for the full
-            // rationale.
-            if (evt is ErrorWarningEvent errorEvent && errorEvent.Severity == ErrorSeverity.Error)
-                important = true;
+            // Record the fact NOW, before the coordinator -- a deferred, coalesced, or Never
+            // notification still shows in Notification History (it was presented; whether it
+            // was spoken is a separate question).
+            _recordHistory?.Invoke(text);
 
-            _delivery.Announce(text, important);
-            _dedupThrottle.RecordFired(evt.EventType, evt.DedupKey);
-            if (policy.SuppressUnchanged)
-                _dedupThrottle.RecordText(evt.EventType, evt.DedupKey, text);
+            // A genuine ErrorSeverity.Error is escalated to Critical regardless of the configured
+            // policy Priority (a Warning respects the policy) -- this is what lets ErrorWarning's
+            // Warning and Error call sites share one policy row. effectivePriority is what the
+            // coordinator sees; it derives the AlertCue (None / Important / Critical) from it.
+            bool isError = evt is ErrorWarningEvent errorEvent && errorEvent.Severity == ErrorSeverity.Error;
+            NotificationPriority effectivePriority =
+                (policy.Priority == NotificationPriority.Critical || isError)
+                    ? NotificationPriority.Critical
+                    : policy.Priority;
+
+            // Dedup/throttle "last announced" bookkeeping is moved to the point of ACTUAL
+            // speech (the onSpoken callback) rather than run unconditionally here. A discarded
+            // occurrence -- SpeakWhen.Never, or DuringQso.Suppress while a QSO is active, or a
+            // deferred item that becomes QSO-suppressed by the time it would flush -- must not
+            // advance RepeatSeconds / ThrottleMilliseconds / SuppressUnchanged state, or it
+            // would silence a LATER occurrence that genuinely should be heard (Codex #12).
+            _coordinator.SubmitNotification(
+                identity: evt.EventType + "|" + (evt.DedupKey ?? ""),
+                text: text,
+                when: policy.SpeakWhen,
+                priority: effectivePriority,
+                condition: policy.Condition,
+                onSpoken: () =>
+                {
+                    _dedupThrottle.RecordFired(evt.EventType, evt.DedupKey);
+                    if (policy.SuppressUnchanged)
+                        _dedupThrottle.RecordText(evt.EventType, evt.DedupKey, text);
+                },
+                isWatchCategory: WatchEventTypes.Contains(evt.EventType));
         }
     }
 }

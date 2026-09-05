@@ -1,0 +1,66 @@
+diff --git a/src/dto.rs b/src/dto.rs
+index c539026e..dd465f72 100644
+--- a/src/dto.rs
++++ b/src/dto.rs
+@@ -798,6 +798,22 @@ pub struct RadioStatus {
+     /// why the waterfall is blank instead of failing silently.
+     #[serde(default)]
+     pub audio_error: Option<String>,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): set when a Fake-It dial restore is
++    /// UNRESOLVED — CAT failed after a temporary Fake-It shift and the radio loop cannot
++    /// confirm the operating dial was put back. A concise operator-facing string so Jimmy can
++    /// raise a persistent, accessible warning rather than silently leaving the operator on an
++    /// unknown VFO frequency. `None` (the default) in normal operation — a healthy immediate
++    /// restore never sets it, and it clears the moment the loop reconciles the dial.
++    #[serde(default)]
++    pub fake_it_restore_warning: Option<String>,
++    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): a monotonic id for the CURRENT
++    /// unresolved Fake-It episode, bumped once on each fresh transition into "unresolved" and
++    /// stable for that episode's life. `Some` iff `fake_it_restore_warning` is `Some`. Jimmy
++    /// pairs it with the snapshot's session token so the SAME still-unresolved episode is
++    /// announced only once even across a Direct transport reconnect, while a genuinely new
++    /// episode (identical wording included) still announces.
++    #[serde(default)]
++    pub fake_it_restore_warning_id: Option<u64>,
+     /// Set when two enabled radios are configured on the SAME serial COM port — the
+     /// monitor radio's CAT can't open the busy port and shows a confusing red pill.
+     /// A config warning (self-clears once the ports differ); surfaced in the status lane.
+diff --git a/src/lib.rs b/src/lib.rs
+index 8f162009..6b67f278 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -306,6 +306,8 @@ impl AppState {
+                 cw_wpm: 25,
+                 split_tx_mhz: None,
+                 audio_error: None,
++                fake_it_restore_warning: None,
++                fake_it_restore_warning_id: None,
+                 radio_config_warning: None,
+                 tx_power_zero: false,
+                 recording_warning: None,
+diff --git a/tests/fixtures/station_identity_snapshot.json b/tests/fixtures/station_identity_snapshot.json
+index 65b46dd4..fc9d3a6b 100644
+--- a/tests/fixtures/station_identity_snapshot.json
++++ b/tests/fixtures/station_identity_snapshot.json
+@@ -51,6 +51,8 @@
+     "cwWpm": 25,
+     "decodeDepth": 3,
+     "dialMhz": 14.074,
++    "fakeItRestoreWarning": null,
++    "fakeItRestoreWarningId": null,
+     "filterWidthHz": null,
+     "flexDaxTx": false,
+     "holdTxFreq": false,
+diff --git a/tests/fixtures/watch_identity_snapshot.json b/tests/fixtures/watch_identity_snapshot.json
+index ef1ddd2a..1808ed37 100644
+--- a/tests/fixtures/watch_identity_snapshot.json
++++ b/tests/fixtures/watch_identity_snapshot.json
+@@ -47,6 +47,8 @@
+     "cwWpm": 25,
+     "decodeDepth": 3,
+     "dialMhz": 14.08,
++    "fakeItRestoreWarning": null,
++    "fakeItRestoreWarningId": null,
+     "filterWidthHz": null,
+     "flexDaxTx": false,
+     "holdTxFreq": false,

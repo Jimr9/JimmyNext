@@ -81,7 +81,23 @@ namespace WSJTX_Controller
         public int maxPrevPotaTo = 4;
         public int maxAutoGenEnqueue = 4;
         public bool suspendComm = false;
-        public string myCall = null, myGrid = null, myContinent = null;
+        // Operator continent as a 2-letter code (AF/AN/AS/EU/NA/OC/SA), or null = "not
+        // specified" (the fallback -- ClassificationEngine only compares continents when BOTH
+        // sides are known, so a null here preserves the conservative "not DX" default).
+        public string myContinent = null;
+        public string myCall = null, myGrid = null;
+
+        // Accepts only a valid 2-letter continent code (case-insensitive, trimmed); anything
+        // else -- a blank, a friendly name accidentally written into the ini, a typo -- becomes
+        // null ("not specified"). Used on the ini read path so a hand-edited value can never
+        // reach classification as something meaningless.
+        public static readonly string[] ContinentCodes = { "AF", "AN", "AS", "EU", "NA", "OC", "SA" };
+        public static string NormalizeContinent(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return null;
+            string c = raw.Trim().ToUpperInvariant();
+            return System.Array.IndexOf(ContinentCodes, c) >= 0 ? c : null;
+        }
         public bool cmdPrompts = true;
         public bool tuning = false;
         // new: optional INI-controlled order for call-waiting row fields.
@@ -414,14 +430,10 @@ namespace WSJTX_Controller
         internal const string spacer = "           *";
         private const int freqChangeThreshold = 200;
         private bool skipFirstDecodeSeries = true;
-        // Batches the "N available stations" announcement while decodes are still arriving
-        // for the current period -- see ShowStatus()'s own comment for why. Interval is set
-        // fresh (from ctrl.statusBatchDelayMs) each time it's (re)started.
-        private System.Windows.Forms.Timer statusAnnounceTimer = new System.Windows.Forms.Timer();
-        private string _pendingStatusHeading = null;
-        private string _pendingStatusText = null;
-        private Color _pendingStatusForeColor;
-        private Color _pendingStatusBackColor;
+        // (The old wall-clock statusAnnounceTimer / _pendingStatus* batch was removed 2026-09-03:
+        // routine-status SPEECH deferral is now SpeechCoordinator's job -- SpeakWhen.AfterRx,
+        // released by the real end-of-decode-pass signal, not a timer. ShowStatus() renders the
+        // visible line immediately every call and hands the text to the coordinator.)
         private System.Windows.Forms.Timer processDecodeTimer2 = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer statusTimer = new System.Windows.Forms.Timer();
         private System.Windows.Forms.Timer statusTimer2 = new System.Windows.Forms.Timer();
@@ -797,7 +809,11 @@ namespace WSJTX_Controller
             Sounds = new NotificationSounds(() => ctrl.soundsEnabled);
             Notify = new NotificationCenter(ctrl.Notifications,
                 new UiaAlertNotificationDelivery(new StatusViewNotificationDelivery(StatusView), StatusView,
-                    () => ctrl.announceImportantAlertsWhenFocusElsewhere));
+                    () => ctrl.announceImportantAlertsWhenFocusElsewhere),
+                // 2026-09-03: a delivered notification's fact goes to Notification History HERE,
+                // immediately, since it no longer passes through ShowMsg (which used to record it).
+                recordHistory: text => ctrl.NotificationHistory?.Record(text, null));
+            InitTargetMonitors();
             LiveQsoUploader = new LiveQsoUploadOrchestrator(
                 credentials: () => new LiveUploadCredentials
                 {
@@ -871,8 +887,6 @@ namespace WSJTX_Controller
 
             firstDecodeTime = DateTime.MinValue;
 
-            statusAnnounceTimer.Tick += new System.EventHandler(StatusAnnounceTimerTick);
-
             processDecodeTimer2.Tick += new System.EventHandler(ProcessDecodeTimer2Tick);
 
             statusTimer.Tick += new System.EventHandler(StatusTimerTick);
@@ -938,6 +952,53 @@ namespace WSJTX_Controller
             ContextReset,    // confirmed band change / tier switch -- the band's whole context is new
             SessionReset,    // ResetOpMode -- construction, Closing, full re-negotiation
         }
+
+        // Transmit-slot analysis outcome (2.0.58). Deliberately small: the three states the
+        // operator actually needs to hear apart, the two per-period offsets, and enough
+        // context (band/mode/time) to know what the result applies to. Held as
+        // _lastSlotAnalysis so the "report latest transmit-slot analysis" command can read it
+        // back without re-running the analysis.
+        internal enum SlotAnalysisState
+        {
+            Unavailable,   // not enough decode data in either period
+            Partial,       // one period produced a usable offset, the other did not
+            Complete,      // both periods produced a usable offset
+        }
+
+        internal sealed class SlotAnalysisResult
+        {
+            public SlotAnalysisState State;
+            public int EvenOffsetHz;      // 0 = this period had no usable data
+            public int OddOffsetHz;       // 0 = this period had no usable data
+            public DateTime TimeUtc;
+            public string Band;           // e.g. "20m"; null/"" if unknown
+            public string Mode;           // "FT8" / "FT4"
+
+            // One concise spoken sentence, screen-reader friendly, no trailing chatter.
+            public string Describe()
+            {
+                string ctx = "";
+                if (!string.IsNullOrEmpty(Band) || !string.IsNullOrEmpty(Mode))
+                    ctx = $" for {string.Join(" ", new[] { Band, Mode }.Where(s => !string.IsNullOrEmpty(s)))}";
+                switch (State)
+                {
+                    case SlotAnalysisState.Complete:
+                        return $"Transmit slot analysis{ctx}: even period {EvenOffsetHz} Hz, odd period {OddOffsetHz} Hz.";
+                    case SlotAnalysisState.Partial:
+                        return EvenOffsetHz > 0
+                            ? $"Transmit slot analysis{ctx} incomplete: only the even period had usable data, {EvenOffsetHz} Hz."
+                            : $"Transmit slot analysis{ctx} incomplete: only the odd period had usable data, {OddOffsetHz} Hz.";
+                    default:
+                        return $"Transmit slot analysis{ctx} incomplete: not enough decodes to analyze the transmit slot.";
+                }
+            }
+        }
+
+        // Most recent transmit-slot analysis outcome (complete, partial, or unavailable), or
+        // null if none has been attempted this session. Stamped with the band/mode/time it was
+        // taken for -- NOT invalidated by a later band change, so the report command can still
+        // say "that analysis was for 20m FT8".
+        private SlotAnalysisResult _lastSlotAnalysis;
 
         private void EndContact(ContactEndReason reason)
         {
@@ -1008,6 +1069,33 @@ namespace WSJTX_Controller
 
         public void CancelQso() => EndContact(ContactEndReason.OperatorAbort);
 
+        // Escape / Alt+H ANNOUNCEMENT gate (Controller.cs). The halt + disable-TX + return-to-
+        // Listen actions those two hotkeys run stay UNCONDITIONAL -- this decides only whether
+        // "Tx halted" is spoken, so an Escape pressed in idle Listen mode with nothing on the
+        // air stays silent (this project's own accessibility rule against redundant speech).
+        //
+        // Hardened per the Codex Nexus audit (Pass 9): the old gate was
+        // `IsTransmitting || txMode == CALL_CQ`, which missed the "active QSO, listening between
+        // slots" and "Tune carrier up" cases, and -- for a longer predicate -- would have
+        // trusted `callInProg` / `txEnabled` mirrors that can be stale across an engine
+        // reconnect or a just-completed contact. This prefers the FRESH facts
+        // DirectApplyStatus reconciles from the engine snapshot every poll (`transmitting`,
+        // `tuning` -- self-healing each tick), and only trusts Jimmy's own CQ/QSO intent
+        // (`txMode == CALL_CQ`, `callInProg`) when the equally-fresh `txEnabled` fact agrees a
+        // cycle is actually armed. Once Nexus disarms TX (completion, watchdog, reconnect),
+        // `txEnabled` goes false within one poll and a leftover CALL_CQ / callInProg no longer
+        // produces a phantom "Tx halted".
+        //
+        //   - active transmission        -> transmitting
+        //   - active QSO between TX slots -> txEnabled && callInProg != null
+        //   - active CQ cycle            -> txEnabled && txMode == CALL_CQ
+        //   - Tune                       -> tuning
+        //   - truly idle Listen          -> none of the above -> silent
+        public bool HasActiveTxOrCycle =>
+            transmitting
+            || tuning
+            || (txEnabled && (txMode == TxModes.CALL_CQ || callInProg != null));
+
         // Operator-initiated abort of the current contact / CQ cycle -- the single ordered
         // sequence behind Escape and Alt+H (Controller.cs), previously open-coded identically at
         // both call sites. Order matters: RequeueAbortedCall() must run while callInProg /
@@ -1021,6 +1109,10 @@ namespace WSJTX_Controller
         // + CancelQso() directly without the halt.
         public void AbortContact()
         {
+            // Station Watch / Smart QSO Start (2.0.63): Escape and Alt+H both route through here.
+            // Cancel any pending automatic start, but do NOT stop a receive-only Station Watch --
+            // that is the explicit toggle hotkey's job (user decision).
+            CancelStationWatchPendingStart();
             RequeueAbortedCall();
             CancelQso();
             HaltAndDisableTx();
@@ -1096,12 +1188,12 @@ namespace WSJTX_Controller
             return false;
         }
 
-        // WSJT-X re-enabled its own "Enable Tx" button without Jimmy having asked for it --
-        // most likely WSJT-X's own "Wait and Reply" feature resuming a stalled QSO after the
-        // other station finally replied (see StatusMessage.TxEnableClk handling above). Mirrors
-        // EnableMode()'s resume bookkeeping for the stalled callInProg, but skips re-sending
-        // EnableTx() since WSJT-X already enabled itself -- and announces a distinct status
-        // message so the operator can tell this was automatic, not their own action.
+        // The native engine re-enabled its own "Enable Tx" without Jimmy having asked -- most
+        // likely its "wait and reply" cooperation resuming a stalled QSO after the other station
+        // finally replied (see StatusMessage.TxEnableClk handling above). Mirrors EnableMode()'s
+        // resume bookkeeping for the stalled callInProg, but skips re-sending EnableTx() since
+        // the engine already enabled itself -- and publishes the AutoTxResume notification so a
+        // blind operator can tell transmission restarted automatically, not by their own action.
         private void HandleUnsolicitedTxResume()
         {
             if (callInProg == null) return;      //nothing Jimmy was waiting on to resume
@@ -1115,7 +1207,7 @@ namespace WSJTX_Controller
             UpdateMaxTxRepeat();
             StartStatusTimer();
             Sounds.PlaySoundEvent(ctrl.soundEnabled_TxEnabled, ctrl.soundFile_TxEnabled);
-            StatusView.ShowMessage($"WSJT-X resumed calling {callInProg} automatically", false);
+            Notify?.Publish(new AutoTxResumeEvent(callInProg));
             DebugOutput($"{Time()} HandleUnsolicitedTxResume, callInProg:'{callInProg}' cqPaused:{cqPaused} txMode:{txMode}");
         }
 
@@ -2076,36 +2168,11 @@ namespace WSJTX_Controller
         // by accessible-app design, not an auto-CQ-answering bot) -- see WsjtxClient.Uploads.cs's
         // own comment on OnQsoLogged's removal for the fuller version of this same finding.
 
-        // Schedules the "N available stations" summary ShowStatus() held back while this
-        // period's decode window was still open (see ShowStatus()'s own comment). Computed
-        // purely from the wall clock and trPeriod -- confirmed live, 2026-08-07, that this
-        // real WSJT-X build reports Decoding:True once at startup and never flips back to
-        // False again for the rest of the session, so decodeCycle/processDecodeTimer/
-        // decodesProcessed (the app's existing "decode pass ended" machinery) never fire a
-        // second time either -- relying on any of that left every deferred announcement
-        // stuck pending forever (confirmed: total silence after the very first one). This
-        // depends on nothing WSJT-X reports about its own decode state, only trPeriod
-        // (already known once ACTIVE) and DateTime.UtcNow, so it can't go silently stale.
-        //
-        // A no-op if a countdown to the next boundary is already running -- only the FIRST
-        // deferred call after a flush starts a fresh one; later calls in the same window
-        // just update the pending text, so the wait is anchored to the period clock and
-        // never gets pushed later by more decodes arriving.
-        private void ScheduleStatusAnnounce()
-        {
-            if (statusAnnounceTimer.Enabled) return;
-            if (trPeriod == null) return;
-            DateTime dtNow = DateTime.UtcNow;
-            int msec = (dtNow.Second * 1000) + dtNow.Millisecond;
-            int diffMsec = msec % (int)trPeriod;
-            int toBoundary = Math.Max(((int)trPeriod) - diffMsec, 1);
-            int interval = toBoundary + Math.Max(0, ctrl.statusBatchDelayMs);
-            // Sane upper bound -- purely a defensive clamp in case of an unexpected trPeriod
-            // value; the arithmetic above should never actually reach this.
-            interval = Math.Min(interval, (int)trPeriod * 2);
-            statusAnnounceTimer.Interval = interval;
-            statusAnnounceTimer.Start();
-        }
+        // (ScheduleStatusAnnounce() -- the old wall-clock "N available stations" batch timer --
+        // was removed 2026-09-03. Routine-status speech deferral is SpeechCoordinator's job now:
+        // SpeakWhen.AfterRx, released by the real end-of-decode-pass signal from
+        // DirectApplyDecodes' new-slot detection, coalesced to the latest, and dropped if
+        // physical TX starts first. ctrl.statusBatchDelayMs no longer feeds anything here.)
 
         // ProcessTxStart()/ProcessTxEnd() -- the classic UDP dispatcher's own transmitting-
         // transition handlers (Tx-hold safety net, consecutive-CQ/timeout tracking, early/normal
@@ -2185,8 +2252,6 @@ namespace WSJTX_Controller
         private void ResetOpMode()
         {
             StopDecodeTimers();
-            statusAnnounceTimer.Stop();
-            _pendingStatusText = null;
             decodeCycle = 0;
             decodeCount = 0;
             consecNoDecodes = 0;
@@ -2240,6 +2305,13 @@ namespace WSJTX_Controller
         // completed QSO / an operator abort: those keep the band's history intact.
         private void ResetBandSession()
         {
+            // Station Watch / Smart QSO Start (2.0.63): a band change, a mode (tier) switch, and a
+            // full ResetOpMode session reset are the three occasions this runs -- all three make a
+            // watch's captured context (band/mode/session token) stale, so stop rather than leave
+            // a hidden dormant watch (explicit user decision for band/mode; a full session reset
+            // is at least as invalidating).
+            StopTargetMonitorsForContextChange();
+
             timeoutCallDict.Clear();
             allCallDict.Clear();
             sentCallList.Clear();
@@ -2571,29 +2643,35 @@ namespace WSJTX_Controller
             _manualAnalysisRequested = true;
             StatusView.ShowMessage("Analyzing transmit slot...", false);
 
-            if (pendingCq)
+            // 2.0.58: the watchdog now runs for a STANDALONE Alt+Z analysis too, not only a
+            // pending-CQ one. Without it, an explicit Alt+Z on a quiet band (one period with no
+            // decodes, stalled slot progression, or simply too little data) waited forever with
+            // no further feedback -- "Analyzing transmit slot..." and nothing more. It now always
+            // reaches a terminal result: complete, partial, or "not enough decodes". A standalone
+            // timeout NEVER starts CQ; only the pending-CQ path continues into CQ (preserved
+            // below in SlotAnalysisWatchdog_Tick).
+            _slotAnalysisElapsedSeconds = 0;
+            if (_slotAnalysisWatchdog == null)
             {
-                _slotAnalysisElapsedSeconds = 0;
-                if (_slotAnalysisWatchdog == null)
-                {
-                    _slotAnalysisWatchdog = new System.Windows.Forms.Timer { Interval = SlotAnalysisStatusIntervalSeconds * 1000 };
-                    _slotAnalysisWatchdog.Tick += SlotAnalysisWatchdog_Tick;
-                }
-                _slotAnalysisWatchdog.Start();
+                _slotAnalysisWatchdog = new System.Windows.Forms.Timer { Interval = SlotAnalysisStatusIntervalSeconds * 1000 };
+                _slotAnalysisWatchdog.Tick += SlotAnalysisWatchdog_Tick;
             }
+            _slotAnalysisWatchdog.Start();
         }
 
-        // Fires every SlotAnalysisStatusIntervalSeconds while a CQ start is waiting on
-        // analysis. Gives periodic "still working" feedback instead of silence, and gives up
-        // (starting CQ anyway) once SlotAnalysisTimeoutSeconds have passed with no completion --
-        // e.g. a quiet band that never produces a decode in one of the two periods.
+        // Fires every SlotAnalysisStatusIntervalSeconds while an analysis is in progress. Gives
+        // periodic "still working" feedback instead of silence, and forces a terminal outcome
+        // once SlotAnalysisTimeoutSeconds have passed with no completion -- e.g. a quiet band
+        // that never produces a decode in one of the two periods. A pending-CQ analysis then
+        // continues into CQ (unchanged behavior); a standalone Alt+Z analysis just reports the
+        // incomplete result and stops -- it must never start CQ.
         private void SlotAnalysisWatchdog_Tick(object sender, EventArgs e)
         {
-            // Already resolved (completed normally, or superseded by a band change / new
-            // analysis request) -- ClearAudioOffsets() resets pendingCqAfterAnalysis to false,
-            // and DecodesCompleted() stops this timer directly on real completion, but this
-            // guard covers any other path that leaves it stale.
-            if (!pendingCqAfterAnalysis || analysisCompleted)
+            // Already resolved: CalcBestOffset flips analysisCompleted + clears both request
+            // flags and stops this timer on real completion, and ClearAudioOffsets (band change,
+            // new analysis request) clears them too. This guard covers any other stale path.
+            bool analysisInProgress = _manualAnalysisRequested || pendingCqAfterAnalysis;
+            if (!analysisInProgress || analysisCompleted)
             {
                 _slotAnalysisWatchdog.Stop();
                 return;
@@ -2603,15 +2681,62 @@ namespace WSJTX_Controller
             if (_slotAnalysisElapsedSeconds >= SlotAnalysisTimeoutSeconds)
             {
                 _slotAnalysisWatchdog.Stop();
+                bool wasPendingCq = pendingCqAfterAnalysis;
+                var result = RecordSlotAnalysisFromCurrentOffsets(
+                    evenOffset > 0 && oddOffset > 0 ? SlotAnalysisState.Complete
+                    : (evenOffset > 0 || oddOffset > 0 ? SlotAnalysisState.Partial : SlotAnalysisState.Unavailable));
                 pendingCqAfterAnalysis = false;
-                StatusView.ShowMessage("Transmit slot analysis timed out; starting CQ anyway.", false);
-                ctrl.cqModeButton_Click(null, null);
+                _manualAnalysisRequested = false;
+                if (wasPendingCq)
+                {
+                    StatusView.ShowMessage(result.Describe() + " Starting CQ anyway.", false);
+                    ctrl.cqModeButton_Click(null, null);
+                }
+                else
+                {
+                    // Standalone Alt+Z: terminal result, no CQ.
+                    StatusView.ShowMessage(result.Describe(), false);
+                }
             }
             else
             {
                 StatusView.ShowMessage($"Still analyzing transmit slot... ({_slotAnalysisElapsedSeconds}s)", false);
             }
         }
+
+        // Snapshots the current even/odd offsets into _lastSlotAnalysis with the given state,
+        // stamped with the band/mode/time it was taken for. Returned so the caller can also
+        // speak result.Describe().
+        private SlotAnalysisResult RecordSlotAnalysisFromCurrentOffsets(SlotAnalysisState state)
+        {
+            _lastSlotAnalysis = new SlotAnalysisResult
+            {
+                State = state,
+                EvenOffsetHz = evenOffset > 0 ? evenOffset : 0,
+                OddOffsetHz = oddOffset > 0 ? oddOffset : 0,
+                TimeUtc = DateTime.UtcNow,
+                Band = CurrentBandStr,
+                Mode = mode,
+            };
+            DebugOutput($"{Time()} [BAND-AUDIT] slot analysis result: {state} even:{evenOffset} odd:{oddOffset} band:{CurrentBandStr} mode:{mode}");
+            return _lastSlotAnalysis;
+        }
+
+        // "Report latest transmit-slot analysis" command (2.0.58) -- reads back the most recent
+        // result WITHOUT re-running analysis. Says so plainly if nothing usable has been done.
+        public void ReportLatestSlotAnalysis()
+        {
+            StatusView.ShowMessage(
+                _lastSlotAnalysis == null
+                    ? "No transmit-slot analysis has been done yet. Use Analyze Transmit Slot to run one."
+                    : _lastSlotAnalysis.Describe(),
+                false);
+        }
+
+        internal SlotAnalysisResult TestLastSlotAnalysis => _lastSlotAnalysis;
+        internal void TestSetSlotAnalysisElapsedSeconds(int s) => _slotAnalysisElapsedSeconds = s;
+        internal void TestSlotAnalysisWatchdogTick() => SlotAnalysisWatchdog_Tick(null, null);
+        internal bool TestManualAnalysisRequested => _manualAnalysisRequested;
 
         public bool ToggleTxFirst()
         {
@@ -2774,6 +2899,15 @@ namespace WSJTX_Controller
                 if (!confirm || Confirm($"Reply to {call}?") == DialogResult.Yes)
                 {
                     if (!callQueue.Contains(call)) return;          //call has already been removed or processed
+
+                    // Smart QSO Start (2.0.63): an operator's own Enter press ("operatorSelected"
+                    // -- never an internal auto-dispatch) is captured instead of replied to
+                    // immediately when the setting is on. Nothing below this (TX-period halting,
+                    // discard timers, ShowStatus) applies to a pure capture -- the call stays
+                    // exactly where it was, untouched, until TargetMonitor itself decides to
+                    // request the real reply through this same path later.
+                    if (operatorSelected && ctrl.smartQsoStartEnabled && TryCaptureSmartStart(call, dmsg))
+                        return;
 
                     DateTime dtNow = DateTime.Now;
                     bool evenCall = IsEvenCall(dmsg);
@@ -3017,6 +3151,9 @@ namespace WSJTX_Controller
             callInProg = call;
             otherPartyForCallInProg = null;
             otherPartyStage = null;
+            // Item 1: the coordinator's AfterQso timing hook -- callInProg is the active-QSO
+            // signal. Idempotent: the coordinator only acts on a genuine active -> inactive edge.
+            Notify?.OnQsoActiveChanged(call != null);
             UpdateDblClkTip();
             UpdateCallInProg();
         }
@@ -3079,6 +3216,9 @@ namespace WSJTX_Controller
                 wsjtxTxEnableButton = buttonState;
                 UpdateDblClkTip();
                 DebugOutput($"{spacer}txEnabled:{txEnabled}");
+                // Smart QSO Start (2.0.63): must not transmit later from stale readiness once TX
+                // is disabled.
+                NotifyTargetMonitorsNonActionable();
             }
             catch
             {
@@ -3202,14 +3342,6 @@ namespace WSJTX_Controller
         {
             statusTimer2.Stop();
             ShowStatus();
-        }
-
-        private void StatusAnnounceTimerTick(object sender, EventArgs e)
-        {
-            statusAnnounceTimer.Stop();
-            if (_pendingStatusText == null) return;
-            StatusView.RenderStatus(_pendingStatusHeading, _pendingStatusText, _pendingStatusForeColor, _pendingStatusBackColor);
-            _pendingStatusText = null;
         }
 
         private void ProcessDecodeTimer2Tick(object sender, EventArgs e)
@@ -3690,6 +3822,17 @@ namespace WSJTX_Controller
                     DebugOutput($"{Time()} ReplyTo: REPLY to '{nCall}' confirmed but superseded (contact epoch moved) while in flight -- not committing");
                     return;
                 }
+                // Station Watch / Smart QSO Start (2.0.63): a successful REPLY commit for the
+                // watched/captured target is exactly the "normal QSO handoff actually succeeded"
+                // moment the spec calls for -- Station Watch fully ends here (not merely its
+                // suppression), and Smart Start's capture is consumed, its job done. A REPLY for
+                // some OTHER station (an ordinary manual selection while a watch/capture happens
+                // to also be active) leaves both completely alone.
+                if (_stationWatch.IsActive && string.Equals(nCall, _stationWatch.TargetCall, StringComparison.OrdinalIgnoreCase))
+                    StopStationWatch();
+                if (_smartStart.IsActive && string.Equals(nCall, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase))
+                    _smartStart.Stop(announce: false);
+
                 _callQueueStore.RemoveCall(nCall);
                 replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress
                 replyDecode = dmsg.DeepCopy();      //save the decode the reply cmd derived from

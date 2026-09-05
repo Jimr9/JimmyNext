@@ -21,35 +21,26 @@ namespace WSJTX_Controller
         IReadOnlyDictionary<string, string> ToTokens();
     }
 
-    // Field sets below were enriched 2026-08-12 (configurable-notification-templates feature)
-    // to cover what Jimmy's real data model can actually supply at each event's natural
-    // publish point -- NOT a reason by itself to wire a new Publish() call site. QsoStarted/
-    // QsoCompleted/TxMessageChanged/AwardsNeeded remain deliberately parked (see
-    // NotificationDefaults.cs's own header comment on the W4MAA double-announcement lesson);
-    // this only makes their TEMPLATES fully configurable in the new UI ahead of time, using
-    // honest field names rather than inventing data Jimmy can't reliably provide (no CQ/ITU
-    // zone or QRZ-sourced US state here -- those need an async network lookup that may not have
-    // completed, so they're intentionally left out of the token set entirely).
+    // Routine-status wording rows (2026-09-04). These four types are NOT published through
+    // NotificationCenter -- NotificationParkedEventTypesGuardTests enforces that no production
+    // file constructs them. Instead WsjtxClient.ShowStatus reads each type's policy Template
+    // (and Enabled flag) via NotificationSettings and formats a CLAUSE of the one routine
+    // RX/TX/QSO status line from it. The token set here is exactly what ShowStatus can supply
+    // at that clause's composition point -- Callsign / Band / Mode -- NOT the fuller
+    // publish-point data model (no Grid/Country/Distance -- those need a network lookup that
+    // may not have completed at status-render time). The classes still exist as the honest,
+    // test-checked contract for what tokens the template validator will accept.
     public sealed class QsoStartedEvent : INotificationEvent
     {
         public string Callsign { get; }
         public string Band { get; }
         public string Mode { get; }
-        public string Grid { get; }
-        public string Country { get; }
-        public int Distance { get; }    // -1 = unknown
-        public int Bearing { get; }     // -1 = unknown
 
-        public QsoStartedEvent(string callsign, string band, string mode, string grid = null,
-            string country = null, int distance = -1, int bearing = -1)
+        public QsoStartedEvent(string callsign, string band, string mode)
         {
             Callsign = callsign ?? "";
             Band = band ?? "";
             Mode = mode ?? "";
-            Grid = grid ?? "";
-            Country = country ?? "";
-            Distance = distance;
-            Bearing = bearing;
         }
 
         public NotificationEventType EventType => NotificationEventType.QsoStarted;
@@ -60,10 +51,6 @@ namespace WSJTX_Controller
             ["Callsign"] = Callsign,
             ["Band"] = Band,
             ["Mode"] = Mode,
-            ["Grid"] = Grid,
-            ["Country"] = Country,
-            ["Distance"] = Distance >= 0 ? Distance.ToString() : "",
-            ["Bearing"] = Bearing >= 0 ? Bearing.ToString() : "",
         };
     }
 
@@ -72,26 +59,12 @@ namespace WSJTX_Controller
         public string Callsign { get; }
         public string Band { get; }
         public string Mode { get; }
-        public string Grid { get; }
-        public string Country { get; }
-        public int Distance { get; }
-        public int Bearing { get; }
-        public string SignalReportSent { get; }
-        public string SignalReportReceived { get; }
 
-        public QsoCompletedEvent(string callsign, string band, string mode, string grid = null,
-            string country = null, int distance = -1, int bearing = -1,
-            string signalReportSent = null, string signalReportReceived = null)
+        public QsoCompletedEvent(string callsign, string band, string mode)
         {
             Callsign = callsign ?? "";
             Band = band ?? "";
             Mode = mode ?? "";
-            Grid = grid ?? "";
-            Country = country ?? "";
-            Distance = distance;
-            Bearing = bearing;
-            SignalReportSent = signalReportSent ?? "";
-            SignalReportReceived = signalReportReceived ?? "";
         }
 
         public NotificationEventType EventType => NotificationEventType.QsoCompleted;
@@ -102,12 +75,6 @@ namespace WSJTX_Controller
             ["Callsign"] = Callsign,
             ["Band"] = Band,
             ["Mode"] = Mode,
-            ["Grid"] = Grid,
-            ["Country"] = Country,
-            ["Distance"] = Distance >= 0 ? Distance.ToString() : "",
-            ["Bearing"] = Bearing >= 0 ? Bearing.ToString() : "",
-            ["SignalReportSent"] = SignalReportSent,
-            ["SignalReportReceived"] = SignalReportReceived,
         };
     }
 
@@ -135,6 +102,81 @@ namespace WSJTX_Controller
             ["Message"] = Message,
             ["Band"] = Band,
             ["Mode"] = Mode,
+        };
+    }
+
+    // The receive-cycle summary clause of the routine status line (2026-09-04). Like the three
+    // above, NOT published -- ShowStatus formats it from this type's policy Template. Tokens are
+    // the counts/classification Jimmy already computes for the "N available stations" summary,
+    // offered both as self-contained phrases (empty when N/A -- what the default template uses,
+    // so the shipped wording is unchanged) and as bare counts for operators who want to write
+    // their own phrasing. Award-needed info folds in here ({Awards} / {AwardCount}) -- there is
+    // no separate award announcement.
+    public sealed class ReceiveCycleSummaryEvent : INotificationEvent
+    {
+        public NotificationEventType EventType => NotificationEventType.ReceiveCycleSummary;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["AvailableCount"] = "", ["Stations"] = "", ["ToYou"] = "",
+            ["NewDxcc"] = "", ["Wanted"] = "", ["Awards"] = "",
+            ["NewDxccCount"] = "", ["WantedCount"] = "", ["AwardCount"] = "", ["Band"] = "",
+        };
+    }
+
+    // The state verb of the routine idle receive line (2026-09-05). NOT published --
+    // ShowStatus formats it from this type's policy Template ("{State}" by default).
+    public sealed class ReceiveStateSummaryEvent : INotificationEvent
+    {
+        public NotificationEventType EventType => NotificationEventType.ReceiveStateSummary;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["State"] = "",
+        };
+    }
+
+    // The advanced-call-layout side name ("RX1" / "TX2") of the routine idle receive line
+    // (2026-09-05). NOT published -- ShowStatus formats it from this type's "{Side}" Template.
+    public sealed class ReceiveSideIdEvent : INotificationEvent
+    {
+        public NotificationEventType EventType => NotificationEventType.ReceiveSideId;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Side"] = "",
+        };
+    }
+
+    // The operating-mode descriptor of the routine idle receive line (2026-09-05). NOT
+    // published -- ShowStatus formats it from this type's policy Template.
+    public sealed class OperatingModeSummaryEvent : INotificationEvent
+    {
+        public NotificationEventType EventType => NotificationEventType.OperatingModeSummary;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Mode"] = "", ["SubMode"] = "",
+        };
+    }
+
+    public sealed class ReceivedReplyEvent : INotificationEvent
+    {
+        public NotificationEventType EventType => NotificationEventType.ReceivedReply;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Received"] = "", ["Previous"] = "", ["Callsign"] = "",
+        };
+    }
+
+    public sealed class NoDecodeWarningEvent : INotificationEvent
+    {
+        public NotificationEventType EventType => NotificationEventType.NoDecodeWarning;
+        public string DedupKey => null;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Mode"] = "",
         };
     }
 
@@ -168,11 +210,157 @@ namespace WSJTX_Controller
         };
     }
 
-    public sealed class ConnectionClosedEvent : INotificationEvent
+    // Jimmy's transmit was resumed automatically for a stalled QSO (the native engine's own
+    // wait-and-reply cooperation, seen via StatusMessage.TxEnableClk). Published from
+    // WsjtxClient.HandleUnsolicitedTxResume. Callsign is the station Jimmy is now back to
+    // working. DedupKey = Callsign so two different stalled QSOs resuming don't dedup each
+    // other, but a rapid double-fire for the same one does.
+    public sealed class AutoTxResumeEvent : INotificationEvent
     {
-        public NotificationEventType EventType => NotificationEventType.ConnectionClosed;
-        public string DedupKey => null;
-        public IReadOnlyDictionary<string, string> ToTokens() => EmptyTokens.Instance;
+        public string Callsign { get; }
+
+        public AutoTxResumeEvent(string callsign)
+        {
+            Callsign = callsign ?? "";
+        }
+
+        public NotificationEventType EventType => NotificationEventType.AutoTxResume;
+        public string DedupKey => Callsign;
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Callsign"] = Callsign,
+        };
+    }
+
+    // Station Watch WatchStarted/WatchStopped (2.0.63) -- shares one class since both are just
+    // "the watched callsign", published from TargetMonitor.Observed via StationWatch/
+    // TargetMonitorGlue.cs. DedupKey = Target so starting/stopping the SAME call twice in a row
+    // (shouldn't normally happen -- Start()/Stop() are themselves idempotent no-ops when already
+    // in that state) doesn't double-announce.
+    public sealed class StationWatchLifecycleEvent : INotificationEvent
+    {
+        private readonly NotificationEventType _type;
+        public string Target { get; }
+
+        public StationWatchLifecycleEvent(NotificationEventType type, string target)
+        {
+            _type = type;
+            Target = target ?? "";
+        }
+
+        public NotificationEventType EventType => _type;
+        public string DedupKey => Target;
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+        };
+    }
+
+    // The CQ/addressing/report/RRR/RR73/73/peer-observed family -- one generic type (see
+    // NotificationEventType.StationWatchActivity's own comment). `Phrase` is TargetMonitor
+    // glue's own pre-worded natural-language phrase (built once, not by the template engine) so
+    // the DEFAULT wording never depends on template-token composition; Target/Peer/Value/Kind
+    // are also exposed for an operator who wants their own template. DedupKey folds in the raw
+    // message so two genuinely different observations for the same target never dedup each other,
+    // while an identical repeat (SuppressUnchanged, if the operator turns it on) still can.
+    public sealed class StationWatchActivityEvent : INotificationEvent
+    {
+        public string Phrase { get; }
+        public string Target { get; }
+        public string Peer { get; }
+        public string Value { get; }
+        public string Kind { get; }
+
+        public StationWatchActivityEvent(string phrase, string target, string peer, string value, string kind)
+        {
+            Phrase = phrase ?? "";
+            Target = target ?? "";
+            Peer = peer ?? "";
+            Value = value ?? "";
+            Kind = kind ?? "";
+        }
+
+        public NotificationEventType EventType => NotificationEventType.StationWatchActivity;
+        public string DedupKey => $"{Target}|{Kind}|{Peer}|{Value}";
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Phrase"] = Phrase,
+            ["Target"] = Target,
+            ["Peer"] = Peer,
+            ["Value"] = Value,
+            ["Kind"] = Kind,
+        };
+    }
+
+    public sealed class StationWatchAmbiguousEvent : INotificationEvent
+    {
+        public string Target { get; }
+
+        public StationWatchAmbiguousEvent(string target) { Target = target ?? ""; }
+
+        public NotificationEventType EventType => NotificationEventType.StationWatchAmbiguous;
+        public string DedupKey => Target;
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+        };
+    }
+
+    // "Target not heard, waiting N of M." -- at most one per completed appropriate receive
+    // opportunity (TargetMonitor.OnReceivePeriodComplete), never per poll tick.
+    public sealed class SmartStartWaitingEvent : INotificationEvent
+    {
+        public string Target { get; }
+        public string Progress { get; }
+
+        public SmartStartWaitingEvent(string target, string progress)
+        {
+            Target = target ?? "";
+            Progress = progress ?? "";
+        }
+
+        public NotificationEventType EventType => NotificationEventType.SmartStartWaiting;
+        public string DedupKey => Target;
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+            ["Progress"] = Progress,
+        };
+    }
+
+    public sealed class SmartStartTargetAvailableEvent : INotificationEvent
+    {
+        public string Target { get; }
+
+        public SmartStartTargetAvailableEvent(string target) { Target = target ?? ""; }
+
+        public NotificationEventType EventType => NotificationEventType.SmartStartTargetAvailable;
+        public string DedupKey => Target;
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+        };
+    }
+
+    public sealed class SmartStartCallStartingEvent : INotificationEvent
+    {
+        public string Target { get; }
+
+        public SmartStartCallStartingEvent(string target) { Target = target ?? ""; }
+
+        public NotificationEventType EventType => NotificationEventType.SmartStartCallStarting;
+        public string DedupKey => Target;
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+        };
     }
 
     public sealed class ConnectionLostEvent : INotificationEvent
@@ -284,6 +472,59 @@ namespace WSJTX_Controller
         public NotificationEventType EventType => NotificationEventType.RadioCatRecovered;
         public string DedupKey => null;
         public IReadOnlyDictionary<string, string> ToTokens() => EmptyTokens.Instance;
+    }
+
+    // The rig's CAT link going down. Its own type (not ErrorWarningEvent) so the default
+    // announcement is concise, generic operator wording -- Nexus/Hamlib's raw cat_detail
+    // ("RPRT -20", escaped newline data, rigctld/backend phrasing) never reaches speech through
+    // the generic "{Source}: {Detail}" error template. The full cat_detail is still carried on
+    // Detail for diagnostics/logging and is offered as the {Detail} template variable for
+    // anyone who deliberately wants it. {Connection} is a pre-built phrase (formatter code, not
+    // a template expression -- same rule AwardsNeededEvent.AwardSummary follows) describing the
+    // CONFIGURED CAT connection: " on COM4 at 115200 baud", " on COM4", or "" when neither is
+    // configured (e.g. an external rigctld). Nothing here is rig-brand-specific.
+    public sealed class RadioCatLostEvent : INotificationEvent
+    {
+        public string RigModel { get; }   // Hamlib rig-model id as configured (may be ""/a number)
+        public string ComPort { get; }
+        public string BaudRate { get; }
+        public string Detail { get; }     // full Nexus/Hamlib cat_detail -- diagnostics / opt-in {Detail}
+
+        public RadioCatLostEvent(string rigModel, string comPort, string baudRate, string detail)
+        {
+            RigModel = rigModel ?? "";
+            ComPort = comPort ?? "";
+            BaudRate = baudRate ?? "";
+            Detail = detail ?? "";
+        }
+
+        public NotificationEventType EventType => NotificationEventType.RadioCatLost;
+        // Only ever one meaningfully-pending CAT-link condition at a time, matching
+        // RadioCatRecovered/ConnectionLost's own null-DedupKey convention.
+        public string DedupKey => null;
+
+        // " on COM4 at 115200 baud" / " on COM4" / "" -- leading space so the template reads
+        // naturally when it's empty ("The radio is not responding").
+        public string ConnectionPhrase
+        {
+            get
+            {
+                bool hasPort = !string.IsNullOrWhiteSpace(ComPort);
+                bool hasBaud = !string.IsNullOrWhiteSpace(BaudRate);
+                if (hasPort && hasBaud) return $" on {ComPort.Trim()} at {BaudRate.Trim()} baud";
+                if (hasPort) return $" on {ComPort.Trim()}";
+                return "";
+            }
+        }
+
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["RigModel"] = RigModel,
+            ["ComPort"] = ComPort,
+            ["BaudRate"] = BaudRate,
+            ["Connection"] = ConnectionPhrase,
+            ["Detail"] = Detail,
+        };
     }
 
     // Shared empty-token-dictionary singleton for events with nothing to substitute --

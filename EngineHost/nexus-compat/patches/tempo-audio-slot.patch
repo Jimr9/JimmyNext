@@ -1,0 +1,338 @@
+diff --git a/src/slot.rs b/src/slot.rs
+index c8e9db0e..ec593ba6 100644
+--- a/src/slot.rs
++++ b/src/slot.rs
+@@ -93,18 +93,41 @@ pub struct SlotAction {
+     /// True when we transmitted this slot — the next boundary uses this as
+     /// `prev_was_tx` so it knows the capture ring then holds our own carrier.
+     pub tx_this_slot: bool,
+-    /// Fake-It split moved the VFO for this over — restore it to this dial
+-    /// (Hz) once the over finishes playing (the loop owns the PTT deadline).
+-    pub fake_it_restore: Option<u64>,
++    /// Fake-It split moved (or tried to move) the VFO for this over — the loop reconciles
++    /// the physical dial back once the over finishes playing (the loop owns the PTT
++    /// deadline). `None` = no Fake-It shift this over (or it FAILED CLOSED — see
++    /// [`apply_tx_dial_shift`]).
++    pub fake_it_shift: Option<FakeItShift>,
+     /// Rig-mode split engaged VFO B for this over — the loop tears the rig
+     /// split down once the over ends (it would otherwise stay latched and a
+     /// later in-window over would TX on a stale VFO B frequency).
+     pub rig_split_engaged: bool,
+ }
+ 
++/// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): what a Fake-It TX-dial shift left
++/// behind for the loop's teardown to reconcile. Every field is a fact about the PHYSICAL
++/// radio, never a cached/logical engine dial.
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub struct FakeItShift {
++    /// The FRESH, CAT-confirmed physical dial read immediately BEFORE the shift — the value
++    /// to put the VFO back to once the over ends. If a fresh read could not be obtained the
++    /// shift FAILS CLOSED (no shift, no `FakeItShift`), so this is always a real reading.
++    pub original_hz: u64,
++    /// Where the shift moved — or tried to move — the VFO. The reconciliation anchor: after
++    /// the over, a physical dial sitting here means "still shifted, restore"; sitting at
++    /// `original_hz` means "already home"; anywhere else means a NEWER operator/external
++    /// frequency that must never be overwritten.
++    pub shifted_to_hz: u64,
++    /// `true` = the shift's `set_freq` returned `Ok` (the daemon accepted it; the VFO is at
++    /// `shifted_to_hz`). `false` = the outcome is AMBIGUOUS — a transport error means the VFO
++    /// may or may not have moved, and the teardown must still protect against a stranded
++    /// shift (it reconciles on the physical readback, not on this flag).
++    pub shift_confirmed: bool,
++}
++
+ /// What the Split-Operation pre-key step did, for the loop's teardown.
+ pub(crate) struct SplitApply {
+-    pub fake_it_restore: Option<u64>,
++    pub fake_it_shift: Option<FakeItShift>,
+     pub rig_split_engaged: bool,
+ }
+ 
+@@ -115,17 +138,20 @@ pub(crate) struct SplitApply {
+ pub(crate) fn apply_tx_dial_shift(eng: &mut Engine, rig: &mut Rig) -> SplitApply {
+     use tempo_app::settings::SplitMode;
+     let none = SplitApply {
+-        fake_it_restore: None,
++        fake_it_shift: None,
+         rig_split_engaged: false,
+     };
+     let shift = eng.take_tx_dial_shift();
+     if shift == 0 {
+         return none;
+     }
+-    let dial = eng.settings().dial_hz();
+-    let tx_dial = (dial as i64 + shift).max(0) as u64;
+     match eng.settings().split_mode {
+         SplitMode::Rig => {
++            // The shifted TX dial for Rig split is derived from the engine's dial value: VFO B
++            // is a SEPARATE VFO, so a stale RX-dial estimate here only mis-places the TX VFO
++            // (annoying, self-correcting on the next over), it cannot strand the operating
++            // dial the way a single-VFO Fake-It shift can — so no fresh physical read here.
++            let tx_dial = (eng.settings().dial_hz() as i64 + shift).max(0) as u64;
+             let _ = rig.set_split(true, "VFOB");
+             let _ = rig.set_split_freq(tx_dial);
+             // …AND THE TX VFO'S MODE. `M` only ever reaches the RX VFO, so without this VFO B
+@@ -139,17 +165,45 @@ pub(crate) fn apply_tx_dial_shift(eng: &mut Engine, rig: &mut Rig) -> SplitApply
+             // point here is the MODE — sending a width would reach across and reset the filter
+             // the operator set on the TX VFO, which is the shape of the very bug #67 was about.
+             // AFTER the split enable above: `X` addresses the TX VFO, so it has to exist first.
+-            let md = eng.rig_mode_effective();
+-            let _ = rig.set_split_mode(&md, -1);
++            //
++            // ⚠️ JIMMY COMPAT (see EngineHost/nexus-compat/README.md): "Do not set mode" (WSJT-X
++            // "Mode: None") gates the TX-VFO mode set TOO. `rig_mode_effective()` already
++            // returns "" under `dont_set_mode` (and `set_split_mode` no-ops on ""), but the
++            // gate is explicit here so the Rig-split path can never regress that on its own —
++            // and only the MODE set is gated; the frequency split above still runs.
++            if !eng.settings().dont_set_mode {
++                let md = eng.rig_mode_effective();
++                let _ = rig.set_split_mode(&md, -1);
++            }
+             SplitApply {
+-                fake_it_restore: None,
++                fake_it_shift: None,
+                 rig_split_engaged: true,
+             }
+         }
+         SplitMode::FakeIt => {
+-            let _ = rig.set_freq(tx_dial);
++            // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): Fake-It moves the ONE
++            // operating VFO, so the restore target MUST be a fresh, CAT-confirmed physical
++            // dial — never the cached/logical engine dial, which can lag a knob turn. Obtain
++            // it through Nexus's existing CAT owner (`rig`); if a trustworthy read cannot be
++            // had, FAIL CLOSED — do not shift a radio we would not know how to put back. The
++            // over then transmits un-shifted (the next over re-evaluates the shift request).
++            let Ok(original_hz) = rig.read_freq() else {
++                return SplitApply {
++                    fake_it_shift: None,
++                    rig_split_engaged: false,
++                };
++            };
++            let tx_dial = (original_hz as i64 + shift).max(0) as u64;
++            // The shift outcome is NOT binary: a transport error on `set_freq` can mean the
++            // VFO moved but the ack was lost. `shift_confirmed = false` records that ambiguity;
++            // the teardown still owes a reconciliation and decides on the physical readback.
++            let shift_confirmed = rig.set_freq(tx_dial).is_ok();
+             SplitApply {
+-                fake_it_restore: Some(dial),
++                fake_it_shift: Some(FakeItShift {
++                    original_hz,
++                    shifted_to_hz: tx_dial,
++                    shift_confirmed,
++                }),
+                 rig_split_engaged: false,
+             }
+         }
+@@ -294,7 +348,7 @@ pub fn slot_tx_phase(
+             did_rx,
+             rx_frame,
+             tx_this_slot: true,
+-            fake_it_restore: split.fake_it_restore,
++            fake_it_shift: split.fake_it_shift,
+             rig_split_engaged: split.rig_split_engaged,
+         }
+     } else {
+@@ -305,7 +359,7 @@ pub fn slot_tx_phase(
+             did_rx,
+             rx_frame,
+             tx_this_slot: false,
+-            fake_it_restore: None,
++            fake_it_shift: None,
+             rig_split_engaged: false,
+         }
+     }
+@@ -826,12 +880,54 @@ mod tests {
+         );
+     }
+ 
++    /// A logging rigctld stand-in that also answers `f` with a fixed physical dial (optionally
++    /// updated by an accepted `F`), and can REJECT `F` — for the Fake-It fresh-read / fail-closed
++    /// / ambiguous-outcome tests.
++    fn logging_rigctld_at(
++        dial_hz: u64,
++        reject_set_freq: bool,
++    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
++        use std::io::{BufRead, BufReader, Write};
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let addr = listener.local_addr().unwrap().to_string();
++        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
++        let log_w = log.clone();
++        std::thread::spawn(move || {
++            let mut dial = dial_hz;
++            for stream in listener.incoming().flatten() {
++                let mut w = stream.try_clone().unwrap();
++                for line in BufReader::new(stream).lines().map_while(Result::ok) {
++                    let t = line.trim().to_string();
++                    if t.is_empty() {
++                        continue;
++                    }
++                    log_w.lock().unwrap().push(t.clone());
++                    if t == "f" {
++                        let _ = w.write_all(format!("{dial}\n").as_bytes());
++                    } else if let Some(rest) = t.strip_prefix("F ") {
++                        if reject_set_freq {
++                            let _ = w.write_all(b"RPRT -1\n");
++                        } else {
++                            if let Ok(v) = rest.trim().parse::<u64>() {
++                                dial = v;
++                            }
++                            let _ = w.write_all(b"RPRT 0\n");
++                        }
++                    } else {
++                        let _ = w.write_all(b"RPRT 0\n");
++                    }
++                }
++            }
++        });
++        (addr, log)
++    }
++
+     #[test]
+-    fn fake_it_split_reports_the_restore_dial() {
+-        // FakeIt: an out-of-window TX offset shifts the dial for the over and
+-        // the action carries the dial to RESTORE once the over finishes — the
+-        // loop applies it at PTT drop. Rig/None report nothing to restore.
+-        // TX-only boundary (empty ring → no decode): the TX phase is called directly.
++    fn fake_it_split_reports_a_fresh_physical_restore_dial() {
++        // FakeIt: an out-of-window TX offset shifts the dial for the over and the action
++        // carries what the teardown reconciles against — the FRESH physical dial (read here,
++        // 14.075), the shifted-to dial, and that the shift command was confirmed. Not the
++        // cached engine dial.
+         let mut eng = Engine::new("W9XYZ", "EN37", 0);
+         eng.set_tier(tempo_app::dto::Tier::Ft8);
+         let mut st = eng.settings().clone();
+@@ -840,30 +936,118 @@ mod tests {
+         eng.set_tx_enabled(true);
+         eng.set_tx_offset(750.0); // f0 1750, dial -1000
+         eng.broadcast("CQ W9XYZ EN37");
+-        let mut rig = Rig::vox();
++        let (addr, _log) = logging_rigctld_at(14_075_000, false); // operator is on a NONSTANDARD dial
++        let mut rig = Rig::rigctld(&addr);
+         let mut backend = MockBackend::new();
+         let mut rx = RxRing::new();
+ 
+-        let act = slot_tx_phase(
+-            &mut eng,
+-            &mut rig,
+-            &mut backend,
+-            &mut rx,
+-            0,
+-            1000.0,
+-            false,
+-            None,
+-            None,
+-        );
++        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
+ 
+         assert!(act.tx_this_slot, "the CQ keyed");
+-        assert_eq!(
+-            act.fake_it_restore,
+-            Some(eng.settings().dial_hz()),
+-            "restore dial = the RX dial the over shifted away from"
++        let shift = act.fake_it_shift.expect("a Fake-It shift was armed");
++        assert_eq!(shift.original_hz, 14_075_000, "restore target = the FRESH physical dial read, not the cached one");
++        assert_eq!(shift.shifted_to_hz, 14_075_000 - 1000, "shifted_to = physical dial + engine shift");
++        assert!(shift.shift_confirmed, "the mock accepted the F command");
++    }
++
++    #[test]
++    fn fake_it_fails_closed_when_the_pre_shift_dial_cannot_be_read() {
++        // No trustworthy physical dial ⇒ NO shift, NO restore state. The over transmits
++        // un-shifted rather than moving a radio we could not put back.
++        let mut eng = Engine::new("W9XYZ", "EN37", 0);
++        eng.set_tier(tempo_app::dto::Tier::Ft8);
++        let mut st = eng.settings().clone();
++        st.split_mode = tempo_app::settings::SplitMode::FakeIt;
++        eng.apply_settings(st);
++        eng.set_tx_enabled(true);
++        eng.set_tx_offset(750.0);
++        eng.broadcast("CQ W9XYZ EN37");
++        let mut rig = Rig::vox(); // no CAT control ⇒ read_freq errors
++        let mut backend = MockBackend::new();
++        let mut rx = RxRing::new();
++
++        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++
++        assert!(act.tx_this_slot, "the CQ still keyed — normal operation is preserved");
++        assert!(act.fake_it_shift.is_none(), "FAIL CLOSED: no shift armed without a fresh physical dial");
++    }
++
++    #[test]
++    fn fake_it_shift_outcome_is_not_binary() {
++        // The shift's `set_freq` was refused (RPRT -1) — the VFO may or may not have moved.
++        // A restore is STILL owed (shift_confirmed = false), not forgotten.
++        let mut eng = Engine::new("W9XYZ", "EN37", 0);
++        eng.set_tier(tempo_app::dto::Tier::Ft8);
++        let mut st = eng.settings().clone();
++        st.split_mode = tempo_app::settings::SplitMode::FakeIt;
++        eng.apply_settings(st);
++        eng.set_tx_enabled(true);
++        eng.set_tx_offset(750.0);
++        eng.broadcast("CQ W9XYZ EN37");
++        let (addr, _log) = logging_rigctld_at(14_074_000, true); // F rejected
++        let mut rig = Rig::rigctld(&addr);
++        let mut backend = MockBackend::new();
++        let mut rx = RxRing::new();
++
++        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++
++        let shift = act.fake_it_shift.expect("an ambiguous shift STILL owes a reconciliation");
++        assert_eq!(shift.original_hz, 14_074_000);
++        assert!(!shift.shift_confirmed, "a refused F command is an AMBIGUOUS outcome, not 'no restore needed'");
++    }
++
++    #[test]
++    fn rig_split_does_not_set_mode_when_dont_set_mode_is_on() {
++        // SECOND BLOCKER: "Do not set mode" must gate the Rig-split TX-VFO mode set too —
++        // but NOT the frequency split.
++        let mut eng = Engine::new("W9XYZ", "EN37", 0);
++        eng.set_tier(tempo_app::dto::Tier::Ft8);
++        let mut st = eng.settings().clone();
++        st.split_mode = tempo_app::settings::SplitMode::Rig;
++        st.dont_set_mode = true;
++        eng.apply_settings(st);
++        eng.set_tx_enabled(true);
++        eng.set_tx_offset(750.0);
++        eng.broadcast("CQ W9XYZ EN37");
++        let (addr, log) = logging_rigctld();
++        let mut rig = Rig::rigctld(&addr);
++        let mut backend = MockBackend::new();
++        let mut rx = RxRing::new();
++
++        let _ = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++
++        let sent = log.lock().unwrap().clone();
++        assert!(sent.iter().any(|l| l.starts_with("S 1")), "frequency split still engages: {sent:?}");
++        assert!(sent.iter().any(|l| l.starts_with("I ")), "the split TX frequency is still set: {sent:?}");
++        assert!(
++            !sent.iter().any(|l| l.starts_with('X') || l.starts_with("M ")),
++            "NO mode command (X or M) under dont_set_mode: {sent:?}"
+         );
+     }
+ 
++    #[test]
++    fn rig_split_still_sets_mode_when_dont_set_mode_is_off() {
++        // Positive control for the gate above.
++        let mut eng = Engine::new("W9XYZ", "EN37", 0);
++        eng.set_tier(tempo_app::dto::Tier::Ft8);
++        let mut st = eng.settings().clone();
++        st.split_mode = tempo_app::settings::SplitMode::Rig;
++        st.dont_set_mode = false;
++        eng.apply_settings(st);
++        eng.set_tx_enabled(true);
++        eng.set_tx_offset(750.0);
++        eng.broadcast("CQ W9XYZ EN37");
++        let (addr, log) = logging_rigctld();
++        let mut rig = Rig::rigctld(&addr);
++        let mut backend = MockBackend::new();
++        let mut rx = RxRing::new();
++
++        let _ = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++
++        let sent = log.lock().unwrap().clone();
++        assert!(sent.iter().any(|l| l.starts_with('X')), "the TX-VFO mode IS set with dont_set_mode off: {sent:?}");
++    }
++
+     #[test]
+     fn tx_slot_keys_ptt_plays_audio_and_sets_hold() {
+         // Engine with tx_parity 0 transmits on EVEN slots; queue a broadcast.
