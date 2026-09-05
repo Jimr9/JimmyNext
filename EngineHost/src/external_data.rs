@@ -446,7 +446,11 @@ pub struct EqslUploadArgs {
 /// "rejected"/"authfail") on a successful round trip, or Err with a redacted (never
 /// credential-bearing) message on transport failure.
 pub fn eqsl_upload(args: &EqslUploadArgs) -> Result<&'static str, String> {
-    let body = tempo_core::eqsl::build_upload_body(&args.username, &args.password, &args.record_adif);
+    // qth_nickname: `None` -- Jimmy Next has no UI for eQSL's multi-profile "QTH Nickname"
+    // (new upstream field, Nexus 93b9f012) and single-profile accounts don't need it; wiring
+    // it up end-to-end (wire args + Options UI) is a separate feature, not part of this
+    // compatibility upgrade.
+    let body = tempo_core::eqsl::build_upload_body(&args.username, &args.password, &args.record_adif, None);
     let html = eqsl::post_form(tempo_core::eqsl::EQSL_IMPORT_URL, body)?;
     match tempo_core::eqsl::classify_upload(&html) {
         Some(outcome) => Ok(outcome.code()),
@@ -472,6 +476,8 @@ pub fn eqsl_download(args: &EqslDownloadArgs) -> Result<String, String> {
     let query = tempo_core::eqsl::EqslQuery {
         username: args.username.clone(),
         password: args.password.clone(),
+        // See eqsl_upload's own comment -- Jimmy Next has no multi-profile QTH Nickname UI yet.
+        qth_nickname: None,
         rcvd_since: args.since_unix.map(tempo_core::eqsl::format_rcvd_since),
     };
     let url = tempo_core::eqsl::build_inbox_url(&query);

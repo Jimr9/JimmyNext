@@ -1,11 +1,13 @@
+warning: in the working copy of 'a/src/service.rs', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'b/src/service.rs', LF will be replaced by CRLF the next time Git touches it
 diff --git a/src/service.rs b/src/service.rs
-index 50d8f253..57088ecc 100644
+index 43ff8d7..065a671 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -910,6 +910,75 @@ const CAT_RETRY_MAX_MS: f64 = 30_000.0;
- /// whereas a rejected FREQUENCY is nearly always a hard fact about the radio's range — and each
- /// retry costs a full CAT round-trip on a link that is already unhappy.
- const DIAL_SET_MAX_TRIES: u32 = 3;
+@@ -935,6 +935,75 @@ const CAT_PORT_CHECK_MS: f64 = 10_000.0;
+ /// CI-V, which respawns its engine every tick) came straight back.
+ const CAT_REOPEN_RETRY_MS: f64 = 10_000.0;
+ const CAT_REOPEN_MAX_MS: f64 = 300_000.0;
 +
 +/// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the state of a Fake-It dial restore the
 +/// loop still owes. Every value is a PHYSICAL fact about the radio (a CAT-confirmed reading),
@@ -78,7 +80,7 @@ index 50d8f253..57088ecc 100644
  /// Hamlib func tokens for the Expert DSP toggles, in the engine's
  /// `[nb, nr, notch, comp, vox, manual_notch]` order.
  ///
-@@ -1097,6 +1166,18 @@ pub struct RadioConfig {
+@@ -1122,6 +1191,18 @@ pub struct RadioConfig {
      pub tx_level: f32,
      /// RX capture gain (≥1.0) applied to received audio before decode.
      pub rx_gain: f32,
@@ -97,7 +99,7 @@ index 50d8f253..57088ecc 100644
  }
  
  impl Default for RadioConfig {
-@@ -1132,6 +1213,8 @@ impl Default for RadioConfig {
+@@ -1157,6 +1238,8 @@ impl Default for RadioConfig {
              audio_out: String::new(),
              tx_level: 0.9,
              rx_gain: 1.0,
@@ -106,7 +108,7 @@ index 50d8f253..57088ecc 100644
          }
      }
  }
-@@ -1568,6 +1651,11 @@ impl Transport {
+@@ -1610,6 +1693,11 @@ impl Transport {
              monitor_enabled: false,
              monitor_device: String::new(),
              monitor_level: 0.5,
@@ -118,7 +120,7 @@ index 50d8f253..57088ecc 100644
          }
      }
  }
-@@ -1611,6 +1699,9 @@ fn open_monitor(t: &Transport) -> (Rig, Option<CatDaemon>, Option<bool>) {
+@@ -1653,6 +1741,9 @@ fn open_monitor(t: &Transport) -> (Rig, Option<CatDaemon>, Option<bool>) {
              rig.set_slow_transport(
                  network || native_civ_addr(t).is_some() || t.is_slow_serial_link(),
              );
@@ -128,7 +130,7 @@ index 50d8f253..57088ecc 100644
              let ok = probe_cat(&mut rig, t).ok;
              (rig, Some(proc), ok)
          }
-@@ -2692,9 +2783,21 @@ struct RadioLoop {
+@@ -2734,9 +2825,21 @@ struct RadioLoop {
      /// those readers is the no-RF watch, which must never judge an over whose carrier is
      /// intermittent. See [`Self::rf_watchable`].
      cur_section_cw: bool,
@@ -153,7 +155,7 @@ index 50d8f253..57088ecc 100644
      /// An audio Rig-mode split engaged VFO B for an over — tear the rig split
      /// down once no over is pending (unless the cluster split owns VFO B).
      audio_rig_split: bool,
-@@ -2866,6 +2969,13 @@ struct RadioLoop {
+@@ -2931,6 +3034,13 @@ struct RadioLoop {
      level_supported: [Option<bool>; N_LEVELS],
      /// Consecutive get-miss counters per extended level — same tolerance as `smeter_misses`.
      level_misses: [u8; N_LEVELS],
@@ -167,7 +169,7 @@ index 50d8f253..57088ecc 100644
      /// Whether we last surfaced the "monitor refused — would transmit into the TX
      /// device" note on the audio-error line, so we clear only our OWN message.
      /// The monitor block currently OWNS the audio-error line (it wrote either
-@@ -2996,7 +3106,9 @@ impl RadioLoop {
+@@ -3061,7 +3171,9 @@ impl RadioLoop {
              cur_dial: 0,
              cur_md: String::new(),
              cur_section_cw: false,
@@ -178,7 +180,7 @@ index 50d8f253..57088ecc 100644
              audio_rig_split: false,
              rig_split_restore: None,
              split_detect: None,
-@@ -3035,6 +3147,7 @@ impl RadioLoop {
+@@ -3109,6 +3221,7 @@ impl RadioLoop {
              meter_feed: cfg.meter_feed.clone(),
              level_supported: [None; N_LEVELS],
              level_misses: [0; N_LEVELS],
@@ -186,7 +188,7 @@ index 50d8f253..57088ecc 100644
  
              clock_offset_ms: 0,
              decode: DecodeWorker::spawn(),
-@@ -3425,11 +3538,184 @@ impl RadioLoop {
+@@ -3656,11 +3769,184 @@ impl RadioLoop {
                  if mode_changed { ", mode changed" } else { "" }
              ));
              self.last_dial = dial;
@@ -371,7 +373,7 @@ index 50d8f253..57088ecc 100644
      /// May the loop START a transmission on the active `rig` this tick?
      ///
      /// `false` in the two windows where the `Rig` handle the loop is holding is NOT the
-@@ -3652,6 +3938,10 @@ impl RadioLoop {
+@@ -3883,6 +4169,10 @@ impl RadioLoop {
                      dial as f64 / 1e6
                  ));
                  self.last_dial = dial;
@@ -382,7 +384,7 @@ index 50d8f253..57088ecc 100644
                  self.dial_fail_count = 0;
                  // ⚠️ CLEAR THE GIVE-UP ONLY FOR THE DIAL THAT WAS GIVEN UP ON. This used to clear
                  // on ANY success, which means an HF-only rig that refused 144.390 forgot the
-@@ -3701,6 +3991,12 @@ impl RadioLoop {
+@@ -3945,6 +4235,12 @@ impl RadioLoop {
                      let mut eng = engine_lock(engine);
                      if let Some(hz) = healed {
                          self.last_dial = hz;
@@ -395,7 +397,7 @@ index 50d8f253..57088ecc 100644
                          eng.observe_rig_freq(hz);
                      }
                      eng.set_rig_refused_dial(Some(mhz));
-@@ -3758,7 +4054,11 @@ impl RadioLoop {
+@@ -4002,7 +4298,11 @@ impl RadioLoop {
          self.nr_level_giveup = None;
          self.comp_level_giveup = None;
          self.notch_freq_giveup = None;
@@ -408,7 +410,7 @@ index 50d8f253..57088ecc 100644
          self.audio_rig_split = false;
          self.rig_split_restore = None; // the OLD radio's split is not the new one's to restore
          self.last_rig_poll = 0.0; // poll the new rig's health/mode/S-meter immediately
-@@ -5068,7 +5368,17 @@ impl RadioLoop {
+@@ -5364,7 +5664,17 @@ impl RadioLoop {
                                  );
                              }
                          }
@@ -427,7 +429,7 @@ index 50d8f253..57088ecc 100644
                              self.last_dial = hz;
                              {
                                  let mut eng = engine_lock(engine);
-@@ -5123,7 +5433,14 @@ impl RadioLoop {
+@@ -5419,7 +5729,14 @@ impl RadioLoop {
                          // one — the K4 via QK4 Remote — doesn't time out and drop+reconnect the CAT
                          // socket every poll. Only AFTER the dial probe answered, so a half-open link
                          // can't eat a SECOND 2.5 s timeout on the same dead poll.
@@ -443,7 +445,7 @@ index 50d8f253..57088ecc 100644
                              let ok = match rig.read_level("RFPOWER") {
                                  Ok(frac) => {
                                      {
-@@ -5619,7 +5936,10 @@ impl RadioLoop {
+@@ -5922,7 +6239,10 @@ impl RadioLoop {
              {
                  self.last_freq_poll = now;
                  if let Ok(hz) = rig.read_freq() {
@@ -455,7 +457,7 @@ index 50d8f253..57088ecc 100644
                          self.last_dial = hz;
                          {
                              let mut eng = engine_lock(engine);
-@@ -7239,7 +7559,12 @@ impl RadioLoop {
+@@ -7563,7 +7883,12 @@ impl RadioLoop {
                  //
                  // Nothing is lost by standing down: the ceiling was already applied before the
                  // tune keyed, and only the heavy poll — also suppressed — could learn otherwise.
@@ -469,7 +471,7 @@ index 50d8f253..57088ecc 100644
                      && (force || Some(p) != self.last_rf_power)
                      && self.rf_power_giveup != Some(p)
                  {
-@@ -7616,18 +7941,57 @@ impl RadioLoop {
+@@ -7959,18 +8284,57 @@ impl RadioLoop {
          // was not counted as a live over. Every other end-of-over site in this loop pairs
          // `tuning_keyed` with `tx_until_ms` — this was the one that did not.
          //
@@ -537,7 +539,7 @@ index 50d8f253..57088ecc 100644
              if self.audio_rig_split {
                  self.audio_rig_split = false;
                  // The cluster SPLIT-on-Work owns VFO B when active — leave it.
-@@ -7813,7 +8177,12 @@ impl RadioLoop {
+@@ -8156,7 +8520,12 @@ impl RadioLoop {
                      d.set_scope_enabled(false);
                      d.set_data_mode(true);
                  }
@@ -551,7 +553,7 @@ index 50d8f253..57088ecc 100644
                      tempo_core::applog::info(
                          "cat",
                          &format!(
-@@ -8156,8 +8525,14 @@ impl RadioLoop {
+@@ -8499,8 +8868,14 @@ impl RadioLoop {
                          // move the TX dial before the carrier keys (same as the
                          // boundary path).
                          let split = crate::slot::apply_tx_dial_shift(&mut eng, rig);
@@ -568,7 +570,7 @@ index 50d8f253..57088ecc 100644
                          }
                          if split.rig_split_engaged {
                              self.audio_rig_split = true;
-@@ -8688,8 +9063,15 @@ impl RadioLoop {
+@@ -9031,8 +9406,15 @@ impl RadioLoop {
              // disconnect fail-safe can't race the fresh key-up.
              self.publish_tx_intent_now();
          }
@@ -586,7 +588,7 @@ index 50d8f253..57088ecc 100644
          }
          if action.rig_split_engaged {
              self.audio_rig_split = true;
-@@ -8839,7 +9221,14 @@ impl RadioLoop {
+@@ -9182,7 +9564,14 @@ impl RadioLoop {
                      // T/R period (s), mode-driven: FT1 = 4, FT4 ≈ 8, FT8/DX1 = 15.
                      tr_period: eng.active_slot_secs().round() as u32,
                      config_name: "Default",
@@ -602,7 +604,7 @@ index 50d8f253..57088ecc 100644
                  });
                  if let Some(fd) = snap.field_day.as_ref() {
                      if fd.qso_count > station.last_fd_qsos {
-@@ -9351,6 +9740,15 @@ struct Transport {
+@@ -9694,6 +10083,15 @@ struct Transport {
      monitor_enabled: bool,
      monitor_device: String,
      monitor_level: f32,
@@ -618,7 +620,7 @@ index 50d8f253..57088ecc 100644
  }
  
  impl Transport {
-@@ -9398,6 +9796,8 @@ impl Transport {
+@@ -9741,6 +10139,8 @@ impl Transport {
              monitor_enabled: false,
              monitor_device: String::new(),
              monitor_level: 0.5,
@@ -627,7 +629,7 @@ index 50d8f253..57088ecc 100644
          }
      }
  
-@@ -9451,6 +9851,8 @@ impl Transport {
+@@ -9794,6 +10194,8 @@ impl Transport {
              monitor_enabled: s.monitor_enabled,
              monitor_device: s.monitor_device.clone(),
              monitor_level: s.monitor_level,
@@ -636,7 +638,7 @@ index 50d8f253..57088ecc 100644
          }
      }
  
-@@ -10344,6 +10746,13 @@ fn rigctld_launch_failed_for(mac: bool, e: &std::io::Error) -> String {
+@@ -10720,6 +11122,13 @@ fn rigctld_launch_failed_for(mac: bool, e: &std::io::Error) -> String {
  /// silently resurrects one of them (the tests exercise the coexist branch; this shared
  /// seam is what makes them cover the spawn branch by construction).
  fn finish_cat_open(rig: &mut Rig, t: &Transport) -> CatProbe {
@@ -650,7 +652,7 @@ index 50d8f253..57088ecc 100644
      // READ-ONLY LAUNCH (operator-approved): the open no longer commands the rig.
      // The set_freq/set_mode that lived here for every session before 2026-07-21 are
      // deleted — the probe below READS the rig's own dial+mode and that read seeds the
-@@ -18089,7 +18498,13 @@ mod tests {
+@@ -18509,7 +18918,13 @@ mod tests {
  
          // ⚠️ POSITIVE CONTROL: with no carrier up, an outstanding restore DOES get written —
          // otherwise the assertion below would pass against a scene where nothing was pending.
@@ -665,7 +667,7 @@ index 50d8f253..57088ecc 100644
          let mark = log.lock().unwrap().len();
          run(&mut state, &mut rig, 0.0);
          assert!(
-@@ -18107,7 +18522,11 @@ mod tests {
+@@ -18527,7 +18942,11 @@ mod tests {
          engine.lock().unwrap().set_tune(true);
          run(&mut state, &mut rig, 200.0);
          assert!(state.tuning_keyed, "control: the tune keyed");
@@ -678,7 +680,7 @@ index 50d8f253..57088ecc 100644
          let mark = log.lock().unwrap().len();
          for i in 1..5 {
              run(&mut state, &mut rig, 200.0 + f64::from(i) * 20.0);
-@@ -18120,11 +18539,351 @@ mod tests {
+@@ -18540,11 +18959,351 @@ mod tests {
              log.lock().unwrap()
          );
          assert!(
@@ -1031,7 +1033,7 @@ index 50d8f253..57088ecc 100644
      /// ⭐ TUNE POWER: a tune-up keys at its own level, and the operator's level comes back on
      /// EVERY exit path — including the ones that never reach the tune-release branch.
      ///
-@@ -18291,6 +19050,164 @@ mod tests {
+@@ -18711,6 +19470,250 @@ mod tests {
          );
      }
  
@@ -1146,6 +1148,92 @@ index 50d8f253..57088ecc 100644
 +        );
 +    }
 +
++    /// JIMMY COMPAT (Nexus 44bca866 -> 93b9f012 audit): zero `L RFPOWER`/`l RFPOWER` drive
++    /// commands reach the wire while `disable_rfpower_probe` is set, AND normal TX meter
++    /// telemetry (SWR/ALC/RFPOWER_METER_WATTS/COMP_METER) keeps flowing at the same time — the
++    /// suppression must be an exact-token chokepoint, never a blanket "no RFPOWER-adjacent
++    /// traffic" one. Run long enough (matching
++    /// `a_tune_carrier_keeps_the_transmit_meters_while_the_lead_is_healthy`'s cadence) for the
++    /// round-robin meter poll to actually cycle, not just for the absence check to trivially
++    /// pass on a short run that never touched a meter at all.
++    #[test]
++    fn jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow() {
++        let engine = Arc::new(Mutex::new(Engine::new("W9XYZ", "EN37", 0)));
++        {
++            let mut e = engine.lock().unwrap();
++            let mut s = e.settings().clone();
++            s.tune_power_pct = Some(10); // arm the Tune-power write path too
++            e.apply_settings(s);
++            e.set_rf_power(0.8);
++            e.set_tx_enabled(true);
++            e.set_tune(true);
++        }
++        let (addr, log) = mock_rigctld_on(14_074_000, false);
++        let mut rig = Rig::rigctld(&addr);
++        let mut backend = MockBackend::new();
++        let mut state = loop_state_cfg(|c| c.disable_rfpower_probe = true);
++        let (sinks, mut ra, mut rr) = (no_sinks(), mock_reopen_audio(), mock_reopen_rig());
++        let mut station = StationSinks::new();
++        let mut run = |state: &mut RadioLoop, rig: &mut Rig, t: f64| {
++            state
++                .step(&engine, &mut backend, rig, &sinks, t, &mut ra, &mut rr, &mut station)
++                .unwrap();
++        };
++        let mut t = 0.0;
++        for _ in 0..3 {
++            t += 50.0;
++            run(&mut state, &mut rig, t);
++        }
++        assert!(state.tuning_keyed, "control: the tune must actually be keyed");
++        let mark = log.lock().unwrap().len();
++        for _ in 0..20 {
++            t += 50.0;
++            run(&mut state, &mut rig, t);
++        }
++        let wire = log.lock().unwrap()[mark..].to_vec();
++        assert!(
++            !wire.iter().any(|l| l == "l RFPOWER" || l.starts_with("L RFPOWER")),
++            "suppressed: NOTHING RFPOWER-drive may reach rigctld during a Tune carrier: {wire:?}"
++        );
++        assert!(
++            ["l SWR", "l ALC", "l RFPOWER_METER_WATTS", "l COMP_METER"]
++                .iter()
++                .any(|m| wire.iter().any(|l| l == m)),
++            "safe TX meter telemetry must keep flowing while RFPOWER drive is suppressed: {wire:?}"
++        );
++
++        // Survives CAT reconnect/reopen and any newly constructed Rig: `finish_cat_open` is the
++        // single funnel every open/reopen/recovery path uses (see the README's "Audited upgrade"
++        // section) — stamp two INDEPENDENT fresh `Rig` instances (each against its OWN mock
++        // rigctld — the mock above serves one connection at a time and `rig`/`state` from the
++        // tuning run above are still holding theirs open) from the same suppressed Transport,
++        // simulating an initial open and a later reopen after a drop, and confirm both are
++        // protected while telemetry stays reachable on each.
++        let mut t1 = cat_transport(4599, None);
++        t1.disable_rfpower_probe = true;
++        for label in ["initial open", "reopen after drop"] {
++            let (addr2, log2) = mock_rigctld_on(14_074_000, false);
++            let mut fresh_rig = Rig::rigctld(&addr2);
++            let _ = finish_cat_open(&mut fresh_rig, &t1);
++            assert!(
++                fresh_rig.read_level("RFPOWER").is_err(),
++                "{label}: l RFPOWER must stay refused on every freshly-opened Rig"
++            );
++            assert!(
++                fresh_rig.set_power(0.4).is_ok(),
++                "{label}: set_power must stay a silent Ok on every freshly-opened Rig"
++            );
++            // A safe meter must still reach the wire on this SAME freshly-stamped Rig — the
++            // mock's canned "RPRT 0" reply won't parse as a meter value, so this checks the
++            // command was actually SENT (not refused like RFPOWER above), not its reply.
++            let mark2 = log2.lock().unwrap().len();
++            let _ = fresh_rig.read_meter_f32_within("SWR", None);
++            let after = log2.lock().unwrap()[mark2..].to_vec();
++            let sent = after.iter().any(|l| l == "l SWR");
++            assert!(sent, "{label}: reading SWR must still reach the wire, unlike RFPOWER: {after:?}");
++        }
++    }
++
 +    /// Do-not-set-mode: when the operator has picked WSJT-X "Mode: None", the loop issues no
 +    /// `M` CAT command at all, for any mode. Positive control: without it, a retune commands `M`.
 +    #[test]
@@ -1196,7 +1284,7 @@ index 50d8f253..57088ecc 100644
      fn cat_transport(rigctld_port: u16, broker_self_port: Option<u16>) -> Transport {
          Transport {
              radio_label: LogLabel(radio_label("", 1035)),
-@@ -18316,6 +19233,11 @@ mod tests {
+@@ -18736,6 +19739,11 @@ mod tests {
              monitor_enabled: false,
              monitor_device: String::new(),
              monitor_level: 0.5,

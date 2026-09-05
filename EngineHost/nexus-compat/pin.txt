@@ -6,9 +6,10 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins an exact commit on `main` (7 commits past tag v1.10.0), NOT a tag.
-# prepare-nexus.ps1 fetches NEXUS_COMMIT directly when NEXUS_TAG is the literal "main".
+# This integration pins an exact commit on `main` (47 commits past tag v1.10.0, past the
+# unreleased-tag 1.10.1/1.10.2 release commits), NOT a tag. prepare-nexus.ps1 fetches
+# NEXUS_COMMIT directly when NEXUS_TAG is the literal "main".
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
 NEXUS_TAG=main
-NEXUS_COMMIT=44bca866856ae0e684203197238dd56897f54ceb
+NEXUS_COMMIT=93b9f012790498a2d6d066e8c38928eac3191c1d

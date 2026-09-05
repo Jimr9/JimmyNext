@@ -34,17 +34,53 @@ equivalent functionality -- see "Checking a patch against a newer Nexus" below.
 
 ```
 NEXUS_TAG=main
-NEXUS_COMMIT=44bca866856ae0e684203197238dd56897f54ceb
+NEXUS_COMMIT=93b9f012790498a2d6d066e8c38928eac3191c1d
 ```
 
-`44bca866` is 7 commits past the newest stable tag `v1.10.0` (`c19e658b`). Those 7 commits are
-Connect-TV work, a stale-decode alert guard, a Confirm-tier opt-out, a Linux capture-buffer
-fix, and optional dB-report log comments -- **no** radio-control, Fake-It, Tune-meter, RFPOWER,
-FT8/FT4 decoder, or QSO-sequencer change. `prepare-nexus.ps1` handles the `main` case by cloning
-`main` and then `git checkout --detach`-ing exactly `NEXUS_COMMIT`, and still verifies the
+`93b9f012` is 47 commits past the newest stable tag `v1.10.0` (`c19e658b`) -- it also carries the
+untagged `1.10.1` and `1.10.2` release commits, which is the batch that carries the two upstream
+improvements this integration deliberately adopted (see "Audited upgrade, 44bca866 ->
+93b9f012" below): better CAT reopen/recovery backoff and bounded Tune-time meter polling.
+`prepare-nexus.ps1` handles the `main` case by cloning `main` and then `git checkout
+--detach`-ing exactly `NEXUS_COMMIT`, and still verifies the
 resolved `HEAD` equals it.
 
-## Current patches (against Nexus `main`, commit `44bca866`)
+## Audited upgrade, 44bca866 -> 93b9f012
+
+Codex-audited upgrade (2026-09-05) from the prior pin `44bca866` to `93b9f012` (the 40 commits
+in between: World Radio League logbook/eQSL integration, a WSJT-X-forward multi-target fix, the
+manual's EPUB/PDF pipeline, and CI/funding chores -- **plus** the two behaviors below this
+integration deliberately adopted). No patch changed its *behavior* in this pass, only its
+context (upstream inserted unrelated code near several patch anchors; see each patch's own
+history for the mechanical re-anchoring). Two upstream improvements are adopted by moving the
+pin alone -- neither needed a patch:
+
+- **CAT reopen/recovery backoff** (`b31be910`, `636ad7e3`): a failed reopen with the serial port
+  present now retries on a doubling backoff (`CAT_REOPEN_RETRY_MS` -> `CAT_REOPEN_MAX_MS`,
+  reset by the port re-appearing) instead of the old single attempt that could leave a radio
+  switched off overnight never reconnecting on its own.
+- **Bounded Tune-meter polling** (`ea37eb1a`): SWR/ALC/RFPOWER_METER_WATTS/COMP_METER are read
+  during a Tune carrier again, gated by `TUNE_METER_MIN_LEAD_MS` (skip the read if the carrier's
+  remaining lead is too thin) and bounded by `TUNE_METER_DEADLINE_MS` (a slow rig costs a
+  reading, never a gap in the carrier) -- replacing the old full stand-down
+  (`meters_now = keyed_now && !self.tuning_keyed`) that went in as a starvation fix and, per
+  upstream's own note, wrongly assumed nobody watches SWR during a tune-up.
+
+Deliberately **not** adopted: the Nexus CAT broker (`cat_broker`/`broker_self_port`, still
+forced off/`None` in EngineHost's `main.rs` -- see the comments there) and upstream's new
+voice-memory transmission (`\send_voice_mem`/`\stop_voice_mem`, `civ/broker.rs`) -- both are
+CAT-broker-surface features Jimmy has no use for and does not enable.
+
+RFPOWER write protection (the two-layer chokepoint in `tempo-audio-rig.patch` +
+`tempo-audio-service.patch`) was re-verified by hand against the new Tune-meter and CAT-reopen
+code: both remaining `L RFPOWER` write call sites (per-mode power ceiling, Tune-power) and the
+heavy-poll `l RFPOWER` read are still gated by `disable_rfpower_probe`, and every live/test `Rig`
+construction still funnels through the single `finish_cat_open` stamp site -- the new CAT-reopen
+backoff only changes *when* that funnel runs, not whether it runs. See
+`jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
+`service.rs`'s test module for the regression proof.
+
+## Current patches (against Nexus `main`, commit `93b9f012`)
 
 Seven patches, **one source file each**. Jimmy's downstream behavior these preserve is the
 **Jimmy Next 2.0.55 operator experience** -- that is the compatibility baseline.
