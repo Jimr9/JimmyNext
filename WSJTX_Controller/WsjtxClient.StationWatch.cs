@@ -25,6 +25,17 @@ namespace WSJTX_Controller
         // belt-and-suspenders pairing, not the only safety net.
         private bool _targetMonitorStartDispatching;
 
+        // Snapshot-finality guard (2.0.64 transmit-safety fix). When a monitor decides it is
+        // ready, the automatic REPLY is NOT sent from inside that decode pass -- the monitor is
+        // parked here and the dispatch is deferred for a few 1 s SNAPSHOT polls. Nexus's decoder
+        // can spread one receive slot's decodes across the first ~3 snapshots after the slot
+        // boundary; holding the REPLY for that window lets any late "target working another
+        // station" decode for the just-completed period be ingested (and set BusyWithOther /
+        // change context) so RevalidateForAutoStart can abort BEFORE anything transmits.
+        private TargetMonitor _pendingAutoStart;
+        private int _pendingAutoStartPollsRemaining;
+        private const int PendingAutoStartFinalityPolls = 3;
+
         public bool StationWatchActive => _stationWatch.IsActive;
         public string StationWatchTarget => _stationWatch.TargetCall;
 
@@ -81,7 +92,10 @@ namespace WSJTX_Controller
                 StatusView.ShowMessage($"Waiting for another decode from {_stationWatch.TargetCall}", false);
                 return;
             }
-            RequestTargetMonitorStart(_stationWatch);
+            // Explicit operator "now" -- but still revalidated (fresh, in-context, not busy)
+            // inside RequestTargetMonitorStart; it will decline with a status rather than
+            // transmit from a stale or wrong-context stored decode.
+            RequestTargetMonitorStart(_stationWatch, operatorOverride: true);
         }
 
         // ── Smart QSO Start: capture from Enter ─────────────────────────────────────────────────
@@ -97,17 +111,20 @@ namespace WSJTX_Controller
 
             _smartStart.SilenceThreshold = ctrl.smartStartSilencePeriods;
             _smartStart.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);
-            // Seed the freshly-started monitor with the exact decode the operator selected --
-            // ObserveDecode would otherwise only learn about the target from FUTURE decodes.
-            _smartStart.ObserveDecode(dmsg, IsEvenSlotNow(), myCall);
+            // Seed the freshly-started monitor with the exact decode the operator selected.
+            // SeedSelectedDecode records it as the decode to eventually reply from, but only
+            // treats it as genuine current evidence (parity, live-evidence, CQ/73/RR73
+            // readiness) when it is still fresh -- a stale queued/list selection identifies
+            // WHICH station to work and nothing more, and Smart Start then waits for a real
+            // live decode before it can authorize any transmission (2.0.64: the V51WW failure
+            // was a ~54 s-old RR73 being manufactured into live "target available" evidence).
+            _smartStart.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall);
             if (_smartStart.ConsumeReadyToStart())
-                RequestTargetMonitorStart(_smartStart);
+                ArmPendingAutoStart(_smartStart);
             else
                 StatusView.ShowMessage($"Will work {call} when appropriate", false);
             return true;
         }
-
-        private bool IsEvenSlotNow() => (_directLastSlotSeen % 2UL) == 0UL;
 
         // ── Shared feed points, called from the Direct decode loop ──────────────────────────────
 
@@ -120,8 +137,54 @@ namespace WSJTX_Controller
             if (_smartStart.IsActive)
             {
                 _smartStart.ObserveDecode(enq, evenSlot, myCall);
-                if (_smartStart.ConsumeReadyToStart()) RequestTargetMonitorStart(_smartStart);
+                if (_smartStart.AwaitingEngagement)
+                    ServiceSmartStartAwaitingEngagement();
+                else if (_smartStart.ConsumeReadyToStart())
+                    ArmPendingAutoStart(_smartStart);
             }
+        }
+
+        // Smart Start has dispatched its first call and is now CALLING the target (see
+        // TargetMonitor.EnterAwaitingEngagement / WsjtxClient.ReplyTo). This runs after every
+        // fresh decode while that phase is active:
+        //   * the target addressed our callsign -> Smart Start is finished; the normal QSO
+        //     sequencer already owns callInProg, so Smart Start just gets out of the way, OR
+        //   * fresh activity shows the target working (or being worked by) another station
+        //     before it answered us -> yield our call and stay armed for the same target.
+        private void ServiceSmartStartAwaitingEngagement()
+        {
+            if (_smartStart.EngagedUs)
+            {
+                DebugOutput($"{Time()} [SMART] {_smartStart.TargetCall} answered our call -- Smart Start done; normal QSO sequencing owns it");
+                _smartStart.Stop(announce: false);
+                return;
+            }
+            if (_smartStart.BusyWithOther)
+                YieldSmartStartToOtherQso();
+        }
+
+        // The Smart Start target started/continued a QSO with someone else before answering us.
+        // Cease our current call exactly the way Escape/Alt+H does (AbortContact's ordered
+        // teardown, MINUS stopping any Station Watch), then drop Smart Start back to armed/
+        // waiting for the SAME target. It resumes only on a genuine availability signal --
+        // TargetMonitor keeps BusyWithOther set across a mere peer change, and only a target
+        // CQ / 73 / RR73 / addressing-us decode clears it and re-signals readiness.
+        private void YieldSmartStartToOtherQso()
+        {
+            string target = _smartStart.TargetCall;
+            // Only unwind OUR OWN call to this exact target -- never touch an unrelated contact.
+            if (!string.Equals(callInProg, target, StringComparison.OrdinalIgnoreCase))
+            {
+                _smartStart.ReturnToWaiting();
+                return;
+            }
+            DebugOutput($"{Time()} [SMART] {target} is working another station before answering us -- ceasing our call, staying armed");
+            RequeueAbortedCall();   // while callInProg / replyDecode are still valid
+            CancelQso();            // clears QSO state + bumps _contactEpoch (in-flight REPLY can't re-commit)
+            HaltAndDisableTx();     // HALT_TX + SET_TX_ENABLED 0
+            ClearPendingAutoStart();
+            _smartStart.ReturnToWaiting();
+            Notify?.Publish(new SmartStartWaitingEvent(target, "working another station"));
         }
 
         // Called once per real, completed receive-period boundary (the exact same signal
@@ -129,9 +192,16 @@ namespace WSJTX_Controller
         // detection). `weTransmittedThisSlot` is Jimmy's own `transmitting` flag at that moment.
         private void FeedTargetMonitorsPeriodComplete(ulong slot, bool evenSlot, bool weTransmittedThisSlot)
         {
+            // Station Watch counts opportunities too (its own Work-Now freshness check reads
+            // OpportunitiesSinceLiveEvidence) -- it just never signals an automatic start.
+            if (_stationWatch.IsActive)
+                _stationWatch.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
             if (!_smartStart.IsActive) return;
             _smartStart.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
-            if (_smartStart.ConsumeReadyToStart()) RequestTargetMonitorStart(_smartStart);
+            // While awaiting engagement (already calling) the readiness machinery is dormant --
+            // OnReceivePeriodComplete won't SignalReady, but gate the consume too for clarity.
+            if (!_smartStart.AwaitingEngagement && _smartStart.ConsumeReadyToStart())
+                ArmPendingAutoStart(_smartStart);
         }
 
         // Band or mode change, or a full session reset (ResetBandSession -- see its own comment):
@@ -139,6 +209,7 @@ namespace WSJTX_Controller
         // monitoring/silence state. Both TargetMonitor instances independently no-op if not active.
         private void StopTargetMonitorsForContextChange()
         {
+            ClearPendingAutoStart();
             if (_stationWatch.IsActive)
             {
                 _stationWatch.Stop();
@@ -154,6 +225,7 @@ namespace WSJTX_Controller
         // leave an actionable pending automatic start behind").
         public void CancelStationWatchPendingStart()
         {
+            ClearPendingAutoStart();
             _stationWatch.CancelPendingStart();
             _smartStart.Stop(announce: false);
         }
@@ -162,16 +234,70 @@ namespace WSJTX_Controller
         // a receive-only Station Watch is untouched (it may continue decoding regardless).
         private void NotifyTargetMonitorsNonActionable()
         {
+            ClearPendingAutoStart();
             _smartStart.OnSmartStartNonActionable();
         }
 
-        // ── The one atomic start-request gate ───────────────────────────────────────────────────
+        // ── Deferred auto-start (snapshot-finality guard) ───────────────────────────────────────
 
-        private void RequestTargetMonitorStart(TargetMonitor monitor)
+        private void ArmPendingAutoStart(TargetMonitor monitor)
+        {
+            if (monitor?.LastUsableDecode == null) return;
+            // A repeated "ready" for the monitor already parked here is a no-op -- the finality
+            // countdown keeps running rather than restarting every silent opportunity (which
+            // would defer the dispatch forever). The revalidation in RequestTargetMonitorStart
+            // still runs against the very latest state when the countdown finally elapses.
+            if (ReferenceEquals(_pendingAutoStart, monitor)) return;
+            _pendingAutoStart = monitor;
+            _pendingAutoStartPollsRemaining = PendingAutoStartFinalityPolls;
+        }
+
+        private void ClearPendingAutoStart()
+        {
+            _pendingAutoStart = null;
+            _pendingAutoStartPollsRemaining = 0;
+        }
+
+        // Called at the END of every DirectApplyDecodes pass (after that pass has ingested its
+        // decodes and run the period-complete tick). Holds a parked auto-start for a few polls
+        // so any late decode for the just-completed receive period is seen first, then dispatches
+        // it through the one revalidating start gate -- which may still decline it.
+        private void ServicePendingAutoStart()
+        {
+            if (_pendingAutoStart == null) return;
+            if (!_pendingAutoStart.IsActive) { ClearPendingAutoStart(); return; }
+            if (_pendingAutoStartPollsRemaining > 0) { _pendingAutoStartPollsRemaining--; return; }
+            TargetMonitor monitor = _pendingAutoStart;
+            ClearPendingAutoStart();
+            RequestTargetMonitorStart(monitor, operatorOverride: false);
+        }
+
+        // ── The one atomic, revalidating start-request gate ─────────────────────────────────────
+
+        private void RequestTargetMonitorStart(TargetMonitor monitor, bool operatorOverride)
         {
             if (monitor?.LastUsableDecode == null) return;
             if (callInProg != null) return;                 // already mid-QSO -- never step on it
             if (_targetMonitorStartDispatching) return;      // one atomic gate; only one wins
+
+            // 2.0.64 transmit-safety: revalidate against CURRENT band/mode/session right now.
+            // Stale historical evidence, a context change, a target now working someone else, or
+            // a receive-finality straggler that landed during the deferral window all decline
+            // here rather than transmit.
+            AutoStartCheck check = monitor.RevalidateForAutoStart(
+                DateTime.UtcNow, CurrentBandStr, mode, _directExpectedSessionToken, operatorOverride);
+            if (check != AutoStartCheck.Ok)
+            {
+                string why = AutoStartDeclineText(monitor.TargetCall, check);
+                if (operatorOverride)
+                    StatusView.ShowMessage(why, false);
+                else
+                    Notify?.Publish(new SmartStartWaitingEvent(monitor.TargetCall, why));
+                // Leave the monitor armed and watching -- a later fresh decode / cleared-busy
+                // state can still start it; it simply did not fire this time.
+                return;
+            }
+
             _targetMonitorStartDispatching = true;
             try
             {
@@ -181,6 +307,18 @@ namespace WSJTX_Controller
             finally
             {
                 _targetMonitorStartDispatching = false;
+            }
+        }
+
+        private static string AutoStartDeclineText(string target, AutoStartCheck check)
+        {
+            switch (check)
+            {
+                case AutoStartCheck.TargetBusy:      return $"{target} is working another station";
+                case AutoStartCheck.ContextChanged:  return $"Band or mode changed; not starting {target}";
+                case AutoStartCheck.NoLiveEvidence:  return $"Waiting for a current decode from {target}";
+                case AutoStartCheck.StaleEvidence:   return $"No recent decode from {target}; still watching";
+                default:                             return $"No usable decode from {target} yet";
             }
         }
 

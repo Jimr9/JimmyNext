@@ -239,6 +239,7 @@ namespace WSJTX_Controller
             udpOnTopCheckBox.Checked = ctrl.alwaysOnTop;
             udpDiagLogCheckBox.Checked = wsjtxClient.diagLog;
             BuildGeneralTab();
+            BuildTransmitTab();
             BuildHotkeysTab();
             BuildAdvancedUiTab();
             BuildWantedCallsTab();
@@ -393,43 +394,75 @@ namespace WSJTX_Controller
             // Options > Notifications > Global speech behaviour (2026-09-04) so all automatic-
             // speech behaviour is configured in one place. Same Controller setting / INI key.
 
-            // Smart QSO Start (2.0.63). OFF preserves today's Enter behaviour exactly; ON means
-            // "work this station when it is appropriate" instead of transmitting immediately --
-            // see TargetMonitor/WsjtxClient.StationWatch.cs.
+            // Smart QSO Start controls moved to Options > Transmit (2.0.64) -- it governs when an
+            // Enter selection turns into a transmission, so it belongs with the other transmit
+            // controls. Built by BuildTransmitTab(); persisted keys (smartQsoStartEnabled /
+            // smartStartSilencePeriods) are unchanged -- placement only, no settings migration.
+        }
+
+        // ===== TRANSMIT TAB (Smart QSO Start group) =====
+        // The rest of the Transmit tab (Transmit frequency, repeat limit, period, etc.) is
+        // assembled from Controller-owned controls in ReparentControlsToDialog(); this adds the
+        // dialog-owned Smart QSO Start group beneath it.
+        private void BuildTransmitTab()
+        {
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+
+            var smartStartGroup = new System.Windows.Forms.GroupBox
+            {
+                Text           = "Smart QSO Start",
+                AccessibleName = "Smart QSO Start",
+                Location       = new System.Drawing.Point(5, 178),
+                Size           = new System.Drawing.Size(650, 80),
+                Font           = font,
+                TabStop        = false,
+            };
+            transmitPanel.Controls.Add(smartStartGroup);
+
+            // OFF preserves today's Enter behaviour exactly; ON means "work this station when it
+            // is appropriate" instead of transmitting immediately -- see TargetMonitor /
+            // WsjtxClient.StationWatch.cs.
             _smartQsoStartCheckBox = new System.Windows.Forms.CheckBox
             {
-                Text                  = "Smart QSO Start (Enter means \"work when appropriate\", not immediately)",
-                AccessibleName        = "Smart QSO Start",
-                AutoSize              = true,
-                Location              = new System.Drawing.Point(10, 195),
-                TabIndex              = 7,
-                Checked               = ctrl.smartQsoStartEnabled,
-                Font                  = font,
+                Text           = "Smart QSO Start (Enter means \"work when appropriate\", not immediately)",
+                AccessibleName = "Smart QSO Start",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(10, 20),
+                TabIndex       = 0,
+                Checked        = ctrl.smartQsoStartEnabled,
+                Font           = font,
             };
-            generalPanel.Controls.Add(_smartQsoStartCheckBox);
+            smartStartGroup.Controls.Add(_smartQsoStartCheckBox);
 
             var smartStartSilenceLabel = new System.Windows.Forms.Label
             {
-                Text     = "Smart Start: start after target not heard for (receive periods):",
+                Text     = "Start after target not heard for (receive periods):",
                 AutoSize = true,
-                Location = new System.Drawing.Point(10, 222),
+                Location = new System.Drawing.Point(10, 48),
                 Font     = font,
                 TabStop  = false,
             };
-            generalPanel.Controls.Add(smartStartSilenceLabel);
+            smartStartGroup.Controls.Add(smartStartSilenceLabel);
 
             _smartStartSilencePeriodsNumeric = new System.Windows.Forms.NumericUpDown
             {
                 AccessibleName = "Smart Start silence periods",
-                Location       = new System.Drawing.Point(360, 219),
+                Location       = new System.Drawing.Point(320, 45),
                 Size           = new System.Drawing.Size(50, 20),
-                TabIndex       = 8,
+                TabIndex       = 1,
                 Minimum        = 1,
                 Maximum        = 10,
                 Value          = Math.Max(1, Math.Min(10, ctrl.smartStartSilencePeriods)),
                 Font           = font,
             };
-            generalPanel.Controls.Add(_smartStartSilencePeriodsNumeric);
+            smartStartGroup.Controls.Add(_smartStartSilencePeriodsNumeric);
+        }
+
+        private void SaveTransmitTab()
+        {
+            ctrl.smartQsoStartEnabled = _smartQsoStartCheckBox?.Checked ?? false;
+            int silencePeriods = (int)(_smartStartSilencePeriodsNumeric?.Value ?? 2);
+            ctrl.smartStartSilencePeriods = Math.Max(1, Math.Min(10, silencePeriods));
         }
 
         private void ApplyGeneralSettings()
@@ -443,10 +476,7 @@ namespace WSJTX_Controller
             ctrl.moveFocusToStatusOnCallSelect = moveFocusToStatusCheckBox?.Checked ?? false;
             ctrl.checkForUpdatesOnStartup = checkForUpdatesCheckBox?.Checked ?? false;
             // announceImportantAlertsWhenFocusElsewhere is applied by SaveNotificationsTab now.
-
-            ctrl.smartQsoStartEnabled = _smartQsoStartCheckBox?.Checked ?? false;
-            int silencePeriods = (int)(_smartStartSilencePeriodsNumeric?.Value ?? 2);
-            ctrl.smartStartSilencePeriods = Math.Max(1, Math.Min(10, silencePeriods));
+            // Smart QSO Start is applied by SaveTransmitTab now (controls moved to the Transmit tab).
 
             int maxAge = (int)(_maxCallQueueAgeNumeric?.Value ?? 16);
             ctrl.maxCallQueueAgePeriods = Math.Max(4, Math.Min(200, maxAge));
@@ -490,6 +520,7 @@ namespace WSJTX_Controller
             if (!ValidateHotkeys()) return;
             ApplyGeneralSettings();
             SaveReceiveReplyTab();
+            SaveTransmitTab();
             SaveHotkeysTab();
             SaveAdvancedUiTab();
             SaveWantedCallsTab();
@@ -997,6 +1028,47 @@ namespace WSJTX_Controller
             string.IsNullOrEmpty(stored) ? SystemDefaultDeviceLabel : stored;
         internal static string ToStoredDeviceName(string display) =>
             display == SystemDefaultDeviceLabel ? "" : display;
+
+        // 2.0.64 -- audio devices are stored and matched by Windows friendly-name string, not a
+        // stable endpoint id, so a driver update / feature update / USB re-enumeration that
+        // renames an endpoint ("Speakers (USB Audio CODEC)" -> "Speakers (2- USB Audio CODEC)")
+        // leaves a perfectly valid stored name that no longer resolves. When that happens the
+        // engine falls back to the system default at runtime while the INI keeps the operator's
+        // choice. This surfaces the mismatch -- to the diag log, and as a non-stealing gray hint
+        // beside the combo -- WITHOUT changing the stored value: Jimmy never replaces the
+        // operator's saved device with a resolved/fallback name (see NativeEngineSettings and
+        // SaveRadioTab, which round-trip whatever text the combo holds). Returns the extra
+        // vertical space consumed (0 when the device is present or empty), so the caller can keep
+        // laying out controls below it.
+        private int NoteIfSavedAudioDeviceUnavailable(System.Windows.Forms.ComboBox combo, string storedName, string kind, int left, int y)
+        {
+            if (string.IsNullOrWhiteSpace(storedName)) return 0;
+
+            foreach (var it in combo.Items)
+                if (string.Equals(it as string, storedName, StringComparison.OrdinalIgnoreCase))
+                    return 0;   // present -- nothing to warn about
+
+            var available = new System.Collections.Generic.List<string>();
+            foreach (var it in combo.Items)
+                if (it is string s && s != SystemDefaultDeviceLabel) available.Add(s);
+            wsjtxClient?.DebugOutput($"[audio] saved {kind} audio device '{storedName}' is NOT among the devices currently available: " +
+                (available.Count > 0 ? string.Join(", ", available) : "(none enumerated)") +
+                " -- keeping the saved selection; the engine falls back to the system default until it reappears");
+
+            var warn = new System.Windows.Forms.Label
+            {
+                Text           = "Saved device not currently available - check the device/driver. Your selection is kept.",
+                AutoSize       = true,
+                ForeColor      = System.Drawing.Color.FromArgb(150, 90, 0),
+                Location       = new System.Drawing.Point(left, y),
+                Font           = new System.Drawing.Font("Microsoft Sans Serif", 8.25F),
+                TabStop        = false,
+                AccessibleName = $"Saved {kind} audio device is not currently available; your selection is kept",
+            };
+            decodeEnginePanel.Controls.Add(warn);
+            return 18;
+        }
+
         private System.Windows.Forms.NumericUpDown _engineAudioInputLevelUpDown;
         private System.Windows.Forms.NumericUpDown _engineAudioOutputLevelUpDown;
         private System.Windows.Forms.TextBox _dxClusterAddressTextBox;
@@ -2060,6 +2132,7 @@ namespace WSJTX_Controller
             _engineAudioDeviceCombo.Text = ToDisplayDeviceName(ctrl.NativeEngine.AudioInputDevice);
             decodeEnginePanel.Controls.Add(_engineAudioDeviceCombo);
             y += 24;
+            y += NoteIfSavedAudioDeviceUnavailable(_engineAudioDeviceCombo, ctrl.NativeEngine.AudioInputDevice, "input", left, y);
 
             var audioInputLevelLabel = new System.Windows.Forms.Label
             {
@@ -2121,6 +2194,7 @@ namespace WSJTX_Controller
             _engineAudioOutputDeviceCombo.Text = ToDisplayDeviceName(ctrl.NativeEngine.AudioOutputDevice);
             decodeEnginePanel.Controls.Add(_engineAudioOutputDeviceCombo);
             y += 24;
+            y += NoteIfSavedAudioDeviceUnavailable(_engineAudioOutputDeviceCombo, ctrl.NativeEngine.AudioOutputDevice, "output", left, y);
 
             var audioOutputLevelLabel = new System.Windows.Forms.Label
             {
@@ -6542,25 +6616,41 @@ namespace WSJTX_Controller
             saveButton.Click += (s, e) => ctrl.SaveProfileAs_Click();
             profilesPanel.Controls.Add(saveButton);
 
+            // 2.0.64: default checked = today's behaviour (the current profile's settings are
+            // flushed to its .ini before the switch). Unchecked lets the operator try changes in
+            // this session and load another profile WITHOUT baking those changes into the profile
+            // being left. Safe shutdown (engine halt, upload cleanup) happens either way.
+            var saveFirstCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Save current configuration first",
+                AccessibleName = "Save current configuration first",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(8, 122),
+                TabIndex       = 1,
+                Checked        = true,
+                Font           = font,
+            };
+            profilesPanel.Controls.Add(saveFirstCheckBox);
+
             var loadButton = new System.Windows.Forms.Button
             {
                 Text = "Load Profile...",
                 AccessibleName = "Load profile",
-                Location = new System.Drawing.Point(8, 120),
+                Location = new System.Drawing.Point(8, 146),
                 Size = new System.Drawing.Size(280, 27),
-                TabIndex = 1,
+                TabIndex = 2,
                 Font = font,
             };
-            loadButton.Click += (s, e) => ctrl.LoadProfile_Click();
+            loadButton.Click += (s, e) => ctrl.LoadProfile_Click(saveFirstCheckBox.Checked);
             profilesPanel.Controls.Add(loadButton);
 
             var deleteButton = new System.Windows.Forms.Button
             {
                 Text = "Delete Profile...",
                 AccessibleName = "Delete profile",
-                Location = new System.Drawing.Point(8, 152),
+                Location = new System.Drawing.Point(8, 180),
                 Size = new System.Drawing.Size(280, 27),
-                TabIndex = 2,
+                TabIndex = 3,
                 Font = font,
             };
             deleteButton.Click += (s, e) => ctrl.DeleteProfile_Click();

@@ -1650,6 +1650,14 @@ namespace WSJTX_Controller
         // "default" to delete) and for whichever profile is currently active (would orphan the
         // pointer -- self-healing on the READ side too, see Form_Load, but refused here for a
         // clearer operator experience).
+        // 2.0.64: set true by LoadProfile_Click when the operator UNticks "Save current
+        // configuration first", so the restart that follows skips serialising the current
+        // profile's settings back to its .ini -- discarding this session's temporary tweaks
+        // rather than baking them into the profile being left. Everything else about a clean
+        // exit (engine halt, pending-upload wait, CloseComm) still runs. One-shot: the process
+        // is exiting immediately after, so it never needs resetting.
+        private bool _suppressSettingsSaveOnExit;
+
         private static string ProgramName() => Assembly.GetExecutingAssembly().GetName().Name;
         private static string ProfilesAppDataPath() => $"{Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData)}\\{ProgramName()}";
         private static string BaseIniFilePath() => ProfilesAppDataPath() + "\\" + ProgramName() + ".ini";
@@ -1842,7 +1850,11 @@ namespace WSJTX_Controller
         }
 
         // internal (not private): called from OptionsDlg's Profiles tab button.
-        internal void LoadProfile_Click()
+        // saveCurrentFirst mirrors the tab's "Save current configuration first" checkbox
+        // (default checked = today's behaviour). Unchecked = load the other profile WITHOUT
+        // writing this session's changes back into the current profile first; safe shutdown
+        // (engine halt, upload cleanup) is unaffected either way.
+        internal void LoadProfile_Click(bool saveCurrentFirst = true)
         {
             var names = new List<string> { DefaultProfileDisplayName };
             names.AddRange(ListNamedProfiles());
@@ -1868,8 +1880,11 @@ namespace WSJTX_Controller
                 return;
             }
 
+            string savePhrase = saveCurrentFirst
+                ? "This session's changes to the current profile are saved first."
+                : "This session's changes to the current profile will be discarded.";
             var confirm = MessageBox.Show(this,
-                $"Loading '{chosen}' will restart Jimmy. Any unsaved change to the current profile is saved first. Continue?",
+                $"Loading '{chosen}' will restart Jimmy. {savePhrase} Continue?",
                 "Load Profile", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (confirm != DialogResult.Yes) return;
 
@@ -1885,6 +1900,15 @@ namespace WSJTX_Controller
                 MessageBox.Show(this, $"Could not switch profiles: {ex.Message}", "Load Profile Failed",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
+            }
+
+            // Unchecked "Save current configuration first": the restart below must NOT flush this
+            // session's settings back into the profile we're leaving. The activeProfile pointer
+            // was already written above, so the switch itself still happens.
+            if (!saveCurrentFirst)
+            {
+                _suppressSettingsSaveOnExit = true;
+                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} profile switch to '{chosen}': operator chose NOT to save current configuration first");
             }
 
             RestartApplication();
@@ -1980,7 +2004,12 @@ namespace WSJTX_Controller
 
         private void Controller_FormClosing(object sender, FormClosingEventArgs e)
         {
-            SaveAllSettingsToIniFile();
+            // Normally the final flush of every setting to the active .ini. Skipped only when the
+            // operator unticked "Save current configuration first" on a profile switch -- see
+            // _suppressSettingsSaveOnExit. Everything below (upload wait, CloseComm/engine halt)
+            // still runs regardless.
+            if (!_suppressSettingsSaveOnExit)
+                SaveAllSettingsToIniFile();
 
             // Codex Audit 02 finding, 2026-08-21 ("improve shutdown handling for outstanding
             // optional remote-upload work"): a real-time QRZ/Club Log/HRDLog/eQSL upload from a
@@ -2342,12 +2371,22 @@ namespace WSJTX_Controller
                 return true;
             }
 
-            // Station Watch (2.0.63). No focus change either way -- Toggle captures whichever
-            // station currently has focus/selection without moving it; Work Now uses the stored
-            // watched target, never current list focus.
+            // Station Watch (2.0.63). Toggle captures whichever station currently has focus/
+            // selection; Work Now uses the stored watched target, never current list focus.
+            // 2.0.64: a SUCCESSFUL start (was inactive, now active) honours the same "Move focus
+            // to status after selecting a call" preference an ordinary call selection does --
+            // reusing MoveFocusToStatusIfEnabled, which no-ops when that option is off, so the
+            // previous no-focus-change behaviour is preserved for anyone who hasn't enabled it.
+            // Stopping the watch, or a no-op (no station selected), never moves focus.
+            // sendReadNudge:false -- this is a Ctrl+Shift chorded hotkey; a synthetic "{UP}"
+            // here would land as Ctrl+Shift+Up (see MoveFocusToStatusIfEnabled). The watch's
+            // own "Watching X" announcement already tells the operator what happened.
             if (keyData == hotkeyConfig[HotkeyAction.ToggleStationWatch] && hotkeyConfig[HotkeyAction.ToggleStationWatch] != Keys.None)
             {
+                bool watchWasActive = wsjtxClient.StationWatchActive;
                 wsjtxClient.ToggleStationWatch(ResolveFocusedOrSelectedCall());
+                if (!watchWasActive && wsjtxClient.StationWatchActive)
+                    MoveFocusToStatusIfEnabled(sendReadNudge: false);
                 return true;
             }
             if (keyData == hotkeyConfig[HotkeyAction.WorkWatchedStationNow] && hotkeyConfig[HotkeyAction.WorkWatchedStationNow] != Keys.None)
@@ -4139,8 +4178,7 @@ namespace WSJTX_Controller
                 $"{nl}{nl}Optional navigation keys:" +
                 $"{nl}{K(HotkeyAction.NavLoggedList)}: Read 'Auto-logged calls' list." +
                 $"{nl}{K(HotkeyAction.NavLoggedCount)}: Read total number of 'Auto-logged calls'." +
-                $"{nl}{K(HotkeyAction.NavPendingCount)}: Read number of pending 'Stations calling'." +
-                $"{nl}Ctrl, Y: Play the 'New call', 'Call directed to {SpacifyMyCall()}', and 'Logged' alert sounds.";
+                $"{nl}{K(HotkeyAction.NavPendingCount)}: Read number of pending 'Stations calling'.";
         }
 
         public void cqModeButton_Click(object sender, EventArgs e)
@@ -4765,8 +4803,10 @@ namespace WSJTX_Controller
             if (helpDlg != null) helpDlg.Close();
             helpDlg = new HelpDlg(this, $"{wsjtxClient.pgmName}{helpSuffix}", (string)helpTimer.Tag);
             // No Owner -- see the matching comment on _logbookWindow's Show() call.
+            // Show() already activates a freshly-created ownerless window (same pattern as
+            // _logbookWindow / _otaSpotsWindow); a redundant Activate() only fired an extra
+            // HelpDlg_Activated, part of the Alt+K "version announced ~3 times" pile-up.
             helpDlg.Show();
-            helpDlg.Activate();
         }
 
         private void cqModeButton_CheckedChanged(object sender, EventArgs e)
@@ -5382,14 +5422,28 @@ namespace WSJTX_Controller
         // lists), move focus to statusText and force NVDA/JAWS to announce the resulting
         // status -- same technique already used by the NavStatus hotkey. Off by default;
         // not everyone wants focus to jump after every selection.
-        private void MoveFocusToStatusIfEnabled()
+        //
+        // sendReadNudge: the SendKeys "{UP}" is what forces the screen reader to speak the
+        // resulting status line. It is right for a call selection (which has no spoken
+        // confirmation of its own), but it MUST NOT be used from a chorded hotkey whose own
+        // modifiers may still be held: SendKeys injects the Up while e.g. Ctrl+Shift are still
+        // physically down, so the app's ProcessCmdKey sees Ctrl+Shift+Up and fires whatever
+        // THAT is bound to. Confirmed live 2026-09-05: Ctrl+Shift+W (Toggle Station Watch) with
+        // this option on injected Ctrl+Shift+Up = TxFreqUp, a transmit-frequency change from a
+        // receive-only watch hotkey. The Station Watch path passes false and relies on its own
+        // spoken "Watching X" announcement.
+        private void MoveFocusToStatusIfEnabled(bool sendReadNudge = true)
         {
             if (!moveFocusToStatusOnCallSelect) return;
             if (!statusText.Focused)
             {
                 statusText.Focus();
             }
-            BeginInvoke((Action)(() => SendKeys.Send("{UP}")));
+            // Defence in depth for every caller: never let the injected Up combine with a
+            // still-held modifier into a different command. If any modifier is currently down
+            // (a chorded hotkey the operator has not released yet), skip the read nudge.
+            if (sendReadNudge && (Control.ModifierKeys & (Keys.Control | Keys.Shift | Keys.Alt)) == Keys.None)
+                BeginInvoke((Action)(() => SendKeys.Send("{UP}")));
         }
 
         private void statusText_TextChanged(object sender, EventArgs e)
@@ -5415,13 +5469,6 @@ namespace WSJTX_Controller
 
         private void Controller_Activated(object sender, EventArgs e)
         {
-        }
-
-        private string SpacifyMyCall()
-        {
-            if (!formLoaded || !wsjtxClient.ConnectedToWsjtx()) return "me";
-
-            return wsjtxClient.SpacifyMyCall();
         }
 
         private void CallListBox_KeyDown(object sender, KeyEventArgs e)

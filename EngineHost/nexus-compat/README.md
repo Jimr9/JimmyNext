@@ -82,8 +82,10 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 
 ## Current patches (against Nexus `main`, commit `93b9f012`)
 
-Seven patches, **one source file each**. Jimmy's downstream behavior these preserve is the
-**Jimmy Next 2.0.55 operator experience** -- that is the compatibility baseline.
+Eight patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
+the source of truth; the eight are itemised in the `###` sections below). Jimmy's downstream
+behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
+compatibility baseline.
 
 ### `patches/tempo-app-engine.patch` -- 5 behaviors, `crates/tempo-app/src/engine.rs`
 

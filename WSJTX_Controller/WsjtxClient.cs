@@ -1381,6 +1381,25 @@ namespace WSJTX_Controller
                 return;
             }
             int clamped = ClampAudioOffset(hz);
+
+            // Parked on the rail: the operator kept stepping in a direction that cannot move any
+            // further (confirmed live 2026-09-05 -- a held TxFreqUp at 4000 Hz issued
+            // SET_TX_OFFSET + re-announced "Transmit 4000 hertz" ~7x/second for 74 s). When the
+            // over-stepped request just re-clamps to the value we are already confirmed at and
+            // nothing is legitimately in flight, do NOT round-trip another engine command or
+            // re-publish the same number -- give one boundary cue and let StatusView's own
+            // duplicate suppression keep a held key quiet after that. `clamped != hz` scopes
+            // this to a genuine over-step (a real clamp), not an exact same-value request.
+            if (clamped != hz && clamped == (int)txOffset
+                && _txOffsetRequestsInFlight == 0 && _pendingTxOffsetHz == null)
+            {
+                string edge = clamped >= MaxAudioOffsetHz ? "maximum"
+                    : clamped <= MinAudioOffsetHz ? "minimum" : null;
+                if (edge != null)
+                    StatusView.ShowMessage($"{prefix} frequency at {edge}, {clamped} hertz", false);
+                return;
+            }
+
             _pendingTxOffsetHz = clamped;
             _txOffsetRequestsInFlight++;
             DebugOutput($"{Time()} {prefix}: manual txOffset request:{clamped} (pending, {_txOffsetRequestsInFlight} in flight)");
@@ -1416,6 +1435,18 @@ namespace WSJTX_Controller
                 return;
             }
             int clamped = ClampAudioOffset(hz);
+
+            // Same rail no-op as ApplyManualTxOffset -- see its comment.
+            if (clamped != hz && clamped == (int)rxOffset
+                && _rxOffsetRequestsInFlight == 0 && _pendingRxOffsetHz == null)
+            {
+                string edge = clamped >= MaxAudioOffsetHz ? "maximum"
+                    : clamped <= MinAudioOffsetHz ? "minimum" : null;
+                if (edge != null)
+                    StatusView.ShowMessage($"Receive frequency at {edge}, {clamped} hertz", false);
+                return;
+            }
+
             _pendingRxOffsetHz = clamped;
             _rxOffsetRequestsInFlight++;
             DebugOutput($"{Time()} Receive: manual rxOffset request:{clamped} (pending, {_rxOffsetRequestsInFlight} in flight)");
@@ -3822,16 +3853,23 @@ namespace WSJTX_Controller
                     DebugOutput($"{Time()} ReplyTo: REPLY to '{nCall}' confirmed but superseded (contact epoch moved) while in flight -- not committing");
                     return;
                 }
-                // Station Watch / Smart QSO Start (2.0.63): a successful REPLY commit for the
-                // watched/captured target is exactly the "normal QSO handoff actually succeeded"
-                // moment the spec calls for -- Station Watch fully ends here (not merely its
-                // suppression), and Smart Start's capture is consumed, its job done. A REPLY for
-                // some OTHER station (an ordinary manual selection while a watch/capture happens
-                // to also be active) leaves both completely alone.
+                // Station Watch / Smart QSO Start: a successful REPLY commit for the watched/
+                // captured target is the "normal QSO handoff actually succeeded" moment.
+                //  * Station Watch fully ends here (not merely its suppression).
+                //  * Smart Start does NOT end here (2.0.65 fix). Dispatching our FIRST call is
+                //    not the same as the target answering us -- until the target actually
+                //    addresses our callsign, Smart Start stays armed and keeps monitoring: if
+                //    fresh decodes show the target working someone else before it answers us,
+                //    WsjtxClient.StationWatch.cs's awaiting-engagement handling yields our call
+                //    (Escape-style halt/requeue) and keeps Smart Start armed for the same target
+                //    until a genuine availability signal. It fully stops only once the target
+                //    engages our callsign (EngagedUs) -- then the normal QSO sequencer owns it.
+                // A REPLY for some OTHER station (an ordinary manual selection while a watch/
+                // capture happens to also be active) leaves both completely alone.
                 if (_stationWatch.IsActive && string.Equals(nCall, _stationWatch.TargetCall, StringComparison.OrdinalIgnoreCase))
                     StopStationWatch();
                 if (_smartStart.IsActive && string.Equals(nCall, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase))
-                    _smartStart.Stop(announce: false);
+                    _smartStart.EnterAwaitingEngagement();
 
                 _callQueueStore.RemoveCall(nCall);
                 replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress

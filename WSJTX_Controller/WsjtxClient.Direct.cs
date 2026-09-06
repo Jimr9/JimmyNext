@@ -2110,6 +2110,12 @@ namespace WSJTX_Controller
                 Notify?.OnPeriodBoundary();
                 FeedTargetMonitorsPeriodComplete(_directLastSlotSeen, directTargetMonitorEvenSlot, transmitting);
             }
+
+            // Snapshot-finality guard: a parked automatic Smart Start / Work-Now dispatch is
+            // held for a few polls AFTER this pass has ingested its decodes, so a late "target
+            // working another station" decode for the just-completed receive period is seen and
+            // can abort the start before it transmits (2.0.64 -- see ArmPendingAutoStart).
+            ServicePendingAutoStart();
         }
 
         // Double-click-to-reply equivalent -- calls Engine::call_station_ctx directly via the
@@ -2840,6 +2846,30 @@ namespace WSJTX_Controller
         // asserts the first orphaned over is tolerated and the second one trips the halt.
         internal int TestOrphanTxOvers => _directOrphanTxOvers;
         internal string TestFinishingCall => _finishingCall;
+
+        // Test-only (2.0.64 Smart QSO Start transmit-safety): drive the exact operator-Enter
+        // capture seam and observe the deferred-auto-start / Station-Watch state, without the
+        // dialogTimer2 WinForms round trip.
+        internal bool TestTryCaptureSmartStart(string call, EnqueueDecodeMessage dmsg) => TryCaptureSmartStart(call, dmsg);
+        internal void TestStartStationWatch(string call) => StartOrReplaceStationWatch(call);
+        internal void TestWorkWatchedStationNow() => WorkWatchedStationNow();
+        internal void TestCancelStationWatchPendingStart() => CancelStationWatchPendingStart();
+        internal string TestSmartStartTarget => _smartStart.TargetCall;
+        internal string TestStationWatchTargetCall => _stationWatch.TargetCall;
+        internal bool TestSmartStartHasLiveEvidence => _smartStart.HasLiveTargetEvidence;
+        internal bool TestSmartStartBusyWithOther => _smartStart.BusyWithOther;
+        internal bool TestSmartStartAwaitingEngagement => _smartStart.AwaitingEngagement;
+        internal bool TestAutoStartPending => _pendingAutoStart != null;
+        // Test-only: stand in for ReplyTo's success callback committing the handoff, so a test
+        // can exercise the awaiting-engagement / yield / resume logic without the async REPLY
+        // round trip (the real dispatch + REPLY is covered by SmartStartStaleEvidenceTransmitSafetyTests).
+        internal void TestSmartStartEnterAwaitingEngagement() => _smartStart.EnterAwaitingEngagement();
+        // Test-only: feed one decode straight into the Station Watch / Smart Start monitors
+        // (and the awaiting-engagement handling), without going through ProcessDecodeMsg's full
+        // QSO classification -- lets a test drive a "target working someone else" decode while
+        // callInProg is set for the yield check, which the ProcessDecodeMsg path is not built to
+        // take from a synthetic half-initialised QSO state.
+        internal void TestFeedTargetMonitorsDecode(EnqueueDecodeMessage d, bool evenSlot) => FeedTargetMonitors(d, evenSlot);
 
         // Test-only: `mode` is private and DirectApplyStatus only ever sets it to "FT8" (its
         // own lazy first-run fallback -- see that method's own comment on why Direct mode has

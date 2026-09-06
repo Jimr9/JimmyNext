@@ -33,6 +33,16 @@ namespace WSJTX_Controller
         // from when Jimmy spoke to an external, real WSJT-X. ApplyEngineMode() now always uses
         // Direct outside of TestModeGuard.IsTestMode (replay tests still force classic UDP,
         // unchanged -- see that method's own comment). See WsjtxClient.Direct.cs.
+        // Preservation contract (2.0.64 audit): every field here is read back ONLY when its key
+        // exists, so a missing key preserves whatever is already in memory rather than resetting
+        // to the "" default -- an upgrade that adds new keys never disturbs existing ones. Just as
+        // important on the other side: nothing anywhere writes a *resolved* or *fallback* audio
+        // device name back into these fields. AudioInputDevice/AudioOutputDevice are set only
+        // here (from the INI) and in OptionsDlg.SaveRadioTab (from the operator's own combo
+        // text). A saved device that Windows has since renamed / unplugged stays exactly as the
+        // operator left it; the engine falls back to the system default at runtime, and the saved
+        // name resolves again once the device reappears. Do not "helpfully" persist the
+        // system-default fallback over a stored name.
         public void LoadFromIni(IniFile ini)
         {
             if (ini.KeyExists("nativeEngineMyCall")) MyCall = ini.Read("nativeEngineMyCall");

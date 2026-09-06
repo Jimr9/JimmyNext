@@ -247,6 +247,7 @@ static class JimmyTests
         RigctldClientListRigModelsTests();
         RigctldClientBoundedReadTests();
         OptionsDlgSystemDefaultDeviceLabelTests();
+        NativeEngineAudioDevicePreservationTests();
         OptionsDlgExtractRigModelIdTests();
         TqslParseFinalStatusTests();
         TqslClassifyFinalStatusTests();
@@ -345,6 +346,7 @@ static class JimmyTests
         FakeItRestoreWarningSurfacesOnceThenClearsSilentlyTests();
         FailedManualTxOffsetPreservesBestFreeTests();
         RapidFrequencyNudgesAccumulateTests();
+        FrequencyOffsetRailNoOpTests();
         SessionTokenAuthenticationTests();
         RepeatLimitActivelyStopsTxTests();
         CompletedQsoRemovesStaleQueueStateTests();
@@ -378,6 +380,10 @@ static class JimmyTests
         TargetMonitorSilenceAndParityTests();
         TargetMonitorSmartStartReadinessTests();
         TargetMonitorLifecycleTests();
+        TargetMonitorStaleEvidenceRevalidationTests();
+        TargetMonitorAwaitingEngagementTests();
+        SmartStartStaleEvidenceTransmitSafetyTests();
+        SmartStartYieldsToOtherQsoTests();
         SpeechCoordinatorStationWatchSuppressionTests();
         StationWatchHotkeyDefaultsTests();
 
@@ -5579,6 +5585,82 @@ static class JimmyTests
             OptionsDlg.ToStoredDeviceName(OptionsDlg.SystemDefaultDeviceLabel), "");
         CheckStr("A real device name saves back unchanged",
             OptionsDlg.ToStoredDeviceName("USB Audio CODEC"), "USB Audio CODEC");
+
+        // 2.0.64: a Windows-renamed endpoint name (the exact shape that makes a saved audio
+        // device stop resolving after a driver/feature update) must still round-trip byte-for-
+        // byte through the Options combo translation -- opening Options and clicking OK without
+        // touching audio can never mangle or drop it.
+        foreach (var name in new[]
+        {
+            "Speakers (2- USB Audio CODEC)",
+            "Microphone (3- USB Audio Device)",
+            "Line In (Realtek(R) Audio)",
+            "Headset Earphone (Jabra EVOLVE 65)",
+        })
+        {
+            CheckStr($"renamed-endpoint round-trip: display of '{name}'", OptionsDlg.ToDisplayDeviceName(name), name);
+            CheckStr($"renamed-endpoint round-trip: store of '{name}'",
+                OptionsDlg.ToStoredDeviceName(OptionsDlg.ToDisplayDeviceName(name)), name);
+        }
+    }
+
+    // 2.0.64 audio-upgrade-preservation audit: the persistence layer must never lose or replace
+    // the operator's stored audio-device selection just because the device is not currently
+    // resolvable. See NativeEngineSettings.LoadFromIni's own contract comment.
+    static void NativeEngineAudioDevicePreservationTests()
+    {
+        Console.WriteLine("\n── Audio-upgrade preservation: stored engine audio devices survive load/save + missing keys ──");
+
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_NativeAudio_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // Save -> reload round-trips both device names verbatim, spaces/parens and all.
+            var saved = new NativeEngineSettings
+            {
+                MyCall = "KB0UZT", MyGrid = "FN42",
+                AudioInputDevice = "Microphone (3- USB Audio Device)",
+                AudioOutputDevice = "Speakers (2- USB Audio CODEC)",
+            };
+            var ini = new IniFile(tmpIni);
+            saved.SaveToIni(ini);
+            var reloaded = new NativeEngineSettings();
+            reloaded.LoadFromIni(ini);
+            CheckStr("input device round-trips through the INI unchanged", reloaded.AudioInputDevice, "Microphone (3- USB Audio Device)");
+            CheckStr("output device round-trips through the INI unchanged", reloaded.AudioOutputDevice, "Speakers (2- USB Audio CODEC)");
+
+            // A later load from an INI that is MISSING the audio keys must not clear a value
+            // already established in memory (an upgrade that only adds keys never resets one).
+            var iniNoAudio = new IniFile(Path.Combine(Path.GetTempPath(), "JimmyTest_NativeAudio_empty_" + Guid.NewGuid().ToString("N") + ".ini"));
+            iniNoAudio.Write("nativeEngineMyCall", "KB0UZT");   // only unrelated keys present
+            var established = new NativeEngineSettings
+            {
+                AudioInputDevice = "Line In (Realtek(R) Audio)",
+                AudioOutputDevice = "Headset Earphone (Jabra EVOLVE 65)",
+            };
+            established.LoadFromIni(iniNoAudio);
+            CheckStr("missing input-device key leaves the established value intact", established.AudioInputDevice, "Line In (Realtek(R) Audio)");
+            CheckStr("missing output-device key leaves the established value intact", established.AudioOutputDevice, "Headset Earphone (Jabra EVOLVE 65)");
+
+            // "System default" (empty) written by one session and read by the next (a fresh
+            // NativeEngineSettings, exactly as real startup does it) stays empty -- never a
+            // fallback device name.
+            var def = new NativeEngineSettings { AudioInputDevice = "", AudioOutputDevice = "" };
+            var iniDef = new IniFile(Path.Combine(Path.GetTempPath(), "JimmyTest_NativeAudio_def_" + Guid.NewGuid().ToString("N") + ".ini"));
+            def.SaveToIni(iniDef);
+            var defReloaded = new NativeEngineSettings();   // fresh, as a real restart builds it
+            defReloaded.LoadFromIni(iniDef);
+            CheckStr("input device 'system default' stays empty across a save/reload", defReloaded.AudioInputDevice, "");
+            CheckStr("output device 'system default' stays empty across a save/reload", defReloaded.AudioOutputDevice, "");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NativeEngineAudioDevicePreservationTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { File.Delete(tmpIni); } catch { }
+        }
     }
 
     static void OptionsDlgExtractRigModelIdTests()
@@ -11548,6 +11630,96 @@ static class JimmyTests
         }
     }
 
+    // 2.0.65 (live report): a held TxFreqUp/TxFreqDown at the audio-offset rail (200 / 4000 Hz)
+    // must NOT keep issuing SET_TX_OFFSET for the same value and re-announcing it. Confirmed
+    // 2026-09-05: ~7 SET_TX_OFFSET 4000 + "Transmit 4000 hertz" per second for 74 s.
+    static void FrequencyOffsetRailNoOpTests()
+    {
+        Console.WriteLine("\n── Frequency offset rail: over-stepping at the clamp sends no command and does not flood ──");
+
+        var seen = new System.Collections.Generic.List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.freqStepHz = 60;
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+
+            System.Collections.Generic.List<string> Cmds(string prefix)
+            {
+                lock (seenLock) return seen.FindAll(c => c.StartsWith(prefix));
+            }
+
+            // ── Tx: ramp to the 4000 Hz ceiling ──
+            lock (seenLock) seen.Clear();
+            wc.NudgeTxFrequency(+42);   // 1500 + 42*60 = 4020 -> clamp 4000
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0);
+            Check("ramp lands on the 4000 Hz ceiling", wc.TestTxOffset == 4000, true);
+            int cmdsAtCeiling = Cmds("SET_TX_OFFSET").Count;
+            Check("...one SET_TX_OFFSET 4000 to get there", cmdsAtCeiling == 1 && Cmds("SET_TX_OFFSET")[0] == "SET_TX_OFFSET 4000", true);
+
+            // ── further TxFreqUp at the ceiling: no command, value unchanged, pending clear ──
+            wc.NudgeTxFrequency(+1);
+            wc.NudgeTxFrequency(+1);
+            wc.NudgeTxFrequency(+1);
+            PumpUntil(() => false, 200);   // let anything async settle (there should be nothing)
+            Check("THE FIX: TxFreqUp at the ceiling sends NO new SET_TX_OFFSET", Cmds("SET_TX_OFFSET").Count == cmdsAtCeiling, true);
+            Check("...confirmed offset stays 4000", wc.TestTxOffset == 4000, true);
+            Check("...pending Tx state stays clear", wc.TestPendingTxOffsetHz == null, true);
+            Check("...no request was even counted in flight", wc.TestTxOffsetRequestsInFlight == 0, true);
+
+            // ── stepping back DOWN off the rail resumes normal stepping ──
+            lock (seenLock) seen.Clear();
+            wc.NudgeTxFrequency(-1);
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0 && wc.TestTxOffset == 3940);
+            Check("stepping down from the ceiling works normally -- SET_TX_OFFSET 3940",
+                Cmds("SET_TX_OFFSET").Count == 1 && Cmds("SET_TX_OFFSET")[0] == "SET_TX_OFFSET 3940", true);
+
+            // ── Tx: ramp to the 200 Hz floor, then over-step down ──
+            wc.NudgeTxFrequency(-100);   // 3940 - 6000 -> clamp 200
+            PumpUntil(() => wc.TestTxOffsetRequestsInFlight == 0 && wc.TestTxOffset == 200);
+            lock (seenLock) seen.Clear();
+            wc.NudgeTxFrequency(-1);
+            wc.NudgeTxFrequency(-1);
+            PumpUntil(() => false, 200);
+            Check("THE FIX: TxFreqDown at the 200 Hz floor sends NO new SET_TX_OFFSET", Cmds("SET_TX_OFFSET").Count == 0, true);
+            Check("...confirmed offset stays 200", wc.TestTxOffset == 200, true);
+
+            // ── Rx side: same no-op at the ceiling ──
+            wc.NudgeRxFrequency(+50);   // 1500 + 3000 -> clamp 4000
+            PumpUntil(() => wc.TestRxOffsetRequestsInFlight == 0 && wc.TestRxOffset == 4000);
+            lock (seenLock) seen.Clear();
+            wc.NudgeRxFrequency(+1);
+            wc.NudgeRxFrequency(+1);
+            PumpUntil(() => false, 200);
+            Check("THE FIX: RxFreqUp at the ceiling sends NO new SET_RX_OFFSET", Cmds("SET_RX_OFFSET").Count == 0, true);
+            Check("...confirmed Rx offset stays 4000", wc.TestRxOffset == 4000, true);
+
+            // ── a genuine change still steps ──
+            lock (seenLock) seen.Clear();
+            wc.NudgeRxFrequency(-2);
+            PumpUntil(() => wc.TestRxOffsetRequestsInFlight == 0 && wc.TestRxOffset == 3880);
+            Check("a real Rx step off the rail still sends the command", Cmds("SET_RX_OFFSET").Count == 1, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  FrequencyOffsetRailNoOpTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
     // ── EngineHost ownership / session identity, 2026-08-23 (independent audit finding, HIGH
     // PRIORITY): Direct mode must prove a SNAPSHOT actually came from the exact child process
     // this session launched before treating the connection as authenticated/connected or
@@ -14693,6 +14865,424 @@ static class JimmyTests
         watch2.Start(THEIR_CALL, "20m", "FT8", "tok1");
         watch2.OnSmartStartNonActionable();
         Check("A Station Watch instance is untouched by OnSmartStartNonActionable (no-op, purpose guard)", watch2.IsActive, true);
+    }
+
+    // ── 2.0.64 transmit-safety: stale / wrong-context evidence must never authorize an automatic
+    // start. Root cause of the 2026-09-05 V51WW failure: a ~54 s-old queued "KF0BAA V51WW RR73"
+    // was seeded into the monitor AS current evidence (with the current slot's parity), the
+    // ordinary-RR73 rule then reached readiness after one silent opportunity, and the reply went
+    // out from that stale decode just as fresh "W4YGM V51WW -07" showed V51WW working W4YGM.
+    static void TargetMonitorStaleEvidenceRevalidationTests()
+    {
+        Console.WriteLine("\n── TargetMonitor: stale-seed rejection + pre-transmit revalidation (V51WW class) ──");
+
+        EnqueueDecodeMessage DAt(string msg, DateTime utc) => new EnqueueDecodeMessage
+        {
+            Message = msg, RxDate = utc.Date, SinceMidnight = utc.TimeOfDay, DeltaFrequency = 1500, Snr = -10,
+        };
+
+        // ══ A stale RR73 selection identifies the target but is not live evidence ══
+        var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+        tm.Start("V51WW", "20m", "FT8", null);
+        tm.SeedSelectedDecode(DAt("KF0BAA V51WW RR73", DateTime.UtcNow.AddSeconds(-54)), DateTime.UtcNow, MY_CALL);
+        Check("stale RR73 seed: identifies the target", tm.TargetCall == "V51WW", true);
+        Check("stale RR73 seed: not live evidence", !tm.HasLiveTargetEvidence, true);
+        Check("stale RR73 seed: parity left unknown (no current-slot parity assigned)", tm.TargetEvenParity == null, true);
+        Check("stale RR73 seed: not immediately ready", !tm.ReadyToStart, true);
+        Check("stale RR73 seed: still stored as the decode to reply from", tm.LastUsableDecode != null, true);
+        Check("stale RR73 seed: revalidation refuses it (no live evidence)",
+            tm.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.NoLiveEvidence, true);
+
+        // ══ Silent opportunities after a stale seed never reach readiness (parity never established) ══
+        for (ulong s = 1; s <= 8; s++)
+            tm.OnReceivePeriodComplete(s, s % 2 == 0, "20m", "FT8", null, false);
+        Check("silent opportunities after a stale seed: never ready", !tm.ReadyToStart && tm.SilenceCount == 0, true);
+        Check("silent opportunities after a stale seed: still no live evidence",
+            tm.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.NoLiveEvidence, true);
+
+        // ══ A fresh live decode showing the target working another station ══
+        tm.ObserveDecode(DAt("W4YGM V51WW -07", DateTime.UtcNow), false, MY_CALL);   // V51WW -> W4YGM report, odd slot
+        Check("fresh live target report: establishes live evidence", tm.HasLiveTargetEvidence, true);
+        Check("fresh 'target working another': marks busy", tm.BusyWithOther, true);
+        Check("fresh 'target working another': not ready", !tm.ReadyToStart, true);
+        Check("fresh 'target working another': revalidation returns TargetBusy",
+            tm.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.TargetBusy, true);
+
+        // ══ Silence after "working another" must NOT override that evidence ══
+        tm.OnReceivePeriodComplete(21, false, "20m", "FT8", null, false);
+        tm.OnReceivePeriodComplete(23, false, "20m", "FT8", null, false);   // SilenceThreshold reached
+        Check("silence after 'working another station': still not ready", !tm.ReadyToStart, true);
+        Check("silence after 'working another station': still busy (not cleared by silence)", tm.BusyWithOther, true);
+        Check("silence after 'working another station': revalidation still TargetBusy",
+            tm.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.TargetBusy, true);
+
+        // ══ A clean CQ from the target clears busy and authorizes ══
+        tm.ObserveDecode(DAt("CQ V51WW EM63", DateTime.UtcNow), false, MY_CALL);
+        Check("target CQ clears busy", !tm.BusyWithOther, true);
+        Check("target CQ -> ready", tm.ReadyToStart, true);
+        Check("target CQ -> revalidation OK",
+            tm.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.Ok, true);
+        Check("band change since arming -> ContextChanged",
+            tm.RevalidateForAutoStart(DateTime.UtcNow, "40m", "FT8", null, false) == AutoStartCheck.ContextChanged, true);
+        tm.ConsumeReadyToStart();
+
+        // ══ A FRESH CQ selection IS accepted as current evidence (preserved behavior) ══
+        var tm2 = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+        tm2.Start("K4YT", "20m", "FT8", null);
+        tm2.SeedSelectedDecode(DAt("CQ K4YT EM63", DateTime.UtcNow.AddSeconds(-2)), DateTime.UtcNow, MY_CALL);
+        Check("fresh CQ seed: live evidence", tm2.HasLiveTargetEvidence, true);
+        Check("fresh CQ seed: immediately ready", tm2.ReadyToStart, true);
+        Check("fresh CQ seed: revalidates OK",
+            tm2.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.Ok, true);
+
+        // ══ Wall-clock backstop: a live decode too old in real time is refused even at gap 0 ══
+        var tm3 = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+        tm3.Start("K4YT", "20m", "FT8", null);
+        tm3.ObserveDecode(DAt("CQ K4YT EM63", DateTime.UtcNow.AddMinutes(-5)), true, MY_CALL);
+        Check("live but 5-minute-old decode -> StaleEvidence (wall-clock backstop)",
+            tm3.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.StaleEvidence, true);
+
+        // ══ Work Now override skips the Smart Start silence-policy bound, not the wider gap ══
+        var tw = new TargetMonitor(TargetPurpose.StationWatch);
+        tw.Start("K4YT", "20m", "FT8", null);
+        tw.ObserveDecode(D("W4YGM K4YT RR73"), true, MY_CALL);   // fresh, not busy, live
+        tw.OnReceivePeriodComplete(2, true, "20m", "FT8", null, false);
+        tw.OnReceivePeriodComplete(4, true, "20m", "FT8", null, false);
+        tw.OnReceivePeriodComplete(6, true, "20m", "FT8", null, false);
+        tw.OnReceivePeriodComplete(8, true, "20m", "FT8", null, false);   // gap 4
+        Check("Work Now: gap of one full exchange + slack revalidates OK (operator override)",
+            tw.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, true) == AutoStartCheck.Ok, true);
+        Check("...and the same gap is StaleEvidence for an automatic Smart Start",
+            tw.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.StaleEvidence, true);
+        for (ulong s = 10; s <= 30; s += 2)
+            tw.OnReceivePeriodComplete(s, true, "20m", "FT8", null, false);
+        Check("Work Now: a long stale watch gap is refused even with the operator override",
+            tw.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, true) == AutoStartCheck.StaleEvidence, true);
+    }
+
+    // 2.0.65: Smart Start's job is not done when it starts CALLING -- only when the target
+    // actually answers OUR callsign. Until then it keeps monitoring; if the target works someone
+    // else first, the caller yields and Smart Start stays armed for the same target.
+    static void TargetMonitorAwaitingEngagementTests()
+    {
+        Console.WriteLine("\n── TargetMonitor: awaiting-engagement (keep monitoring after Smart Start starts calling) ──");
+
+        const string TARGET = "J38DX", A = "W6PAN", B = "KD2VCE";
+
+        var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+        tm.Start(TARGET, "20m", "FT8", null);
+        tm.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);          // fresh CQ -> ready
+        Check("fresh CQ -> ready to start", tm.ReadyToStart, true);
+        tm.ConsumeReadyToStart();
+
+        tm.EnterAwaitingEngagement();                                     // we dispatch our first call
+        Check("EnterAwaitingEngagement: awaiting, not ready, still active", tm.AwaitingEngagement && !tm.ReadyToStart && tm.IsActive, true);
+
+        tm.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);          // target CQs again (didn't hear us)
+        Check("target CQ while we are calling does not re-arm readiness", !tm.ReadyToStart && tm.AwaitingEngagement, true);
+
+        tm.ObserveDecode(D($"{A} {TARGET} -07"), true, MY_CALL);          // TARGET -> A report (working A, not us)
+        Check("target working A -> BusyWithOther", tm.BusyWithOther, true);
+        Check("target working A -> NOT EngagedUs", !tm.EngagedUs, true);
+        Check("still awaiting -- the monitor doesn't yield, the caller does", tm.AwaitingEngagement, true);
+
+        tm.ReturnToWaiting();                                             // caller ceased our call
+        Check("ReturnToWaiting: no longer awaiting, not ready", !tm.AwaitingEngagement && !tm.ReadyToStart, true);
+        Check("ReturnToWaiting KEEPS BusyWithOther (resume needs a real availability signal)", tm.BusyWithOther, true);
+        Check("ReturnToWaiting keeps the target + live evidence", tm.TargetCall == TARGET && tm.HasLiveTargetEvidence, true);
+        Check("busy target -> revalidation refuses a resume", tm.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.TargetBusy, true);
+
+        tm.ObserveDecode(D($"{B} {TARGET} R-05"), true, MY_CALL);          // TARGET -> B (peer change during the other QSO)
+        Check("target changed peer A->B: still BusyWithOther", tm.BusyWithOther, true);
+        Check("target changed peer: still not ready", !tm.ReadyToStart, true);
+
+        tm.OnReceivePeriodComplete(2, true, "20m", "FT8", null, false);
+        tm.OnReceivePeriodComplete(4, true, "20m", "FT8", null, false);   // reaches SilenceThreshold
+        Check("silence after 'working another' does NOT resume", !tm.ReadyToStart, true);
+        Check("...and BusyWithOther is still set (never cleared by silence)", tm.BusyWithOther, true);
+
+        tm.ObserveDecode(D($"{B} {TARGET} RR73"), true, MY_CALL);          // TARGET -> B RR73: finishing -> available
+        Check("target RR73 to B clears busy", !tm.BusyWithOther, true);
+        Check("ordinary RR73 does not resume immediately", !tm.ReadyToStart, true);
+        tm.OnReceivePeriodComplete(6, true, "20m", "FT8", null, false);   // one appropriate opportunity
+        Check("...resumes ready after exactly one more appropriate opportunity", tm.ReadyToStart, true);
+        tm.ConsumeReadyToStart();
+
+        tm.EnterAwaitingEngagement();                                     // we call again
+        tm.ObserveDecode(D($"{MY_CALL} {TARGET} R-03"), true, MY_CALL);   // TARGET -> us
+        Check("target addresses our callsign -> EngagedUs", tm.EngagedUs, true);
+        tm.Stop(announce: false);
+        Check("Stop() clears the awaiting-engagement phase", !tm.AwaitingEngagement && !tm.EngagedUs && !tm.IsActive, true);
+
+        // CQ variant: target abandons the other QSO and calls CQ -> immediate resume after a yield.
+        var tm2 = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+        tm2.Start(TARGET, "20m", "FT8", null);
+        tm2.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);
+        tm2.ConsumeReadyToStart();
+        tm2.EnterAwaitingEngagement();
+        tm2.ObserveDecode(D($"{A} {TARGET} -07"), true, MY_CALL);          // working A
+        tm2.ReturnToWaiting();
+        tm2.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);          // target calls CQ again
+        Check("target CQ after a yield -> immediate resume (ready)", tm2.ReadyToStart, true);
+
+        // A Station Watch instance never enters the awaiting-engagement phase.
+        var sw = new TargetMonitor(TargetPurpose.StationWatch);
+        sw.Start(TARGET, "20m", "FT8", null);
+        sw.EnterAwaitingEngagement();
+        Check("Station Watch instance ignores EnterAwaitingEngagement (purpose guard)", !sw.AwaitingEngagement, true);
+    }
+
+    // End-to-end through the real DirectApplyStatus/DirectApplyDecodes pipeline + a control-port
+    // stub: the exact V51WW failure class must send ZERO REPLY, while a clean fresh CQ still does.
+    static void SmartStartStaleEvidenceTransmitSafetyTests()
+    {
+        Console.WriteLine("\n── Smart QSO Start (Direct pipeline): stale/wrong-context evidence sends no REPLY; a clean fresh CQ still does ──");
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartStale_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            ctrl.smartQsoStartEnabled = true;
+            ctrl.smartStartSilencePeriods = 2;
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "V51WW", other = "W4YGM", oldPeer = "KF0BAA";
+            List<string> Seen() { lock (seenLock) return new List<string>(seen); }
+            bool SawReply() => Seen().Exists(c => c.StartsWith("REPLY"));
+
+            DirectSnapshot Snap(ulong slot, string decodeFrom = null, string decodeMsg = null)
+            {
+                string decodes = decodeFrom == null ? "" :
+                    @"{ ""from"": """ + decodeFrom + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"]
+                }");
+            }
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
+
+            // ══ 1. Select V51WW from a ~54 s-old queued "KF0BAA V51WW RR73" ══
+            var staleRr73 = new EnqueueDecodeMessage
+            {
+                Message = $"{oldPeer} {target} RR73",
+                RxDate = DateTime.UtcNow.AddSeconds(-54).Date,
+                SinceMidnight = DateTime.UtcNow.AddSeconds(-54).TimeOfDay,
+                DeltaFrequency = 1500, Snr = -8,
+            };
+            bool captured = wc.TestTryCaptureSmartStart(target, staleRr73);
+            Check("stale RR73 selection is captured (identifies the target)", captured && wc.TestSmartStartTarget == target, true);
+            Check("stale RR73 selection is NOT live evidence", wc.TestSmartStartHasLiveEvidence, false);
+            Check("stale RR73 selection does not arm an automatic start", wc.TestAutoStartPending, false);
+
+            // ══ 2. One later appropriate receive opportunity elapses (the old bug fired here) ══
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(101));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(103));
+            Check("a silent opportunity after a stale RR73 seed sends no REPLY", SawReply(), false);
+            Check("...and nothing is armed", wc.TestAutoStartPending, false);
+
+            // ══ 3. Fresh activity shows the target working someone else ══
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(105, target, $"{other} {target} -07"));
+            Check("fresh 'V51WW working W4YGM' becomes live evidence", wc.TestSmartStartHasLiveEvidence, true);
+            Check("fresh 'V51WW working W4YGM' marks the target busy", wc.TestSmartStartBusyWithOther, true);
+            Check("no REPLY sent to a station working someone else", SawReply(), false);
+
+            // ══ 4. Target then goes quiet -- silence must not override 'working another station' ══
+            for (ulong s = 107; s <= 121; s += 2)
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            System.Threading.Thread.Sleep(40);
+            Check("silence after 'working another station' still sends no REPLY", SawReply(), false);
+
+            // ══ 5. Positive control: a clean FRESH CQ from a different target DOES start a REPLY ══
+            wc.TestCancelStationWatchPendingStart();
+            lock (seenLock) seen.Clear();
+            // A high silence threshold keeps the positive control deterministic: the deferral
+            // resolves well before any silence counting could re-enter readiness.
+            ctrl.smartStartSilencePeriods = 6;
+            const string freshTarget = "K4YT";
+            var freshCq = new EnqueueDecodeMessage
+            {
+                Message = $"CQ {freshTarget} EM63",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1400, Snr = -3,
+            };
+            bool cap2 = wc.TestTryCaptureSmartStart(freshTarget, freshCq);
+            Check("fresh CQ selection arms a deferred automatic start", cap2 && wc.TestAutoStartPending, true);
+            Check("fresh CQ start is deferred, not sent in the capture pass", SawReply(), false);
+            for (ulong s = 200; s <= 210; s += 2)
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
+            Check("after the finality-deferral window a clean fresh CQ DOES send a REPLY", SawReply(), true);
+
+            // ══ 6. Smart Start OFF: capture is declined, the old Enter path is preserved ══
+            ctrl.smartQsoStartEnabled = false;
+            Check("Smart Start OFF -> TryCaptureSmartStart returns false (old Enter behavior kept)",
+                wc.TestTryCaptureSmartStart("N0XYZ", freshCq), false);
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // 2.0.65 (J38DX live report): once Smart Start has started CALLING, it must keep monitoring
+    // fresh target activity. If the target works another station before answering us, Jimmy
+    // yields (HALT_TX, callInProg cleared), stays armed for the same target through peer changes,
+    // and resumes only on a genuine availability signal -- then hands the QSO to the normal
+    // sequencer once the target actually addresses our callsign.
+    static void SmartStartYieldsToOtherQsoTests()
+    {
+        Console.WriteLine("\n── Smart QSO Start (Direct pipeline): yield when the target works another station before answering us ──");
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartYield_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            ctrl.smartQsoStartEnabled = true;
+            // High threshold keeps the deferral/opportunity counting deterministic; the RR73
+            // one-more-opportunity resume rule is independent of it.
+            ctrl.smartStartSilencePeriods = 6;
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "J38DX", A = "W6PAN", B = "KD2VCE";
+            List<string> Seen() { lock (seenLock) return new List<string>(seen); }
+            bool SawCmd(string p) => Seen().Exists(c => c.StartsWith(p));
+            bool SawReply() => SawCmd("REPLY");
+
+            DirectSnapshot Snap(ulong slot, string decodeFrom = null, string decodeMsg = null)
+            {
+                string decodes = decodeFrom == null ? "" :
+                    @"{ ""from"": """ + decodeFrom + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"]
+                }");
+            }
+            // Extra polls on the SAME slot -- these are the finality-deferral ticks, NOT new
+            // receive opportunities (only a slot change advances the opportunity counter).
+            void Polls(ulong slot, int n) { for (int i = 0; i < n; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot)); }
+
+            EnqueueDecodeMessage FreshCq() => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {target} FK92",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
+
+            EnqueueDecodeMessage Dec(string msg) => new EnqueueDecodeMessage { Message = msg, DeltaFrequency = 1500, Snr = -6 };
+
+            // Stand in for ReplyTo's success callback committing the handoff: Smart Start has
+            // just dispatched our first call. (The real deferral -> REPLY dispatch is covered by
+            // SmartStartStaleEvidenceTransmitSafetyTests.) "Working other" / "answered us"
+            // decodes are fed straight to the monitors (TestFeedTargetMonitorsDecode) rather
+            // than through TestApplyDirectSnapshot -- ProcessDecodeMsg's full QSO classification
+            // is not built to take a "callInProg working someone else" decode from this
+            // synthetic half-initialised QSO state.
+            void HandOff()
+            {
+                Check("fresh CQ captured + armed", wc.TestTryCaptureSmartStart(target, FreshCq()) && wc.TestAutoStartPending, true);
+                wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // one live CQ (establishes parity/evidence)
+                wc.callInProg = target;
+                wc.TestSmartStartEnterAwaitingEngagement();
+            }
+
+            // ══ 1. Smart Start has started CALLING the target (post-handoff) ══
+            HandOff();
+            Check("Smart Start is NOT stopped -- it entered awaiting-engagement",
+                wc.TestSmartStartTarget == target && wc.TestSmartStartAwaitingEngagement, true);
+
+            // ══ 2. Before the target ever addresses us: fresh decode shows it working station A ══
+            lock (seenLock) seen.Clear();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // J38DX -> W6PAN report
+            PumpUntil(() => SawCmd("HALT_TX"), 2000);
+            Check("target working A -> Jimmy HALTs our call", SawCmd("HALT_TX"), true);
+            Check("...callInProg cleared -- we yielded", wc.callInProg == null, true);
+            Check("...Smart Start stays ARMED for the same target", wc.TestSmartStartTarget == target, true);
+            Check("...left the awaiting-engagement phase (back to waiting)", wc.TestSmartStartAwaitingEngagement, false);
+            Check("...target still marked busy", wc.TestSmartStartBusyWithOther, true);
+
+            // ══ 3. Target changes peer A -> B, then goes quiet: Jimmy must stay waiting ══
+            lock (seenLock) seen.Clear();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} R-05"), true);   // J38DX -> KD2VCE (peer change)
+            for (ulong s = 107; s <= 117; s += 2) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));   // silence (callInProg null now)
+            System.Threading.Thread.Sleep(30);
+            Check("peer change + silence -> NO new REPLY, still no callInProg", !SawReply() && wc.callInProg == null, true);
+            Check("...still armed for the target, still busy", wc.TestSmartStartTarget == target && wc.TestSmartStartBusyWithOther, true);
+
+            // ══ 4. Target finishes the other QSO (RR73 to B) -> becomes available -> Smart Start resumes ══
+            lock (seenLock) seen.Clear();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(119, target, $"{B} {target} RR73"));   // J38DX -> KD2VCE RR73 (callInProg null)
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(121));                                 // one appropriate opportunity
+            Check("target became available -> Smart Start re-arms a start", wc.TestAutoStartPending, true);
+            Polls(121, 4);                                                                        // finality-deferral ticks
+            try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
+            Check("...and after the deferral window it sends a new REPLY", SawReply(), true);
+            Check("...the start was dispatched (no longer pending)", wc.TestAutoStartPending, false);
+
+            // ══ 5. Target finally addresses OUR callsign -> Smart Start is done ══
+            wc.callInProg = target;                                   // stand in for the resume's REPLY commit
+            wc.TestSmartStartEnterAwaitingEngagement();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{myCall} {target} R-03"), true);   // J38DX -> us
+            Check("target answered us -> Smart Start stops (no longer active)", wc.TestSmartStartTarget == null, true);
+            Check("...normal QSO sequencer keeps callInProg", wc.callInProg == target, true);
+
+            // ══ 6. Escape/Alt+H still fully tears Smart Start down from the awaiting-engagement phase ══
+            wc.callInProg = null;
+            HandOff();
+            Check("re-armed + awaiting engagement", wc.TestSmartStartAwaitingEngagement, true);
+            wc.TestCancelStationWatchPendingStart();   // the Escape / Alt+H cancel path
+            Check("Escape/Alt+H fully stops Smart Start from the awaiting-engagement phase", wc.TestSmartStartTarget == null, true);
+
+            // ══ 7. A receive-only Station Watch is untouched by any of this ══
+            wc.callInProg = null;
+            wc.TestStartStationWatch("KX9X");
+            HandOff();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // Smart Start yields
+            PumpUntil(() => SawCmd("HALT_TX"), 2000);
+            Check("Station Watch target is untouched through a Smart Start yield", wc.TestStationWatchTargetCall == "KX9X", true);
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
     }
 
     static void SpeechCoordinatorStationWatchSuppressionTests()

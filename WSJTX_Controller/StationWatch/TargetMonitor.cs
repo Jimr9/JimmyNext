@@ -30,6 +30,20 @@ namespace WSJTX_Controller
         SmartStart,
     }
 
+    // Result of the atomic pre-transmit revalidation (RevalidateForAutoStart). Only Ok
+    // authorizes an automatic REPLY / Work-Watched-Station-Now dispatch. 2.0.64 transmit-safety
+    // fix (V51WW, 2026-09-05): a stale historical/queued decode may identify WHICH station the
+    // operator wants, but it must never by itself authorize a future automatic transmission.
+    public enum AutoStartCheck
+    {
+        Ok,
+        NoUsableDecode,   // nothing to hand to ReplyTo
+        ContextChanged,   // band / mode / engine session no longer matches what was armed
+        NoLiveEvidence,   // never actually heard the target live since arming (seed alone doesn't count)
+        StaleEvidence,    // heard live once, but too many silent opportunities / too much wall time since
+        TargetBusy,       // current evidence shows the target working (or being called by) another station
+    }
+
     // What TargetMonitor actually reports, one fact at a time. Only what was truly decoded --
     // the unseen half of another station's exchange is never synthesized (WatchTargetAmbiguous/
     // TargetAddressingOther describe only what Jimmy itself heard from the TARGET; a reply the
@@ -99,10 +113,51 @@ namespace WSJTX_Controller
         // and Smart Start's own auto-fire both reply using THIS, never a synthesized message.
         public EnqueueDecodeMessage LastUsableDecode { get; private set; }
 
+        // Wall-clock UTC of whatever decode LastUsableDecode currently holds -- taken from the
+        // decode's own RxDate+SinceMidnight when it carries a real timestamp (Direct-mode
+        // decodes always do), else the moment it was observed. Read by RevalidateForAutoStart's
+        // documented wall-clock backstop.
+        public DateTime LastUsableDecodeUtc { get; private set; }
+
+        // True once at least one confident decode FROM THE TARGET has been observed on the live
+        // decode feed since this monitor was armed. An operator's selected/queued decode
+        // (SeedSelectedDecode) sets this ONLY when that decode is still current (see
+        // _seedFreshLimitPeriods) -- a stale seed identifies the call but is not live evidence.
+        public bool HasLiveTargetEvidence { get; private set; }
+
+        // Completed, appropriate (matching band/mode/session/parity, not our own TX) receive
+        // opportunities elapsed since the last confident live target decode. 0 immediately after
+        // hearing the target; grows by one per silent opportunity. For the silence path this
+        // tracks SilenceCount; RevalidateForAutoStart also uses it as the primary freshness
+        // measure (receive-opportunity context, not wall-clock polling).
+        public int OpportunitiesSinceLiveEvidence { get; private set; }
+
+        // Current evidence that the target is mid-exchange with, or actively being called by,
+        // some other station. Set from live traffic only (target -> other with a mid-QSO
+        // payload, or any station -> target). Cleared ONLY by current receive evidence that the
+        // target is now available/turning to us (target CQ / 73 / RR73 / addressing us) -- never
+        // by mere silence, so "target working another station" wins over a silence decision.
+        public bool BusyWithOther { get; private set; }
+
         // Smart Start only: true once TargetMonitor has decided there is enough evidence to
         // request a normal QSO start. Cleared the instant the caller consumes it (see
         // ConsumeReadyToStart) or the monitor is stopped/reset.
         public bool ReadyToStart { get; private set; }
+
+        // Smart Start only. Set once an automatic REPLY for this target has actually been
+        // dispatched (WsjtxClient.EnterAwaitingEngagement, from ReplyTo's success callback):
+        // Smart Start is now CALLING the target and watching for one of two outcomes --
+        //   * the target answers OUR callsign  -> EngagedUs; Smart Start's job is done and the
+        //     normal Jimmy/Nexus QSO sequencer owns it from here, OR
+        //   * the target starts / continues a QSO with someone else before answering us
+        //     -> BusyWithOther; the caller ceases our call and calls ReturnToWaiting().
+        // While AwaitingEngagement is true the readiness machinery (silence counting, the
+        // RR73 one-more-opportunity rule, SignalReady) is dormant -- we are already calling.
+        public bool AwaitingEngagement { get; private set; }
+
+        // Smart Start only: a confident LIVE decode from the target addressed to our own
+        // callsign has been seen since EnterAwaitingEngagement (the target engaged us).
+        public bool EngagedUs { get; private set; }
 
         public event Action<TargetObservation> Observed;
 
@@ -122,9 +177,49 @@ namespace WSJTX_Controller
         private string _mode;
         private string _sessionToken;
 
+        // Fixed WSJT-X T/R period lengths, used to turn a receive-opportunity count into a
+        // documented wall-clock backstop and to reason about a seed decode's age. FT8 = 15 s,
+        // FT4 = 7.5 s; any other/unknown mode conservatively uses the longer FT8 period.
+        private double _periodSeconds = 15.0;
+
+        // A seed decode (operator selection) is treated as genuine current evidence only when it
+        // is no older than this many T/R periods -- i.e. from the current or immediately
+        // preceding receive period. Two periods is deliberately short: it is far less than the
+        // time a station needs to complete a whole call -> report -> RR73 exchange with someone
+        // else (3+ periods), which is exactly what made a 54 s-old RR73 invalid evidence in the
+        // V51WW failure.
+        private const int SeedFreshLimitPeriods = 2;
+
+        // Work Watched Station Now is an explicit operator request, so it bypasses the Smart
+        // Start silence policy -- but it still needs a reasonably current decode. One full
+        // standard exchange is 3 periods (call, R+report, RR73); allow that plus one for slack.
+        private const int WorkNowMaxOpportunityGap = 4;
+
         public TargetMonitor(TargetPurpose purpose)
         {
             Purpose = purpose;
+        }
+
+        // Fixed WSJT-X T/R period length for a mode token (FT8 15 s / FT4 7.5 s). Unknown or
+        // any other value conservatively uses the longer FT8 period.
+        private static double PeriodSecondsForMode(string mode) =>
+            string.Equals(mode, "FT4", StringComparison.OrdinalIgnoreCase) ? 7.5 : 15.0;
+
+        // Which alternating slot a UTC instant falls in, using the same seconds-since-midnight /
+        // period alignment the engine's own monotonic slot counter uses (FT8 boundaries at
+        // :00/:15/:30/:45). Only trusted for a decode already known to be recent (the seed
+        // fresh-window check) -- never used to age an old decode.
+        private bool ParityFromUtc(DateTime utc) =>
+            ((long)(utc.TimeOfDay.TotalSeconds / _periodSeconds)) % 2 == 0;
+
+        // The decode's own capture time when it carries a real one (Direct-mode decodes always
+        // stamp RxDate+SinceMidnight at ingest), else "now" -- a live decode with no explicit
+        // timestamp is by definition current.
+        private static DateTime DecodeUtcOrNow(EnqueueDecodeMessage d)
+        {
+            if (d != null && d.RxDate > new DateTime(2000, 1, 1))
+                return d.RxDate.Add(d.SinceMidnight);
+            return DateTime.UtcNow;
         }
 
         // Starts the watch, or -- if one is already active -- explicitly replaces it. Either way
@@ -140,12 +235,19 @@ namespace WSJTX_Controller
             TargetEvenParity = null;
             SilenceCount = 0;
             LastUsableDecode = null;
+            LastUsableDecodeUtc = default;
+            HasLiveTargetEvidence = false;
+            OpportunitiesSinceLiveEvidence = 0;
+            BusyWithOther = false;
             ReadyToStart = false;
+            AwaitingEngagement = false;
+            EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
             _lastCountedSlot = null;
             _band = band;
             _mode = mode;
             _sessionToken = sessionToken;
+            _periodSeconds = PeriodSecondsForMode(mode);
 
             Raise(TargetObservationKind.WatchStarted, call);
         }
@@ -159,7 +261,13 @@ namespace WSJTX_Controller
             TargetEvenParity = null;
             SilenceCount = 0;
             LastUsableDecode = null;
+            LastUsableDecodeUtc = default;
+            HasLiveTargetEvidence = false;
+            OpportunitiesSinceLiveEvidence = 0;
+            BusyWithOther = false;
             ReadyToStart = false;
+            AwaitingEngagement = false;
+            EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
             _lastCountedSlot = null;
             if (announce) Raise(TargetObservationKind.WatchStopped, call);
@@ -185,6 +293,77 @@ namespace WSJTX_Controller
             _rr73AwaitingOneMoreOpportunity = false;
         }
 
+        // Smart Start only. Called once the automatic REPLY for this target has actually been
+        // dispatched (WsjtxClient.ReplyTo's success callback): Smart Start stays ARMED but its
+        // own readiness machinery goes dormant -- it is now CALLING the target and just watches,
+        // via ObserveDecode, for one of two outcomes: the target addresses our callsign
+        // (EngagedUs -> Smart Start's job is done, the normal QSO sequencer owns it) or the
+        // target starts/continues a QSO with someone else (BusyWithOther -> the caller ceases
+        // our call and calls ReturnToWaiting).
+        public void EnterAwaitingEngagement()
+        {
+            if (Purpose != TargetPurpose.SmartStart) return;
+            AwaitingEngagement = true;
+            EngagedUs = false;
+            ReadyToStart = false;
+            _rr73AwaitingOneMoreOpportunity = false;
+        }
+
+        // The target started working someone else before answering us and the caller has ceased
+        // our transmit attempt (the normal Escape-style halt/cancel/requeue). Drop back to the
+        // armed/waiting state for the SAME target: the readiness machinery is live again, but
+        // BusyWithOther is deliberately KEPT -- so a resume needs a genuine availability signal
+        // (target CQ / 73 / RR73 / addressing us), never mere silence, and a mere peer change in
+        // the other QSO keeps BusyWithOther set. TargetCall / parity / HasLiveTargetEvidence /
+        // ApparentPeer / LastUsableDecode are all retained.
+        public void ReturnToWaiting()
+        {
+            if (Purpose != TargetPurpose.SmartStart) return;
+            AwaitingEngagement = false;
+            EngagedUs = false;
+            ReadyToStart = false;
+            _rr73AwaitingOneMoreOpportunity = false;
+            SilenceCount = 0;
+            _lastCountedSlot = null;
+            OpportunitiesSinceLiveEvidence = 0;
+        }
+
+        // Smart Start capture (WsjtxClient.TryCaptureSmartStart): the operator selected this
+        // exact decode from a list/queue. It always identifies the target and is stored as the
+        // decode to eventually hand to ReplyTo -- but it only counts as genuine current evidence
+        // (parity, live-evidence flag, CQ/73/RR73 readiness rules) when it is still fresh. A
+        // stale selection identifies WHICH station to work and nothing more; Smart Start then
+        // behaves exactly as if freshly armed with no prior evidence, waiting for a real live
+        // decode before it can authorize a transmission. `nowUtc` is the capture instant.
+        public void SeedSelectedDecode(EnqueueDecodeMessage d, DateTime nowUtc, string myCall)
+        {
+            if (TargetCall == null || d == null || string.IsNullOrEmpty(d.Message)) return;
+
+            string de = d.DeCall();
+            if (de == null || !string.Equals(de, TargetCall, StringComparison.OrdinalIgnoreCase)) return;
+
+            DateTime decodeUtc = DecodeUtcOrNow(d);
+            double ageSeconds = Math.Max(0.0, (nowUtc - decodeUtc).TotalSeconds);
+
+            // Always: remember it as the decode to reply from, and its real age.
+            LastUsableDecode = d;
+            LastUsableDecodeUtc = decodeUtc;
+
+            if (ageSeconds > _periodSeconds * SeedFreshLimitPeriods)
+            {
+                // Stale selection -- context only. No parity (so no opportunity can count until a
+                // real live decode establishes it), no live-evidence, no readiness. Narrate what
+                // was selected so the feature still reports "watching X".
+                RaiseSeedClassification(d, myCall);
+                return;
+            }
+
+            // Fresh selection -- genuine current evidence. Feed it through the same
+            // classification/readiness path a live decode would take, with the decode's own real
+            // parity rather than a guess.
+            IngestTargetDecode(d, ParityFromUtc(decodeUtc), myCall, live: true, decodeUtc: decodeUtc);
+        }
+
         // Feed every decode Jimmy processes (not just ones already in the reply queue) while this
         // monitor is active. `evenSlot`/`slot` come from the engine's own RadioStatus.Slot at the
         // moment this decode arrived (WsjtxClient.Direct.cs) -- the real per-period identity, not
@@ -199,14 +378,24 @@ namespace WSJTX_Controller
 
             if (!string.Equals(de, TargetCall, StringComparison.OrdinalIgnoreCase))
             {
-                // Not the target -- only interesting if it is the target's OWN apparent peer
-                // replying TO the target (never invent the unseen half of the exchange; only
-                // report what was actually decoded).
+                // Not the target -- interesting in two ways:
+                //   1. the target's OWN apparent peer replying TO the target (narrate it, never
+                //      invent the unseen half of the exchange), and
+                //   2. ANY station addressing the target (2.0.64): someone is calling or working
+                //      the target right now, so the target is busy. This is a transmit-safety
+                //      signal only (no narration for an unknown caller) and clears again the
+                //      moment the target itself is heard available.
                 string toTarget = WsjtxMessage.ToCall(d.Message);
-                if (!string.IsNullOrEmpty(ApparentPeer)
-                    && string.Equals(de, ApparentPeer, StringComparison.OrdinalIgnoreCase)
-                    && !string.IsNullOrEmpty(toTarget)
-                    && string.Equals(toTarget, TargetCall, StringComparison.OrdinalIgnoreCase))
+                bool addressedToTarget = !string.IsNullOrEmpty(toTarget)
+                    && string.Equals(toTarget, TargetCall, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(de, myCall, StringComparison.OrdinalIgnoreCase);
+
+                if (addressedToTarget)
+                    BusyWithOther = true;
+
+                if (addressedToTarget
+                    && !string.IsNullOrEmpty(ApparentPeer)
+                    && string.Equals(de, ApparentPeer, StringComparison.OrdinalIgnoreCase))
                 {
                     // Only what was actually decoded from the PEER's own transmission -- never
                     // the unseen half of the target's own exchange. Value carries the peer's own
@@ -217,16 +406,30 @@ namespace WSJTX_Controller
                 return;
             }
 
+            IngestTargetDecode(d, evenSlot, myCall, live: true, decodeUtc: DecodeUtcOrNow(d));
+        }
+
+        // Shared body for a confident decode attributed to the target, whether it arrived on the
+        // live feed (ObserveDecode) or as a still-fresh operator selection (SeedSelectedDecode).
+        private void IngestTargetDecode(EnqueueDecodeMessage d, bool evenSlot, string myCall, bool live, DateTime decodeUtc)
+        {
             // Any confidently attributed decode from the target -- including an ambiguous one --
             // resets the silence count and records the freshest usable decode/parity.
             SilenceCount = 0;
             _lastCountedSlot = null;
             TargetEvenParity = evenSlot;
             LastUsableDecode = d;
+            LastUsableDecodeUtc = decodeUtc;
+            if (live)
+            {
+                HasLiveTargetEvidence = true;
+                OpportunitiesSinceLiveEvidence = 0;
+            }
 
             if (WsjtxMessage.IsCQ(d.Message))
             {
                 ApparentPeer = null;
+                BusyWithOther = false;                 // calling CQ -> available
                 _rr73AwaitingOneMoreOpportunity = false;
                 Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
@@ -246,8 +449,15 @@ namespace WSJTX_Controller
                 ApparentPeer = to;
             string peer = addressingUs ? myCall : to;
 
+            if (live && addressingUs)
+                EngagedUs = true;                      // the target answered our callsign
+
+            if (addressingUs)
+                BusyWithOther = false;                 // turning to us -> not busy with anyone else
+
             if (WsjtxMessage.IsRR73(d.Message))
             {
+                BusyWithOther = false;                 // finishing with the peer -> becoming available
                 Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart)
                 {
@@ -262,6 +472,7 @@ namespace WSJTX_Controller
             }
             if (WsjtxMessage.Is73(d.Message))
             {
+                BusyWithOther = false;                 // signed off with the peer -> available
                 _rr73AwaitingOneMoreOpportunity = false;
                 Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
@@ -269,16 +480,19 @@ namespace WSJTX_Controller
             }
             if (WsjtxMessage.IsRogers(d.Message))       // RRR -- distinct from, and NOT equivalent to, RR73/73
             {
+                if (!addressingUs) BusyWithOther = true;   // mid-exchange with the peer
                 Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
                 return;
             }
             if (WsjtxMessage.IsRogerReport(d.Message))
             {
+                if (!addressingUs) BusyWithOther = true;
                 Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
                 return;
             }
             if (WsjtxMessage.IsReport(d.Message))
             {
+                if (!addressingUs) BusyWithOther = true;
                 Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
                 return;
             }
@@ -290,7 +504,26 @@ namespace WSJTX_Controller
             // Directed at someone else with a payload that isn't one of the recognized standard
             // forms (grid, free text, contest exchange, etc.) -- still meaningful "working
             // another station" evidence, just not one of the specific typed observations above.
+            BusyWithOther = true;
             Raise(TargetObservationKind.TargetAddressingOther, TargetCall, peer, null, d.Message);
+        }
+
+        // Narrate a stale seed selection without letting it drive any readiness/parity/evidence
+        // state -- classification only, so Station Watch style callers still report "watching X".
+        private void RaiseSeedClassification(EnqueueDecodeMessage d, string myCall)
+        {
+            if (WsjtxMessage.IsCQ(d.Message)) { Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message); return; }
+            string to = WsjtxMessage.ToCall(d.Message);
+            if (string.IsNullOrEmpty(to)) { Raise(TargetObservationKind.TargetAmbiguous, TargetCall, null, null, d.Message); return; }
+            bool addressingUs = !string.IsNullOrEmpty(myCall) && string.Equals(to, myCall, StringComparison.OrdinalIgnoreCase);
+            string peer = addressingUs ? myCall : to;
+            if (WsjtxMessage.IsRR73(d.Message)) Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
+            else if (WsjtxMessage.Is73(d.Message)) Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
+            else if (WsjtxMessage.IsRogers(d.Message)) Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
+            else if (WsjtxMessage.IsRogerReport(d.Message)) Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
+            else if (WsjtxMessage.IsReport(d.Message)) Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
+            else if (addressingUs) Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, null, d.Message);
+            else Raise(TargetObservationKind.TargetAddressingOther, TargetCall, peer, null, d.Message);
         }
 
         // Called once per real, completed receive-period boundary (the same engine-slot-advance
@@ -304,7 +537,6 @@ namespace WSJTX_Controller
             string sessionToken, bool weTransmittedThisSlot)
         {
             if (TargetCall == null) return;
-            if (Purpose != TargetPurpose.SmartStart) return;   // Station Watch never counts silence
             if (weTransmittedThisSlot) return;
             if (!string.Equals(band, _band, StringComparison.OrdinalIgnoreCase)) return;
             if (!string.Equals(mode, _mode, StringComparison.OrdinalIgnoreCase)) return;
@@ -313,6 +545,14 @@ namespace WSJTX_Controller
             if (evenSlot != TargetEvenParity.Value) return;     // opposite parity -- never counted
             if (_lastCountedSlot == slot) return;                // defensive dedup
             _lastCountedSlot = slot;
+
+            // Both purposes track how long it has been (in real appropriate opportunities) since
+            // the target was actually heard -- Work Watched Station Now's freshness check reads
+            // this too, not just Smart Start's silence counter.
+            OpportunitiesSinceLiveEvidence++;
+
+            if (Purpose != TargetPurpose.SmartStart) return;   // Station Watch never counts toward an automatic start
+            if (AwaitingEngagement) return;                    // already calling -- silence/RR73 readiness is dormant
 
             if (_rr73AwaitingOneMoreOpportunity)
             {
@@ -344,8 +584,53 @@ namespace WSJTX_Controller
             _lastCountedSlot = null;
         }
 
+        // The atomic pre-transmit revalidation. Called immediately before an automatic REPLY (or
+        // a Work-Watched-Station-Now dispatch) actually goes out, against the CURRENT band/mode/
+        // session -- see WsjtxClient.RequestTargetMonitorStart. `operatorOverride` is true for
+        // Work Now: it skips the Smart Start silence-policy bound but still requires live, in-
+        // context, non-busy, reasonably current evidence.
+        public AutoStartCheck RevalidateForAutoStart(DateTime nowUtc, string band, string mode,
+            string sessionToken, bool operatorOverride)
+        {
+            if (TargetCall == null || LastUsableDecode == null) return AutoStartCheck.NoUsableDecode;
+
+            if (!string.Equals(band, _band, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(mode, _mode, StringComparison.OrdinalIgnoreCase)
+                || !string.Equals(sessionToken, _sessionToken, StringComparison.Ordinal))
+                return AutoStartCheck.ContextChanged;
+
+            if (!HasLiveTargetEvidence) return AutoStartCheck.NoLiveEvidence;
+            if (BusyWithOther) return AutoStartCheck.TargetBusy;
+
+            // Primary freshness measure: completed appropriate receive opportunities since the
+            // target was last actually heard. Auto-start must stay within the operator's own
+            // silence policy (+1 for the one-poll snapshot-finality deferral in WsjtxClient);
+            // Work Now allows one full standard exchange plus slack.
+            int maxGap = operatorOverride
+                ? WorkNowMaxOpportunityGap
+                : Math.Max(SilenceThreshold, 1) + 1;
+            if (OpportunitiesSinceLiveEvidence > maxGap) return AutoStartCheck.StaleEvidence;
+
+            // Wall-clock backstop, derived (not a magic number): each counted opportunity is one
+            // T/R period of real elapsed time; a decode is delivered near the end of its own
+            // period (+1) and the automatic REPLY is held one extra poll/period for snapshot
+            // finality (+1). If the wall clock shows materially more time than that, the poll /
+            // decode feed stalled (host sleep, CAT loss, GC pause) and we cannot claim to have
+            // observed every intervening opportunity -- so the "silence" is untrusted.
+            double maxAgeSeconds = (OpportunitiesSinceLiveEvidence + 2) * _periodSeconds;
+            if ((nowUtc - LastUsableDecodeUtc).TotalSeconds > maxAgeSeconds) return AutoStartCheck.StaleEvidence;
+
+            return AutoStartCheck.Ok;
+        }
+
         private void SignalReady()
         {
+            // Guardrails independent of the RR73/silence rule that got us here: never signal
+            // ready without genuine live evidence, never while current evidence says the target
+            // is working someone else, and never while we are already calling it.
+            if (!HasLiveTargetEvidence) return;
+            if (BusyWithOther) return;
+            if (AwaitingEngagement) return;
             ReadyToStart = true;
             Raise(TargetObservationKind.SmartStartTargetAvailable, TargetCall);
         }

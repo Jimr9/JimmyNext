@@ -409,6 +409,18 @@ namespace WSJTX_Controller
                 // rig's CAT/meter behaviour was seen against. Diagnostic only.
                 debugOutput?.Invoke($"[NativeEngine] bundled Hamlib version: {RigctldClient.GetBundledHamlibVersion() ?? "unknown"}");
 
+                // 2.0.64 -- record the audio devices Jimmy is asking the engine to open, once per
+                // launch. Audio devices are stored (and matched by the engine) as friendly-name
+                // strings, so a driver update / Windows feature update / USB re-enumeration that
+                // renames an endpoint ("Speakers (USB Audio CODEC)" -> "Speakers (2- USB Audio
+                // CODEC)") leaves the stored name valid but no longer resolvable -- the engine
+                // then falls back to the system default at runtime while the INI value is intact.
+                // This line is the one piece of evidence that turns "audio changed after the
+                // upgrade" into a diagnosable name mismatch. Jimmy never writes a resolved/fallback
+                // device name back over the operator's stored selection (see NativeEngineSettings).
+                debugOutput?.Invoke($"[NativeEngine] audio devices requested: input={(string.IsNullOrWhiteSpace(audioDevice) ? "(system default)" : "'" + audioDevice + "'")}, " +
+                    $"output={(string.IsNullOrWhiteSpace(outputDevice) ? "(system default)" : "'" + outputDevice + "'")}");
+
                 _process = new Process
                 {
                     StartInfo = new ProcessStartInfo

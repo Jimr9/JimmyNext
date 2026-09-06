@@ -13,6 +13,12 @@ namespace WSJTX_Controller
     public partial class HelpDlg : Form
     {
         private Controller ctrl;
+        // 2.0.64 accessibility: HelpDlg_Activated fires on every window activation (including
+        // alt-tabbing back). Focusing the help text box on each one made JAWS re-read its first
+        // line -- which is the product name + version -- so opening Alt+K announced the version
+        // roughly three times (Show, the tick's own Activate(), Load's old Activate()). Focus it
+        // exactly once, on first activation.
+        private bool _initialFocusDone;
 
         public HelpDlg(Controller co, string c, string t)
         {
@@ -21,6 +27,10 @@ namespace WSJTX_Controller
             ctrl = co;
             Text = c;
             helpLabel.Text = t;
+            // A concise name so a screen reader announces the control by purpose, not by
+            // re-reading its (version-bearing) contents. The version stays exactly once, in the
+            // visible help text itself.
+            helpLabel.AccessibleName = "Jimmy Next help and shortcut keys";
         }
 
         private void HelpDlg_Load(object sender, EventArgs e)
@@ -37,7 +47,8 @@ namespace WSJTX_Controller
 
             helpLabel.SelectionStart = 0;
             helpLabel.SelectionLength = 0;
-            this.Activate();
+            // No redundant this.Activate() here -- Load already runs inside Show()'s activation;
+            // an extra Activate() only fires another HelpDlg_Activated (see _initialFocusDone).
         }
 
         private void closeButton_Click(object sender, EventArgs e)
@@ -97,6 +108,10 @@ namespace WSJTX_Controller
 
         private void HelpDlg_Activated(object sender, EventArgs e)
         {
+            // Put focus in the help text once, when the window first opens -- not on every
+            // re-activation, which made a screen reader re-announce the first line each time.
+            if (_initialFocusDone) return;
+            _initialFocusDone = true;
             helpLabel.Focus();
         }
     }

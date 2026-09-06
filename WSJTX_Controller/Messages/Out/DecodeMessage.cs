@@ -493,10 +493,12 @@ namespace WsjtxUdpLib.Messages.Out
             return enqueueDecodeMessage;
         }
 
-        // String.Copy(string) is obsolete on modern .NET. Strings are immutable, so a
-        // distinct copy is never observable; only String.Copy's null-check behavior
-        // (ArgumentNullException on a null field) needs preserving here.
-        private static string CopyString(string str) => str ?? throw new ArgumentNullException(nameof(str));
+        // String.Copy(string) is obsolete on modern .NET, and strings are immutable, so a
+        // "deep copy" of a string field is just the reference itself. A null optional field
+        // (e.g. an EnqueueDecodeMessage built directly rather than via FromStandardDecode)
+        // must stay null here, not throw -- DeepCopy runs on the UI thread inside a Direct
+        // completion callback, where an ArgumentNullException would be an unhandled app crash.
+        private static string CopyString(string str) => str;
 
         //quality is how likely a station is to answer while in the current stage of a QSO
         private void SetMsgQuality()
