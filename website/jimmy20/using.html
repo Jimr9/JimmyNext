@@ -64,6 +64,21 @@
     <li><kbd>Escape</kbd> halts transmit, cancels the current QSO, and returns you to Listen mode.</li>
   </ul>
 
+  <h2 id="smart-qso-start">Smart QSO Start</h2>
+  <p>Normally, selecting a station starts calling it right away. Turn on <strong>Smart QSO Start</strong> (Options &gt; Transmit) and <kbd>Enter</kbd> instead tells Jimmy Next <em>"work this station when the moment is right"</em> — then Jimmy Next watches that station and decides for itself when to call:</p>
+  <ul>
+    <li>It waits while the station is still finishing a contact with someone else.</li>
+    <li>It calls when the station comes free — its CQ, 73, or RR73, or a quiet gap long enough to count (set by <strong>Start after target not heard for</strong> on the same tab).</li>
+    <li>If the station turns to another caller before answering you, Jimmy Next stops calling, stays armed for that same station, and tries again once it's genuinely free.</li>
+    <li>The moment the station comes back to your callsign, normal QSO sequencing takes over and finishes the contact.</li>
+  </ul>
+  <p>A short spoken line marks each step — "Waiting to work NL8F", "NL8F is working another station", "NL8F appears available", "Calling NL8F", "NL8F answered you" — so you always know Jimmy Next is still on the job. Every one of those lines is an ordinary notification you can reword, retime, or silence in <a href="settings.html#notifications">Options &gt; Notifications</a>; the repetitive "still waiting" progress is off by default. Smart QSO Start only ever <em>starts</em> a contact you asked for — it never picks a station on its own.</p>
+
+  <h2 id="station-watch">Station Watch</h2>
+  <p><strong>Station Watch</strong> (<kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd>) is for <em>listening to</em> one particular station with no intention of working it — a DXpedition you want to keep tabs on, a friend you're hoping to catch, a frequency you want to understand. Select a station and press the key to start; press again to stop. It is strictly receive-only and never transmits.</p>
+  <p>While a watch is running, Jimmy Next gives you a fuller running commentary on that station — calling CQ, working someone and the report passed, signing RR73 or 73 — and stays quiet about routine status so the watch is what you hear. If you decide you do want to work the watched station, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> ("Work Watched Station Now") calls it from its most recent decode. A band or mode change stops the watch; nothing else does except pressing the key again.</p>
+  <p>Station Watch and Smart QSO Start can run together on the same station: the watch tells you what the station is <em>doing</em>, Smart QSO Start tells you what Jimmy Next has <em>decided</em> to do about it, and a shared fact isn't announced twice.</p>
+
   <h2 id="transmit-frequency">Transmit frequency</h2>
   <p>A sighted WSJT-X or Nexus operator sets where in the passband they transmit and receive by dragging markers on a waterfall. Jimmy Next gives you the same control through the keyboard, with spoken confirmation and no waterfall required.</p>
   <p>The <strong>Transmit frequency</strong> setting (Options &gt; Transmit) chooses how Jimmy Next places your transmit audio when it starts a CQ or answers a station:</p>

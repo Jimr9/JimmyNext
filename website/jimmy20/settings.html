@@ -54,6 +54,7 @@
     <li><strong>Transmit frequency</strong> — <em>Best free frequency (automatic)</em> (the default; Jimmy Next finds a clear gap in the passband for each CQ and reply), <em>Hold Tx frequency</em> (keep your current transmit frequency, follow the worked station on receive only — WSJT-X's "Hold Tx Freq" on), or <em>Transmit on station's frequency</em> (move both transmit and receive onto the station you answer — classic double-click-to-work). Jimmy Next never changes your transmit frequency in the middle of a contact. See <a href="using.html#transmit-frequency">Using Jimmy Next</a> for how each mode behaves, plus the keyboard commands for setting frequency by hand.</li>
     <li><strong>Frequency step (Hz)</strong> — how far the transmit and receive frequency nudge keys (<kbd>Shift</kbd>+<kbd>F11</kbd>/<kbd>F12</kbd> and <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F11</kbd>/<kbd>F12</kbd>) move per press. Default 60&nbsp;Hz; set it smaller for fine work, larger to clear a pile-up quickly.</li>
     <li><strong>Repeat limit</strong> — how many times the same message is repeated to a station that isn't answering before Jimmy Next gives up and moves to the next call. This is now the single control for that; the old "Extended Timeout" / "Hold" toggle has been removed.</li>
+    <li><strong>Smart QSO Start</strong> — when on, <kbd>Enter</kbd> on a station means "work it when the moment is right" rather than "call it now": Jimmy Next watches that station and calls, waits, yields, and hands off on its own. <strong>Start after target not heard for</strong> (1–10 receive periods) sets how long a quiet gap counts as the station being free. See <a href="using.html#smart-qso-start">Using Jimmy Next</a>.</li>
     <li><strong>Optimize throughput</strong>, <strong>Log early</strong>, <strong>Use RR73</strong>, <strong>Skip my grid</strong>, and the transmit-period default also live here.</li>
   </ul>
 
@@ -70,6 +71,17 @@
 
   <h2>Sounds</h2>
   <p>Jimmy Next can play a distinct sound for 14 different events — a new call added, a call directed to you, a QSO logged, transmit enabled, a new DXCC (overall or on the current band), an always-wanted call, a directed CQ, POTA or SOTA activity, a wanted call heard anywhere, an interesting call on the opposite period, and a needed-award match. Each one can be turned on or off individually and pointed at your own <code>.wav</code> file, with a Test button to preview it.</p>
+
+  <h2 id="notifications">Notifications and speech</h2>
+  <p>Separate from the alert <em>sounds</em> above, the <strong>Notifications</strong> tab controls what Jimmy Next <em>says</em> — both its routine operating status (receive and transmit state, the receive-cycle summary, "QSO started", "QSO logged", the transmit message) and its event announcements (radio CAT link lost or recovered, computer clock out of sync, an automatic transmit resume, Station Watch and Smart QSO Start activity, and more). For each one you can:</p>
+  <ul>
+    <li>Turn it on or off.</li>
+    <li>Reword it — every announcement is a plain-text template with <code>{Field}</code> placeholders (callsign, band, mode, and so on) you can edit.</li>
+    <li>Choose <strong>when</strong> it's spoken — right away, after the current receive period, after the current transmission, or after the whole QSO ends — so it never talks over something you're waiting to hear.</li>
+    <li>Choose <strong>whether</strong> it's spoken during an active QSO, only outside a QSO, always, or never (shown on screen and in history only).</li>
+    <li>Set a minimum gap before the same announcement can repeat.</li>
+  </ul>
+  <p>A <strong>Global speech behaviour</strong> group sets the default timing and during-a-QSO rule for the whole routine status line at once, so you can dial in how talkative Jimmy Next is overall and then override individual events as needed. Safety-critical notices — the radio CAT link dropping, for example — are always spoken immediately regardless of these settings. <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>H</kbd> opens a <strong>Notification History</strong> window listing everything Jimmy Next has presented this session, whether or not it was spoken aloud.</p>
 
   <h2>Lookups</h2>
   <p>Jimmy Next can combine several sources into one record for any callsign — country, DXCC entity, state, grid, LoTW status, and more. All of it is optional and configured on the <strong>Lookup Data</strong> tab in Options:</p>

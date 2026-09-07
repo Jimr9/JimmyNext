@@ -34,6 +34,8 @@
   <h1>Keyboard Commands</h1>
   <p class="lede">Every command below is reachable without a mouse. These are Jimmy Next's defaults — every one of them (except the handful marked fixed) can be reassigned from <strong>Options &gt; Hotkeys</strong> (<kbd>Alt</kbd>+<kbd>O</kbd>).</p>
 
+  <p><kbd>Enter</kbd> on a station in any list selects it and starts calling. With <strong>Smart QSO Start</strong> turned on (Options &gt; Transmit), <kbd>Enter</kbd> instead arms that station to be worked automatically when the moment is right — see <a href="using.html#smart-qso-start">Using Jimmy Next</a>.</p>
+
   <table class="keys">
     <caption>Command keys</caption>
     <thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead>
@@ -81,6 +83,16 @@
     </tbody>
   </table>
   <p>These pair with <kbd>F11</kbd>/<kbd>F12</kbd> already being audio level down/up: <kbd>F12</kbd> is the up / transmit-side key, <kbd>F11</kbd> the down / receive-side key. No arrow keys are used, so nothing collides with screen-reader navigation. Using any of the transmit keys above during a contact switches that contact to a manual transmit frequency, so Jimmy Next won't automatically pick a different one until you Halt, finish the QSO, change band or mode, or reselect "Best free frequency" in Options. See <a href="using.html#transmit-frequency">Using Jimmy Next</a> for the full picture.</p>
+
+  <table class="keys">
+    <caption>Station Watch keys</caption>
+    <thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Ctrl+Shift+W</kbd></td><td>Start or stop watching the selected station — a receive-only running commentary on what that one station is doing. Never transmits. See <a href="using.html#station-watch">Using Jimmy Next</a>.</td></tr>
+      <tr><td><kbd>Ctrl+Shift+Enter</kbd></td><td>Work Watched Station Now — call the station currently being watched, using its most recent decode.</td></tr>
+    </tbody>
+  </table>
+  <p>Both are set by default but can be reassigned or cleared in <strong>Options &gt; Hotkeys</strong>. If you already use <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd> or <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Enter</kbd> for something else, your existing binding is kept and these are left unassigned.</p>
 
   <table class="keys">
     <caption>Optional command keys</caption>
