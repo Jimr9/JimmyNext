@@ -316,6 +316,7 @@ static class JimmyTests
         SpeechCoordinatorTests();
         SpeakWhenMigrationTests();
         RenderStatusSpeechCoordinationTests();
+        RenderStatusVisibleKeepsLastOnEmptyTests();
         RoutineClauseTemplateTests();
         RoutineCycleSummarySplitTests();
         RoutineCycleSummarySplitMigrationTests();
@@ -8829,6 +8830,77 @@ static class JimmyTests
         }
     }
 
+    // ── RenderStatusVisible: a WORDLESS routine render (every configurable status clause the
+    //    operator left enabled produced no words this cycle, so NormalizeStatusLine collapsed the
+    //    line to "") must NOT blank the visible status box -- a screen-reader user returns to the
+    //    status control to re-read the LAST real message. Regression for the 2026-09-06 "status
+    //    area goes blank after a short time" report. The composition side (ShowStatus ->
+    //    NormalizeStatusLine -> "") and the speech side (SpeechCoordinator discards a wordless
+    //    line) are covered by RoutineCycleSummarySplitTests / RenderStatusSpeechCoordinationTests
+    //    and are deliberately unchanged. ──
+    static void RenderStatusVisibleKeepsLastOnEmptyTests()
+    {
+        Console.WriteLine("\n── RenderStatusVisible: a wordless render keeps the last real status + colours ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_RenderKeepLast_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+
+            var green  = System.Drawing.Color.FromArgb(0, 128, 0);
+            var yellow = System.Drawing.Color.Yellow;
+            var red    = System.Drawing.Color.Red;
+            var white  = System.Drawing.Color.White;
+
+            // 1. A normal render sets visible text, colours, heading and accessible name.
+            ctrl.RenderStatusVisible("20m FT8", "Receiving, no available stations, Listen mode.", green, yellow);
+            CheckStr("normal render: visible text set", ctrl.statusText.Text, "Receiving, no available stations, Listen mode.");
+            Check("normal render: fore colour set", ctrl.statusText.ForeColor.ToArgb() == green.ToArgb(), true);
+            Check("normal render: back colour set", ctrl.statusText.BackColor.ToArgb() == yellow.ToArgb(), true);
+            CheckStr("normal render: heading set", ctrl.statusHeadingLabel.Text, "20m FT8");
+            CheckStr("normal render: accessible name set", ctrl.statusText.AccessibleName, "20m FT8");
+
+            // 2. A wordless render ("" -- every routine clause disabled) leaves the last real text
+            //    AND its colours in place, but still updates the band/mode heading + accessible name.
+            ctrl.RenderStatusVisible("17m FT8", "", red, white);
+            CheckStr("empty render: last real text is retained", ctrl.statusText.Text, "Receiving, no available stations, Listen mode.");
+            Check("empty render: fore colour is retained", ctrl.statusText.ForeColor.ToArgb() == green.ToArgb(), true);
+            Check("empty render: back colour is retained", ctrl.statusText.BackColor.ToArgb() == yellow.ToArgb(), true);
+            CheckStr("empty render: heading still tracks band/mode", ctrl.statusHeadingLabel.Text, "17m FT8");
+            CheckStr("empty render: accessible name still tracks band/mode", ctrl.statusText.AccessibleName, "17m FT8");
+
+            // 3. A punctuation/space-only remnant (the ". " / ", ." shape a collapsed line can
+            //    take) is also wordless -- retained, not shown. This is why the guard uses
+            //    HasSpeakableContent (letter/digit) and not string.IsNullOrWhiteSpace.
+            ctrl.RenderStatusVisible("17m FT8", "  .  ", red, white);
+            CheckStr("punctuation-only render: last real text is retained", ctrl.statusText.Text, "Receiving, no available stations, Listen mode.");
+            Check("punctuation-only render: colours retained",
+                ctrl.statusText.ForeColor.ToArgb() == green.ToArgb() && ctrl.statusText.BackColor.ToArgb() == yellow.ToArgb(), true);
+
+            // 4. null is handled like empty -- retained, no throw.
+            ctrl.RenderStatusVisible("17m FT8", null, red, white);
+            CheckStr("null render: last real text is retained", ctrl.statusText.Text, "Receiving, no available stations, Listen mode.");
+
+            // 5. The next render WITH words replaces text and colours as normal.
+            ctrl.RenderStatusVisible("17m FT8", "Transmitting W 1 A W, sending 73.", red, white);
+            CheckStr("next real render: text replaced", ctrl.statusText.Text, "Transmitting W 1 A W, sending 73.");
+            Check("next real render: colours replaced",
+                ctrl.statusText.ForeColor.ToArgb() == red.ToArgb() && ctrl.statusText.BackColor.ToArgb() == white.ToArgb(), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RenderStatusVisibleKeepsLastOnEmptyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
     // ── Routine-status wording rows: the Receive cycle summary / QSO started clauses are
     //    driven by their editable Template, stay ONE coalesced utterance, and honour Enabled ──
     static void RoutineClauseTemplateTests()
@@ -9698,15 +9770,22 @@ static class JimmyTests
                 return wc;
             }
 
-            // A. THE EXACT REPORTED BUG: active QSO, nothing new to report this render -> no
-            //    bare "WA4VLC." on the status line, and no new history entry for it.
+            // A. THE EXACT REPORTED BUG: active QSO, nothing new to report this render -> the
+            //    routine line composes to nothing. Two things must hold: no bare "W A 4 V L C."
+            //    ever reaches the status area, AND -- 2026-09-06 regression -- a wordless render
+            //    must NOT blank the box; it keeps whatever real line was last shown (a
+            //    screen-reader user returns to the status control to re-read it). Still no new
+            //    Notification History entry for the bare callsign.
             {
                 var wc = MakeWc(out var ctrl);
-                wc.callInProg = "WA4VLC";
+                // Seed a known real status line first.
+                ctrl.RenderStatusVisible("Status:", "Receiving, Listen mode.",
+                    System.Drawing.Color.Black, System.Drawing.Color.Yellow);
                 int histBefore = ctrl.NotificationHistory.Count;
+                wc.callInProg = "WA4VLC";
                 wc.TestShowStatus();
-                CheckStr("A: active QSO, nothing new -> status area is empty, NOT 'WA4VLC.'",
-                    ctrl.statusText.Text, "");
+                CheckStr("A: active QSO, nothing new -> last real line kept, NOT a bare 'W A 4 V L C.'",
+                    ctrl.statusText.Text, "Receiving, Listen mode.");
                 Check("A: no new Notification History entry for the bare callsign",
                     ctrl.NotificationHistory.Count == histBefore, true);
             }

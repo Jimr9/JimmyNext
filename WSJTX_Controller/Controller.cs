@@ -3310,20 +3310,35 @@ namespace WSJTX_Controller
         // been spoken now" hint.
         public bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor)
         {
+            // Heading / accessible name track the current band+mode (never wordless -- "17m FT8"
+            // or "Status:"), so keep them in sync on every render.
             statusHeadingLabel.Text = headingText;
             this.statusText.AccessibleName = headingText;
-            this.statusText.ForeColor = foreColor;
-            this.statusText.BackColor = backColor;
-            this.statusText.Text = statusText;
-            this.statusText.SelectionStart = 0;
-            this.statusText.SelectionLength = 0;
 
-            // 2.0.58 Notification History: the routine status render path -- recorded HERE,
-            // immediately and independent of whether/when the line is spoken. Opt-in (default on
-            // for the testing phase) and deduplicated on change inside RecordRoutineStatus (this
-            // is called with identical text every poll tick; the history must not fill with dups).
-            if (notificationHistoryIncludeRoutineStatus)
-                NotificationHistory?.RecordRoutineStatus(statusText);
+            // A routine render can compose to no words at all -- e.g. the operator disabled the
+            // "Receive or transmit state" / "Operating mode announcement" / "Receive cycle
+            // summary" clauses, so NormalizeStatusLine (WsjtxClient.Display.cs) collapsed the
+            // whole line to "". Writing that would BLANK the visible status box; a screen-reader
+            // user returns to this control specifically to re-read the LAST real message. So a
+            // wordless render leaves the previous text AND its colours untouched -- matching the
+            // pre-redesign behaviour where the box always kept the last non-empty line. Speech is
+            // unaffected: SpeechCoordinator already discards a wordless routine line, and
+            // ShowStatus still composes/submits its fragments independently of this method.
+            if (WsjtxClient.HasSpeakableContent(statusText))
+            {
+                this.statusText.ForeColor = foreColor;
+                this.statusText.BackColor = backColor;
+                this.statusText.Text = statusText;
+                this.statusText.SelectionStart = 0;
+                this.statusText.SelectionLength = 0;
+
+                // 2.0.58 Notification History: the routine status render path -- recorded HERE,
+                // immediately and independent of whether/when the line is spoken. Opt-in (default
+                // on for the testing phase) and deduplicated on change inside RecordRoutineStatus
+                // (called with identical text every poll tick; the history must not fill with dups).
+                if (notificationHistoryIncludeRoutineStatus)
+                    NotificationHistory?.RecordRoutineStatus(statusText);
+            }
 
             return this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
         }
