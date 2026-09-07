@@ -2948,9 +2948,13 @@ namespace WSJTX_Controller
                 NotificationEventType.StationWatchStopped,
                 NotificationEventType.StationWatchActivity,
                 NotificationEventType.StationWatchAmbiguous,
-                NotificationEventType.SmartStartWaiting,
-                NotificationEventType.SmartStartTargetAvailable,
+                NotificationEventType.SmartStartArmed,
                 NotificationEventType.SmartStartCallStarting,
+                NotificationEventType.SmartStartTargetBusy,
+                NotificationEventType.SmartStartYielded,
+                NotificationEventType.SmartStartTargetAvailable,
+                NotificationEventType.SmartStartEngaged,
+                NotificationEventType.SmartStartWaiting,
             };
 
             // ── B. Event list ────────────────────────────────────────────────────────────────

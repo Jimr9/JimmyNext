@@ -83,5 +83,19 @@ namespace WSJTX_Controller
         SmartStartWaiting,
         SmartStartTargetAvailable,
         SmartStartCallStarting,
+
+        // Added 2026-09-07 (Smart Start narration pass). Smart Start is a decision-support
+        // feature, not a full observational watch: these carry the small operational subset a
+        // blind operator needs to follow what Jimmy is deciding while it waits on / calls a
+        // captured target -- "request taken", "target is working someone else", "standing by",
+        // "target engaged us / normal QSO sequencing has it". Every one is a normal configurable
+        // NotificationCenter type (Options > Notifications: enable, template, when, condition);
+        // the fuller CQ/report/RRR play-by-play stays StationWatchActivity's job. When a Station
+        // Watch is ALSO active on the same call, the glue (WsjtxClient.StationWatch.cs) drops
+        // Smart Start's bare "target busy" fact so the richer Station Watch line is not doubled.
+        SmartStartArmed,
+        SmartStartTargetBusy,
+        SmartStartYielded,
+        SmartStartEngaged,
     }
 }

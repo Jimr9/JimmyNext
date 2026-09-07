@@ -88,7 +88,8 @@ namespace WSJTX_Controller
             }
             if (_stationWatch.LastUsableDecode == null)
             {
-                Notify?.Publish(new SmartStartWaitingEvent(_stationWatch.TargetCall, "no decode yet"));
+                Notify?.Publish(new SmartStartWaitingEvent(_stationWatch.TargetCall,
+                    $"Waiting for another decode from {_stationWatch.TargetCall}."));
                 StatusView.ShowMessage($"Waiting for another decode from {_stationWatch.TargetCall}", false);
                 return;
             }
@@ -119,10 +120,11 @@ namespace WSJTX_Controller
             // live decode before it can authorize any transmission (2.0.64: the V51WW failure
             // was a ~54 s-old RR73 being manufactured into live "target available" evidence).
             _smartStart.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall);
+            // "Waiting to work {call}." is announced by SmartStartArmedEvent, raised from
+            // _smartStart.Start above via HandleTargetObservation -- no separate ShowMessage
+            // (that would be a near-duplicate on both the visible line and in speech).
             if (_smartStart.ConsumeReadyToStart())
                 ArmPendingAutoStart(_smartStart);
-            else
-                StatusView.ShowMessage($"Will work {call} when appropriate", false);
             return true;
         }
 
@@ -155,7 +157,16 @@ namespace WSJTX_Controller
         {
             if (_smartStart.EngagedUs)
             {
-                DebugOutput($"{Time()} [SMART] {_smartStart.TargetCall} answered our call -- Smart Start done; normal QSO sequencing owns it");
+                string target = _smartStart.TargetCall;
+                DebugOutput($"{Time()} [SMART] {target} answered our call -- Smart Start done; normal QSO sequencing owns it");
+                Notify?.Publish(new SmartStartEngagedEvent(target));
+                // Decision (2026-09-07): the target has actually engaged us, so the normal QSO
+                // sequencer now owns the contact. A Station Watch the operator set on this SAME
+                // call stops here too, so routine QSO speech takes over cleanly -- matching the
+                // manual-selection / Work-Watched-Station-Now handoff. (A watch on a DIFFERENT
+                // call is untouched.)
+                if (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, target, StringComparison.OrdinalIgnoreCase))
+                    StopStationWatch();
                 _smartStart.Stop(announce: false);
                 return;
             }
@@ -184,7 +195,7 @@ namespace WSJTX_Controller
             HaltAndDisableTx();     // HALT_TX + SET_TX_ENABLED 0
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
-            Notify?.Publish(new SmartStartWaitingEvent(target, "working another station"));
+            Notify?.Publish(new SmartStartYieldedEvent(target));
         }
 
         // Called once per real, completed receive-period boundary (the exact same signal
@@ -291,6 +302,8 @@ namespace WSJTX_Controller
                 string why = AutoStartDeclineText(monitor.TargetCall, check);
                 if (operatorOverride)
                     StatusView.ShowMessage(why, false);
+                else if (check == AutoStartCheck.TargetBusy)
+                    Notify?.Publish(new SmartStartYieldedEvent(monitor.TargetCall));
                 else
                     Notify?.Publish(new SmartStartWaitingEvent(monitor.TargetCall, why));
                 // Leave the monitor armed and watching -- a later fresh decode / cleared-busy
@@ -326,25 +339,34 @@ namespace WSJTX_Controller
 
         private void HandleTargetObservation(TargetObservation obs)
         {
-            switch (obs.Kind)
+            // ── Lifecycle: purpose-aware presentation ──────────────────────────────────────────
+            // Only a real Station Watch publishes the "Watching X" / "Stopped watching X"
+            // lifecycle line. Arming or dropping the Smart Start monitor must never leak through
+            // it -- Smart Start has its own "Waiting to work X" line (SmartStartArmed), and its
+            // teardown is covered by the engagement / yield / cancel paths.
+            if (obs.Kind == TargetObservationKind.WatchStarted)
             {
-                case TargetObservationKind.WatchStarted:
+                if (obs.Purpose == TargetPurpose.StationWatch)
                     Notify?.Publish(new StationWatchLifecycleEvent(NotificationEventType.StationWatchStarted, obs.Target));
-                    return;
-                case TargetObservationKind.WatchStopped:
+                else
+                    Notify?.Publish(new SmartStartArmedEvent(obs.Target));
+                return;
+            }
+            if (obs.Kind == TargetObservationKind.WatchStopped)
+            {
+                if (obs.Purpose == TargetPurpose.StationWatch)
                     Notify?.Publish(new StationWatchLifecycleEvent(NotificationEventType.StationWatchStopped, obs.Target));
-                    return;
-                case TargetObservationKind.SmartStartWaiting:
-                    Notify?.Publish(new SmartStartWaitingEvent(obs.Target, obs.Value));
-                    return;
-                case TargetObservationKind.SmartStartTargetAvailable:
-                    Notify?.Publish(new SmartStartTargetAvailableEvent(obs.Target));
-                    return;
+                return;
             }
 
-            // The CQ/addressing/report/RRR/RR73/73/peer-observed narration family is Station
-            // Watch's own feature (Smart Start is meant to stay a quiet background auto-pilot --
-            // it only ever speaks Waiting/Available/CallStarting above).
+            // ── Smart Start: the small decision-support narration subset ───────────────────────
+            if (obs.Purpose == TargetPurpose.SmartStart)
+            {
+                HandleSmartStartObservation(obs);
+                return;
+            }
+
+            // ── Station Watch: the fuller CQ/addressing/report/RRR/RR73/73/peer-observed family ─
             if (obs.Purpose != TargetPurpose.StationWatch) return;
 
             if (obs.Kind == TargetObservationKind.TargetAmbiguous)
@@ -356,6 +378,46 @@ namespace WSJTX_Controller
             string phrase = BuildActivityPhrase(obs);
             if (string.IsNullOrEmpty(phrase)) return;
             Notify?.Publish(new StationWatchActivityEvent(phrase, obs.Target, obs.Peer, obs.Value, obs.Kind.ToString()));
+        }
+
+        // Smart Start's own narration -- deliberately a SUBSET of what Station Watch reports:
+        // just enough for the operator to follow Jimmy's decision while it waits on / calls a
+        // captured target. The CQ/73/RR73 "target is now available" facts are conveyed by the
+        // SmartStartTargetAvailable + SmartStartCallStarting decision events (raised elsewhere),
+        // not a bare per-message line here; engagement is handled in
+        // ServiceSmartStartAwaitingEngagement. What is left for this method is the "target is
+        // busy with someone else" fact -- and even that is suppressed when a Station Watch is
+        // ALSO running on the same call, so the richer Station Watch line is never doubled.
+        private void HandleSmartStartObservation(TargetObservation obs)
+        {
+            switch (obs.Kind)
+            {
+                case TargetObservationKind.SmartStartWaiting:
+                    Notify?.Publish(new SmartStartWaitingEvent(
+                        obs.Target, $"Still waiting for {obs.Target}, {obs.Value}.", obs.Value));
+                    return;
+                case TargetObservationKind.SmartStartTargetAvailable:
+                    Notify?.Publish(new SmartStartTargetAvailableEvent(obs.Target));
+                    return;
+            }
+
+            bool stationWatchCoversSameTarget = _stationWatch.IsActive
+                && string.Equals(_stationWatch.TargetCall, obs.Target, StringComparison.OrdinalIgnoreCase);
+
+            switch (obs.Kind)
+            {
+                case TargetObservationKind.TargetAddressingOther:
+                case TargetObservationKind.TargetReport:
+                case TargetObservationKind.TargetRReport:
+                case TargetObservationKind.TargetRrr:
+                case TargetObservationKind.OtherPartyObserved:
+                    // "Target working another station" -- Smart Start's decision-relevant fact.
+                    // Deduped over one busy episode by the policy's RepeatSeconds; skipped
+                    // entirely when Station Watch already narrates the fuller version.
+                    if (!stationWatchCoversSameTarget)
+                        Notify?.Publish(new SmartStartTargetBusyEvent(obs.Target));
+                    return;
+            }
         }
 
         // Natural spoken phrasing -- no S/R shorthand, no "report" filler word (spec). Only what

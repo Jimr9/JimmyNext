@@ -315,15 +315,42 @@ namespace WSJTX_Controller
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Never,
             },
-            // "Target not heard, waiting 1 of 2." -- speech OFF by default (spec); still visible/
-            // recorded so the operator can check progress without turning speech on for it.
+            // The repetitive "still waiting" progress nudge -- speech OFF by default (it fires
+            // once per silent receive opportunity and would be chatty); still visible/recorded
+            // so the operator can check progress without turning speech on for it. {Phrase} is a
+            // full sentence built at the call site.
             [NotificationEventType.SmartStartWaiting] = new NotificationPolicy
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
-                Template = "{Target} not heard, waiting {Progress}.",
+                Template = "{Phrase}",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Never,
+            },
+            // Smart Start narration pass (2026-09-07): meaningful state changes speak by
+            // default so the operator is never left wondering whether Jimmy is still working on
+            // a captured target -- but only ONE concise line per real state change, and all
+            // fully reconfigurable (including Condition = Never) in Options > Notifications.
+            [NotificationEventType.SmartStartArmed] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "Waiting to work {Target}.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
+            },
+            // The target is mid-exchange with (or being called by) someone else. RepeatSeconds
+            // keeps a single busy episode -- which can produce several decodes (report, R-report,
+            // RRR, RR73) -- down to one spoken line, while a genuinely new busy episode a while
+            // later still re-announces.
+            [NotificationEventType.SmartStartTargetBusy] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                RepeatSeconds = 30,
+                Template = "{Target} is working another station.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
             },
             [NotificationEventType.SmartStartTargetAvailable] = new NotificationPolicy
             {
@@ -331,13 +358,34 @@ namespace WSJTX_Controller
                 Priority = NotificationPriority.Normal,
                 Template = "{Target} appears available.",
                 SpeakWhen = SpeakWhen.Now,
-                Condition = SpeakCondition.Never,
+                Condition = SpeakCondition.Always,
+            },
+            // Jimmy was calling and has ceased our call because the target turned to another
+            // station first -- Smart Start stays armed and waits for a real availability signal.
+            [NotificationEventType.SmartStartYielded] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "{Target} is busy; standing by.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
             },
             [NotificationEventType.SmartStartCallStarting] = new NotificationPolicy
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
                 Template = "Calling {Target}.",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
+            },
+            // The target has addressed our callsign: Smart Start's job is done and the normal
+            // QSO sequencer owns the contact from here (a Station Watch on this same call also
+            // stops -- see WsjtxClient.StationWatch.cs).
+            [NotificationEventType.SmartStartEngaged] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "{Target} answered you; switching to normal QSO.",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },
@@ -372,6 +420,10 @@ namespace WSJTX_Controller
             [NotificationEventType.SmartStartWaiting] = "Smart Start waiting progress",
             [NotificationEventType.SmartStartTargetAvailable] = "Smart Start target appears available",
             [NotificationEventType.SmartStartCallStarting] = "Smart Start calling target",
+            [NotificationEventType.SmartStartArmed] = "Smart Start armed (request taken)",
+            [NotificationEventType.SmartStartTargetBusy] = "Smart Start target working another station",
+            [NotificationEventType.SmartStartYielded] = "Smart Start standing by (target busy)",
+            [NotificationEventType.SmartStartEngaged] = "Smart Start target engaged (QSO takeover)",
         };
     }
 }

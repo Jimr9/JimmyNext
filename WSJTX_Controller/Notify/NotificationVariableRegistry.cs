@@ -138,8 +138,9 @@ namespace WSJTX_Controller
             },
             [NotificationEventType.SmartStartWaiting] = new List<NotificationVariable>
             {
+                new NotificationVariable("Phrase", "A ready-made sentence describing what Jimmy is still waiting for."),
                 new NotificationVariable("Target", "The captured Smart Start target callsign."),
-                new NotificationVariable("Progress", "\"N of M\" -- how many appropriate receive opportunities have elapsed of the configured threshold."),
+                new NotificationVariable("Progress", "\"N of M\" -- how many appropriate receive opportunities have elapsed of the configured threshold (empty for a non-progress wait)."),
             },
             [NotificationEventType.SmartStartTargetAvailable] = new List<NotificationVariable>
             {
@@ -148,6 +149,22 @@ namespace WSJTX_Controller
             [NotificationEventType.SmartStartCallStarting] = new List<NotificationVariable>
             {
                 new NotificationVariable("Target", "The station Jimmy is now calling."),
+            },
+            [NotificationEventType.SmartStartArmed] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The station Jimmy will work when appropriate."),
+            },
+            [NotificationEventType.SmartStartTargetBusy] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The Smart Start target, now working another station."),
+            },
+            [NotificationEventType.SmartStartYielded] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The Smart Start target Jimmy has stopped calling for now."),
+            },
+            [NotificationEventType.SmartStartEngaged] = new List<NotificationVariable>
+            {
+                new NotificationVariable("Target", "The station that has just addressed your callsign."),
             },
             [NotificationEventType.ErrorWarning] = new List<NotificationVariable>
             {

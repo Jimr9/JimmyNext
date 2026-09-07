@@ -387,6 +387,7 @@ static class JimmyTests
         SmartStartYieldsToOtherQsoTests();
         SpeechCoordinatorStationWatchSuppressionTests();
         StationWatchHotkeyDefaultsTests();
+        SmartStartNarrationPresentationTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -8060,6 +8061,7 @@ static class JimmyTests
         public AlertCue LastCue;
         public bool? LastImportant;   // convenience: LastCue != None
         public int AnnounceCount;
+        public readonly List<string> AllText = new List<string>();
 
         public void Announce(string text, AlertCue cue)
         {
@@ -8067,6 +8069,7 @@ static class JimmyTests
             LastCue = cue;
             LastImportant = cue != AlertCue.None;
             AnnounceCount++;
+            AllText.Add(text);
         }
     }
 
@@ -15447,4 +15450,188 @@ static class JimmyTests
             File.Delete(tmpIni);
         }
     }
+
+    // Smart Start narration pass (2026-09-07). Smart Start's operational subset must reach the
+    // real NotificationCenter policy pipeline; arming it must NOT emit Station Watch's "Watching
+    // X" lifecycle line; a Station Watch the operator set for observation must survive a Smart
+    // Start reply dispatch and stop only at the real target-engaged handoff; and when both
+    // monitors watch the same call the bare "target busy" fact is not spoken twice.
+    static void SmartStartNarrationPresentationTests()
+    {
+        Console.WriteLine("\n── Smart Start: purpose-aware narration, dedup with Station Watch, config defaults ──");
+
+        // ── Config defaults ─────────────────────────────────────────────────────────────────
+        Check("SmartStartWaiting stays speech-off by default (repetitive progress)",
+            NotificationDefaults.Policies[NotificationEventType.SmartStartWaiting].Condition == SpeakCondition.Never, true);
+        CheckStr("SmartStartWaiting default template is the pre-worded {Phrase}",
+            NotificationDefaults.Policies[NotificationEventType.SmartStartWaiting].Template, "{Phrase}");
+        foreach (var t in new[]
+        {
+            NotificationEventType.SmartStartArmed, NotificationEventType.SmartStartTargetBusy,
+            NotificationEventType.SmartStartYielded, NotificationEventType.SmartStartTargetAvailable,
+            NotificationEventType.SmartStartEngaged, NotificationEventType.SmartStartCallStarting,
+        })
+        {
+            Check($"{t} is enabled and speaks by default (meaningful state change)",
+                NotificationDefaults.Policies[t].Enabled
+                && NotificationDefaults.Policies[t].Condition == SpeakCondition.Always, true);
+        }
+
+        // Every new Smart Start event must be watch-category: heard even while a receive-only
+        // Station Watch has routine speech suppressed. Checked behaviourally through the real
+        // NotificationCenter (WatchEventTypes is private).
+        {
+            var gateFake = new FakeNotificationDelivery();
+            var gated = new NotificationCenter(new NotificationSettings(), gateFake);
+            gated.SetStationWatchActive(true);
+            var watchEvents = new INotificationEvent[]
+            {
+                new SmartStartArmedEvent("K4YT"),
+                new SmartStartTargetBusyEvent("K4YT"),
+                new SmartStartYieldedEvent("K4YT"),
+                new SmartStartEngagedEvent("K4YT"),
+                new SmartStartTargetAvailableEvent("K4YT"),
+                new SmartStartCallStartingEvent("K4YT"),
+            };
+            int before = gateFake.AnnounceCount;
+            foreach (var e in watchEvents) gated.Publish(e);
+            Check("all Smart Start narration events are heard while Station Watch suppresses routine speech",
+                gateFake.AnnounceCount == before + watchEvents.Length, true);
+            int muted = gateFake.AnnounceCount;
+            gated.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));   // ordinary routine notification
+            Check("an ordinary notification is still muted by that gate (control)",
+                gateFake.AnnounceCount == muted, true);
+        }
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartNarr_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            ctrl.smartQsoStartEnabled = true;
+            ctrl.smartStartSilencePeriods = 6;   // deterministic: no silence-driven readiness mid-test
+
+            // Real Controller stays wired as StatusView; a FakeNotificationDelivery under a fresh
+            // NotificationCenter (real default policies) records every spoken utterance.
+            var fake = new FakeNotificationDelivery();
+            wc.Notify = new NotificationCenter(ctrl.Notifications, fake);
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "J38DX", A = "W6PAN", B = "KD2VCE";
+            List<string> Said() { lock (fake.AllText) return new List<string>(fake.AllText); }
+            bool SaidContains(string sub) => Said().Exists(s => s.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0);
+            int SaidCount(string sub) => Said().FindAll(s => s.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0).Count;
+            List<string> SeenCmds() { lock (seenLock) return new List<string>(seen); }
+            bool SawReply() => SeenCmds().Exists(c => c.StartsWith("REPLY"));
+
+            DirectSnapshot Snap(ulong slot, string decodeFrom = null, string decodeMsg = null)
+            {
+                string decodes = decodeFrom == null ? "" :
+                    @"{ ""from"": """ + decodeFrom + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"]
+                }");
+            }
+            EnqueueDecodeMessage Dec(string msg) => new EnqueueDecodeMessage { Message = msg, DeltaFrequency = 1500, Snr = -6 };
+            EnqueueDecodeMessage FreshCq(string call) => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {call} FK92",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
+
+            // ══ 1. Arming Smart Start: "Waiting to work X." and never "Watching X." ══
+            Check("Smart Start captured", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
+            Check("arming Smart Start speaks its own 'Waiting to work' line", SaidContains($"Waiting to work {target}"), true);
+            Check("arming Smart Start does NOT emit Station Watch's 'Watching X' lifecycle line", SaidContains("Watching"), false);
+            Check("arming Smart Start does not turn on the receive-only Station Watch", wc.StationWatchActive, false);
+            wc.TestCancelStationWatchPendingStart();   // clear the armed pending auto-start
+
+            // ══ 2. Smart Start alone: target working another station -> one concise line ══
+            // (No DirectApplyDecodes pump here, so the armed pending auto-start is never
+            // serviced -- decodes are fed straight to the monitors.)
+            lock (fake.AllText) fake.AllText.Clear();
+            Check("re-armed", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
+            wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // live CQ -> parity/evidence
+            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // target now working A
+            Check("Smart Start alone narrates 'target is working another station'",
+                SaidContains($"{target} is working another station"), true);
+            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} R-05"), true);  // same busy episode
+            Check("a repeat inside one busy episode is deduped (RepeatSeconds) -- said once",
+                SaidCount($"{target} is working another station") == 1, true);
+
+            // ══ 3. Both monitors on the same call: no doubled target fact ══
+            wc.TestStartStationWatch(target);
+            lock (fake.AllText) fake.AllText.Clear();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -12"), true);
+            Check("Station Watch still gives the fuller shared observation",
+                SaidContains($"{target} working {B}"), true);
+            Check("Smart Start does NOT repeat the bare 'is working another station' fact while Station Watch covers it",
+                SaidContains($"{target} is working another station"), false);
+            wc.TestCancelStationWatchPendingStart();
+            wc.StopStationWatch();
+
+            // ══ 4. Station Watch alone: full play-by-play unchanged ══
+            lock (fake.AllText) fake.AllText.Clear();
+            wc.TestStartStationWatch(target);
+            wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);
+            Check("Station Watch alone still narrates the target's CQ", SaidContains($"{target} CQ"), true);
+            wc.StopStationWatch();
+
+            // ══ 5. Engagement handoff: engaged line + Station Watch on the SAME call stops ══
+            lock (fake.AllText) fake.AllText.Clear();
+            lock (seenLock) seen.Clear();
+            Check("re-armed for engagement case", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
+            wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);
+            wc.TestStartStationWatch(target);          // operator also watching this call
+            wc.callInProg = target;
+            wc.TestSmartStartEnterAwaitingEngagement();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{myCall} {target} R-03"), true);   // target answers us
+            Check("engagement speaks the QSO-takeover line", SaidContains($"{target} answered you"), true);
+            Check("Station Watch on the same call stops at the real engagement handoff",
+                wc.TestStationWatchTargetCall == null, true);
+            Check("Smart Start itself is done after engagement", wc.TestSmartStartTarget == null, true);
+            wc.callInProg = null;
+
+            // ══ 6. A Smart Start REPLY dispatch must NOT stop a Station Watch on that call ══
+            lock (fake.AllText) fake.AllText.Clear();
+            lock (seenLock) seen.Clear();
+            const string t2 = "K4YT";
+            wc.TestStartStationWatch(t2);
+            Check("Station Watch armed for K4YT", wc.TestStationWatchTargetCall == t2, true);
+            Check("Smart Start captured a fresh CQ for K4YT", wc.TestTryCaptureSmartStart(t2, FreshCq(t2)), true);
+            for (ulong s = 200; s <= 212; s += 2)
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
+            PumpUntil(() => wc.TestSmartStartAwaitingEngagement, 2000);
+            Check("Smart Start dispatched its REPLY", SawReply(), true);
+            Check("Smart Start entered awaiting-engagement after the dispatch", wc.TestSmartStartAwaitingEngagement, true);
+            Check("the observational Station Watch on that same call is left running", wc.TestStationWatchTargetCall == t2, true);
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
 }

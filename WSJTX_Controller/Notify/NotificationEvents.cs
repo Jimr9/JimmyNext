@@ -310,16 +310,24 @@ namespace WSJTX_Controller
         };
     }
 
-    // "Target not heard, waiting N of M." -- at most one per completed appropriate receive
-    // opportunity (TargetMonitor.OnReceivePeriodComplete), never per poll tick.
+    // The repetitive "still waiting" progress nudge -- at most one per completed appropriate
+    // receive opportunity (TargetMonitor.OnReceivePeriodComplete), never per poll tick. Also
+    // used for the "waiting for a current decode / no recent decode" auto-start declines, which
+    // are the same "Jimmy still hasn't got what it needs" idea. Speech OFF by default.
+    // `Phrase` is a fully-worded sentence built at the call site (the default template is just
+    // "{Phrase}") so the wording never depends on token composition; `{Target}` and the bare
+    // "{Progress}" fragment ("1 of 2", or "" when not applicable) stay available for a custom
+    // template.
     public sealed class SmartStartWaitingEvent : INotificationEvent
     {
         public string Target { get; }
+        public string Phrase { get; }
         public string Progress { get; }
 
-        public SmartStartWaitingEvent(string target, string progress)
+        public SmartStartWaitingEvent(string target, string phrase, string progress = "")
         {
             Target = target ?? "";
+            Phrase = phrase ?? "";
             Progress = progress ?? "";
         }
 
@@ -329,7 +337,60 @@ namespace WSJTX_Controller
         public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
         {
             ["Target"] = Target,
+            ["Phrase"] = Phrase,
             ["Progress"] = Progress,
+        };
+    }
+
+    // Smart Start narration pass (2026-09-07). All four share the "just the target callsign"
+    // shape; each is its own type only so the operator can turn them on/off and re-word them
+    // independently in Options > Notifications (they carry genuinely distinct operational
+    // meaning -- request taken / target busy elsewhere / Jimmy standing by / target engaged us).
+    public sealed class SmartStartArmedEvent : INotificationEvent
+    {
+        public string Target { get; }
+        public SmartStartArmedEvent(string target) { Target = target ?? ""; }
+        public NotificationEventType EventType => NotificationEventType.SmartStartArmed;
+        public string DedupKey => Target;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+        };
+    }
+
+    public sealed class SmartStartTargetBusyEvent : INotificationEvent
+    {
+        public string Target { get; }
+        public SmartStartTargetBusyEvent(string target) { Target = target ?? ""; }
+        public NotificationEventType EventType => NotificationEventType.SmartStartTargetBusy;
+        public string DedupKey => Target;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+        };
+    }
+
+    public sealed class SmartStartYieldedEvent : INotificationEvent
+    {
+        public string Target { get; }
+        public SmartStartYieldedEvent(string target) { Target = target ?? ""; }
+        public NotificationEventType EventType => NotificationEventType.SmartStartYielded;
+        public string DedupKey => Target;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
+        };
+    }
+
+    public sealed class SmartStartEngagedEvent : INotificationEvent
+    {
+        public string Target { get; }
+        public SmartStartEngagedEvent(string target) { Target = target ?? ""; }
+        public NotificationEventType EventType => NotificationEventType.SmartStartEngaged;
+        public string DedupKey => Target;
+        public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
+        {
+            ["Target"] = Target,
         };
     }
 

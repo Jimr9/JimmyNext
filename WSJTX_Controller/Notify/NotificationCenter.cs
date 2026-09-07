@@ -82,6 +82,10 @@ namespace WSJTX_Controller
             NotificationEventType.SmartStartWaiting,
             NotificationEventType.SmartStartTargetAvailable,
             NotificationEventType.SmartStartCallStarting,
+            NotificationEventType.SmartStartArmed,
+            NotificationEventType.SmartStartTargetBusy,
+            NotificationEventType.SmartStartYielded,
+            NotificationEventType.SmartStartEngaged,
         };
 
         private void Deliver(INotificationEvent evt, NotificationPolicy policy)

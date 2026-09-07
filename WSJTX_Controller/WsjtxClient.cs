@@ -3866,9 +3866,20 @@ namespace WSJTX_Controller
                 //    engages our callsign (EngagedUs) -- then the normal QSO sequencer owns it.
                 // A REPLY for some OTHER station (an ordinary manual selection while a watch/
                 // capture happens to also be active) leaves both completely alone.
-                if (_stationWatch.IsActive && string.Equals(nCall, _stationWatch.TargetCall, StringComparison.OrdinalIgnoreCase))
+                bool smartStartOwnsThisReply = _smartStart.IsActive
+                    && string.Equals(nCall, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase);
+                // A plain manual selection or Work-Watched-Station-Now on the watched call still
+                // ends Station Watch here -- the operator chose to work it. A Smart Start call
+                // does NOT: Smart Start stays armed and keeps monitoring through the calling
+                // phase, and a Station Watch the operator set for observation keeps running until
+                // Smart Start actually hands off (target engages us --
+                // ServiceSmartStartAwaitingEngagement) or the watch's own toggle/context rules
+                // stop it (2026-09-07).
+                if (!smartStartOwnsThisReply
+                    && _stationWatch.IsActive
+                    && string.Equals(nCall, _stationWatch.TargetCall, StringComparison.OrdinalIgnoreCase))
                     StopStationWatch();
-                if (_smartStart.IsActive && string.Equals(nCall, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase))
+                if (smartStartOwnsThisReply)
                     _smartStart.EnterAwaitingEngagement();
 
                 _callQueueStore.RemoveCall(nCall);
