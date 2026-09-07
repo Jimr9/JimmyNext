@@ -108,6 +108,17 @@ namespace WSJTX_Controller
         public int SilenceCount { get; private set; }
         public int SilenceThreshold { get; set; } = 2;
 
+        // Smart Start only. Cumulative count of ACTUAL transmitted calling overs to this target
+        // across the WHOLE armed effort -- the initial call, ordinary repeated calling overs,
+        // calls after a busy yield, and calls after later target-not-heard waiting all add to
+        // this one total. A busy yield / re-arm (ReturnToWaiting) does NOT reset it; only Start()
+        // (a genuinely new target/session) does. WsjtxClient feeds each completed calling over
+        // through NoteCallingOverTransmitted at the same transmitting-just-ended edge the
+        // ordinary per-call discard counter uses, and disarms Smart Start entirely once the
+        // operator's Repeat Limit is reached -- so one armed target is one bounded calling
+        // effort, never restarted per ReplyTo.
+        public int TransmittedCallCount { get; private set; }
+
         // The most recent decode from the target that carries enough information (frequency,
         // parity, exact wire text) to hand off to the real REPLY path. Work Watched Station Now
         // and Smart Start's own auto-fire both reply using THIS, never a synthesized message.
@@ -167,6 +178,16 @@ namespace WSJTX_Controller
         // (target 73 / target CQ / a fresh RR73) since those either already fire immediately or
         // restart the same one-opportunity wait.
         private bool _rr73AwaitingOneMoreOpportunity;
+
+        // Set only when a Smart Start busy-yield (ReturnToWaiting while BusyWithOther) parks a
+        // STALE "target working someone else" observation. While armed, that old BusyWithOther is
+        // allowed to expire once SilenceThreshold appropriate target-not-heard receive
+        // opportunities have elapsed on the target's own parity with NO fresh evidence the target
+        // is still busy -- fresh busy evidence (target -> other mid-QSO, or any station -> target)
+        // re-zeros SilenceCount and keeps this armed, so fresh evidence always wins. Never set
+        // outside a busy-yield, so the plain "silence never overrides 'working another station'"
+        // rule is unchanged for a target that went busy while Smart Start was only waiting.
+        private bool _busyExpirationArmedAfterYield;
 
         // Dedup: OnReceivePeriodComplete is called once per real slot transition, but guards
         // against being asked twice for the same slot (defensive; the real per-tick caller
@@ -234,6 +255,7 @@ namespace WSJTX_Controller
             ApparentPeer = null;
             TargetEvenParity = null;
             SilenceCount = 0;
+            TransmittedCallCount = 0;
             LastUsableDecode = null;
             LastUsableDecodeUtc = default;
             HasLiveTargetEvidence = false;
@@ -243,6 +265,7 @@ namespace WSJTX_Controller
             AwaitingEngagement = false;
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _busyExpirationArmedAfterYield = false;
             _lastCountedSlot = null;
             _band = band;
             _mode = mode;
@@ -260,6 +283,7 @@ namespace WSJTX_Controller
             ApparentPeer = null;
             TargetEvenParity = null;
             SilenceCount = 0;
+            TransmittedCallCount = 0;
             LastUsableDecode = null;
             LastUsableDecodeUtc = default;
             HasLiveTargetEvidence = false;
@@ -269,6 +293,7 @@ namespace WSJTX_Controller
             AwaitingEngagement = false;
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _busyExpirationArmedAfterYield = false;
             _lastCountedSlot = null;
             if (announce) Raise(TargetObservationKind.WatchStopped, call);
         }
@@ -326,6 +351,25 @@ namespace WSJTX_Controller
             SilenceCount = 0;
             _lastCountedSlot = null;
             OpportunitiesSinceLiveEvidence = 0;
+            // If we yielded because the target was working someone else, the "busy" observation
+            // we are carrying is now stale: arm it to expire after SilenceThreshold appropriate
+            // target-not-heard opportunities unless fresh busy evidence re-zeros that window.
+            // TransmittedCallCount is deliberately NOT reset -- this same calling effort resumes.
+            _busyExpirationArmedAfterYield = BusyWithOther;
+        }
+
+        // One ACTUAL transmitted calling over to this target just completed (fed by WsjtxClient
+        // from the transmitting-just-ended edge, while this monitor is armed and AwaitingEngagement).
+        // Adds to the cumulative effort total and returns true once the operator's Repeat Limit
+        // is reached -- at which point WsjtxClient disarms Smart Start entirely, so no further
+        // calling transmission can go out. Deliberately NOT reset by a busy yield / re-arm, so
+        // the whole effort (initial call + repeats + calls after any yields) is bounded once,
+        // never restarted per ReplyTo. A non-positive repeatLimit (limit disabled) never trips.
+        public bool NoteCallingOverTransmitted(int repeatLimit)
+        {
+            if (Purpose != TargetPurpose.SmartStart) return false;
+            TransmittedCallCount++;
+            return repeatLimit > 0 && TransmittedCallCount >= repeatLimit;
         }
 
         // Smart Start capture (WsjtxClient.TryCaptureSmartStart): the operator selected this
@@ -391,7 +435,16 @@ namespace WSJTX_Controller
                     && !string.Equals(de, myCall, StringComparison.OrdinalIgnoreCase);
 
                 if (addressedToTarget)
+                {
                     BusyWithOther = true;
+                    // Fresh evidence the target is still tied up: restart the post-yield
+                    // expiration window from zero (fresh busy evidence always wins).
+                    if (_busyExpirationArmedAfterYield)
+                    {
+                        SilenceCount = 0;
+                        _lastCountedSlot = null;
+                    }
+                }
 
                 if (addressedToTarget
                     && !string.IsNullOrEmpty(ApparentPeer)
@@ -454,6 +507,24 @@ namespace WSJTX_Controller
 
             if (addressingUs)
                 BusyWithOther = false;                 // turning to us -> not busy with anyone else
+
+            // Smart Start, still armed/waiting (not yet in its own calling phase): the target is
+            // now addressing OUR callsign -- it is literally calling us, the strongest possible
+            // "go". Make ready immediately so the EXISTING revalidated dispatch path replies to
+            // THIS decode, instead of sitting in the silence counter until the target moves on
+            // again (the KV4CW POTA case: it came back to us between our own call attempts and
+            // Smart Start ignored it). 73 already signals ready in its own branch below; RR73
+            // keeps its deliberate one-more-opportunity rule. AwaitingEngagement keeps its own
+            // EngagedUs handling (ServiceSmartStartAwaitingEngagement) -- this is only the
+            // between-attempts / never-yet-called case. SignalReady()'s own guards
+            // (HasLiveTargetEvidence / !BusyWithOther / !AwaitingEngagement) and the pre-TX
+            // RevalidateForAutoStart still gate the actual transmission.
+            if (live && addressingUs && Purpose == TargetPurpose.SmartStart && !AwaitingEngagement
+                && !WsjtxMessage.Is73(d.Message) && !WsjtxMessage.IsRR73(d.Message))
+            {
+                SignalReady();
+                return;
+            }
 
             if (WsjtxMessage.IsRR73(d.Message))
             {
@@ -564,6 +635,19 @@ namespace WSJTX_Controller
             SilenceCount++;
             if (SilenceCount >= SilenceThreshold)
             {
+                // A stale "target working someone else" observation carried across a Smart Start
+                // busy-yield expires here: the operator's configured silence window has now
+                // passed on the target's own parity with no fresh evidence the target is still
+                // busy (any such evidence re-zeros SilenceCount, in ObserveDecode /
+                // IngestTargetDecode). The non-yield case is untouched --
+                // _busyExpirationArmedAfterYield is only ever set by ReturnToWaiting -- so
+                // "silence never overrides 'working another station'" still holds for a target
+                // that went busy while Smart Start was only waiting.
+                if (BusyWithOther && _busyExpirationArmedAfterYield)
+                {
+                    BusyWithOther = false;
+                    _busyExpirationArmedAfterYield = false;
+                }
                 SignalReady();
             }
             else

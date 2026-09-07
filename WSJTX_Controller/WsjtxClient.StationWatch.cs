@@ -110,6 +110,13 @@ namespace WSJTX_Controller
             if (!ctrl.smartQsoStartEnabled) return false;
             if (string.IsNullOrEmpty(call) || dmsg == null) return false;
 
+            // An Enter on a decode that is already addressed to OUR callsign means "answer them
+            // now", not "wait for a good moment to start" -- fall through to the normal ReplyTo
+            // path (this is how Enter behaved before Smart Start existed). Smart Start is only for
+            // timing the START of a QSO with a station that is not yet working us.
+            if (string.Equals(WsjtxMessage.ToCall(dmsg.Message), myCall, StringComparison.OrdinalIgnoreCase))
+                return false;
+
             _smartStart.SilenceThreshold = ctrl.smartStartSilencePeriods;
             _smartStart.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);
             // Seed the freshly-started monitor with the exact decode the operator selected.
@@ -196,6 +203,30 @@ namespace WSJTX_Controller
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
             Notify?.Publish(new SmartStartYieldedEvent(target));
+        }
+
+        // The Smart Start Repeat Limit -- (int)ctrl.timeoutNumUpDown.Value, the operator's own
+        // ordinary per-call limit -- has now been reached for the armed target across the whole
+        // calling effort (initial call + repeated overs + calls after any busy yields), without
+        // the target ever answering our callsign. Treat it exactly like an ordinary give-up:
+        // unwind our own call to that target with the same Escape-style ordered teardown, surface
+        // it through the EXISTING "<call> expired" status the ordinary Repeat Limit give-up
+        // already uses (WsjtxClient.Display.cs), and disarm Smart Start completely so nothing can
+        // transmit for it later. Called from DirectApplyStatus's transmitting-just-ended edge,
+        // the same place DiscardCall() fires for an ordinary call.
+        private void SmartStartRepeatLimitReached()
+        {
+            string target = _smartStart.TargetCall;
+            DebugOutput($"{Time()} [SMART] Repeat limit ({(int)ctrl.timeoutNumUpDown.Value}) reached for {target} -- no further calls, disarming Smart Start");
+            ClearPendingAutoStart();
+            if (string.Equals(callInProg, target, StringComparison.OrdinalIgnoreCase))
+            {
+                RequeueAbortedCall();                       // while callInProg / replyDecode are still valid
+                if (!transmitting) expiredCall = target;    // existing "<call> expired" operator status/announcement
+                CancelQso();                                // clears QSO state + bumps _contactEpoch
+                HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
+            }
+            _smartStart.Stop(announce: false);
         }
 
         // Called once per real, completed receive-period boundary (the exact same signal
@@ -404,6 +435,15 @@ namespace WSJTX_Controller
             bool stationWatchCoversSameTarget = _stationWatch.IsActive
                 && string.Equals(_stationWatch.TargetCall, obs.Target, StringComparison.OrdinalIgnoreCase);
 
+            // A report / R-report / RRR whose peer is OUR OWN callsign is the target working US,
+            // not another station -- never narrate it as "working another station" (the KV4CW
+            // case: it sent us "+02" and Smart Start announced it was busy). Only reachable in
+            // the awaiting-engagement phase now that IngestTargetDecode makes an addressing-us
+            // decode go straight to ready while armed; ServiceSmartStartAwaitingEngagement owns
+            // the hand-off, this method just stays quiet about it.
+            bool reportIsToUs = !string.IsNullOrEmpty(obs.Peer)
+                && string.Equals(obs.Peer, myCall, StringComparison.OrdinalIgnoreCase);
+
             switch (obs.Kind)
             {
                 case TargetObservationKind.TargetAddressingOther:
@@ -414,7 +454,7 @@ namespace WSJTX_Controller
                     // "Target working another station" -- Smart Start's decision-relevant fact.
                     // Deduped over one busy episode by the policy's RepeatSeconds; skipped
                     // entirely when Station Watch already narrates the fuller version.
-                    if (!stationWatchCoversSameTarget)
+                    if (!reportIsToUs && !stationWatchCoversSameTarget)
                         Notify?.Publish(new SmartStartTargetBusyEvent(obs.Target));
                     return;
             }

@@ -1598,6 +1598,22 @@ namespace WSJTX_Controller
                 && ++discardCallCycleCount >= maxTxRepeat)
                 DiscardCall();
 
+            // Smart QSO Start: ONE continuous calling effort per armed target/session. Every
+            // actual transmitted calling over to the captured target -- the initial call,
+            // ordinary repeated calling overs, calls after a busy yield, and calls after later
+            // target-not-heard waiting -- counts toward the operator's Repeat Limit
+            // (timeoutNumUpDown, read directly so "Optimize throughput" can never shorten an
+            // operator-selected target's effort). Same transmitting-just-ended edge the per-call
+            // discard counter above uses; the Smart Start calling phase never arms discardCall,
+            // so the two never double-count. A busy yield keeps the running total (TargetMonitor.
+            // ReturnToWaiting), so it is not restarted per ReplyTo. When the limit is reached the
+            // whole effort is done: disarm Smart Start completely -- no further calling over.
+            if (wasTransmitting && !transmitting
+                && _smartStart.IsActive && _smartStart.AwaitingEngagement && !_smartStart.EngagedUs
+                && string.Equals(callInProg, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase)
+                && _smartStart.NoteCallingOverTransmitted((int)ctrl.timeoutNumUpDown.Value))
+                SmartStartRepeatLimitReached();
+
             // Mirrors the transmitting assignment above -- same root cause, same fix: without
             // this, the class-level `tuning` field (AudioLevel()'s own guard, Alt+T's status
             // text) never learned a real Tune (SET_TUNING) was underway in Direct mode.
@@ -2859,6 +2875,7 @@ namespace WSJTX_Controller
         internal bool TestSmartStartHasLiveEvidence => _smartStart.HasLiveTargetEvidence;
         internal bool TestSmartStartBusyWithOther => _smartStart.BusyWithOther;
         internal bool TestSmartStartAwaitingEngagement => _smartStart.AwaitingEngagement;
+        internal int TestSmartStartTransmittedCallCount => _smartStart.TransmittedCallCount;
         internal bool TestAutoStartPending => _pendingAutoStart != null;
         // Test-only: stand in for ReplyTo's success callback committing the handoff, so a test
         // can exercise the awaiting-engagement / yield / resume logic without the async REPLY
