@@ -25,7 +25,7 @@
   <p class="note">Live — pulled directly from GitHub each time this page loads.</p>
   <div id="downloads-status" class="status loading">Loading…</div>
   <table class="keys" id="downloads-table" style="display:none;">
-    <caption>Downloads per release (MSI installer)</caption>
+    <caption>Downloads per release (installer plus zip combined)</caption>
     <thead>
       <tr><th>Release</th><th>Published</th><th>Downloads</th></tr>
     </thead>
@@ -69,16 +69,20 @@
       var body = document.getElementById("downloads-body");
       var total = 0;
       releases.forEach(function (rel) {
-        (rel.assets || []).forEach(function (asset) {
-          total += asset.download_count;
-          var tr = document.createElement("tr");
-          var published = rel.published_at ? rel.published_at.slice(0, 10) : "";
-          tr.innerHTML =
-            "<td>" + rel.tag_name + "</td>" +
-            "<td>" + published + "</td>" +
-            "<td>" + asset.download_count + "</td>";
-          body.appendChild(tr);
-        });
+        var assets = rel.assets || [];
+        // One row per release: sum this release's assets (JimmyNext.msi +
+        // JimmyNext.msi.zip) rather than a row per file, which double-listed
+        // every release once both a raw .msi and a zipped .msi were published.
+        var relCount = assets.reduce(function (n, a) { return n + a.download_count; }, 0);
+        total += relCount;
+        if (assets.length === 0) return;
+        var tr = document.createElement("tr");
+        var published = rel.published_at ? rel.published_at.slice(0, 10) : "";
+        tr.innerHTML =
+          "<td>" + rel.tag_name + "</td>" +
+          "<td>" + published + "</td>" +
+          "<td>" + relCount + "</td>";
+        body.appendChild(tr);
       });
       document.getElementById("downloads-status").style.display = "none";
       document.getElementById("downloads-table").style.display = "";
