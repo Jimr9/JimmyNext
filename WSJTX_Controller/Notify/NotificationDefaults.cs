@@ -339,16 +339,18 @@ namespace WSJTX_Controller
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },
-            // The target is mid-exchange with (or being called by) someone else. RepeatSeconds
-            // keeps a single busy episode -- which can produce several decodes (report, R-report,
-            // RRR, RR73) -- down to one spoken line, while a genuinely new busy episode a while
-            // later still re-announces.
+            // The target is mid-exchange with (or being called by) someone else. Default wording
+            // (2026-09-07) names the other station and its report when known -- "{Phrase}" renders
+            // "X is working Y, minus 8." / "X is working Y." / "X is working another station."
+            // depending on what was decoded. DedupKey folds in the peer, so a move to a NEW
+            // station re-announces immediately; RepeatSeconds still collapses several decodes for
+            // the SAME peer in one exchange down to one line.
             [NotificationEventType.SmartStartTargetBusy] = new NotificationPolicy
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
                 RepeatSeconds = 30,
-                Template = "{Target} is working another station.",
+                Template = "{Phrase}",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },

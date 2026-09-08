@@ -1676,7 +1676,14 @@ namespace WSJTX_Controller
                 rList.Reverse();
                 foreach (string call in rList)
                 {
-                    logItems.Add($"{Spacify(call)}, {Country(call)}");
+                    // Callsign, then country (or US state when that option is on), then the
+                    // sent/received reports for this QSO so the row is a self-contained record
+                    // of what was logged. The reports are a display-only snapshot captured at
+                    // log time (_loggedReports); the row's key stays the bare callsign.
+                    string line = $"{Spacify(call)}, {Country(call)}";
+                    if (_loggedReports.TryGetValue(call, out string rpt) && !string.IsNullOrEmpty(rpt))
+                        line += $", {rpt}";
+                    logItems.Add(line);
                     logKeys.Add(call);
                 }
             }

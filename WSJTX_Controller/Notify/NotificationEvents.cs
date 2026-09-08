@@ -358,15 +358,45 @@ namespace WSJTX_Controller
         };
     }
 
+    // The target is mid-exchange with (or being called by) someone else. `Phrase` is a fully
+    // worded sentence built at the call site (the default template is just "{Phrase}") that
+    // degrades cleanly: "X is working Y, minus 8." with a known peer + report, "X is working Y."
+    // with just a peer, "X is working another station." when the peer couldn't be parsed. The
+    // `{Target}` / `{Peer}` / `{Report}` fragments stay available for an operator's own template.
+    // DedupKey folds in the peer so the line re-announces each time the target turns to a NEW
+    // station (naturally the right cadence in FT8 and FT4 alike), while several decodes for the
+    // SAME peer in one exchange still collapse via RepeatSeconds.
     public sealed class SmartStartTargetBusyEvent : INotificationEvent
     {
         public string Target { get; }
-        public SmartStartTargetBusyEvent(string target) { Target = target ?? ""; }
+        public string Peer { get; }
+        public string Report { get; }
+        public string Phrase { get; }
+
+        // `report` is the SPOKEN form ("minus 8", "R minus 5"), "" when the decode carried none.
+        public SmartStartTargetBusyEvent(string target, string peer = "", string report = "")
+        {
+            Target = target ?? "";
+            Peer = peer ?? "";
+            Report = report ?? "";
+            Phrase = BuildPhrase(Target, Peer, Report);
+        }
+
+        private static string BuildPhrase(string target, string peer, string report)
+        {
+            if (string.IsNullOrEmpty(peer)) return $"{target} is working another station.";
+            if (string.IsNullOrEmpty(report)) return $"{target} is working {peer}.";
+            return $"{target} is working {peer}, {report}.";
+        }
+
         public NotificationEventType EventType => NotificationEventType.SmartStartTargetBusy;
-        public string DedupKey => Target;
+        public string DedupKey => $"{Target}|{Peer}";
         public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
         {
             ["Target"] = Target,
+            ["Phrase"] = Phrase,
+            ["Peer"] = Peer,
+            ["Report"] = Report,
         };
     }
 

@@ -353,6 +353,11 @@ namespace WSJTX_Controller
         private string txMsg = null;            //msg for the most-recent Tx
         internal List<string> logList = new List<string>();      //calls logged for current mode/band for this session
 
+        // Presentation only: "<sent>, <rcvd>" report pair captured at log time so the auto-logged
+        // list can show what was exchanged on the same row as the callsign. Keyed by callsign,
+        // cleared in lockstep with logList (ClearCalls). Never read by any machine-readable path.
+        private readonly Dictionary<string, string> _loggedReports = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
         // Dedup guard for a QSO logged via Direct mode's own real completion detection
         // (DirectApplyStatus's curTxMsg/callInProg/Is73orRR73 -> LogQso -> RequestLog,
         // WsjtxClient.Direct.cs/WsjtxClient.cs) -- RequestLog's own repeated-poll-tick calls
@@ -2350,6 +2355,7 @@ namespace WSJTX_Controller
             unwantedCqList.Clear();
             _bandSessionLocationCache.Clear();
             logList.Clear();
+            _loggedReports.Clear();
             ShowLogged();
         }
 
@@ -2641,6 +2647,7 @@ namespace WSJTX_Controller
             if (!localWriteFailed)
             {
                 logList.Add(call);
+                _loggedReports[call] = $"{rstSent}, {rstRecd}";   // presentation only -- see field comment
                 ShowLogged();
                 loggedCall = call;
             }

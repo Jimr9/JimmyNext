@@ -1826,6 +1826,14 @@ static class JimmyTests
             Check("Direct mode: engine's own tx_now 73 text logs the completed QSO",
                   wc.logList.Contains(qsoCall), true);
 
+            // Auto-logged list: the sent/received reports are captured at log time so the row
+            // can read "<call>, <country>, <sent>, <rcvd>". Presentation only -- never a
+            // machine-readable value; the row's key stays the bare callsign. (Cleared in
+            // lockstep with logList in ResetBandSession -- one line beside logList.Clear().)
+            string loggedRpt = wc.TestLoggedReport(qsoCall);
+            Check("Auto-logged list: sent/received reports captured for the logged row",
+                  loggedRpt != null && loggedRpt.Contains(",") && loggedRpt.Contains("-15"), true);
+
             // Regression guard, 2026-08-11: DirectApplyStatus logged the completed QSO above but
             // never cleared callInProg afterward -- unlike the UDP path's ProcessTxEnd, which
             // always calls SetCallInProg(null) once a 73/RR73 to callInProg goes out. Root-caused
@@ -15903,6 +15911,19 @@ static class JimmyTests
             NotificationDefaults.Policies[NotificationEventType.SmartStartWaiting].Condition == SpeakCondition.Never, true);
         CheckStr("SmartStartWaiting default template is the pre-worded {Phrase}",
             NotificationDefaults.Policies[NotificationEventType.SmartStartWaiting].Template, "{Phrase}");
+
+        // SmartStartTargetBusy: default template is "{Phrase}" (2026-09-07), and the phrase names
+        // the other station + report when known, degrading cleanly when they aren't.
+        CheckStr("SmartStartTargetBusy default template is the pre-worded {Phrase}",
+            NotificationDefaults.Policies[NotificationEventType.SmartStartTargetBusy].Template, "{Phrase}");
+        CheckStr("busy phrase: peer + report",
+            new SmartStartTargetBusyEvent("J38DX", "VA2VT", "minus 16").Phrase, "J38DX is working VA2VT, minus 16.");
+        CheckStr("busy phrase: peer only (no report on this decode)",
+            new SmartStartTargetBusyEvent("J38DX", "VA2VT").Phrase, "J38DX is working VA2VT.");
+        CheckStr("busy phrase: peer not parsed -> the old wording",
+            new SmartStartTargetBusyEvent("J38DX").Phrase, "J38DX is working another station.");
+        CheckStr("busy DedupKey folds in the peer (re-announce on a new station)",
+            new SmartStartTargetBusyEvent("J38DX", "VA2VT").DedupKey, "J38DX|VA2VT");
         foreach (var t in new[]
         {
             NotificationEventType.SmartStartArmed, NotificationEventType.SmartStartTargetBusy,
@@ -16001,18 +16022,21 @@ static class JimmyTests
             Check("arming Smart Start does not turn on the receive-only Station Watch", wc.StationWatchActive, false);
             wc.TestCancelStationWatchPendingStart();   // clear the armed pending auto-start
 
-            // ══ 2. Smart Start alone: target working another station -> one concise line ══
+            // ══ 2. Smart Start alone: names the station the target is working, deduped per-peer ══
             // (No DirectApplyDecodes pump here, so the armed pending auto-start is never
             // serviced -- decodes are fed straight to the monitors.)
             lock (fake.AllText) fake.AllText.Clear();
             Check("re-armed", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
             wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // live CQ -> parity/evidence
             wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // target now working A
-            Check("Smart Start alone narrates 'target is working another station'",
-                SaidContains($"{target} is working another station"), true);
-            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} R-05"), true);  // same busy episode
-            Check("a repeat inside one busy episode is deduped (RepeatSeconds) -- said once",
-                SaidCount($"{target} is working another station") == 1, true);
+            Check("Smart Start names the station the target is working, with its report",
+                SaidContains($"{target} is working {A}, minus 7"), true);
+            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} R-05"), true);  // SAME peer, same busy episode
+            Check("a repeat for the SAME peer within RepeatSeconds is deduped -- said once",
+                SaidCount($"{target} is working {A}") == 1, true);
+            wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -09"), true);   // target MOVES to a new station
+            Check("moving to a NEW station re-announces (peer folded into the dedup key)",
+                SaidContains($"{target} is working {B}, minus 9"), true);
 
             // ══ 3. Both monitors on the same call: no doubled target fact ══
             wc.TestStartStationWatch(target);
@@ -16020,8 +16044,8 @@ static class JimmyTests
             wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -12"), true);
             Check("Station Watch still gives the fuller shared observation",
                 SaidContains($"{target} working {B}"), true);
-            Check("Smart Start does NOT repeat the bare 'is working another station' fact while Station Watch covers it",
-                SaidContains($"{target} is working another station"), false);
+            Check("Smart Start does NOT repeat the target-busy fact while Station Watch covers it",
+                SaidContains($"{target} is working {B}"), false);
             wc.TestCancelStationWatchPendingStart();
             wc.StopStationWatch();
 

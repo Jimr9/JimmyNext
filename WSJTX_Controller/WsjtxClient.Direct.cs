@@ -2877,6 +2877,9 @@ namespace WSJTX_Controller
         internal bool TestSmartStartAwaitingEngagement => _smartStart.AwaitingEngagement;
         internal int TestSmartStartTransmittedCallCount => _smartStart.TransmittedCallCount;
         internal bool TestAutoStartPending => _pendingAutoStart != null;
+        // Presentation-only "<sent>, <rcvd>" report pair the auto-logged list shows on the call's
+        // row; null when nothing captured. Proves it is populated at log time and cleared with logList.
+        internal string TestLoggedReport(string call) => _loggedReports.TryGetValue(call, out var r) ? r : null;
         // Test-only: stand in for ReplyTo's success callback committing the handoff, so a test
         // can exercise the awaiting-engagement / yield / resume logic without the async REPLY
         // round trip (the real dispatch + REPLY is covered by SmartStartStaleEvidenceTransmitSafetyTests).

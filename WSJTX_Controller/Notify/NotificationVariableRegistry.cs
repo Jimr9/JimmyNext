@@ -156,7 +156,10 @@ namespace WSJTX_Controller
             },
             [NotificationEventType.SmartStartTargetBusy] = new List<NotificationVariable>
             {
-                new NotificationVariable("Target", "The Smart Start target, now working another station."),
+                new NotificationVariable("Phrase", "A ready-made sentence: \"X is working Y, minus 8.\" when the other station and its report are known, \"X is working Y.\" with just the station, or \"X is working another station.\" when neither could be parsed. The default template."),
+                new NotificationVariable("Target", "The Smart Start target callsign."),
+                new NotificationVariable("Peer", "The other station the target is working (empty when it couldn't be parsed)."),
+                new NotificationVariable("Report", "The report the target passed, spoken (e.g. \"minus 8\", \"R minus 5\"), empty when the decode carried none."),
             },
             [NotificationEventType.SmartStartYielded] = new List<NotificationVariable>
             {

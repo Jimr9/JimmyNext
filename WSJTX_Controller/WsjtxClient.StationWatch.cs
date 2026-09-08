@@ -452,10 +452,14 @@ namespace WSJTX_Controller
                 case TargetObservationKind.TargetRrr:
                 case TargetObservationKind.OtherPartyObserved:
                     // "Target working another station" -- Smart Start's decision-relevant fact.
-                    // Deduped over one busy episode by the policy's RepeatSeconds; skipped
-                    // entirely when Station Watch already narrates the fuller version.
+                    // Deduped per-peer by the policy's RepeatSeconds; skipped entirely when
+                    // Station Watch already narrates the fuller version. The phrase names the
+                    // other station (and its report when the decode carried one), degrading to
+                    // the old "another station" wording when the peer couldn't be parsed -- so a
+                    // string of different calls reads as the pileup it is.
                     if (!reportIsToUs && !stationWatchCoversSameTarget)
-                        Notify?.Publish(new SmartStartTargetBusyEvent(obs.Target));
+                        Notify?.Publish(new SmartStartTargetBusyEvent(
+                            obs.Target, obs.Peer ?? "", SpokenReport(obs.Value)));
                     return;
             }
         }
