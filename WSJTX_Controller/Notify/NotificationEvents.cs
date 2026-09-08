@@ -315,9 +315,17 @@ namespace WSJTX_Controller
     // used for the "waiting for a current decode / no recent decode" auto-start declines, which
     // are the same "Jimmy still hasn't got what it needs" idea. Speech OFF by default.
     // `Phrase` is a fully-worded sentence built at the call site (the default template is just
-    // "{Phrase}") so the wording never depends on token composition; `{Target}` and the bare
-    // "{Progress}" fragment ("1 of 2", or "" when not applicable) stay available for a custom
-    // template.
+    // "{Phrase}") so the wording never depends on token composition; `{Target}` and the
+    // "{Progress}" fragment stay available for a custom template. Progress is "1 of 2" for a
+    // true silence-progress observation; for the non-progress paths (a revalidation-decline, a
+    // "waiting for another decode" nudge) there is no count.
+    //
+    // KR4NO live-radio audit, 2026-09-08: a custom template that wrote "waiting {Progress}."
+    // rendered "KR4NO not heard, waiting ." on a non-progress event. The exact PRE-2.0.67
+    // default is migrated to "{Phrase}" in NotificationSettings.LoadFromIni; as a belt-and-
+    // suspenders for any other hand-crafted "{Progress}" template, ToTokens() never emits an
+    // empty {Progress} -- it falls back to the fully-worded Phrase so the sentence is always
+    // complete and truthful, never a dangling "waiting .".
     public sealed class SmartStartWaitingEvent : INotificationEvent
     {
         public string Target { get; }
@@ -338,7 +346,9 @@ namespace WSJTX_Controller
         {
             ["Target"] = Target,
             ["Phrase"] = Phrase,
-            ["Progress"] = Progress,
+            // Never a blank {Progress}: a custom "... waiting {Progress}." template must not be
+            // able to render "waiting ." on a non-progress event. Fall back to the worded Phrase.
+            ["Progress"] = string.IsNullOrWhiteSpace(Progress) ? Phrase : Progress,
         };
     }
 

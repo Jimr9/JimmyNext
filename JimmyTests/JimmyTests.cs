@@ -332,6 +332,8 @@ static class JimmyTests
         RoutineCycleSummarySplitTests();
         RoutineCycleSummarySplitMigrationTests();
         SmartStartBusyTemplateMigrationTests();
+        SmartStartWaitingTemplateSafetyTests();
+        NoResponseOpportunityTimingTests();
         RoutineReceiveSideRoleScopeTests();
         RoutinePunctuationOnlyRemnantTests();
         ActiveQsoBareCallsignSuppressionTests();
@@ -10666,6 +10668,269 @@ static class JimmyTests
         finally
         {
             foreach (var p in mk) { try { File.Delete(p); } catch { } }
+        }
+    }
+
+    // ── Smart Start "waiting" text can never render a dangling "waiting ." ─────────────────────
+    // KR4NO live-radio audit (2026-09-08): the active profile still had the PRE-2.0.67 default
+    // SmartStartWaiting template "{Target} not heard, waiting {Progress}.". {Progress} is empty
+    // for the legitimate non-progress revalidation-decline path, so it rendered
+    // "KR4NO not heard, waiting .". Two guards: (1) that exact legacy default is migrated to the
+    // current {Phrase} default in LoadFromIni; (2) SmartStartWaitingEvent.ToTokens() never emits
+    // an empty {Progress} -- it falls back to the fully-worded Phrase -- so ANY hand-crafted
+    // "{Progress}" template still produces a complete sentence. Real "1 of 2" / "2 of 2"
+    // progress is untouched.
+    static void SmartStartWaitingTemplateSafetyTests()
+    {
+        Console.WriteLine("\n── Smart Start waiting line: no dangling \"waiting .\" ──");
+        var mk = new List<string>();
+        string NewIni()
+        {
+            string p = Path.Combine(Path.GetTempPath(), $"jimmy_sswait_{System.Guid.NewGuid():N}.ini");
+            mk.Add(p);
+            return p;
+        }
+        try
+        {
+            const string legacy = "{Target} not heard, waiting {Progress}.";
+            CheckStr("sanity: the new code default is {Phrase}",
+                NotificationDefaults.Policies[NotificationEventType.SmartStartWaiting].Template, "{Phrase}");
+
+            // 1. The exact pre-2.0.67 default -> migrated to {Phrase}, silently.
+            var ini = new IniFile(NewIni());
+            ini.Write($"notifyTemplate_{NotificationEventType.SmartStartWaiting}", legacy);
+            var s = new NotificationSettings();
+            s.LoadFromIni(ini);
+            CheckStr("pre-2.0.67 {Progress} default -> migrated to {Phrase}",
+                s.Policies[NotificationEventType.SmartStartWaiting].Template, "{Phrase}");
+            Check("...silently (not flagged rejected)",
+                !s.RejectedTemplates.ContainsKey(NotificationEventType.SmartStartWaiting), true);
+
+            // 2. An operator's OWN edited {Progress} template is left untouched.
+            var ini2 = new IniFile(NewIni());
+            ini2.Write($"notifyTemplate_{NotificationEventType.SmartStartWaiting}", "{Target}: {Progress} silent.");
+            var s2 = new NotificationSettings();
+            s2.LoadFromIni(ini2);
+            CheckStr("an edited valid template is kept as-is",
+                s2.Policies[NotificationEventType.SmartStartWaiting].Template, "{Target}: {Progress} silent.");
+
+            // 3. A saved copy of the NEW default loads unchanged.
+            var ini3 = new IniFile(NewIni());
+            ini3.Write($"notifyTemplate_{NotificationEventType.SmartStartWaiting}", "{Phrase}");
+            var s3 = new NotificationSettings();
+            s3.LoadFromIni(ini3);
+            CheckStr("a saved copy of {Phrase} loads unchanged",
+                s3.Policies[NotificationEventType.SmartStartWaiting].Template, "{Phrase}");
+
+            // 4. Rendering guard: a surviving hand-crafted "{Progress}" template on a NON-progress
+            //    event can never produce "waiting ." -- {Progress} falls back to the worded Phrase.
+            {
+                var evt = new SmartStartWaitingEvent("KR4NO", "KR4NO is working another station", progress: "");
+                string outText = NotificationTemplateEngine.Format(legacy, evt.ToTokens());
+                Check("non-progress event + {Progress} template -> no dangling \"waiting .\"",
+                    !outText.Contains("waiting .") && !outText.Contains("waiting  ") && !outText.TrimEnd().EndsWith("waiting"), true);
+                Check("...and it still carries the real worded reason",
+                    outText.Contains("KR4NO is working another station"), true);
+                // The shipped {Phrase} default is unaffected -- it renders the reason verbatim.
+                CheckStr("{Phrase} default renders the worded reason",
+                    NotificationTemplateEngine.Format("{Phrase}", evt.ToTokens()),
+                    "KR4NO is working another station");
+            }
+
+            // 5. Real silence progress is untouched: "1 of 2" / "2 of 2" render in BOTH the
+            //    worded {Phrase} default and a custom {Progress} template.
+            {
+                var p1 = new SmartStartWaitingEvent("KR4NO", "KR4NO not heard, 1 of 2.", "1 of 2");
+                CheckStr("progress {Phrase} default -> \"1 of 2\" sentence",
+                    NotificationTemplateEngine.Format("{Phrase}", p1.ToTokens()), "KR4NO not heard, 1 of 2.");
+                CheckStr("progress {Progress} template -> \"waiting 1 of 2.\"",
+                    NotificationTemplateEngine.Format(legacy, p1.ToTokens()), "KR4NO not heard, waiting 1 of 2.");
+
+                var p2 = new SmartStartWaitingEvent("KR4NO", "KR4NO not heard, 2 of 2.", "2 of 2");
+                CheckStr("progress {Progress} template -> \"waiting 2 of 2.\"",
+                    NotificationTemplateEngine.Format(legacy, p2.ToTokens()), "KR4NO not heard, waiting 2 of 2.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SmartStartWaitingTemplateSafetyTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            foreach (var p in mk) { try { File.Delete(p); } catch { } }
+        }
+    }
+
+    // ── "No response" is announced only after a completed listening opportunity, not at the
+    // transmit-ended edge ────────────────────────────────────────────────────────────────────
+    // KR4NO / K4JC live-radio audit (2026-09-08): DirectApplyStatus runs before DirectApplyDecodes
+    // and rendered "K4JC, no response" the instant transmitting went true->false -- the START of
+    // the following receive slot, before its decodes existed, so a reply later in that same slot
+    // would arrive after Jimmy had already said "no response". The clause is now gated
+    // (NoResponseOpportunityComplete): it stays quiet until a receive opportunity in which the
+    // radio was genuinely NOT transmitting has completed with its decodes processed. Slot parity
+    // is irrelevant -- a yielded nominal TX-side slot counts as listening evidence. Repeat Limit
+    // counting is a separate mechanism and is not touched here.
+    static void NoResponseOpportunityTimingTests()
+    {
+        Console.WriteLine("\n── \"No response\" waits for a completed listening opportunity ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_NoRespTiming_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            WsjtxClient MakeWc(out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.replyDxCheckBox.Checked = true;
+                ctrl.replyLocalCheckBox.Checked = true;
+                ctrl.advancedCallLayout = false;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 500 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+
+            // Our over to WA4VLC in slot N (transmitting), then the transmit ENDS in the SAME
+            // slot (the decode/RX slot has not advanced yet -- exactly the live K4JC timing).
+            void ArmSameSlot(WsjtxClient wc, ulong txSlot)
+            {
+                wc.callInProg = "WA4VLC";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""tuning"": false, ""catOk"": true, ""slot"": " + txSlot + @" },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""awaitReport"", ""txNow"": ""WA4VLC KB0UZT EN34"" } }"));
+                wc.callInProg = "WA4VLC";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": " + txSlot + @" },
+                    ""recentDecodes"": [] }"));
+                wc.callInProg = "WA4VLC";
+            }
+
+            // 1. Transmit just ended, listening opportunity NOT yet complete -> no "no response".
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmSameSlot(wc, 700);
+                Check("transmit-ended edge: opportunity not complete yet",
+                    wc.NoResponseOpportunityComplete("WA4VLC"), false);
+                wc.TestShowStatus();
+                Check("transmit-ended edge -> status does NOT say \"no response\"",
+                    !ctrl.statusText.Text.Contains("no response"), true);
+            }
+
+            // 2. The following receive slot completes (radio not transmitting, decodes processed)
+            //    with nothing from the target -> "no response" now, exactly once, at the boundary.
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmSameSlot(wc, 700);
+                wc.callInProg = "WA4VLC";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 701 },
+                    ""recentDecodes"": [] }"));
+                Check("listening opportunity complete",
+                    wc.NoResponseOpportunityComplete("WA4VLC"), true);
+                Check("completed silent listening opportunity -> status now says \"no response\"",
+                    ctrl.statusText.Text.Contains("no response"), true);
+            }
+
+            // 3. A nominal FT8 TX-side slot in which the radio was NOT transmitting is still a
+            //    valid listening opportunity (parity does not matter -- only radio.Transmitting).
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmSameSlot(wc, 800);
+                wc.callInProg = "WA4VLC";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 802 },
+                    ""recentDecodes"": [] }"));
+                Check("yielded nominal TX-side slot counts as listening -> \"no response\"",
+                    ctrl.statusText.Text.Contains("no response"), true);
+            }
+
+            // 4. The target answers us during that listening opportunity -> the "received" detail
+            //    wins; no false "no response", ordinary QSO handling owns it.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.allCallDict["WA4VLC"] = new List<EnqueueDecodeMessage>
+                {
+                    new EnqueueDecodeMessage
+                    {
+                        Message = "KB0UZT WA4VLC R-07", Snr = -7,
+                        RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                    },
+                };
+                ArmSameSlot(wc, 900);
+                wc.callInProg = "WA4VLC";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 901 },
+                    ""recentDecodes"": [] }"));
+                wc.TestShowStatus();
+                Check("target answered -> no \"no response\"",
+                    !ctrl.statusText.Text.Contains("no response"), true);
+                Check("target answered -> the received report is surfaced instead",
+                    ctrl.statusText.Text.Contains("received"), true);
+            }
+
+            // 5. The target is heard working another station -> existing factual "received ..."
+            //    handling supersedes; still no false "no response".
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.allCallDict["WA4VLC"] = new List<EnqueueDecodeMessage>
+                {
+                    new EnqueueDecodeMessage
+                    {
+                        Message = "K1ABC WA4VLC -12", Snr = -12,
+                        RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                    },
+                };
+                ArmSameSlot(wc, 1000);
+                wc.callInProg = "WA4VLC";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 1001 },
+                    ""recentDecodes"": [] }"));
+                wc.TestShowStatus();
+                Check("target working someone else -> no false \"no response\"",
+                    !ctrl.statusText.Text.Contains("no response"), true);
+            }
+
+            // 6. The gate is call-scoped -- it never suppresses an unrelated call's status, and it
+            //    is independent of the Repeat Limit counter (separate mechanism, unchanged).
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmSameSlot(wc, 1100);
+                Check("gate is scoped to the awaited call only",
+                    wc.NoResponseOpportunityComplete("K4JC"), true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NoResponseOpportunityTimingTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
         }
     }
 

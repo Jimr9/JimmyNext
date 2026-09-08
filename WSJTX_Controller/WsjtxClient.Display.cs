@@ -1425,7 +1425,14 @@ namespace WSJTX_Controller
                                         recClean = $"received {curRxPayload}";
                                     else if (callInProg != null && curCall == callInProg && !transmitting
                                              && curTxMsg != null
-                                             && string.Equals(WsjtxMessage.ToCall(curTxMsg), callInProg, StringComparison.OrdinalIgnoreCase))
+                                             && string.Equals(WsjtxMessage.ToCall(curTxMsg), callInProg, StringComparison.OrdinalIgnoreCase)
+                                             // Premature "no response" fix (KR4NO / K4JC live-radio
+                                             // audit, 2026-09-08): not at the transmit-ended edge --
+                                             // only once the following receive opportunity has
+                                             // actually completed with its decodes processed and the
+                                             // radio was genuinely receiving during it. See
+                                             // NoResponseOpportunityComplete / _directNoResponseAwaitingCall.
+                                             && NoResponseOpportunityComplete(callInProg))
                                         // In a QSO, our last over went to this station, receive
                                         // period, nothing heard back -> a plain constant "no
                                         // response". (The old sentCallList gate here has been

@@ -1752,6 +1752,20 @@ namespace WSJTX_Controller
                 && _smartStart.NoteCallingOverTransmitted((int)ctrl.timeoutNumUpDown.Value))
                 SmartStartRepeatLimitReached();
 
+            // Premature "no response" fix (see _directNoResponseAwaitingCall). A real over to the
+            // call in progress just ended: arm the "no response" timing gate and clear the
+            // opportunity-complete flag. ShowStatus's "no response" clause now stays quiet until
+            // the following receive opportunity (radio genuinely not transmitting) has completed
+            // AND its decodes have been processed -- the period-boundary point in
+            // DirectApplyDecodes. Not gated on curTxMsg here (its level-triggered refresh from
+            // qso.txNow happens further down this method); the ShowStatus clause keeps its own
+            // curTxMsg / ToCall == callInProg checks, this only adds the timing constraint.
+            if (wasTransmitting && !transmitting && callInProg != null)
+            {
+                _directNoResponseAwaitingCall = callInProg;
+                _directNoResponseOpportunityComplete = false;
+            }
+
             // Mirrors the transmitting assignment above -- same root cause, same fix: without
             // this, the class-level `tuning` field (AudioLevel()'s own guard, Alt+T's status
             // text) never learned a real Tune (SET_TUNING) was underway in Direct mode.
@@ -2106,6 +2120,43 @@ namespace WSJTX_Controller
         // receive period finished AND Jimmy has processed its decodes -- for SpeechCoordinator.
         private bool _directReceiveCycleCompletedThisTick;
 
+        // Premature "no response" fix (KR4NO / K4JC live-radio audit, 2026-09-08). "No response"
+        // must NOT be announced at the transmitting->false edge: that edge is the START of the
+        // following receive opportunity, before its decodes exist, so a reply later in the same
+        // slot arrives after Jimmy has already said "no response". DirectApplyStatus also runs
+        // BEFORE DirectApplyDecodes every tick, so the status render on the transmit-ended tick
+        // never sees that tick's decode batch either.
+        //
+        // _directNoResponseAwaitingCall is armed with callInProg on the actual transmitting->false
+        // edge (a real over ended -- see the arm site in DirectApplyStatus). The ShowStatus
+        // "no response" clause then stays suppressed (NoResponseOpportunityComplete) until a
+        // subsequent receive opportunity in which the radio was genuinely NOT transmitting has
+        // completed with its decodes processed -- the period-boundary point at the end of
+        // DirectApplyDecodes, the same signal Notify.OnPeriodBoundary() uses. A nominal FT8
+        // TX-side slot in which Jimmy yielded and never keyed still counts as receive evidence:
+        // the test is the real radio.Transmitting flag at the boundary, not slot parity (mirrors
+        // OnReceivePeriodComplete's own weTransmittedThisSlot gate). If the target answered us,
+        // or was heard working someone / CQing, ShowStatus's own curRxPayload / "received ..."
+        // path supersedes this clause as before. Re-armed on every real transmit-end so each
+        // unanswered opportunity can surface "no response" exactly once, at the right time. This
+        // does NOT touch Repeat Limit counting (discardCallCycleCount / NoteCallingOverTransmitted
+        // both stay on the transmitting->false edge, unchanged).
+        private string _directNoResponseAwaitingCall;
+        private bool _directNoResponseOpportunityComplete;
+
+        // "No response" is only truthful once the receive opportunity that FOLLOWS our last real
+        // over has actually completed with its decodes processed. When we are not currently
+        // awaiting a post-transmit opportunity for this call (e.g. a status render unrelated to a
+        // just-ended over, or any non-Direct render path), there is no timing gate to apply and
+        // the caller's own conditions govern exactly as before.
+        internal bool NoResponseOpportunityComplete(string call)
+        {
+            if (call == null
+                || !string.Equals(_directNoResponseAwaitingCall, call, StringComparison.OrdinalIgnoreCase))
+                return true;
+            return _directNoResponseOpportunityComplete;
+        }
+
         private void DirectApplyDecodes(DirectSnapshot snap)
         {
             _directReceiveCycleCompletedThisTick = false;
@@ -2371,6 +2422,23 @@ namespace WSJTX_Controller
                 _directReceiveCycleCompletedThisTick = false;
                 Notify?.OnPeriodBoundary();
                 FeedTargetMonitorsPeriodComplete(_directLastSlotSeen, directTargetMonitorEvenSlot, transmitting);
+
+                // Premature "no response" fix (see _directNoResponseAwaitingCall). This receive
+                // opportunity is now complete with its decodes processed. If Jimmy was NOT
+                // transmitting during it -- a genuine listening opportunity, a yielded nominal
+                // TX-side slot included -- a still-unanswered call may now legitimately render
+                // "no response". Force one status render so it lands right here, right after
+                // decode processing, rather than a whole cycle later at the next transmit-end.
+                if (_directNoResponseAwaitingCall != null)
+                {
+                    if (!string.Equals(_directNoResponseAwaitingCall, callInProg, StringComparison.OrdinalIgnoreCase))
+                        _directNoResponseAwaitingCall = null;   // contact ended or moved to another call
+                    else if (!transmitting)
+                    {
+                        _directNoResponseOpportunityComplete = true;
+                        ShowStatus();
+                    }
+                }
             }
 
             // Snapshot-finality guard: a parked automatic Smart Start / Work-Now dispatch is

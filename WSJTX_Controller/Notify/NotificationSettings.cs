@@ -99,6 +99,18 @@ namespace WSJTX_Controller
                     && template == "{Target} is working another station.")
                     template = null;
 
+                // 2026-09-08 waiting-phrase migration (KR4NO live-radio audit): a saved copy of
+                // the PRE-2.0.67 "Smart Start waiting" default carried the raw {Progress} token.
+                // {Progress} is "1 of 2" only for a true silence-progress observation and empty
+                // for the legitimate non-progress revalidation-decline path -- with this template
+                // that rendered "KR4NO not heard, waiting ." Treated as "unedited" -- dropped so
+                // the current {Phrase} default takes over (a fully worded sentence for every
+                // case, progress or not). An operator's OWN edited wording is left untouched; a
+                // hand-typed copy of the exact old default is the acceptable false-positive.
+                if (type == NotificationEventType.SmartStartWaiting
+                    && template == "{Target} not heard, waiting {Progress}.")
+                    template = null;
+
                 if (!string.IsNullOrWhiteSpace(template))
                 {
                     // A saved template that no longer validates against this type's variable
