@@ -389,6 +389,8 @@ static class JimmyTests
         SmartStartRepeatLimitSpansYieldsTests();
         TargetMonitorAnswersUsWhileArmedTests();
         SmartStartAnswersTargetCallingUsTests();
+        SmartStartAdvancedLayoutTxSideFlipTests();
+        SmartStartPileupBackoffTests();
         SpeechCoordinatorStationWatchSuppressionTests();
         StationWatchHotkeyDefaultsTests();
         SmartStartNarrationPresentationTests();
@@ -9833,13 +9835,24 @@ static class JimmyTests
             }
 
             // D. Received-reply detail still produces its configured wording, with the callsign
-            //    named exactly once alongside it.
+            //    named exactly once alongside it. 2.0.70: the "no response" branch is now driven
+            //    by "our last over went to callInProg and this is a silent receive period" -- the
+            //    old sentCallList gate has been dead since the UDP ProcessTxEnd removal.
             {
                 var wc = MakeWc(out var ctrl);
                 wc.callInProg = "WA4VLC";
-                wc.sentCallList.Add("WA4VLC");   // no allCallDict entry -> recClean falls to "no response"
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""tuning"": false, ""catOk"": true, ""slot"": 610 },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""awaitReport"", ""txNow"": ""WA4VLC KB0UZT EN34"" } }"));
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 611 },
+                    ""recentDecodes"": [] }"));
+                wc.callInProg = "WA4VLC";
                 wc.TestShowStatus();
-                CheckStr("D: received-reply detail (no response) composes with the callsign once",
+                CheckStr("D: unanswered calling phase -> 'no response' composes with the callsign once",
                     ctrl.statusText.Text, "W A 4 V L C, no response.");
             }
 
@@ -15086,17 +15099,25 @@ static class JimmyTests
         Check("ReturnToWaiting keeps the target + live evidence", tm.TargetCall == TARGET && tm.HasLiveTargetEvidence, true);
         Check("busy target -> revalidation refuses a resume", tm.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", null, false) == AutoStartCheck.TargetBusy, true);
 
-        tm.ObserveDecode(D($"{B} {TARGET} R-05"), true, MY_CALL);          // TARGET -> B (peer change) -- fresh busy evidence
+        tm.ObserveDecode(D($"{B} {TARGET} R-05"), true, MY_CALL);          // TARGET -> B (peer change) -- still working someone
         Check("target changed peer A->B: still BusyWithOther", tm.BusyWithOther, true);
         Check("target changed peer: still not ready", !tm.ReadyToStart, true);
 
-        // Post-yield: the STALE "working someone else" observation is now allowed to expire once
-        // the operator's configured silence window passes on the target's parity with no fresh
-        // busy evidence -- and that makes Smart Start eligible to call the same target again.
-        tm.OnReceivePeriodComplete(2, true, "20m", "FT8", null, false);   // 1 of 2 appropriate silent opportunities
-        Check("one silent opportunity after the yield: still busy, not resumed", tm.BusyWithOther && !tm.ReadyToStart, true);
-        tm.OnReceivePeriodComplete(4, true, "20m", "FT8", null, false);   // reaches the configured silence threshold
-        Check("stale busy observation EXPIRES at the silence threshold after a yield", !tm.BusyWithOther, true);
+        // 2.0.70 tightening: while the LAST thing heard from the target was it working someone,
+        // silence alone never expires the stale busy observation -- a weak/QSB DX's gaps
+        // between overs are not "the other QSO ended" (C6AZB live finding).
+        tm.OnReceivePeriodComplete(2, true, "20m", "FT8", null, false);
+        tm.OnReceivePeriodComplete(4, true, "20m", "FT8", null, false);
+        tm.OnReceivePeriodComplete(6, true, "20m", "FT8", null, false);
+        Check("silence after 'working another' does NOT expire the busy state", tm.BusyWithOther && !tm.ReadyToStart, true);
+
+        // ...but once the target is heard doing something AMBIGUOUS and then goes quiet, the
+        // stale observation expires (Jimmy genuinely lost the thread of the other QSO).
+        tm.ObserveDecode(D($"1234 {TARGET} -08"), true, MY_CALL);          // unparseable addressee -> TargetAmbiguous
+        tm.OnReceivePeriodComplete(8, true, "20m", "FT8", null, false);
+        Check("one silent opportunity after an ambiguous decode: still busy", tm.BusyWithOther && !tm.ReadyToStart, true);
+        tm.OnReceivePeriodComplete(10, true, "20m", "FT8", null, false);
+        Check("silence threshold after an ambiguous decode -> stale busy expires", !tm.BusyWithOther, true);
         Check("...and Smart Start becomes ready to call the same target again", tm.ReadyToStart, true);
         tm.ConsumeReadyToStart();
 
@@ -15400,7 +15421,7 @@ static class JimmyTests
     static void TargetMonitorBusyExpirationAfterYieldTests()
     {
         Console.WriteLine("\n── TargetMonitor: stale BusyWithOther expires after a Smart Start busy-yield ──");
-        const string TARGET = "J38DX", A = "W6PAN", B = "KD2VCE", RANDO = "K9ABC";
+        const string TARGET = "J38DX", A = "W6PAN", B = "KD2VCE";
 
         // Armed + calling + target went to another station + caller yielded -> back to waiting,
         // carrying a stale "busy" observation. Parity is established EVEN by the CQ.
@@ -15416,69 +15437,57 @@ static class JimmyTests
             return m;
         }
 
-        // 3 + 4: stale busy expires at the configured threshold; expiration -> ready again.
+        // 2.0.70 tightening (C6AZB live): while the LAST heard classification is "target working
+        // someone", ANY amount of silence leaves BusyWithOther set -- a weak/QSB DX's gaps
+        // between its own overs are not "the other QSO ended".
         var m1 = Yielded(2);
-        Check("armed, carrying a stale busy observation after the yield", m1.BusyWithOther && !m1.ReadyToStart, true);
-        m1.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);
-        Check("one silent opportunity: still busy, not yet expired", m1.BusyWithOther && !m1.ReadyToStart, true);
-        m1.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);
-        Check("silence threshold reached with no fresh busy evidence: stale busy expires", !m1.BusyWithOther, true);
-        Check("...and a new Smart Start becomes ready", m1.ReadyToStart, true);
-        Check("...revalidation now passes rather than returning TargetBusy",
-            m1.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", "sess1", false) == AutoStartCheck.Ok, true);
+        Check("after a yield, carrying a 'working another' observation", m1.BusyWithOther && !m1.ReadyToStart, true);
+        for (ulong s = 2; s <= 12; s += 2) m1.OnReceivePeriodComplete(s, true, "20m", "FT8", "sess1", false);
+        Check("silence after 'working another' does NOT expire the busy state (pileup/QSB safety)", m1.BusyWithOther, true);
+        Check("...Smart Start not made ready by that silence", !m1.ReadyToStart, true);
+        Check("...revalidation still returns TargetBusy",
+            m1.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", "sess1", false) == AutoStartCheck.TargetBusy, true);
 
-        // 1: fresh target-busy evidence re-zeros the counter (window measured from LATEST evidence).
+        // Fix #1's real case survives: after the yield the target is heard doing something
+        // AMBIGUOUS (partial decode / Jimmy lost the thread), then goes quiet -> that silence
+        // DOES expire the stale busy observation.
         var m2 = Yielded(2);
-        m2.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);   // 1 of 2
-        m2.ObserveDecode(D($"{B} {TARGET} R-05"), true, MY_CALL);            // fresh evidence: target still working someone
-        Check("fresh busy evidence keeps it busy", m2.BusyWithOther && !m2.ReadyToStart, true);
-        m2.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);   // would be 2 of 2 WITHOUT the reset
-        Check("counter was reset by fresh busy evidence: not expired yet", m2.BusyWithOther && !m2.ReadyToStart, true);
-        m2.OnReceivePeriodComplete(6, true, "20m", "FT8", "sess1", false);   // 2 clean opportunities since the reset
-        Check("expires only after the full window measured from the latest busy evidence", !m2.BusyWithOther && m2.ReadyToStart, true);
+        m2.ObserveDecode(D($"1234 {TARGET} -08"), true, MY_CALL);           // unparseable addressee -> TargetAmbiguous
+        Check("ambiguous target decode: still busy, but the 'working another' block is lifted", m2.BusyWithOther, true);
+        m2.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);
+        Check("one silent opportunity: still busy", m2.BusyWithOther && !m2.ReadyToStart, true);
+        m2.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);
+        Check("silence threshold, last heard was ambiguous -> stale busy expires", !m2.BusyWithOther, true);
+        Check("...and a new Smart Start becomes ready", m2.ReadyToStart, true);
+        Check("...revalidation now passes",
+            m2.RevalidateForAutoStart(DateTime.UtcNow, "20m", "FT8", "sess1", false) == AutoStartCheck.Ok, true);
 
-        // 1 (other form): a third station calling/working the TARGET (addressed TO the target)
-        // is also fresh busy evidence and re-zeros the window.
-        var m2b = Yielded(2);
-        m2b.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);
-        m2b.ObserveDecode(D($"{TARGET} {A} R-05"), true, MY_CALL);           // A -> target: someone is working it
-        m2b.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);
-        Check("a third station addressing the target also re-zeros the window", m2b.BusyWithOther && !m2b.ReadyToStart, true);
+        // Fresh "working another" evidence during the ambiguous-then-quiet window re-blocks it.
+        var m3 = Yielded(2);
+        m3.ObserveDecode(D($"1234 {TARGET} -08"), true, MY_CALL);           // ambiguous -> unblocked
+        m3.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);  // 1 of 2
+        m3.ObserveDecode(D($"{B} {TARGET} R-05"), true, MY_CALL);           // fresh: target working B again
+        m3.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);
+        m3.OnReceivePeriodComplete(6, true, "20m", "FT8", "sess1", false);
+        Check("fresh 'working another' re-blocks expiration", m3.BusyWithOther && !m3.ReadyToStart, true);
 
-        // 2: unrelated stations neither reset nor expire the counter.
-        var m3 = Yielded(3);
-        m3.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);   // 1
-        m3.ObserveDecode(D($"CQ {RANDO} EN10"), true, MY_CALL);             // unrelated third party
-        m3.ObserveDecode(D($"{RANDO} K1XYZ -03"), true, MY_CALL);           // unrelated QSO
-        m3.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);   // 2
-        Check("unrelated activity neither resets nor expires the counter", m3.BusyWithOther && !m3.ReadyToStart, true);
-        m3.OnReceivePeriodComplete(6, true, "20m", "FT8", "sess1", false);   // 3 -> threshold
-        Check("expires at the threshold, counting only appropriate opportunities", !m3.BusyWithOther && m3.ReadyToStart, true);
-
-        // 14: only appropriate opportunities count (parity / band / mode / session / our-own-TX).
+        // A real availability signal always clears busy directly (unchanged).
         var m4 = Yielded(2);
-        m4.OnReceivePeriodComplete(3, false, "20m", "FT8", "sess1", false);  // opposite parity -- ignored
-        m4.OnReceivePeriodComplete(5, false, "20m", "FT8", "sess1", false);  // opposite parity -- ignored
-        m4.OnReceivePeriodComplete(7, true, "40m", "FT8", "sess1", false);   // wrong band -- ignored
-        m4.OnReceivePeriodComplete(9, true, "20m", "FT4", "sess1", false);   // wrong mode -- ignored
-        m4.OnReceivePeriodComplete(11, true, "20m", "FT8", "other", false);  // wrong session -- ignored
-        m4.OnReceivePeriodComplete(13, true, "20m", "FT8", "sess1", true);   // we transmitted -- ignored
-        Check("no appropriate opportunity counted yet: still busy", m4.BusyWithOther && !m4.ReadyToStart, true);
-        m4.OnReceivePeriodComplete(15, true, "20m", "FT8", "sess1", false);  // 1 of 2
-        m4.OnReceivePeriodComplete(17, true, "20m", "FT8", "sess1", false);  // 2 of 2 -> expire
-        Check("expires only after the right count of appropriate opportunities", !m4.BusyWithOther && m4.ReadyToStart, true);
+        m4.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);
+        Check("target CQ after a yield clears busy immediately", !m4.BusyWithOther, true);
 
-        // 14 (FT4 parity path is equivalent -- 7.5 s period, same parity gate).
+        // FT4 parity path: same behaviour, ODD target parity.
         var m4b = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
         m4b.Start(TARGET, "20m", "FT4", "sess1");
-        m4b.ObserveDecode(D($"CQ {TARGET} FK92"), false, MY_CALL);          // FT4, parity ODD this time
+        m4b.ObserveDecode(D($"CQ {TARGET} FK92"), false, MY_CALL);          // FT4, parity ODD
         m4b.ConsumeReadyToStart();
         m4b.EnterAwaitingEngagement();
         m4b.ObserveDecode(D($"{A} {TARGET} -07"), false, MY_CALL);
         m4b.ReturnToWaiting();
-        m4b.OnReceivePeriodComplete(2, true, "20m", "FT4", "sess1", false);  // EVEN -- opposite parity, ignored
-        m4b.OnReceivePeriodComplete(3, false, "20m", "FT4", "sess1", false); // ODD -- 1 of 2
-        m4b.OnReceivePeriodComplete(5, false, "20m", "FT4", "sess1", false); // ODD -- 2 of 2 -> expire
+        m4b.ObserveDecode(D($"1234 {TARGET} -08"), false, MY_CALL);         // ambiguous -> unblocked
+        m4b.OnReceivePeriodComplete(2, true, "20m", "FT4", "sess1", false); // EVEN -- opposite parity, ignored
+        m4b.OnReceivePeriodComplete(3, false, "20m", "FT4", "sess1", false);// ODD -- 1 of 2
+        m4b.OnReceivePeriodComplete(5, false, "20m", "FT4", "sess1", false);// ODD -- 2 of 2 -> expire
         Check("FT4: expiration honours the target's ODD transmit parity", !m4b.BusyWithOther && m4b.ReadyToStart, true);
 
         // The non-yield invariant is preserved: a target that goes busy while we were only
@@ -15488,6 +15497,7 @@ static class JimmyTests
         m5.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);
         m5.ConsumeReadyToStart();
         m5.ObserveDecode(D($"{A} {TARGET} -07"), true, MY_CALL);            // busy while merely waiting
+        m5.ObserveDecode(D($"1234 {TARGET} -08"), true, MY_CALL);           // even an ambiguous decode later
         m5.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);
         m5.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);
         Check("no yield: silence still never clears 'working another station'", m5.BusyWithOther, true);
@@ -15802,6 +15812,155 @@ static class JimmyTests
                 SaidContains($"{target} is working another station"), false);
             Check("...announces the go / call instead",
                 SaidContains($"{target} appears available") || SaidContains($"Calling {target}"), true);
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // Post-ship 2.0.70 item B: a Smart Start / Work-Watched-Station-Now dispatch through
+    // ReplyTo(EnqueueDecodeMessage) must sync txFirst to the reply's period in the advanced
+    // (TX1/TX2) layout -- NextCall's plain-Enter path already does, but Smart Start returns
+    // before it, so the panels used to stay labelled backwards for the whole QSO.
+    static void SmartStartAdvancedLayoutTxSideFlipTests()
+    {
+        Console.WriteLine("\n── Smart Start (advanced layout): the dispatched reply flips the TX/RX sides ──");
+
+        var listener = new StubEngineHost(_ => "OK");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartTxSide_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            ctrl.advancedCallLayout = true;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            wc.trPeriod = 15000;   // FT8 T/R period (ms) -- IsEvenPeriod needs it non-null
+
+            // Decode timestamped in an EVEN T/R period -> IsEvenCall == true -> desiredTxFirst == false.
+            EnqueueDecodeMessage evenDecode = new EnqueueDecodeMessage { Message = "CQ 4D3UNB QK23", DeltaFrequency = 1500, Snr = -6, SinceMidnight = TimeSpan.FromSeconds(0) };
+            // Decode timestamped in an ODD T/R period -> IsEvenCall == false -> desiredTxFirst == true.
+            EnqueueDecodeMessage oddDecode  = new EnqueueDecodeMessage { Message = "CQ 4D3UNB QK23", DeltaFrequency = 1500, Snr = -6, SinceMidnight = TimeSpan.FromSeconds(15) };
+            Check("sanity: even/odd decodes classify as expected", wc.IsEvenCall(evenDecode) && !wc.IsEvenCall(oddDecode), true);
+
+            wc.txFirst = true;                       // currently on the "first" side
+            wc.TestReplyTo(evenDecode);              // reply belongs on the opposite (odd) side
+            Check("advanced layout: txFirst synced to the even decode's opposite period", wc.txFirst == false, true);
+
+            wc.txFirst = false;
+            wc.TestReplyTo(oddDecode);
+            Check("advanced layout: txFirst synced to the odd decode's opposite period", wc.txFirst == true, true);
+
+            // Already matching -> no spurious change.
+            wc.txFirst = false;
+            wc.TestReplyTo(evenDecode);
+            Check("advanced layout: no change when txFirst already matches the reply's period", wc.txFirst == false, true);
+
+            // Simple layout: never touched.
+            ctrl.advancedCallLayout = false;
+            wc.txFirst = true;
+            wc.TestReplyTo(evenDecode);
+            Check("simple layout: txFirst is left alone", wc.txFirst == true, true);
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // Post-ship 2.0.70 item C: a CQing pileup DX has no lull. The dispatch now waits a full
+    // receive period on the target's parity (so a "DX working <someone>" straggler aborts it
+    // before any RF), and after MaxSmartStartStandbyRounds dead-end "looked ready -> was busy"
+    // rounds Smart Start disarms and tells the operator instead of looping "Calling X" forever.
+    static void SmartStartPileupBackoffTests()
+    {
+        Console.WriteLine("\n── Smart QSO Start (Direct pipeline): pileup back-off + period-hold before dispatch ──");
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartPileup_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            ctrl.smartQsoStartEnabled = true;
+            ctrl.smartStartSilencePeriods = 6;
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "4D3UNB", A = "W6PAN";
+            List<string> Seen() { lock (seenLock) return new List<string>(seen); }
+            bool SawReply() => Seen().Exists(c => c.StartsWith("REPLY"));
+            DirectSnapshot Snap(ulong slot, string from = null, string msg = null)
+            {
+                string dec = from == null ? "" :
+                    @"{ ""from"": """ + from + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + msg + @""" }";
+                return ParseDirectSnapshot(@"{ ""mycall"":""" + myCall + @""",""mygrid"":""" + myGrid + @""",
+                    ""radio"":{ ""dialMhz"":14.074,""transmitting"":false,""slot"":" + slot + @" },
+                    ""recentDecodes"":[" + dec + @"] }");
+            }
+            EnqueueDecodeMessage FreshCq() => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {target} FK92",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // establish band / mode / slot
+
+            // ══ Period-hold: a "DX working someone" decode during the hold aborts before any RF ══
+            Check("fresh CQ captured + auto-start armed", wc.TestTryCaptureSmartStart(target, FreshCq()) && wc.TestAutoStartPending, true);
+            wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }, true);  // live CQ -> parity/evidence
+            // finality polls elapse on the SAME slot -- not enough on its own now (needs a period to pass)
+            for (int i = 0; i < 5; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));
+            Check("still pending after the finality polls -- waiting out a full receive period", wc.TestAutoStartPending, true);
+            Check("nothing transmitted yet", SawReply(), false);
+            // next period arrives AND it shows the DX working someone else
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1002, target, $"{A} {target} -07"));
+            System.Threading.Thread.Sleep(30);
+            Check("DX working another station during the hold -> start declined, NO REPLY", SawReply(), false);
+            Check("...and no 'Calling' commit -- callInProg stays clear", wc.callInProg == null, true);
+
+            // ══ Back-off: enough dead-end rounds -> Smart Start disarms itself ══
+            // Each round: establish the slot, target looks available (CQ) -> arm on THIS slot,
+            // finality polls on the same slot (no dispatch -- period not elapsed), then the next
+            // period arrives showing the DX working someone -> revalidation declines it busy.
+            ulong slot = 1004;
+            for (int round = 0; round < 6 && wc.TestSmartStartTarget != null; round++)
+            {
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot));   // _directLastSlotSeen = slot
+                wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }, true);  // arm, armSlot = slot
+                for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot));           // finality polls, same slot -> held
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot + 2, target, $"{A} {target} -07"));      // +2 periods AND DX busy -> decline
+                slot += 4;
+                System.Threading.Thread.Sleep(20);
+            }
+            Check("after repeated dead-end rounds, Smart Start disarms (no endless pileup churn)", wc.TestSmartStartTarget == null, true);
+            Check("...still never transmitted", SawReply(), false);
         }
         finally
         {

@@ -1418,7 +1418,16 @@ namespace WSJTX_Controller
                                     string recClean = "";
                                     if (curRxPayload != null)
                                         recClean = $"received {curRxPayload}";
-                                    else if (callInProg != null && curCall == callInProg && sentCallList.Contains(curCall))
+                                    else if (callInProg != null && curCall == callInProg && !transmitting
+                                             && curTxMsg != null
+                                             && string.Equals(WsjtxMessage.ToCall(curTxMsg), callInProg, StringComparison.OrdinalIgnoreCase))
+                                        // In a QSO, our last over went to this station, receive
+                                        // period, nothing heard back -> say so. (The old
+                                        // sentCallList gate here has been dead since the UDP
+                                        // ProcessTxEnd removal -- nothing populates that list in
+                                        // Direct mode -- so an unanswered calling phase used to
+                                        // render a wordless line and, since 2.0.66, leave the
+                                        // stale "Sending <grid>" from the previous TX on screen.)
                                         recClean = callInProgLastActivity ?? "no response";
                                     string prevClean = prevRxPayload != null ? $"previous {prevRxPayload}" : "";
                                     if (transmitting && (curTxPayload == "73" || curTxPayload == "RR73")) prevClean = "";    //don't need that detail any more

@@ -36,6 +36,24 @@ namespace WSJTX_Controller
         private int _pendingAutoStartPollsRemaining;
         private const int PendingAutoStartFinalityPolls = 3;
 
+        // Post-ship 2.0.69 (J38DX / KC2HMD / 4D3UNB pileup churn): the 3-poll finality window
+        // above spans only ~3 s -- less than one FT8 T/R period. A station calling CQ doesn't
+        // reveal WHICH caller it picked until its NEXT over (~15 s later), so Smart Start used to
+        // commit + announce "Calling X" and then have to yield when that over showed the DX chose
+        // someone else -- endless "appears available -> Calling -> [silent halt] -> waiting" with
+        // zero RF. The dispatch now also waits until the engine slot counter has advanced by at
+        // least this many periods since the monitor was parked, so at least one full receive
+        // period on the target's own parity has completed AND its decodes ingested -- a
+        // "DX working <someone>" decode then lands first and RevalidateForAutoStart declines
+        // before anything transmits.
+        private const ulong PendingAutoStartMinSlotAdvance = 2;
+        private ulong _pendingAutoStartArmSlot;
+
+        // After this many dead-end readiness rounds for one armed target (revalidation declined
+        // it as busy, or a dispatched call yielded before engagement), Smart Start disarms and
+        // tells the operator -- a hot CQing pileup has no lull to wait for.
+        private const int MaxSmartStartStandbyRounds = 4;
+
         public bool StationWatchActive => _stationWatch.IsActive;
         public string StationWatchTarget => _stationWatch.TargetCall;
 
@@ -203,6 +221,20 @@ namespace WSJTX_Controller
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
             Notify?.Publish(new SmartStartYieldedEvent(target));
+            if (_smartStart.NoteStandbyRoundAndCheckGiveUp(MaxSmartStartStandbyRounds))
+                SmartStartStoodDownBusy(target);
+        }
+
+        // Smart Start has churned through MaxSmartStartStandbyRounds "looked ready -> was busy"
+        // rounds for this armed target without ever getting a real calling over out. There is no
+        // lull coming -- disarm and tell the operator (existing status-message channel, no new
+        // notification type). A plain Enter + the Repeat Limit is how you work a hot pileup.
+        private void SmartStartStoodDownBusy(string target)
+        {
+            DebugOutput($"{Time()} [SMART] {target} stayed busy across {MaxSmartStartStandbyRounds} standby rounds -- disarming Smart Start");
+            ClearPendingAutoStart();
+            _smartStart.Stop(announce: false);
+            StatusView.ShowMessage($"{target} stayed busy; Smart Start stopped", false);
         }
 
         // The Smart Start Repeat Limit -- (int)ctrl.timeoutNumUpDown.Value, the operator's own
@@ -292,12 +324,14 @@ namespace WSJTX_Controller
             if (ReferenceEquals(_pendingAutoStart, monitor)) return;
             _pendingAutoStart = monitor;
             _pendingAutoStartPollsRemaining = PendingAutoStartFinalityPolls;
+            _pendingAutoStartArmSlot = _directLastSlotSeen;
         }
 
         private void ClearPendingAutoStart()
         {
             _pendingAutoStart = null;
             _pendingAutoStartPollsRemaining = 0;
+            _pendingAutoStartArmSlot = 0;
         }
 
         // Called at the END of every DirectApplyDecodes pass (after that pass has ingested its
@@ -309,6 +343,11 @@ namespace WSJTX_Controller
             if (_pendingAutoStart == null) return;
             if (!_pendingAutoStart.IsActive) { ClearPendingAutoStart(); return; }
             if (_pendingAutoStartPollsRemaining > 0) { _pendingAutoStartPollsRemaining--; return; }
+            // Also wait out a full receive period on the target's parity since arming, so the
+            // DX's own next over has been decoded -- a "DX working <someone>" straggler then
+            // aborts the start in RevalidateForAutoStart instead of Jimmy calling into a QSO the
+            // DX already began (see PendingAutoStartMinSlotAdvance).
+            if (_directLastSlotSeen < _pendingAutoStartArmSlot + PendingAutoStartMinSlotAdvance) return;
             TargetMonitor monitor = _pendingAutoStart;
             ClearPendingAutoStart();
             RequestTargetMonitorStart(monitor, operatorOverride: false);
@@ -334,7 +373,17 @@ namespace WSJTX_Controller
                 if (operatorOverride)
                     StatusView.ShowMessage(why, false);
                 else if (check == AutoStartCheck.TargetBusy)
+                {
                     Notify?.Publish(new SmartStartYieldedEvent(monitor.TargetCall));
+                    // A "looked ready, revalidated busy" round for the Smart Start monitor --
+                    // after enough of these on one target, stop chasing the pileup (below).
+                    if (ReferenceEquals(monitor, _smartStart)
+                        && _smartStart.NoteStandbyRoundAndCheckGiveUp(MaxSmartStartStandbyRounds))
+                    {
+                        SmartStartStoodDownBusy(monitor.TargetCall);
+                        return;
+                    }
+                }
                 else
                     Notify?.Publish(new SmartStartWaitingEvent(monitor.TargetCall, why));
                 // Leave the monitor armed and watching -- a later fresh decode / cleared-busy

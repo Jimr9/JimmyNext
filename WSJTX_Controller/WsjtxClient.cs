@@ -3757,6 +3757,22 @@ namespace WSJTX_Controller
             string toCall = WsjtxMessage.ToCall(dmsg.Message);
             DebugOutput($"{Time()} ReplyTo, nCall:'{nCall}' toCall:{toCall}");
 
+            // Advanced (TX1/TX2) layout: sync txFirst to this reply's period so the panel holding
+            // the call becomes the TX side. NextCall already does this for a plain Enter, but a
+            // Smart Start capture returns before that block, and Work-Watched-Station-Now never
+            // ran it -- so both used to leave the panels labelled backwards for the rest of the
+            // QSO (post-ship 2.0.68 finding). No-op on the NextCall path (already synced); the
+            // guard makes a redundant call harmless.
+            if (ctrl.advancedCallLayout)
+            {
+                bool desiredTxFirst = !IsEvenCall(dmsg);
+                if (desiredTxFirst != txFirst)
+                {
+                    SetBandTxFirst(0, desiredTxFirst, "ReplyTo (advanced UI, Smart Start / Work Now)");
+                    UpdateCallListAccessibleName(force: true);
+                }
+            }
+
             if (WsjtxMessage.IsCQ(dmsg.Message))                  //save the grid for logging
             {
                 AddAllCallDict(nCall, dmsg);

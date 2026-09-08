@@ -189,10 +189,31 @@ namespace WSJTX_Controller
         // rule is unchanged for a target that went busy while Smart Start was only waiting.
         private bool _busyExpirationArmedAfterYield;
 
+        // The MOST RECENT confident classification for the target was "working (or being called
+        // by) another station" -- report/R-report/RRR to a peer, addressing-other, or any station
+        // addressing the target. Cleared by a target CQ / 73 / RR73 / addressing-us / ambiguous
+        // decode. The busy-yield expiration above only fires when this is FALSE: a weak/QSB DX
+        // in a pileup produces "not decoded" gaps of a period or two between its overs, which the
+        // raw silence counter used to mistake for "the other QSO ended" (C6AZB, 2026-09-07 log --
+        // Smart Start briefly called a station mid-QSO, then aborted). If the last thing actually
+        // heard from the target was it working someone, the "busy" state still reflects reality
+        // and silence must not clear it. Fix #1's real case -- target went quiet after an
+        // AMBIGUOUS exchange, or Jimmy lost the thread -- still expires (ambiguous clears this).
+        private bool _lastHeardWorkingOther;
+
         // Dedup: OnReceivePeriodComplete is called once per real slot transition, but guards
         // against being asked twice for the same slot (defensive; the real per-tick caller
         // already only calls this once per boundary).
         private ulong? _lastCountedSlot;
+
+        // Smart Start only. How many times, for THIS armed target, a readiness turned out to be a
+        // dead end -- pre-transmit revalidation declined it as busy, or a dispatched call yielded
+        // before the target engaged us. A CQing DX in a pileup produces an endless "appears
+        // available -> busy -> standing by" churn with no useful outcome; after MaxSmartStart
+        // StandbyRounds of it WsjtxClient disarms Smart Start and tells the operator (there is no
+        // lull to wait for -- a plain call + Repeat Limit is the tool for a hot pileup). Reset by
+        // Start() (new target) and by a real EnterAwaitingEngagement (we actually got to call).
+        private int _standbyRounds;
 
         private string _band;
         private string _mode;
@@ -266,6 +287,8 @@ namespace WSJTX_Controller
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
             _busyExpirationArmedAfterYield = false;
+            _lastHeardWorkingOther = false;
+            _standbyRounds = 0;
             _lastCountedSlot = null;
             _band = band;
             _mode = mode;
@@ -294,6 +317,8 @@ namespace WSJTX_Controller
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
             _busyExpirationArmedAfterYield = false;
+            _lastHeardWorkingOther = false;
+            _standbyRounds = 0;
             _lastCountedSlot = null;
             if (announce) Raise(TargetObservationKind.WatchStopped, call);
         }
@@ -332,6 +357,7 @@ namespace WSJTX_Controller
             EngagedUs = false;
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _standbyRounds = 0;   // we actually got to call -- the earlier dead-end rounds don't count against us
         }
 
         // The target started working someone else before answering us and the caller has ceased
@@ -370,6 +396,17 @@ namespace WSJTX_Controller
             if (Purpose != TargetPurpose.SmartStart) return false;
             TransmittedCallCount++;
             return repeatLimit > 0 && TransmittedCallCount >= repeatLimit;
+        }
+
+        // One readiness for this armed target turned out to be a dead end (revalidation declined
+        // it as busy, or a dispatched call yielded before engagement). Returns true once that has
+        // happened `maxRounds` times with no real call in between -- the caller then disarms Smart
+        // Start (a CQing pileup DX has no lull to wait for). Reset by Start() / EnterAwaitingEngagement.
+        public bool NoteStandbyRoundAndCheckGiveUp(int maxRounds)
+        {
+            if (Purpose != TargetPurpose.SmartStart) return false;
+            _standbyRounds++;
+            return maxRounds > 0 && _standbyRounds >= maxRounds;
         }
 
         // Smart Start capture (WsjtxClient.TryCaptureSmartStart): the operator selected this
@@ -437,6 +474,7 @@ namespace WSJTX_Controller
                 if (addressedToTarget)
                 {
                     BusyWithOther = true;
+                    _lastHeardWorkingOther = true;
                     // Fresh evidence the target is still tied up: restart the post-yield
                     // expiration window from zero (fresh busy evidence always wins).
                     if (_busyExpirationArmedAfterYield)
@@ -483,6 +521,7 @@ namespace WSJTX_Controller
             {
                 ApparentPeer = null;
                 BusyWithOther = false;                 // calling CQ -> available
+                _lastHeardWorkingOther = false;
                 _rr73AwaitingOneMoreOpportunity = false;
                 Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
@@ -492,6 +531,7 @@ namespace WSJTX_Controller
             string to = WsjtxMessage.ToCall(d.Message);
             if (string.IsNullOrEmpty(to))
             {
+                _lastHeardWorkingOther = false;   // heard the target, but not "working someone" -- unblock expiration
                 Raise(TargetObservationKind.TargetAmbiguous, TargetCall, null, null, d.Message);
                 return;
             }
@@ -506,7 +546,10 @@ namespace WSJTX_Controller
                 EngagedUs = true;                      // the target answered our callsign
 
             if (addressingUs)
+            {
                 BusyWithOther = false;                 // turning to us -> not busy with anyone else
+                _lastHeardWorkingOther = false;
+            }
 
             // Smart Start, still armed/waiting (not yet in its own calling phase): the target is
             // now addressing OUR callsign -- it is literally calling us, the strongest possible
@@ -529,6 +572,7 @@ namespace WSJTX_Controller
             if (WsjtxMessage.IsRR73(d.Message))
             {
                 BusyWithOther = false;                 // finishing with the peer -> becoming available
+                _lastHeardWorkingOther = false;
                 Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart)
                 {
@@ -544,6 +588,7 @@ namespace WSJTX_Controller
             if (WsjtxMessage.Is73(d.Message))
             {
                 BusyWithOther = false;                 // signed off with the peer -> available
+                _lastHeardWorkingOther = false;
                 _rr73AwaitingOneMoreOpportunity = false;
                 Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
@@ -551,19 +596,19 @@ namespace WSJTX_Controller
             }
             if (WsjtxMessage.IsRogers(d.Message))       // RRR -- distinct from, and NOT equivalent to, RR73/73
             {
-                if (!addressingUs) BusyWithOther = true;   // mid-exchange with the peer
+                if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }   // mid-exchange with the peer
                 Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
                 return;
             }
             if (WsjtxMessage.IsRogerReport(d.Message))
             {
-                if (!addressingUs) BusyWithOther = true;
+                if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }
                 Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
                 return;
             }
             if (WsjtxMessage.IsReport(d.Message))
             {
-                if (!addressingUs) BusyWithOther = true;
+                if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }
                 Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
                 return;
             }
@@ -576,6 +621,7 @@ namespace WSJTX_Controller
             // forms (grid, free text, contest exchange, etc.) -- still meaningful "working
             // another station" evidence, just not one of the specific typed observations above.
             BusyWithOther = true;
+            _lastHeardWorkingOther = true;
             Raise(TargetObservationKind.TargetAddressingOther, TargetCall, peer, null, d.Message);
         }
 
@@ -643,7 +689,10 @@ namespace WSJTX_Controller
                 // _busyExpirationArmedAfterYield is only ever set by ReturnToWaiting -- so
                 // "silence never overrides 'working another station'" still holds for a target
                 // that went busy while Smart Start was only waiting.
-                if (BusyWithOther && _busyExpirationArmedAfterYield)
+                // Only when the LAST thing actually heard from the target was NOT it working
+                // someone (see _lastHeardWorkingOther): a weak/QSB DX in a pileup goes quiet for a
+                // period or two between its own overs, which is not "the other QSO ended."
+                if (BusyWithOther && _busyExpirationArmedAfterYield && !_lastHeardWorkingOther)
                 {
                     BusyWithOther = false;
                     _busyExpirationArmedAfterYield = false;
