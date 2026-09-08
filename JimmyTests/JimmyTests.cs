@@ -320,6 +320,7 @@ static class JimmyTests
         RoutineClauseTemplateTests();
         RoutineCycleSummarySplitTests();
         RoutineCycleSummarySplitMigrationTests();
+        SmartStartBusyTemplateMigrationTests();
         RoutineReceiveSideRoleScopeTests();
         RoutinePunctuationOnlyRemnantTests();
         ActiveQsoBareCallsignSuppressionTests();
@@ -9381,6 +9382,63 @@ static class JimmyTests
         }
     }
 
+    // ── Smart Start "target busy" line: a profile saved by 2.0.67/2.0.68 persisted the peerless
+    //    "{Target} is working another station." template, which has no {Peer}/{Phrase} token, so
+    //    the 2.0.69 peer-naming default never took effect on any existing install. LoadFromIni
+    //    now treats that exact string as "unedited" and drops it for the {Phrase} default. ──
+    static void SmartStartBusyTemplateMigrationTests()
+    {
+        Console.WriteLine("\n── Smart Start busy line: pre-2.0.69 template migrates to {Phrase} ──");
+        var mk = new List<string>();
+        string NewIni()
+        {
+            string p = Path.Combine(Path.GetTempPath(), $"jimmy_ssbusy_{System.Guid.NewGuid():N}.ini");
+            mk.Add(p);
+            return p;
+        }
+        try
+        {
+            const string legacy = "{Target} is working another station.";
+            string newDefault = NotificationDefaults.Policies[NotificationEventType.SmartStartTargetBusy].Template;
+            CheckStr("sanity: the new code default is {Phrase}", newDefault, "{Phrase}");
+
+            // 1. The exact pre-2.0.69 default -> migrated to {Phrase}, silently.
+            var ini = new IniFile(NewIni());
+            ini.Write($"notifyTemplate_{NotificationEventType.SmartStartTargetBusy}", legacy);
+            var s = new NotificationSettings();
+            s.LoadFromIni(ini);
+            CheckStr("pre-2.0.69 peerless default -> migrated to {Phrase}",
+                s.Policies[NotificationEventType.SmartStartTargetBusy].Template, "{Phrase}");
+            Check("...silently (not flagged rejected)",
+                !s.RejectedTemplates.ContainsKey(NotificationEventType.SmartStartTargetBusy), true);
+
+            // 2. An operator's OWN edited wording is left untouched.
+            var ini2 = new IniFile(NewIni());
+            ini2.Write($"notifyTemplate_{NotificationEventType.SmartStartTargetBusy}", "Busy: {Target}.");
+            var s2 = new NotificationSettings();
+            s2.LoadFromIni(ini2);
+            CheckStr("an edited valid template is kept as-is",
+                s2.Policies[NotificationEventType.SmartStartTargetBusy].Template, "Busy: {Target}.");
+
+            // 3. A saved copy of the NEW default loads unchanged.
+            var ini3 = new IniFile(NewIni());
+            ini3.Write($"notifyTemplate_{NotificationEventType.SmartStartTargetBusy}", "{Phrase}");
+            var s3 = new NotificationSettings();
+            s3.LoadFromIni(ini3);
+            CheckStr("a saved copy of {Phrase} loads unchanged",
+                s3.Policies[NotificationEventType.SmartStartTargetBusy].Template, "{Phrase}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SmartStartBusyTemplateMigrationTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            foreach (var p in mk) { try { File.Delete(p); } catch { } }
+        }
+    }
+
     // ── Receive-side role scopes: the RX1/TX2 side name and the "N available stations" count are
     // two independently role-scoped routine clauses, and the scope follows the CURRENT RX/TX
     // roles automatically when the slots flip (advanced call layout) ─────────────────────────
@@ -9835,9 +9893,12 @@ static class JimmyTests
             }
 
             // D. Received-reply detail still produces its configured wording, with the callsign
-            //    named exactly once alongside it. 2.0.70: the "no response" branch is now driven
-            //    by "our last over went to callInProg and this is a silent receive period" -- the
-            //    old sentCallList gate has been dead since the UDP ProcessTxEnd removal.
+            //    named exactly once alongside it. 2.0.70: the "no response" branch is driven by
+            //    "our last over went to callInProg and this is a silent receive period" -- the
+            //    old sentCallList gate has been dead since the UDP ProcessTxEnd removal. 2.0.71:
+            //    the wording is a fixed "no response" -- it was `callInProgLastActivity ?? "no
+            //    response"`, but that field holds a pre-call "working <other>" decode and would
+            //    flip the receive line between the two every period.
             {
                 var wc = MakeWc(out var ctrl);
                 wc.callInProg = "WA4VLC";
@@ -15827,6 +15888,8 @@ static class JimmyTests
     // ReplyTo(EnqueueDecodeMessage) must sync txFirst to the reply's period in the advanced
     // (TX1/TX2) layout -- NextCall's plain-Enter path already does, but Smart Start returns
     // before it, so the panels used to stay labelled backwards for the whole QSO.
+    // 2.0.71: the flip now also happens at CAPTURE time (TryCaptureSmartStart), so the panel
+    // isn't backwards during the wait; SyncAdvancedLayoutTxFirst is the shared helper.
     static void SmartStartAdvancedLayoutTxSideFlipTests()
     {
         Console.WriteLine("\n── Smart Start (advanced layout): the dispatched reply flips the TX/RX sides ──");
@@ -15854,6 +15917,28 @@ static class JimmyTests
             // Decode timestamped in an ODD T/R period -> IsEvenCall == false -> desiredTxFirst == true.
             EnqueueDecodeMessage oddDecode  = new EnqueueDecodeMessage { Message = "CQ 4D3UNB QK23", DeltaFrequency = 1500, Snr = -6, SinceMidnight = TimeSpan.FromSeconds(15) };
             Check("sanity: even/odd decodes classify as expected", wc.IsEvenCall(evenDecode) && !wc.IsEvenCall(oddDecode), true);
+
+            // 2.0.71: the flip must happen the moment Smart Start CAPTURES the Enter, not only
+            // when it later dispatches -- the reported bug was the panels labelled backwards for
+            // the whole wait (and forever, if the target stayed busy). TryCaptureSmartStart does
+            // it now; NextCall's own sync is unreachable once capture returns true.
+            ctrl.smartQsoStartEnabled = true;
+            wc.txFirst = true;
+            Check("Smart Start capture is taken", wc.TestTryCaptureSmartStart("4D3UNB", evenDecode), true);
+            Check("capture (advanced): txFirst flipped to the even decode's opposite period at capture time",
+                wc.txFirst == false, true);
+
+            wc.txFirst = false;
+            Check("Smart Start capture is taken (odd)", wc.TestTryCaptureSmartStart("4D3UNB", oddDecode), true);
+            Check("capture (advanced): txFirst flipped to the odd decode's opposite period at capture time",
+                wc.txFirst == true, true);
+
+            ctrl.advancedCallLayout = false;
+            wc.txFirst = true;
+            Check("Smart Start capture is taken (simple layout)", wc.TestTryCaptureSmartStart("4D3UNB", evenDecode), true);
+            Check("capture (simple layout): txFirst is left alone", wc.txFirst == true, true);
+            ctrl.advancedCallLayout = true;
+            ctrl.smartQsoStartEnabled = false;
 
             wc.txFirst = true;                       // currently on the "first" side
             wc.TestReplyTo(evenDecode);              // reply belongs on the opposite (odd) side

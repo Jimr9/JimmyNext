@@ -86,6 +86,19 @@ namespace WSJTX_Controller
                     && template == "{Status}, {AvailableCount} {Stations}{ToYou}{NewDxcc}{Wanted}{Awards}{Mode}{Prompt}.")
                     template = null;
 
+                // 2026-09-08 peer-in-busy-line migration: a saved copy of the PRE-2.0.69
+                // "Smart Start target busy" default named no other station. It is treated as
+                // "unedited" -- dropped so the new {Phrase} default takes over, which names the
+                // other station (and its report when the decode carried one) and degrades to
+                // the same "another station" wording only when neither could be parsed. Without
+                // this, every profile saved by 2.0.67/2.0.68 keeps the peerless string forever
+                // and the 2.0.69 wording never appears. An operator's OWN edited wording is left
+                // untouched; a hand-typed copy of the exact old default is the acceptable
+                // false-positive (it renders identically in the peerless case anyway).
+                if (type == NotificationEventType.SmartStartTargetBusy
+                    && template == "{Target} is working another station.")
+                    template = null;
+
                 if (!string.IsNullOrWhiteSpace(template))
                 {
                     // A saved template that no longer validates against this type's variable

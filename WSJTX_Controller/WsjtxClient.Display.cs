@@ -1422,13 +1422,23 @@ namespace WSJTX_Controller
                                              && curTxMsg != null
                                              && string.Equals(WsjtxMessage.ToCall(curTxMsg), callInProg, StringComparison.OrdinalIgnoreCase))
                                         // In a QSO, our last over went to this station, receive
-                                        // period, nothing heard back -> say so. (The old
-                                        // sentCallList gate here has been dead since the UDP
-                                        // ProcessTxEnd removal -- nothing populates that list in
-                                        // Direct mode -- so an unanswered calling phase used to
-                                        // render a wordless line and, since 2.0.66, leave the
-                                        // stale "Sending <grid>" from the previous TX on screen.)
-                                        recClean = callInProgLastActivity ?? "no response";
+                                        // period, nothing heard back -> a plain constant "no
+                                        // response". (The old sentCallList gate here has been
+                                        // dead since the UDP ProcessTxEnd removal -- nothing
+                                        // populates that list in Direct mode -- so an unanswered
+                                        // calling phase used to render a wordless line and, since
+                                        // 2.0.66, leave the stale "Sending <grid>" from the
+                                        // previous TX frozen on screen.)
+                                        //
+                                        // 2.0.71: was `callInProgLastActivity ?? "no response"`,
+                                        // but callInProgLastActivity holds a "working <other>"
+                                        // decode heard BEFORE we started calling (e.g. TG9SO was
+                                        // heard working YV0DX) and is not cleared as it ages, so
+                                        // the receive line flipped between "no response" and a
+                                        // minutes-stale "working YV0DX" every period. A fixed
+                                        // "no response" is honest and stable, and still gives the
+                                        // render words so the TX line no longer freezes.
+                                        recClean = "no response";
                                     string prevClean = prevRxPayload != null ? $"previous {prevRxPayload}" : "";
                                     if (transmitting && (curTxPayload == "73" || curTxPayload == "RR73")) prevClean = "";    //don't need that detail any more
                                     string receivedPhrase = recClean;

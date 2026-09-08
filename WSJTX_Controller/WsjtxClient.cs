@@ -2894,6 +2894,21 @@ namespace WSJTX_Controller
             return expectedCall == null ? rawIdx : lookupCurrentIndex(expectedCall);
         }
 
+        // Advanced (TX1/TX2) layout only: point txFirst at the period this decode's reply
+        // belongs in (IsCorrectTimePeriodForMode's own res = evenCall != txFirst), so the
+        // panel that just became the real TX side is labelled "TX", not "RX". Guarded and
+        // idempotent -- safe to call from every point a reply is committed (plain-Enter
+        // NextCall, a Smart QSO Start capture, the eventual Smart Start / Work-Now dispatch
+        // in ReplyTo). No-op in the simple one-list layout.
+        private void SyncAdvancedLayoutTxFirst(EnqueueDecodeMessage dmsg, string reason)
+        {
+            if (!ctrl.advancedCallLayout || dmsg == null) return;
+            bool desiredTxFirst = !IsEvenCall(dmsg);
+            if (desiredTxFirst == txFirst) return;
+            SetBandTxFirst(0, desiredTxFirst, reason);
+            UpdateCallListAccessibleName(force: true);
+        }
+
         public void NextCall(bool confirm, int idx, bool operatorSelected = false, string expectedCall = null)
         {
             HaltTuning();
@@ -2960,16 +2975,10 @@ namespace WSJTX_Controller
                     // the QSO -- txFirst only ever moved via the manual Toggle Transmit Period
                     // hotkey. Sync it here, to whichever period this specific reply actually
                     // needs (IsCorrectTimePeriodForMode's own res = evenCall != txFirst), right
-                    // before the reply is dispatched below, so the labels reflect reality.
-                    if (ctrl.advancedCallLayout)
-                    {
-                        bool desiredTxFirst = !evenCall;
-                        if (desiredTxFirst != txFirst)
-                        {
-                            SetBandTxFirst(0, desiredTxFirst, "NextCall (advanced UI reply)");
-                            UpdateCallListAccessibleName(force: true);
-                        }
-                    }
+                    // before the reply is dispatched below, so the labels reflect reality. A
+                    // Smart QSO Start capture does the same flip itself, from TryCaptureSmartStart
+                    // above, since it returns before ever reaching this point (2.0.71).
+                    SyncAdvancedLayoutTxFirst(dmsg, "NextCall (advanced UI reply)");
 
                     if (txMode == TxModes.LISTEN)
                     {
@@ -3758,20 +3767,11 @@ namespace WSJTX_Controller
             DebugOutput($"{Time()} ReplyTo, nCall:'{nCall}' toCall:{toCall}");
 
             // Advanced (TX1/TX2) layout: sync txFirst to this reply's period so the panel holding
-            // the call becomes the TX side. NextCall already does this for a plain Enter, but a
-            // Smart Start capture returns before that block, and Work-Watched-Station-Now never
-            // ran it -- so both used to leave the panels labelled backwards for the rest of the
-            // QSO (post-ship 2.0.68 finding). No-op on the NextCall path (already synced); the
-            // guard makes a redundant call harmless.
-            if (ctrl.advancedCallLayout)
-            {
-                bool desiredTxFirst = !IsEvenCall(dmsg);
-                if (desiredTxFirst != txFirst)
-                {
-                    SetBandTxFirst(0, desiredTxFirst, "ReplyTo (advanced UI, Smart Start / Work Now)");
-                    UpdateCallListAccessibleName(force: true);
-                }
-            }
+            // the call becomes the TX side. NextCall already does this for a plain Enter, and a
+            // Smart Start capture does it from TryCaptureSmartStart -- Work-Watched-Station-Now
+            // never ran it, and drift is possible during a long Smart Start wait, so re-assert it
+            // here at dispatch. No-op when already synced (the guard inside makes it harmless).
+            SyncAdvancedLayoutTxFirst(dmsg, "ReplyTo (advanced UI, Smart Start / Work Now)");
 
             if (WsjtxMessage.IsCQ(dmsg.Message))                  //save the grid for logging
             {

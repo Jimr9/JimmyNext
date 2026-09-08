@@ -150,6 +150,14 @@ namespace WSJTX_Controller
             // (that would be a near-duplicate on both the visible line and in speech).
             if (_smartStart.ConsumeReadyToStart())
                 ArmPendingAutoStart(_smartStart);
+
+            // 2.0.71: the operator just picked this call from one of the two TX/RX panels.
+            // Flip that panel to the TX side now, not (only) when Smart Start eventually
+            // dispatches -- the real ReplyTo can be many receive periods away, or never come
+            // if the target stays busy, and the panels sitting labelled backwards the whole
+            // time is the reported bug. NextCall's own plain-Enter sync is unreachable on this
+            // path (it returns true here, above that block); ReplyTo re-asserts it at dispatch.
+            SyncAdvancedLayoutTxFirst(dmsg, "Smart QSO Start capture (advanced UI)");
             return true;
         }
 
