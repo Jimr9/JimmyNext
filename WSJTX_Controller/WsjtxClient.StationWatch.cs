@@ -144,20 +144,41 @@ namespace WSJTX_Controller
                 return false;
 
             _smartStart.SilenceThreshold = ctrl.smartStartSilencePeriods;
-            _smartStart.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);
-            // Seed the freshly-started monitor with the exact decode the operator selected.
-            // SeedSelectedDecode records it as the decode to eventually reply from, but only
-            // treats it as genuine current evidence (parity, live-evidence, CQ/73/RR73
-            // readiness) when it is still fresh -- a stale queued/list selection identifies
-            // WHICH station to work and nothing more, and Smart Start then waits for a real
-            // live decode before it can authorize any transmission (2.0.64: the V51WW failure
-            // was a ~54 s-old RR73 being manufactured into live "target available" evidence).
-            _smartStart.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall);
-            // "Waiting to work {call}." is announced by SmartStartArmedEvent, raised from
-            // _smartStart.Start above via HandleTargetObservation -- no separate ShowMessage
-            // (that would be a near-duplicate on both the visible line and in speech).
-            if (_smartStart.ConsumeReadyToStart())
-                ArmPendingAutoStart(_smartStart);
+
+            // Re-selecting the call Smart Start is ALREADY armed on -- a second Enter/Space, or
+            // dialogTimer2_Tick re-issuing the operator's still-queued selection (Smart Start
+            // deliberately leaves a waiting target in the RX list) -- must NOT restart the
+            // monitor. Start() wipes the parity, live-evidence and silence progression it has
+            // accumulated, and the re-seed decode is by then usually older than the seed
+            // fresh-window, so SeedSelectedDecode would leave TargetEvenParity null and
+            // OnReceivePeriodComplete could not count a single opportunity until an unrelated
+            // fresh live decode happened to arrive -- Smart Start silently sits with no progress
+            // for minutes (TJ1GD live-radio finding, 2026-09-08). The live feed (ObserveDecode
+            // via FeedTargetMonitors) already keeps the active monitor current, so the restart +
+            // re-seed is simply skipped. The purely presentational re-sync of the advanced TX/RX
+            // panels (2.0.71) still runs below -- the operator may have re-picked the call from
+            // the other panel -- and the method still returns true so the caller does not fall
+            // through to an immediate ReplyTo. A genuine change of target still replaces.
+            bool alreadyArmedOnThisCall = _smartStart.IsActive
+                && string.Equals(_smartStart.TargetCall, call, StringComparison.OrdinalIgnoreCase);
+
+            if (!alreadyArmedOnThisCall)
+            {
+                _smartStart.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);
+                // Seed the freshly-started monitor with the exact decode the operator selected.
+                // SeedSelectedDecode records it as the decode to eventually reply from, but only
+                // treats it as genuine current evidence (parity, live-evidence, CQ/73/RR73
+                // readiness) when it is still fresh -- a stale queued/list selection identifies
+                // WHICH station to work and nothing more, and Smart Start then waits for a real
+                // live decode before it can authorize any transmission (2.0.64: the V51WW failure
+                // was a ~54 s-old RR73 being manufactured into live "target available" evidence).
+                _smartStart.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall);
+                // "Waiting to work {call}." is announced by SmartStartArmedEvent, raised from
+                // _smartStart.Start above via HandleTargetObservation -- no separate ShowMessage
+                // (that would be a near-duplicate on both the visible line and in speech).
+                if (_smartStart.ConsumeReadyToStart())
+                    ArmPendingAutoStart(_smartStart);
+            }
 
             // 2.0.71: the operator just picked this call from one of the two TX/RX panels.
             // Flip that panel to the TX side now, not (only) when Smart Start eventually

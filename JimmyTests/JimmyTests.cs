@@ -399,6 +399,7 @@ static class JimmyTests
         TargetMonitorStaleEvidenceRevalidationTests();
         TargetMonitorAwaitingEngagementTests();
         SmartStartStaleEvidenceTransmitSafetyTests();
+        SmartStartRedundantRecaptureKeepsProgressTests();
         SmartStartYieldsToOtherQsoTests();
         TargetMonitorBusyExpirationAfterYieldTests();
         SmartStartRepeatLimitSpansYieldsTests();
@@ -16945,6 +16946,107 @@ static class JimmyTests
             ctrl.smartQsoStartEnabled = false;
             Check("Smart Start OFF -> TryCaptureSmartStart returns false (old Enter behavior kept)",
                 wc.TestTryCaptureSmartStart("N0XYZ", freshCq), false);
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // TJ1GD live-radio finding (2026-09-08): Smart Start "looked dead" -- armed on TJ1GD, then no
+    // silence progress ("1 of 2" ...) for minutes. Root cause: dialogTimer2_Tick re-issued the
+    // operator's still-queued TJ1GD selection, so TryCaptureSmartStart ran a SECOND time on the
+    // already-armed monitor. Start() wiped the established parity / live-evidence / silence
+    // count, and the re-seed decode was by then older than the seed fresh-window, so
+    // TargetEvenParity stayed null and OnReceivePeriodComplete could not count a single
+    // opportunity until an unrelated fresh live decode arrived. Fix: a redundant re-capture of
+    // the call Smart Start is already armed on is a no-op (returns true; the live ObserveDecode
+    // feed already keeps the monitor current). A genuine change of target still replaces.
+    static void SmartStartRedundantRecaptureKeepsProgressTests()
+    {
+        Console.WriteLine("\n── Smart QSO Start: a redundant re-capture of the already-armed target keeps its silence progression ──");
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartRecap_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            ctrl.smartQsoStartEnabled = true;
+            ctrl.smartStartSilencePeriods = 2;
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "TJ1GD", peer = "IK1MHM";
+
+            EnqueueDecodeMessage Dq(string msg, double ageSeconds) => new EnqueueDecodeMessage
+            {
+                Message = msg,
+                RxDate = DateTime.UtcNow.AddSeconds(-ageSeconds).Date,
+                SinceMidnight = DateTime.UtcNow.AddSeconds(-ageSeconds).TimeOfDay,
+                DeltaFrequency = 1500, Snr = -8,
+            };
+            DirectSnapshot Snap(ulong slot, string from = null, string msg = null)
+            {
+                string decodes = from == null ? "" :
+                    @"{ ""from"": """ + from + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + msg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"] }");
+            }
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
+
+            // Operator selects TJ1GD (Smart Start capture). Then a fresh live decode of TJ1GD
+            // working a peer establishes parity + live evidence through the ObserveDecode feed.
+            wc.TestTryCaptureSmartStart(target, Dq($"{peer} {target} -06", 4));
+            Check("armed on TJ1GD", wc.TestSmartStartTarget == target, true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(105, target, $"{peer} {target} -06"));
+            Check("live decode establishes parity", wc.TestSmartStartTargetEvenParity != null, true);
+            Check("live decode establishes live evidence", wc.TestSmartStartHasLiveEvidence, true);
+            bool? parity0 = wc.TestSmartStartTargetEvenParity;
+
+            // The period TJ1GD was heard in is absorbed; the next clean target-parity opportunity
+            // advances the silence count to 1 of 2.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(107));
+            Check("one clean opportunity -> silence count 1", wc.TestSmartStartSilenceCount == 1, true);
+
+            // ── The bug: dialogTimer2_Tick re-issues the still-queued TJ1GD selection, now stale ──
+            bool recap = wc.TestTryCaptureSmartStart(target, Dq($"{peer} {target} -06", 60));
+            Check("redundant re-capture returns true (caller must not also ReplyTo)", recap, true);
+            Check("redundant re-capture keeps the target", wc.TestSmartStartTarget == target, true);
+            Check("redundant re-capture keeps the established parity (not wiped to null)",
+                wc.TestSmartStartTargetEvenParity == parity0 && parity0 != null, true);
+            Check("redundant re-capture keeps live evidence", wc.TestSmartStartHasLiveEvidence, true);
+            Check("redundant re-capture keeps the silence progression (not reset to 0)",
+                wc.TestSmartStartSilenceCount == 1, true);
+
+            // Progress continues from where it was -- the next clean opportunity reaches the
+            // threshold and Smart Start arms an automatic start (before the fix it would have
+            // been stuck at parity==null, counting nothing).
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(109));
+            Check("silence progression continued past the redundant re-capture -> count 2",
+                wc.TestSmartStartSilenceCount >= 2, true);
+
+            // Regression: selecting a genuinely DIFFERENT call still replaces the monitor.
+            wc.TestTryCaptureSmartStart("W9XYZ", Dq("CQ W9XYZ EM63", 1));
+            Check("selecting a different call still replaces the Smart Start target",
+                wc.TestSmartStartTarget == "W9XYZ", true);
         }
         finally
         {

@@ -3206,6 +3206,10 @@ namespace WSJTX_Controller
         internal bool TestSmartStartAwaitingEngagement => _smartStart.AwaitingEngagement;
         internal int TestSmartStartTransmittedCallCount => _smartStart.TransmittedCallCount;
         internal bool TestAutoStartPending => _pendingAutoStart != null;
+        // Accumulated silence-progression state -- a redundant re-capture of an already-armed
+        // target must not reset these (TJ1GD live-radio finding, 2026-09-08).
+        internal int TestSmartStartSilenceCount => _smartStart.SilenceCount;
+        internal bool? TestSmartStartTargetEvenParity => _smartStart.TargetEvenParity;
         // Post-ship 2.0.70: drive the reply-dispatch seam directly (advanced-layout txFirst sync
         // lives at the top of ReplyTo(EnqueueDecodeMessage) now, covering Smart Start / Work Now).
         internal void TestReplyTo(EnqueueDecodeMessage dmsg) => ReplyTo(dmsg);
