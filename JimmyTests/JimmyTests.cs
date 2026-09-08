@@ -268,6 +268,7 @@ static class JimmyTests
         GeoMathEllipsoidCrossValidationTests();
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
+        DirectDtoStage3SnapshotFieldsTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -2614,6 +2615,112 @@ static class JimmyTests
 
     static DirectSnapshot ParseDirectSnapshot(string json) =>
         System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(json, WsjtxClient.DirectJsonOptions);
+
+    // ── Nexus modernization Stage 3: the Direct DTO now RETAINS the per-decode and per-QSO
+    //    semantic facts Nexus already puts on every snapshot (DecodeRow.is_cq/directed_to_me/
+    //    signoff/grid/ap/low_conf/tier/rv; QsoStatus.dxcall/dxgrid/rx_report/running/cq_running/
+    //    stalled/tx_count). This is additive C# only -- nothing consumes them yet. Two things
+    //    must hold: (1) a snapshot that carries them deserializes them correctly, camelCase;
+    //    (2) an OLDER EngineHost's snapshot that omits them still deserializes, with the new
+    //    fields at their defaults and every pre-existing field untouched. ──
+    static void DirectDtoStage3SnapshotFieldsTests()
+    {
+        Console.WriteLine("\n── Direct DTO Stage 3: retained Nexus decode/QSO semantic fields (additive) ──");
+        try
+        {
+            // (1) Full snapshot -- every new field present, camelCase, mixed values.
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 7 },
+                ""recentDecodes"": [
+                    { ""from"": ""W1AW"", ""snr"": -12, ""dtSec"": 0.2, ""freqHz"": 1400.0,
+                      ""message"": ""CQ W1AW FN31"",
+                      ""isCq"": true, ""directedToMe"": false, ""signoff"": false,
+                      ""grid"": ""FN31"", ""ap"": false, ""lowConf"": false, ""tier"": ""FT8"", ""rv"": 0 },
+                    { ""from"": ""DL1ABC"", ""snr"": 3, ""dtSec"": -0.1, ""freqHz"": 1615.0,
+                      ""message"": ""KB0UZT DL1ABC RR73"",
+                      ""isCq"": false, ""directedToMe"": true, ""signoff"": true,
+                      ""grid"": null, ""ap"": true, ""lowConf"": true, ""tier"": ""FT4"", ""rv"": 2 }
+                ],
+                ""qso"": { ""state"": ""awaitRoger"", ""txNow"": ""DL1ABC KB0UZT R-03"",
+                          ""dxcall"": ""DL1ABC"", ""dxgrid"": ""JO31"", ""rxReport"": -7,
+                          ""running"": true, ""cqRunning"": false, ""stalled"": true, ""txCount"": 4 }
+            }");
+
+            var d0 = snap.RecentDecodes[0];
+            Check("decode[0] isCq", d0.IsCq, true);
+            Check("decode[0] directedToMe", d0.DirectedToMe, false);
+            Check("decode[0] signoff", d0.Signoff, false);
+            CheckStr("decode[0] grid", d0.Grid, "FN31");
+            Check("decode[0] ap", d0.Ap, false);
+            Check("decode[0] lowConf", d0.LowConf, false);
+            CheckStr("decode[0] tier", d0.Tier, "FT8");
+            Check("decode[0] rv is 0", d0.Rv == 0, true);
+            Check("decode[0] pre-existing Snr still parsed (-12)", d0.Snr == -12, true);
+
+            var d1 = snap.RecentDecodes[1];
+            Check("decode[1] directedToMe", d1.DirectedToMe, true);
+            Check("decode[1] signoff", d1.Signoff, true);
+            Check("decode[1] grid null when JSON null", d1.Grid == null, true);
+            Check("decode[1] ap", d1.Ap, true);
+            Check("decode[1] lowConf", d1.LowConf, true);
+            CheckStr("decode[1] tier", d1.Tier, "FT4");
+            Check("decode[1] rv is 2", d1.Rv == 2, true);
+
+            Check("qso not null", snap.Qso != null, true);
+            CheckStr("qso.state (pre-existing) intact", snap.Qso.State, "awaitRoger");
+            CheckStr("qso.txNow (pre-existing) intact", snap.Qso.TxNow, "DL1ABC KB0UZT R-03");
+            CheckStr("qso.dxcall", snap.Qso.Dxcall, "DL1ABC");
+            CheckStr("qso.dxgrid", snap.Qso.Dxgrid, "JO31");
+            Check("qso.rxReport", snap.Qso.RxReport == -7, true);
+            Check("qso.running", snap.Qso.Running, true);
+            Check("qso.cqRunning", snap.Qso.CqRunning, false);
+            Check("qso.stalled", snap.Qso.Stalled, true);
+            Check("qso.txCount is 4", snap.Qso.TxCount == 4, true);
+
+            // (2) Legacy snapshot -- NONE of the new fields present (exactly the shape an older
+            //     EngineHost emits). Must still deserialize; new fields at defaults; old intact.
+            var legacy = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 9 },
+                ""recentDecodes"": [
+                    { ""from"": ""K7ABC"", ""snr"": -5, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""CQ K7ABC DN13"" }
+                ],
+                ""qso"": { ""state"": ""done"", ""txNow"": ""K7ABC KB0UZT 73"" }
+            }");
+            var ld = legacy.RecentDecodes[0];
+            Check("legacy: snapshot still deserializes", legacy != null && legacy.RecentDecodes.Count == 1, true);
+            CheckStr("legacy: decode message intact", ld.Message, "CQ K7ABC DN13");
+            Check("legacy: decode.Snr intact (-5)", ld.Snr == -5, true);
+            Check("legacy: decode.IsCq defaults false", ld.IsCq, false);
+            Check("legacy: decode.Signoff defaults false", ld.Signoff, false);
+            Check("legacy: decode.Grid defaults null", ld.Grid == null, true);
+            Check("legacy: decode.Tier defaults null", ld.Tier == null, true);
+            Check("legacy: decode.Rv defaults 0", ld.Rv == 0, true);
+            CheckStr("legacy: qso.state intact", legacy.Qso.State, "done");
+            CheckStr("legacy: qso.txNow intact", legacy.Qso.TxNow, "K7ABC KB0UZT 73");
+            Check("legacy: qso.Dxcall defaults null", legacy.Qso.Dxcall == null, true);
+            Check("legacy: qso.RxReport defaults null (absent != 0)", legacy.Qso.RxReport == null, true);
+            Check("legacy: qso.Running defaults false", legacy.Qso.Running, false);
+            Check("legacy: qso.CqRunning defaults false", legacy.Qso.CqRunning, false);
+            Check("legacy: qso.Stalled defaults false", legacy.Qso.Stalled, false);
+            Check("legacy: qso.TxCount defaults 0", legacy.Qso.TxCount == 0, true);
+
+            // (3) rxReport present-and-zero must round-trip as 0, distinct from absent (null).
+            var zeroRep = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1 },
+                ""recentDecodes"": [],
+                ""qso"": { ""state"": ""awaitRoger"", ""txNow"": null, ""rxReport"": 0 }
+            }");
+            Check("qso.rxReport present-zero deserializes as 0 (not null)", zeroRep.Qso.RxReport == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectDtoStage3SnapshotFieldsTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
 
     // ── Item 5 (test-infra stabilisation, 2026-09-02) ──────────────────────────────────────────
     // One OWNED fake EngineHost control-server fixture, replacing the two fire-and-forget

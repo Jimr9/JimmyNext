@@ -3146,6 +3146,37 @@ namespace WSJTX_Controller
         // (e.g. "KB0UZT W1XI -05") the UDP path's own txMsg (StatusMessage.LastTxMsg) carries,
         // so it can be parsed with the exact same WsjtxMessage helpers.
         public string TxNow { get; set; }
+
+        // ── Nexus modernization Stage 3 (additive, 2026-09-08): QSO-status facts Nexus already
+        //    puts on every snapshot (tempo-app::dto::QsoStatus) that Jimmy has been discarding
+        //    and re-deriving from raw text. Populated by the deserializer whenever present;
+        //    absent in an older EngineHost's JSON -> these stay at their defaults (null / false
+        //    / 0), which is why the Option<_> ones are nullable. NOTHING reads these yet -- the
+        //    shadow-comparison stage (Stage 5) wires them in beside the existing WsjtxMessage
+        //    parse, and only proven-equal facts migrate consumers later. See
+        //    C:\chat gpt\nexus plan.txt Section 7 Stage 3. ──
+
+        // The DX call the engine's sequencer is working (QsoStatus.dxcall). Null between QSOs.
+        public string Dxcall { get; set; }
+        // The DX's grid as the engine resolved it -- what the exchange carried, else what was
+        // decoded from this station earlier this session (QsoStatus.dxgrid). Null if unknown.
+        public string Dxgrid { get; set; }
+        // Signal report RECEIVED about our own signal, if any (QsoStatus.rx_report). Nullable:
+        // Rust Option<i32>, and "no report yet" must be distinguishable from a real 0.
+        public int? RxReport { get; set; }
+        // True if this station is calling CQ / running vs answering (QsoStatus.running). NOTE
+        // its own doc caveat: it is also set for a directed S&P call and is not cleared after
+        // the QSO -- CqRunning below is the real "a CQ run is in progress" flag.
+        public bool Running { get; set; }
+        // True while a CQ RUN is actually in progress (QsoStatus.cq_running) -- the engine's own
+        // cq_running; what the CQ/S&P toggle shows.
+        public bool CqRunning { get; set; }
+        // True when the current step has been retransmitted to its limit without the partner
+        // advancing -- the sequencer is withholding further TX (QsoStatus.stalled).
+        public bool Stalled { get; set; }
+        // How many times the current message has been transmitted this step, resetting when the
+        // partner advances (QsoStatus.tx_count) -- the engine's own "I've called them N times".
+        public int TxCount { get; set; }
     }
 
     internal class DirectRadioStatus
@@ -3269,6 +3300,37 @@ namespace WSJTX_Controller
         public double DtSec { get; set; }
         public double FreqHz { get; set; }
         public string Message { get; set; }
+
+        // ── Nexus modernization Stage 3 (additive, 2026-09-08): per-decode semantic facts Nexus
+        //    already parses and puts on every DecodeRow (tempo-app::dto::DecodeRow) that Jimmy
+        //    currently throws away and re-derives with WsjtxMessage. Populated by the
+        //    deserializer when present; absent in an older EngineHost's JSON -> defaults
+        //    (false / null / 0). NOTHING reads these yet -- Stage 5 runs them beside the
+        //    WsjtxMessage parse for shadow comparison; consumers migrate only after proven
+        //    equal. Priority set per the audit; more can be added if a later stage needs them
+        //    (worked/workedBand/newDxcc/newBand/mine/txAt are also on the wire). See
+        //    C:\chat gpt\nexus plan.txt Sections 7 (Stage 3) and 8. ──
+
+        // True if Nexus parsed this decode as a CQ (DecodeRow.is_cq).
+        public bool IsCq { get; set; }
+        // True if Nexus read this decode as addressed to my callsign (DecodeRow.directed_to_me).
+        public bool DirectedToMe { get; set; }
+        // True if Nexus classified this as a QSO-ending signoff (RR73 / 73) by the parse's own
+        // token-positional Msg::is_signoff -- so a "DM73" grid never counts (DecodeRow.signoff).
+        public bool Signoff { get; set; }
+        // The Maidenhead grid the decode carried (CQ/grid messages), else null (DecodeRow.grid).
+        public string Grid { get; set; }
+        // WSJT-X 'a' marker: the decode used a-priori (AP) assistance (DecodeRow.ap).
+        public bool Ap { get; set; }
+        // WSJT-X '?' marker: low-confidence decode, quality below the stock line (DecodeRow.low_conf).
+        public bool LowConf { get; set; }
+        // The RF/signal tier this decode is on, as Nexus's Tier enum serializes it ("FT8",
+        // "FT4", "TempoFast", ...) (DecodeRow.tier). Null in an older EngineHost's JSON.
+        public string Tier { get; set; }
+        // IR-HARQ redundancy versions combined to recover this decode: 0 = initial transmission
+        // alone; 1/2 = joint-combined that many retransmissions; -1 = not applicable
+        // (DecodeRow.rv). Left 0 when absent.
+        public int Rv { get; set; }
     }
 
     // Wire shape for the REPLY control command -- field names (once camelCase'd by
