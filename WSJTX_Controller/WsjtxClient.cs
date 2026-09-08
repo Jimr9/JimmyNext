@@ -2409,6 +2409,8 @@ namespace WSJTX_Controller
             _logbookDb?.Dispose();
             // TEMPORARY developer diagnostic -- see Classification/ClassificationParityLogger.cs.
             ClassificationParityLogger.Close();
+            // Nexus modernization Stage 5 diagnostic -- see Semantic/SemanticParityLogger.cs.
+            SemanticParityLogger.Close();
 
             SetLogFileState(false);         //close log file
         }

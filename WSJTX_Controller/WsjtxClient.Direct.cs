@@ -2069,6 +2069,27 @@ namespace WSJTX_Controller
 
                 EnqueueDecodeMessage enq = EnqueueDecodeMessage.FromStandardDecode(dmsg);
 
+                // Nexus modernization Stage 5: shadow-compare Jimmy's own WsjtxMessage parse of
+                // this decode against Nexus's parse (the Stage 3 DecodeRow flags + the Stage 4
+                // decodeSemantics envelope). Records a per-field disagreement tally always, and
+                // writes a detailed line only when logSemanticParityMismatches=True. Nothing
+                // here changes behaviour -- SemanticCutover.UseNexusSemantics is still false and
+                // no consumer reads the Nexus side yet. Remove with the Semantic/ diagnostic
+                // once the migration is field-proven. See C:\chat gpt\nexus plan.txt Section 9.
+                {
+                    string myCallForSem = myCall;
+                    var semOld = SemanticDecode.FromWsjtxMessage(normMsg, myCallForSem);
+                    DirectDecodeSemantics envForRow = null;
+                    if (snap.DecodeSemantics != null)
+                    {
+                        foreach (var e in snap.DecodeSemantics)
+                            if (e != null && string.Equals(e.RawMessage, row.Message, StringComparison.Ordinal))
+                            { envForRow = e; break; }
+                    }
+                    var semNew = SemanticDecode.FromNexus(row, envForRow, myCallForSem);
+                    SemanticParityLogger.CheckAndLog(semOld, semNew, row.Message, normMsg, CurrentBandStr, myCallForSem);
+                }
+
                 // Finishing (see _finishingCall): the just-worked station's own closing over --
                 // 73, RR73, or a bare RRR -- means both sides are done, so end Finishing right
                 // away. Its repeated R-reports are handled entirely by the engine (Nexus keeps

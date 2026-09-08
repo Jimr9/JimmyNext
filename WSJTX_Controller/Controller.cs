@@ -749,6 +749,13 @@ namespace WSJTX_Controller
                 // Set logClassificationParityMismatches=True by hand-editing the .ini file only
                 // to collect field-verification evidence for Stage A6; remove once confirmed.
                 if (iniFile.KeyExists("logClassificationParityMismatches")) ClassificationParityLogger.Enabled = iniFile.Read("logClassificationParityMismatches") == "True";
+                // Nexus modernization Stage 5+ semantic-migration valves (Semantic/*) --
+                // intentionally undocumented/not exposed in OptionsDlg. useNexusSemantics
+                // defaults FALSE (Stage 5 only shadow-compares; Stage 6+ flips it per family).
+                // logSemanticParityMismatches defaults FALSE -- set True by hand-editing the
+                // .ini to collect field-verification evidence; remove once field-proven.
+                if (iniFile.KeyExists("useNexusSemantics")) SemanticCutover.UseNexusSemantics = iniFile.Read("useNexusSemantics") == "True";
+                if (iniFile.KeyExists("logSemanticParityMismatches")) SemanticParityLogger.Enabled = iniFile.Read("logSemanticParityMismatches") == "True";
                 NativeEngine.LoadFromIni(iniFile);
                 Radio.LoadFromIni(iniFile);
                 Decode.LoadFromIni(iniFile);

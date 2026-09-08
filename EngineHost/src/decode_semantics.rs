@@ -299,4 +299,57 @@ mod tests {
     fn the_schema_version_rides_every_entry() {
         assert_eq!(sem("CQ K1ABC FN42").schema_version, SCHEMA_VERSION);
     }
+
+    /// Stage 5 shadow-comparison corpus, LOCKED to Nexus's actual parse. The Jimmy-side
+    /// SemanticShadowCorpusTests (JimmyTests.cs) uses the SAME strings and asserts these
+    /// exact values as the "Nexus" side of the diff -- keep the two in sync. `(msg, kind,
+    /// from, to, cq_dir, grid, report, addr_to_me, signoff, call_form)` for my_call W9XYZ,
+    /// no active QSO.
+    #[test]
+    fn stage5_corpus_matches_nexus_parse_exactly() {
+        let c = |m: &str| DecodeSemantics::from_decode(m, "W9XYZ", None);
+        macro_rules! row {
+            ($m:expr, $k:expr, $from:expr, $to:expr, $dir:expr, $grid:expr, $rep:expr,
+             $atm:expr, $so:expr, $cf:expr) => {{
+                let s = c($m);
+                assert_eq!(s.kind, $k, "kind for {:?}", $m);
+                assert_eq!(s.from.as_deref(), $from, "from for {:?}", $m);
+                assert_eq!(s.to.as_deref(), $to, "to for {:?}", $m);
+                assert_eq!(s.cq_direction.as_deref(), $dir, "cq_dir for {:?}", $m);
+                assert_eq!(s.grid.as_deref(), $grid, "grid for {:?}", $m);
+                assert_eq!(s.report_db, $rep, "report for {:?}", $m);
+                assert_eq!(s.addressed_to_me, $atm, "addr_to_me for {:?}", $m);
+                assert_eq!(s.signoff, $so, "signoff for {:?}", $m);
+                assert_eq!(s.call_form, $cf, "call_form for {:?}", $m);
+            }};
+        }
+        use SemCallForm::*;
+        use SemKind::*;
+        // plain + directed CQ
+        row!("CQ K1ABC FN42", Cq, Some("K1ABC"), None, None, Some("FN42"), None, false, None, Standard);
+        row!("CQ DX K1ABC FN42", DirectedCq, Some("K1ABC"), None, Some("DX"), Some("FN42"), None, false, None, Standard);
+        row!("CQ POTA K1ABC FN42", DirectedCq, Some("K1ABC"), None, Some("POTA"), Some("FN42"), None, false, None, Standard);
+        row!("CQ 040 K1ABC FN42", DirectedCq, Some("K1ABC"), None, Some("040"), Some("FN42"), None, false, None, Standard);
+        row!("CQ NA K1ABC FN42", DirectedCq, Some("K1ABC"), None, Some("NA"), Some("FN42"), None, false, None, Standard);
+        // reply w/ grid, report, R-report
+        row!("W9XYZ K1ABC FN31", Reply, Some("K1ABC"), Some("W9XYZ"), None, Some("FN31"), None, true, None, Standard);
+        row!("K7QQ K1ABC EM10", Reply, Some("K1ABC"), Some("K7QQ"), None, Some("EM10"), None, false, None, Standard);
+        row!("W9XYZ K1ABC -08", Report, Some("K1ABC"), Some("W9XYZ"), None, None, Some(-8), true, None, Standard);
+        row!("W9XYZ K1ABC +02", Report, Some("K1ABC"), Some("W9XYZ"), None, None, Some(2), true, None, Standard);
+        row!("W9XYZ K1ABC R-08", RReport, Some("K1ABC"), Some("W9XYZ"), None, None, Some(-8), true, None, Standard);
+        // signoffs, 3 subtypes, + a DM73 grid that must NOT be a signoff
+        row!("W9XYZ K1ABC RRR", Rrr, Some("K1ABC"), Some("W9XYZ"), None, None, None, true, Some(SemSignoff::Rrr), Standard);
+        row!("W9XYZ K1ABC RR73", Rr73, Some("K1ABC"), Some("W9XYZ"), None, None, None, true, Some(SemSignoff::Rr73), Standard);
+        row!("W9XYZ K1ABC 73", SevenThree, Some("K1ABC"), Some("W9XYZ"), None, None, None, true, Some(SemSignoff::SevenThree), Standard);
+        row!("W9XYZ K1ABC DM73", Reply, Some("K1ABC"), Some("W9XYZ"), None, Some("DM73"), None, true, None, Standard);
+        // compound / portable senders
+        row!("CQ F4CYH/P JN18", Cq, Some("F4CYH/P"), None, None, Some("JN18"), None, false, None, Standard);
+        row!("W9XYZ PJ4/K1ABC -08", Report, Some("PJ4/K1ABC"), Some("W9XYZ"), None, None, Some(-8), true, None, Compound);
+        // Field Day exchange
+        row!("W9XYZ K2DEF 3A WI", FieldDay, Some("K2DEF"), Some("W9XYZ"), None, None, None, true, None, Standard);
+        row!("W9XYZ K2DEF R 3A WI", FieldDay, Some("K2DEF"), Some("W9XYZ"), None, None, None, true, None, Standard);
+        // free text / not-a-report
+        row!("HPE CUAGN OM", Other, None, None, None, None, None, false, None, Unknown);
+        row!("W9XYZ K1ABC R73", Other, None, None, None, None, None, false, None, Unknown);
+    }
 }

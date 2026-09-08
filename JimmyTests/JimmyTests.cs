@@ -270,6 +270,7 @@ static class JimmyTests
         DirectModePlumbingParityTests();
         DirectDtoStage3SnapshotFieldsTests();
         DirectDtoStage4DecodeSemanticsTests();
+        SemanticShadowCorpusTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -2815,6 +2816,161 @@ static class JimmyTests
         {
             Console.WriteLine($"  FAIL  DirectDtoStage4DecodeSemanticsTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
+        }
+    }
+
+    // ── Nexus modernization Stage 5: the shadow-comparison corpus. For each representative
+    //    FT8 message it builds SemanticDecode two ways -- FromWsjtxMessage (Jimmy's own
+    //    parser) and FromNexus (fed a DirectDecodeRow + decodeSemantics envelope carrying the
+    //    values Nexus's parser actually produces, LOCKED by
+    //    EngineHost decode_semantics::tests::stage5_corpus_matches_nexus_parse_exactly) --
+    //    runs SemanticParityLogger.CheckAndLog, and asserts the categorised outcome. Where the
+    //    two AGREE across the corpus, that fact is safe for Stage 6+ to migrate. Where they
+    //    DISAGREE, the disagreement is classified here (Nexus improvement accepted / intentional
+    //    mapping / Jimmy-parser-stays) so nothing migrates on an un-understood difference. ──
+    static void SemanticShadowCorpusTests()
+    {
+        Console.WriteLine("\n── Semantic shadow corpus (WsjtxMessage vs Nexus parse) ──");
+        const string MY = "W9XYZ";
+
+        // (msg, envKind, from, to, cqDir, grid, reportDb, addrToMe, signoff, callForm)
+        // -- envelope values are exactly what EngineHost/src/decode_semantics.rs emits for the
+        //    same string (proven by the Rust corpus test).
+        var corpus = new (string msg, string kind, string from, string to, string dir,
+                          string grid, int? rep, bool atm, string signoff, string callForm)[]
+        {
+            ("CQ K1ABC FN42",        "cq",         "K1ABC", null,  null,   "FN42", null, false, null,        "standard"),
+            ("CQ DX K1ABC FN42",     "directedCq", "K1ABC", null,  "DX",   "FN42", null, false, null,        "standard"),
+            ("CQ POTA K1ABC FN42",   "directedCq", "K1ABC", null,  "POTA", "FN42", null, false, null,        "standard"),
+            ("CQ 040 K1ABC FN42",    "directedCq", "K1ABC", null,  "040",  "FN42", null, false, null,        "standard"),
+            ("CQ NA K1ABC FN42",     "directedCq", "K1ABC", null,  "NA",   "FN42", null, false, null,        "standard"),
+            ("W9XYZ K1ABC FN31",     "reply",      "K1ABC", "W9XYZ", null, "FN31", null, true,  null,        "standard"),
+            ("K7QQ K1ABC EM10",      "reply",      "K1ABC", "K7QQ",  null, "EM10", null, false, null,        "standard"),
+            ("W9XYZ K1ABC -08",      "report",     "K1ABC", "W9XYZ", null, null,  -8,    true,  null,        "standard"),
+            ("W9XYZ K1ABC +02",      "report",     "K1ABC", "W9XYZ", null, null,   2,    true,  null,        "standard"),
+            ("W9XYZ K1ABC R-08",     "rReport",    "K1ABC", "W9XYZ", null, null,  -8,    true,  null,        "standard"),
+            ("W9XYZ K1ABC RRR",      "rrr",        "K1ABC", "W9XYZ", null, null,  null,  true,  "rrr",       "standard"),
+            ("W9XYZ K1ABC RR73",     "rr73",       "K1ABC", "W9XYZ", null, null,  null,  true,  "rr73",      "standard"),
+            ("W9XYZ K1ABC 73",       "sevenThree", "K1ABC", "W9XYZ", null, null,  null,  true,  "sevenThree","standard"),
+            ("W9XYZ K1ABC DM73",     "reply",      "K1ABC", "W9XYZ", null, "DM73", null, true,  null,        "standard"),
+            ("CQ F4CYH/P JN18",      "cq",         "F4CYH/P", null,  null, "JN18", null, false, null,        "standard"),
+            ("W9XYZ PJ4/K1ABC -08",  "report",     "PJ4/K1ABC", "W9XYZ", null, null, -8, true, null,        "compound"),
+            ("W9XYZ K2DEF 3A WI",    "fieldDay",   "K2DEF", "W9XYZ", null, null,  null,  true,  null,        "standard"),
+            ("HPE CUAGN OM",         "other",      null,    null,  null,   null,  null,  false, null,        "unknown"),
+            ("W9XYZ K1ABC R73",      "other",      null,    null,  null,   null,  null,  false, null,        "unknown"),
+        };
+
+        SemanticParityLogger.Reset();
+        int agreeAll = 0;
+        var disagreeCases = new List<string>();
+
+        try
+        {
+            foreach (var e in corpus)
+            {
+                var row = new DirectDecodeRow
+                {
+                    Message = e.msg,
+                    IsCq = e.kind == "cq" || e.kind == "directedCq",
+                    DirectedToMe = e.atm,
+                    // Nexus DecodeRow.signoff is true for RR73 | 73 (not RRR).
+                    Signoff = e.signoff == "rr73" || e.signoff == "sevenThree",
+                    Grid = e.grid,
+                };
+                var env = new DirectDecodeSemantics
+                {
+                    SchemaVersion = 1,
+                    RawMessage = e.msg,
+                    Kind = e.kind,
+                    From = e.from,
+                    To = e.to,
+                    CqDirection = e.dir,
+                    Grid = e.grid,
+                    ReportDb = e.rep,
+                    AddressedToMe = e.atm,
+                    Signoff = e.signoff,
+                    CallForm = e.callForm,
+                    QsoRelation = "none",
+                };
+
+                var semOld = SemanticDecode.FromWsjtxMessage(e.msg, MY);
+                var semNew = SemanticDecode.FromNexus(row, env, MY);
+
+                int before = SemanticParityLogger.Disagreed;
+                SemanticParityLogger.CheckAndLog(semOld, semNew, e.msg, e.msg, "20m", MY);
+                if (SemanticParityLogger.Disagreed == before) agreeAll++;
+                else disagreeCases.Add(e.msg);
+            }
+
+            Console.WriteLine($"  corpus: {SemanticParityLogger.Compared} compared, " +
+                              $"{SemanticParityLogger.Disagreed} with >=1 field disagreement");
+            foreach (var kv in SemanticParityLogger.DisagreementsByField)
+                Console.WriteLine($"    field '{kv.Key}': {kv.Value} disagreement(s)");
+            foreach (var m in disagreeCases)
+                Console.WriteLine($"    disagreed: \"{m}\"");
+
+            // ── Findings / classification (asserted so a regression in either parser trips) ──
+            //
+            // Stage 5 result: the CORE migrateable protocol facts agree for EVERY corpus
+            // entry. The only disagreements are cases where Nexus's parser is strictly more
+            // correct than WsjtxMessage -- exactly the direction the migration wants -- and
+            // each is classified below.
+
+            int Dis(string f) => SemanticParityLogger.DisagreementsByField.TryGetValue(f, out int n) ? n : 0;
+
+            // (A) SAFE TO MIGRATE NOW -- zero disagreement across the corpus:
+            //     the CQ facts, the grid, the numeric report, and every report/signoff kind.
+            foreach (var f in new[] { "IsCq", "IsDirectedCq", "CqTarget", "Grid", "ReportDb",
+                                      "IsReport", "IsRReport", "IsRrr", "IsRr73", "Is73" })
+                Check($"core fact '{f}': zero disagreement across the corpus", Dis(f) == 0, true);
+
+            // (B) From / To / AddressedToMe -- one disagreement each, all on the SAME entry:
+            //     "W9XYZ K1ABC R73". "R73" is not a valid report (73 is outside WSJT-X's
+            //     -50..+49 report range), so it is free text. WsjtxMessage nonetheless splits
+            //     any 3-token string into <to> <de>, inventing From=K1ABC / To=W9XYZ /
+            //     AddressedToMe=true from garbage; Nexus's Msg::parse correctly returns Other
+            //     with no sender/recipient. FINDING: Nexus authoritative -- and SAFER, a
+            //     migrating consumer no longer treats a malformed decode as a workable station.
+            Check("From disagreement: exactly 1, and only on the invalid 'R73' entry",
+                  Dis("From") == 1 && disagreeCases.Contains("W9XYZ K1ABC R73"), true);
+            Check("To disagreement: exactly 1 (same 'R73' entry)", Dis("To") == 1, true);
+            Check("AddressedToMe disagreement: exactly 1 (same 'R73' entry)", Dis("AddressedToMe") == 1, true);
+
+            // (C) Kind -- one disagreement, on "W9XYZ K2DEF 3A WI" (Field Day). The
+            //     WsjtxMessage side of this comparison deliberately does NOT classify Field
+            //     Day (contest handling stays Jimmy policy/parser per the plan, Section 8.1
+            //     class 2), so it reports "other" where Nexus reports "fieldDay". FINDING:
+            //     expected + acceptable -- a consumer that needs the FD kind reads Jimmy's own
+            //     IsContest; the envelope's fieldDay marker is additive, not a regression.
+            Check("Kind disagreement: exactly 1, and only the Field Day entry",
+                  Dis("Kind") == 1 && disagreeCases.Contains("W9XYZ K2DEF 3A WI"), true);
+
+            // (D) CallForm -- two disagreements: "CQ F4CYH/P JN18" (WsjtxMessage sees the '/'
+            //     and wrongly says "compound"; Nexus's is_std_call knows /P rides its own
+            //     protocol bit and correctly says "standard") and "W9XYZ K1ABC R73"
+            //     (WsjtxMessage says "standard" off the garbage-extracted K1ABC; Nexus says
+            //     "unknown", no sender). FINDING: Nexus authoritative on call form -- this was
+            //     always the plan (WsjtxMessage has no real classifier).
+            Check("CallForm disagreement: exactly 2 (the /P CQ and the invalid R73)",
+                  Dis("CallForm") == 2, true);
+
+            // Net: exactly 3 corpus entries disagree, all understood + classified above.
+            Check("exactly 3 corpus entries have any disagreement", SemanticParityLogger.Disagreed == 3, true);
+            Check("the 3 are F4CYH/P CQ, the Field Day exchange, and the invalid R73",
+                  disagreeCases.Count == 3
+                  && disagreeCases.Contains("CQ F4CYH/P JN18")
+                  && disagreeCases.Contains("W9XYZ K2DEF 3A WI")
+                  && disagreeCases.Contains("W9XYZ K1ABC R73"), true);
+            Check("corpus size sanity", SemanticParityLogger.Compared == corpus.Length, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SemanticShadowCorpusTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            SemanticParityLogger.Reset();
         }
     }
 
