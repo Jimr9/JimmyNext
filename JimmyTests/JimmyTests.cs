@@ -274,6 +274,7 @@ static class JimmyTests
         SemanticStage6DisplayQueueParityTests();
         SemanticStage7ObservationParityTests();
         SemanticStage8SmartStartForkParityTests();
+        SemanticStage9StartPathParityTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -3257,6 +3258,77 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  SemanticStage8SmartStartForkParityTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
+    // ── Nexus modernization Stage 9: Enter / ReplyTo / Work-Now / Smart-Start-dispatch all
+    //    converge on ReplyTo(dmsg) -> one Direct REPLY -> Nexus sequences. ReplyTo's
+    //    decode-derived facts (To for the debug line, IsCq for the log-dict save, AddressedToMe
+    //    for the answering-our-CQ frequency-placement branch) and ProcessDecodeMsg's
+    //    directed-alert priority upgrade (CqTarget) now read through EffectiveSemantic. This
+    //    proves each of those facts is identical WsjtxMessage vs Nexus for a start-path corpus,
+    //    so which station ReplyTo works, which side it presents, and the WANTED_CQ upgrade are
+    //    unchanged. (Jimmy builds NO on-air message and decides NO advancement in Direct mode --
+    //    that is all Nexus; ReplyTo only sends the REPLY intent.) ──
+    static void SemanticStage9StartPathParityTests()
+    {
+        Console.WriteLine("\n── Semantic Stage 9: start-path (ReplyTo / priority) fact parity ──");
+        const string MY = "KB0UZT";
+        try
+        {
+            var corpus = new (string msg, string kind, string from, string to, string dir, string grid, int? rep, bool atm, string signoff)[]
+            {
+                ($"CQ N0DX EM10",        "cq",         "N0DX", null,  null,   "EM10", null, false, null),
+                ($"CQ DX N0DX EM10",     "directedCq", "N0DX", null,  "DX",   "EM10", null, false, null),
+                ($"CQ POTA N0DX EM10",   "directedCq", "N0DX", null,  "POTA", "EM10", null, false, null),
+                ($"{MY} N0DX -07",       "report",     "N0DX", MY,    null,   null,  -7,    true,  null),
+                ($"{MY} N0DX R-07",      "rReport",    "N0DX", MY,    null,   null,  -7,    true,  null),
+                ($"{MY} N0DX RR73",      "rr73",       "N0DX", MY,    null,   null,  null,  true,  "rr73"),
+                ($"{MY} N0DX FN31",      "reply",      "N0DX", MY,    null,   "FN31", null, true,  null),
+                ($"W1XYZ N0DX -07",      "report",     "N0DX", "W1XYZ", null, null,  -7,    false, null),
+                ($"W1XYZ N0DX EM10",     "reply",      "N0DX", "W1XYZ", null, "EM10", null, false, null),
+            };
+
+            int mismatch = 0;
+            foreach (var e in corpus)
+            {
+                var oldSem = SemanticDecode.FromWsjtxMessage(e.msg, MY);
+                var row = new DirectDecodeRow
+                {
+                    Message = e.msg,
+                    IsCq = e.kind == "cq" || e.kind == "directedCq",
+                    DirectedToMe = e.atm,
+                    Signoff = e.signoff == "rr73" || e.signoff == "sevenThree",
+                    Grid = e.grid,
+                };
+                var env = new DirectDecodeSemantics
+                {
+                    SchemaVersion = 1, RawMessage = e.msg, Kind = e.kind, From = e.from, To = e.to,
+                    CqDirection = e.dir, Grid = e.grid, ReportDb = e.rep, AddressedToMe = e.atm,
+                    Signoff = e.signoff, CallForm = "standard", QsoRelation = "none",
+                };
+                var newSem = SemanticDecode.FromNexus(row, env, MY);
+
+                // The exact facts ReplyTo + the priority upgrade consume.
+                bool ok =
+                    string.Equals(oldSem.To, newSem.To, StringComparison.OrdinalIgnoreCase) &&
+                    oldSem.IsCq == newSem.IsCq &&
+                    oldSem.AddressedToMe == newSem.AddressedToMe &&
+                    string.Equals(oldSem.CqTarget, newSem.CqTarget, StringComparison.OrdinalIgnoreCase);
+                if (!ok)
+                {
+                    mismatch++;
+                    Console.WriteLine($"    MISMATCH \"{e.msg}\": To {oldSem.To}/{newSem.To} IsCq {oldSem.IsCq}/{newSem.IsCq} " +
+                        $"atm {oldSem.AddressedToMe}/{newSem.AddressedToMe} cqT {oldSem.CqTarget}/{newSem.CqTarget}");
+                }
+            }
+            Check("start-path facts (To / IsCq / AddressedToMe / CqTarget) identical WsjtxMessage vs Nexus",
+                  mismatch == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SemanticStage9StartPathParityTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
     }

@@ -1746,7 +1746,7 @@ namespace WSJTX_Controller
             // classification itself must not depend on filter state.
             if (dmsg.Priority == (int)CallPriority.DEFAULT && dmsg.IsCQ())
             {
-                string directedTo = WsjtxMessage.DirectedTo(dmsg.Message);
+                string directedTo = dmsg.EffectiveSemantic(myCall).CqTarget;   // Stage 9 (was WsjtxMessage.DirectedTo)
                 if (IsDirectedAlert(directedTo, classification.IsDx))
                     dmsg.Priority = (int)CallPriority.WANTED_CQ;
             }
@@ -3764,8 +3764,19 @@ namespace WSJTX_Controller
                 return;
             }
 
+            // Nexus modernization Stage 9: this is the ONE shared reply/start dispatch. Plain
+            // Enter (NextCall), Work-Watched-Station-Now, and the Smart Start dispatch all reach
+            // here; each differs only in the policy gate BEFORE the call. Jimmy resolves the
+            // station (dmsg.DeCall()) and RX/TX side, prepares the log row, and sends exactly
+            // one Direct REPLY -- Nexus (Engine::call_station_ctx) owns TX parity, message
+            // construction, advancement, retry and termination. Jimmy does NOT sequence.
+            // The decode-derived facts read below come from EffectiveSemantic; Stage 5 proved
+            // To / IsCq / AddressedToMe / CqTarget identical, so which station this works and
+            // which side it presents are unchanged. dmsg.DeCall() (the station) stays a DTO
+            // method -- unchanged on both paths.
             string nCall = dmsg.DeCall();
-            string toCall = WsjtxMessage.ToCall(dmsg.Message);
+            var replySem = dmsg.EffectiveSemantic(myCall);
+            string toCall = replySem.To;
             DebugOutput($"{Time()} ReplyTo, nCall:'{nCall}' toCall:{toCall}");
 
             // Advanced (TX1/TX2) layout: sync txFirst to this reply's period so the panel holding
@@ -3775,7 +3786,7 @@ namespace WSJTX_Controller
             // here at dispatch. No-op when already synced (the guard inside makes it harmless).
             SyncAdvancedLayoutTxFirst(dmsg, "ReplyTo (advanced UI, Smart Start / Work Now)");
 
-            if (WsjtxMessage.IsCQ(dmsg.Message))                  //save the grid for logging
+            if (replySem.IsCq)                  //save the grid for logging   (Stage 9)
             {
                 AddAllCallDict(nCall, dmsg);
             }
@@ -3822,9 +3833,11 @@ namespace WSJTX_Controller
             // which is always what the operator wants when working a specific station.
             if (nCall != callInProg) _manualFreqThisQso = false;
             uint theirHz = dmsg.DeltaFrequency > 0 ? (uint)dmsg.DeltaFrequency : 0;
+            // Stage 9: curCmd is OUR last transmitted text (not a decode) -> stays on
+            // WsjtxMessage; the decode facts come from EffectiveSemantic.
             bool answeringOurCq = curCmd != null && WsjtxMessage.IsCQ(curCmd)
-                && !WsjtxMessage.IsCQ(dmsg.Message)
-                && string.Equals(WsjtxMessage.ToCall(dmsg.Message), myCall, StringComparison.OrdinalIgnoreCase);
+                && !replySem.IsCq
+                && replySem.AddressedToMe;
 
             if (theirHz > 0) DirectSetRxOffset(theirHz);
 
