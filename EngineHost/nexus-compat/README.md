@@ -15,6 +15,28 @@ build/test-toolchain interactions in Nexus's own build script and test suite).
 Every patch here is small, isolated to one file, and removed the moment official Nexus provides
 equivalent functionality -- see "Checking a patch against a newer Nexus" below.
 
+## Currency check (do this at every significant release)
+
+Run `scripts/nexus-status.ps1` (read-only -- it never changes the pin). It prints the Jimmy
+base vs the current upstream stable tag and `main`, the commits-behind counts, and the ordered
+patch manifest with SHA-256s. `pin.txt` carries a `# DISPOSITION:` line stating the current
+decision (upgrade to stable / stay pinned with reason+expiry / take a named intermediate fix);
+update its date + text at each release. `scripts/prepare-nexus.ps1` records the full provenance
+(repo, ref, resolved commit + date, upstream stable/main heads at prep time, per-patch SHA-256,
+tool versions) into `EngineHost/.nexus-src-info.json`. This process exists because the
+pre-v1.10.3 integration drifted ~175 commits behind `main` silently -- exact pinning gives
+reproducibility, this gives visibility.
+
+## Eight-patch re-assessment -- 2026-09-08 (Nexus modernization Stage 12)
+
+Re-checked against the current pin `v1.10.3` (`7618390`). Decisions from the
+`93b9f012 -> v1.10.3` upgrade (below) stand unchanged: **all eight KEEP**. `nexus-status.ps1`
+confirmed the pin is AT the current stable tag; upstream `main` is ~173 commits ahead but is
+overwhelmingly new-scope (JS8, Winlink, contest widening, FT-710 scope UI, a tempo-audio
+process refactor) -- no ordinary-FT8/FT4 safety or API improvement there outweighs the stable
+boundary. Next re-assessment at the next Nexus stable tag. Long-term goal: this count decreases
+as upstream matures; nothing here is superseded at v1.10.3.
+
 ## Rules
 
 - The real `C:\claude\nexus` checkout (or whatever machine-local Nexus clone is configured) is

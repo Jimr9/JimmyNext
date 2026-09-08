@@ -193,14 +193,47 @@ Do NOT force it. Instead:
 }
 $ErrorActionPreference = $prevEAP
 
-# --- Record state for the fast-path check on future runs --------------------------------
+# --- Record state + full provenance for the fast-path check and release evidence -------
+# Nexus modernization Stage 12: the provenance block below is what a release review and
+# scripts/nexus-status.ps1 read to see EXACTLY what was built -- repo, requested ref,
+# resolved commit + its date, the upstream stable/main heads at the moment of preparation,
+# every patch file with its SHA-256, and the tool versions. `stateHash` (pin commit + patch
+# hashes) still drives the "already prepared, nothing to do" fast path on re-runs.
+$prevEAP2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+$commitDate = (& git -C $StagingDir show -s --format=%cI $actualCommit 2>$null | Out-String).Trim()
+& git -C $StagingDir fetch --quiet --tags origin main 2>$null
+$upstreamMain = (& git -C $StagingDir rev-parse FETCH_HEAD 2>$null | Out-String).Trim()
+if (-not $upstreamMain -or $upstreamMain -notmatch '^[0-9a-f]{40}$') {
+    $upstreamMain = (& git ls-remote $Pin.NEXUS_REPO refs/heads/main 2>$null | Out-String).Split("`t")[0].Trim()
+}
+$upstreamStable = ""
+$stableTags = & git -C $StagingDir tag --list "v*" 2>$null | Where-Object { $_ -match '^v\d+\.\d+\.\d+$' }
+if ($stableTags) {
+    $newest = $stableTags | Sort-Object { [version]($_.TrimStart('v')) } | Select-Object -Last 1
+    $upstreamStable = "$newest " + (& git -C $StagingDir rev-list -n 1 $newest 2>$null | Out-String).Trim()
+}
+$patchTool = (& $PatchExe --version 2>$null | Select-Object -First 1 | Out-String).Trim()
+$gitVer    = (& git --version 2>$null | Out-String).Trim()
+$ErrorActionPreference = $prevEAP2
+
+$patchManifest = @{}
+foreach ($pf in $patchFiles) { $patchManifest[$pf.Name] = (Get-FileHash $pf.FullName -Algorithm SHA256).Hash }
+
 @{
-    nexusTag    = $Pin.NEXUS_TAG
-    nexusCommit = $Pin.NEXUS_COMMIT
-    patchCount  = $patchFiles.Count
-    stateHash   = $expectedHash
-    preparedAt  = (Get-Date).ToString("o")
-} | ConvertTo-Json | Set-Content -Path $InfoFile -Encoding utf8
+    nexusRepo             = $Pin.NEXUS_REPO
+    nexusRef              = $(if ($Pin.ContainsKey("NEXUS_REF")) { $Pin.NEXUS_REF } else { $Pin.NEXUS_TAG })
+    nexusTag              = $Pin.NEXUS_TAG
+    nexusCommit           = $Pin.NEXUS_COMMIT
+    nexusCommitDate       = $commitDate
+    upstreamStableAtPrep  = $upstreamStable
+    upstreamMainAtPrep    = $upstreamMain
+    patchCount            = $patchFiles.Count
+    patchManifest         = $patchManifest
+    patchTool             = $patchTool
+    gitVersion            = $gitVer
+    stateHash             = $expectedHash
+    preparedAt            = (Get-Date).ToString("o")
+} | ConvertTo-Json -Depth 4 | Set-Content -Path $InfoFile -Encoding utf8
 
 Write-Host ""
 Write-Host "Nexus staging checkout ready: $StagingDir"
