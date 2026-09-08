@@ -15,6 +15,12 @@ namespace WSJTX_Controller
     // it never discards either source.
     public static class SemanticCutover
     {
-        public static bool UseNexusSemantics = false;
+        // Master valve. TRUE from Stage 6: migrated consumers (see EffectiveSemantic) read
+        // Nexus's own FT8/FT4 parse. Set useNexusSemantics=False in the .ini to force EVERY
+        // migrated consumer back onto WsjtxMessage in one move (full rollback) -- the
+        // WsjtxMessage path stays computed alongside, so nothing is lost. Only the call sites
+        // a given Stage has actually converted read through EffectiveSemantic; the rest still
+        // call WsjtxMessage directly until their Stage migrates them.
+        public static bool UseNexusSemantics = true;
     }
 }

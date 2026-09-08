@@ -229,7 +229,11 @@ namespace WSJTX_Controller
             }
             string country = countryName.Length > 0 ? $", {countryName}" : "";
 
-            string g = WsjtxMessage.Grid(d.Message);
+            // Nexus modernization Stage 6: grid / directed-CQ target for this row come from
+            // EffectiveSemantic (Nexus's parse when the cutover is on, WsjtxMessage otherwise).
+            // Stage 5 proved Grid and CqTarget byte-identical between the two across the corpus.
+            var sem = d.EffectiveSemantic(myCall);
+            string g = sem.Grid;
             string grid = g == null ? "" : $", {SpacifyPayload(g)}";
 
             if (ctrl.showUsStateCheckBox.Checked &&
@@ -253,7 +257,7 @@ namespace WSJTX_Controller
 
             string oe = debug ? $", {d.SinceMidnight.Minutes.ToString().PadLeft(2, '0')}:{d.SinceMidnight.Seconds.ToString().PadLeft(2, '0')}" : "";
 
-            string to = WsjtxMessage.DirectedTo(d.Message);
+            string to = sem.CqTarget;
             string dirTo = (to == null ? "" : $" {to}");
             string callp = $"{Spacify(call)}";
             string pri = (d.Priority == (int)CallPriority.TO_MYCALL) ? " replying" : (d.Priority == (int)CallPriority.WANTED_CQ ? dirTo : "");
@@ -350,7 +354,7 @@ namespace WSJTX_Controller
                 {
                     string catTag;
                     if (d.Category == CallCategory.WANTED_CQ)
-                        catTag = WsjtxMessage.DirectedTo(d.Message) ?? "Dir CQ";
+                        catTag = d.EffectiveSemantic(myCall).CqTarget ?? "Dir CQ";   // Stage 6
                     else if (d.Category == CallCategory.STILL_NEEDED)
                         catTag = _awardTagger.AwardDisplayName(d) + " Needed";
                     else
@@ -371,7 +375,7 @@ namespace WSJTX_Controller
                 // Decode's audio offset -- opt-in via the Row Order editor.
                 string freq = d.DeltaFrequency > 0 ? $", {d.DeltaFrequency} Hz" : "";
 
-                string g = WsjtxMessage.Grid(d.Message);
+                string g = d.EffectiveSemantic(myCall).Grid;   // Stage 6
                 string grid = ctrl.rawShowGrid && g != null ? $", {g}" : "";
 
                 string country = ctrl.rawShowCountry && classification.Country.Length > 0 ? $", {classification.Country}" : "";
@@ -439,7 +443,7 @@ namespace WSJTX_Controller
                 if (string.IsNullOrEmpty(d.DeCall())) return false;
 
                 bool isNewCtyOnBand    = classification.IsNewCountryOnBand;
-                bool isDirAlert        = d.IsCQ() && IsDirectedAlert(WsjtxMessage.DirectedTo(d.Message), classification.IsDx);
+                bool isDirAlert        = d.IsCQ() && IsDirectedAlert(d.EffectiveSemantic(myCall).CqTarget, classification.IsDx);   // Stage 6
                 bool isWantedDirected  = ctrl.replyDirCqCheckBox.Checked && isDirAlert;
 
                 if (!isNewCtyOnBand && !isWantedDirected)
@@ -473,7 +477,8 @@ namespace WSJTX_Controller
             bool isDirected = false;
             if (!isCq && !isDxCq && !isPota && !isSota && !isRR73 && !is73)
             {
-                isReport   = WsjtxMessage.IsReport(d.Message) || WsjtxMessage.IsRogerReport(d.Message);
+                var semR = d.EffectiveSemantic(myCall);   // Stage 6: report / roger-report facts
+                isReport   = semR.IsReport || semR.IsRReport;
                 isDirected = !isReport;
             }
 

@@ -42,8 +42,9 @@ namespace WSJTX_Controller
                 if (call != null && _wc.callDict.ContainsKey(call))
                 {
                     //check for call saved as a low-priority CQ but now high-priority call to myCall
+                    // Stage 6: grid comes from EffectiveSemantic (Stage 5 proved Grid identical).
                     if ((msg.Priority < dmsg.Priority)
-                        || (WsjtxMessage.Grid(dmsg.Message) == null && WsjtxMessage.Grid(msg.Message) != null))
+                        || (dmsg.EffectiveSemantic(_wc.myCall).Grid == null && msg.EffectiveSemantic(_wc.myCall).Grid != null))
                     {
                         if (_wc.IsCorrectTimePeriodForMode(msg))
                         {
@@ -160,7 +161,7 @@ namespace WSJTX_Controller
                          msgCountry == "USA" &&
                          _wc.lookupManager != null &&
                          _wc.lookupManager.CanAutoQueue(call) &&
-                         WsjtxClient.GridToUsState(WsjtxMessage.Grid(msg.Message)) == null)
+                         WsjtxClient.GridToUsState(msg.EffectiveSemantic(_wc.myCall).Grid) == null)   // Stage 6
                     _wc.lookupManager.QueueAutoLookup(call);
                 if (_wc.debugDetail) _wc.DebugOutput($"{WsjtxClient.spacer}enqueued {call}{_wc.nl}{CallQueueString()}");
                 _wc.UpdateMaxTxRepeat();

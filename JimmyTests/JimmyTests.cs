@@ -271,6 +271,7 @@ static class JimmyTests
         DirectDtoStage3SnapshotFieldsTests();
         DirectDtoStage4DecodeSemanticsTests();
         SemanticShadowCorpusTests();
+        SemanticStage6DisplayQueueParityTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -2971,6 +2972,125 @@ static class JimmyTests
         finally
         {
             SemanticParityLogger.Reset();
+        }
+    }
+
+    // ── Nexus modernization Stage 6: display + call-queue call sites now read their FT8/FT4
+    //    facts through EnqueueDecodeMessage.EffectiveSemantic(myCall). This proves (1) the
+    //    EffectiveSemantic plumbing (cutover on -> Nexus's attached SemanticDecode; off or no
+    //    attachment -> WsjtxMessage), and (2) that the SPECIFIC facts the migrated sites
+    //    consume -- Grid, CqTarget, reply-ness, (RR)73-ness, report/roger-report-ness -- are
+    //    identical with the cutover ON vs OFF for a display/queue-relevant corpus, so rendered
+    //    rows and queue-admission decisions are unchanged. ──
+    static void SemanticStage6DisplayQueueParityTests()
+    {
+        Console.WriteLine("\n── Semantic Stage 6: display + call-queue EffectiveSemantic parity ──");
+        const string MY = "W9XYZ";
+        bool savedCutover = SemanticCutover.UseNexusSemantics;
+        try
+        {
+            // (msg, envKind, from, to, cqDir, grid, reportDb, addrToMe, signoff, callForm)
+            // -- LOCKED by EngineHost decode_semantics::tests::stage5_corpus_matches_nexus_parse_exactly.
+            var corpus = new (string msg, string kind, string from, string to, string dir,
+                              string grid, int? rep, bool atm, string signoff, string callForm)[]
+            {
+                ("CQ K1ABC FN42",      "cq",         "K1ABC", null,    null,   "FN42", null, false, null,        "standard"),
+                ("CQ DX K1ABC FN42",   "directedCq", "K1ABC", null,    "DX",   "FN42", null, false, null,        "standard"),
+                ("CQ POTA K1ABC FN42", "directedCq", "K1ABC", null,    "POTA", "FN42", null, false, null,        "standard"),
+                ("CQ NA K1ABC FN42",   "directedCq", "K1ABC", null,    "NA",   "FN42", null, false, null,        "standard"),
+                ("W9XYZ K1ABC FN31",   "reply",      "K1ABC", "W9XYZ", null,   "FN31", null, true,  null,        "standard"),
+                ("K7QQ K1ABC EM10",    "reply",      "K1ABC", "K7QQ",  null,   "EM10", null, false, null,        "standard"),
+                ("W9XYZ K1ABC -08",    "report",     "K1ABC", "W9XYZ", null,   null,  -8,    true,  null,        "standard"),
+                ("W9XYZ K1ABC R-08",   "rReport",    "K1ABC", "W9XYZ", null,   null,  -8,    true,  null,        "standard"),
+                ("W9XYZ K1ABC RRR",    "rrr",        "K1ABC", "W9XYZ", null,   null,  null,  true,  "rrr",       "standard"),
+                ("W9XYZ K1ABC RR73",   "rr73",       "K1ABC", "W9XYZ", null,   null,  null,  true,  "rr73",      "standard"),
+                ("W9XYZ K1ABC 73",     "sevenThree", "K1ABC", "W9XYZ", null,   null,  null,  true,  "sevenThree","standard"),
+                ("W9XYZ K1ABC DM73",   "reply",      "K1ABC", "W9XYZ", null,   "DM73", null, true,  null,        "standard"),
+                ("CQ F4CYH/P JN18",    "cq",         "F4CYH/P", null,  null,   "JN18", null, false, null,        "standard"),
+            };
+
+            EnqueueDecodeMessage MkEnq(string msg, bool attachNexus, (string,string,string,string,string,string,int?,bool,string,string) e)
+            {
+                var d = new DecodeMessage { Message = msg, Mode = "~", Snr = -10 };
+                var enq = EnqueueDecodeMessage.FromStandardDecode(d);
+                if (attachNexus)
+                {
+                    var row = new DirectDecodeRow
+                    {
+                        Message = msg,
+                        IsCq = e.Item2 == "cq" || e.Item2 == "directedCq",
+                        DirectedToMe = e.Item8,
+                        Signoff = e.Item9 == "rr73" || e.Item9 == "sevenThree",
+                        Grid = e.Item6,
+                    };
+                    var env = new DirectDecodeSemantics
+                    {
+                        SchemaVersion = 1, RawMessage = msg, Kind = e.Item2, From = e.Item3, To = e.Item4,
+                        CqDirection = e.Item5, Grid = e.Item6, ReportDb = e.Item7, AddressedToMe = e.Item8,
+                        Signoff = e.Item9, CallForm = e.Item10, QsoRelation = "none",
+                    };
+                    enq.Semantic = SemanticDecode.FromNexus(row, env, MY);
+                }
+                return enq;
+            }
+
+            // (1) EffectiveSemantic plumbing.
+            {
+                var e = corpus[0];
+                var enqAttached = MkEnq(e.msg, true, (e.msg, e.kind, e.from, e.to, e.dir, e.grid, e.rep, e.atm, e.signoff, e.callForm));
+                var enqBare = MkEnq(e.msg, false, default);
+
+                SemanticCutover.UseNexusSemantics = true;
+                Check("cutover ON + attached -> returns the Nexus SemanticDecode",
+                      ReferenceEquals(enqAttached.EffectiveSemantic(MY), enqAttached.Semantic), true);
+                Check("cutover ON + NO attachment -> falls back to WsjtxMessage",
+                      enqBare.EffectiveSemantic(MY).Source == "wsjtx", true);
+
+                SemanticCutover.UseNexusSemantics = false;
+                Check("cutover OFF -> WsjtxMessage even when attached",
+                      enqAttached.EffectiveSemantic(MY).Source == "wsjtx", true);
+            }
+
+            // (2) The migrated facts agree ON vs OFF for every corpus entry.
+            int mismatches = 0;
+            foreach (var e in corpus)
+            {
+                var enq = MkEnq(e.msg, true, (e.msg, e.kind, e.from, e.to, e.dir, e.grid, e.rep, e.atm, e.signoff, e.callForm));
+
+                SemanticCutover.UseNexusSemantics = false;
+                var off = enq.EffectiveSemantic(MY);
+                SemanticCutover.UseNexusSemantics = true;
+                var on = enq.EffectiveSemantic(MY);
+
+                bool ok =
+                    string.Equals(off.Grid, on.Grid, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(off.CqTarget, on.CqTarget, StringComparison.OrdinalIgnoreCase) &&
+                    (off.Kind == "reply") == (on.Kind == "reply") &&
+                    (off.IsRr73 || off.Is73) == (on.IsRr73 || on.Is73) &&
+                    (off.IsReport || off.IsRReport) == (on.IsReport || on.IsRReport) &&
+                    off.IsCq == on.IsCq &&
+                    off.IsDirectedCq == on.IsDirectedCq;
+                if (!ok)
+                {
+                    mismatches++;
+                    Console.WriteLine($"    MISMATCH on \"{e.msg}\": " +
+                        $"grid {off.Grid}/{on.Grid} cqT {off.CqTarget}/{on.CqTarget} " +
+                        $"reply {(off.Kind=="reply")}/{(on.Kind=="reply")} " +
+                        $"73 {(off.IsRr73||off.Is73)}/{(on.IsRr73||on.Is73)} " +
+                        $"rep {(off.IsReport||off.IsRReport)}/{(on.IsReport||on.IsRReport)}");
+                }
+            }
+            Check("every corpus entry: the migrated display/queue facts are identical ON vs OFF",
+                  mismatches == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SemanticStage6DisplayQueueParityTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            SemanticCutover.UseNexusSemantics = savedCutover;
         }
     }
 

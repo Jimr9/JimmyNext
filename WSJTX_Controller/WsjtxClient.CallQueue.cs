@@ -35,20 +35,27 @@ namespace WSJTX_Controller
             // EffectiveClassification() instead of directly off the wire.
             ClassifiedCall classification = emsg.EffectiveClassification();
 
+            // Nexus modernization Stage 6: the message-type facts below come from
+            // EffectiveSemantic (Nexus's parse when the cutover is on). Stage 5 proved
+            // CqTarget / Kind=="reply" / IsRr73|Is73 / Grid byte-identical to WsjtxMessage's
+            // DirectedTo / IsReply / Is73orRR73 / Grid across the corpus. deCall/toCall stay on
+            // WsjtxMessage for now -- they carry the "CQ"/null convention that this method's
+            // callers depend on; migrating them is Stage 9 (shared start path) work.
+            var sem = emsg.EffectiveSemantic(myCall);
             string deCall = WsjtxMessage.DeCall(msg);       //known to not be null
             string toCall = WsjtxMessage.ToCall(msg);       //known to not be null
-            string directedTo = WsjtxMessage.DirectedTo(msg);
+            string directedTo = sem.CqTarget;
             bool isCq = emsg.IsCQ();                //CQ format check
             bool isPota = emsg.IsPota();
             bool isSota = emsg.IsSota();
             bool isDirectedAlert = isCq && IsDirectedAlert(directedTo, classification.IsDx);
-            bool isGridReply = WsjtxMessage.IsReply(emsg.Message);
+            bool isGridReply = string.Equals(sem.Kind, "reply", System.StringComparison.Ordinal);
             bool isAcceptableCq = isCq && (directedTo == null /*|| directedTo == "QRP"*/ || (directedTo == "DX" && classification.IsDx) || directedTo == myContinent);
             bool isWantedNewCallOnBand = ctrl.bandComboBox.SelectedIndex == (int)WsjtxClient.NewCallBands.CURRENT && classification.IsNewCallOnBand;
             bool isWantedAzimuth = Ranker.rankMethod < RankMethods.AZ_NQUAD || Ranker.rankMethod > RankMethods.AZ_NWQUAD || emsg.Rank != CallQueueRanker.OffBeamRank;         //within desired azimuth
             bool isWantedMsgType =
-                (ctrl.cqOnlyRadioButton.Checked && (isAcceptableCq || WsjtxMessage.Is73orRR73(emsg.Message)))               //CQ, with or without grid info, or (RR)73
-                || (ctrl.cqGridRadioButton.Checked && ((isAcceptableCq && WsjtxMessage.Grid(emsg.Message) != null) || isGridReply))             //CQ or reply, with grid info
+                (ctrl.cqOnlyRadioButton.Checked && (isAcceptableCq || sem.IsRr73 || sem.Is73))                              //CQ, with or without grid info, or (RR)73   (Stage 6)
+                || (ctrl.cqGridRadioButton.Checked && ((isAcceptableCq && sem.Grid != null) || isGridReply))             //CQ or reply, with grid info   (Stage 6)
                 || ctrl.anyMsgRadioButton.Checked;                                                 //don't care about grid info
             bool isWantedOrigin = ((ctrl.replyDxCheckBox.Checked && classification.IsDx) || (ctrl.replyLocalCheckBox.Checked && !classification.IsDx)) && (!isCq || isAcceptableCq);
             bool isWantedCall = isWantedMsgType && isWantedOrigin && isWantedAzimuth && (classification.IsNewCallAnyBand || isWantedNewCallOnBand);

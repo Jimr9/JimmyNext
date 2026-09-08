@@ -2088,6 +2088,11 @@ namespace WSJTX_Controller
                     }
                     var semNew = SemanticDecode.FromNexus(row, envForRow, myCallForSem);
                     SemanticParityLogger.CheckAndLog(semOld, semNew, row.Message, normMsg, CurrentBandStr, myCallForSem);
+                    // Stage 6+: carry the Nexus-derived view on the decode so migrated
+                    // consumers can read it via EffectiveSemantic(). semOld is only for the
+                    // parity log above -- EffectiveSemantic rebuilds the WsjtxMessage view
+                    // itself when the cutover is off / this is the UDP path.
+                    enq.Semantic = semNew;
                 }
 
                 // Finishing (see _finishingCall): the just-worked station's own closing over --

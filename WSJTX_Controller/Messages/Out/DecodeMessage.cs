@@ -312,6 +312,17 @@ namespace WsjtxUdpLib.Messages.Out
         // (Classification/ClassificationCutover.cs) rather than reading this directly.
         public WSJTX_Controller.ClassifiedCall Classified { get; set; }
 
+        // Nexus modernization Stage 5+ (2026-09-08): the SemanticDecode built from Nexus's own
+        // FT8/FT4 parse for this decode (the Stage 3 DecodeRow flags + the Stage 4
+        // decodeSemantics envelope). Attached by DirectApplyDecodes; null on the UDP path and
+        // anywhere the Direct snapshot did not carry it. Do not read this directly -- call
+        // EnqueueDecodeMessage.EffectiveSemantic(myCall) (Semantic/SemanticExtensions.cs),
+        // which returns this when SemanticCutover.UseNexusSemantics is on and it is present,
+        // and otherwise falls back to SemanticDecode.FromWsjtxMessage. Internal: this is a
+        // migration-internal type. The WsjtxMessage-derived facts stay computed alongside so
+        // the shadow comparison keeps working.
+        internal WSJTX_Controller.SemanticDecode Semantic { get; set; }
+
         // Minor words a title-caser should leave lowercase (mid-string) rather than
         // capitalizing every word blindly -- e.g. "Isle of Man", not "Isle Of Man".
         private static readonly HashSet<string> CountryMinorWords =
