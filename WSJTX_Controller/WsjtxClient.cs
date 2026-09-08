@@ -3445,15 +3445,6 @@ namespace WSJTX_Controller
             if (removed) DebugOutput($"{spacer}CheckCallQueuePeriod: calls removed{nl}{_callQueueStore.CallQueueString()}");
         }
 
-        private bool IsSameMessage(string tx, string lastTx)
-        {
-            if (tx == lastTx) return true;
-            if (WsjtxMessage.ToCall(tx) != WsjtxMessage.ToCall(lastTx)) return false;
-            if (WsjtxMessage.IsReport(tx) && WsjtxMessage.IsReport(lastTx)) return true;
-            if (WsjtxMessage.IsRogerReport(tx) && WsjtxMessage.IsRogerReport(lastTx)) return true;
-            return false;
-        }
-
         internal void UpdateMaxTxRepeat()
         {
             int limit = (int)ctrl.timeoutNumUpDown.Value;

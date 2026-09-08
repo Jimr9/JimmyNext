@@ -276,6 +276,8 @@ static class JimmyTests
         SemanticStage8SmartStartForkParityTests();
         SemanticStage9StartPathParityTests();
         SemanticStage10CompletionParityTests();
+        PostS12_S2_SemanticEnvelopeContractTests();
+        PostS12_S3_TxCompletionViaNexusTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -3397,6 +3399,283 @@ static class JimmyTests
         {
             Console.WriteLine($"  FAIL  SemanticStage10CompletionParityTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
+        }
+    }
+
+    // ── Post-Stage-12 cleanup S2 (2026-09-08): a missing FT8/FT4 semantic envelope from an
+    //    AUTHENTICATED jimmy-engine-host is a CONTRACT VIOLATION, not a silent fallback. The
+    //    WsjtxMessage fallback still runs (operation continues), but the operator is told once
+    //    per EngineHost session, with a debug line + per-session coverage tally. A listening
+    //    snapshot with zero decodes must NOT false-positive. ──
+    static void PostS12_S2_SemanticEnvelopeContractTests()
+    {
+        Console.WriteLine("\n── Post-Stage-12 S2: missing semantic envelope is a visible contract problem (not silent) ──");
+        const string myCall = "KB0UZT", myGrid = "FN42";
+
+        (WsjtxClient wc, FakeNotificationDelivery notify) MakeClient()
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var notify = new FakeNotificationDelivery();
+            wc.Notify = new NotificationCenter(new NotificationSettings(), notify);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            return (wc, notify);
+        }
+
+        // recentDecodes with N rows; `withSem` => an aligned decodeSemantics array, `cover` rows of it.
+        string Snap(string token, int decodeRows, bool withSem, int cover, string qsoTxNow, bool withQsoTxSem)
+        {
+            var rows = new System.Text.StringBuilder();
+            for (int i = 0; i < decodeRows; i++)
+            {
+                if (i > 0) rows.Append(',');
+                rows.Append(@"{ ""from"": ""K" + i + @"ABC"", ""snr"": -5, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""KB0UZT K" + i + @"ABC -0" + i + @""" }");
+            }
+            var sem = new System.Text.StringBuilder();
+            if (withSem)
+            {
+                for (int i = 0; i < cover; i++)
+                {
+                    if (i > 0) sem.Append(',');
+                    sem.Append(@"{ ""schemaVersion"": 1, ""rawMessage"": ""KB0UZT K" + i + @"ABC -0" + i + @""", ""kind"": ""report"", ""from"": ""K" + i + @"ABC"", ""to"": ""KB0UZT"", ""reportDb"": -" + i + @", ""addressedToMe"": true, ""callForm"": ""standard"", ""qsoRelation"": ""none"" }");
+                }
+            }
+            string qso = qsoTxNow == null ? "" :
+                @", ""qso"": { ""state"": ""awaitRr73"", ""dxcall"": ""K4YT"", ""txNow"": """ + qsoTxNow + @""" }";
+            string qtx = withQsoTxSem
+                ? @", ""qsoTxSemantics"": { ""schemaVersion"": 1, ""rawMessage"": """ + qsoTxNow + @""", ""kind"": ""rr73"", ""from"": ""KB0UZT"", ""to"": ""K4YT"", ""addressedToMe"": false, ""signoff"": ""rr73"", ""callForm"": ""standard"", ""qsoRelation"": ""partner"" }"
+                : "";
+            return @"{ ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""", ""sessionToken"": """ + token + @""", ""pid"": 4242,
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 10 },
+                ""recentDecodes"": [ " + rows + @" ]" +
+                (withSem ? @", ""decodeSemantics"": [ " + sem + @" ]" : "") + qso + qtx + @" }";
+        }
+
+        try
+        {
+            // 1. Matched host: decodes + aligned decodeSemantics, no active QSO -> silent, no miss.
+            {
+                var (wc, notify) = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("A", 2, withSem: true, cover: 2, qsoTxNow: null, withQsoTxSem: false)));
+                Check("1: matched host (full envelope) -> no contract warning", notify.AnnounceCount == 0, true);
+                Check("1: ...and no miss recorded", wc.TestDirectSemanticEnvelopeMisses == 0L, true);
+            }
+
+            // 2. decodeSemantics absent entirely, with real decodes -> exactly one warning, once per session.
+            {
+                var (wc, notify) = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("B", 3, withSem: false, cover: 0, qsoTxNow: null, withQsoTxSem: false)));
+                Check("2: missing decodeSemantics -> one accessible warning", notify.AnnounceCount == 1, true);
+                Check("2: ...worded about the native engine / semantic info",
+                      notify.LastText != null && notify.LastText.Contains("semantic") && notify.LastText.Contains("jimmy-engine-host"), true);
+                Check("2: ...miss recorded", wc.TestDirectSemanticEnvelopeMisses == 1L, true);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("B", 3, withSem: false, cover: 0, qsoTxNow: null, withQsoTxSem: false)));
+                Check("2: same session (same token) -> NOT re-warned", notify.AnnounceCount == 1, true);
+            }
+
+            // 3. Partial coverage: 3 decode rows, decodeSemantics covers only 1 -> one warning.
+            {
+                var (wc, notify) = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("C", 3, withSem: true, cover: 1, qsoTxNow: null, withQsoTxSem: false)));
+                Check("3: partial decodeSemantics coverage -> one warning", notify.AnnounceCount == 1, true);
+                Check("3: ...miss recorded", wc.TestDirectSemanticEnvelopeMisses == 1L, true);
+            }
+
+            // 4. Active QSO with real txNow but no qsoTxSemantics -> one warning.
+            {
+                var (wc, notify) = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("D", 2, withSem: true, cover: 2, qsoTxNow: "K4YT KB0UZT RR73", withQsoTxSem: false)));
+                Check("4: active QSO, txNow present, qsoTxSemantics missing -> one warning", notify.AnnounceCount == 1, true);
+            }
+
+            // 5. Listening: zero decodes, no QSO -> NO false positive even though there is no envelope.
+            {
+                var (wc, notify) = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("E", 0, withSem: false, cover: 0, qsoTxNow: null, withQsoTxSem: false)));
+                Check("5: listening snapshot with zero decodes -> no warning", notify.AnnounceCount == 0, true);
+                Check("5: ...and no miss recorded", wc.TestDirectSemanticEnvelopeMisses == 0L, true);
+            }
+
+            // 6. A brand-new EngineHost (new session token) is re-checked.
+            {
+                var (wc, notify) = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("F1", 2, withSem: true, cover: 2, qsoTxNow: null, withQsoTxSem: false)));
+                Check("6: first host OK -> silent", notify.AnnounceCount == 0, true);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("F2", 2, withSem: false, cover: 0, qsoTxNow: null, withQsoTxSem: false)));
+                Check("6: a NEW host (new token) that omits the envelope -> warned", notify.AnnounceCount == 1, true);
+            }
+
+            // 7. Fallback still works: a missing envelope does not stop decodes reaching the queue.
+            {
+                var (wc, notify) = MakeClient();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(Snap("G", 1, withSem: false, cover: 0, qsoTxNow: null, withQsoTxSem: false)));
+                Check("7: with no envelope, the decode still reached the call dictionary (WsjtxMessage fallback)",
+                      wc.allCallDict.ContainsKey("K0ABC"), true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  PostS12_S2_SemanticEnvelopeContractTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Post-Stage-12 cleanup S3 (2026-09-08): the Direct completion / TX-tracking path reads
+    //    the transmitted-message kind from Nexus's qsoTxSemantics envelope and the partner
+    //    identity from Qso.dxcall, instead of re-parsing curTxMsg with WsjtxMessage. The
+    //    2026-08-30 W1AW/2 hashed-compound-call completion fix MUST survive -- through BOTH the
+    //    Nexus path (envelope present) and the WsjtxMessage fallback (envelope absent). ──
+    static void PostS12_S3_TxCompletionViaNexusTests()
+    {
+        Console.WriteLine("\n── Post-Stage-12 S3: completion via qsoTxSemantics + Qso.dxcall (W1AW/2 preserved both paths) ──");
+        string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_S3_" + Guid.NewGuid().ToString("N") + ".db");
+        string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        const string myCall = "KB0UZT", myGrid = "FN42";
+
+        WsjtxClient MakeClient()
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+            var lm = new LookupManager();
+            lm.RegisterProviderFirst(new TestFixtureLookupProvider());
+            lm.Initialize(useLookupData: true, qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                lotwEnabled: false, lotwDays: 1, clubLogAppKey: null, clubLogDays: 1, fccUlsEnabled: false);
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.lookupManager = lm;
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            return wc;
+        }
+        string Esc(string s) => s.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
+        // A TX snapshot that CARRIES the qsoTxSemantics envelope + Qso.dxcall (the Nexus path).
+        // `txNowRaw` is the engine's raw on-air text (may be hashed); `kind`/`signoff` are what
+        // Nexus's own parser makes of it; `dxcall` is the bracket-free partner Nexus is working.
+        DirectSnapshot TxSnapNexus(ulong slot, string dxcall, string txNowRaw, string kind, string signoff)
+            => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""", ""sessionToken"": ""S3"", ""pid"": 7,
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot + @" },
+                ""recentDecodes"": [],
+                ""qso"": { ""state"": ""confirming"", ""dxcall"": """ + Esc(dxcall) + @""", ""txNow"": """ + Esc(txNowRaw) + @""" },
+                ""qsoTxSemantics"": { ""schemaVersion"": 1, ""rawMessage"": """ + Esc(txNowRaw) + @""", ""kind"": """ + kind + @""",
+                    ""from"": """ + myCall + @""", ""to"": ""<" + Esc(dxcall) + @">"", ""addressedToMe"": false" +
+                    (signoff == null ? "" : @", ""signoff"": """ + signoff + @"""") +
+                    @", ""callForm"": ""compound"", ""qsoRelation"": ""partner"" }
+            }");
+
+        // Same shape but NO envelope at all (older host / rollback) -- the WsjtxMessage fallback.
+        DirectSnapshot TxSnapLegacy(ulong slot, string txNowRaw) => ParseDirectSnapshot(@"{
+            ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+            ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot + @" },
+            ""recentDecodes"": [],
+            ""qso"": { ""state"": ""done"", ""txNow"": """ + Esc(txNowRaw) + @""" }
+        }");
+
+        // One incoming decode row (used to put the DX's roger-report on record between our
+        // report and our final 73, so LogQso has a completable exchange).
+        DirectSnapshot DecodeSnap(ulong slot, string message) => ParseDirectSnapshot(@"{
+            ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+            ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+            ""recentDecodes"": [ { ""from"": ""X"", ""snr"": -5, ""dtSec"": 0.2, ""freqHz"": 1500.0, ""message"": """ + Esc(message) + @""" } ]
+        }");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+
+            // 1. W1AW/2 via the NEXUS path: hashed outgoing report -> incoming hashed
+            //    roger-report -> hashed final RR73. The envelope's `to` is the bracketed
+            //    "<W1AW/2>" (Nexus #84) -- partner identity has to come from Qso.dxcall for this
+            //    to match callInProg and complete.
+            {
+                var wc = MakeClient();
+                const string dx = "W1AW/2";
+                wc.callInProg = dx;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnapNexus(100, dx, "<" + dx + "> " + myCall + " -07", "report", null));
+                Check("1 (Nexus path): our hashed report is recognised -> sentReportList has W1AW/2",
+                      wc.sentReportList.Contains(dx), true);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(101, myCall + " <" + dx + "> R-05"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnapNexus(102, dx, "<" + dx + "> " + myCall + " RR73", "rr73", "rr73"));
+                Check("1 (Nexus path): the hashed final RR73 completes + logs the QSO",
+                      wc.logList.Contains(dx), true);
+                Check("1 (Nexus path): callInProg cleared (no wedge)", wc.callInProg == null, true);
+                using (var db = new LogbookDb(goodDb))
+                    Check("1 (Nexus path): exactly one logbook row", db.SearchQsos(dx, null, null, null).Count == 1, true);
+            }
+
+            // 2. Ordinary (non-hashed) partner via the Nexus path: report -> roger -> 73 -> logged.
+            {
+                var wc = MakeClient();
+                const string dx = "K4YT";
+                wc.callInProg = dx;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnapNexus(200, dx, myCall + " " + dx + " -07", "report", null));
+                Check("2 (Nexus path): report tracked", wc.sentReportList.Contains(dx), true);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(201, myCall + " " + dx + " R-05"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnapNexus(202, dx, myCall + " " + dx + " 73", "sevenThree", "sevenThree"));
+                Check("2 (Nexus path): final 73 logs + clears", wc.logList.Contains(dx) && wc.callInProg == null, true);
+            }
+
+            // 3. Envelope ABSENT (fallback): the same W1AW/2 exchange still completes through
+            //    NormalizeDecodedMessage + WsjtxMessage, exactly as before S3.
+            {
+                var wc = MakeClient();
+                const string dx = "W1AW/2";
+                wc.callInProg = dx;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnapLegacy(300, "<" + dx + "> " + myCall + " -07"));
+                Check("3 (fallback): hashed report tracked without an envelope", wc.sentReportList.Contains(dx), true);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(301, myCall + " <" + dx + "> R-05"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnapLegacy(302, "<" + dx + "> " + myCall + " 73"));
+                Check("3 (fallback): hashed final 73 completes + logs", wc.logList.Contains(dx) && wc.callInProg == null, true);
+            }
+
+            // 4. The Nexus path must not complete a QSO whose partner ISN'T our callInProg:
+            //    engine working K4YT, but Jimmy's callInProg is W9AAA -> no log, no clear.
+            {
+                var wc = MakeClient();
+                wc.callInProg = "W9AAA";
+                wc.TestApplyDirectSnapshot(myCall, myGrid, TxSnapNexus(400, "K4YT", myCall + " K4YT 73", "sevenThree", "sevenThree"));
+                Check("4 (Nexus path): a 73 to a DIFFERENT partner does not log/clear our callInProg",
+                      !wc.logList.Contains("W9AAA") && wc.callInProg == "W9AAA", true);
+            }
+
+            // 5. Calling CQ through the Nexus path (envelope present, dxcall null, txNow a CQ):
+            //    must not be mistaken for a completion.
+            {
+                var wc = MakeClient();
+                wc.callInProg = "K4YT";
+                var cqSnap = ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""", ""sessionToken"": ""S3"", ""pid"": 7,
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 500 },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""callingCq"", ""txNow"": ""CQ " + myCall + @" FN42"" },
+                    ""qsoTxSemantics"": { ""schemaVersion"": 1, ""rawMessage"": ""CQ " + myCall + @" FN42"", ""kind"": ""cq"",
+                        ""from"": """ + myCall + @""", ""addressedToMe"": false, ""callForm"": ""standard"", ""qsoRelation"": ""none"" }
+                }");
+                wc.TestApplyDirectSnapshot(myCall, myGrid, cqSnap);
+                Check("5 (Nexus path): a CQ over is never a completion", !wc.logList.Contains("K4YT") && wc.callInProg == "K4YT", true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  PostS12_S3_TxCompletionViaNexusTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            try { File.Delete(goodDb); } catch { }
         }
     }
 

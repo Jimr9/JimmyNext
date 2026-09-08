@@ -416,6 +416,26 @@ namespace WSJTX_Controller
         private bool _directAuthenticated;
         private bool _directSessionAuthFailureAnnounced;
 
+        // ── Post-Stage-12 cleanup S2 (2026-09-08): the FT8/FT4 semantic envelope
+        //    (decodeSemantics / qsoTxSemantics, injected by main.rs from Nexus's own parser --
+        //    see decode_semantics.rs) is a CONTRACT between this Jimmy build and its bundled,
+        //    matched jimmy-engine-host.exe, not an optional extra. A released Jimmy Next ships
+        //    its own engine host (Jimmy.csproj stages it into the MSI), so an authenticated
+        //    snapshot that omits the envelope means the host is outdated, mismatched, or
+        //    damaged. The migrated consumers still fall back to the WsjtxMessage parser
+        //    (EffectiveSemantic) so the operator is not dead in the water, but that fallback
+        //    must NOT be silent. This fires ONE accessible notification per EngineHost session
+        //    (keyed on the session token, so a Direct reconnect to the SAME host does not
+        //    re-warn but a NEW host re-checks), plus a debug line, plus running per-session
+        //    counters the support ZIP picks up from the diag log. HARD failure / disabling
+        //    decode is deliberately NOT done here -- deferred to after the migration is
+        //    field-proven and useNexusSemantics is removed. A listening snapshot with zero
+        //    recent decodes is NOT a violation (an empty decodeSemantics array is correct then).
+        private string _directSemanticContractCheckedToken;
+        private long _directDecodeRowsSeen;
+        private long _directDecodeRowsWithSemantics;
+        private long _directSemanticEnvelopeMisses;
+
         // Has DirectApplyStatus ever actually rendered a status once this connection came up?
         // Forces the very first poll's status through regardless of the transmitting/newBand
         // gate below (see that gate's own comment).
@@ -744,6 +764,12 @@ namespace WSJTX_Controller
         {
             _directPollTimer?.Stop();
             _directConnected = false;
+            // S2 (2026-09-08): leave the semantic-envelope coverage tally in the diag log so a
+            // support ZIP shows whether the Nexus semantic path was actually feeding Jimmy this
+            // session (decodeRowsWithSemantics / decodeRowsSeen should be ~1.0 with a matched host).
+            if (_directDecodeRowsSeen > 0 || _directSemanticEnvelopeMisses > 0)
+                DebugOutput($"{Time()} [DIRECT] semantic-envelope session tally: decodeRowsSeen={_directDecodeRowsSeen}, " +
+                            $"decodeRowsWithSemantics={_directDecodeRowsWithSemantics}, contractViolationsDetected={_directSemanticEnvelopeMisses}");
             // Codex Audit 03 finding 3, 2026-08-21: same reasoning as ConnectDirectEngine's own
             // purge (this is always called immediately before it, at the one real call site,
             // Controller.cs's reconnect sequence) -- belt and braces in case that ever changes.
@@ -912,10 +938,91 @@ namespace WSJTX_Controller
                         DebugOutput($"{Time()} [DIRECT] first snapshot received -- NegoState -> RECD");
                     }
 
+                    // S2 (2026-09-08): assert the FT8/FT4 semantic-envelope contract on the
+                    // first authenticated snapshot of each EngineHost session. Fallback still
+                    // happens downstream, but a missing envelope is no longer silent. Runs
+                    // before DirectApplyStatus/Decodes so its debug line precedes the first
+                    // decode processing in the log.
+                    DirectCheckSemanticEnvelopeContract(snap);
+
                     DirectApplyStatus(snap);
                     DirectApplyDecodes(snap);
                 }));
             });
+        }
+
+        // ── Post-Stage-12 cleanup S2 (2026-09-08): one-shot semantic-envelope contract check.
+        //    See the _directSemanticContractCheckedToken field's own comment for the rationale.
+        //    A released Jimmy Next always runs against its own matched jimmy-engine-host.exe,
+        //    which always emits `decodeSemantics` (a possibly-empty array) and, when a QSO is
+        //    active, `qsoTxSemantics`. An authenticated snapshot that DOESN'T is a broken /
+        //    outdated / mismatched host -- warn once, keep running on the WsjtxMessage fallback.
+        private void DirectCheckSemanticEnvelopeContract(DirectSnapshot snap)
+        {
+            if (snap == null) return;
+            // If the operator has explicitly rolled the migration back (useNexusSemantics=False,
+            // an undocumented .ini valve), the envelope is deliberately unused -- a missing one
+            // is then not worth a warning. The debug tally below still records coverage.
+            if (!SemanticCutover.UseNexusSemantics) return;
+            // Once per EngineHost session: a Direct reconnect to the SAME host echoes the same
+            // token and must not re-warn; a NEW host (new token) is re-checked. Empty token =
+            // an unauthenticated test client -- skip (matches the auth check's own skip).
+            if (string.IsNullOrEmpty(snap.SessionToken)) return;
+            if (string.Equals(snap.SessionToken, _directSemanticContractCheckedToken, StringComparison.Ordinal))
+                return;
+            _directSemanticContractCheckedToken = snap.SessionToken;
+
+            int decodeRows = snap.RecentDecodes?.Count ?? 0;
+            int semRows = snap.DecodeSemantics?.Count ?? 0;
+
+            // Count how many decode rows actually have a matching envelope entry (matched by
+            // raw text, the same way DirectApplyDecodes attaches enq.Semantic).
+            int matched = 0;
+            if (decodeRows > 0 && snap.DecodeSemantics != null)
+            {
+                foreach (var row in snap.RecentDecodes)
+                {
+                    if (row == null || string.IsNullOrEmpty(row.Message)) { continue; }
+                    foreach (var e in snap.DecodeSemantics)
+                    {
+                        if (e != null && string.Equals(e.RawMessage, row.Message, StringComparison.Ordinal))
+                        { matched++; break; }
+                    }
+                }
+            }
+            int nonEmptyDecodeRows = 0;
+            if (snap.RecentDecodes != null)
+                foreach (var row in snap.RecentDecodes)
+                    if (row != null && !string.IsNullOrEmpty(row.Message)) nonEmptyDecodeRows++;
+
+            // A listening snapshot with no decodes is fine -- an empty decodeSemantics array
+            // (or none at all) is the correct state then, NOT a violation.
+            bool decodeEnvelopeMissing = nonEmptyDecodeRows > 0 && snap.DecodeSemantics == null;
+            bool decodeEnvelopePartial = nonEmptyDecodeRows > 0 && snap.DecodeSemantics != null
+                                         && matched < nonEmptyDecodeRows;
+            // An active QSO with real "now sending" text but no parsed TX envelope.
+            bool txEnvelopeMissing = snap.Qso != null
+                                     && !string.IsNullOrEmpty(snap.Qso.TxNow)
+                                     && snap.QsoTxSemantics == null;
+
+            if (!decodeEnvelopeMissing && !decodeEnvelopePartial && !txEnvelopeMissing)
+            {
+                DebugOutput($"{Time()} [DIRECT] semantic-envelope contract OK (decodeRows={nonEmptyDecodeRows}, semanticRows={semRows}, matched={matched}, qsoTxSemantics={(snap.QsoTxSemantics != null ? "present" : (snap.Qso != null && !string.IsNullOrEmpty(snap.Qso.TxNow) ? "n/a" : "none"))})");
+                return;
+            }
+
+            string what =
+                decodeEnvelopeMissing ? "no decodeSemantics array at all" :
+                decodeEnvelopePartial ? $"decodeSemantics covered only {matched} of {nonEmptyDecodeRows} decode rows" :
+                "an active QSO's qsoTxSemantics was missing";
+            _directSemanticEnvelopeMisses++;
+            DebugOutput($"{Time()} [DIRECT] semantic-envelope CONTRACT VIOLATION: {what} " +
+                        $"(decodeRows={nonEmptyDecodeRows}, semanticRows={semRows}, matched={matched}, " +
+                        $"qsoActive={(snap.Qso != null)}, txNow={(snap.Qso != null && !string.IsNullOrEmpty(snap.Qso.TxNow) ? "yes" : "no")}, " +
+                        $"qsoTxSemantics={(snap.QsoTxSemantics != null ? "present" : "absent")}, pid={snap.Pid}) " +
+                        $"-- falling back to the WsjtxMessage parser for affected facts");
+            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Native engine",
+                "the native engine (jimmy-engine-host.exe) did not supply the FT8/FT4 semantic information this Jimmy Next build expects -- the bundled engine may be outdated, mismatched, or damaged. Rebuild/redeploy jimmy-engine-host.exe. Operation continues using the built-in message parser."));
         }
 
         // Companion to the failure-tracking fields declared above -- see their own comment.
@@ -1630,10 +1737,19 @@ namespace WSJTX_Controller
             // FIRST such over is tolerated, the SECOND trips HALT_TX + SET_TX_ENABLED 0 (exactly
             // as Escape does) and announces. Not gated on ctrl.freqCheckBox or any mode flag
             // beyond "LISTEN, no contact, not tuning".
+            // S3 (2026-09-08): the "is this over a closing 73/RR73?" test stays on the RETAINED
+            // curTxMsg (the last real TX text -- there is no qsoTxSemantics envelope for a
+            // retained value, and the engine may already report qso.txNow == null during the
+            // tail). NormalizeDecodedMessage already unwrapped any hashed compound call in it,
+            // so there is no W1AW/2 bug here. Partner identity, though, now also accepts Nexus's
+            // authoritative Qso.Dxcall -- a strictly wider "this belongs to the finishing
+            // exchange, don't count it as a runaway orphan", which only ever makes this
+            // transmit-safety backstop less trigger-happy during a legitimate closing tail.
             bool finishingTailOver = _finishingCall != null
                 && !string.IsNullOrEmpty(curTxMsg)
                 && WsjtxMessage.Is73orRR73(curTxMsg)
-                && string.Equals(WsjtxMessage.ToCall(curTxMsg), _finishingCall, StringComparison.OrdinalIgnoreCase);
+                && (string.Equals(WsjtxMessage.ToCall(curTxMsg), _finishingCall, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(snap.Qso?.Dxcall, _finishingCall, StringComparison.OrdinalIgnoreCase));
 
             if (callInProg != null || txMode != TxModes.LISTEN || tuning || finishingTailOver)
             {
@@ -1712,11 +1828,41 @@ namespace WSJTX_Controller
                 txMsg = newTxMsg;
                 curTxPayload = null;
             }
-            if (!string.IsNullOrEmpty(curTxMsg) && callInProg != null && WsjtxMessage.ToCall(curTxMsg) == callInProg)
+
+            // ── Post-Stage-12 cleanup S3 (2026-09-08): the transmitted-message PROTOCOL FACTS
+            //    below (did WE send a report? a roger-report? the final 73/RR73? a bare RRR?)
+            //    now come from Nexus's OWN parse of qso.txNow via EffectiveTxSemantic -- the
+            //    EngineHost `qsoTxSemantics` envelope when it is present AND the cutover is on,
+            //    otherwise Jimmy's WsjtxMessage parse of the already-normalized curTxMsg, which
+            //    is byte-identical to the direct WsjtxMessage.Is*/IsReport calls this replaced
+            //    (SemanticDecode.FromWsjtxMessage calls exactly those). Jimmy is no longer
+            //    independently interpreting its own FT8/FT4 transmission when Nexus can tell it.
+            //
+            //    PARTNER IDENTITY ("is this over to the call in progress?") comes from Nexus's
+            //    Qso.Dxcall -- the bracket-free callsign the sequencer is actually working --
+            //    NOT from the TX text's "to". A hashed compound call (`<W1AW/2>`) stays
+            //    bracketed even after Nexus's own Msg::unhashed (issue #84: a compound call
+            //    cannot ride an ordinary frame bare), so matching qsoTxSemantics.to against a
+            //    bare callInProg would re-open the 2026-08-30 W1AW/2 completion wedge. Dxcall
+            //    does not have that problem. When the envelope is absent (older host, listening
+            //    edge, rollback) the bracket-free curTxMsg (NormalizeDecodedMessage) +
+            //    WsjtxMessage.ToCall keeps the exact prior behaviour, W1AW/2 fix included.
+            var txSem = SemanticExtensions.EffectiveTxSemantic(curTxMsg, snap.QsoTxSemantics, myCall);
+            bool txSemFromNexus = SemanticCutover.UseNexusSemantics && snap.QsoTxSemantics != null;
+            string engineQsoPartner = snap.Qso?.Dxcall;
+            // "The current TX over is addressed to <who>." Nexus's Dxcall is authoritative when
+            // the TX envelope is on the wire; the text parse of curTxMsg is the fallback.
+            bool TxOverAddressedTo(string who) =>
+                !string.IsNullOrEmpty(who)
+                && (txSemFromNexus && !string.IsNullOrEmpty(engineQsoPartner)
+                    ? string.Equals(engineQsoPartner, who, StringComparison.OrdinalIgnoreCase)
+                    : string.Equals(WsjtxMessage.ToCall(curTxMsg), who, StringComparison.Ordinal));
+
+            if (!string.IsNullOrEmpty(curTxMsg) && callInProg != null && TxOverAddressedTo(callInProg))
             {
-                if ((WsjtxMessage.IsReport(curTxMsg) || WsjtxMessage.IsRogerReport(curTxMsg)) && !sentReportList.Contains(callInProg))
+                if ((txSem.IsReport || txSem.IsRReport) && !sentReportList.Contains(callInProg))
                     sentReportList.Add(callInProg);
-                if (WsjtxMessage.Is73orRR73(curTxMsg))
+                if (txSem.IsRr73 || txSem.Is73)
                 {
                     // Mirrors the UDP path's ProcessTxEnd (WsjtxClient.cs, Is73orRR73(txMsg)
                     // branch): once the final 73/RR73 to callInProg is on its way, the QSO is
@@ -1856,7 +2002,7 @@ namespace WSJTX_Controller
                     // runaway instead (within ~2 overs) without touching the between-contacts
                     // state -- see its own comment.
                 }
-                else if (WsjtxMessage.IsRogers(curTxMsg) && IsLogEarly(callInProg)
+                else if (txSem.IsRrr && IsLogEarly(callInProg)
                          && (RecdReport(callInProg) || RecdRogerReport(callInProg)) && sentReportList.Contains(callInProg))
                 {
                     // Finding 1, 2026-08-28 (read-only audit): mirrors the removed UDP
@@ -2087,6 +2233,9 @@ namespace WSJTX_Controller
                             { envForRow = e; break; }
                     }
                     var semNew = SemanticDecode.FromNexus(row, envForRow, myCallForSem);
+                    // S2 (2026-09-08): running per-session coverage tally for the support ZIP.
+                    _directDecodeRowsSeen++;
+                    if (envForRow != null) _directDecodeRowsWithSemantics++;
                     SemanticParityLogger.CheckAndLog(semOld, semNew, row.Message, normMsg, CurrentBandStr, myCallForSem);
                     // Stage 6+: carry the Nexus-derived view on the decode so migrated consumers
                     // can read it via EffectiveSemantic(). ONLY when the full Stage 4
@@ -2850,9 +2999,20 @@ namespace WSJTX_Controller
             // -- ConnectDirectEngine always sets this before the poll timer's first tick reaches
             // it; matched here since this bypasses ConnectDirectEngine entirely.
             opMode = OpModes.ACTIVE;
+            // S2 (2026-09-08): run the same one-shot contract check the live poll does, so the
+            // Direct test pipeline covers it. A no-op for the many test snapshots with no
+            // sessionToken (returns immediately, exactly like an unauthenticated live client).
+            DirectCheckSemanticEnvelopeContract(snap);
             DirectApplyStatus(snap);
             DirectApplyDecodes(snap);
         }
+
+        // S2 test hooks: the per-session semantic-envelope coverage tally + how many first-
+        // snapshot contract violations were detected this session.
+        internal long TestDirectDecodeRowsSeen => _directDecodeRowsSeen;
+        internal long TestDirectDecodeRowsWithSemantics => _directDecodeRowsWithSemantics;
+        internal long TestDirectSemanticEnvelopeMisses => _directSemanticEnvelopeMisses;
+        internal void TestResetSemanticContractCheck() => _directSemanticContractCheckedToken = null;
 
         internal string TestCallQueueString => _callQueueStore.CallQueueString();
         internal List<EnqueueDecodeMessage> TestRawDecodeHistory => _rawDecodeHistory;
