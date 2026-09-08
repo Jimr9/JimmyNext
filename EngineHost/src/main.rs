@@ -317,6 +317,7 @@ mod crashlog {
 
 use std::sync::{Arc, Mutex};
 
+mod decode_semantics;
 mod external_data;
 mod live_feeds;
 
@@ -945,10 +946,38 @@ fn handle_control_connection(
             // process and never marks Direct connected/sends TX-capable commands without a
             // match -- see that file's own comment. pid is informational only (support-report/
             // diagnostic cross-check), not itself required for the match.
+            //
+            // Nexus modernization Stage 4 (2026-09-08): `decodeSemantics` is injected the same
+            // way -- one entry per `recent_decodes` entry, SAME order -- carrying the typed
+            // FT8/FT4 facts (`to` call, directed-CQ target, numeric report, R-report vs
+            // report, RRR/RR73/73 subtype, call form, active-QSO relationship) that
+            // `DecodeRow` does not expose and Jimmy re-derives with its own parser. Built from
+            // `tempo_core::message::Msg::parse` -- Nexus's OWN public parser, not a reparse --
+            // and never touching the pinned `AppSnapshot` struct. Jimmy shadow-compares it
+            // against `WsjtxMessage` (Stage 5); nothing acts on it until proven equal. See
+            // EngineHost/src/decode_semantics.rs and C:\chat gpt\nexus plan.txt Section 7.
+            let decode_semantics: Vec<decode_semantics::DecodeSemantics> = {
+                let partner = snap.qso.as_ref().and_then(|q| q.dxcall.as_deref());
+                snap.recent_decodes
+                    .iter()
+                    .map(|row| {
+                        decode_semantics::DecodeSemantics::from_decode(
+                            &row.message,
+                            &snap.mycall,
+                            partner,
+                        )
+                    })
+                    .collect()
+            };
             match serde_json::to_value(&snap) {
                 Ok(serde_json::Value::Object(mut obj)) => {
                     obj.insert("sessionToken".to_string(), serde_json::Value::String(session_token.to_string()));
                     obj.insert("pid".to_string(), serde_json::Value::Number(std::process::id().into()));
+                    obj.insert(
+                        "decodeSemantics".to_string(),
+                        serde_json::to_value(&decode_semantics)
+                            .unwrap_or(serde_json::Value::Array(Vec::new())),
+                    );
                     let _ = writeln!(stream, "{}", serde_json::Value::Object(obj));
                 }
                 Ok(_) => {

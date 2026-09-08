@@ -3130,6 +3130,53 @@ namespace WSJTX_Controller
         // mismatch), never itself part of the match.
         public string SessionToken { get; set; }
         public int Pid { get; set; }
+
+        // ── Nexus modernization Stage 4 (additive, 2026-09-08): EngineHost injects
+        //    `decodeSemantics` next to sessionToken/pid -- one entry per RecentDecodes entry,
+        //    SAME order -- carrying the typed FT8/FT4 facts DecodeRow does not expose, derived
+        //    in EngineHost from Nexus's own public message parser (see
+        //    EngineHost/src/decode_semantics.rs). Null / short in an older EngineHost's JSON.
+        //    NOTHING reads this yet -- Stage 5 shadow-compares each entry against the
+        //    WsjtxMessage parse of the same decode; consumers migrate only after proven equal.
+        //    See C:\chat gpt\nexus plan.txt Section 7 (Stage 4). ──
+        public List<DirectDecodeSemantics> DecodeSemantics { get; set; }
+    }
+
+    // Nexus modernization Stage 4: the C# shape of EngineHost's per-decode semantic envelope
+    // (EngineHost/src/decode_semantics.rs::DecodeSemantics, #[serde(rename_all = "camelCase")]).
+    // Enum-valued fields are carried as their camelCase string tokens for now -- Stage 5's
+    // shadow comparison maps them; nothing depends on them being C# enums yet.
+    internal class DirectDecodeSemantics
+    {
+        // Envelope schema version (EngineHost decode_semantics::SCHEMA_VERSION). A future
+        // breaking change bumps this so a mismatched Jimmy can decline to shadow-compare.
+        public int SchemaVersion { get; set; }
+        // The engine text this entry was parsed from (DecodeRow.message as-carried).
+        public string RawMessage { get; set; }
+        // "cq" | "directedCq" | "reply" | "report" | "rReport" | "rrr" | "rr73" |
+        // "sevenThree" | "fieldDay" | "other".
+        public string Kind { get; set; }
+        // Sender ("de"), per Nexus's parser. Null when not identifiable (free text).
+        public string From { get; set; }
+        // Recipient ("to"), per Nexus's parser. Null for a CQ / free text.
+        public string To { get; set; }
+        // Directed-CQ token ("DX" / "NA" / "POTA" / "TEST" / "040" ...). Non-null only for
+        // Kind == "directedCq".
+        public string CqDirection { get; set; }
+        // The grid the decode carried (CQ / reply), else null.
+        public string Grid { get; set; }
+        // Numeric report for Kind report / rReport; null otherwise (Rust Option<i32>).
+        public int? ReportDb { get; set; }
+        // True if Nexus's parser read this as addressed to my callsign.
+        public bool AddressedToMe { get; set; }
+        // "rrr" | "rr73" | "sevenThree" for a signoff; null otherwise. (Mirrors Kind but is
+        // the one field a signoff-subtype consumer reads.)
+        public string Signoff { get; set; }
+        // "standard" | "compound" | "nonstandard" | "unknown" -- the SENDER's call form.
+        public string CallForm { get; set; }
+        // "none" | "partner" | "partnerWorkingOther" | "addressedToUsBystander" -- this
+        // decode's relationship to the active QSO (QsoStatus.dxcall).
+        public string QsoRelation { get; set; }
     }
 
     // Mirrors the QSO-relevant slice of tempo-app::dto::QsoStatus (Rust) -- only the fields

@@ -269,6 +269,7 @@ static class JimmyTests
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
         DirectDtoStage3SnapshotFieldsTests();
+        DirectDtoStage4DecodeSemanticsTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -2718,6 +2719,101 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DirectDtoStage3SnapshotFieldsTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
+    // ── Nexus modernization Stage 4: EngineHost injects a `decodeSemantics` array (one entry
+    //    per recentDecodes entry, same order) carrying the typed FT8/FT4 facts DecodeRow does
+    //    not expose, derived from Nexus's own message parser. Jimmy's DirectSnapshot must
+    //    deserialize it into DirectDecodeSemantics; an older EngineHost that omits it must
+    //    still deserialize (DecodeSemantics == null). Nothing consumes it yet. ──
+    static void DirectDtoStage4DecodeSemanticsTests()
+    {
+        Console.WriteLine("\n── Direct DTO Stage 4: EngineHost decodeSemantics envelope (additive) ──");
+        try
+        {
+            // (1) Full snapshot with decodeSemantics aligned to recentDecodes by index.
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": ""W9XYZ"", ""mygrid"": ""EN37"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 3 },
+                ""recentDecodes"": [
+                    { ""from"": ""K1ABC"", ""snr"": -6, ""dtSec"": 0.1, ""freqHz"": 1300.0, ""message"": ""CQ POTA K1ABC FN42"" },
+                    { ""from"": ""DL1XYZ"", ""snr"": 2, ""dtSec"": 0.0, ""freqHz"": 1520.0, ""message"": ""W9XYZ DL1XYZ R-11"" },
+                    { ""from"": ""N0DX"", ""snr"": -14, ""dtSec"": -0.2, ""freqHz"": 1700.0, ""message"": ""W9XYZ N0DX RR73"" }
+                ],
+                ""qso"": { ""state"": ""awaitRoger"", ""txNow"": ""DL1XYZ W9XYZ R-03"", ""dxcall"": ""DL1XYZ"" },
+                ""sessionToken"": ""t"", ""pid"": 1,
+                ""decodeSemantics"": [
+                    { ""schemaVersion"": 1, ""rawMessage"": ""CQ POTA K1ABC FN42"", ""kind"": ""directedCq"",
+                      ""from"": ""K1ABC"", ""to"": null, ""cqDirection"": ""POTA"", ""grid"": ""FN42"",
+                      ""reportDb"": null, ""addressedToMe"": false, ""signoff"": null,
+                      ""callForm"": ""standard"", ""qsoRelation"": ""none"" },
+                    { ""schemaVersion"": 1, ""rawMessage"": ""W9XYZ DL1XYZ R-11"", ""kind"": ""rReport"",
+                      ""from"": ""DL1XYZ"", ""to"": ""W9XYZ"", ""cqDirection"": null, ""grid"": null,
+                      ""reportDb"": -11, ""addressedToMe"": true, ""signoff"": null,
+                      ""callForm"": ""standard"", ""qsoRelation"": ""partner"" },
+                    { ""schemaVersion"": 1, ""rawMessage"": ""W9XYZ N0DX RR73"", ""kind"": ""rr73"",
+                      ""from"": ""N0DX"", ""to"": ""W9XYZ"", ""cqDirection"": null, ""grid"": null,
+                      ""reportDb"": null, ""addressedToMe"": true, ""signoff"": ""rr73"",
+                      ""callForm"": ""standard"", ""qsoRelation"": ""addressedToUsBystander"" }
+                ]
+            }");
+
+            Check("decodeSemantics deserialized", snap.DecodeSemantics != null && snap.DecodeSemantics.Count == 3, true);
+            Check("aligned 1:1 with recentDecodes", snap.RecentDecodes.Count == snap.DecodeSemantics.Count, true);
+
+            var s0 = snap.DecodeSemantics[0];
+            Check("[0] schemaVersion", s0.SchemaVersion == 1, true);
+            CheckStr("[0] kind", s0.Kind, "directedCq");
+            CheckStr("[0] from", s0.From, "K1ABC");
+            Check("[0] to null", s0.To == null, true);
+            CheckStr("[0] cqDirection", s0.CqDirection, "POTA");
+            CheckStr("[0] grid", s0.Grid, "FN42");
+            Check("[0] reportDb null", s0.ReportDb == null, true);
+            Check("[0] addressedToMe false", s0.AddressedToMe, false);
+            Check("[0] signoff null", s0.Signoff == null, true);
+            CheckStr("[0] callForm", s0.CallForm, "standard");
+            CheckStr("[0] qsoRelation", s0.QsoRelation, "none");
+            CheckStr("[0] rawMessage matches its decode row", s0.RawMessage, snap.RecentDecodes[0].Message);
+
+            var s1 = snap.DecodeSemantics[1];
+            CheckStr("[1] kind rReport", s1.Kind, "rReport");
+            Check("[1] reportDb -11", s1.ReportDb == -11, true);
+            Check("[1] addressedToMe true", s1.AddressedToMe, true);
+            CheckStr("[1] qsoRelation partner", s1.QsoRelation, "partner");
+
+            var s2 = snap.DecodeSemantics[2];
+            CheckStr("[2] kind rr73", s2.Kind, "rr73");
+            CheckStr("[2] signoff subtype", s2.Signoff, "rr73");
+            CheckStr("[2] qsoRelation bystander", s2.QsoRelation, "addressedToUsBystander");
+
+            // (2) Older EngineHost: no decodeSemantics key at all -> null, rest fine.
+            var legacy = ParseDirectSnapshot(@"{
+                ""mycall"": ""W9XYZ"", ""mygrid"": ""EN37"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1 },
+                ""recentDecodes"": [
+                    { ""from"": ""K1ABC"", ""snr"": -6, ""dtSec"": 0.1, ""freqHz"": 1300.0, ""message"": ""CQ K1ABC FN42"" }
+                ]
+            }");
+            Check("legacy: no decodeSemantics -> null", legacy.DecodeSemantics == null, true);
+            Check("legacy: recentDecodes still parse", legacy.RecentDecodes.Count == 1, true);
+            CheckStr("legacy: decode message intact", legacy.RecentDecodes[0].Message, "CQ K1ABC FN42");
+
+            // (3) reportDb present-zero round-trips as 0, distinct from absent (null).
+            var zero = ParseDirectSnapshot(@"{
+                ""mycall"": ""W9XYZ"", ""mygrid"": ""EN37"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1 },
+                ""recentDecodes"": [ { ""from"": ""K1ABC"", ""snr"": 0, ""dtSec"": 0.0, ""freqHz"": 1500.0, ""message"": ""W9XYZ K1ABC 0"" } ],
+                ""decodeSemantics"": [ { ""schemaVersion"": 1, ""rawMessage"": ""W9XYZ K1ABC 0"", ""kind"": ""report"",
+                    ""from"": ""K1ABC"", ""to"": ""W9XYZ"", ""reportDb"": 0, ""addressedToMe"": true,
+                    ""callForm"": ""standard"", ""qsoRelation"": ""none"" } ]
+            }");
+            Check("reportDb present-zero deserializes as 0 (not null)", zero.DecodeSemantics[0].ReportDb == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectDtoStage4DecodeSemanticsTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
     }
