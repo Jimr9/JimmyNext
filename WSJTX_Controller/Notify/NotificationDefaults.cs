@@ -340,8 +340,8 @@ namespace WSJTX_Controller
                 Condition = SpeakCondition.Always,
             },
             // The target is mid-exchange with (or being called by) someone else. Default wording
-            // (2026-09-07) names the other station and its report when known -- "{Phrase}" renders
-            // "X is working Y, minus 8." / "X is working Y." / "X is working another station."
+            // (N4BP live-radio audit, 2026-09-08) is the decoded FT8 fact -- "{Phrase}" renders
+            // "X to Y, minus 8." / "X to Y, RR73." / "X to Y." / "X working another station."
             // depending on what was decoded. DedupKey folds in the peer, so a move to a NEW
             // station re-announces immediately; RepeatSeconds still collapses several decodes for
             // the SAME peer in one exchange down to one line.
@@ -354,21 +354,26 @@ namespace WSJTX_Controller
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },
+            // RepeatSeconds folds the repeated "appears available" nudge (one per clean receive
+            // opportunity once the silence threshold is met) down to one line per 30 s.
             [NotificationEventType.SmartStartTargetAvailable] = new NotificationPolicy
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
+                RepeatSeconds = 30,
                 Template = "{Target} appears available.",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },
             // Jimmy was calling and has ceased our call because the target turned to another
             // station first -- Smart Start stays armed and waits for a real availability signal.
+            // The busy line just before this one already names the target + the other station,
+            // so this stays a bare "Standing by." (N4BP live-radio audit, 2026-09-08).
             [NotificationEventType.SmartStartYielded] = new NotificationPolicy
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
-                Template = "{Target} is busy; standing by.",
+                Template = "Standing by.",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },
@@ -387,7 +392,7 @@ namespace WSJTX_Controller
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
-                Template = "{Target} answered you; switching to normal QSO.",
+                Template = "{Target} answered you; normal QSO.",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },

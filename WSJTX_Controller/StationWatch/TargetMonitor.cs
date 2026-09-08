@@ -174,64 +174,30 @@ namespace WSJTX_Controller
         public event Action<TargetObservation> Observed;
 
         // One extra appropriate receive opportunity must elapse after an ORDINARY validated RR73
-        // before Smart Start treats the target as available -- the operator's own decision (the
-        // other station may still send a courtesy 73). Cleared by any newer, clearer event
-        // (target 73 / target CQ / a fresh RR73) since those either already fire immediately or
-        // restart the same one-opportunity wait.
-        //
-        // Live-radio audit fix, 2026-09-08 (Problem 2 / KB2SLO): superseded by _peerCloseSettle
-        // below for a target -> PEER RR73 / 73. The single-opportunity rule was too eager -- a
-        // station whose peer does not cleanly confirm keeps re-sending "PEER TARGET RR73" for
-        // several periods, and each one used to clear BusyWithOther and reach "available" after
-        // one silent opportunity. This field now only backs the target -> US RR73 case (line
-        // ~16681 test: the target rogered OUR callsign), which is genuinely one-more-opportunity.
+        // ADDRESSED TO US before Smart Start treats the target as available -- the operator's own
+        // decision (the other station may still send a courtesy 73). Cleared by any newer,
+        // clearer event (target 73 / target CQ / a fresh RR73). Applies ONLY to a target -> US
+        // RR73; a target -> PEER RR73 is ordinary "working another station" busy evidence and is
+        // governed by the single configurable clean-silence mechanism below.
         private bool _rr73AwaitingOneMoreOpportunity;
 
-        // Problem 2 / KB2SLO fix: a target -> PEER RR73 or 73 means the target is in its CLOSING
-        // exchange with that peer -- NOT free yet. It becomes available (Smart Start only) only
-        // after this many appropriate target-parity opportunities pass with the target NOT heard
-        // sending any finishing traffic to a peer (RR73/73/report/RReport/RRR). Any such fresh
-        // decode re-arms the full count; a target CQ / the target addressing us clears it and
-        // makes ready at once. Counts down in OnReceivePeriodComplete; at 0 it clears
-        // BusyWithOther and signals ready.
-        //
-        // The count is DELIBERATELY generous (KB2SLO live: Jimmy missed decoding some of the
-        // target's RR73 repeats, leaving apparent 2-3 period gaps that a shorter count would
-        // have mistaken for "the QSO ended"). Smart Start is the "wait for the lull" tool -- a
-        // couple of extra quiet minutes here is far better than calling a station mid-close.
-        private int _peerCloseSettle;
-        private const int PeerCloseSettleOpportunities = 4;
+        // N4BP live-radio audit, 2026-09-08 -- fix 1 (the confirmed silence-count bug). Set true
+        // for exactly the receive period in which the TARGET'S OWN decode was ingested. A period
+        // in which the target was actually heard is NOT a "not heard" opportunity, so the next
+        // matching OnReceivePeriodComplete on the target's parity must not count it toward
+        // SilenceCount and must not narrate "not heard N of M" for it. Cleared by that first
+        // period completion after it is set (mirrors the established one-shot pattern). Any
+        // over-count from a rare lagged decode is separately undone by IngestTargetDecode's
+        // SilenceCount = 0.
+        private bool _targetHeardThisPeriod;
 
-        // True for exactly the period in which a target -> peer finishing decode (re)armed
-        // _peerCloseSettle: that period is NOT a "silent settle opportunity" (the target was
-        // heard), so the same-period OnReceivePeriodComplete must not decrement. Cleared by the
-        // first OnReceivePeriodComplete after the arm.
-        private bool _peerCloseSettleHeardThisPeriod;
-
-        // Test-only (JimmyTests via InternalsVisibleTo): the live peer-close settle countdown.
-        internal int TestPeerCloseSettle => _peerCloseSettle;
-
-        // Set only when a Smart Start busy-yield (ReturnToWaiting while BusyWithOther) parks a
-        // STALE "target working someone else" observation. While armed, that old BusyWithOther is
-        // allowed to expire once SilenceThreshold appropriate target-not-heard receive
-        // opportunities have elapsed on the target's own parity with NO fresh evidence the target
-        // is still busy -- fresh busy evidence (target -> other mid-QSO, or any station -> target)
-        // re-zeros SilenceCount and keeps this armed, so fresh evidence always wins. Never set
-        // outside a busy-yield, so the plain "silence never overrides 'working another station'"
-        // rule is unchanged for a target that went busy while Smart Start was only waiting.
-        private bool _busyExpirationArmedAfterYield;
-
-        // The MOST RECENT confident classification for the target was "working (or being called
-        // by) another station" -- report/R-report/RRR to a peer, addressing-other, or any station
-        // addressing the target. Cleared by a target CQ / 73 / RR73 / addressing-us / ambiguous
-        // decode. The busy-yield expiration above only fires when this is FALSE: a weak/QSB DX
-        // in a pileup produces "not decoded" gaps of a period or two between its overs, which the
-        // raw silence counter used to mistake for "the other QSO ended" (C6AZB, 2026-09-07 log --
-        // Smart Start briefly called a station mid-QSO, then aborted). If the last thing actually
-        // heard from the target was it working someone, the "busy" state still reflects reality
-        // and silence must not clear it. Fix #1's real case -- target went quiet after an
-        // AMBIGUOUS exchange, or Jimmy lost the thread -- still expires (ambiguous clears this).
-        private bool _lastHeardWorkingOther;
+        // N4BP live-radio audit, 2026-09-08 -- fix 4. The target addressed OUR callsign with a
+        // mid-exchange report/reply while Smart Start was still WAITING (not yet in its calling
+        // phase). That is unambiguous engagement, not merely "available": WsjtxClient answers
+        // THIS exact decode immediately and hands the contact to the normal QSO sequencer,
+        // rather than parking a deferred generic auto-start that can then dispatch off a newer
+        // CQ from the target. One-shot: WsjtxClient consumes it via ConsumeEngagedWhileWaiting().
+        private bool _engagedWhileWaiting;
 
         // Dedup: OnReceivePeriodComplete is called once per real slot transition, but guards
         // against being asked twice for the same slot (defensive; the real per-tick caller
@@ -318,10 +284,8 @@ namespace WSJTX_Controller
             AwaitingEngagement = false;
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
-            _peerCloseSettle = 0;
-            _peerCloseSettleHeardThisPeriod = false;
-            _busyExpirationArmedAfterYield = false;
-            _lastHeardWorkingOther = false;
+            _targetHeardThisPeriod = false;
+            _engagedWhileWaiting = false;
             _standbyRounds = 0;
             _lastCountedSlot = null;
             _band = band;
@@ -350,10 +314,8 @@ namespace WSJTX_Controller
             AwaitingEngagement = false;
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
-            _peerCloseSettle = 0;
-            _peerCloseSettleHeardThisPeriod = false;
-            _busyExpirationArmedAfterYield = false;
-            _lastHeardWorkingOther = false;
+            _targetHeardThisPeriod = false;
+            _engagedWhileWaiting = false;
             _standbyRounds = 0;
             _lastCountedSlot = null;
             if (announce) Raise(TargetObservationKind.WatchStopped, call);
@@ -377,7 +339,17 @@ namespace WSJTX_Controller
         {
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
-            _peerCloseSettle = 0;
+            _engagedWhileWaiting = false;
+        }
+
+        // One-shot: WsjtxClient consumes this after ObserveDecode to hand a "target addressed us
+        // while we were still waiting" straight to the normal QSO sequencer (see the field's
+        // own comment). Both reads and clears it.
+        public bool ConsumeEngagedWhileWaiting()
+        {
+            if (!_engagedWhileWaiting) return false;
+            _engagedWhileWaiting = false;
+            return true;
         }
 
         // Smart Start only. Called once the automatic REPLY for this target has actually been
@@ -394,17 +366,20 @@ namespace WSJTX_Controller
             EngagedUs = false;
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
-            _peerCloseSettle = 0;
+            _engagedWhileWaiting = false;
             _standbyRounds = 0;   // we actually got to call -- the earlier dead-end rounds don't count against us
         }
 
         // The target started working someone else before answering us and the caller has ceased
         // our transmit attempt (the normal Escape-style halt/cancel/requeue). Drop back to the
-        // armed/waiting state for the SAME target: the readiness machinery is live again, but
-        // BusyWithOther is deliberately KEPT -- so a resume needs a genuine availability signal
-        // (target CQ / 73 / RR73 / addressing us), never mere silence, and a mere peer change in
-        // the other QSO keeps BusyWithOther set. TargetCall / parity / HasLiveTargetEvidence /
-        // ApparentPeer / LastUsableDecode are all retained.
+        // armed/waiting state for the SAME target: the readiness machinery is live again, and
+        // BusyWithOther is KEPT (the target IS busy). The clean-silence count restarts from zero
+        // here (N4BP live-radio audit: "when that traffic stops, start the existing configurable
+        // clean-silence count from zero"), so once the target has been silent for the operator's
+        // configured SilenceThreshold appropriate target-parity opportunities with no fresh busy
+        // evidence, BusyWithOther expires and Smart Start is ready again. TargetCall / parity /
+        // HasLiveTargetEvidence / ApparentPeer / LastUsableDecode / TransmittedCallCount are all
+        // retained -- this same calling effort resumes.
         public void ReturnToWaiting()
         {
             if (Purpose != TargetPurpose.SmartStart) return;
@@ -412,14 +387,11 @@ namespace WSJTX_Controller
             EngagedUs = false;
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _engagedWhileWaiting = false;
+            _targetHeardThisPeriod = false;
             SilenceCount = 0;
             _lastCountedSlot = null;
             OpportunitiesSinceLiveEvidence = 0;
-            // If we yielded because the target was working someone else, the "busy" observation
-            // we are carrying is now stale: arm it to expire after SilenceThreshold appropriate
-            // target-not-heard opportunities unless fresh busy evidence re-zeros that window.
-            // TransmittedCallCount is deliberately NOT reset -- this same calling effort resumes.
-            _busyExpirationArmedAfterYield = BusyWithOther;
         }
 
         // One ACTUAL transmitted calling over to this target just completed (fed by WsjtxClient
@@ -519,15 +491,12 @@ namespace WSJTX_Controller
 
                 if (addressedToTarget)
                 {
+                    // Someone is calling / working the target right now -- fresh busy evidence.
+                    // It restarts the clean-silence count from zero (fresh busy evidence always
+                    // wins over a pending "target has gone quiet" decision).
                     BusyWithOther = true;
-                    _lastHeardWorkingOther = true;
-                    // Fresh evidence the target is still tied up: restart the post-yield
-                    // expiration window from zero (fresh busy evidence always wins).
-                    if (_busyExpirationArmedAfterYield)
-                    {
-                        SilenceCount = 0;
-                        _lastCountedSlot = null;
-                    }
+                    SilenceCount = 0;
+                    _lastCountedSlot = null;
                 }
 
                 if (addressedToTarget
@@ -555,9 +524,13 @@ namespace WSJTX_Controller
             var sem = d.EffectiveSemantic(myCall);
 
             // Any confidently attributed decode from the target -- including an ambiguous one --
-            // resets the silence count and records the freshest usable decode/parity.
+            // resets the silence count and records the freshest usable decode/parity. It also
+            // marks this receive period as one in which the target WAS heard, so its own
+            // period-complete does not falsely count it as a "not heard" opportunity (N4BP live
+            // audit -- fix 1).
             SilenceCount = 0;
             _lastCountedSlot = null;
+            _targetHeardThisPeriod = true;
             TargetEvenParity = evenSlot;
             LastUsableDecode = d;
             LastUsableDecodeUtc = decodeUtc;
@@ -571,9 +544,7 @@ namespace WSJTX_Controller
             {
                 ApparentPeer = null;
                 BusyWithOther = false;                 // calling CQ -> available
-                _lastHeardWorkingOther = false;
                 _rr73AwaitingOneMoreOpportunity = false;
-                _peerCloseSettle = 0;                  // a fresh CQ = the prior QSO is over
                 Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
                 return;
@@ -582,7 +553,6 @@ namespace WSJTX_Controller
             string to = sem.To;
             if (string.IsNullOrEmpty(to))
             {
-                _lastHeardWorkingOther = false;   // heard the target, but not "working someone" -- unblock expiration
                 Raise(TargetObservationKind.TargetAmbiguous, TargetCall, null, null, d.Message);
                 return;
             }
@@ -592,6 +562,7 @@ namespace WSJTX_Controller
             if (!addressingUs && !string.Equals(to, ApparentPeer, StringComparison.OrdinalIgnoreCase))
                 ApparentPeer = to;
             string peer = addressingUs ? myCall : to;
+            string payload = WsjtxMessage.Payload(d.Message);   // "-15" / "R-15" / "RRR" / "RR73" / "73" -- narration only
 
             if (live && addressingUs)
                 EngagedUs = true;                      // the target answered our callsign
@@ -599,145 +570,83 @@ namespace WSJTX_Controller
             if (addressingUs)
             {
                 BusyWithOther = false;                 // turning to us -> not busy with anyone else
-                _lastHeardWorkingOther = false;
-                _peerCloseSettle = 0;                  // the target turned to us -- no peer close to wait out
+
+                // Smart Start, still armed/waiting (not yet CALLING): the target is sending US a
+                // mid-exchange report/reply. That is unambiguous ENGAGEMENT, not merely
+                // "available" -- WsjtxClient answers THIS exact decode now and hands the contact
+                // to the normal QSO sequencer (like Enter on a to-us decode), instead of parking
+                // a deferred generic auto-start that can dispatch off a newer CQ from the target
+                // (N4BP live, 2026-09-08). A target -> US 73 / RR73 keeps its own rules below.
+                if (live && Purpose == TargetPurpose.SmartStart && !AwaitingEngagement
+                    && !sem.Is73 && !sem.IsRr73)
+                {
+                    _engagedWhileWaiting = true;
+                    Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, payload, d.Message);
+                    return;
+                }
             }
 
-            // Smart Start, still armed/waiting (not yet in its own calling phase): the target is
-            // now addressing OUR callsign -- it is literally calling us, the strongest possible
-            // "go". Make ready immediately so the EXISTING revalidated dispatch path replies to
-            // THIS decode, instead of sitting in the silence counter until the target moves on
-            // again (the KV4CW POTA case: it came back to us between our own call attempts and
-            // Smart Start ignored it). 73 already signals ready in its own branch below; RR73
-            // keeps its deliberate one-more-opportunity rule. AwaitingEngagement keeps its own
-            // EngagedUs handling (ServiceSmartStartAwaitingEngagement) -- this is only the
-            // between-attempts / never-yet-called case. SignalReady()'s own guards
-            // (HasLiveTargetEvidence / !BusyWithOther / !AwaitingEngagement) and the pre-TX
-            // RevalidateForAutoStart still gate the actual transmission.
-            if (live && addressingUs && Purpose == TargetPurpose.SmartStart && !AwaitingEngagement
-                && !sem.Is73 && !sem.IsRr73)
+            // ── Target -> US : 73 / RR73 keep their existing special handling ──────────────────
+            if (addressingUs && sem.IsRr73)
             {
-                SignalReady();
+                // The target rogered OUR callsign -- becoming available; the deliberate
+                // one-extra-opportunity rule for RR73-to-us is unchanged.
+                _rr73AwaitingOneMoreOpportunity = Purpose == TargetPurpose.SmartStart && !d.IsFoxHound();
+                Raise(TargetObservationKind.TargetRr73, TargetCall, peer, payload, d.Message);
                 return;
             }
-
-            if (sem.IsRr73)
+            if (addressingUs && sem.Is73)
             {
-                if (addressingUs)
-                {
-                    // The target rogered OUR callsign -- becoming available; the deliberate
-                    // one-extra-opportunity rule for RR73-to-us is unchanged (test ~16681).
-                    BusyWithOther = false;
-                    _lastHeardWorkingOther = false;
-                    _peerCloseSettle = 0;
-                    Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
-                    if (Purpose == TargetPurpose.SmartStart && !d.IsFoxHound())
-                        _rr73AwaitingOneMoreOpportunity = true;
-                    return;
-                }
-                if (d.IsFoxHound())
-                {
-                    // Fox/Hound (multiplex) RR73: unchanged from before this fix -- the /H suffix
-                    // is not generic "target available" evidence and does not arm any resume
-                    // rule; it just falls to the normal silence counter. Same IsFoxHound
-                    // heuristic Jimmy's "Possible F/H" tagging uses (ClassificationEngine.cs).
-                    BusyWithOther = false;
-                    _lastHeardWorkingOther = false;
-                    _rr73AwaitingOneMoreOpportunity = false;
-                    Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
-                    return;
-                }
-                // Target -> PEER RR73 (ordinary).
-                if (Purpose == TargetPurpose.SmartStart)
-                {
-                    // The target is in its CLOSING exchange with that peer, NOT free yet. KB2SLO
-                    // live (2026-09-08): it kept re-sending "K8UMF KB2SLO RR73" for 5+ periods
-                    // while Smart Start had already called it. Stay busy; require
-                    // PeerCloseSettleOpportunities appropriate target-parity opportunities with NO
-                    // further finishing traffic to a peer before "available" (any fresh RR73/73/
-                    // report/RReport/RRR to a peer re-arms the count).
-                    BusyWithOther = true;
-                    _lastHeardWorkingOther = true;
-                    _rr73AwaitingOneMoreOpportunity = false;
-                    ArmPeerCloseSettle();
-                }
-                else
-                {
-                    // Station Watch / Work Now: unchanged -- "finishing with the peer, becoming
-                    // available" (Work Now is an explicit operator command with its own bounded
-                    // gap check; it must not start reading RR73 as busy).
-                    BusyWithOther = false;
-                    _lastHeardWorkingOther = false;
-                    _rr73AwaitingOneMoreOpportunity = false;
-                }
-                Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
-                return;
-            }
-            if (sem.Is73)
-            {
-                if (addressingUs || Purpose != TargetPurpose.SmartStart)
-                {
-                    // Signed off with US, or a Station Watch / Work Now monitor: unchanged --
-                    // 73 = available.
-                    BusyWithOther = false;
-                    _lastHeardWorkingOther = false;
-                    _rr73AwaitingOneMoreOpportunity = false;
-                    _peerCloseSettle = 0;
-                    Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
-                    if (Purpose == TargetPurpose.SmartStart) SignalReady();
-                    return;
-                }
-                // Smart Start, target -> PEER 73: usually the definitive final, but a target
-                // whose peer did not hear it re-sends 73 too -- same class of bug as RR73. Route
-                // it through the same bounded settle so a single (possibly repeated) 73 to a peer
-                // does not by itself read as "available".
-                BusyWithOther = true;
-                _lastHeardWorkingOther = true;
                 _rr73AwaitingOneMoreOpportunity = false;
-                ArmPeerCloseSettle();
-                Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
-                return;
-            }
-            if (sem.IsRrr)       // RRR -- distinct from, and NOT equivalent to, RR73/73
-            {
-                if (!addressingUs)
-                {
-                    BusyWithOther = true; _lastHeardWorkingOther = true;   // mid-exchange with the peer
-                    if (_peerCloseSettle > 0) ArmPeerCloseSettle();        // still closing -> re-arm the peer-close settle
-                }
-                Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
-                return;
-            }
-            if (sem.IsRReport)
-            {
-                if (!addressingUs)
-                {
-                    BusyWithOther = true; _lastHeardWorkingOther = true;
-                    if (_peerCloseSettle > 0) ArmPeerCloseSettle();
-                }
-                Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
-                return;
-            }
-            if (sem.IsReport)
-            {
-                if (!addressingUs)
-                {
-                    BusyWithOther = true; _lastHeardWorkingOther = true;
-                    if (_peerCloseSettle > 0) ArmPeerCloseSettle();
-                }
-                Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
+                Raise(TargetObservationKind.Target73, TargetCall, peer, payload, d.Message);
+                if (Purpose == TargetPurpose.SmartStart) SignalReady();
                 return;
             }
             if (addressingUs)
             {
-                Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, null, d.Message);
+                // Reaches here only during the AwaitingEngagement phase (a report/reply to us
+                // while we are already calling), or for a Station Watch instance. EngagedUs is
+                // already set above; ServiceSmartStartAwaitingEngagement owns the hand-off. Raise
+                // the SPECIFIC decoded kind so Station Watch narration keeps the detail it always
+                // had (report / R-report vs a bare directed message).
+                if (sem.IsRReport) { Raise(TargetObservationKind.TargetRReport, TargetCall, peer, payload, d.Message); return; }
+                if (sem.IsReport)  { Raise(TargetObservationKind.TargetReport, TargetCall, peer, payload, d.Message); return; }
+                Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, payload, d.Message);
                 return;
             }
-            // Directed at someone else with a payload that isn't one of the recognized standard
-            // forms (grid, free text, contest exchange, etc.) -- still meaningful "working
-            // another station" evidence, just not one of the specific typed observations above.
-            BusyWithOther = true;
-            _lastHeardWorkingOther = true;
+
+            // ── Target -> PEER : the single "working another station" busy path ────────────────
+            // Every kind of target-to-peer traffic (report / R-report / RRR / RR73 / 73 /
+            // any other directed payload) means the target is working someone else. For Smart
+            // Start it sets BusyWithOther and restarts the ONE configurable clean-silence count
+            // from zero (fresh busy evidence always wins). It becomes available again only when
+            // the target has been silent for SilenceThreshold appropriate target-parity
+            // opportunities, or sends a CQ / addresses us. There is no separate hard-coded
+            // "peer close" countdown -- if the operator wants a longer settle, they raise the
+            // Smart QSO Start silence-period setting (N4BP live audit -- fix 2). Station Watch /
+            // Work Now keep the older "RR73/73 to a peer = finishing, becoming available"
+            // reading (Work Now is an explicit operator command with its own bounded gap check).
+            if (Purpose == TargetPurpose.SmartStart || !(sem.IsRr73 || sem.Is73))
+            {
+                BusyWithOther = true;
+                _rr73AwaitingOneMoreOpportunity = false;
+                SilenceCount = 0;
+                _lastCountedSlot = null;
+            }
+            else
+            {
+                // Station Watch / Work Now, target -> peer RR73/73: "finishing, becoming
+                // available" -- unchanged from before.
+                BusyWithOther = false;
+                _rr73AwaitingOneMoreOpportunity = false;
+            }
+
+            if (sem.IsRr73)      { Raise(TargetObservationKind.TargetRr73, TargetCall, peer, payload, d.Message); return; }
+            if (sem.Is73)        { Raise(TargetObservationKind.Target73, TargetCall, peer, payload, d.Message); return; }
+            if (sem.IsRrr)       { Raise(TargetObservationKind.TargetRrr, TargetCall, peer, payload, d.Message); return; }
+            if (sem.IsRReport)   { Raise(TargetObservationKind.TargetRReport, TargetCall, peer, payload, d.Message); return; }
+            if (sem.IsReport)    { Raise(TargetObservationKind.TargetReport, TargetCall, peer, payload, d.Message); return; }
+            if (addressingUs)    { Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, payload, d.Message); return; }
             Raise(TargetObservationKind.TargetAddressingOther, TargetCall, peer, null, d.Message);
         }
 
@@ -788,37 +697,17 @@ namespace WSJTX_Controller
             if (Purpose != TargetPurpose.SmartStart) return;   // Station Watch never counts toward an automatic start
             if (AwaitingEngagement) return;                    // already calling -- silence/RR73 readiness is dormant
 
-            // Problem 2 / KB2SLO: the target -> peer RR73/73 closing-exchange settle. Counts
-            // down one per appropriate target-parity opportunity in which the target was NOT
-            // heard sending finishing traffic to a peer (any such decode re-arms it in
-            // IngestTargetDecode). At 0 the closing exchange has demonstrably ended and the
-            // target is available.
-            if (_peerCloseSettle > 0)
+            // Fix 1 (N4BP live audit): a period in which the target itself was actually heard is
+            // NOT a "not heard" opportunity. Do not count it toward the clean-silence total and
+            // do not narrate "not heard N of M" for it. One-shot, cleared here.
+            if (_targetHeardThisPeriod)
             {
-                if (_peerCloseSettleHeardThisPeriod)
-                {
-                    // The target WAS heard this period (it (re)armed the settle) -- not a silent
-                    // opportunity. Do not count it down.
-                    _peerCloseSettleHeardThisPeriod = false;
-                    Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null,
-                        $"0 of {PeerCloseSettleOpportunities}");
-                    return;
-                }
-                _peerCloseSettle--;
-                if (_peerCloseSettle == 0)
-                {
-                    BusyWithOther = false;
-                    _lastHeardWorkingOther = false;
-                    SignalReady();
-                }
-                else
-                {
-                    Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null,
-                        $"{PeerCloseSettleOpportunities - _peerCloseSettle} of {PeerCloseSettleOpportunities}");
-                }
+                _targetHeardThisPeriod = false;
                 return;
             }
 
+            // The deliberate one-extra-opportunity rule for a target -> US RR73 (the target
+            // rogered our callsign): one clean opportunity later, it is available.
             if (_rr73AwaitingOneMoreOpportunity)
             {
                 _rr73AwaitingOneMoreOpportunity = false;
@@ -826,25 +715,20 @@ namespace WSJTX_Controller
                 return;
             }
 
+            // The ONE configurable clean-silence mechanism (fix 2). SilenceThreshold is the
+            // operator's Smart QSO Start silence-period setting. Each genuinely clean appropriate
+            // target-parity opportunity (target not heard, no fresh busy evidence this period)
+            // counts one. When the count reaches the threshold:
+            //   * if the target was working another station, that traffic has now been silent
+            //     for the operator's full configured window -- the exchange has ended / the
+            //     target has moved on, so clear BusyWithOther, and
+            //   * signal ready.
+            // Fresh target traffic (IngestTargetDecode) or a third party addressing the target
+            // (ObserveDecode) re-zeros SilenceCount, so busy evidence always restarts the count.
             SilenceCount++;
             if (SilenceCount >= SilenceThreshold)
             {
-                // A stale "target working someone else" observation carried across a Smart Start
-                // busy-yield expires here: the operator's configured silence window has now
-                // passed on the target's own parity with no fresh evidence the target is still
-                // busy (any such evidence re-zeros SilenceCount, in ObserveDecode /
-                // IngestTargetDecode). The non-yield case is untouched --
-                // _busyExpirationArmedAfterYield is only ever set by ReturnToWaiting -- so
-                // "silence never overrides 'working another station'" still holds for a target
-                // that went busy while Smart Start was only waiting.
-                // Only when the LAST thing actually heard from the target was NOT it working
-                // someone (see _lastHeardWorkingOther): a weak/QSB DX in a pileup goes quiet for a
-                // period or two between its own overs, which is not "the other QSO ended."
-                if (BusyWithOther && _busyExpirationArmedAfterYield && !_lastHeardWorkingOther)
-                {
-                    BusyWithOther = false;
-                    _busyExpirationArmedAfterYield = false;
-                }
+                BusyWithOther = false;
                 SignalReady();
             }
             else
@@ -862,7 +746,8 @@ namespace WSJTX_Controller
             SilenceCount = 0;
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
-            _peerCloseSettle = 0;
+            _engagedWhileWaiting = false;
+            _targetHeardThisPeriod = false;
             _lastCountedSlot = null;
         }
 
@@ -885,12 +770,16 @@ namespace WSJTX_Controller
             if (BusyWithOther) return AutoStartCheck.TargetBusy;
 
             // Primary freshness measure: completed appropriate receive opportunities since the
-            // target was last actually heard. Auto-start must stay within the operator's own
-            // silence policy (+1 for the one-poll snapshot-finality deferral in WsjtxClient);
-            // Work Now allows one full standard exchange plus slack.
+            // target was last actually heard. An automatic start is legitimately reached exactly
+            // SilenceThreshold clean opportunities after the last live decode (N4BP live audit --
+            // fix 2), plus the period that decode was heard in (+1) and the snapshot-finality
+            // deferral's slot advances in WsjtxClient (+2), plus 1 for jitter -- so the ceiling
+            // is SilenceThreshold + 4. Beyond that the poll/decode feed almost certainly stalled
+            // and the wall-clock backstop below is the real guard. Work Now allows one full
+            // standard exchange plus slack.
             int maxGap = operatorOverride
                 ? WorkNowMaxOpportunityGap
-                : Math.Max(SilenceThreshold, 1) + 1;
+                : Math.Max(SilenceThreshold, 1) + 4;
             if (OpportunitiesSinceLiveEvidence > maxGap) return AutoStartCheck.StaleEvidence;
 
             // Wall-clock backstop, derived (not a magic number): each counted opportunity is one
@@ -903,15 +792,6 @@ namespace WSJTX_Controller
             if ((nowUtc - LastUsableDecodeUtc).TotalSeconds > maxAgeSeconds) return AutoStartCheck.StaleEvidence;
 
             return AutoStartCheck.Ok;
-        }
-
-        // (Re)arm the target -> peer closing-exchange settle to its full count, and mark that the
-        // target was heard this receive period so the same-period OnReceivePeriodComplete does
-        // not count it down (see PeerCloseSettleOpportunities' own comment).
-        private void ArmPeerCloseSettle()
-        {
-            _peerCloseSettle = PeerCloseSettleOpportunities;
-            _peerCloseSettleHeardThisPeriod = true;
         }
 
         private void SignalReady()

@@ -2369,10 +2369,14 @@ namespace WSJTX_Controller
                     // way Escape is -- Alt+H used to announce "Tx halted" unconditionally, even
                     // in idle Listen mode with nothing to halt. Actions stay unconditional.
                     bool hadSomethingToHalt = wsjtxClient.HasActiveTxOrCycle;
+                    bool smartStartWasActive = wsjtxClient.SmartStartActive;
+                    string smartStartTarget = wsjtxClient.SmartStartTarget;
                     wsjtxClient.AbortContact();
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
                     if (hadSomethingToHalt) ShowMsg("Tx halted", true);
+                    else if (smartStartWasActive)
+                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Start stopped" : $"Smart Start stopped, {smartStartTarget}", true);
                 }
                 BeginInvoke((Action)(() => RestoreFocus(focused)));
                 return true;
@@ -4746,11 +4750,17 @@ namespace WSJTX_Controller
                     // fully unconditional (safety net, same as before) -- only the spoken
                     // announcement is gated.
                     bool hadSomethingToHalt = wsjtxClient.HasActiveTxOrCycle;
+                    // N4BP live-radio audit -- fix 6: Smart Start while only WAITING has nothing
+                    // transmitting, so "Tx halted" would not fire -- confirm the cancel instead.
+                    bool smartStartWasActive = wsjtxClient.SmartStartActive;
+                    string smartStartTarget = wsjtxClient.SmartStartTarget;
 
                     wsjtxClient.AbortContact();         // unconditional: works in both CQ and Listen mode
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
                     if (hadSomethingToHalt) ShowMsg("Tx halted", true);
+                    else if (smartStartWasActive)
+                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Start stopped" : $"Smart Start stopped, {smartStartTarget}", true);
                 }
                 BeginInvoke((Action)(() =>
                     BeginInvoke((Action)(() => RestoreFocus(focused)))

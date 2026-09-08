@@ -382,11 +382,14 @@ namespace WSJTX_Controller
             Phrase = BuildPhrase(Target, Peer, Report);
         }
 
+        // N4BP live-radio audit -- fix 3: the decoded FT8 fact, not a translated state. "N4BP to
+        // KZ4MW, minus 15." / "N4BP to KZ4MW, RR73." / "N4BP to KZ4MW." / "N4BP working another
+        // station." (`report` is already the spoken form -- "minus 15" / "R minus 15" / "RR73").
         private static string BuildPhrase(string target, string peer, string report)
         {
-            if (string.IsNullOrEmpty(peer)) return $"{target} is working another station.";
-            if (string.IsNullOrEmpty(report)) return $"{target} is working {peer}.";
-            return $"{target} is working {peer}, {report}.";
+            if (string.IsNullOrEmpty(peer)) return $"{target} working another station.";
+            if (string.IsNullOrEmpty(report)) return $"{target} to {peer}.";
+            return $"{target} to {peer}, {report}.";
         }
 
         public NotificationEventType EventType => NotificationEventType.SmartStartTargetBusy;

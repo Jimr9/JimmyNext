@@ -182,9 +182,35 @@ namespace WSJTX_Controller
                 _smartStart.ObserveDecode(enq, evenSlot, myCall);
                 if (_smartStart.AwaitingEngagement)
                     ServiceSmartStartAwaitingEngagement();
+                else if (_smartStart.ConsumeEngagedWhileWaiting())
+                    HandOffSmartStartWhileWaiting(enq);
                 else if (_smartStart.ConsumeReadyToStart())
                     ArmPendingAutoStart(_smartStart);
             }
+        }
+
+        // N4BP live-radio audit -- fix 4. The target addressed OUR callsign with a mid-exchange
+        // report/reply while Smart Start was still WAITING (not yet in its own calling phase).
+        // That IS engagement -- answer THIS exact decode now (identical to Enter on a to-us
+        // decode), hand the contact to the normal QSO sequencer, and end Smart Start. This
+        // bypasses the snapshot-finality deferral on purpose: the deferral exists to catch a
+        // "target working someone else" straggler, and here the target is literally sending US a
+        // report. Without this, the parked deferred auto-start could dispatch off a NEWER decode
+        // (a fresh CQ from the target), replying with Tx1 grid instead of the roger -- exactly
+        // what happened with N4BP's -06 on 2026-09-08.
+        private void HandOffSmartStartWhileWaiting(EnqueueDecodeMessage enq)
+        {
+            string target = _smartStart.TargetCall;
+            DebugOutput($"{Time()} [SMART] {target} addressed us while Smart Start was waiting -- answering now; normal QSO sequencing owns it");
+            ClearPendingAutoStart();
+            Notify?.Publish(new SmartStartEngagedEvent(target));
+            if (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, target, StringComparison.OrdinalIgnoreCase))
+                StopStationWatch();
+            _smartStart.Stop(announce: false);
+            // Answer the target's actual to-us decode. If a contact is somehow already running
+            // (an in-flight dispatch beat us here), leave it alone -- the sequencer owns it.
+            if (callInProg == null && enq != null)
+                ReplyTo(enq);
         }
 
         // Smart Start has dispatched its first call and is now CALLING the target (see
@@ -242,15 +268,18 @@ namespace WSJTX_Controller
         }
 
         // Smart Start has churned through MaxSmartStartStandbyRounds "looked ready -> was busy"
-        // rounds for this armed target without ever getting a real calling over out. There is no
-        // lull coming -- disarm and tell the operator (existing status-message channel, no new
-        // notification type). A plain Enter + the Repeat Limit is how you work a hot pileup.
+        // rounds for this armed target WITHOUT ever getting a real calling over out (revalidation
+        // kept declining it as busy). This is a SEPARATE terminal policy from the Repeat Limit:
+        // it fires on dead-end busy churn where zero calls happened, so "20 actual calls" is NOT
+        // promised under all busy-churn conditions -- a hot CQing pileup has no lull to wait for,
+        // and a plain Enter + the Repeat Limit is the tool for that. Its message is deliberately
+        // distinct from the Repeat-Limit "expired" wording so the operator can tell them apart.
         private void SmartStartStoodDownBusy(string target)
         {
-            DebugOutput($"{Time()} [SMART] {target} stayed busy across {MaxSmartStartStandbyRounds} standby rounds -- disarming Smart Start");
+            DebugOutput($"{Time()} [SMART] {target} stayed busy across {MaxSmartStartStandbyRounds} standby rounds with no call out -- disarming Smart Start");
             ClearPendingAutoStart();
             _smartStart.Stop(announce: false);
-            StatusView.ShowMessage($"{target} stayed busy; Smart Start stopped", false);
+            StatusView.ShowMessage($"{target} stayed busy; Smart Start stopped, no calls made", true);
         }
 
         // The Smart Start Repeat Limit -- (int)ctrl.timeoutNumUpDown.Value, the operator's own
@@ -265,7 +294,8 @@ namespace WSJTX_Controller
         private void SmartStartRepeatLimitReached()
         {
             string target = _smartStart.TargetCall;
-            DebugOutput($"{Time()} [SMART] Repeat limit ({(int)ctrl.timeoutNumUpDown.Value}) reached for {target} -- no further calls, disarming Smart Start");
+            int limit = (int)ctrl.timeoutNumUpDown.Value;
+            DebugOutput($"{Time()} [SMART] Repeat limit ({limit}) reached for {target} -- no further calls, disarming Smart Start");
             ClearPendingAutoStart();
             if (string.Equals(callInProg, target, StringComparison.OrdinalIgnoreCase))
             {
@@ -275,6 +305,9 @@ namespace WSJTX_Controller
                 HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
             }
             _smartStart.Stop(announce: false);
+            // Concise terminal message so the operator knows the effort ended on the Repeat
+            // Limit (counted calling overs only), distinct from the busy-churn stop above.
+            StatusView.ShowMessage($"Repeat limit reached after {limit} calls to {target}, no contact completed", true);
         }
 
         // Called once per real, completed receive-period boundary (the exact same signal
@@ -319,6 +352,13 @@ namespace WSJTX_Controller
             _stationWatch.CancelPendingStart();
             _smartStart.Stop(announce: false);
         }
+
+        // N4BP live-radio audit -- fix 6. Escape / Alt+H (Controller.cs) capture this BEFORE
+        // AbortContact() so, when nothing was transmitting (the Smart-Start-only-waiting case),
+        // it can still give a short "Smart Start stopped" confirmation -- the "Tx halted"
+        // announcement is gated on HasActiveTxOrCycle, which is false while merely waiting.
+        public bool SmartStartActive => _smartStart.IsActive || _pendingAutoStart != null;
+        public string SmartStartTarget => _smartStart.TargetCall;
 
         // CAT loss / TX disabled: Smart Start becomes non-actionable and its silence count resets;
         // a receive-only Station Watch is untouched (it may continue decoding regardless).
@@ -489,8 +529,11 @@ namespace WSJTX_Controller
             switch (obs.Kind)
             {
                 case TargetObservationKind.SmartStartWaiting:
+                    // N4BP live audit -- fix 3: concise, and only ever raised for a period the
+                    // target was genuinely NOT heard (TargetMonitor's _targetHeardThisPeriod
+                    // guard). `obs.Value` is "1 of 2" (the operator's own silence setting).
                     Notify?.Publish(new SmartStartWaitingEvent(
-                        obs.Target, $"Still waiting for {obs.Target}, {obs.Value}.", obs.Value));
+                        obs.Target, $"{obs.Target} not heard, {obs.Value}.", obs.Value));
                     return;
                 case TargetObservationKind.SmartStartTargetAvailable:
                     Notify?.Publish(new SmartStartTargetAvailableEvent(obs.Target));
@@ -499,15 +542,17 @@ namespace WSJTX_Controller
 
             bool stationWatchCoversSameTarget = _stationWatch.IsActive
                 && string.Equals(_stationWatch.TargetCall, obs.Target, StringComparison.OrdinalIgnoreCase);
+            if (stationWatchCoversSameTarget) return;   // the richer Station Watch line owns it -- never doubled
 
-            // A report / R-report / RRR whose peer is OUR OWN callsign is the target working US,
-            // not another station -- never narrate it as "working another station" (the KV4CW
-            // case: it sent us "+02" and Smart Start announced it was busy). Only reachable in
-            // the awaiting-engagement phase now that IngestTargetDecode makes an addressing-us
-            // decode go straight to ready while armed; ServiceSmartStartAwaitingEngagement owns
-            // the hand-off, this method just stays quiet about it.
+            // A report / reply whose peer is OUR OWN callsign is the target working US, not
+            // another station. When Smart Start is WAITING, IngestTargetDecode routes that
+            // straight to the engagement hand-off (HandOffSmartStartWhileWaiting) -- the
+            // "answered you; normal QSO" line covers it and the normal QSO status shows the
+            // report, so nothing is narrated here. During AwaitingEngagement,
+            // ServiceSmartStartAwaitingEngagement owns it -- also nothing here.
             bool reportIsToUs = !string.IsNullOrEmpty(obs.Peer)
                 && string.Equals(obs.Peer, myCall, StringComparison.OrdinalIgnoreCase);
+            if (reportIsToUs) return;
 
             switch (obs.Kind)
             {
@@ -515,16 +560,15 @@ namespace WSJTX_Controller
                 case TargetObservationKind.TargetReport:
                 case TargetObservationKind.TargetRReport:
                 case TargetObservationKind.TargetRrr:
+                case TargetObservationKind.TargetRr73:
+                case TargetObservationKind.Target73:
                 case TargetObservationKind.OtherPartyObserved:
-                    // "Target working another station" -- Smart Start's decision-relevant fact.
-                    // Deduped per-peer by the policy's RepeatSeconds; skipped entirely when
-                    // Station Watch already narrates the fuller version. The phrase names the
-                    // other station (and its report when the decode carried one), degrading to
-                    // the old "another station" wording when the peer couldn't be parsed -- so a
-                    // string of different calls reads as the pileup it is.
-                    if (!reportIsToUs && !stationWatchCoversSameTarget)
-                        Notify?.Publish(new SmartStartTargetBusyEvent(
-                            obs.Target, obs.Peer ?? "", SpokenReport(obs.Value)));
+                    // The decoded FT8 fact about what the target is doing -- "N4BP to KZ4MW, -15."
+                    // / "N4BP to KZ4MW, RR73." etc. (no translated state like "finishing").
+                    // Deduped per-peer by the policy's RepeatSeconds so several decodes for the
+                    // SAME peer collapse; a move to a NEW station re-announces.
+                    Notify?.Publish(new SmartStartTargetBusyEvent(
+                        obs.Target, obs.Peer ?? "", SpokenReport(obs.Value)));
                     return;
             }
         }
