@@ -272,6 +272,7 @@ static class JimmyTests
         DirectDtoStage4DecodeSemanticsTests();
         SemanticShadowCorpusTests();
         SemanticStage6DisplayQueueParityTests();
+        SemanticStage7ObservationParityTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -3086,6 +3087,99 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  SemanticStage6DisplayQueueParityTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            SemanticCutover.UseNexusSemantics = savedCutover;
+        }
+    }
+
+    // ── Nexus modernization Stage 7a: TargetMonitor's observation classification now reads its
+    //    message-type + recipient facts through EffectiveSemantic. This feeds a target-relative
+    //    corpus through ObserveDecode BOTH ways -- a bare decode (no Semantic -> WsjtxMessage)
+    //    and one with a Nexus SemanticDecode attached (cutover ON) -- and asserts the resulting
+    //    TargetObservation.Kind/Value sequence and the BusyWithOther / ApparentPeer / EngagedUs
+    //    end state are IDENTICAL. The pre-existing TargetMonitorClassificationTests already lock
+    //    the WsjtxMessage path; this locks the Nexus path against it. ──
+    static void SemanticStage7ObservationParityTests()
+    {
+        Console.WriteLine("\n── Semantic Stage 7a: TargetMonitor observation parity (WsjtxMessage vs Nexus) ──");
+        bool savedCutover = SemanticCutover.UseNexusSemantics;
+        try
+        {
+            // (msg, kind, from, to, grid, reportDb, signoff)  -- Nexus's parse for target K4YT.
+            var corpus = new (string msg, string kind, string from, string to, string grid, int? rep, string signoff)[]
+            {
+                ($"CQ {THEIR_CALL} EM63",            "cq",         THEIR_CALL, null,      "EM63", null, null),
+                ($"{MY_CALL} {THEIR_CALL} -08",      "report",     THEIR_CALL, MY_CALL,   null,  -8,    null),
+                ($"{MY_CALL} {THEIR_CALL} R-05",     "rReport",    THEIR_CALL, MY_CALL,   null,  -5,    null),
+                ($"{MY_CALL} {THEIR_CALL} RRR",      "rrr",        THEIR_CALL, MY_CALL,   null,  null,  "rrr"),
+                ($"{MY_CALL} {THEIR_CALL} RR73",     "rr73",       THEIR_CALL, MY_CALL,   null,  null,  "rr73"),
+                ($"{MY_CALL} {THEIR_CALL} 73",       "sevenThree", THEIR_CALL, MY_CALL,   null,  null,  "sevenThree"),
+                ($"{MY_CALL} {THEIR_CALL} EM63",     "reply",      THEIR_CALL, MY_CALL,   "EM63", null, null),
+                ($"W1ABC {THEIR_CALL} -08",          "report",     THEIR_CALL, "W1ABC",   null,  -8,    null),
+                ($"W1ABC {THEIR_CALL} RR73",         "rr73",       THEIR_CALL, "W1ABC",   null,  null,  "rr73"),
+                ($"W1ABC {THEIR_CALL} R-05",         "rReport",    THEIR_CALL, "W1ABC",   null,  -5,    null),
+                ($"W1ABC {THEIR_CALL} EM63",         "reply",      THEIR_CALL, "W1ABC",   "EM63", null, null),
+                ($"{THEIR_CALL} W1ABC R-05",         "rReport",    THEIR_CALL, "W1ABC",   null,  -5,    null),
+            };
+
+            EnqueueDecodeMessage MkBare(string msg) => new EnqueueDecodeMessage { Message = msg };
+            EnqueueDecodeMessage MkSem((string msg, string kind, string from, string to, string grid, int? rep, string signoff) e)
+            {
+                var enq = new EnqueueDecodeMessage { Message = e.msg };
+                var row = new DirectDecodeRow
+                {
+                    Message = e.msg,
+                    IsCq = e.kind == "cq" || e.kind == "directedCq",
+                    DirectedToMe = string.Equals(e.to, MY_CALL, StringComparison.OrdinalIgnoreCase),
+                    Signoff = e.signoff == "rr73" || e.signoff == "sevenThree",
+                    Grid = e.grid,
+                };
+                var env = new DirectDecodeSemantics
+                {
+                    SchemaVersion = 1, RawMessage = e.msg, Kind = e.kind, From = e.from, To = e.to,
+                    Grid = e.grid, ReportDb = e.rep, AddressedToMe = row.DirectedToMe,
+                    Signoff = e.signoff, CallForm = "standard", QsoRelation = "none",
+                };
+                enq.Semantic = SemanticDecode.FromNexus(row, env, MY_CALL);
+                return enq;
+            }
+
+            string Run(bool nexus, (string,string,string,string,string,int?,string) e)
+            {
+                SemanticCutover.UseNexusSemantics = nexus;
+                var tm = new TargetMonitor(TargetPurpose.StationWatch);
+                var seen = new System.Collections.Generic.List<string>();
+                tm.Observed += o => seen.Add($"{o.Kind}|{o.Peer}|{o.Value}");
+                tm.Start(THEIR_CALL, "20m", "FT8", "tok");
+                // Prime ApparentPeer for the "target working W1ABC" cases so the not-us branches
+                // behave identically to the pre-existing suite's ordering.
+                var t = e;
+                tm.ObserveDecode(nexus ? MkSem((t.Item1,t.Item2,t.Item3,t.Item4,t.Item5,t.Item6,t.Item7)) : MkBare(t.Item1), true, MY_CALL);
+                return string.Join(" ; ", seen)
+                     + $" || busy={tm.BusyWithOther} peer={tm.ApparentPeer} engaged={tm.EngagedUs}";
+            }
+
+            int mismatch = 0;
+            foreach (var e in corpus)
+            {
+                var tup = (e.msg, e.kind, e.from, e.to, e.grid, e.rep, e.signoff);
+                string oldR = Run(false, tup);
+                string newR = Run(true, tup);
+                if (oldR != newR)
+                {
+                    mismatch++;
+                    Console.WriteLine($"    MISMATCH \"{e.msg}\"\n      wsjtx: {oldR}\n      nexus: {newR}");
+                }
+            }
+            Check("every target-relative decode: same observation Kind/Value + end state ON vs OFF",
+                  mismatch == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SemanticStage7ObservationParityTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
         finally

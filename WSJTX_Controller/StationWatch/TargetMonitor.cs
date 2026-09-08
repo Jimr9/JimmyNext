@@ -17,13 +17,14 @@ namespace WSJTX_Controller
     // the EXISTING ReplyTo path -- this class never sends anything to the radio, never touches
     // callInProg, and never generates a TX message itself.
     //
-    // Classification reuses WsjtxMessage's existing, tested static parser (Is73/IsRR73/IsRogers/
-    // IsReport/IsRogerReport/IsCQ/DeCall/ToCall/Payload/IsFoxHound) exactly as DecodeMessage/
-    // EnqueueDecodeMessage/ProcessDecodeMsg already do everywhere else in Jimmy -- no new FT8/FT4
-    // grammar is invented here, root-caused via a read of Nexus's own tempo_core::message::Msg
-    // (EngineHost's existing dependency) which parses the identical message shapes; Jimmy's own
-    // parser already gives every classification this feature needs, so nothing new was needed in
-    // EngineHost/Rust at all. See the 2.0.63 release notes for the full trace.
+    // Classification (Nexus modernization Stage 7a, 2026-09-08): the message-type + recipient
+    // facts -- IsCq / To / IsReport / IsRReport / IsRrr / IsRr73 / Is73 -- come from
+    // EnqueueDecodeMessage.EffectiveSemantic (Nexus's own tempo_core::message parse via the
+    // Direct snapshot when SemanticCutover.UseNexusSemantics is on; WsjtxMessage otherwise /
+    // on the UDP path). Stage 5 proved those facts byte-identical to the WsjtxMessage
+    // equivalents across the shadow corpus. The observation Value strings still come from
+    // WsjtxMessage.Payload (narration formatting, migrated separately at Stage 7b) and F/H
+    // detection stays d.IsFoxHound() (a heuristic). No new FT8/FT4 grammar is invented here.
     public enum TargetPurpose
     {
         StationWatch,
@@ -457,6 +458,14 @@ namespace WSJTX_Controller
             string de = d.DeCall();
             if (de == null) return;
 
+            // Nexus modernization Stage 7a: the message-type + recipient facts this method
+            // classifies on come from EffectiveSemantic (Nexus's own parse when the cutover is
+            // on). Stage 5 proved To / IsCq / IsReport / IsRReport / IsRrr / IsRr73 / Is73
+            // byte-identical to the WsjtxMessage equivalents across the corpus. The observation
+            // Value strings (Payload) and IsFoxHound stay on WsjtxMessage / the DTO -- narration
+            // formatting is migrated separately (Stage 7b), and F/H is a heuristic.
+            var sem = d.EffectiveSemantic(myCall);
+
             if (!string.Equals(de, TargetCall, StringComparison.OrdinalIgnoreCase))
             {
                 // Not the target -- interesting in two ways:
@@ -466,7 +475,7 @@ namespace WSJTX_Controller
                 //      the target right now, so the target is busy. This is a transmit-safety
                 //      signal only (no narration for an unknown caller) and clears again the
                 //      moment the target itself is heard available.
-                string toTarget = WsjtxMessage.ToCall(d.Message);
+                string toTarget = sem.To;   // Stage 7a
                 bool addressedToTarget = !string.IsNullOrEmpty(toTarget)
                     && string.Equals(toTarget, TargetCall, StringComparison.OrdinalIgnoreCase)
                     && !string.Equals(de, myCall, StringComparison.OrdinalIgnoreCase);
@@ -504,6 +513,10 @@ namespace WSJTX_Controller
         // live feed (ObserveDecode) or as a still-fresh operator selection (SeedSelectedDecode).
         private void IngestTargetDecode(EnqueueDecodeMessage d, bool evenSlot, string myCall, bool live, DateTime decodeUtc)
         {
+            // Stage 7a: classify on EffectiveSemantic (see ObserveDecode's note). Payload
+            // strings + IsFoxHound stay as-is.
+            var sem = d.EffectiveSemantic(myCall);
+
             // Any confidently attributed decode from the target -- including an ambiguous one --
             // resets the silence count and records the freshest usable decode/parity.
             SilenceCount = 0;
@@ -517,7 +530,7 @@ namespace WSJTX_Controller
                 OpportunitiesSinceLiveEvidence = 0;
             }
 
-            if (WsjtxMessage.IsCQ(d.Message))
+            if (sem.IsCq)
             {
                 ApparentPeer = null;
                 BusyWithOther = false;                 // calling CQ -> available
@@ -528,7 +541,7 @@ namespace WSJTX_Controller
                 return;
             }
 
-            string to = WsjtxMessage.ToCall(d.Message);
+            string to = sem.To;
             if (string.IsNullOrEmpty(to))
             {
                 _lastHeardWorkingOther = false;   // heard the target, but not "working someone" -- unblock expiration
@@ -563,13 +576,13 @@ namespace WSJTX_Controller
             // (HasLiveTargetEvidence / !BusyWithOther / !AwaitingEngagement) and the pre-TX
             // RevalidateForAutoStart still gate the actual transmission.
             if (live && addressingUs && Purpose == TargetPurpose.SmartStart && !AwaitingEngagement
-                && !WsjtxMessage.Is73(d.Message) && !WsjtxMessage.IsRR73(d.Message))
+                && !sem.Is73 && !sem.IsRr73)
             {
                 SignalReady();
                 return;
             }
 
-            if (WsjtxMessage.IsRR73(d.Message))
+            if (sem.IsRr73)
             {
                 BusyWithOther = false;                 // finishing with the peer -> becoming available
                 _lastHeardWorkingOther = false;
@@ -585,7 +598,7 @@ namespace WSJTX_Controller
                 }
                 return;
             }
-            if (WsjtxMessage.Is73(d.Message))
+            if (sem.Is73)
             {
                 BusyWithOther = false;                 // signed off with the peer -> available
                 _lastHeardWorkingOther = false;
@@ -594,19 +607,19 @@ namespace WSJTX_Controller
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
                 return;
             }
-            if (WsjtxMessage.IsRogers(d.Message))       // RRR -- distinct from, and NOT equivalent to, RR73/73
+            if (sem.IsRrr)       // RRR -- distinct from, and NOT equivalent to, RR73/73
             {
                 if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }   // mid-exchange with the peer
                 Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
                 return;
             }
-            if (WsjtxMessage.IsRogerReport(d.Message))
+            if (sem.IsRReport)
             {
                 if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }
                 Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
                 return;
             }
-            if (WsjtxMessage.IsReport(d.Message))
+            if (sem.IsReport)
             {
                 if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }
                 Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
@@ -629,16 +642,17 @@ namespace WSJTX_Controller
         // state -- classification only, so Station Watch style callers still report "watching X".
         private void RaiseSeedClassification(EnqueueDecodeMessage d, string myCall)
         {
-            if (WsjtxMessage.IsCQ(d.Message)) { Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message); return; }
-            string to = WsjtxMessage.ToCall(d.Message);
+            var sem = d.EffectiveSemantic(myCall);   // Stage 7a (Payload strings stay as-is)
+            if (sem.IsCq) { Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message); return; }
+            string to = sem.To;
             if (string.IsNullOrEmpty(to)) { Raise(TargetObservationKind.TargetAmbiguous, TargetCall, null, null, d.Message); return; }
             bool addressingUs = !string.IsNullOrEmpty(myCall) && string.Equals(to, myCall, StringComparison.OrdinalIgnoreCase);
             string peer = addressingUs ? myCall : to;
-            if (WsjtxMessage.IsRR73(d.Message)) Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
-            else if (WsjtxMessage.Is73(d.Message)) Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
-            else if (WsjtxMessage.IsRogers(d.Message)) Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
-            else if (WsjtxMessage.IsRogerReport(d.Message)) Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
-            else if (WsjtxMessage.IsReport(d.Message)) Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
+            if (sem.IsRr73) Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
+            else if (sem.Is73) Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
+            else if (sem.IsRrr) Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
+            else if (sem.IsRReport) Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
+            else if (sem.IsReport) Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
             else if (addressingUs) Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, null, d.Message);
             else Raise(TargetObservationKind.TargetAddressingOther, TargetCall, peer, null, d.Message);
         }
