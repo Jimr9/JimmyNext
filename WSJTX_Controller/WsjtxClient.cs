@@ -2435,8 +2435,10 @@ namespace WSJTX_Controller
             // ONLY when the operator opted in AND IsLogEarly(call) is true -- IsLogEarly's own
             // "new DXCC or higher priority still waits for a real 73/RR73" exception is thereby
             // preserved. 73/RR73 keeps logging unconditionally exactly as before.
-            bool isSignoff = WsjtxMessage.Is73orRR73(msg.Message);
-            bool isEarlyRoger = !isSignoff && WsjtxMessage.IsRogers(msg.Message) && IsLogEarly(call);
+            // Stage 10: message-type facts via EffectiveSemantic (Stage-5-proven-equal).
+            var clSem = msg.EffectiveSemantic(myCall);
+            bool isSignoff = clSem.IsRr73 || clSem.Is73;
+            bool isEarlyRoger = !isSignoff && clSem.IsRrr && IsLogEarly(call);
             DebugOutput($"{spacer}CheckLateLog: call:'{call}' callInProg:'{CallPriorityString(callInProg)}' txTimeout:{txTimeout} msg:{msg.Message} Is73orRR73:{isSignoff} isEarlyRoger:{isEarlyRoger} logEarly:{ctrl.logEarlyCheckBox.Checked} logList:{logList.Contains(call)} allCallDict:{allCallDict.ContainsKey(call)} sentReport:{sentReportList.Contains(call)}");
             if (call == null || (!isSignoff && !isEarlyRoger))
             {
@@ -2473,34 +2475,39 @@ namespace WSJTX_Controller
             RequestLog(call, rMsg, msg);              //process a "late" QSO completion
         }
 
+        // Stage 10: these msgList.FindLast(...) predicates over stored decodes (allCallDict)
+        // now classify via EffectiveSemantic -- Nexus's parse when the cutover is on, the
+        // same WsjtxMessage.* result otherwise. Stage 5 proved every one of these facts
+        // identical across the shadow corpus.
         private bool Rogers(EnqueueDecodeMessage msg)
         {
-            return WsjtxMessage.IsRogers(msg.Message);
+            return msg.EffectiveSemantic(myCall).IsRrr;
         }
 
         private bool RogerReport(EnqueueDecodeMessage msg)
         {
-            return WsjtxMessage.IsRogerReport(msg.Message);
+            return msg.EffectiveSemantic(myCall).IsRReport;
         }
 
         private bool Report(EnqueueDecodeMessage msg)
         {
-            return WsjtxMessage.IsReport(msg.Message);
+            return msg.EffectiveSemantic(myCall).IsReport;
         }
 
         private bool Reply(EnqueueDecodeMessage msg)
         {
-            return WsjtxMessage.IsReply(msg.Message);
+            return string.Equals(msg.EffectiveSemantic(myCall).Kind, "reply", StringComparison.Ordinal);
         }
 
         private bool Signoff(EnqueueDecodeMessage msg)
         {
-            return WsjtxMessage.Is73orRR73(msg.Message);
+            var s = msg.EffectiveSemantic(myCall);
+            return s.IsRr73 || s.Is73;
         }
 
         private bool CQ(EnqueueDecodeMessage msg)
         {
-            return WsjtxMessage.IsCQ(msg.Message);
+            return msg.EffectiveSemantic(myCall).IsCq;
         }
 
         // Record a completed QSO directly to Jimmy's own logbook (LogbookDb via

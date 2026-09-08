@@ -956,19 +956,24 @@ fn handle_control_connection(
             // and never touching the pinned `AppSnapshot` struct. Jimmy shadow-compares it
             // against `WsjtxMessage` (Stage 5); nothing acts on it until proven equal. See
             // EngineHost/src/decode_semantics.rs and C:\chat gpt\nexus plan.txt Section 7.
-            let decode_semantics: Vec<decode_semantics::DecodeSemantics> = {
-                let partner = snap.qso.as_ref().and_then(|q| q.dxcall.as_deref());
-                snap.recent_decodes
-                    .iter()
-                    .map(|row| {
-                        decode_semantics::DecodeSemantics::from_decode(
-                            &row.message,
-                            &snap.mycall,
-                            partner,
-                        )
-                    })
-                    .collect()
-            };
+            let partner = snap.qso.as_ref().and_then(|q| q.dxcall.as_deref());
+            let decode_semantics: Vec<decode_semantics::DecodeSemantics> = snap
+                .recent_decodes
+                .iter()
+                .map(|row| {
+                    decode_semantics::DecodeSemantics::from_decode(&row.message, &snap.mycall, partner)
+                })
+                .collect();
+            // Stage 10: the same envelope for the QSO's own "now sending" text, so Jimmy's
+            // completion / TX-tracking path reads a typed kind instead of re-parsing
+            // qso.txNow with WsjtxMessage. Same Msg::parse -- no Nexus patch. `None` when
+            // listening / no active QSO.
+            let qso_tx_semantics: Option<decode_semantics::DecodeSemantics> = snap
+                .qso
+                .as_ref()
+                .and_then(|q| q.tx_now.as_deref())
+                .filter(|t| !t.is_empty())
+                .map(|t| decode_semantics::DecodeSemantics::from_decode(t, &snap.mycall, partner));
             match serde_json::to_value(&snap) {
                 Ok(serde_json::Value::Object(mut obj)) => {
                     obj.insert("sessionToken".to_string(), serde_json::Value::String(session_token.to_string()));
@@ -977,6 +982,10 @@ fn handle_control_connection(
                         "decodeSemantics".to_string(),
                         serde_json::to_value(&decode_semantics)
                             .unwrap_or(serde_json::Value::Array(Vec::new())),
+                    );
+                    obj.insert(
+                        "qsoTxSemantics".to_string(),
+                        serde_json::to_value(&qso_tx_semantics).unwrap_or(serde_json::Value::Null),
                     );
                     let _ = writeln!(stream, "{}", serde_json::Value::Object(obj));
                 }

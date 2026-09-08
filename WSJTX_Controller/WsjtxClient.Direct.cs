@@ -2105,10 +2105,14 @@ namespace WSJTX_Controller
                 // 73, RR73, or a bare RRR -- means both sides are done, so end Finishing right
                 // away. Its repeated R-reports are handled entirely by the engine (Nexus keeps
                 // re-sending RR73); Jimmy neither counts nor acts on those.
+                // Stage 10: classify this decode via EffectiveSemantic (Nexus's parse when the
+                // cutover is on). Stage 5 proved AddressedToMe / IsRr73 / Is73 / IsRrr identical
+                // to the WsjtxMessage equivalents. enq.DeCall() (the sender) stays a DTO method.
+                var finSem = enq.EffectiveSemantic(myCall);
                 if (_finishingCall != null
                     && string.Equals(enq.DeCall(), _finishingCall, StringComparison.OrdinalIgnoreCase)
-                    && string.Equals(WsjtxMessage.ToCall(enq.Message), myCall, StringComparison.OrdinalIgnoreCase)
-                    && (WsjtxMessage.Is73orRR73(enq.Message) || WsjtxMessage.IsRogers(enq.Message)))
+                    && finSem.AddressedToMe
+                    && (finSem.IsRr73 || finSem.Is73 || finSem.IsRrr))
                 {
                     DebugOutput($"{Time()} [DIRECT] finishing: '{_finishingCall}' sent its own closing over -- QSO fully closed");
                     _finishingCall = null;
@@ -3172,6 +3176,12 @@ namespace WSJTX_Controller
         //    WsjtxMessage parse of the same decode; consumers migrate only after proven equal.
         //    See C:\chat gpt\nexus plan.txt Section 7 (Stage 4). ──
         public List<DirectDecodeSemantics> DecodeSemantics { get; set; }
+
+        // Nexus modernization Stage 10 (additive, 2026-09-08): EngineHost's decode_semantics
+        // envelope for the QSO's own `qso.txNow` text -- so Jimmy's completion / TX-tracking
+        // path reads a typed kind instead of re-parsing curTxMsg with WsjtxMessage. Same
+        // Msg::parse; no Nexus patch. Null when listening / no active QSO / older EngineHost.
+        public DirectDecodeSemantics QsoTxSemantics { get; set; }
     }
 
     // Nexus modernization Stage 4: the C# shape of EngineHost's per-decode semantic envelope

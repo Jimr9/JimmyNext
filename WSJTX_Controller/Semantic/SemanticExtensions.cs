@@ -25,5 +25,16 @@ namespace WSJTX_Controller
                 return d.Semantic;
             return SemanticDecode.FromWsjtxMessage(d.Message, myCall);
         }
+
+        // Nexus modernization Stage 10: the same seam for the QSO's own "now sending" text.
+        // `txText` is Jimmy's already-normalized curTxMsg; `env` is snap.QsoTxSemantics (the
+        // EngineHost envelope for qso.txNow, null when listening). Cutover on + env present ->
+        // Nexus's parse of the TX text; otherwise WsjtxMessage on txText, exactly as before.
+        internal static SemanticDecode EffectiveTxSemantic(string txText, DirectDecodeSemantics env, string myCall)
+        {
+            if (SemanticCutover.UseNexusSemantics && env != null && env.SchemaVersion > 0)
+                return SemanticDecode.FromNexus(new DirectDecodeRow { Message = env.RawMessage }, env, myCall);
+            return SemanticDecode.FromWsjtxMessage(txText, myCall);
+        }
     }
 }

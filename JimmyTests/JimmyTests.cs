@@ -275,6 +275,7 @@ static class JimmyTests
         SemanticStage7ObservationParityTests();
         SemanticStage8SmartStartForkParityTests();
         SemanticStage9StartPathParityTests();
+        SemanticStage10CompletionParityTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -3329,6 +3330,72 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  SemanticStage9StartPathParityTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
+    // ── Nexus modernization Stage 10: the DECODE-based completion facts -- the _finishingCall
+    //    clear (DirectApplyDecodes) and the CheckLateLog + Rogers/RogerReport/Report/Reply/
+    //    Signoff/CQ predicates over stored allCallDict decodes -- now classify via
+    //    EffectiveSemantic. This proves each fact (AddressedToMe / IsRr73 / Is73 / IsRrr /
+    //    IsRReport / IsReport / Kind=="reply" / IsCq) is identical WsjtxMessage vs Nexus for a
+    //    completion corpus, so what Jimmy logs, its dedup, prompts and uploads are unchanged.
+    //    qso.txNow reparsing (curTxMsg) is deliberately NOT migrated here -- it is Jimmy's own
+    //    TX text with a delicate hashed-call edge (2026-08-30 W1AW/2 fix); the additive
+    //    EngineHost `qsoTxSemantics` envelope is now on the wire for a future stage. ──
+    static void SemanticStage10CompletionParityTests()
+    {
+        Console.WriteLine("\n── Semantic Stage 10: completion-fact parity (WsjtxMessage vs Nexus) ──");
+        const string MY = "KB0UZT", DX = "K4YT";
+        try
+        {
+            var corpus = new (string msg, string kind, string from, string to, string grid, int? rep, bool atm, string signoff)[]
+            {
+                ($"{MY} {DX} RR73",     "rr73",       DX, MY,     null,   null, true,  "rr73"),
+                ($"{MY} {DX} 73",       "sevenThree", DX, MY,     null,   null, true,  "sevenThree"),
+                ($"{MY} {DX} RRR",      "rrr",        DX, MY,     null,   null, true,  "rrr"),
+                ($"{MY} {DX} R-07",     "rReport",    DX, MY,     null,  -7,    true,  null),
+                ($"{MY} {DX} -07",      "report",     DX, MY,     null,  -7,    true,  null),
+                ($"{MY} {DX} FN31",     "reply",      DX, MY,     "FN31", null, true,  null),
+                ($"CQ {DX} FN31",       "cq",         DX, null,   "FN31", null, false, null),
+                ($"W1XYZ {DX} RR73",    "rr73",       DX, "W1XYZ", null,  null, false, "rr73"),
+            };
+            int mismatch = 0;
+            foreach (var e in corpus)
+            {
+                var o = SemanticDecode.FromWsjtxMessage(e.msg, MY);
+                var row = new DirectDecodeRow
+                {
+                    Message = e.msg,
+                    IsCq = e.kind == "cq" || e.kind == "directedCq",
+                    DirectedToMe = e.atm,
+                    Signoff = e.signoff == "rr73" || e.signoff == "sevenThree",
+                    Grid = e.grid,
+                };
+                var env = new DirectDecodeSemantics
+                {
+                    SchemaVersion = 1, RawMessage = e.msg, Kind = e.kind, From = e.from, To = e.to,
+                    Grid = e.grid, ReportDb = e.rep, AddressedToMe = e.atm, Signoff = e.signoff,
+                    CallForm = "standard", QsoRelation = "none",
+                };
+                var n = SemanticDecode.FromNexus(row, env, MY);
+                bool ok =
+                    o.AddressedToMe == n.AddressedToMe &&
+                    o.IsRr73 == n.IsRr73 && o.Is73 == n.Is73 && o.IsRrr == n.IsRrr &&
+                    o.IsRReport == n.IsRReport && o.IsReport == n.IsReport &&
+                    (o.Kind == "reply") == (n.Kind == "reply") &&
+                    o.IsCq == n.IsCq;
+                if (!ok)
+                {
+                    mismatch++;
+                    Console.WriteLine($"    MISMATCH \"{e.msg}\"");
+                }
+            }
+            Check("completion facts identical WsjtxMessage vs Nexus across the corpus", mismatch == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SemanticStage10CompletionParityTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
     }

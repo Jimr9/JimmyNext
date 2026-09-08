@@ -135,8 +135,9 @@ namespace WSJTX_Controller
 
             var d = new SemanticDecode { Source = "nexus" };
 
-            // Stage 3 DecodeRow flags.
-            d.IsCq = row.IsCq;
+            // Stage 3 DecodeRow flags (a TX-text envelope passes a bare row -- the envelope's
+            // own Kind then supplies IsCq below).
+            d.IsCq = row.IsCq || env.Kind == "cq" || env.Kind == "directedCq";
             d.Grid = string.IsNullOrEmpty(row.Grid) ? null : row.Grid;
             bool rowSignoff = row.Signoff; // true for RR73 | 73 (not RRR)
 
