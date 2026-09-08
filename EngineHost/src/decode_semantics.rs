@@ -23,12 +23,36 @@
 //! `WsjtxMessage` parse for shadow comparison (Stage 5). Nothing acts on it until a
 //! consumer is proven equal and migrated (Stages 6+).
 //!
-//! Deliberately NOT carried here: hashed-call resolution PROVENANCE ("was this
-//! originally `<...>` that Nexus resolved?"). `DecodeRow.message` is already
-//! post-resolution and EngineHost cannot see the pre-resolution text, so that stays
-//! with Jimmy's own parse (`NormalizeDecodedMessage` sees the brackets before it
-//! strips them). An UNRESOLVED hash still shows as `<...>` in the text and both sides
-//! already reject it. See C:\chat gpt\nexus plan.txt Section 22 B-3.
+//! ## Hashed callsigns (Post-Stage-12 cleanup S1, 2026-09-08)
+//!
+//! The parse is run through Nexus's OWN `Msg::unhashed()` (a public method on `Msg`,
+//! `tempo_core::message`) before `from` / `to` / `call_form` are read, so the envelope
+//! carries the callsign Nexus itself would recognise and log -- not the raw i3=4
+//! bracket form. `Msg::unhashed()` delegates to `message::resolve_hashed`, whose rules
+//! are DELIBERATELY fine-grained and are followed here verbatim (Jim's S1 decision:
+//! do not force these to imitate Jimmy's old blanket bracket-strip):
+//!
+//!   * `<W9XYZ>`  -> `W9XYZ`   -- a STANDARD call sent hashed only to save bits (the
+//!                               multi-answering DXpedition case, field report
+//!                               2026-08-23 `<RI1FJL> KD9TAW EN52`). Resolved.
+//!   * `<KH8/W1AW>` stays `<KH8/W1AW>` -- a COMPOUND call is hashed because it does
+//!                               NOT fit an ordinary 77-bit frame; unwrapping it would
+//!                               name a call the protocol cannot carry (Nexus issue
+//!                               #84). Nexus keeps the brackets all the way to the air;
+//!                               so does this envelope. A consumer that compares
+//!                               `from`/`to` to a bare compound call MUST do it
+//!                               bracket-insensitively (Nexus's `base_call` /
+//!                               `same_call` already are; so is Jimmy's callsign
+//!                               matching). Jimmy's `NormalizeDecodedMessage` still
+//!                               strips these brackets for the RAW `enq.Message` text
+//!                               the un-migrated `WsjtxMessage` consumers read -- that
+//!                               path is unchanged.
+//!   * `<...>`    stays `<...>` -- an UNRESOLVED hash is not a callsign; both Nexus and
+//!                               Jimmy already reject it downstream.
+//!
+//! Matching was never affected (Nexus's `same_call` / `base_call` ignore brackets):
+//! this changes what the envelope SAYS a call is, aligning it with `DecodeRow.from` and
+//! with Nexus's own sequencer, not who is recognised.
 //!
 //! Obsoleted when: Nexus's own `DecodeRow` carries typed to / report / kind /
 //! call-form directly.
@@ -119,7 +143,13 @@ impl DecodeSemantics {
     /// Build the envelope for one decode. `my_call` is the operator's callsign;
     /// `partner` is the active QSO partner (`QsoStatus.dxcall`), if any.
     pub fn from_decode(raw_message: &str, my_call: &str, partner: Option<&str>) -> Self {
-        let msg = Msg::parse(raw_message);
+        // S1 (2026-09-08): resolve i3=4 hashed callsigns with Nexus's OWN `Msg::unhashed()`
+        // before reading `from` / `to` / `call_form`, so the envelope names the call Nexus
+        // itself recognises (a hashed STANDARD call unwrapped; a COMPOUND or unresolved hash
+        // deliberately left bracketed -- see the module header). Nexus applies this same step
+        // where IT parses decodes; this brings the envelope into line. No Nexus patch:
+        // `Msg::unhashed` is a public method. `Cq` / `Other` pass through untouched.
+        let msg = Msg::parse(raw_message).unhashed();
         let from = msg.sender().map(str::to_string);
         let to = msg.addressee().map(str::to_string);
 
@@ -298,6 +328,59 @@ mod tests {
     #[test]
     fn the_schema_version_rides_every_entry() {
         assert_eq!(sem("CQ K1ABC FN42").schema_version, SCHEMA_VERSION);
+    }
+
+    /// S1 (Post-Stage-12 cleanup, 2026-09-08): the envelope's `from` / `to` / `call_form`
+    /// come from Nexus's OWN `Msg::unhashed()` hash resolution. Fine-grained on purpose --
+    /// a hashed STANDARD call is unwrapped, a COMPOUND or UNRESOLVED hash keeps its
+    /// brackets (Nexus issue #84: a compound call cannot ride an ordinary frame bare).
+    #[test]
+    fn s1_hash_resolution_follows_nexus_fine_grained_rules() {
+        // (a) ordinary call -- untouched, both fields.
+        let ord = DecodeSemantics::from_decode("W9XYZ K1ABC -08", "W9XYZ", None);
+        assert_eq!(ord.from.as_deref(), Some("K1ABC"));
+        assert_eq!(ord.to.as_deref(), Some("W9XYZ"));
+        assert_eq!(ord.call_form, SemCallForm::Standard);
+
+        // (b) portable/compound sent IN THE CLEAR (not hashed) -- untouched.
+        let port = DecodeSemantics::from_decode("W9XYZ PJ4/K1ABC -08", "W9XYZ", None);
+        assert_eq!(port.from.as_deref(), Some("PJ4/K1ABC"));
+        assert_eq!(port.call_form, SemCallForm::Compound);
+        // "/P" rides its own protocol bit -> standard, and never hashed.
+        assert_eq!(
+            DecodeSemantics::from_decode("CQ F4CYH/P JN18", "W9XYZ", None).from.as_deref(),
+            Some("F4CYH/P")
+        );
+
+        // (c) hashed STANDARD call -- Nexus RESOLVES it; the envelope must NOT keep the
+        //     brackets (field report 2026-08-23 `<RI1FJL> KD9TAW EN52`). Both roles.
+        let hs_from = DecodeSemantics::from_decode("KD9TAW <W9XYZ> EN37", "KD9TAW", None);
+        assert_eq!(hs_from.from.as_deref(), Some("W9XYZ"), "hashed standard sender resolved");
+        assert_eq!(hs_from.call_form, SemCallForm::Standard);
+        let hs_to = DecodeSemantics::from_decode("<W9XYZ> K1ABC -05", "W9XYZ", None);
+        assert_eq!(hs_to.to.as_deref(), Some("W9XYZ"), "hashed standard recipient resolved");
+        assert!(hs_to.addressed_to_me, "and still reads as addressed to me");
+        assert_eq!(hs_to.kind, SemKind::Report);
+
+        // (d) hashed COMPOUND / DXpedition-style call (W1AW/2, KH8/W1AW) -- Nexus
+        //     DELIBERATELY keeps the brackets so the compound form never goes on the air
+        //     unwrapped. The envelope follows suit. A consumer matching this against a bare
+        //     "W1AW/2" must compare bracket-insensitively (Jimmy uses Qso.dxcall for
+        //     partner identity in the completion path -- see S3 -- exactly to avoid this).
+        let hc = DecodeSemantics::from_decode("<W1AW/2> KB0UZT -07", "KB0UZT", None);
+        assert_eq!(hc.to.as_deref(), Some("<W1AW/2>"), "compound hash stays bracketed (Nexus #84)");
+        assert_eq!(hc.kind, SemKind::Report, "kind is still positional -> correct despite brackets");
+        assert_eq!(hc.report_db, Some(-7));
+        assert_eq!(
+            DecodeSemantics::from_decode("KB0UZT <KH8/W1AW> R-03", "KB0UZT", None).from.as_deref(),
+            Some("<KH8/W1AW>")
+        );
+
+        // (e) UNRESOLVED hash sender -- stays `<...>`, never becomes a plausible-looking call.
+        let un = DecodeSemantics::from_decode("KD9TAW <...> EN37", "KD9TAW", None);
+        assert_eq!(un.to.as_deref(), Some("KD9TAW"));
+        assert_eq!(un.from.as_deref(), Some("<...>"));
+        assert_eq!(un.call_form, SemCallForm::Unknown);
     }
 
     /// Stage 5 shadow-comparison corpus, LOCKED to Nexus's actual parse. The Jimmy-side
