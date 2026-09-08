@@ -2088,11 +2088,17 @@ namespace WSJTX_Controller
                     }
                     var semNew = SemanticDecode.FromNexus(row, envForRow, myCallForSem);
                     SemanticParityLogger.CheckAndLog(semOld, semNew, row.Message, normMsg, CurrentBandStr, myCallForSem);
-                    // Stage 6+: carry the Nexus-derived view on the decode so migrated
-                    // consumers can read it via EffectiveSemantic(). semOld is only for the
-                    // parity log above -- EffectiveSemantic rebuilds the WsjtxMessage view
-                    // itself when the cutover is off / this is the UDP path.
-                    enq.Semantic = semNew;
+                    // Stage 6+: carry the Nexus-derived view on the decode so migrated consumers
+                    // can read it via EffectiveSemantic(). ONLY when the full Stage 4
+                    // decodeSemantics envelope was present -- without it FromNexus has just the
+                    // Stage 3 row flags (IsCq / Grid / Signoff / DirectedToMe) and NOT the
+                    // recipient / report-kind facts, so attaching it would make a migrated
+                    // consumer read a null To / false IsReport instead of falling back to the
+                    // WsjtxMessage parse. A v1.10.3 EngineHost always emits the envelope; this
+                    // guard only matters for an older host or a partial test snapshot.
+                    // semOld is only for the parity log above.
+                    if (envForRow != null)
+                        enq.Semantic = semNew;
                 }
 
                 // Finishing (see _finishingCall): the just-worked station's own closing over --

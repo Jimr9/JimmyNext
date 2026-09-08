@@ -110,19 +110,36 @@ namespace WSJTX_Controller
         }
 
         // ── NEW path: Nexus's parser via the Direct snapshot (Stage 3 flags + Stage 4 envelope) ──
-        // `env` is the decodeSemantics entry for this row (may be null on an older EngineHost --
-        // then only the Stage 3 DecodeRow flags are available and the deeper facts stay null).
+        // `env` is the decodeSemantics entry for this row. A v1.10.3 EngineHost always emits it;
+        // when it is ABSENT (an older host, or a partial test snapshot) FromNexus has ONLY the
+        // Stage 3 DecodeRow flags -- not the recipient / report-kind facts -- so it fills the
+        // rest from the WsjtxMessage parse of row.Message rather than returning a crippled
+        // object a migrated consumer would then trust. DirectApplyDecodes additionally does not
+        // ATTACH the result to the decode when env was absent (EffectiveSemantic then uses
+        // FromWsjtxMessage directly), so this fallback is belt-and-braces.
         public static SemanticDecode FromNexus(DirectDecodeRow row, DirectDecodeSemantics env, string myCall)
         {
-            var d = new SemanticDecode { Source = "nexus" };
-            if (row == null) return d;
+            if (row == null) return new SemanticDecode { Source = "nexus" };
 
-            // Stage 3 DecodeRow flags (always present from a v1.10.3 EngineHost).
+            if (env == null || env.SchemaVersion <= 0)
+            {
+                // No Stage 4 envelope: parse the text ourselves, then let the Stage 3 row flags
+                // that ARE present override where they are authoritative.
+                var f = FromWsjtxMessage(row.Message, myCall);
+                f.Source = "nexus-rowflags";
+                if (row.IsCq) f.IsCq = true;
+                if (!string.IsNullOrEmpty(row.Grid)) f.Grid = row.Grid;
+                if (row.DirectedToMe) f.AddressedToMe = true;
+                return f;
+            }
+
+            var d = new SemanticDecode { Source = "nexus" };
+
+            // Stage 3 DecodeRow flags.
             d.IsCq = row.IsCq;
             d.Grid = string.IsNullOrEmpty(row.Grid) ? null : row.Grid;
             bool rowSignoff = row.Signoff; // true for RR73 | 73 (not RRR)
 
-            if (env != null && env.SchemaVersion > 0)
             {
                 d.From = string.IsNullOrEmpty(env.From) ? null : env.From;
                 d.To = string.IsNullOrEmpty(env.To) ? null : env.To;
@@ -153,22 +170,11 @@ namespace WSJTX_Controller
                     default: d.Kind = "other"; break;
                 }
             }
-            else
-            {
-                // Older EngineHost: only Stage 3 flags. directed_to_me is on the row.
-                d.AddressedToMe = row.DirectedToMe;
-                // signoff bool alone can't split RR73 vs 73 -- leave both false, Kind derived.
-                d.Kind = DeriveKind(d);
-            }
 
-            // Cross-check the Stage 3 signoff bool against the envelope subtype (no-op when
-            // they agree; a disagreement is itself a finding the parity log will surface via
-            // Kind / IsRr73 / Is73).
-            if (env == null && rowSignoff)
-            {
-                // best we can say from the row alone
-                d.Kind = "rr73_or_73";
-            }
+            // rowSignoff (RR73|73, from the Stage 3 flag) is a cross-check only -- the envelope's
+            // Signoff subtype above is authoritative and finer-grained. A disagreement would be
+            // surfaced by the parity log via Kind / IsRr73 / Is73.
+            _ = rowSignoff;
 
             return d;
         }

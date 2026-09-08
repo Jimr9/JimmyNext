@@ -273,6 +273,7 @@ static class JimmyTests
         SemanticShadowCorpusTests();
         SemanticStage6DisplayQueueParityTests();
         SemanticStage7ObservationParityTests();
+        SemanticStage8SmartStartForkParityTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -3122,7 +3123,8 @@ static class JimmyTests
                 ($"W1ABC {THEIR_CALL} RR73",         "rr73",       THEIR_CALL, "W1ABC",   null,  null,  "rr73"),
                 ($"W1ABC {THEIR_CALL} R-05",         "rReport",    THEIR_CALL, "W1ABC",   null,  -5,    null),
                 ($"W1ABC {THEIR_CALL} EM63",         "reply",      THEIR_CALL, "W1ABC",   "EM63", null, null),
-                ($"{THEIR_CALL} W1ABC R-05",         "rReport",    THEIR_CALL, "W1ABC",   null,  -5,    null),
+                // someone ELSE (W1ABC) working the target -> WSJT-X "<to> <de>": to=K4YT, de=W1ABC.
+                ($"{THEIR_CALL} W1ABC R-05",         "rReport",    "W1ABC",    THEIR_CALL, null, -5,    null),
             };
 
             EnqueueDecodeMessage MkBare(string msg) => new EnqueueDecodeMessage { Message = msg };
@@ -3185,6 +3187,77 @@ static class JimmyTests
         finally
         {
             SemanticCutover.UseNexusSemantics = savedCutover;
+        }
+    }
+
+    // ── Nexus modernization Stage 8: TryCaptureSmartStart's "is this Enter on a decode already
+    //    addressed to us? then decline Smart Start and fall through to ReplyTo" fork moved from
+    //    WsjtxMessage.ToCall(msg)==myCall to EffectiveSemantic(myCall).AddressedToMe. This is
+    //    the ONLY parser call left in the Smart Start dispatch/arm/revalidate path
+    //    (RevalidateForAutoStart / AutoStartCheck and the 3-poll finality deferral run on
+    //    TargetMonitor STATE, which Stage 7a already fed from Nexus). This test proves the fork
+    //    predicate is identical -- WsjtxMessage vs Nexus -- for every Smart-Start-relevant
+    //    decode shape, so which path an Enter takes (capture vs reply-now) is unchanged, and
+    //    therefore WHEN Smart Start transmits is unchanged. ──
+    static void SemanticStage8SmartStartForkParityTests()
+    {
+        Console.WriteLine("\n── Semantic Stage 8: Smart Start capture-vs-ReplyTo fork parity ──");
+        const string MY = "KB0UZT", T = "KV4CW";
+        try
+        {
+            // (msg, expectedAddressedToMe)  -- shapes an Enter-selected decode can be.
+            var corpus = new (string msg, string kind, string from, string to, string grid, int? rep, string signoff, bool atm)[]
+            {
+                ($"CQ {T} EM96",         "cq",         T,  null, "EM96", null, null,        false),
+                ($"CQ POTA {T} EM96",    "directedCq", T,  null, "EM96", null, null,        false),
+                ($"{MY} {T} +02",        "report",     T,  MY,   null,   2,    null,        true),
+                ($"{MY} {T} R-07",       "rReport",    T,  MY,   null,  -7,    null,        true),
+                ($"{MY} {T} RR73",       "rr73",       T,  MY,   null,  null,  "rr73",      true),
+                ($"{MY} {T} 73",         "sevenThree", T,  MY,   null,  null,  "sevenThree",true),
+                ($"{MY} {T} FN42",       "reply",      T,  MY,   "FN42", null, null,        true),
+                ($"W6PAN {T} -05",       "report",     T,  "W6PAN", null, -5,  null,        false),
+                ($"W6PAN {T} RR73",      "rr73",       T,  "W6PAN", null, null,"rr73",      false),
+                ($"W6PAN {T} EM10",      "reply",      T,  "W6PAN", "EM10", null, null,     false),
+            };
+
+            int mismatch = 0;
+            foreach (var e in corpus)
+            {
+                // OLD fork predicate, exactly: WsjtxMessage.ToCall(msg) == myCall.
+                var oldSem = SemanticDecode.FromWsjtxMessage(e.msg, MY);
+                bool oldDecl = oldSem.AddressedToMe;   // FromWsjtxMessage sets this = (To==myCall)
+
+                // NEW fork predicate: EffectiveSemantic(myCall).AddressedToMe with a Nexus
+                // SemanticDecode attached and the cutover ON.
+                var row = new DirectDecodeRow
+                {
+                    Message = e.msg,
+                    IsCq = e.kind == "cq" || e.kind == "directedCq",
+                    DirectedToMe = e.atm,
+                    Signoff = e.signoff == "rr73" || e.signoff == "sevenThree",
+                    Grid = e.grid,
+                };
+                var env = new DirectDecodeSemantics
+                {
+                    SchemaVersion = 1, RawMessage = e.msg, Kind = e.kind, From = e.from, To = e.to,
+                    Grid = e.grid, ReportDb = e.rep, AddressedToMe = e.atm, Signoff = e.signoff,
+                    CallForm = "standard", QsoRelation = "none",
+                };
+                bool newDecl = SemanticDecode.FromNexus(row, env, MY).AddressedToMe;
+
+                if (oldDecl != newDecl || oldDecl != e.atm)
+                {
+                    mismatch++;
+                    Console.WriteLine($"    MISMATCH \"{e.msg}\": wsjtx={oldDecl} nexus={newDecl} expected={e.atm}");
+                }
+            }
+            Check("every Enter-selectable decode shape: the capture-vs-reply fork decision is identical",
+                  mismatch == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SemanticStage8SmartStartForkParityTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
         }
     }
 

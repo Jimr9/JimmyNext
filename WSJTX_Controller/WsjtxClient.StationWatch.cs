@@ -132,7 +132,15 @@ namespace WSJTX_Controller
             // now", not "wait for a good moment to start" -- fall through to the normal ReplyTo
             // path (this is how Enter behaved before Smart Start existed). Smart Start is only for
             // timing the START of a QSO with a station that is not yet working us.
-            if (string.Equals(WsjtxMessage.ToCall(dmsg.Message), myCall, StringComparison.OrdinalIgnoreCase))
+            // Nexus modernization Stage 8: "addressed to us" comes from EffectiveSemantic
+            // (Nexus's parse when the cutover is on). Stage 5 proved AddressedToMe identical to
+            // WsjtxMessage.ToCall(..)==myCall for every valid decode; a queued/selected decode
+            // is always a valid one. This is the only parser call left in the Smart Start
+            // dispatch/arm/revalidate path -- RevalidateForAutoStart / AutoStartCheck and the
+            // 3-poll finality deferral all run on TargetMonitor STATE (Stage 7a already fed that
+            // from Nexus). The state machine, thresholds, yield/retry, Repeat Limit, and the
+            // 2.0.65 premature-TX guards are unchanged.
+            if (dmsg.EffectiveSemantic(myCall).AddressedToMe)
                 return false;
 
             _smartStart.SilenceThreshold = ctrl.smartStartSilencePeriods;
