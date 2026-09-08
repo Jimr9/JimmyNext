@@ -278,6 +278,7 @@ static class JimmyTests
         SemanticStage10CompletionParityTests();
         PostS12_S2_SemanticEnvelopeContractTests();
         PostS12_S3_TxCompletionViaNexusTests();
+        LiveAudit_MidTxCompletionDoesNotFalseHaltTests();
         DirectRunawayRr73HaltsEngineTests();
         DirectLogRetryAndEarlyRrrTests();
         DirectRr73BeforeRogerDecodeHoldsCallInProgTests();
@@ -391,6 +392,7 @@ static class JimmyTests
         TargetMonitorClassificationTests();
         TargetMonitorSilenceAndParityTests();
         TargetMonitorSmartStartReadinessTests();
+        LiveAudit_SmartStartWaitsOutRepeatingRr73Tests();
         TargetMonitorLifecycleTests();
         TargetMonitorStaleEvidenceRevalidationTests();
         TargetMonitorAwaitingEngagementTests();
@@ -3676,6 +3678,169 @@ static class JimmyTests
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
             try { File.Delete(goodDb); } catch { }
+        }
+    }
+
+    // ── READ-ONLY LIVE RADIO AUDIT follow-up (2026-09-08 20m FT8, KB2SLO). Problem 1: Nexus can
+    //    decode the DX's closing RR73 at the LEADING EDGE of one of Jimmy's own TX slots, so it
+    //    advances qso.txNow to the closing "73" and Jimmy's level-triggered completion block
+    //    logs + clears callInProg MID-transmission. Before the fix, (a) the DX's own RR73 decode
+    //    cleared _finishingCall in that SAME poll tick -- before any engine closing over had
+    //    gone out -- and (b) the in-flight slot's own tail then counted as orphan over #1, so
+    //    Nexus's ONE legitimate closing 73 became orphan #2 and falsely tripped HALT_TX.
+    //    Fix: PART A -- do not clear _finishingCall on the same poll it was set; PART B -- do not
+    //    count the end of the very slot we were transmitting when the mid-TX completion happened.
+    //    The genuine runaway backstop (two truly orphaned overs, no contact / no finishing)
+    //    still halts. ──
+    static void LiveAudit_MidTxCompletionDoesNotFalseHaltTests()
+    {
+        Console.WriteLine("\n── Live audit / KB2SLO: a mid-TX completion + Nexus's closing 73 must NOT false-trip the runaway backstop ──");
+
+        var seen = new System.Collections.Generic.List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_MidTxHalt_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevDb = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        const string myCall = "KB0UZT", myGrid = "FN42", dx = "KB2SLO";
+        System.Collections.Generic.List<string> Seen() { lock (seenLock) return new System.Collections.Generic.List<string>(seen); }
+        bool SawHalt() => Seen().Exists(c => c.StartsWith("HALT_TX"));
+
+        try
+        {
+            WsjtxClient MakeClient()
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var _ = ctrl.Handle;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetDirectConnected(true);
+                wc.TestSetMode("FT8");
+                return wc;
+            }
+
+            // A TX snapshot: transmitting?, engine slot, qso.txNow (raw), qso.state, qso.dxcall,
+            // and the matching qsoTxSemantics envelope (kind/signoff) so S3's Nexus completion
+            // path is exercised. `decodeMsg` optionally adds one incoming decode row.
+            DirectSnapshot Snap(bool transmitting, ulong slot, string txNow, string kind, string signoff,
+                                string state, string dxcall, string decodeMsg = null)
+            {
+                string qso = txNow == null ? "" : @",
+                    ""qso"": { ""state"": """ + state + @""", ""dxcall"": """ + dxcall + @""", ""txNow"": """ + txNow + @""" },
+                    ""qsoTxSemantics"": { ""schemaVersion"": 1, ""rawMessage"": """ + txNow + @""", ""kind"": """ + kind + @""",
+                        ""from"": """ + myCall + @""", ""to"": """ + dxcall + @""", ""addressedToMe"": false" +
+                        (signoff == null ? "" : @", ""signoff"": """ + signoff + @"""") +
+                        @", ""callForm"": ""standard"", ""qsoRelation"": ""partner"" }";
+                string decodes = decodeMsg == null ? "" :
+                    @"{ ""from"": ""X"", ""snr"": -12, ""dtSec"": 0.2, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") + @", ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + "]" + qso + @"
+                }");
+            }
+
+            // A completable mid-QSO: the DX's report is on record and we have sent ours.
+            void SeedMidQso(WsjtxClient wc)
+            {
+                wc.callInProg = dx;
+                wc.allCallDict[dx] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+                {
+                    new EnqueueDecodeMessage
+                    {
+                        Message = $"{myCall} {dx} +09", Snr = 9, Priority = (int)WsjtxClient.CallPriority.DEFAULT,
+                        RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                    },
+                };
+                wc.sentReportList.Add(dx);
+            }
+
+            // ══ 1. THE KB2SLO SEQUENCE: mid-TX completion, then Nexus's one closing 73 -> NO halt ══
+            {
+                var wc = MakeClient();
+                SeedMidQso(wc);
+
+                // TX slot 601: we are re-sending our R-report (still transmitting).
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 601, $"{dx} {myCall} R-14", "rReport", null, "awaitRr73", dx));
+                // DX's closing RR73 decodes at the leading edge of slot 601: Nexus advances
+                // qso.txNow to the closing 73 while slot 601 is STILL transmitting. Same poll
+                // also carries the DX's RR73 decode row.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 601, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx, $"{myCall} {dx} RR73"));
+                Check("1: mid-TX completion logged + cleared callInProg", wc.logList.Contains(dx) && wc.callInProg == null, true);
+                Check("1: _finishingCall is set and was NOT cleared this same poll (Part A)", wc.TestFinishingCall == dx, true);
+                Check("1: the in-flight slot is recorded for the orphan exemption (Part B)", wc.TestDirectOrphanExemptSlot == 601UL, true);
+
+                // Slot 601 finishes transmitting (its own tail) -- Part B exempts it.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 601, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx));
+                Check("1: the in-flight slot's tail is NOT counted as an orphan (Part B)",
+                      wc.TestOrphanTxOvers == 0 && !SawHalt(), true);
+                Check("1: the exemption is consumed once", wc.TestDirectOrphanExemptSlot == null, true);
+
+                // RX gap (slot 602), then Nexus transmits its ONE legitimate closing 73 in slot 603.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 602, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 603, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx));
+                // The DX repeats its RR73 (as KB2SLO did) -- but on a LATER poll, so Part A lets it clear _finishingCall.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 603, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx, $"{myCall} {dx} RR73"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 603, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx));
+                Check("1: Nexus's closing 73 slot ends -> at most one tolerated orphan, NO halt",
+                      wc.TestOrphanTxOvers <= 1 && !SawHalt(), true);
+
+                // Nexus goes idle -> finishing state clears; no halt ever fired.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 605 }, ""recentDecodes"": [] }"));
+                Check("1: after Nexus is idle and the DX signed off, finishing state cleared -- and NO halt happened",
+                      !SawHalt(), true);
+            }
+
+            // ══ 2. KO4CAA-style: completion happens while RECEIVING (not mid-TX) -> only the
+            //       engine's closing 73 slot counts, one tolerated orphan, still no halt ══
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeClient();
+                SeedMidQso(wc);
+                // Report slot ends cleanly with callInProg still set (not an orphan).
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 700, $"{dx} {myCall} R-14", "rReport", null, "awaitRr73", dx));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 701, $"{dx} {myCall} R-14", "rReport", null, "awaitRr73", dx));
+                // Completion lands during the RX gap (transmitting == false): callInProg cleared cleanly.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 701, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx, $"{myCall} {dx} RR73"));
+                Check("2: RX-gap completion logged + cleared callInProg", wc.logList.Contains(dx) && wc.callInProg == null, true);
+                Check("2: no mid-TX exemption was armed (completion was not transmitting)", wc.TestDirectOrphanExemptSlot == null, true);
+                // The engine's closing 73 slot.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 703, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 703, $"{dx} {myCall} 73", "sevenThree", "sevenThree", "confirming", dx));
+                Check("2: only the closing 73 slot counts -> <= 1 orphan, NO halt",
+                      wc.TestOrphanTxOvers <= 1 && !SawHalt(), true);
+            }
+
+            // ══ 3. A GENUINE runaway still halts: no contact, no finishing, two orphaned overs ══
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeClient();
+                // No callInProg, no completion -> _finishingCall null, no exemption.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 800, $"W9XYZ {myCall} RR73", "rr73", "rr73", "confirming", "W9XYZ"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 801, null, null, null, null, null));
+                Check("3: orphan over #1 tolerated", wc.TestOrphanTxOvers == 1 && !SawHalt(), true);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 802, $"W9XYZ {myCall} RR73", "rr73", "rr73", "confirming", "W9XYZ"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 803, null, null, null, null, null));
+                Check("3: orphan over #2 -> genuine runaway STILL halts (backstop preserved)",
+                      SawHalt() && wc.TestOrphanTxOvers == 0, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  LiveAudit_MidTxCompletionDoesNotFalseHaltTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb);
+            try { File.Delete(tmpDb); } catch { }
         }
     }
 
@@ -15997,24 +16162,46 @@ static class JimmyTests
         Check("CQ -> immediately ready, bypassing silence threshold", tm.ReadyToStart, true);
         tm.ConsumeReadyToStart();
 
-        // Ordinary validated 73 -> immediate readiness (strong final completion evidence).
-        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        // Ordinary validated 73 / RR73 to a PEER -> the target is in its CLOSING exchange, NOT
+        // free yet (Problem 2 / KB2SLO fix). It becomes available only after the bounded
+        // peer-close settle: the target's own (re-)arming period is NOT a silent opportunity,
+        // then TargetMonitor.PeerCloseSettleOpportunities clean silent target-parity
+        // opportunities must elapse with NO further finishing traffic to a peer.
+        int Settle = 4;   // keep in sync with TargetMonitor.PeerCloseSettleOpportunities
+        void SilentOpps(TargetMonitor m, int n, ulong startSlot)
+        {
+            for (int i = 0; i < n; i++)
+                m.OnReceivePeriodComplete(startSlot + (ulong)(2 * i), true, "20m", "FT8", "tok1", false);
+        }
+
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 9 };
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
         tm.ConsumeReadyToStart();
         tm.ObserveDecode(D($"W1ABC {THEIR_CALL} 73"), true, MY_CALL);
-        Check("Ordinary 73 -> immediately ready", tm.ReadyToStart, true);
+        Check("Ordinary 73 to a peer -> NOT immediately ready (closing-exchange settle)", !tm.ReadyToStart, true);
+        Check("...target still marked busy right after the 73", tm.BusyWithOther, true);
+        SilentOpps(tm, Settle, 2);   // 1 absorbed (target-heard period) + (Settle-1) count-downs
+        Check("...still not ready after the target-heard period + (Settle-1) silent opportunities", !tm.ReadyToStart, true);
+        tm.OnReceivePeriodComplete(2 + (ulong)(2 * Settle), true, "20m", "FT8", "tok1", false);
+        Check("...ready after the full peer-close settle", tm.ReadyToStart && tm.SilenceCount == 0, true);
         tm.ConsumeReadyToStart();
 
-        // Ordinary RR73 -> NOT immediately ready; waits one additional appropriate opportunity.
-        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        // Ordinary RR73 to a peer -> same bounded settle, and a FRESH RR73 to the peer mid-settle
+        // RE-ARMS it (the KB2SLO case: the target kept re-sending RR73 while Jimmy waited).
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 9 };
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
         tm.ConsumeReadyToStart();
         tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);
-        Check("Ordinary RR73 does NOT immediately signal ready", !tm.ReadyToStart, true);
-        tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false);
-        Check("...but IS ready after exactly one more appropriate opportunity", tm.ReadyToStart, true);
+        Check("Ordinary RR73 to a peer does NOT immediately signal ready", !tm.ReadyToStart, true);
+        SilentOpps(tm, Settle - 1, 2);   // burn most of the settle
+        Check("...not ready partway through the settle", !tm.ReadyToStart, true);
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);   // target re-sends RR73 -> settle re-arms
+        SilentOpps(tm, Settle, 100);
+        Check("...still not ready one short of a full settle SINCE the re-arm", !tm.ReadyToStart, true);
+        tm.OnReceivePeriodComplete(100 + (ulong)(2 * Settle), true, "20m", "FT8", "tok1", false);
+        Check("...ready only after a full clean settle since the last RR73", tm.ReadyToStart, true);
         tm.ConsumeReadyToStart();
 
         // Fox/Hound (multiplex) RR73 -- the /H suffix marks a Hound; must NOT use the generic
@@ -16041,6 +16228,78 @@ static class JimmyTests
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);
         Check("Target busy with a peer -> not ready", !tm.ReadyToStart, true);
+    }
+
+    // ── READ-ONLY LIVE RADIO AUDIT follow-up (2026-09-08 20m FT8, KB2SLO). Problem 2: Smart
+    //    Start declared KB2SLO "available" and began calling it while KB2SLO was still finishing
+    //    its QSO with K8UMF -- it kept sending "K8UMF KB2SLO RR73" for several more periods
+    //    (with decode gaps in between) before it finally turned to Jim. A single RR73 from the
+    //    target to a peer used to clear BusyWithOther and reach readiness after one silent
+    //    opportunity. Fix: a target -> peer RR73/73 keeps the target unavailable through a
+    //    bounded peer-close settle; any fresh finishing traffic to a peer re-arms it; a real
+    //    availability signal (target CQ / target addressing us) still clears it at once. ──
+    static void LiveAudit_SmartStartWaitsOutRepeatingRr73Tests()
+    {
+        Console.WriteLine("\n── Live audit / KB2SLO: Smart Start must NOT call a target that is still repeating RR73 to a peer ──");
+        const string T = "KB2SLO", PEER = "K8UMF";
+        try
+        {
+            var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
+            tm.Start(T, "20m", "FT8", "s1");
+            tm.ObserveDecode(D($"CQ {T} EM10"), true, MY_CALL);              // armed on a live CQ (parity even)
+            tm.ConsumeReadyToStart();
+
+            // The target answers PEER and exchanges reports -> busy.
+            tm.ObserveDecode(D($"{PEER} {T} -07"), true, MY_CALL);
+            tm.ObserveDecode(D($"{PEER} {T} R-05"), true, MY_CALL);
+            Check("target working a peer -> busy, not ready", tm.BusyWithOther && !tm.ReadyToStart, true);
+
+            // The target/peer exchange reaches RR73 -- but the target is NOT free yet.
+            tm.ObserveDecode(D($"{PEER} {T} RR73"), true, MY_CALL);
+            Check("target -> peer RR73 does NOT clear busy or make ready", tm.BusyWithOther && !tm.ReadyToStart, true);
+
+            // Several periods with incomplete / missed evidence: some silent, one repeated RR73
+            // (as KB2SLO did). Smart Start must keep waiting the whole time -- never ready.
+            tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "s1", false);   // arming period absorbed
+            tm.OnReceivePeriodComplete(4, true, "20m", "FT8", "s1", false);   // silent
+            tm.OnReceivePeriodComplete(6, true, "20m", "FT8", "s1", false);   // silent
+            Check("mid-settle: still not ready, still busy", !tm.ReadyToStart && tm.BusyWithOther, true);
+            tm.ObserveDecode(D($"{PEER} {T} RR73"), true, MY_CALL);           // target re-sends RR73 -> settle re-arms
+            tm.OnReceivePeriodComplete(8, true, "20m", "FT8", "s1", false);   // arming period absorbed
+            tm.OnReceivePeriodComplete(10, true, "20m", "FT8", "s1", false);  // silent
+            tm.OnReceivePeriodComplete(12, true, "20m", "FT8", "s1", false);  // silent
+            Check("after a repeated RR73 the settle re-armed -> STILL not ready, STILL busy, silence counter untouched",
+                  !tm.ReadyToStart && tm.BusyWithOther && tm.SilenceCount == 0, true);
+
+            // The target finally turns to US -> Smart Start becomes ready immediately from that
+            // decode (normal QSO sequencing then takes over via EngagedUs).
+            tm.ObserveDecode(D($"{MY_CALL} {T} +09"), true, MY_CALL);
+            Check("target addresses OUR callsign -> ready now, no longer busy, replies from THAT decode",
+                  tm.ReadyToStart && !tm.BusyWithOther && tm.LastUsableDecode?.Message == $"{MY_CALL} {T} +09", true);
+            tm.ConsumeReadyToStart();
+            tm.EnterAwaitingEngagement();
+            tm.ObserveDecode(D($"{MY_CALL} {T} R-14"), true, MY_CALL);
+            Check("target keeps addressing us while we call -> EngagedUs (normal QSO sequencer owns it)",
+                  tm.EngagedUs, true);
+
+            // Control: once the target GENUINELY finishes (goes quiet for the whole settle after
+            // its last RR73), Smart Start does become available under the normal readiness rules.
+            var tm2 = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 9 };
+            tm2.Start(T, "20m", "FT8", "s1");
+            tm2.ObserveDecode(D($"CQ {T} EM10"), true, MY_CALL);
+            tm2.ConsumeReadyToStart();
+            tm2.ObserveDecode(D($"{PEER} {T} -07"), true, MY_CALL);
+            tm2.ObserveDecode(D($"{PEER} {T} RR73"), true, MY_CALL);
+            for (ulong s = 2; s <= 2 + 2UL * 5; s += 2)   // arming period + a full clean settle
+                tm2.OnReceivePeriodComplete(s, true, "20m", "FT8", "s1", false);
+            Check("control: a target that truly went quiet after RR73 DOES become available",
+                  tm2.ReadyToStart && !tm2.BusyWithOther, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  LiveAudit_SmartStartWaitsOutRepeatingRr73Tests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
     }
 
     static void TargetMonitorLifecycleTests()
@@ -16246,21 +16505,25 @@ static class JimmyTests
         Check("...and Smart Start becomes ready to call the same target again", tm.ReadyToStart, true);
         tm.ConsumeReadyToStart();
 
-        // RR73 stays the fast path: a real "finishing with the peer" signal after a yield clears
-        // busy at once and resumes after exactly ONE more appropriate opportunity -- it does not
-        // wait out the whole silence-expiration window.
-        var tmRr = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        // RR73 to a PEER after a yield: the target is still in its closing exchange (Problem 2 /
+        // KB2SLO fix). It does NOT clear busy at once; it resumes only after the bounded
+        // peer-close settle, and does so without ever touching the silence counter.
+        var tmRr = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 9 };
         tmRr.Start(TARGET, "20m", "FT8", null);
         tmRr.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);
         tmRr.ConsumeReadyToStart();
         tmRr.EnterAwaitingEngagement();
         tmRr.ObserveDecode(D($"{A} {TARGET} -07"), true, MY_CALL);        // target working A -> busy
         tmRr.ReturnToWaiting();
-        tmRr.ObserveDecode(D($"{A} {TARGET} RR73"), true, MY_CALL);       // target -> A RR73 (finishing)
-        Check("RR73 after a yield clears busy immediately", !tmRr.BusyWithOther, true);
-        Check("...but does not resume in the same instant (one-more-opportunity rule)", !tmRr.ReadyToStart, true);
-        tmRr.OnReceivePeriodComplete(8, true, "20m", "FT8", null, false);
-        Check("...resumes ready after exactly one more appropriate opportunity", tmRr.ReadyToStart, true);
+        tmRr.ObserveDecode(D($"{A} {TARGET} RR73"), true, MY_CALL);       // target -> A RR73 (still finishing)
+        Check("RR73 to a peer after a yield does NOT clear busy immediately", tmRr.BusyWithOther, true);
+        Check("...and does not resume in the same instant", !tmRr.ReadyToStart, true);
+        for (ulong s = 8; s < 8 + (ulong)(2 * 4); s += 2)   // arming period absorbed + (settle-1) count-downs
+            tmRr.OnReceivePeriodComplete(s, true, "20m", "FT8", null, false);
+        Check("...still not ready partway through the peer-close settle", !tmRr.ReadyToStart, true);
+        tmRr.OnReceivePeriodComplete(8 + (ulong)(2 * 4), true, "20m", "FT8", null, false);
+        Check("...resumes ready after the full peer-close settle, silence counter never touched",
+            tmRr.ReadyToStart && tmRr.SilenceCount == 0, true);
 
         tm.EnterAwaitingEngagement();                                     // we call again
         tm.ObserveDecode(D($"{MY_CALL} {TARGET} R-03"), true, MY_CALL);   // TARGET -> us
@@ -16497,12 +16760,20 @@ static class JimmyTests
             Check("peer change + silence -> NO new REPLY, still no callInProg", !SawReply() && wc.callInProg == null, true);
             Check("...still armed for the target, still busy", wc.TestSmartStartTarget == target && wc.TestSmartStartBusyWithOther, true);
 
-            // ══ 4. Target finishes the other QSO (RR73 to B) -> becomes available -> Smart Start resumes ══
+            // ══ 4. Target finishes the other QSO (RR73 to B), then goes quiet for the full
+            //       bounded peer-close settle (Problem 2 / KB2SLO fix) -> it becomes available
+            //       and Smart Start resumes ══
             lock (seenLock) seen.Clear();
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(119, target, $"{B} {target} RR73"));   // J38DX -> KD2VCE RR73 (callInProg null)
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(121));                                 // one appropriate opportunity
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(121));                                 // arming period was absorbed; count-down starts
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(123));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(125));
+            Check("partway through the peer-close settle after RR73 -> still not available", wc.TestAutoStartPending, false);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(127));                                 // full settle elapsed -> ready + pending
             Check("target became available -> Smart Start re-arms a start", wc.TestAutoStartPending, true);
-            Polls(121, 4);                                                                        // finality-deferral ticks
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(129));                                 // advance past the snapshot-finality min
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(131));
+            Polls(131, 4);                                                                        // finality-deferral ticks
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
             Check("...and after the deferral window it sends a new REPLY", SawReply(), true);
             Check("...the start was dispatched (no longer pending)", wc.TestAutoStartPending, false);

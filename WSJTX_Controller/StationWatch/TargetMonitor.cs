@@ -178,7 +178,38 @@ namespace WSJTX_Controller
         // other station may still send a courtesy 73). Cleared by any newer, clearer event
         // (target 73 / target CQ / a fresh RR73) since those either already fire immediately or
         // restart the same one-opportunity wait.
+        //
+        // Live-radio audit fix, 2026-09-08 (Problem 2 / KB2SLO): superseded by _peerCloseSettle
+        // below for a target -> PEER RR73 / 73. The single-opportunity rule was too eager -- a
+        // station whose peer does not cleanly confirm keeps re-sending "PEER TARGET RR73" for
+        // several periods, and each one used to clear BusyWithOther and reach "available" after
+        // one silent opportunity. This field now only backs the target -> US RR73 case (line
+        // ~16681 test: the target rogered OUR callsign), which is genuinely one-more-opportunity.
         private bool _rr73AwaitingOneMoreOpportunity;
+
+        // Problem 2 / KB2SLO fix: a target -> PEER RR73 or 73 means the target is in its CLOSING
+        // exchange with that peer -- NOT free yet. It becomes available (Smart Start only) only
+        // after this many appropriate target-parity opportunities pass with the target NOT heard
+        // sending any finishing traffic to a peer (RR73/73/report/RReport/RRR). Any such fresh
+        // decode re-arms the full count; a target CQ / the target addressing us clears it and
+        // makes ready at once. Counts down in OnReceivePeriodComplete; at 0 it clears
+        // BusyWithOther and signals ready.
+        //
+        // The count is DELIBERATELY generous (KB2SLO live: Jimmy missed decoding some of the
+        // target's RR73 repeats, leaving apparent 2-3 period gaps that a shorter count would
+        // have mistaken for "the QSO ended"). Smart Start is the "wait for the lull" tool -- a
+        // couple of extra quiet minutes here is far better than calling a station mid-close.
+        private int _peerCloseSettle;
+        private const int PeerCloseSettleOpportunities = 4;
+
+        // True for exactly the period in which a target -> peer finishing decode (re)armed
+        // _peerCloseSettle: that period is NOT a "silent settle opportunity" (the target was
+        // heard), so the same-period OnReceivePeriodComplete must not decrement. Cleared by the
+        // first OnReceivePeriodComplete after the arm.
+        private bool _peerCloseSettleHeardThisPeriod;
+
+        // Test-only (JimmyTests via InternalsVisibleTo): the live peer-close settle countdown.
+        internal int TestPeerCloseSettle => _peerCloseSettle;
 
         // Set only when a Smart Start busy-yield (ReturnToWaiting while BusyWithOther) parks a
         // STALE "target working someone else" observation. While armed, that old BusyWithOther is
@@ -287,6 +318,8 @@ namespace WSJTX_Controller
             AwaitingEngagement = false;
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _peerCloseSettle = 0;
+            _peerCloseSettleHeardThisPeriod = false;
             _busyExpirationArmedAfterYield = false;
             _lastHeardWorkingOther = false;
             _standbyRounds = 0;
@@ -317,6 +350,8 @@ namespace WSJTX_Controller
             AwaitingEngagement = false;
             EngagedUs = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _peerCloseSettle = 0;
+            _peerCloseSettleHeardThisPeriod = false;
             _busyExpirationArmedAfterYield = false;
             _lastHeardWorkingOther = false;
             _standbyRounds = 0;
@@ -342,6 +377,7 @@ namespace WSJTX_Controller
         {
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _peerCloseSettle = 0;
         }
 
         // Smart Start only. Called once the automatic REPLY for this target has actually been
@@ -358,6 +394,7 @@ namespace WSJTX_Controller
             EngagedUs = false;
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _peerCloseSettle = 0;
             _standbyRounds = 0;   // we actually got to call -- the earlier dead-end rounds don't count against us
         }
 
@@ -536,6 +573,7 @@ namespace WSJTX_Controller
                 BusyWithOther = false;                 // calling CQ -> available
                 _lastHeardWorkingOther = false;
                 _rr73AwaitingOneMoreOpportunity = false;
+                _peerCloseSettle = 0;                  // a fresh CQ = the prior QSO is over
                 Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message);
                 if (Purpose == TargetPurpose.SmartStart) SignalReady();
                 return;
@@ -562,6 +600,7 @@ namespace WSJTX_Controller
             {
                 BusyWithOther = false;                 // turning to us -> not busy with anyone else
                 _lastHeardWorkingOther = false;
+                _peerCloseSettle = 0;                  // the target turned to us -- no peer close to wait out
             }
 
             // Smart Start, still armed/waiting (not yet in its own calling phase): the target is
@@ -584,44 +623,108 @@ namespace WSJTX_Controller
 
             if (sem.IsRr73)
             {
-                BusyWithOther = false;                 // finishing with the peer -> becoming available
-                _lastHeardWorkingOther = false;
-                Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
+                if (addressingUs)
+                {
+                    // The target rogered OUR callsign -- becoming available; the deliberate
+                    // one-extra-opportunity rule for RR73-to-us is unchanged (test ~16681).
+                    BusyWithOther = false;
+                    _lastHeardWorkingOther = false;
+                    _peerCloseSettle = 0;
+                    Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
+                    if (Purpose == TargetPurpose.SmartStart && !d.IsFoxHound())
+                        _rr73AwaitingOneMoreOpportunity = true;
+                    return;
+                }
+                if (d.IsFoxHound())
+                {
+                    // Fox/Hound (multiplex) RR73: unchanged from before this fix -- the /H suffix
+                    // is not generic "target available" evidence and does not arm any resume
+                    // rule; it just falls to the normal silence counter. Same IsFoxHound
+                    // heuristic Jimmy's "Possible F/H" tagging uses (ClassificationEngine.cs).
+                    BusyWithOther = false;
+                    _lastHeardWorkingOther = false;
+                    _rr73AwaitingOneMoreOpportunity = false;
+                    Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
+                    return;
+                }
+                // Target -> PEER RR73 (ordinary).
                 if (Purpose == TargetPurpose.SmartStart)
                 {
-                    // Fox/Hound (multiplex) RR73 must NOT be treated as generic "target is now
-                    // available" evidence -- preserve the existing protocol distinction (reuses
-                    // the same IsFoxHound heuristic Jimmy's own "Possible F/H" tagging uses,
-                    // ClassificationEngine.cs).
-                    if (!d.IsFoxHound())
-                        _rr73AwaitingOneMoreOpportunity = true;   // operator's one-extra-opportunity rule
+                    // The target is in its CLOSING exchange with that peer, NOT free yet. KB2SLO
+                    // live (2026-09-08): it kept re-sending "K8UMF KB2SLO RR73" for 5+ periods
+                    // while Smart Start had already called it. Stay busy; require
+                    // PeerCloseSettleOpportunities appropriate target-parity opportunities with NO
+                    // further finishing traffic to a peer before "available" (any fresh RR73/73/
+                    // report/RReport/RRR to a peer re-arms the count).
+                    BusyWithOther = true;
+                    _lastHeardWorkingOther = true;
+                    _rr73AwaitingOneMoreOpportunity = false;
+                    ArmPeerCloseSettle();
                 }
+                else
+                {
+                    // Station Watch / Work Now: unchanged -- "finishing with the peer, becoming
+                    // available" (Work Now is an explicit operator command with its own bounded
+                    // gap check; it must not start reading RR73 as busy).
+                    BusyWithOther = false;
+                    _lastHeardWorkingOther = false;
+                    _rr73AwaitingOneMoreOpportunity = false;
+                }
+                Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
                 return;
             }
             if (sem.Is73)
             {
-                BusyWithOther = false;                 // signed off with the peer -> available
-                _lastHeardWorkingOther = false;
+                if (addressingUs || Purpose != TargetPurpose.SmartStart)
+                {
+                    // Signed off with US, or a Station Watch / Work Now monitor: unchanged --
+                    // 73 = available.
+                    BusyWithOther = false;
+                    _lastHeardWorkingOther = false;
+                    _rr73AwaitingOneMoreOpportunity = false;
+                    _peerCloseSettle = 0;
+                    Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
+                    if (Purpose == TargetPurpose.SmartStart) SignalReady();
+                    return;
+                }
+                // Smart Start, target -> PEER 73: usually the definitive final, but a target
+                // whose peer did not hear it re-sends 73 too -- same class of bug as RR73. Route
+                // it through the same bounded settle so a single (possibly repeated) 73 to a peer
+                // does not by itself read as "available".
+                BusyWithOther = true;
+                _lastHeardWorkingOther = true;
                 _rr73AwaitingOneMoreOpportunity = false;
+                ArmPeerCloseSettle();
                 Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
-                if (Purpose == TargetPurpose.SmartStart) SignalReady();
                 return;
             }
             if (sem.IsRrr)       // RRR -- distinct from, and NOT equivalent to, RR73/73
             {
-                if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }   // mid-exchange with the peer
+                if (!addressingUs)
+                {
+                    BusyWithOther = true; _lastHeardWorkingOther = true;   // mid-exchange with the peer
+                    if (_peerCloseSettle > 0) ArmPeerCloseSettle();        // still closing -> re-arm the peer-close settle
+                }
                 Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
                 return;
             }
             if (sem.IsRReport)
             {
-                if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }
+                if (!addressingUs)
+                {
+                    BusyWithOther = true; _lastHeardWorkingOther = true;
+                    if (_peerCloseSettle > 0) ArmPeerCloseSettle();
+                }
                 Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
                 return;
             }
             if (sem.IsReport)
             {
-                if (!addressingUs) { BusyWithOther = true; _lastHeardWorkingOther = true; }
+                if (!addressingUs)
+                {
+                    BusyWithOther = true; _lastHeardWorkingOther = true;
+                    if (_peerCloseSettle > 0) ArmPeerCloseSettle();
+                }
                 Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
                 return;
             }
@@ -685,6 +788,37 @@ namespace WSJTX_Controller
             if (Purpose != TargetPurpose.SmartStart) return;   // Station Watch never counts toward an automatic start
             if (AwaitingEngagement) return;                    // already calling -- silence/RR73 readiness is dormant
 
+            // Problem 2 / KB2SLO: the target -> peer RR73/73 closing-exchange settle. Counts
+            // down one per appropriate target-parity opportunity in which the target was NOT
+            // heard sending finishing traffic to a peer (any such decode re-arms it in
+            // IngestTargetDecode). At 0 the closing exchange has demonstrably ended and the
+            // target is available.
+            if (_peerCloseSettle > 0)
+            {
+                if (_peerCloseSettleHeardThisPeriod)
+                {
+                    // The target WAS heard this period (it (re)armed the settle) -- not a silent
+                    // opportunity. Do not count it down.
+                    _peerCloseSettleHeardThisPeriod = false;
+                    Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null,
+                        $"0 of {PeerCloseSettleOpportunities}");
+                    return;
+                }
+                _peerCloseSettle--;
+                if (_peerCloseSettle == 0)
+                {
+                    BusyWithOther = false;
+                    _lastHeardWorkingOther = false;
+                    SignalReady();
+                }
+                else
+                {
+                    Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null,
+                        $"{PeerCloseSettleOpportunities - _peerCloseSettle} of {PeerCloseSettleOpportunities}");
+                }
+                return;
+            }
+
             if (_rr73AwaitingOneMoreOpportunity)
             {
                 _rr73AwaitingOneMoreOpportunity = false;
@@ -728,6 +862,7 @@ namespace WSJTX_Controller
             SilenceCount = 0;
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
+            _peerCloseSettle = 0;
             _lastCountedSlot = null;
         }
 
@@ -768,6 +903,15 @@ namespace WSJTX_Controller
             if ((nowUtc - LastUsableDecodeUtc).TotalSeconds > maxAgeSeconds) return AutoStartCheck.StaleEvidence;
 
             return AutoStartCheck.Ok;
+        }
+
+        // (Re)arm the target -> peer closing-exchange settle to its full count, and mark that the
+        // target was heard this receive period so the same-period OnReceivePeriodComplete does
+        // not count it down (see PeerCloseSettleOpportunities' own comment).
+        private void ArmPeerCloseSettle()
+        {
+            _peerCloseSettle = PeerCloseSettleOpportunities;
+            _peerCloseSettleHeardThisPeriod = true;
         }
 
         private void SignalReady()

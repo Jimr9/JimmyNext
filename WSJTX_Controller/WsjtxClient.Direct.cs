@@ -526,6 +526,30 @@ namespace WSJTX_Controller
         //                     Completed, HaltTx, or a reconnect.
         private string _finishingCall;
 
+        // Live-radio audit fix, 2026-09-08 (Problem 1 / KB2SLO). Nexus can decode the DX's
+        // closing RR73 at the LEADING EDGE of one of Jimmy's own TX slots: it advances qso.txNow
+        // to the closing "73" and Jimmy's level-triggered completion block logs + clears
+        // callInProg MID-transmission. The very RR73 that completed the QSO is ALSO the DX's own
+        // signoff decode, and it used to clear _finishingCall in the SAME poll tick -- before any
+        // engine closing over had gone out. That, plus the in-flight slot's own tail counting as
+        // orphan #1, let Nexus's one legitimate closing 73 become orphan #2 and falsely halt.
+        //   PART A -- _finishingCallSetThisPoll: the DX-signoff-decode clear in DirectApplyDecodes
+        //     is skipped for the one poll tick in which DirectApplyStatus set _finishingCall
+        //     (same snapshot: Status runs, then Decodes). A genuine post-completion signoff from
+        //     the DX on a LATER poll still clears it normally. Reset at the top of every
+        //     DirectApplyStatus so it is strictly per-poll.
+        private bool _finishingCallSetThisPoll;
+        //   PART B -- _directOrphanExemptSlot: when EndContact(Completed) runs while
+        //     radio.Transmitting is true, the engine slot that is still on the air is recorded
+        //     here. The FIRST transmitting->false edge after that (the end of that same in-flight
+        //     slot -- FT8 always has an RX gap after a TX slot, so it is genuinely the next edge)
+        //     is exempted from the orphan counter, honoured only when the ended slot matches
+        //     (== or ==+1, the counter may tick at the period boundary). One-shot: consumed on
+        //     that first edge whether or not it matched; also cleared on a new contact / reset /
+        //     reconnect. The genuine runaway backstop (two orphan overs, no contact, no
+        //     finishing) is unchanged.
+        private ulong? _directOrphanExemptSlot;
+
         // KF4CCG race, 2026-08-29 (CONFIRMED live): bounds how many extra polls the Is73orRR73
         // completion branch (DirectApplyStatus) will HOLD callInProg while LogQso() keeps failing
         // because the DX's roger-report decode has not been ingested into allCallDict yet -- the
@@ -699,6 +723,8 @@ namespace WSJTX_Controller
             _directRr73LogRetries = 0;
             _directWriteFailRetries = 0;
             _finishingCall = null;
+            _finishingCallSetThisPoll = false;
+            _directOrphanExemptSlot = null;
             if (_lastCatOk == false || _catLostAtUtc.HasValue)
                 DebugOutput($"{Time()} [CAT-DIAG] Direct reconnect clearing the live CAT latch while CAT was down " +
                     $"(prevLatch={(_lastCatOk?.ToString() ?? "null")}); the next cat_ok=true will be reported as a post-reconnect recovery");
@@ -1110,6 +1136,11 @@ namespace WSJTX_Controller
         private void DirectApplyStatus(DirectSnapshot snap)
         {
             _completedThisPollTick.Clear();
+            // Per-poll: true only for the tick DirectApplyStatus sets _finishingCall, so the
+            // DX-signoff-decode clear in DirectApplyDecodes (same tick, runs right after) does
+            // not release the finishing latch before any engine closing over has gone out
+            // (Problem 1 / KB2SLO fix -- see _finishingCallSetThisPoll's own comment).
+            _finishingCallSetThisPoll = false;
             var radio = snap.Radio;
             if (radio == null) return;
 
@@ -1754,10 +1785,24 @@ namespace WSJTX_Controller
             if (callInProg != null || txMode != TxModes.LISTEN || tuning || finishingTailOver)
             {
                 _directOrphanTxOvers = 0;
+                _directOrphanExemptSlot = null;   // a real contact / finishing tail -- no stale exemption
             }
             else if (wasTransmitting && !transmitting)
             {
-                if (++_directOrphanTxOvers >= 2)
+                // Problem 1 / KB2SLO fix (Part B): the end of the very slot Jimmy was still
+                // physically transmitting when a mid-TX completion cleared callInProg is NOT an
+                // orphan -- it is the tail of the report/exchange we were legitimately sending.
+                // Exempt that ONE slot end (matched by the engine's own slot counter; the
+                // exemption is consumed on this first edge regardless of whether it matched).
+                bool exemptThisTxEnd = _directOrphanExemptSlot.HasValue
+                    && (radio.Slot == _directOrphanExemptSlot.Value || radio.Slot == _directOrphanExemptSlot.Value + 1UL);
+                _directOrphanExemptSlot = null;
+
+                if (exemptThisTxEnd)
+                {
+                    DebugOutput($"{Time()} [DIRECT] runaway-Tx backstop: not counting the in-flight TX slot that ended right after a mid-transmission completion (slot {radio.Slot})");
+                }
+                else if (++_directOrphanTxOvers >= 2)
                 {
                     DebugOutput($"{Time()} [DIRECT] runaway-Tx backstop: {_directOrphanTxOvers} orphaned overs with no callInProg in LISTEN mode -- halting");
                     HaltAndDisableTx();
@@ -1935,7 +1980,22 @@ namespace WSJTX_Controller
                     // orphans (Nexus owns that exchange and its own wall-clock watchdog bounds a
                     // silent tail); it is cleared by that station's own 73/RR73/RRR decode.
                     if (onRecord)
+                    {
                         _finishingCall = justWorkedCall;
+                        // Problem 1 / KB2SLO fix (Part A): mark that the finishing latch was set
+                        // THIS poll tick, so the DX's own signoff decode -- which, when its RR73
+                        // lands on a Jimmy TX-slot edge, is the SAME decode that just completed
+                        // the QSO -- does not clear it in DirectApplyDecodes later in this same
+                        // tick, before any engine closing over has gone out.
+                        _finishingCallSetThisPoll = true;
+                    }
+                    // Problem 1 / KB2SLO fix (Part B): if we are completing MID-transmission
+                    // (Nexus advanced qso.txNow to the closing 73 while this slot was still on
+                    // the air), the end of THIS slot is the tail of the report we were
+                    // legitimately sending -- not an orphan. Record it so the next
+                    // transmitting->false edge is not counted (see the orphan check above).
+                    if (transmitting)
+                        _directOrphanExemptSlot = radio.Slot;
                     // EndContact(Completed) = SetCallInProg(null) (which also zeroes the RR73/
                     // write-fail retry counters on the call transition) + the _contactEpoch bump.
                     // It deliberately leaves curTxMsg alone (the final 73 still announces as it
@@ -2259,6 +2319,7 @@ namespace WSJTX_Controller
                 // to the WsjtxMessage equivalents. enq.DeCall() (the sender) stays a DTO method.
                 var finSem = enq.EffectiveSemantic(myCall);
                 if (_finishingCall != null
+                    && !_finishingCallSetThisPoll   // Problem 1 / KB2SLO: not the SAME decode that just completed the QSO
                     && string.Equals(enq.DeCall(), _finishingCall, StringComparison.OrdinalIgnoreCase)
                     && finSem.AddressedToMe
                     && (finSem.IsRr73 || finSem.Is73 || finSem.IsRrr))
@@ -3058,6 +3119,10 @@ namespace WSJTX_Controller
         // asserts the first orphaned over is tolerated and the second one trips the halt.
         internal int TestOrphanTxOvers => _directOrphanTxOvers;
         internal string TestFinishingCall => _finishingCall;
+        // Problem 1 / KB2SLO fix hooks: the recorded in-flight-slot exemption (null once
+        // consumed) and whether _finishingCall was set on the current poll tick.
+        internal ulong? TestDirectOrphanExemptSlot => _directOrphanExemptSlot;
+        internal bool TestFinishingCallSetThisPoll => _finishingCallSetThisPoll;
 
         // Test-only (2.0.64 Smart QSO Start transmit-safety): drive the exact operator-Enter
         // capture seam and observe the deferred-auto-start / Station-Watch state, without the
