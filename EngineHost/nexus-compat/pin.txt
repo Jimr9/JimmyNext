@@ -6,10 +6,20 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins an exact commit on `main` (47 commits past tag v1.10.0, past the
-# unreleased-tag 1.10.1/1.10.2 release commits), NOT a tag. prepare-nexus.ps1 fetches
-# NEXUS_COMMIT directly when NEXUS_TAG is the literal "main".
+# This integration pins the newest official STABLE release tag, v1.10.3 (2026-09-04), by its
+# exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
+# prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
+# HEAD equals NEXUS_COMMIT exactly (a lightweight tag checks out in detached HEAD, which is
+# fine). The literal "main" branch-and-detach path in that script is retained for any future
+# exact-commit-on-main pin but is not used here.
+#
+# v1.10.3 was chosen over the current moving `main` (~175 commits ahead) because the only
+# material pre-stable deltas are the two transmit-safety fixes in ed9e6130 (suspect-link
+# rebuild PTT-off; ordinary-QSO / Fox-multiplex wrong-73), both carried by this tag, while
+# post-v1.10.3 main is overwhelmingly new-scope (JS8, Winlink, contest widening, FT-710
+# scope UI, a tempo-audio process refactor) with a large patch-overlap surface and a recent
+# "main was red" repair. See C:\chat gpt\nexus plan.txt sections 2 and 20.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=main
-NEXUS_COMMIT=93b9f012790498a2d6d066e8c38928eac3191c1d
+NEXUS_TAG=v1.10.3
+NEXUS_COMMIT=7618390658f8f92431dec0ac65979b84f2c0fb76

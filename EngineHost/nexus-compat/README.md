@@ -30,22 +30,58 @@ equivalent functionality -- see "Checking a patch against a newer Nexus" below.
 
 ## Current pin
 
-`pin.txt` points at an **exact commit on `main`**, not a release tag:
+`pin.txt` points at the **newest official stable release tag, `v1.10.3`**, by its exact commit:
 
 ```
-NEXUS_TAG=main
-NEXUS_COMMIT=93b9f012790498a2d6d066e8c38928eac3191c1d
+NEXUS_TAG=v1.10.3
+NEXUS_COMMIT=7618390658f8f92431dec0ac65979b84f2c0fb76
 ```
 
-`93b9f012` is 47 commits past the newest stable tag `v1.10.0` (`c19e658b`) -- it also carries the
-untagged `1.10.1` and `1.10.2` release commits, which is the batch that carries the two upstream
-improvements this integration deliberately adopted (see "Audited upgrade, 44bca866 ->
-93b9f012" below): better CAT reopen/recovery backoff and bounded Tune-time meter polling.
-`prepare-nexus.ps1` handles the `main` case by cloning `main` and then `git checkout
---detach`-ing exactly `NEXUS_COMMIT`, and still verifies the
-resolved `HEAD` equals it.
+`NEXUS_COMMIT` is the real lock; `NEXUS_TAG` is the honest human reference. `v1.10.3` is a
+lightweight tag pointing straight at `7618390` (2026-09-04). `prepare-nexus.ps1` clones
+`--branch v1.10.3 --single-branch` (a lightweight tag checks out in detached HEAD, which is
+fine) and still verifies the resolved `HEAD` equals `NEXUS_COMMIT`. The `NEXUS_TAG=main`
+branch-and-detach path in that script is retained for any future exact-commit-on-`main` pin
+but is not used here.
 
-## Audited upgrade, 44bca866 -> 93b9f012
+## Audited upgrade, 93b9f012 -> v1.10.3 (7618390)
+
+Codex-audited upgrade (2026-09-07 audit, executed 2026-09-08) from the prior pin `93b9f012`
+(an untagged `v1.10.2`-era commit on `main`) to the tagged stable `v1.10.3` -- **2 commits**:
+`ed9e6130` (the substantive "1.10.3 batch") and `76183906` (the version-bump commit, which
+touches no crate source). Chosen over the moving `main` (~175 commits ahead: JS8, Winlink,
+contest widening, FT-710 scope UI, a tempo-audio process refactor, and a "main was red"
+Windows repair) because `ed9e6130` carries the only two material pre-stable deltas and they
+are both **ordinary-FT8 transmit-safety fixes**:
+
+- **Stuck-TX on a keyed rig across a channel rebuild** (`ed9e6130`, `service.rs`): a suspect/
+  transport rebuild (not just `daemon_died`) now carries the pre-teardown `rig.keyed` belief
+  onto the fresh rig and issues an **unconditional** `rig.ptt(false)` through the reopened
+  channel. Adopted by the base; no patch. Verified by hand in the staged tree (`grep -n
+  "let was_keyed = rig.keyed" service.rs` -> present, not touched by any Jimmy hunk).
+- **Ordinary QSO sends 73 off a bystander Fox multiplex** (`ed9e6130`, `engine.rs`, #236): the
+  Fox-multiplex `reattach` closure is now gated on `hound_active = matches!(special_op,
+  Hound | SuperHound)`. Jimmy Next never sets `special_op` to Hound, so this fabrication path
+  is permanently inert for Jimmy. Adopted by the base; no patch.
+
+Also in the base by pin alone (no patch): the #126 FTDX-101D mid-over RFPOWER foldback fix,
+which refactored the per-mode power-ceiling `L RFPOWER` write site into a
+`should_command_rf_power(tuning_keyed, transmitting, changed_or_forced, giveup_blocked)`
+helper; and `logged_tick` / an opt-in beta update channel (neither consumed by EngineHost's
+Direct host -- both additive `#[serde(default)]` snapshot/settings fields, verified to
+round-trip).
+
+**Patch impact:** 7 of 8 patches re-anchored with offsets only. `tempo-audio-service.patch`
+needed a **one-hunk re-anchor** (hunk #17, the RFPOWER Layer-2 gate): its insertion moved
+from `if !self.tuning_keyed && (force || ...) && self.rf_power_giveup != Some(p)` to
+`if !self.disable_rfpower_probe && should_command_rf_power(...)` -- same conceptual change
+(the loop never forms the command when the probe is disabled), now in front of the #126
+helper call. The patch file's context/line numbers were regenerated wholesale from the
+fully-patched `service.rs`; the added/removed *code* is byte-identical to the prior version
+except that one hunk (verified by md5 of the `+`/`-` lines). No patch was deleted; no ninth
+patch was created.
+
+### Superseded: audited upgrade 44bca866 -> 93b9f012
 
 Codex-audited upgrade (2026-09-05) from the prior pin `44bca866` to `93b9f012` (the 40 commits
 in between: World Radio League logbook/eQSL integration, a WSJT-X-forward multi-target fix, the
@@ -80,7 +116,7 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `main`, commit `93b9f012`)
+## Current patches (against Nexus `v1.10.3`, commit `7618390`)
 
 Eight patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the eight are itemised in the `###` sections below). Jimmy's downstream
@@ -178,6 +214,10 @@ One file, one concern (the radio loop / CAT service). Carries:
   the heavy-poll `l RFPOWER` read, the per-mode power-ceiling `set_power`, and the Tune-power
   `set_power` (the last two are `L RFPOWER` **writes** that did not exist in Jimmy's old v1.6.0
   Nexus baseline). Safe meters (`RFPOWER_METER_WATTS`/`SWR`/`ALC`/`COMP_METER`) are untouched.
+  On v1.10.3 the per-mode power-ceiling site is upstream's #126 `should_command_rf_power(...)`
+  helper (FTDX-101D mid-over foldback fix); Jimmy's Layer-2 gate sits in **front** of it as
+  `if !self.disable_rfpower_probe && should_command_rf_power(...)`. The two are orthogonal --
+  #126 says "not mid-over", Jimmy says "not at all when suppressed".
 - **`Status.tx_message`** changes from a hardcoded `""` to `eng.last_own_tx_text()`.
 - **Corrected Fake-It dial restore** (rewritten in the Codex correction pass; the state model
   now lives in the `FakeItRestore` enum -- `None` / `Armed` / `Unresolved`):
@@ -217,9 +257,14 @@ patched); live meters are intentionally unavailable during a chunk-fed Tune carr
 **Obsoleted when:** the engine/settings/rig patch items are obsoleted (the threading follows
 them); AND upstream's Fake-It teardown itself verifies the restore and does not consume state
 on failure.
-**How to check:** `grep -n "disable_rfpower_probe\|fake_it_restore\|last_own_tx_text\|ptt_data_source" crates/tempo-audio/src/service.rs`
--- and re-read the Fake-It teardown block and every `read_level("RFPOWER")` / `set_power` call
-site by hand (grep -- do not assume the counts are unchanged).
+**How to check:** `grep -n "disable_rfpower_probe\|fake_it_restore\|last_own_tx_text\|ptt_data_source\|should_command_rf_power" crates/tempo-audio/src/service.rs`
+-- and re-read the Fake-It teardown block and every `read_level("RFPOWER")` / `set_power` /
+`should_command_rf_power` call site by hand (grep -- do not assume the counts are unchanged).
+On v1.10.3 there are three `disable_rfpower_probe` drive gates in the loop body: the heavy-poll
+`l RFPOWER` read (`if !self.disable_rfpower_probe` before `rig.read_level("RFPOWER")`), the
+per-mode ceiling (`if !self.disable_rfpower_probe && should_command_rf_power(...)`), and the
+Tune-power write (`tune_power.filter(|_| !self.disable_rfpower_probe)`), plus the two stamp
+sites (`finish_cat_open`, `open_monitor`).
 
 ### `patches/tempo-audio-slot.patch` -- Fake-It physical capture + Rig-split do-not-set-mode
 
