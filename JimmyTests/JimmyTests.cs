@@ -403,6 +403,7 @@ static class JimmyTests
         SmartStartOperatorPolicy20260908Tests();
         SmartStartYieldsToOtherQsoTests();
         ActivePartnerYieldAndStaleSelectionTests();
+        SmartStartResumesAfterHandoffYieldTests();
         TargetMonitorBusyExpirationAfterYieldTests();
         SmartStartRepeatLimitSpansYieldsTests();
         TargetMonitorAnswersUsWhileArmedTests();
@@ -17435,6 +17436,228 @@ static class JimmyTests
                 PumpUntil(() => Saw("HALT_TX"), 2000);
                 Check("D: after hand-off, partner working another -> same yield (HALT_TX)", Saw("HALT_TX"), true);
                 Check("D: ...contact ended", wc.callInProg == null, true);
+                // 2026-09-08 follow-up: this contact ORIGINATED under Smart Start, so Smart Start
+                // resumes ownership of the same target (full resume coverage is in
+                // SmartStartResumesAfterHandoffYieldTests).
+                Check("D: ...Smart Start resumes watching the SAME target", wc.TestSmartStartTarget == target, true);
+            }
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevDb == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // Operator policy (2026-09-08 follow-up to 5a58e95): a QSO that ORIGINATED under Smart Start
+    // and then handed off to the normal sequencer must return to Smart Start -- not be abandoned
+    // -- if the active-partner-to-other-station guard yields it before the QSO completes. The
+    // cumulative Repeat Limit carries across the whole capture -> call -> answer -> yield ->
+    // resume cycle. An ordinary manual QSO (no Smart Start origin) still just stops. A completed
+    // Smart Start QSO, and a manual Escape/Alt+H, do NOT re-arm.
+    static void SmartStartResumesAfterHandoffYieldTests()
+    {
+        Console.WriteLine("\n── Smart QSO Start: a handed-off QSO returns to Smart Start when the partner moves to another station ──");
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+        List<string> Seen() { lock (seenLock) return new List<string>(seen); }
+        bool Saw(string p) => Seen().Exists(c => c.StartsWith(p));
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SSResume_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevDb = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "KA1BMF", peer = "N1UL", peer2 = "K9ABC";
+            const ulong SLOT = 600;
+
+            WsjtxClient MakeWc(out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.smartQsoStartEnabled = true;
+                ctrl.smartStartSilencePeriods = 2;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetDirectConnected(true);
+                wc.TestSetMode("FT8");
+                wc.StatusView = new FakeStatusView();
+                return wc;
+            }
+
+            EnqueueDecodeMessage Dec(string msg) => new EnqueueDecodeMessage { Message = msg, DeltaFrequency = 1500, Snr = -6 };
+            EnqueueDecodeMessage FreshCq() => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {target} FN31",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+
+            DirectSnapshot DecodeSnap(WsjtxClient wc, ulong slot, string decodeFrom = null, string decodeMsg = null)
+            {
+                string decodes = decodeFrom == null ? "" :
+                    @"{ ""from"": """ + decodeFrom + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 10.136, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"] }");
+            }
+
+            void Tx(WsjtxClient wc, bool tx) => wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot($@"{{
+                ""mycall"": ""{myCall}"", ""mygrid"": ""{myGrid}"",
+                ""radio"": {{ ""dialMhz"": 10.136, ""transmitting"": {(tx ? "true" : "false")}, ""tuning"": false, ""slot"": {SLOT}, ""txEnabled"": true }},
+                ""recentDecodes"": [] }}"));
+            void CallingOver(WsjtxClient wc) { Tx(wc, true); Tx(wc, false); }
+
+            // Smart Start captures target on a fresh CQ, calls it, target answers us -> hand-off.
+            // Returns after the monitor has been Stopped for the normal sequencer.
+            void ArmCallAnswer(WsjtxClient wc, int callingOvers)
+            {
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT));   // establish band/mode
+                wc.TestTryCaptureSmartStart(target, FreshCq());
+                wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FN31"), true);    // live CQ -> parity/evidence
+                wc.callInProg = target;
+                wc.TestSmartStartEnterAwaitingEngagement();                          // stands in for ReplyTo's commit
+                for (int i = 0; i < callingOvers; i++) CallingOver(wc);
+                wc.TestFeedTargetMonitorsDecode(Dec($"{myCall} {target} R-03"), true);   // target answers us -> hand-off + Stop
+            }
+
+            // ── 1 + 2. Hand-off -> partner works another -> yield AND Smart Start resumes; then
+            //          a target -> peer RR73 is the next legitimate opening ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmCallAnswer(wc, 1);
+                Check("1: handed off (Smart Start not active during the exchange)", wc.TestSmartStartTarget == null, true);
+                Check("1: ordinary sequencer owns the contact", wc.callInProg == target, true);
+
+                lock (seenLock) seen.Clear();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 1, target, $"{peer} {target} -10"));
+                PumpUntil(() => Saw("HALT_TX"), 2000);
+                Check("1: partner (report) to a third station -> active QSO yields (HALT_TX)", Saw("HALT_TX"), true);
+                Check("1: ...contact ended", wc.callInProg == null, true);
+                Check("1: ...Smart Start RESUMES watching the SAME target", wc.TestSmartStartTarget == target, true);
+                Check("1: ...resumed while waiting, not still calling", wc.TestSmartStartAwaitingEngagement, false);
+
+                // 2: the resumed monitor treats a target -> peer RR73 as the next opening.
+                wc.TestFeedTargetMonitorsDecode(Dec($"{peer} {target} -14"), true);   // still busy first
+                Check("2: fresh report to the peer keeps it busy", wc.TestSmartStartBusyWithOther, true);
+                wc.TestFeedTargetMonitorsDecode(Dec($"{peer2} {target} RR73"), true); // target closes with the peer
+                Check("2: target -> peer RR73 -> Smart Start arms a new start (opening)", wc.TestAutoStartPending, true);
+            }
+
+            // ── 2b. Same, but the next opening is a fresh CQ from the target ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmCallAnswer(wc, 1);
+                lock (seenLock) seen.Clear();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 1, target, $"{peer} {target} R-10"));
+                PumpUntil(() => Saw("HALT_TX"), 2000);
+                Check("2b: R-report to the peer also yields + resumes", wc.TestSmartStartTarget == target && wc.callInProg == null, true);
+                wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FN31"), true);
+                Check("2b: target CQ after the resume -> Smart Start arms a new start", wc.TestAutoStartPending, true);
+            }
+
+            // ── 3. Repeat Limit stays cumulative across capture -> call -> answer -> yield -> resume ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ctrl.timeoutNumUpDown.Value = 3;
+                ArmCallAnswer(wc, 2);   // two real calling overs BEFORE the target answered
+                // (the monitor is Stopped at the hand-off, so its own live counter reads 0 here --
+                //  the cumulative total is carried in the hand-off origin marker and restored on
+                //  resume; the two assertions below prove it.)
+
+                lock (seenLock) seen.Clear();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 1, target, $"{peer} {target} RRR"));
+                PumpUntil(() => Saw("HALT_TX"), 2000);
+                Check("3: RRR to the peer -> yield + resume", wc.TestSmartStartTarget == target && wc.callInProg == null, true);
+                Check("3: ...cumulative calling-over count preserved across the resume", wc.TestSmartStartTransmittedCallCount == 2, true);
+
+                // Resumed: one more real calling over reaches the operator's limit of 3.
+                wc.callInProg = target;
+                wc.TestSmartStartEnterAwaitingEngagement();
+                CallingOver(wc);
+                Check("3: calling over 3 reaches Repeat Limit 3 -> Smart Start disarmed", wc.TestSmartStartTarget == null, true);
+                // No N+1: a further over cannot be counted.
+                lock (seenLock) seen.Clear();
+                wc.callInProg = target;
+                CallingOver(wc);
+                Check("3: after the limit, nothing further is armed or counted",
+                    wc.TestSmartStartTarget == null && wc.TestSmartStartTransmittedCallCount == 0, true);
+            }
+
+            // ── 4. Smart Start OFF (ordinary manual QSO): the 5a58e95 guard still yields, but
+            //       Smart Start is NOT armed ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = false;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT));
+                wc.callInProg = target;                       // an ordinary Enter-started QSO
+                lock (seenLock) seen.Clear();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 1, target, $"{peer} {target} -10"));
+                PumpUntil(() => Saw("HALT_TX"), 2000);
+                Check("4: ordinary QSO still yields on the guard", Saw("HALT_TX") && wc.callInProg == null, true);
+                Check("4: ...Smart Start is NOT armed", wc.TestSmartStartTarget == null, true);
+            }
+
+            // ── 4b. Smart Start ENABLED but the contact did NOT originate under Smart Start ──
+            {
+                var wc = MakeWc(out var ctrl);   // smartQsoStartEnabled = true
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT));
+                wc.callInProg = target;          // ordinary manual selection, no Smart Start capture
+                lock (seenLock) seen.Clear();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 1, target, $"{peer} {target} -10"));
+                PumpUntil(() => Saw("HALT_TX"), 2000);
+                Check("4b: no Smart Start origin -> yields, but Smart Start is NOT armed",
+                    Saw("HALT_TX") && wc.callInProg == null && wc.TestSmartStartTarget == null, true);
+            }
+
+            // ── 5. A successful Smart Start QSO completion does NOT re-arm the completed target ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmCallAnswer(wc, 1);
+                wc.allCallDict[target] = new List<EnqueueDecodeMessage>
+                {
+                    new EnqueueDecodeMessage { Message = $"{myCall} {target} +05", Snr = 5,
+                        RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay },
+                };
+                wc.sentReportList.Add(target);
+                // Final RR73 to the partner goes out -> QSO logged + callInProg cleared.
+                string qsoBlk = @",
+                    ""qso"": { ""state"": ""confirming"", ""dxcall"": """ + target + @""", ""txNow"": """ + target + " " + myCall + @" RR73"" },
+                    ""qsoTxSemantics"": { ""schemaVersion"": 1, ""rawMessage"": """ + target + " " + myCall + @" RR73"", ""kind"": ""rr73"",
+                        ""from"": """ + myCall + @""", ""to"": """ + target + @""", ""addressedToMe"": false, ""signoff"": ""rr73"", ""callForm"": ""standard"", ""qsoRelation"": ""partner"" }";
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 10.136, ""transmitting"": true, ""slot"": " + (SLOT + 2) + @" }, ""recentDecodes"": []" + qsoBlk + @" }"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 10.136, ""transmitting"": false, ""slot"": " + (SLOT + 2) + @" }, ""recentDecodes"": []" + qsoBlk + @" }"));
+                Check("5: Smart Start QSO logged + callInProg cleared", wc.logList.Contains(target) && wc.callInProg == null, true);
+                Check("5: completion did NOT re-arm Smart Start", wc.TestSmartStartTarget == null, true);
+                // A later partner -> peer decode after a clean completion must not resurrect it.
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 4, target, $"{peer} {target} -10"));
+                Check("5: ...and stays un-armed on a later partner -> peer decode", wc.TestSmartStartTarget == null, true);
+            }
+
+            // ── 6. Manual Escape / Alt+H after a hand-off does NOT re-arm Smart Start ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmCallAnswer(wc, 1);
+                lock (seenLock) seen.Clear();
+                wc.AbortContact();                    // Escape / Alt+H
+                Check("6: Escape ends the contact", wc.callInProg == null, true);
+                Check("6: Escape does NOT re-arm Smart Start", wc.TestSmartStartTarget == null, true);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 2, target, $"{peer} {target} -10"));
+                Check("6: ...still un-armed after a later partner -> peer decode", wc.TestSmartStartTarget == null, true);
             }
         }
         finally

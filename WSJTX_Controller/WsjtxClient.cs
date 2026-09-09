@@ -1142,19 +1142,32 @@ namespace WSJTX_Controller
         // third station -- a fresh signal report / R-report / RRR from it to a real peer, not to
         // us. Cease our attempt the same ordered way Escape / Alt+H does: requeue the call while
         // callInProg / replyDecode are still valid, end the contact (EndContact bumps
-        // _contactEpoch so an in-flight REPLY cannot re-commit), then HALT_TX + SET_TX_ENABLED 0,
-        // and tell the operator plainly. This is a real operating transition, not a narration
-        // change -- no further RF goes to that station. Shared by every active-contact origin
-        // (an ordinary Enter/queue QSO, and a Smart Start QSO after hand-off); the Smart Start
-        // calling phase keeps its own YieldSmartStartToOtherQso, which additionally tracks the
-        // cumulative Repeat Limit / standby rounds.
+        // _contactEpoch so an in-flight REPLY cannot re-commit), then HALT_TX + SET_TX_ENABLED 0.
+        // This is a real operating transition, not a narration change -- no further RF goes to
+        // that station. Shared by every active-contact origin.
+        //
+        // If the contact ORIGINATED under Smart Start (it handed off when the target answered
+        // us), Smart Start resumes ownership of the SAME target and waits for the next opening
+        // under its existing policy -- carrying the cumulative Repeat-Limit count. Whether to
+        // resume is decided BEFORE the teardown, because CancelQso -> SetCallInProg(null) clears
+        // the _smartStartHandoffCall marker. An ordinary manual QSO (no Smart Start origin, even
+        // with the feature merely enabled) just stops, exactly as before. The Smart Start
+        // *calling* phase (still calling, target has not answered) keeps its own
+        // YieldSmartStartToOtherQso -- it is never routed here.
         private void YieldActiveContactToOtherQso(string partner, string other)
         {
+            bool resumeSmartStart = ShouldResumeSmartStartOnYield(partner);
+            int carriedCallCount = _smartStartHandoffCallCount;
+
             DebugOutput($"{Time()} active partner '{partner}' is working '{other}' -- ceasing our call (no further TX to it)");
             RequeueAbortedCall();
             CancelQso();
             HaltAndDisableTx();
-            StatusView.ShowMessage($"{partner} is working {other}; stopped calling", true);
+
+            if (resumeSmartStart)
+                ResumeSmartStartAfterHandoffYield(partner, carriedCallCount);
+            else
+                StatusView.ShowMessage($"{partner} is working {other}; stopped calling", true);
         }
 
         public bool EnableMode()              //cq/listen mode selected
@@ -3232,6 +3245,19 @@ namespace WSJTX_Controller
             // A new contact begins -> the previous QSO's "Finishing" RR73 tail is over, whatever
             // the engine still thinks (Nexus starts a fresh Station on the new call).
             if (call != null) _finishingCall = null;
+
+            // Smart Start hand-off origin marker (see WsjtxClient.StationWatch.cs): valid only
+            // while callInProg IS that exact call. Any move off it -- contact ended (call == null),
+            // operator picked another call, band change -- means a later YieldActiveContactToOtherQso
+            // must NOT resume Smart Start. A successful completion and a manual Escape/Alt+H both
+            // route through here, so this is the single clear point (point 5 / point 6). The
+            // yield-resume path itself captures its decision BEFORE calling CancelQso, so clearing
+            // here does not defeat it.
+            if (!string.Equals(call, _smartStartHandoffCall, StringComparison.OrdinalIgnoreCase))
+            {
+                _smartStartHandoffCall = null;
+                _smartStartHandoffCallCount = 0;
+            }
 
             if (call == null) { CancelDiscardCall(); _manualCallInProg = false; }
 

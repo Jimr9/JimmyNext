@@ -408,6 +408,46 @@ namespace WSJTX_Controller
             OpportunitiesSinceLiveEvidence = 0;
         }
 
+        // Smart Start only. The contact that a successful auto-start had handed to the normal QSO
+        // sequencer (the target answered our callsign) has now been ceased because, before that
+        // QSO completed, the target moved into a substantive report/R-report/RRR exchange with a
+        // third station (WsjtxClient.YieldActiveContactToOtherQso). The monitor had been Stopped
+        // at that hand-off, so this re-establishes it: armed and waiting on the SAME target, with
+        // NO carried live evidence (the next real decode re-derives parity / busy state through
+        // the normal feed), but carrying the CUMULATIVE Repeat-Limit calling-over count so the
+        // operator's limit is one bounded effort across the whole capture -> call -> answer ->
+        // yield -> resume cycle, never restarted. Identical to a fresh Start() except it raises
+        // no WatchStarted observation (the caller narrates the yield) and keeps the call count.
+        public void ResumeAfterHandoff(string call, string band, string mode, string sessionToken,
+            int cumulativeCallCount, int silenceThreshold)
+        {
+            if (Purpose != TargetPurpose.SmartStart || string.IsNullOrEmpty(call)) return;
+
+            TargetCall = call;
+            ApparentPeer = null;
+            TargetEvenParity = null;
+            SilenceCount = 0;
+            TransmittedCallCount = cumulativeCallCount;   // cumulative across the hand-off -- NOT reset
+            LastUsableDecode = null;
+            LastUsableDecodeUtc = default;
+            HasLiveTargetEvidence = false;
+            OpportunitiesSinceLiveEvidence = 0;
+            BusyWithOther = false;
+            ReadyToStart = false;
+            AwaitingEngagement = false;
+            EngagedUs = false;
+            _rr73AwaitingOneMoreOpportunity = false;
+            _targetHeardThisPeriod = false;
+            _engagedWhileWaiting = false;
+            _standbyRounds = 0;
+            _lastCountedSlot = null;
+            _band = band;
+            _mode = mode;
+            _sessionToken = sessionToken;
+            _periodSeconds = PeriodSecondsForMode(mode);
+            if (silenceThreshold > 0) SilenceThreshold = silenceThreshold;
+        }
+
         // One ACTUAL transmitted calling over to this target just completed (fed by WsjtxClient
         // from the transmitting-just-ended edge, while this monitor is armed and AwaitingEngagement).
         // Adds to the cumulative effort total and returns true once the operator's Repeat Limit

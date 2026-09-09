@@ -15,6 +15,23 @@ namespace WSJTX_Controller
         private readonly TargetMonitor _stationWatch = new TargetMonitor(TargetPurpose.StationWatch);
         private readonly TargetMonitor _smartStart = new TargetMonitor(TargetPurpose.SmartStart);
 
+        // Smart Start ownership survives a temporary hand-off to the normal QSO sequencer.
+        // Operator policy (2026-09-08): once Smart Start owns a target, it keeps owning it until
+        // the QSO completes, the operator stops it, the Repeat Limit is reached, the operator
+        // picks a different target, or another terminal condition ends it. When the target
+        // ANSWERS us the monitor is Stopped and the normal sequencer runs the exchange -- but if
+        // that exchange is then ceased because the target moved into a substantive exchange with
+        // a third station (WsjtxClient.YieldActiveContactToOtherQso), Smart Start RESUMES
+        // ownership of the SAME target. These two fields carry just what a resume needs across
+        // the Stop(): which call originated under Smart Start, and its cumulative Repeat-Limit
+        // calling-over count. _smartStartHandoffCall is null whenever the current/just-ended
+        // contact did NOT originate under Smart Start (an ordinary manual QSO with Smart Start
+        // merely enabled must NOT arm Smart Start on a yield). Cleared in SetCallInProg the
+        // moment callInProg moves to any other value (contact ended, operator picked another
+        // call, band change) -- see SetCallInProg.
+        private string _smartStartHandoffCall;
+        private int _smartStartHandoffCallCount;
+
         // Race-safety gate ("Work Now versus Smart Start becoming ready at the same time: one
         // atomic start-request gate; only one wins"). WinForms' single UI thread means the only
         // real hazard is two observations landing in the SAME synchronous pass (e.g. a target's
@@ -231,6 +248,7 @@ namespace WSJTX_Controller
             Notify?.Publish(new SmartStartEngagedEvent(target));
             if (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, target, StringComparison.OrdinalIgnoreCase))
                 StopStationWatch();
+            RecordSmartStartHandoffOrigin(target);
             _smartStart.Stop(announce: false);
             // Answer the target's actual to-us decode. If a contact is somehow already running
             // (an in-flight dispatch beat us here), leave it alone -- the sequencer owns it.
@@ -259,11 +277,54 @@ namespace WSJTX_Controller
                 // call is untouched.)
                 if (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, target, StringComparison.OrdinalIgnoreCase))
                     StopStationWatch();
+                RecordSmartStartHandoffOrigin(target);
                 _smartStart.Stop(announce: false);
                 return;
             }
             if (_smartStart.BusyWithOther)
                 YieldSmartStartToOtherQso();
+        }
+
+        // Remember that THIS contact originated under Smart Start, just before the monitor is
+        // Stopped for the hand-off to the normal QSO sequencer. Carries the cumulative
+        // Repeat-Limit calling-over count so a later resume (YieldActiveContactToOtherQso) does
+        // not restart the operator's limit. callInProg is normally already this target here; the
+        // marker is cleared in SetCallInProg the moment callInProg moves to anything else.
+        private void RecordSmartStartHandoffOrigin(string target)
+        {
+            _smartStartHandoffCall = target;
+            _smartStartHandoffCallCount = _smartStart.TransmittedCallCount;
+        }
+
+        // Did the contact now being ceased by YieldActiveContactToOtherQso originate under Smart
+        // Start (so Smart Start should RESUME ownership of the target rather than abandon it)?
+        // Read BY THE CALLER before its teardown trio, because CancelQso -> SetCallInProg(null)
+        // clears the _smartStartHandoffCall marker.
+        private bool ShouldResumeSmartStartOnYield(string partner) =>
+            ctrl.smartQsoStartEnabled
+            && !string.IsNullOrEmpty(_smartStartHandoffCall)
+            && string.Equals(_smartStartHandoffCall, partner, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(callInProg, partner, StringComparison.OrdinalIgnoreCase)
+            // The operator armed Smart Start on a DIFFERENT target in the meantime -- never
+            // clobber that.
+            && (!_smartStart.IsActive
+                || string.Equals(_smartStart.TargetCall, partner, StringComparison.OrdinalIgnoreCase));
+
+        // Bring Smart Start back to armed/waiting on the SAME target after its hand-off QSO was
+        // ceased (the target moved into a substantive report/R-report/RRR exchange with a third
+        // station before completing with us). Carries the cumulative Repeat-Limit count so the
+        // operator's limit is not restarted, and narrates it exactly as the calling-phase busy
+        // yield does ("Standing by."). The next real decode re-establishes parity / busy state
+        // through the normal feed; the existing Smart Start policy (CQ / RR73 / 73 opening,
+        // report/RRR busy, silence fallback, target-answers-us hand-off, cumulative Repeat Limit)
+        // then applies unchanged.
+        private void ResumeSmartStartAfterHandoffYield(string target, int carriedCallCount)
+        {
+            ClearPendingAutoStart();
+            _smartStart.ResumeAfterHandoff(target, CurrentBandStr, mode, _directExpectedSessionToken,
+                carriedCallCount, ctrl.smartStartSilencePeriods);
+            Notify?.Publish(new SmartStartYieldedEvent(target));
+            DebugOutput($"{Time()} [SMART] {target} moved to another station mid-QSO -- Smart Start resumes ownership (cumulative calls: {carriedCallCount})");
         }
 
         // The Smart Start target started/continued a QSO with someone else before answering us.
