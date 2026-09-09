@@ -400,6 +400,7 @@ static class JimmyTests
         TargetMonitorAwaitingEngagementTests();
         SmartStartStaleEvidenceTransmitSafetyTests();
         SmartStartRedundantRecaptureKeepsProgressTests();
+        SmartStartOperatorPolicy20260908Tests();
         SmartStartYieldsToOtherQsoTests();
         TargetMonitorBusyExpirationAfterYieldTests();
         SmartStartRepeatLimitSpansYieldsTests();
@@ -16429,83 +16430,92 @@ static class JimmyTests
 
     static void TargetMonitorSmartStartReadinessTests()
     {
-        Console.WriteLine("\n── TargetMonitor: Smart Start CQ/73/RR73 readiness rules ──");
+        Console.WriteLine("\n── TargetMonitor: Smart Start CQ/73/RR73 readiness rules (operator policy 2026-09-08) ──");
 
-        // CQ immediate readiness -- bypasses silence waiting entirely.
+        // CQ immediate readiness -- bypasses silence waiting entirely (rule 1).
         var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
         Check("CQ -> immediately ready, bypassing silence threshold", tm.ReadyToStart, true);
         tm.ConsumeReadyToStart();
 
-        // N4BP live audit -- fix 2: a validated 73 / RR73 to a PEER means the target is working
-        // someone else. There is NO separate hard-coded "peer close" countdown any more; it is
-        // the ONE configurable clean-silence mechanism -- BusyWithOther is set, the count restarts
-        // from zero, the target-heard period is absorbed, and the target becomes available only
-        // after SilenceThreshold clean target-parity opportunities with no further traffic to a
-        // peer (the KB2SLO case). Fresh finishing traffic to the peer re-zeros the count.
+        // Operator policy rules 2 & 3: a target -> PEER RR73 or 73 means the previous QSO is
+        // closing -- a positive call opportunity. It clears BusyWithOther and signals ready at
+        // once, with NO configurable silence periods first.
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);   // was working W1ABC -> busy
+        Check("target working a peer -> busy, not ready", tm.BusyWithOther && !tm.ReadyToStart, true);
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} 73"), true, MY_CALL);    // closes to W1ABC with 73
+        Check("target -> peer 73 -> immediately ready, busy cleared, no silence wait",
+            tm.ReadyToStart && !tm.BusyWithOther, true);
+        tm.ConsumeReadyToStart();
+
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} R-05"), true, MY_CALL); // working W1ABC -> busy
+        Check("target R-report to a peer -> busy, not ready", tm.BusyWithOther && !tm.ReadyToStart, true);
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL); // closes to W1ABC with RR73
+        Check("target -> peer RR73 -> immediately ready, busy cleared, no silence wait",
+            tm.ReadyToStart && !tm.BusyWithOther, true);
+        tm.ConsumeReadyToStart();
+        // A repeated RR73 to the same peer is still just a positive opening -- still ready.
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);
+        Check("a repeated RR73 to the peer keeps it a positive opening (ready)", tm.ReadyToStart, true);
+        tm.ConsumeReadyToStart();
+
+        // Fox/Hound (multiplex) RR73 to a peer -> also a positive opening now.
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -07"), true, MY_CALL);
+        tm.ObserveDecode(D($"W1ABC/H {THEIR_CALL} RR73"), true, MY_CALL);
+        Check("Fox/Hound RR73 to a peer -> ready, busy cleared", tm.ReadyToStart && !tm.BusyWithOther, true);
+
+        // Rule 4/5: a report / R-report / RRR to a peer means the target IS actively working
+        // someone -- Smart Start yields; it becomes available again only via the configurable
+        // clean-silence count (rule 6) or a CQ/RR73/73.
         void SilentOpps(TargetMonitor m, int n, ulong startSlot)
         {
             for (int i = 0; i < n; i++)
                 m.OnReceivePeriodComplete(startSlot + (ulong)(2 * i), true, "20m", "FT8", "tok1", false);
         }
-
         tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
         tm.ConsumeReadyToStart();
-        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} 73"), true, MY_CALL);
-        Check("Ordinary 73 to a peer -> NOT immediately ready (target working someone)", !tm.ReadyToStart, true);
-        Check("...target marked busy right after the 73", tm.BusyWithOther, true);
-        SilentOpps(tm, 1 + 2, 2);   // 1 absorbed (target-heard period) + 2 of 3 clean opportunities
-        Check("...one short of the configured count is still not ready", !tm.ReadyToStart && tm.SilenceCount == 2, true);
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RRR"), true, MY_CALL);   // RRR to a peer -> still busy (rule 5)
+        Check("RRR to a peer -> busy, not ready (rule 5)", tm.BusyWithOther && !tm.ReadyToStart, true);
+        SilentOpps(tm, 1 + 2, 2);   // 1 absorbed + 2 of 3
+        Check("...one short of the configured silence count is still not ready", !tm.ReadyToStart && tm.SilenceCount == 2, true);
         tm.OnReceivePeriodComplete(8, true, "20m", "FT8", "tok1", false);   // 3 of 3
         Check("...ready after the configured clean-silence count, busy cleared", tm.ReadyToStart && !tm.BusyWithOther, true);
         tm.ConsumeReadyToStart();
 
-        // Ordinary RR73 to a peer -> same clean-silence wait, and a FRESH RR73 to the peer
-        // mid-wait re-zeros it (the KB2SLO case: the target kept re-sending RR73 while Jimmy
-        // waited -- each one restarts the operator's clean-silence count).
-        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
-        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
-        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
-        tm.ConsumeReadyToStart();
-        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);
-        Check("Ordinary RR73 to a peer does NOT immediately signal ready", !tm.ReadyToStart, true);
-        SilentOpps(tm, 1 + 2, 2);   // absorbed + 2 of 3
-        Check("...not ready partway through the clean-silence count", !tm.ReadyToStart, true);
-        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);   // target re-sends RR73 -> count re-zeros
-        Check("...a fresh RR73 to the peer re-zeros the clean-silence count", tm.SilenceCount == 0, true);
-        SilentOpps(tm, 1 + 2, 100);   // absorbed + 2 of 3 again
-        Check("...still not ready one short of a full clean-silence count SINCE the re-zero", !tm.ReadyToStart, true);
-        tm.OnReceivePeriodComplete(100 + (ulong)(2 * (1 + 2)), true, "20m", "FT8", "tok1", false);
-        Check("...ready only after a full clean-silence count since the last RR73", tm.ReadyToStart, true);
-        tm.ConsumeReadyToStart();
-
-        // Fox/Hound (multiplex) RR73 to a peer -> also just "target working someone" now; the F/H
-        // distinction only ever mattered for the target -> US RR73 one-extra-opportunity rule.
+        // A fresh CQ supersedes a pending silence wait with immediate readiness.
         tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
         tm.ConsumeReadyToStart();
-        tm.ObserveDecode(D($"W1ABC/H {THEIR_CALL} RR73"), true, MY_CALL);
-        tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false);
-        Check("Fox/Hound RR73 to a peer -> busy, not instantly ready", !tm.ReadyToStart && tm.BusyWithOther, true);
-
-        // A clearer event (target CQ) supersedes a pending ordinary-RR73 wait.
-        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
-        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);   // report -> busy
         tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
-        tm.ConsumeReadyToStart();
-        tm.ObserveDecode(D($"W1ABC {THEIR_CALL} RR73"), true, MY_CALL);
-        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
-        Check("A fresh CQ supersedes the pending RR73 wait with immediate readiness", tm.ReadyToStart, true);
+        Check("A fresh CQ supersedes the pending silence wait with immediate readiness", tm.ReadyToStart, true);
 
-        // Target working another station -- do not transmit, keep monitoring.
+        // Target working another station (report) -- do not transmit, keep monitoring.
         tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
         tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
         tm.ObserveDecode(D($"W1ABC {THEIR_CALL} -08"), true, MY_CALL);
         Check("Target busy with a peer -> not ready", !tm.ReadyToStart, true);
+
+        // A THIRD station calling the target is NOT busy evidence for Smart Start (rule 1: a
+        // pileup calling a CQing DX is normal). The target's own CQ still governs.
+        tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 5 };
+        tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        tm.ObserveDecode(D($"CQ {THEIR_CALL} EM63"), true, MY_CALL);
+        Check("target CQ -> ready", tm.ReadyToStart, true);
+        tm.ObserveDecode(D($"{THEIR_CALL} W9AAA"), true, MY_CALL);       // W9AAA calling the target
+        tm.ObserveDecode(D($"{THEIR_CALL} W9BBB EM10"), true, MY_CALL);  // W9BBB calling the target
+        Check("a pileup calling the target does NOT mark it busy for Smart Start",
+            !tm.BusyWithOther, true);
     }
 
     // ── READ-ONLY LIVE RADIO AUDIT follow-up (2026-09-08 20m FT8, KB2SLO). Problem 2: Smart
@@ -16519,8 +16529,8 @@ static class JimmyTests
     //    us) still clears it at once. No separate hard-coded peer-close countdown. ──
     static void LiveAudit_SmartStartWaitsOutRepeatingRr73Tests()
     {
-        Console.WriteLine("\n── Live audit / KB2SLO: Smart Start must NOT call a target that is still repeating RR73 to a peer ──");
-        const string T = "KB2SLO", PEER = "K8UMF";
+        Console.WriteLine("\n── Operator policy 2026-09-08 / KB2SLO shape: a target's RR73 to a peer is a call opportunity; yield again if it then picks someone else ──");
+        const string T = "KB2SLO", PEER = "K8UMF", OTHER = "K4XYZ";
         try
         {
             var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
@@ -16528,52 +16538,60 @@ static class JimmyTests
             tm.ObserveDecode(D($"CQ {T} EM10"), true, MY_CALL);              // armed on a live CQ (parity even)
             tm.ConsumeReadyToStart();
 
-            // The target answers PEER and exchanges reports -> busy.
+            // The target answers PEER and exchanges reports -> busy (rule 4).
             tm.ObserveDecode(D($"{PEER} {T} -07"), true, MY_CALL);
             tm.ObserveDecode(D($"{PEER} {T} R-05"), true, MY_CALL);
             Check("target working a peer -> busy, not ready", tm.BusyWithOther && !tm.ReadyToStart, true);
 
-            // The target/peer exchange reaches RR73 -- but the target is NOT free yet.
+            // The target/peer exchange reaches RR73 -> the previous QSO is CLOSING: a positive
+            // call opportunity right now, with NO extra silence periods (rule 2).
             tm.ObserveDecode(D($"{PEER} {T} RR73"), true, MY_CALL);
-            Check("target -> peer RR73 does NOT clear busy or make ready", tm.BusyWithOther && !tm.ReadyToStart, true);
+            Check("target -> peer RR73 -> ready immediately, busy cleared", tm.ReadyToStart && !tm.BusyWithOther, true);
+            tm.ConsumeReadyToStart();
 
-            // Several periods with incomplete / missed evidence: some silent, one repeated RR73
-            // (as KB2SLO did). Each fresh RR73 re-zeros the clean-silence count, so Smart Start
-            // keeps waiting -- never ready -- for as long as the target keeps finishing to a peer
-            // within the operator's configured window.
-            tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "s1", false);   // target-heard period absorbed
-            tm.OnReceivePeriodComplete(4, true, "20m", "FT8", "s1", false);   // 1 of 3
-            tm.OnReceivePeriodComplete(6, true, "20m", "FT8", "s1", false);   // 2 of 3
-            Check("mid clean-silence count: still not ready, still busy", !tm.ReadyToStart && tm.BusyWithOther, true);
-            tm.ObserveDecode(D($"{PEER} {T} RR73"), true, MY_CALL);           // target re-sends RR73 -> count re-zeros
-            Check("...a repeated RR73 to the peer re-zeros the clean-silence count", tm.SilenceCount == 0, true);
-            tm.OnReceivePeriodComplete(8, true, "20m", "FT8", "s1", false);   // target-heard period absorbed
-            tm.OnReceivePeriodComplete(10, true, "20m", "FT8", "s1", false);  // 1 of 3
-            tm.OnReceivePeriodComplete(12, true, "20m", "FT8", "s1", false);  // 2 of 3
-            Check("after the repeated RR73 the count restarted -> STILL not ready, STILL busy",
-                  !tm.ReadyToStart && tm.BusyWithOther && tm.SilenceCount == 2, true);
+            // A repeated RR73 to the same peer (peer didn't ack) is still just a positive
+            // opening -- Smart Start stays ready to call, not "busy".
+            tm.ObserveDecode(D($"{PEER} {T} RR73"), true, MY_CALL);
+            Check("repeated RR73 to the peer is still a positive opening (ready, not busy)",
+                  tm.ReadyToStart && !tm.BusyWithOther, true);
+            tm.ConsumeReadyToStart();
 
-            // The target finally turns to US -> that is engagement, not just availability: Smart
-            // Start hands the exact decode to the normal QSO sequencer (N4BP live audit -- fix 4).
+            // We call. Instead of answering us, the target sends a REPORT to a different station
+            // -> factual evidence it chose K4XYZ. Smart Start must yield / stand by (rule 7).
+            tm.EnterAwaitingEngagement();
+            tm.ObserveDecode(D($"{OTHER} {T} -12"), true, MY_CALL);
+            Check("target chose K4XYZ (report to another station) -> BusyWithOther, monitor stays awaiting",
+                  tm.BusyWithOther && !tm.EngagedUs && tm.AwaitingEngagement, true);
+            tm.ReturnToWaiting();                                            // caller ceased our call
+            Check("after the yield: busy carried, not ready", tm.BusyWithOther && !tm.ReadyToStart, true);
+
+            // Rule 7 continues: when the target then closes to K4XYZ (RR73/73) or CQs, Smart
+            // Start gets another opportunity.
+            tm.ObserveDecode(D($"{OTHER} {T} 73"), true, MY_CALL);
+            Check("target -> K4XYZ 73 after the yield -> another call opportunity (ready, busy cleared)",
+                  tm.ReadyToStart && !tm.BusyWithOther, true);
+            tm.ConsumeReadyToStart();
+
+            // The target finally turns to US -> engagement hand-off (unchanged, rule 8).
+            tm.ReturnToWaiting();
             tm.ObserveDecode(D($"{MY_CALL} {T} +09"), true, MY_CALL);
-            Check("target addresses OUR callsign while waiting -> engaged hand-off, no longer busy, replies from THAT decode",
+            Check("target addresses OUR callsign while waiting -> engaged hand-off, replies from THAT decode",
                   tm.ConsumeEngagedWhileWaiting() && !tm.BusyWithOther && tm.LastUsableDecode?.Message == $"{MY_CALL} {T} +09", true);
             tm.EnterAwaitingEngagement();
             tm.ObserveDecode(D($"{MY_CALL} {T} R-14"), true, MY_CALL);
             Check("target keeps addressing us while we call -> EngagedUs (normal QSO sequencer owns it)",
                   tm.EngagedUs, true);
 
-            // Control: once the target GENUINELY finishes (goes quiet for the whole configured
-            // clean-silence count after its last RR73), Smart Start does become available.
+            // Rule 6 control: the target goes to a peer with a REPORT, then simply disappears --
+            // the configured clean-silence count is still the fallback that makes it available.
             var tm2 = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
             tm2.Start(T, "20m", "FT8", "s1");
             tm2.ObserveDecode(D($"CQ {T} EM10"), true, MY_CALL);
             tm2.ConsumeReadyToStart();
-            tm2.ObserveDecode(D($"{PEER} {T} -07"), true, MY_CALL);
-            tm2.ObserveDecode(D($"{PEER} {T} RR73"), true, MY_CALL);
+            tm2.ObserveDecode(D($"{PEER} {T} -07"), true, MY_CALL);          // working a peer (report) -> busy
             for (ulong s = 2; s <= 2 + 2UL * 4; s += 2)   // target-heard period + a full clean-silence count
                 tm2.OnReceivePeriodComplete(s, true, "20m", "FT8", "s1", false);
-            Check("control: a target that truly went quiet after RR73 DOES become available",
+            Check("control: target went quiet after a report -> configured silence fallback makes it available",
                   tm2.ReadyToStart && !tm2.BusyWithOther, true);
         }
         catch (Exception ex)
@@ -16794,9 +16812,9 @@ static class JimmyTests
         Check("...and Smart Start becomes ready to call the same target again", tm.ReadyToStart, true);
         tm.ConsumeReadyToStart();
 
-        // RR73 to a PEER after a yield: the target is still working someone (KB2SLO). It does NOT
-        // clear busy at once; it resumes only after the configured clean-silence count, and a
-        // fresh RR73 to the peer re-zeros that count.
+        // Operator policy rule 7: after we yielded (target picked someone else), the target's
+        // RR73 to that peer is the previous QSO closing -- a positive call opportunity right
+        // away, no configurable silence periods first.
         var tmRr = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
         tmRr.Start(TARGET, "20m", "FT8", null);
         tmRr.ObserveDecode(D($"CQ {TARGET} FK92"), true, MY_CALL);
@@ -16804,15 +16822,9 @@ static class JimmyTests
         tmRr.EnterAwaitingEngagement();
         tmRr.ObserveDecode(D($"{A} {TARGET} -07"), true, MY_CALL);        // target working A -> busy
         tmRr.ReturnToWaiting();
-        tmRr.ObserveDecode(D($"{A} {TARGET} RR73"), true, MY_CALL);       // target -> A RR73 (still finishing)
-        Check("RR73 to a peer after a yield does NOT clear busy immediately", tmRr.BusyWithOther, true);
-        Check("...and does not resume in the same instant", !tmRr.ReadyToStart, true);
-        tmRr.OnReceivePeriodComplete(8, true, "20m", "FT8", null, false);    // target-heard period absorbed
-        tmRr.OnReceivePeriodComplete(10, true, "20m", "FT8", null, false);   // 1 of 3
-        tmRr.OnReceivePeriodComplete(12, true, "20m", "FT8", null, false);   // 2 of 3
-        Check("...still not ready partway through the clean-silence count", !tmRr.ReadyToStart, true);
-        tmRr.OnReceivePeriodComplete(14, true, "20m", "FT8", null, false);   // 3 of 3
-        Check("...resumes ready after the configured clean-silence count, busy cleared",
+        Check("after the yield: still busy, not ready", tmRr.BusyWithOther && !tmRr.ReadyToStart, true);
+        tmRr.ObserveDecode(D($"{A} {TARGET} RR73"), true, MY_CALL);       // target -> A RR73 (closing)
+        Check("RR73 to a peer after a yield -> ready immediately, busy cleared",
             tmRr.ReadyToStart && !tmRr.BusyWithOther, true);
 
         tm.EnterAwaitingEngagement();                                     // we call again
@@ -17058,6 +17070,66 @@ static class JimmyTests
         }
     }
 
+    // Operator policy 2026-09-08: "try on evidence of an opening (CQ / RR73 / 73), yield the
+    // moment the target reports to someone else, then try again at the next opening; the
+    // configured silence-period setting is only the fallback for when the target disappears."
+    // Covers the parts of that policy not already asserted by the per-scenario tests above:
+    // repeated CQ keeps trying, actual-transmitting vs nominal-parity for silence counting,
+    // and no repeated/preliminary "appears available" narration.
+    static void SmartStartOperatorPolicy20260908Tests()
+    {
+        Console.WriteLine("\n── Smart QSO Start: operator policy 2026-09-08 (opening/yield/retry + silence fallback + speech) ──");
+        const string T = "TN8GD", A = "W1ABC";
+        try
+        {
+            // ── #2 Repeated CQ: each CQ is a fresh opening; readiness re-arms every time
+            //      (Repeat Limit -- not any silence/standby counter -- bounds the effort). ──
+            var m = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+            m.Start(T, "20m", "FT8", "s");
+            m.ObserveDecode(D($"CQ {T} JI75"), true, MY_CALL);
+            Check("#2 first CQ -> ready", m.ReadyToStart, true);
+            m.ConsumeReadyToStart();
+            m.ObserveDecode(D($"CQ {T} JI75"), true, MY_CALL);
+            Check("#2 repeated CQ -> ready again (not treated as busy)", m.ReadyToStart && !m.BusyWithOther, true);
+            m.ConsumeReadyToStart();
+            m.ObserveDecode(D($"CQ {T} JI75"), true, MY_CALL);
+            Check("#2 a third CQ -> still ready (keep trying on the DX's CQ)", m.ReadyToStart, true);
+            m.ConsumeReadyToStart();
+            // while we are actually calling, further CQs must not disturb the calling phase
+            m.EnterAwaitingEngagement();
+            m.ObserveDecode(D($"CQ {T} JI75"), true, MY_CALL);
+            Check("#2 CQ while we are calling -> no re-arm, still awaiting engagement",
+                !m.ReadyToStart && m.AwaitingEngagement, true);
+
+            // ── #10 / #11 Silence counting keys on ACTUAL transmitting, not nominal parity. ──
+            var s = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
+            s.Start(T, "20m", "FT8", "s");
+            s.ObserveDecode(D($"{A} {T} -07"), true, MY_CALL);          // target working A -> busy, parity even
+            // a period on the target's parity in which JIMMY ACTUALLY TRANSMITTED -> not a
+            // listening opportunity, must not count (#10).
+            s.OnReceivePeriodComplete(2, true, "20m", "FT8", "s", /*weTransmittedThisSlot:*/ true);
+            Check("#10 a period we actually transmitted in does not count toward silence", s.SilenceCount == 0, true);
+            // the target-heard period is absorbed once
+            s.OnReceivePeriodComplete(4, true, "20m", "FT8", "s", false);
+            Check("#11 target-heard period absorbed (radio not transmitting)", s.SilenceCount == 0, true);
+            // periods where radio.Transmitting == false DO count -- even if this were Jimmy's
+            // nominal TX side, actual not-transmitting makes it a real listening opportunity.
+            s.OnReceivePeriodComplete(6, true, "20m", "FT8", "s", false);
+            Check("#11 a not-transmitting period counts as a listening opportunity", s.SilenceCount == 1, true);
+            s.OnReceivePeriodComplete(8, true, "20m", "FT8", "s", true);   // we transmitted -> skipped
+            Check("#10 an actual-TX period in the middle still does not count", s.SilenceCount == 1, true);
+            s.OnReceivePeriodComplete(10, true, "20m", "FT8", "s", false); // 2 of 3
+            s.OnReceivePeriodComplete(12, true, "20m", "FT8", "s", false); // 3 of 3 -> fallback fires
+            Check("#9 configured silence fallback still reaches readiness once the target truly went quiet",
+                s.ReadyToStart && !s.BusyWithOther, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SmartStartOperatorPolicy20260908Tests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
     // 2.0.65 (J38DX live report): once Smart Start has started CALLING, it must keep monitoring
     // fresh target activity. If the target works another station before answering us, Jimmy
     // yields (HALT_TX, callInProg cleared), stays armed for the same target through peer changes,
@@ -17160,21 +17232,16 @@ static class JimmyTests
             Check("peer change + short quiet -> NO new REPLY, still no callInProg", !SawReply() && wc.callInProg == null, true);
             Check("...still armed for the target, still busy", wc.TestSmartStartTarget == target && wc.TestSmartStartBusyWithOther, true);
 
-            // ══ 4. Target finishes the other QSO (RR73 to B), then goes quiet for the full
-            //       configured clean-silence count (N4BP live audit -- fix 2) -> it becomes
-            //       available and Smart Start resumes ══
+            // ══ 4. Target finishes the other QSO (RR73 to B) -> operator policy rule 2: that is
+            //       a positive call opportunity RIGHT AWAY -- no configurable silence periods --
+            //       so Smart Start re-arms a start and, after only the 3-poll finality window,
+            //       dispatches a new REPLY ══
             lock (seenLock) seen.Clear();
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(119, target, $"{B} {target} RR73"));   // RR73 + its target-heard period absorbed (same pass)
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(121));                                 // 1 of 3
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(123));                                 // 2 of 3
-            Check("partway through the clean-silence count after RR73 -> still not available", wc.TestAutoStartPending, false);
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(125));                                 // 3 of 3 -> ready + pending
-            Check("target became available -> Smart Start re-arms a start", wc.TestAutoStartPending, true);
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(127));                                 // advance past the snapshot-finality min
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(129));
-            Polls(129, 4);                                                                        // finality-deferral ticks
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(119, target, $"{B} {target} RR73"));   // RR73 to the peer -> immediately available
+            Check("target -> peer RR73 -> Smart Start re-arms a start with no silence wait", wc.TestAutoStartPending, true);
+            Polls(119, 4);                                                                        // 3-poll finality window (same slot)
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
-            Check("...and after the deferral window it sends a new REPLY", SawReply(), true);
+            Check("...and after only the finality window it sends a new REPLY", SawReply(), true);
             Check("...the start was dispatched (no longer pending)", wc.TestAutoStartPending, false);
 
             // ══ 5. Target finally addresses OUR callsign -> Smart Start is done ══
@@ -17760,41 +17827,54 @@ static class JimmyTests
 
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // establish band / mode / slot
 
-            // ══ Period-hold: a "DX working someone" decode during the hold aborts before any RF ══
+            // ══ Operator policy rule 1: a fresh CQ -> Smart Start calls at the next legitimate
+            //    transmit opportunity. Only the 3-poll finality window (a same-period straggler
+            //    guard), NOT an extra full FT8 period, precedes the dispatch. ══
             Check("fresh CQ captured + auto-start armed", wc.TestTryCaptureSmartStart(target, FreshCq()) && wc.TestAutoStartPending, true);
             wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }, true);  // live CQ -> parity/evidence
-            // finality polls elapse on the SAME slot -- not enough on its own now (needs a period to pass)
-            for (int i = 0; i < 5; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));
-            Check("still pending after the finality polls -- waiting out a full receive period", wc.TestAutoStartPending, true);
-            Check("nothing transmitted yet", SawReply(), false);
-            // next period arrives AND it shows the DX working someone else
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1002, target, $"{A} {target} -07"));
-            System.Threading.Thread.Sleep(30);
-            Check("DX working another station during the hold -> start declined, NO REPLY", SawReply(), false);
-            Check("...and no 'Calling' commit -- callInProg stays clear", wc.callInProg == null, true);
+            for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // 3-poll finality, SAME slot -- no extra period
+            try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 2000); } catch (TimeoutException) { }
+            Check("fresh CQ -> REPLY dispatched after only the finality window (no extra FT8 period)", SawReply(), true);
+            Check("...no longer pending", wc.TestAutoStartPending, false);
+            PumpUntil(() => wc.TestSmartStartAwaitingEngagement, 1000);
+            Check("...Smart Start is now calling (awaiting engagement)", wc.TestSmartStartAwaitingEngagement, true);
 
-            // ══ Back-off: enough dead-end rounds -> Smart Start disarms itself ══
-            // Each round: establish the slot, target looks available (CQ) -> arm on THIS slot,
-            // finality polls on the same slot (no dispatch -- period not elapsed), then the next
-            // period arrives showing the DX working someone -> revalidation declines it busy.
-            ulong slot = 1004;
-            for (int round = 0; round < 6 && wc.TestSmartStartTarget != null; round++)
+            // ══ Rule 7: the DX then works another station -> Smart Start yields and stands by ══
+            lock (seenLock) seen.Clear();
+            wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{A} {target} -07", DeltaFrequency = 1500, Snr = -6 }, true);
+            PumpUntil(() => Seen().Exists(c => c.StartsWith("HALT_TX")), 2000);
+            Check("DX works another station -> Jimmy HALTs our call and yields", Seen().Exists(c => c.StartsWith("HALT_TX")) && wc.callInProg == null, true);
+            Check("...Smart Start stays armed for the same target", wc.TestSmartStartTarget == target, true);
+
+            // ══ Same-period straggler guard is still in force: if a "DX working a peer" decode
+            //    lands during the finality window, the start is declined (NO REPLY) and Smart
+            //    Start just stands by -- it does NOT call into a QSO the DX already began. ══
+            lock (seenLock) seen.Clear();
+            wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{A} {target} RR73", DeltaFrequency = 1500, Snr = -6 }, true);  // DX closes to A -> opening
+            PumpUntil(() => wc.TestAutoStartPending, 1000);
+            Check("DX RR73 to a peer -> re-armed", wc.TestAutoStartPending, true);
+            wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{A} {target} -09", DeltaFrequency = 1500, Snr = -6 }, true);   // straggler: DX still reporting to A -> busy
+            for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000));   // finality elapses
+            System.Threading.Thread.Sleep(30);
+            Check("a 'DX working a peer' straggler during the finality window -> start declined, NO REPLY", SawReply(), false);
+            Check("...Smart Start stays armed, callInProg clear", wc.TestSmartStartTarget == target && wc.callInProg == null, true);
+
+            // ══ Rule 1/7: a CQing pileup where every opening ends in a yield keeps TRYING --
+            //    real calling overs go out each round (so the standby-round backstop resets and
+            //    never fires); the operator's Repeat Limit is the bound (proven exactly in
+            //    SmartStartRepeatLimitSpansYieldsTests). Here just confirm several
+            //    opening->call->yield cycles leave Smart Start still armed and not stood-down. ══
+            for (int cyc = 0; cyc < 6 && wc.TestSmartStartTarget != null; cyc++)
             {
-                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot));   // _directLastSlotSeen = slot
-                wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }, true);  // arm, armSlot = slot
-                for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot));           // finality polls, same slot -> held
-                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot + 2, target, $"{A} {target} -07"));      // +2 periods AND DX busy -> decline
-                slot += 4;
-                System.Threading.Thread.Sleep(20);
+                if (!wc.TestSmartStartAwaitingEngagement) { wc.callInProg = target; wc.TestSmartStartEnterAwaitingEngagement(); }
+                wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{A} {target} -07", DeltaFrequency = 1500, Snr = -6 }, true);  // DX picks A -> yield
+                PumpUntil(() => !wc.TestSmartStartAwaitingEngagement, 1000);
+                wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{A} {target} RR73", DeltaFrequency = 1500, Snr = -6 }, true); // DX closes to A -> opening again
             }
-            Check("after repeated dead-end rounds, Smart Start disarms (no endless pileup churn)", wc.TestSmartStartTarget == null, true);
-            Check("...still never transmitted", SawReply(), false);
-            // Part 5 / N4BP live audit: the busy-churn stand-down has its OWN wording -- it must
-            // NOT read like the Repeat Limit was reached (no call ever went out).
-            Check("...the stand-down message says 'stayed busy ... no calls made', not a Repeat-Limit message",
-                statusView.LastShowMessageText == $"{target} stayed busy; Smart Start stopped, no calls made", true);
-            Check("...and it is not phrased as a repeat-limit stop",
-                statusView.LastShowMessageText != null && !statusView.LastShowMessageText.Contains("Repeat limit"), true);
+            Check("repeated opening->yield cycles keep Smart Start armed (Repeat Limit is the bound, not a standby give-up)",
+                wc.TestSmartStartTarget == target, true);
+            Check("...no 'stayed busy, no calls made' stand-down was issued",
+                statusView.LastShowMessageText == null || !statusView.LastShowMessageText.Contains("stayed busy"), true);
         }
         finally
         {
@@ -18078,10 +18158,14 @@ static class JimmyTests
 
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
 
-            // ══ 1. Arming Smart Start: "Waiting to work X." and never "Watching X." ══
+            // ══ 1. Arming Smart Start: "Waiting to work X." and never "Watching X." Operator
+            //      policy 2026-09-08: the live CQ that armed it is narrated as a truthful FACT
+            //      ("X calling CQ."), never a preliminary/dispatch-sounding "appears available". ══
             Check("Smart Start captured", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
             Check("arming Smart Start speaks its own 'Waiting to work' line", SaidContains($"Waiting to work {target}"), true);
             Check("arming Smart Start does NOT emit Station Watch's 'Watching X' lifecycle line", SaidContains("Watching"), false);
+            Check("the arming CQ is narrated as a fact ('X calling CQ.')", SaidContains($"{target} calling CQ"), true);
+            Check("NO dispatch-sounding 'appears available' from preliminary readiness", SaidContains("appears available"), false);
             Check("arming Smart Start does not turn on the receive-only Station Watch", wc.StationWatchActive, false);
             wc.TestCancelStationWatchPendingStart();   // clear the armed pending auto-start
 

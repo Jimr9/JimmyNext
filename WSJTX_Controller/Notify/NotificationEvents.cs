@@ -392,6 +392,21 @@ namespace WSJTX_Controller
             Phrase = BuildPhrase(Target, Peer, Report);
         }
 
+        private SmartStartTargetBusyEvent(string target, string phrase, bool _)
+        {
+            Target = target ?? "";
+            Peer = "";
+            Report = "";
+            Phrase = phrase ?? "";
+        }
+
+        // Operator policy (2026-09-08): the target is calling CQ -- a positive opening, not a
+        // "busy" fact, but it rides this same event's config row / per-target dedup + 30 s
+        // RepeatSeconds fold so a target that keeps CQing without hearing us is narrated once,
+        // not every period. "{Phrase}" (the default template) renders "X calling CQ."
+        public static SmartStartTargetBusyEvent Cq(string target) =>
+            new SmartStartTargetBusyEvent(target ?? "", $"{target} calling CQ.", false);
+
         // N4BP live-radio audit -- fix 3: the decoded FT8 fact, not a translated state. "N4BP to
         // KZ4MW, minus 15." / "N4BP to KZ4MW, RR73." / "N4BP to KZ4MW." / "N4BP working another
         // station." (`report` is already the spoken form -- "minus 15" / "R minus 15" / "RR73").

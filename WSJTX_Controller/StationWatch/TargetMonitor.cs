@@ -477,6 +477,15 @@ namespace WSJTX_Controller
 
             if (!string.Equals(de, TargetCall, StringComparison.OrdinalIgnoreCase))
             {
+                // Smart Start's decision model (operator policy, 2026-09-08) is driven ONLY by
+                // the TARGET's own decoded transmissions. A third station calling or rogering
+                // the target is NOT evidence the target is working anyone -- a pileup calling a
+                // CQing DX is the normal "keep trying" case (rule 1). So a non-target decode is
+                // ignored outright for a Smart Start monitor. Station Watch keeps its fuller
+                // "being called by / the peer's own reply" reading unchanged (it never
+                // auto-transmits; Work Now revalidation still reads BusyWithOther).
+                if (Purpose == TargetPurpose.SmartStart) return;
+
                 // Not the target -- interesting in two ways:
                 //   1. the target's OWN apparent peer replying TO the target (narrate it, never
                 //      invent the unseen half of the exchange), and
@@ -615,34 +624,34 @@ namespace WSJTX_Controller
                 return;
             }
 
-            // ── Target -> PEER : the single "working another station" busy path ────────────────
-            // Every kind of target-to-peer traffic (report / R-report / RRR / RR73 / 73 /
-            // any other directed payload) means the target is working someone else. For Smart
-            // Start it sets BusyWithOther and restarts the ONE configurable clean-silence count
-            // from zero (fresh busy evidence always wins). It becomes available again only when
-            // the target has been silent for SilenceThreshold appropriate target-parity
-            // opportunities, or sends a CQ / addresses us. There is no separate hard-coded
-            // "peer close" countdown -- if the operator wants a longer settle, they raise the
-            // Smart QSO Start silence-period setting (N4BP live audit -- fix 2). Station Watch /
-            // Work Now keep the older "RR73/73 to a peer = finishing, becoming available"
-            // reading (Work Now is an explicit operator command with its own bounded gap check).
-            if (Purpose == TargetPurpose.SmartStart || !(sem.IsRr73 || sem.Is73))
+            // ── Target -> PEER ────────────────────────────────────────────────────────────────
+            // Operator policy (2026-09-08): a target -> peer RR73 or 73 means the target's
+            // previous QSO is CLOSING -- a positive call opportunity, not busy evidence. For
+            // BOTH purposes it clears BusyWithOther, and for Smart Start it signals ready right
+            // away (rules 2 & 3: call at the next legitimate transmit opportunity, with NO extra
+            // silence periods). Every OTHER kind of target -> peer traffic -- report, R-report,
+            // RRR, or any other directed payload -- means the target is actively working someone
+            // else: for Smart Start that sets BusyWithOther and restarts the ONE configurable
+            // clean-silence count from zero (rules 4 & 5). The count then becomes available
+            // again after SilenceThreshold clean target-parity opportunities (rule 6), or the
+            // moment the target sends a CQ / RR73 / 73 / addresses us. Station Watch / Work Now
+            // keep their existing "RR73/73 to a peer = finishing" reading (they never auto-key).
+            if (sem.IsRr73 || sem.Is73)
             {
-                BusyWithOther = true;
-                _rr73AwaitingOneMoreOpportunity = false;
-                SilenceCount = 0;
-                _lastCountedSlot = null;
-            }
-            else
-            {
-                // Station Watch / Work Now, target -> peer RR73/73: "finishing, becoming
-                // available" -- unchanged from before.
                 BusyWithOther = false;
                 _rr73AwaitingOneMoreOpportunity = false;
+                if (sem.IsRr73) Raise(TargetObservationKind.TargetRr73, TargetCall, peer, payload, d.Message);
+                else            Raise(TargetObservationKind.Target73, TargetCall, peer, payload, d.Message);
+                if (Purpose == TargetPurpose.SmartStart) SignalReady();
+                return;
             }
 
-            if (sem.IsRr73)      { Raise(TargetObservationKind.TargetRr73, TargetCall, peer, payload, d.Message); return; }
-            if (sem.Is73)        { Raise(TargetObservationKind.Target73, TargetCall, peer, payload, d.Message); return; }
+            // report / R-report / RRR / any other directed payload to a peer -> working someone.
+            BusyWithOther = true;
+            _rr73AwaitingOneMoreOpportunity = false;
+            SilenceCount = 0;
+            _lastCountedSlot = null;
+
             if (sem.IsRrr)       { Raise(TargetObservationKind.TargetRrr, TargetCall, peer, payload, d.Message); return; }
             if (sem.IsRReport)   { Raise(TargetObservationKind.TargetRReport, TargetCall, peer, payload, d.Message); return; }
             if (sem.IsReport)    { Raise(TargetObservationKind.TargetReport, TargetCall, peer, payload, d.Message); return; }
@@ -717,23 +726,18 @@ namespace WSJTX_Controller
 
             // The ONE configurable clean-silence mechanism (fix 2). SilenceThreshold is the
             // operator's Smart QSO Start silence-period setting. Each genuinely clean appropriate
-            // target-parity opportunity (target not heard, no fresh busy evidence this period)
-            // counts one. When the count reaches the threshold:
-            //   * if the target was working another station, that traffic has now been silent
-            //     for the operator's full configured window -- the exchange has ended / the
-            //     target has moved on, so clear BusyWithOther, and
-            //   * signal ready.
-            // Fresh target traffic (IngestTargetDecode) or a third party addressing the target
-            // (ObserveDecode) re-zeros SilenceCount, so busy evidence always restarts the count.
+            // target-parity opportunity (target not heard this period) counts one, and is
+            // narrated "N of M" -- including the FINAL period, so the operator hears "not heard,
+            // 2 of 2." right before the call (operator policy, 2026-09-08, rule 6). When the
+            // count reaches the threshold the target's earlier "working another station" traffic
+            // has now been silent for the operator's full window, so clear BusyWithOther and
+            // signal ready. Fresh target traffic (IngestTargetDecode) re-zeros SilenceCount.
             SilenceCount++;
+            Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null, $"{SilenceCount} of {SilenceThreshold}");
             if (SilenceCount >= SilenceThreshold)
             {
                 BusyWithOther = false;
                 SignalReady();
-            }
-            else
-            {
-                Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null, $"{SilenceCount} of {SilenceThreshold}");
             }
         }
 

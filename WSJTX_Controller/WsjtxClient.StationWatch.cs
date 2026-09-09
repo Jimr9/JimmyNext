@@ -36,22 +36,20 @@ namespace WSJTX_Controller
         private int _pendingAutoStartPollsRemaining;
         private const int PendingAutoStartFinalityPolls = 3;
 
-        // Post-ship 2.0.69 (J38DX / KC2HMD / 4D3UNB pileup churn): the 3-poll finality window
-        // above spans only ~3 s -- less than one FT8 T/R period. A station calling CQ doesn't
-        // reveal WHICH caller it picked until its NEXT over (~15 s later), so Smart Start used to
-        // commit + announce "Calling X" and then have to yield when that over showed the DX chose
-        // someone else -- endless "appears available -> Calling -> [silent halt] -> waiting" with
-        // zero RF. The dispatch now also waits until the engine slot counter has advanced by at
-        // least this many periods since the monitor was parked, so at least one full receive
-        // period on the target's own parity has completed AND its decodes ingested -- a
-        // "DX working <someone>" decode then lands first and RevalidateForAutoStart declines
-        // before anything transmits.
-        private const ulong PendingAutoStartMinSlotAdvance = 2;
-        private ulong _pendingAutoStartArmSlot;
+        // Operator policy (2026-09-08): a fresh CQ / RR73 / 73 from the target is a positive call
+        // opportunity -- call at our next legitimate transmit opportunity, do NOT wait extra FT8
+        // periods "to see which caller the DX picked". The old 2-period slot-advance hold that
+        // did exactly that (post-ship 2.0.69 pileup-churn mitigation) is removed: the 3-poll
+        // finality window above still catches a same-period straggler decode (Nexus spreads one
+        // slot's decodes across ~3 snapshots) so RevalidateForAutoStart can still decline a
+        // target that is genuinely mid-report to a peer, and rule 7 (yield the moment the target
+        // sends someone else a report) is the recovery when the DX does choose another station.
 
         // After this many dead-end readiness rounds for one armed target (revalidation declined
-        // it as busy, or a dispatched call yielded before engagement), Smart Start disarms and
-        // tells the operator -- a hot CQing pileup has no lull to wait for.
+        // it as busy, or a dispatched call yielded before engagement) with NO calling over out,
+        // Smart Start disarms and tells the operator. Under the 2026-09-08 policy a positive
+        // opening normally reaches an actual calling over (which resets this), so it now only
+        // guards a pathological "opening always immediately contradicted, zero RF" loop.
         private const int MaxSmartStartStandbyRounds = 4;
 
         public bool StationWatchActive => _stationWatch.IsActive;
@@ -401,14 +399,12 @@ namespace WSJTX_Controller
             if (ReferenceEquals(_pendingAutoStart, monitor)) return;
             _pendingAutoStart = monitor;
             _pendingAutoStartPollsRemaining = PendingAutoStartFinalityPolls;
-            _pendingAutoStartArmSlot = _directLastSlotSeen;
         }
 
         private void ClearPendingAutoStart()
         {
             _pendingAutoStart = null;
             _pendingAutoStartPollsRemaining = 0;
-            _pendingAutoStartArmSlot = 0;
         }
 
         // Called at the END of every DirectApplyDecodes pass (after that pass has ingested its
@@ -420,11 +416,6 @@ namespace WSJTX_Controller
             if (_pendingAutoStart == null) return;
             if (!_pendingAutoStart.IsActive) { ClearPendingAutoStart(); return; }
             if (_pendingAutoStartPollsRemaining > 0) { _pendingAutoStartPollsRemaining--; return; }
-            // Also wait out a full receive period on the target's parity since arming, so the
-            // DX's own next over has been decoded -- a "DX working <someone>" straggler then
-            // aborts the start in RevalidateForAutoStart instead of Jimmy calling into a QSO the
-            // DX already began (see PendingAutoStartMinSlotAdvance).
-            if (_directLastSlotSeen < _pendingAutoStartArmSlot + PendingAutoStartMinSlotAdvance) return;
             TargetMonitor monitor = _pendingAutoStart;
             ClearPendingAutoStart();
             RequestTargetMonitorStart(monitor, operatorOverride: false);
@@ -552,12 +543,18 @@ namespace WSJTX_Controller
                 case TargetObservationKind.SmartStartWaiting:
                     // N4BP live audit -- fix 3: concise, and only ever raised for a period the
                     // target was genuinely NOT heard (TargetMonitor's _targetHeardThisPeriod
-                    // guard). `obs.Value` is "1 of 2" (the operator's own silence setting).
+                    // guard). `obs.Value` is "1 of 2" ... "2 of 2" (the operator's own silence
+                    // setting -- the final period is now narrated too, operator policy rule 6).
                     Notify?.Publish(new SmartStartWaitingEvent(
                         obs.Target, $"{obs.Target} not heard, {obs.Value}.", obs.Value));
                     return;
                 case TargetObservationKind.SmartStartTargetAvailable:
-                    Notify?.Publish(new SmartStartTargetAvailableEvent(obs.Target));
+                    // Operator policy (2026-09-08): no dispatch-sounding "appears available" from
+                    // preliminary readiness. The factual opening narration (the target's CQ /
+                    // RR73 / 73, or "not heard, N of M") plus "Calling {Target}." at the real
+                    // dispatch is the truthful presentation; a separate "appears available" was
+                    // premature (published before final revalidation) and could repeat while the
+                    // same pending start was parked. Deliberately not published.
                     return;
             }
 
@@ -577,6 +574,14 @@ namespace WSJTX_Controller
 
             switch (obs.Kind)
             {
+                case TargetObservationKind.TargetCq:
+                    // Operator policy rule 1: a CQ from the target is the opening. Narrate the
+                    // fact ("N4BP calling CQ.") -- "Calling {Target}." follows at dispatch.
+                    // Shares SmartStartTargetBusy's config row + per-target RepeatSeconds fold,
+                    // so a target that keeps CQing without hearing us is not re-announced every
+                    // period.
+                    Notify?.Publish(SmartStartTargetBusyEvent.Cq(obs.Target));
+                    return;
                 case TargetObservationKind.TargetAddressingOther:
                 case TargetObservationKind.TargetReport:
                 case TargetObservationKind.TargetRReport:
