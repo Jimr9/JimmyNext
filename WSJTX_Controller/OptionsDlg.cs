@@ -1152,8 +1152,18 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Button _notifyVarMoveUpButton;
         private System.Windows.Forms.Button _notifyVarMoveDownButton;
         private System.Windows.Forms.TextBox _notifyTemplateTextBox;
-        // Per-event delivery-timing combo. Backed by NotificationPolicy.SpeakWhen.
+        // Per-event delivery-timing combo. Backed by NotificationPolicy.SpeakWhen (the PRIMARY
+        // boundary -- also what routine-status clause composition uses).
         private System.Windows.Forms.ComboBox _notifySpeakWhenComboBox;
+        // Per-event EXTRA delivery boundaries (2026-09-09): a published notification can be
+        // spoken at more than one boundary at once. Checked items, together with the primary
+        // from the combo above, become NotificationPolicy.SpeakWhenSet. Disabled for
+        // routine-status clause rows (they compose into one utterance).
+        private System.Windows.Forms.CheckedListBox _notifySpeakWhenExtraList;
+        private SpeakWhen[] _notifySpeakWhenExtraValues = System.Array.Empty<SpeakWhen>();
+        // Per-event status-area delivery choice (2026-09-09): Normal / Send immediately /
+        // Latest only. Backed by NotificationPolicy.StatusDelivery. Disabled for clause rows.
+        private System.Windows.Forms.ComboBox _notifyStatusDeliveryComboBox;
         // The GLOBAL "when to speak the routine RX/TX/QSO status line" combo -- routine status is
         // not a NotificationEventType. Backed by Controller.routineStatusSpeakWhen.
         private System.Windows.Forms.ComboBox _notifyRoutineStatusSpeakWhenComboBox;
@@ -3106,7 +3116,7 @@ namespace WSJTX_Controller
             var deliveryGroup = new System.Windows.Forms.GroupBox
             {
                 Text = "Delivery", Location = new System.Drawing.Point(L, y),
-                Size = new System.Drawing.Size(W, 120), Font = font,
+                Size = new System.Drawing.Size(W, 250), Font = font,
             };
             notificationsPanel.Controls.Add(deliveryGroup);
             deliveryGroup.Controls.Add(new System.Windows.Forms.Label
@@ -3140,9 +3150,52 @@ namespace WSJTX_Controller
             _notifyPriorityComboBox.SelectedIndexChanged += (s, e) => CommitNotifyCheckboxes();
             deliveryGroup.Controls.Add(_notifyPriorityComboBox);
 
+            // Status-area delivery choice (2026-09-09).
+            deliveryGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Status area:", Location = new System.Drawing.Point(12, 54),
+                Size = new System.Drawing.Size(110, 18), Font = font, TabStop = false,
+            });
+            _notifyStatusDeliveryComboBox = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(126, 52), Size = new System.Drawing.Size(230, 22),
+                TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Status area delivery for this event",
+            };
+            // Positions match NotificationStatusDelivery (Normal=0, SendImmediately=1, LatestOnly=2).
+            _notifyStatusDeliveryComboBox.Items.AddRange(new object[] { "Normal", "Send immediately", "Latest only" });
+            _notifyStatusDeliveryComboBox.SelectedIndexChanged += (s, e) => CommitNotifyCheckboxes();
+            deliveryGroup.Controls.Add(_notifyStatusDeliveryComboBox);
+
+            // Extra delivery boundaries -- "also speak at these times" (2026-09-09 multi-delivery).
+            deliveryGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Also speak at these times (in addition to the one above):",
+                Location = new System.Drawing.Point(12, 82), Size = new System.Drawing.Size(W - 24, 18),
+                Font = font, TabStop = false,
+            });
+            _notifySpeakWhenExtraList = new System.Windows.Forms.CheckedListBox
+            {
+                Location = new System.Drawing.Point(12, 102), Size = new System.Drawing.Size(W - 24, 92),
+                TabIndex = tabIdx++, Font = font, CheckOnClick = true,
+                AccessibleName = "Also speak this event at these additional times",
+            };
+            RebuildSpeakWhenExtraItems(SpeakCondition.Always);
+            _notifySpeakWhenExtraList.ItemCheck += (s, e) =>
+            {
+                if (_notifyUpdatingFields) return;
+                // Commit AFTER the ItemCheck's own state change settles. BeginInvoke needs a
+                // window handle (absent in headless tests) -- fall back to a direct commit,
+                // reading the pending check via e.NewValue for the item being toggled.
+                if (IsHandleCreated) BeginInvoke((Action)CommitNotifyCheckboxes);
+                else CommitNotifyCheckboxes();
+            };
+            deliveryGroup.Controls.Add(_notifySpeakWhenExtraList);
+
             _notifyDeliveryExplainLabel = new System.Windows.Forms.Label
             {
-                Text = "", Location = new System.Drawing.Point(12, 52), Size = new System.Drawing.Size(W - 24, 60),
+                Text = "", Location = new System.Drawing.Point(12, 198), Size = new System.Drawing.Size(W - 24, 46),
                 Font = font, ForeColor = System.Drawing.SystemColors.GrayText, TabStop = false,
             };
             deliveryGroup.Controls.Add(_notifyDeliveryExplainLabel);
@@ -3372,12 +3425,33 @@ namespace WSJTX_Controller
         {
             switch (w)
             {
+                case SpeakWhen.RxStart:  return "When receive begins";
                 case SpeakWhen.TxStart:  return "When transmit starts";
                 case SpeakWhen.AfterRx:  return "After the receive cycle";
                 case SpeakWhen.AfterTx:  return "After transmit ends";
                 case SpeakWhen.AfterQso: return "After the QSO ends";
                 default:                 return "Immediately";
             }
+        }
+
+        // The per-event "also speak at these times" checked list (2026-09-09 multi-delivery).
+        // Same contradiction rule as RebuildTimingComboItems -- "After the QSO ends" is dropped
+        // when the condition is "Only during a QSO". Checked state is preserved by value across
+        // a rebuild so toggling the condition does not silently lose the operator's picks.
+        private void RebuildSpeakWhenExtraItems(SpeakCondition condition)
+        {
+            var prevChecked = new System.Collections.Generic.HashSet<SpeakWhen>();
+            for (int i = 0; i < _notifySpeakWhenExtraValues.Length && i < _notifySpeakWhenExtraList.Items.Count; i++)
+                if (_notifySpeakWhenExtraList.GetItemChecked(i)) prevChecked.Add(_notifySpeakWhenExtraValues[i]);
+
+            var vals = new List<SpeakWhen>
+            {
+                SpeakWhen.Now, SpeakWhen.RxStart, SpeakWhen.TxStart, SpeakWhen.AfterRx, SpeakWhen.AfterTx,
+            };
+            if (condition != SpeakCondition.DuringQsoOnly) vals.Add(SpeakWhen.AfterQso);
+            _notifySpeakWhenExtraValues = vals.ToArray();
+            _notifySpeakWhenExtraList.Items.Clear();
+            foreach (var v in vals) _notifySpeakWhenExtraList.Items.Add(TimingLabel(v), prevChecked.Contains(v));
         }
         private int IndexOfTiming(SpeakWhen w)
         {
@@ -3428,6 +3502,11 @@ namespace WSJTX_Controller
             _notifyTemplateTextBox.Enabled = has;
             _notifyDuringQsoComboBox.Enabled = has;
             _notifySpeakWhenComboBox.Enabled = has;
+            // Multi-delivery + status-area choice apply only to published notifications -- a
+            // routine-status clause composes into the one status line and has no per-event
+            // publish path.
+            _notifySpeakWhenExtraList.Enabled = has && !isClause;
+            _notifyStatusDeliveryComboBox.Enabled = has && !isClause;
             _notifyPriorityComboBox.Enabled = has && !isClause;
             _notifySuppressUnchangedCheckBox.Enabled = has && !isClause;
             _notifyRepeatSecondsUpDown.Enabled = has && !isClause;
@@ -3450,6 +3529,13 @@ namespace WSJTX_Controller
                 _notifyDuringQsoComboBox.SelectedIndex = (int)policy.Condition;
                 RebuildTimingComboItems(policy.Condition);
                 _notifySpeakWhenComboBox.SelectedIndex = IndexOfTiming(policy.SpeakWhen);
+                _notifyStatusDeliveryComboBox.SelectedIndex = (int)policy.StatusDelivery;
+                // "Also speak at" -- check every boundary in the effective set (the primary
+                // included; changing the primary combo later just re-classifies it as an extra).
+                RebuildSpeakWhenExtraItems(policy.Condition);
+                var effSet = new System.Collections.Generic.HashSet<SpeakWhen>(policy.EffectiveSpeakWhenSet());
+                for (int i = 0; i < _notifySpeakWhenExtraValues.Length && i < _notifySpeakWhenExtraList.Items.Count; i++)
+                    _notifySpeakWhenExtraList.SetItemChecked(i, effSet.Contains(_notifySpeakWhenExtraValues[i]));
                 _notifySuppressUnchangedCheckBox.Checked = policy.SuppressUnchanged;
                 _notifyRepeatSecondsUpDown.Value = System.Math.Max(_notifyRepeatSecondsUpDown.Minimum, System.Math.Min(_notifyRepeatSecondsUpDown.Maximum, policy.RepeatSeconds));
                 _notifyThrottleMsUpDown.Value = System.Math.Max(_notifyThrottleMsUpDown.Minimum, System.Math.Min(_notifyThrottleMsUpDown.Maximum, policy.ThrottleMilliseconds));
@@ -3676,12 +3762,17 @@ namespace WSJTX_Controller
                 RebuildTimingComboItems(condition);
                 _notifySpeakWhenComboBox.SelectedIndex =
                     IndexOfTiming((!afterQsoAllowed && prev == SpeakWhen.AfterQso) ? SpeakWhen.Now : prev);
+                // Keep the "also speak at" list's After-the-QSO-ends option in step too.
+                RebuildSpeakWhenExtraItems(condition);
                 _notifyUpdatingFields = false;
             }
 
             SpeakWhen timing = _notifySpeakWhenComboBox.SelectedIndex >= 0
                 && _notifySpeakWhenComboBox.SelectedIndex < _timingComboValues.Length
                 ? _timingComboValues[_notifySpeakWhenComboBox.SelectedIndex] : SpeakWhen.Now;
+
+            bool isClause = _notifyTypesListBox.SelectedIndex >= 0
+                && _routineClauseTypes.Contains(_notifyTypeOrder[_notifyTypesListBox.SelectedIndex]);
 
             policy.Condition = condition;
             policy.SpeakWhen = timing;
@@ -3695,10 +3786,29 @@ namespace WSJTX_Controller
                             : pi == 1 ? NotificationPriority.Important
                             : NotificationPriority.Normal;
 
-            // Codex #6: keep the explanation accurate for a routine-status wording row, not
-            // just for an independent alert.
-            bool isClause = _notifyTypesListBox.SelectedIndex >= 0
-                && _routineClauseTypes.Contains(_notifyTypeOrder[_notifyTypesListBox.SelectedIndex]);
+            // 2026-09-09 -- status-area delivery choice (published events only).
+            int sd = _notifyStatusDeliveryComboBox.SelectedIndex;
+            policy.StatusDelivery = sd == 1 ? NotificationStatusDelivery.SendImmediately
+                                  : sd == 2 ? NotificationStatusDelivery.LatestOnly
+                                  : NotificationStatusDelivery.Normal;
+
+            // 2026-09-09 -- the multi-delivery set: the primary boundary plus any checked
+            // "also speak at" boundaries. Just the primary -> leave the set null so the policy
+            // is byte-identical to a single-boundary one. A routine-status clause never gets a
+            // multi-set (it composes into one utterance).
+            if (isClause)
+            {
+                policy.SpeakWhenSet = null;
+            }
+            else
+            {
+                var set = new List<SpeakWhen> { timing };
+                for (int i = 0; i < _notifySpeakWhenExtraValues.Length && i < _notifySpeakWhenExtraList.Items.Count; i++)
+                    if (_notifySpeakWhenExtraList.GetItemChecked(i) && !set.Contains(_notifySpeakWhenExtraValues[i]))
+                        set.Add(_notifySpeakWhenExtraValues[i]);
+                policy.SpeakWhenSet = set.Count > 1 ? set : null;
+            }
+
             UpdateNotifyDeliveryExplain(policy, isClause);
         }
 

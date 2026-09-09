@@ -333,6 +333,7 @@ static class JimmyTests
         SpeakWhenMigrationTests();
         MultiDeliveryNotificationTests();
         NotificationStatusDeliveryTests();
+        NotificationsTabMultiDeliveryUiTests();
         RenderStatusSpeechCoordinationTests();
         RenderStatusVisibleKeepsLastOnEmptyTests();
         RoutineClauseTemplateTests();
@@ -9291,6 +9292,105 @@ static class JimmyTests
         nrmC.OnPeriodBoundary();
         Check("Normal: two DIFFERENT identities both deliver (no type-wide collapse)",
             nrmD.AnnounceCount == 2, true);
+    }
+
+    // P8 (2026-09-09): the Options > Notifications tab exposes the multi-delivery "also speak
+    // at" checked list and the per-notification "Status area" choice, wired to
+    // NotificationPolicy.SpeakWhenSet / StatusDelivery; a routine-status clause row disables
+    // both; reopening restores the saved selections.
+    static void NotificationsTabMultiDeliveryUiTests()
+    {
+        Console.WriteLine("\n── Options > Notifications: multi-delivery + status-area UI ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+            ctrl.routineStatusCondition = SpeakCondition.Always;
+
+            // A published type with a pre-existing multi-boundary set + a status-area choice.
+            ctrl.Notifications.Policies[NotificationEventType.StationWatchActivity].SpeakWhenSet =
+                new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.AfterRx };
+            ctrl.Notifications.Policies[NotificationEventType.StationWatchActivity].StatusDelivery =
+                NotificationStatusDelivery.LatestOnly;
+
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            using (var dlg = new OptionsDlg(wc, ctrl))
+            {
+                dlg.BuildNotificationsTab();
+                var t = typeof(OptionsDlg);
+                object F(string n) => t.GetField(n, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg);
+                var typesList = (System.Windows.Forms.CheckedListBox)F("_notifyTypesListBox");
+                var typeOrder = (System.Collections.Generic.List<NotificationEventType>)F("_notifyTypeOrder");
+                var extraList = (System.Windows.Forms.CheckedListBox)F("_notifySpeakWhenExtraList");
+                var statusCombo = (System.Windows.Forms.ComboBox)F("_notifyStatusDeliveryComboBox");
+                var extraValues = (SpeakWhen[])F("_notifySpeakWhenExtraValues");
+
+                void Select(NotificationEventType et) => typesList.SelectedIndex = typeOrder.IndexOf(et);
+
+                // Published type: controls enabled, and reflect the saved policy.
+                Select(NotificationEventType.StationWatchActivity);
+                Check("published type: 'also speak at' list is enabled", extraList.Enabled, true);
+                Check("published type: 'Status area' combo is enabled", statusCombo.Enabled, true);
+                CheckStr("Status area combo reflects the saved LatestOnly choice",
+                    (string)statusCombo.SelectedItem, "Latest only");
+                bool afterRxChecked = false, afterTxChecked = false;
+                for (int i = 0; i < extraValues.Length; i++)
+                {
+                    if (extraValues[i] == SpeakWhen.AfterRx) afterRxChecked = extraList.GetItemChecked(i);
+                    if (extraValues[i] == SpeakWhen.AfterTx) afterTxChecked = extraList.GetItemChecked(i);
+                }
+                Check("'also speak at' shows AfterRx checked (from the saved set)", afterRxChecked, true);
+                Check("'also speak at' shows AfterTx unchecked (not in the saved set)", afterTxChecked == false, true);
+
+                // Toggle AfterTx on, commit, and confirm the pending policy picked it up.
+                int afterTxIdx = System.Array.IndexOf(extraValues, SpeakWhen.AfterTx);
+                extraList.SetItemChecked(afterTxIdx, true);
+                t.GetMethod("CommitNotifyCheckboxes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                    .Invoke(dlg, null);
+                var pending = (System.Collections.Generic.Dictionary<NotificationEventType, NotificationPolicy>)F("_pendingNotifyPolicies");
+                var set = pending[NotificationEventType.StationWatchActivity].SpeakWhenSet;
+                Check("commit: AfterTx added to the pending SpeakWhenSet",
+                    set != null && set.Contains(SpeakWhen.AfterTx) && set.Contains(SpeakWhen.AfterRx), true);
+
+                // Change status-area choice, commit.
+                statusCombo.SelectedIndex = 1;   // "Send immediately"
+                t.GetMethod("CommitNotifyCheckboxes", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                    .Invoke(dlg, null);
+                Check("commit: status-area choice reaches the pending policy",
+                    pending[NotificationEventType.StationWatchActivity].StatusDelivery == NotificationStatusDelivery.SendImmediately, true);
+
+                // A routine-status clause row disables both new controls.
+                Select(NotificationEventType.ReceiveCycleSummary);
+                Check("routine-status clause: 'also speak at' list disabled", extraList.Enabled == false, true);
+                Check("routine-status clause: 'Status area' combo disabled", statusCombo.Enabled == false, true);
+
+                // Reopen: a fresh dialog restores the just-committed selection... simulate by
+                // committing pending -> ctrl and rebuilding.
+                foreach (var kv in pending) ctrl.Notifications.Policies[kv.Key] = kv.Value;
+            }
+
+            using (var dlg2 = new OptionsDlg(wc, ctrl))
+            {
+                dlg2.BuildNotificationsTab();
+                var t = typeof(OptionsDlg);
+                object F(string n) => t.GetField(n, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg2);
+                var typesList = (System.Windows.Forms.CheckedListBox)F("_notifyTypesListBox");
+                var typeOrder = (System.Collections.Generic.List<NotificationEventType>)F("_notifyTypeOrder");
+                var statusCombo = (System.Windows.Forms.ComboBox)F("_notifyStatusDeliveryComboBox");
+                typesList.SelectedIndex = typeOrder.IndexOf(NotificationEventType.StationWatchActivity);
+                CheckStr("reopen: the committed 'Send immediately' status choice is restored",
+                    (string)statusCombo.SelectedItem, "Send immediately");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NotificationsTabMultiDeliveryUiTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()
