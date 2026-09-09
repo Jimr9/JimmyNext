@@ -2154,17 +2154,29 @@ namespace WSJTX_Controller
         // unheard and the radio still not transmitting.
         private int _directNoResponseFinalityPollsRemaining;
 
-        // "No response" is only truthful once the receive opportunity that FOLLOWS our last real
-        // over has actually completed with its decodes processed. When we are not currently
-        // awaiting a post-transmit opportunity for this call (e.g. a status render unrelated to a
-        // just-ended over, or any non-Direct render path), there is no timing gate to apply and
-        // the caller's own conditions govern exactly as before.
+        // "No response" is only truthful once BOTH facts hold: (a) at least one ACTUAL completed
+        // calling over has gone to THIS exact target, and (b) a real listening opportunity has
+        // then finished with its decodes processed.
+        //
+        // EA3HMM live-radio audit (2026-09-09): the old pass-through -- "return true when
+        // _directNoResponseAwaitingCall doesn't match this call" -- let "no response" render
+        // BEFORE the first over. In Direct mode both facts are already captured:
+        //   * _directNoResponseAwaitingCall is armed ONLY on a real wasTransmitting->false edge,
+        //     so it matching `call` proves an over to `call` completed;
+        //   * _directNoResponseOpportunityComplete is set ONLY by the deferred finalize block,
+        //     after a non-transmitting period's decodes were processed.
+        // Before the first over the awaiting-call does not match -> block, so "no response" is
+        // impossible for a target Jimmy has not yet transmitted to (live: "EA3HMM, no response"
+        // rendered at 05:20:13, ~2 s before the first physical over began). A non-Direct render
+        // path (legacy UDP / a status render with no Direct QSO) keeps the old pass-through --
+        // there is no Direct timing state there and the caller's own conditions govern.
         internal bool NoResponseOpportunityComplete(string call)
         {
-            if (call == null
-                || !string.Equals(_directNoResponseAwaitingCall, call, StringComparison.OrdinalIgnoreCase))
-                return true;
-            return _directNoResponseOpportunityComplete;
+            if (string.IsNullOrEmpty(call)) return true;
+            if (_directConnected)
+                return string.Equals(_directNoResponseAwaitingCall, call, StringComparison.OrdinalIgnoreCase)
+                       && _directNoResponseOpportunityComplete;
+            return true;
         }
 
         private void DirectApplyDecodes(DirectSnapshot snap)

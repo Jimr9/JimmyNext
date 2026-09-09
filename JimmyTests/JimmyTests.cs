@@ -406,6 +406,7 @@ static class JimmyTests
         ActivePartnerYieldAndStaleSelectionTests();
         SmartStartResumesAfterHandoffYieldTests();
         TargetMonitorBusyExpirationAfterYieldTests();
+        TargetMonitorHeardPeriodNotCountedAcrossYieldTests();
         SmartStartRepeatLimitSpansYieldsTests();
         TargetMonitorAnswersUsWhileArmedTests();
         SmartStartAnswersTargetCallingUsTests();
@@ -10800,6 +10801,7 @@ static class JimmyTests
                 ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
                 ctrlOut = ctrl;
                 var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetDirectConnected(true);   // Direct is the only transport; the no-response gate is Direct-scoped
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
                 wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
@@ -10839,6 +10841,30 @@ static class JimmyTests
                         ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                         ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": " + slot + @" },
                         ""recentDecodes"": [] }"));
+            }
+
+            // 0. EA3HMM live-radio audit (2026-09-09): "no response" is IMPOSSIBLE before the
+            //    FIRST actual completed over to the target. Armed (callInProg set, the engine
+            //    already has a pending tx text addressed to it), radio never keyed -> the clause
+            //    must stay silent no matter how many listening periods pass. (Live: "EA3HMM,
+            //    no response" rendered at 05:20:13, ~2 s before the first physical over began.)
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "EA3HMM";
+                for (ulong s = 620; s <= 624; s++)
+                {
+                    wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                        ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                        ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": " + s + @" },
+                        ""recentDecodes"": [],
+                        ""qso"": { ""state"": ""calling"", ""txNow"": ""EA3HMM KB0UZT EN34"" } }"));
+                    wc.callInProg = "EA3HMM";
+                }
+                Check("0: armed, no over yet -> NoResponseOpportunityComplete is false",
+                    wc.NoResponseOpportunityComplete("EA3HMM"), false);
+                wc.TestShowStatus();
+                Check("0: armed, no over yet, several listening periods -> NO \"no response\"",
+                    !ctrl.statusText.Text.Contains("no response"), true);
             }
 
             // 1. Transmit just ended, listening opportunity NOT yet complete -> no "no response".
@@ -10969,13 +10995,20 @@ static class JimmyTests
                     !ctrl.statusText.Text.Contains("no response"), true);
             }
 
-            // 6. The gate is call-scoped -- it never suppresses an unrelated call's status, and it
-            //    is independent of the Repeat Limit counter (separate mechanism, unchanged).
+            // 6. The gate is call-scoped: it reports "complete" ONLY for the exact call that has
+            //    had a completed over followed by a finished listening opportunity. A DIFFERENT
+            //    call (one Jimmy has not transmitted to this cycle) is never "complete" -> its
+            //    "no response" can never render prematurely. Independent of the Repeat Limit
+            //    counter (separate mechanism, unchanged).
             {
                 var wc = MakeWc(out var ctrl);
                 ArmSameSlot(wc, 1100);
-                Check("gate is scoped to the awaited call only",
-                    wc.NoResponseOpportunityComplete("K4JC"), true);
+                PumpFinality(wc, 1101);
+                wc.callInProg = "WA4VLC";
+                Check("6: the awaited call, over + completed opportunity -> complete",
+                    wc.NoResponseOpportunityComplete("WA4VLC"), true);
+                Check("6: a different call with no over this cycle -> NOT complete (no premature no-response)",
+                    wc.NoResponseOpportunityComplete("K4JC"), false);
             }
         }
         catch (Exception ex)
@@ -11015,6 +11048,10 @@ static class JimmyTests
                 ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
                 ctrlOut = ctrl;
                 var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                // NOTE: deliberately NOT _directConnected -- this test drives otherPartyForCallInProg
+                // directly (TestSetOtherParty) and checks only ShowStatus's recency gate; the
+                // 5a58e95 active-partner-yield guard (Direct-only) would otherwise end the contact
+                // on case 4's report decode.
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
                 wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
@@ -17871,7 +17908,7 @@ static class JimmyTests
 
         // Fresh "working another" evidence during the count re-zeros it -- the target is still busy.
         var m3 = Yielded(2);
-        m3.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);  // 1 of 2 (no absorb: ReturnToWaiting cleared the flag)
+        m3.OnReceivePeriodComplete(2, true, "20m", "FT8", "sess1", false);  // the yield period is ABSORBED (target was heard) -- EA3HMM fix
         m3.ObserveDecode(D($"{B} {TARGET} R-05"), true, MY_CALL);           // fresh: target working B again -> re-zeros
         Check("fresh 'working another' re-zeros the count", m3.SilenceCount == 0, true);
         m3.OnReceivePeriodComplete(4, true, "20m", "FT8", "sess1", false);  // absorbed
@@ -17889,8 +17926,9 @@ static class JimmyTests
         m4b.ObserveDecode(D($"CQ {TARGET} FK92"), false, MY_CALL);          // FT4, parity ODD
         m4b.ConsumeReadyToStart();
         m4b.EnterAwaitingEngagement();
-        m4b.ObserveDecode(D($"{A} {TARGET} -07"), false, MY_CALL);
+        m4b.ObserveDecode(D($"{A} {TARGET} -07"), false, MY_CALL);          // target -> peer, ODD period -> heard this period
         m4b.ReturnToWaiting();
+        m4b.OnReceivePeriodComplete(1, false, "20m", "FT4", "sess1", false);// ODD -- the yield period's own boundary (same pass): ABSORBED (EA3HMM fix)
         m4b.OnReceivePeriodComplete(2, true, "20m", "FT4", "sess1", false); // EVEN -- opposite parity, ignored
         m4b.OnReceivePeriodComplete(3, false, "20m", "FT4", "sess1", false);// ODD -- 1 of 2
         m4b.OnReceivePeriodComplete(5, false, "20m", "FT4", "sess1", false);// ODD -- 2 of 2 -> expire
@@ -17908,6 +17946,59 @@ static class JimmyTests
         m5.OnReceivePeriodComplete(6, true, "20m", "FT8", "sess1", false);  // 2 of 2 -> expire
         Check("no yield: the same clean-silence count clears 'working another station'", !m5.BusyWithOther, true);
         Check("no yield: Smart Start becomes ready", m5.ReadyToStart, true);
+    }
+
+    // EA3HMM live-radio audit (2026-09-09), FIX 2: the receive period in which the target was
+    // decoded working someone else -- the very decode that drives the busy yield -- must NOT then
+    // be counted as clean silence, and must NOT produce "<target> not heard, N of M." Before the
+    // fix, YieldSmartStartToOtherQso -> ReturnToWaiting() cleared _targetHeardThisPeriod (and
+    // AwaitingEngagement), so OnReceivePeriodComplete for that same period incremented
+    // SilenceCount and raised SmartStartWaiting. Pure TargetMonitor unit test (no engine/WinForms).
+    static void TargetMonitorHeardPeriodNotCountedAcrossYieldTests()
+    {
+        Console.WriteLine("\n── TargetMonitor: a heard-then-yielded receive period is not counted as silence ──");
+        const string TARGET = "EA3HMM", PEER = "M9MRX", PEER2 = "EA4EER";
+
+        // ── FT8, target EVEN parity ──
+        {
+            int waiting = 0;
+            var m = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+            m.Observed += o => { if (o.Kind == TargetObservationKind.SmartStartWaiting) waiting++; };
+            m.Start(TARGET, "80m", "FT8", "sess1");
+            m.ObserveDecode(D($"{PEER2} {TARGET} 73"), true, MY_CALL);          // opening -> parity(even), ready
+            m.ConsumeReadyToStart();
+            m.EnterAwaitingEngagement();                                        // Smart Start is now calling
+            // The target turns to PEER in its own (EVEN) receive period -- decoded THIS period.
+            m.ObserveDecode(D($"{PEER} {TARGET} JN00"), true, MY_CALL);         // target -> peer -> BusyWithOther + heard-this-period
+            Check("FT8: target -> peer decode marks it busy", m.BusyWithOther, true);
+            m.ReturnToWaiting();                                               // the yield ceases our call, stays armed
+            // Same DirectApplyDecodes pass: the period-complete for that very period, EVEN parity.
+            m.OnReceivePeriodComplete(4, true, "80m", "FT8", "sess1", false);
+            Check("FT8: the heard-then-yielded period does NOT increment SilenceCount", m.SilenceCount == 0, true);
+            Check("FT8: ...and raises no \"<target> not heard, N of M\" line", waiting == 0, true);
+            // A genuinely silent EVEN period AFTER the yield still counts (fallback preserved).
+            m.OnReceivePeriodComplete(6, true, "80m", "FT8", "sess1", false);
+            Check("FT8: a subsequent silent period still counts toward the silence fallback", m.SilenceCount == 1, true);
+            Check("FT8: ...and now the 'not heard' line is raised (once)", waiting == 1, true);
+        }
+
+        // ── FT4, target ODD parity (a wrong-parity boundary sits between the yield and the count) ──
+        {
+            int waiting = 0;
+            var m = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 2 };
+            m.Observed += o => { if (o.Kind == TargetObservationKind.SmartStartWaiting) waiting++; };
+            m.Start(TARGET, "40m", "FT4", "sess1");
+            m.ObserveDecode(D($"{PEER2} {TARGET} 73"), false, MY_CALL);         // opening -> parity(odd), ready
+            m.ConsumeReadyToStart();
+            m.EnterAwaitingEngagement();
+            m.ObserveDecode(D($"{PEER} {TARGET} R-01"), false, MY_CALL);        // target -> peer report -> busy + heard
+            m.ReturnToWaiting();
+            m.OnReceivePeriodComplete(3, false, "40m", "FT4", "sess1", false);  // ODD -- the yield period's own boundary (same pass)
+            Check("FT4: heard-then-yielded period not counted", m.SilenceCount == 0 && waiting == 0, true);
+            m.OnReceivePeriodComplete(4, true, "40m", "FT4", "sess1", false);   // EVEN -- ignored
+            m.OnReceivePeriodComplete(5, false, "40m", "FT4", "sess1", false);  // ODD -- genuine silence -> 1 of 2
+            Check("FT4: the next genuine silent ODD period counts", m.SilenceCount == 1 && waiting == 1, true);
+        }
     }
 
     // Bug A (2026-09-07, KV4CW POTA): a decode addressed to OUR callsign while Smart Start is

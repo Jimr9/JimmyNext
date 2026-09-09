@@ -394,6 +394,15 @@ namespace WSJTX_Controller
         // evidence, BusyWithOther expires and Smart Start is ready again. TargetCall / parity /
         // HasLiveTargetEvidence / ApparentPeer / LastUsableDecode / TransmittedCallCount are all
         // retained -- this same calling effort resumes.
+        //
+        // EA3HMM live-radio audit (2026-09-09): _targetHeardThisPeriod is DELIBERATELY NOT
+        // cleared here. The decode that drove the busy yield was, by definition, a decode FROM
+        // the target in this same receive period -- so that period must not then be counted as
+        // clean silence or narrated "<target> not heard, N of M." OnReceivePeriodComplete runs
+        // once more in the SAME DirectApplyDecodes pass (right after this yield), on the target's
+        // own parity, and its `if (_targetHeardThisPeriod)` guard consumes the flag and skips the
+        // count. Subsequent genuinely-silent periods still increment SilenceCount normally, so
+        // the silence-threshold fallback is unaffected.
         public void ReturnToWaiting()
         {
             if (Purpose != TargetPurpose.SmartStart) return;
@@ -402,7 +411,6 @@ namespace WSJTX_Controller
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
             _engagedWhileWaiting = false;
-            _targetHeardThisPeriod = false;
             SilenceCount = 0;
             _lastCountedSlot = null;
             OpportunitiesSinceLiveEvidence = 0;
