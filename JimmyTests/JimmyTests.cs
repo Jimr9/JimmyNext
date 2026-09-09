@@ -424,6 +424,7 @@ static class JimmyTests
         SpeechCoordinatorStationWatchSuppressionTests();
         StationWatchHotkeyDefaultsTests();
         SmartStartNarrationPresentationTests();
+        SmartStartSeedNoImmediateCqTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -9390,6 +9391,133 @@ static class JimmyTests
         {
             Console.WriteLine($"  FAIL  NotificationsTabMultiDeliveryUiTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
+        }
+    }
+
+    // 2026-09-09 -- the cached decode the operator selects when arming Smart QSO Start must not
+    // re-announce "<call> calling CQ" at activation (it is not a fresh on-air CQ). Everything
+    // else the seed does -- record the decode for the reply, parity, live evidence / readiness,
+    // and every OTHER narrated status -- is unchanged. Fix: _smartStartSeeding (a bool scoped
+    // to exactly the synchronous SeedSelectedDecode call in TryCaptureSmartStart) suppresses
+    // only the TargetCq -> "calling CQ" publish in HandleSmartStartObservation.
+    static void SmartStartSeedNoImmediateCqTests()
+    {
+        Console.WriteLine("\n── Smart QSO Start: a cached CQ does not re-announce 'calling CQ' at activation ──");
+
+        var seenLock = new object();
+        var seenCmds = new List<string>();
+        var listener = new StubEngineHost(line => { lock (seenLock) seenCmds.Add(line); return "OK"; });
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SeedNoCq_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            ctrl.smartQsoStartEnabled = true;
+            ctrl.smartStartSilencePeriods = 6;
+
+            var fake = new FakeNotificationDelivery();
+            wc.Notify = new NotificationCenter(ctrl.Notifications, fake);
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "J38DX", peer = "W6PAN";
+            List<string> Said() { lock (fake.AllText) return new List<string>(fake.AllText); }
+            bool SaidHas(string sub) => Said().Exists(s => s.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0);
+            void ClearSaid() { lock (fake.AllText) fake.AllText.Clear(); }
+            bool SawReply() { lock (seenLock) return seenCmds.Exists(c => c.StartsWith("REPLY")); }
+
+            EnqueueDecodeMessage Dec(string msg) => new EnqueueDecodeMessage { Message = msg, DeltaFrequency = 1500, Snr = -6 };
+            EnqueueDecodeMessage FreshCq(string call) => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {call} FK92",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+            DirectSnapshot Snap(ulong slot) => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                ""recentDecodes"": [] }");
+
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
+
+            // 1) Arming from a cached CQ -> "Waiting to work X." but NOT "X calling CQ."
+            Check("cached CQ captured Smart Start", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
+            Check("activation speaks 'Waiting to work X'", SaidHas($"Waiting to work {target}"), true);
+            Check("activation does NOT re-announce 'X calling CQ' from the cached decode",
+                SaidHas($"{target} calling CQ"), false);
+
+            // 5) The cached decode is still recorded for the reply -- a fresh-CQ seed makes it
+            //    ready and arms the pending auto-start (ArmPendingAutoStart no-ops without a
+            //    LastUsableDecode), and pumping the poll feed actually sends the REPLY from it.
+            Check("cached decode was recorded -> auto-start armed", wc.TestAutoStartPending, true);
+            for (ulong s = 102; s <= 120; s += 2) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(s));
+            try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
+            PumpUntil(SawReply, 2000);
+            Check("the initial REPLY is constructed and sent from the cached decode", SawReply(), true);
+            Check("...and 'Calling X.' is announced at the real dispatch", SaidHas($"Calling {target}"), true);
+            wc.TestCancelStationWatchPendingStart();
+            wc.callInProg = null;
+
+            // 2) A NEW CQ decoded AFTER activation (via the live feed) DOES announce "calling CQ".
+            ClearSaid();
+            Check("re-armed from a cached CQ (still no immediate 'calling CQ')",
+                wc.TestTryCaptureSmartStart(target, FreshCq(target)) && !SaidHas($"{target} calling CQ"), true);
+            wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // genuinely new on-air CQ
+            Check("a live CQ decoded after activation announces 'X calling CQ'",
+                SaidHas($"{target} calling CQ"), true);
+
+            // 3) A new message showing the target working somebody else still announces it.
+            ClearSaid();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{peer} {target} -07"), true);
+            Check("target working another station still announces that activity",
+                SaidHas($"{target} to {peer}, minus 7"), true);
+            wc.TestCancelStationWatchPendingStart();
+
+            // 4) Replies addressed to the operator, and 73 / RR73, are unchanged. A stale "to us"
+            //    seed still hands straight to the normal sequencer (no Smart Start narration for
+            //    it -- same as before), and a live target->us / target 73 path is untouched by
+            //    the CQ-only suppression.
+            ClearSaid();
+            var staleToUs = new EnqueueDecodeMessage
+            {
+                Message = $"{myCall} {target} R-05",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay - TimeSpan.FromSeconds(90),
+                DeltaFrequency = 1500, Snr = -6,
+            };
+            bool captured = wc.TestTryCaptureSmartStart("K7RAT", staleToUs);
+            Check("a stale 'to us' selection is still handed to Smart Start management (captured)", captured, true);
+            Check("...and it is NOT narrated as 'calling CQ'", SaidHas("calling CQ"), false);
+            wc.TestCancelStationWatchPendingStart();
+
+            ClearSaid();
+            const string t73 = "K4YT";
+            Check("re-armed on a fresh CQ for the 73 check", wc.TestTryCaptureSmartStart(t73, FreshCq(t73)), true);
+            wc.TestFeedTargetMonitorsDecode(Dec($"CQ {t73} FK92"), true);      // establish parity/evidence
+            ClearSaid();
+            wc.TestFeedTargetMonitorsDecode(Dec($"{peer} {t73} RR73"), true);  // target -> peer RR73 (finishing)
+            Check("a target -> peer RR73 still narrates the fact (73/RR73 path unchanged)",
+                SaidHas($"{t73} to {peer}, RR73"), true);
+            wc.TestCancelStationWatchPendingStart();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SmartStartSeedNoImmediateCqTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
         }
     }
 
@@ -19390,13 +19518,19 @@ static class JimmyTests
 
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
 
-            // ══ 1. Arming Smart Start: "Waiting to work X." and never "Watching X." Operator
-            //      policy 2026-09-08: the live CQ that armed it is narrated as a truthful FACT
-            //      ("X calling CQ."), never a preliminary/dispatch-sounding "appears available". ══
+            // ══ 1. Arming Smart Start: "Waiting to work X." and never "Watching X." ══
+            //      2026-09-09 (supersedes the 2026-09-08 "arming CQ narrated as a fact"
+            //      sub-decision): the decode that armed Smart Start is the CACHED one the
+            //      operator just selected -- it must NOT re-announce "X calling CQ" at
+            //      activation, because that sounds like a fresh on-air CQ when it is not. A CQ
+            //      decoded AFTER activation (via the live feed) still announces it -- see the
+            //      dedicated SmartStartSeedNoImmediateCqTests. Still never a preliminary /
+            //      dispatch-sounding "appears available".
             Check("Smart Start captured", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
             Check("arming Smart Start speaks its own 'Waiting to work' line", SaidContains($"Waiting to work {target}"), true);
             Check("arming Smart Start does NOT emit Station Watch's 'Watching X' lifecycle line", SaidContains("Watching"), false);
-            Check("the arming CQ is narrated as a fact ('X calling CQ.')", SaidContains($"{target} calling CQ"), true);
+            Check("arming from a cached CQ does NOT re-announce 'X calling CQ' at activation",
+                SaidContains($"{target} calling CQ"), false);
             Check("NO dispatch-sounding 'appears available' from preliminary readiness", SaidContains("appears available"), false);
             Check("arming Smart Start does not turn on the receive-only Station Watch", wc.StationWatchActive, false);
             wc.TestCancelStationWatchPendingStart();   // clear the armed pending auto-start

@@ -42,6 +42,19 @@ namespace WSJTX_Controller
         // belt-and-suspenders pairing, not the only safety net.
         private bool _targetMonitorStartDispatching;
 
+        // True for exactly the duration of the synchronous SeedSelectedDecode call in
+        // TryCaptureSmartStart -- i.e. while Smart QSO Start is being ARMED from the cached
+        // decode the operator just selected. That decode is what the operator is already
+        // looking at; it must not narrate "<call> calling CQ" as though the target had just
+        // called on the air. The seed still records the decode for the reply, parity, and
+        // live-evidence/readiness -- only its CQ-opening narration is held. A genuinely new CQ
+        // decoded AFTER activation arrives via ObserveDecode (the live feed), not this
+        // synchronous seed, so it still sets and announces "calling CQ". A bool scoped to the
+        // one synchronous call is used rather than a decode-timestamp comparison because the
+        // seed and the live feed both run on the single UI thread and cannot interleave --
+        // there is no race and no clock-skew edge to reason about.
+        private bool _smartStartSeeding;
+
         // Snapshot-finality guard (2.0.64 transmit-safety fix). When a monitor decides it is
         // ready, the automatic REPLY is NOT sent from inside that decode pass -- the monitor is
         // parked here and the dispatch is deferred for a few 1 s SNAPSHOT polls. Nexus's decoder
@@ -193,7 +206,11 @@ namespace WSJTX_Controller
                 // WHICH station to work and nothing more, and Smart Start then waits for a real
                 // live decode before it can authorize any transmission (2.0.64: the V51WW failure
                 // was a ~54 s-old RR73 being manufactured into live "target available" evidence).
-                _smartStart.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall);
+                // Seeding is bracketed so a CQ classification derived from THIS cached decode
+                // does not narrate "<call> calling CQ" at activation (see _smartStartSeeding).
+                _smartStartSeeding = true;
+                try { _smartStart.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall); }
+                finally { _smartStartSeeding = false; }
                 // "Waiting to work {call}." is announced by SmartStartArmedEvent, raised from
                 // _smartStart.Start above via HandleTargetObservation -- no separate ShowMessage
                 // (that would be a near-duplicate on both the visible line and in speech).
@@ -642,6 +659,11 @@ namespace WSJTX_Controller
             switch (obs.Kind)
             {
                 case TargetObservationKind.TargetCq:
+                    // Do NOT narrate "calling CQ" while this came from the Smart QSO Start SEED
+                    // (the cached decode the operator just selected) -- it is not a fresh
+                    // on-air CQ. A CQ decoded AFTER activation arrives via the live feed
+                    // (ObserveDecode), where _smartStartSeeding is false, and still announces.
+                    if (_smartStartSeeding) return;
                     // Operator policy rule 1: a CQ from the target is the opening. Narrate the
                     // fact ("N4BP calling CQ.") -- "Calling {Target}." follows at dispatch.
                     // Shares SmartStartTargetBusy's config row + per-target RepeatSeconds fold,
