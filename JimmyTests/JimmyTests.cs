@@ -214,6 +214,7 @@ static class JimmyTests
         CallQueueRankerTieBreakTests();
         StationLastHeardAgeTests();
         AgeRowFieldTests();
+        LastHeardSortTests();
         CallQueueRankerCategoryWeightValidationTests();
         CallQueueRankerCallingPrioritiesTests();
         CallQueueRankerBeamRankTests();
@@ -8688,7 +8689,7 @@ static class JimmyTests
     // isn't covered here; these tests assume Category/Priority/Distance/Azimuth/Snr/
     // SequenceNumber are already set, matching how WsjtxClient.SortCalls() calls in.
     static EnqueueDecodeMessage MakeDecode(string call, WsjtxClient.CallCategory cat, int distance = 500,
-        int azimuth = 45, int snr = -10, int sequenceNumber = 1)
+        int azimuth = 45, int snr = -10, int sequenceNumber = 1, DateTime? lastHeardUtc = null)
     {
         return new EnqueueDecodeMessage
         {
@@ -8698,6 +8699,7 @@ static class JimmyTests
             Azimuth = azimuth,
             Snr = snr,
             SequenceNumber = sequenceNumber,
+            LastHeardUtc = lastHeardUtc ?? default,
         };
     }
 
@@ -8735,17 +8737,35 @@ static class JimmyTests
         Console.WriteLine("\n── CallQueueRanker: DEFAULT-category Sort Methods ──");
         var ranker = new CallQueueRanker();
 
-        // CALL_ORDER: oldest (lowest SequenceNumber) first.
+        // CALL_ORDER: purely arrival order -- oldest (lowest SequenceNumber) first. Unchanged
+        // by the 2026-09-09 last-heard sort work.
         var older = MakeDecode("K1OLD", WsjtxClient.CallCategory.DEFAULT, sequenceNumber: 1);
         var newer = MakeDecode("K2NEW", WsjtxClient.CallCategory.DEFAULT, sequenceNumber: 2);
         ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.CALL_ORDER }, null);
         ranker.SetRank(older); ranker.SetRank(newer);
         Check("CALL_ORDER: oldest (lower SequenceNumber) ranks first", older.Rank > newer.Rank, true);
 
-        // MOST_RECENT: newest (highest SequenceNumber) first.
+        // MOST_RECENT (2026-09-09): "Most recent first" now means the freshest station by the
+        // authoritative last-heard value, NOT SequenceNumber. Same label, same enum value 1.
+        var heardLongAgo = MakeDecode("K1STALE", WsjtxClient.CallCategory.DEFAULT, sequenceNumber: 9,
+            lastHeardUtc: DateTime.UtcNow.AddMinutes(-3));
+        var heardJustNow = MakeDecode("K2FRESH", WsjtxClient.CallCategory.DEFAULT, sequenceNumber: 1,
+            lastHeardUtc: DateTime.UtcNow);
         ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.MOST_RECENT }, null);
-        ranker.SetRank(older); ranker.SetRank(newer);
-        Check("MOST_RECENT: newest (higher SequenceNumber) ranks first", newer.Rank > older.Rank, true);
+        ranker.SetRank(heardLongAgo); ranker.SetRank(heardJustNow);
+        Check("MOST_RECENT: freshest station ranks first, regardless of SequenceNumber",
+            heardJustNow.Rank > heardLongAgo.Rank, true);
+
+        // OLDEST_FIRST: the single opposite -- same authoritative last-heard value, other way.
+        ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.OLDEST_FIRST }, null);
+        ranker.SetRank(heardLongAgo); ranker.SetRank(heardJustNow);
+        Check("OLDEST_FIRST: least-recently-heard station ranks first",
+            heardLongAgo.Rank > heardJustNow.Rank, true);
+
+        // Last-heard scores stay well below the non-DEFAULT category tier band, so a fresh
+        // ordinary CQ never outranks a higher-priority station just for being newer.
+        Check("MOST_RECENT score for a just-heard station is below NonDefaultTierBase",
+            CallQueueRanker.LastHeardBucket(DateTime.UtcNow) < CallQueueRanker.NonDefaultTierBase, true);
 
         // DIST_DECR: farthest first (descending distance down the list).
         var near = MakeDecode("K3NEAR", WsjtxClient.CallCategory.DEFAULT, distance: 100);
@@ -8776,16 +8796,18 @@ static class JimmyTests
     {
         Console.WriteLine("\n── CallQueueRanker: Tie-break Ordering (Compare/CompareRank) ──");
         var ranker = new CallQueueRanker();
-        // Primary MOST_RECENT (tied), secondary DIST_INCR breaks the tie.
+        // Primary MOST_RECENT (both stations tie -- same last-heard), secondary DIST_INCR
+        // breaks the tie.
         ranker.ApplySortOrder(new List<WsjtxClient.RankMethods>
             { WsjtxClient.RankMethods.MOST_RECENT, WsjtxClient.RankMethods.DIST_INCR }, null);
 
-        var closeStation = MakeDecode("K1CLOSE", WsjtxClient.CallCategory.DEFAULT, distance: 200, sequenceNumber: 5);
-        var farStation   = MakeDecode("K2FAR",   WsjtxClient.CallCategory.DEFAULT, distance: 3000, sequenceNumber: 5);
+        var sameHeard = DateTime.UtcNow.AddSeconds(-20);
+        var closeStation = MakeDecode("K1CLOSE", WsjtxClient.CallCategory.DEFAULT, distance: 200, sequenceNumber: 5, lastHeardUtc: sameHeard);
+        var farStation   = MakeDecode("K2FAR",   WsjtxClient.CallCategory.DEFAULT, distance: 3000, sequenceNumber: 5, lastHeardUtc: sameHeard);
         ranker.SetRank(closeStation);
         ranker.SetRank(farStation);
 
-        Check("Tied primary sort (equal SequenceNumber) produces equal Rank",
+        Check("Tied primary sort (equal last-heard) produces equal Rank",
               closeStation.Rank == farStation.Rank, true);
         int cmp = ranker.Compare(closeStation, farStation, null, false);
         Check("Compare: closer station (DIST_INCR secondary) sorts before farther one", cmp < 0, true);
@@ -8894,6 +8916,74 @@ static class JimmyTests
         CheckStr("row builder: age first drops its leading comma",
             RowFormatter.BuildOrderedRow(fieldMap, new List<string> { "age", "callp" }, "FB"),
             "3 periods, K 1 A B C");
+    }
+
+    // P3 (2026-09-09): "Most recent first" re-scored on the authoritative last-heard value
+    // (not SequenceNumber), plus the single new opposite "Oldest first". MOST_RECENT keeps its
+    // label, its enum value (1), and its persistence id ("most_recent") so an existing saved
+    // config keeps loading and now means "freshest station first".
+    static void LastHeardSortTests()
+    {
+        Console.WriteLine("\n── Sort by last heard: Most recent first / Oldest first ──");
+
+        // Compatibility: enum value, label, and persistence id are all preserved.
+        Check("MOST_RECENT enum value is unchanged (1)", (int)WsjtxClient.RankMethods.MOST_RECENT == 1, true);
+        Check("OLDEST_FIRST is appended after the AZ block (value > AZ_NWQUAD)",
+            (int)WsjtxClient.RankMethods.OLDEST_FIRST > (int)WsjtxClient.RankMethods.AZ_NWQUAD, true);
+        CheckStr("MOST_RECENT persistence id round-trips as 'most_recent'",
+            Controller.MethodToRankId(WsjtxClient.RankMethods.MOST_RECENT), "most_recent");
+        CheckStr("OLDEST_FIRST persistence id is 'oldest_first'",
+            Controller.MethodToRankId(WsjtxClient.RankMethods.OLDEST_FIRST), "oldest_first");
+        Check("'most_recent' still parses back to MOST_RECENT (old configs keep loading)",
+            Controller.RankIdToMethod("most_recent", out var mr) && mr == WsjtxClient.RankMethods.MOST_RECENT, true);
+        Check("'oldest_first' parses to OLDEST_FIRST",
+            Controller.RankIdToMethod("oldest_first", out var of) && of == WsjtxClient.RankMethods.OLDEST_FIRST, true);
+
+        var ranker = new CallQueueRanker();
+
+        // Priority/category tier still wins: a fresh ordinary CQ must NOT outrank a
+        // higher-priority station just for being newer.
+        ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.MOST_RECENT }, null);
+        var freshOrdinary = MakeDecode("K1CQ", WsjtxClient.CallCategory.DEFAULT, lastHeardUtc: DateTime.UtcNow);
+        var staleNewDxcc  = MakeDecode("K2DX", WsjtxClient.CallCategory.NEW_COUNTRY, lastHeardUtc: DateTime.UtcNow.AddMinutes(-5));
+        ranker.SetRank(freshOrdinary);
+        ranker.SetRank(staleNewDxcc);
+        Check("priority tier outranks freshness: a stale New-DXCC still ranks above a fresh ordinary CQ",
+            staleNewDxcc.Rank > freshOrdinary.Rank, true);
+
+        // Deterministic tie-break: equal last-heard -> older SequenceNumber sorts first (the
+        // existing final CALL_ORDER fallback, unchanged).
+        var t = DateTime.UtcNow.AddSeconds(-30);
+        var a = MakeDecode("K3AAA", WsjtxClient.CallCategory.DEFAULT, distance: 500, sequenceNumber: 1, lastHeardUtc: t);
+        var b = MakeDecode("K4BBB", WsjtxClient.CallCategory.DEFAULT, distance: 500, sequenceNumber: 2, lastHeardUtc: t);
+        ranker.SetRank(a);
+        ranker.SetRank(b);
+        Check("equal last-heard -> equal Rank", a.Rank == b.Rank, true);
+        Check("equal last-heard tie broken deterministically by SequenceNumber (older first)",
+            ranker.Compare(a, b, null, false) < 0, true);
+
+        // Unstamped last-heard: an impossible state for a QUEUED station (CallQueueStore.AddCall
+        // always stamps on entry), so this is only a defensive check that the ranker is
+        // deterministic for it -- two unstamped decodes tie on last-heard and fall through to
+        // the SequenceNumber tie-break rather than producing an unstable order.
+        ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.OLDEST_FIRST }, null);
+        var unk1 = MakeDecode("K5UNK", WsjtxClient.CallCategory.DEFAULT, sequenceNumber: 1);
+        var unk2 = MakeDecode("K6UNK", WsjtxClient.CallCategory.DEFAULT, sequenceNumber: 2);
+        ranker.SetRank(unk1);
+        ranker.SetRank(unk2);
+        Check("Oldest first: two unstamped decodes tie on last-heard", unk1.Rank == unk2.Rank, true);
+        Check("Oldest first: the tie is broken deterministically by SequenceNumber",
+            ranker.Compare(unk1, unk2, null, false) < 0, true);
+
+        // SortDependsOnLastHeard drives the deferred one-per-period re-sort.
+        ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.MOST_RECENT }, null);
+        Check("SortDependsOnLastHeard: true when MOST_RECENT is primary", ranker.SortDependsOnLastHeard(), true);
+        ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.DIST_INCR, WsjtxClient.RankMethods.OLDEST_FIRST }, null);
+        Check("SortDependsOnLastHeard: true when OLDEST_FIRST is a tie-breaker", ranker.SortDependsOnLastHeard(), true);
+        ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.DIST_INCR }, null);
+        Check("SortDependsOnLastHeard: false for a distance-only sort", ranker.SortDependsOnLastHeard(), false);
+        ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.MOST_RECENT }, WsjtxClient.RankMethods.AZ_NQUAD);
+        Check("SortDependsOnLastHeard: false in beam mode (ranks by heading only)", ranker.SortDependsOnLastHeard(), false);
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()

@@ -4923,12 +4923,15 @@ namespace WSJTX_Controller
             return null;
         }
 
-        private static bool RankIdToMethod(string id, out WsjtxClient.RankMethods method)
+        // internal (not private): JimmyTests exercises the rank-id round trip directly
+        // (InternalsVisibleTo, see AssemblyInfo.Testing.cs) to prove "most_recent" still loads.
+        internal static bool RankIdToMethod(string id, out WsjtxClient.RankMethods method)
         {
             switch (id?.ToLowerInvariant())
             {
-                case "call_order":  method = WsjtxClient.RankMethods.CALL_ORDER;  return true;
-                case "most_recent": method = WsjtxClient.RankMethods.MOST_RECENT; return true;
+                case "call_order":   method = WsjtxClient.RankMethods.CALL_ORDER;   return true;
+                case "most_recent":  method = WsjtxClient.RankMethods.MOST_RECENT;  return true;
+                case "oldest_first": method = WsjtxClient.RankMethods.OLDEST_FIRST; return true;
                 case "dist_near":   method = WsjtxClient.RankMethods.DIST_INCR;   return true;
                 case "dist_far":    method = WsjtxClient.RankMethods.DIST_DECR;   return true;
                 case "snr_weak":    method = WsjtxClient.RankMethods.SNR_INCR;    return true;
@@ -4954,12 +4957,13 @@ namespace WSJTX_Controller
             }
         }
 
-        private static string MethodToRankId(WsjtxClient.RankMethods method)
+        internal static string MethodToRankId(WsjtxClient.RankMethods method)
         {
             switch (method)
             {
-                case WsjtxClient.RankMethods.CALL_ORDER:  return "call_order";
-                case WsjtxClient.RankMethods.MOST_RECENT: return "most_recent";
+                case WsjtxClient.RankMethods.CALL_ORDER:   return "call_order";
+                case WsjtxClient.RankMethods.MOST_RECENT:  return "most_recent";
+                case WsjtxClient.RankMethods.OLDEST_FIRST: return "oldest_first";
                 case WsjtxClient.RankMethods.DIST_INCR:   return "dist_near";
                 case WsjtxClient.RankMethods.DIST_DECR:   return "dist_far";
                 case WsjtxClient.RankMethods.SNR_INCR:    return "snr_weak";

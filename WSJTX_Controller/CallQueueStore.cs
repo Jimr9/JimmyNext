@@ -51,7 +51,15 @@ namespace WSJTX_Controller
                 // happens to carry an older timestamp than what we already have never moves
                 // last-heard backwards.
                 var heardUtc = DecodeUtc(msg);
-                if (dmsg.LastHeardUtc < heardUtc) dmsg.LastHeardUtc = heardUtc;
+                if (dmsg.LastHeardUtc < heardUtc)
+                {
+                    dmsg.LastHeardUtc = heardUtc;
+                    // If the queue is sorted by last-heard (Most recent / Oldest first), this
+                    // refresh can change the order. Re-sort is deferred to the receive-period
+                    // boundary (DirectApplyDecodes) so a whole period's decodes cause at most
+                    // one re-sort. The improvement branches below re-insert by rank anyway.
+                    if (_wc.Ranker.SortDependsOnLastHeard()) _wc.lastHeardResortPending = true;
+                }
 
                 if (WsjtxMessage.ToCall(msg.Message) == _wc.myCall && WsjtxMessage.ToCall(dmsg.Message) == _wc.myCall && WsjtxMessage.Progress(msg.Message) > WsjtxMessage.Progress(dmsg.Message))
                 {

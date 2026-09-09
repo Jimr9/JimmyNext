@@ -2445,6 +2445,16 @@ namespace WSJTX_Controller
                 Notify?.OnPeriodBoundary();
                 FeedTargetMonitorsPeriodComplete(_directLastSlotSeen, directTargetMonitorEvenSlot, transmitting);
 
+                // One re-sort per period if a last-heard-refresh changed the order and the
+                // active sort depends on it (Most recent / Oldest first). SortCalls() also
+                // refreshes the queue displays; ShowQueue preserves the operator's selection
+                // by callsign across the reorder.
+                if (lastHeardResortPending)
+                {
+                    lastHeardResortPending = false;
+                    SortCalls();
+                }
+
                 // Premature "no response" fix (see _directNoResponseAwaitingCall). The receive
                 // opportunity's slot has advanced -- but Nexus can still deliver that period's
                 // decodes across the next ~few snapshots (5N0YEN live audit). Do NOT finalize

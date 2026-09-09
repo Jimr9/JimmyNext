@@ -18,12 +18,16 @@ namespace WSJTX_Controller
         // ── Static data ────────────────────────────────────────────────────────
         private static readonly SortEntry[] DefaultSortEntries = new SortEntry[]
         {
-            new SortEntry(WsjtxClient.RankMethods.CALL_ORDER,  "Order received, oldest first"),
-            new SortEntry(WsjtxClient.RankMethods.MOST_RECENT, "Most recent first"),
-            new SortEntry(WsjtxClient.RankMethods.DIST_INCR,   "Nearest callers first"),
-            new SortEntry(WsjtxClient.RankMethods.DIST_DECR,   "Farthest callers first"),
-            new SortEntry(WsjtxClient.RankMethods.SNR_INCR,    "Weakest signal first"),
-            new SortEntry(WsjtxClient.RankMethods.SNR_DECR,    "Strongest signal first"),
+            new SortEntry(WsjtxClient.RankMethods.CALL_ORDER,   "Order received, oldest first"),
+            // "Most recent first" now means freshest station first, by the authoritative
+            // last-heard value; "Oldest first" is its single opposite (same value, other
+            // direction). "Order received, oldest first" above is still purely arrival order.
+            new SortEntry(WsjtxClient.RankMethods.MOST_RECENT,  "Most recent first"),
+            new SortEntry(WsjtxClient.RankMethods.OLDEST_FIRST, "Oldest first"),
+            new SortEntry(WsjtxClient.RankMethods.DIST_INCR,    "Nearest callers first"),
+            new SortEntry(WsjtxClient.RankMethods.DIST_DECR,    "Farthest callers first"),
+            new SortEntry(WsjtxClient.RankMethods.SNR_INCR,     "Weakest signal first"),
+            new SortEntry(WsjtxClient.RankMethods.SNR_DECR,     "Strongest signal first"),
         };
 
         private static readonly BeamEntry[] BeamEntries = new BeamEntry[]

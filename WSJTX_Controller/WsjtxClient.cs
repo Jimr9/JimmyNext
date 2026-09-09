@@ -664,7 +664,10 @@ namespace WSJTX_Controller
         {
             //"sort order"
             CALL_ORDER,
-            MOST_RECENT,
+            MOST_RECENT,    // 2026-09-09: now orders by real station freshness (the
+                            // authoritative last-heard value), not SequenceNumber. Kept at
+                            // value 1 and its "Most recent first" label so an existing saved
+                            // config keeps loading and meaning "freshest station first".
             DIST_INCR,
             DIST_DECR,
             SNR_INCR,
@@ -676,11 +679,23 @@ namespace WSJTX_Controller
             AZ_SQUAD,
             AZ_SWQUAD,
             AZ_WQUAD,
-            AZ_NWQUAD   //AZ order important
+            AZ_NWQUAD,  //AZ order important
+            // Appended after the AZ block on purpose -- the AZ_* values must stay contiguous
+            // at 6..13 for the beam-heading arithmetic (CalcAzRank) and the "not a beam
+            // method" range checks. OLDEST_FIRST is the single opposite of MOST_RECENT:
+            // same authoritative last-heard value, oldest station first.
+            OLDEST_FIRST
         }
         // Ranking config (category weights, calling priorities, sort/rank-method state) now
         // lives in Ranker (CallQueueRanker.cs) so it's unit-testable outside a live Form.
         public CallQueueRanker Ranker = new CallQueueRanker();
+
+        // Set by CallQueueStore.UpdateCall when an already-queued station's authoritative
+        // last-heard advances AND the active sort order depends on it (Most recent / Oldest
+        // first, primary or tie-break). Consumed once per receive-period boundary in
+        // DirectApplyDecodes -- one re-sort per period, not one per decode -- so the queue
+        // re-orders only when the selected sorting configuration actually requires it.
+        internal bool lastHeardResortPending;
 
         // User-defined always-wanted callsigns. Calls matching this set get ALWAYS_WANTED category.
         public HashSet<string> wantedCalls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

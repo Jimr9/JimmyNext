@@ -30,6 +30,23 @@ namespace WSJTX_Controller
         public static int BeamWidth = 90;
         private const int EarthDiameter = 40000;
 
+        // "Most recent first" / "Oldest first" order by the authoritative last-heard value
+        // (EnqueueDecodeMessage.LastHeardUtc) through this ONE pure helper, so the sort POLICY
+        // stays decoupled from the Age/last-heard implementation and can be changed later.
+        // Returns a nominal-15-second "period bucket" since a fixed 2025 epoch: monotonic in
+        // real time, roughly period-granular, and always far below NonDefaultTierBase (~3.5M
+        // in 2026, +~2M/year) so DEFAULT-tier rank arithmetic is unaffected. Unstamped
+        // (default) last-heard -> 0, i.e. treated as unknown, never "infinitely old".
+        private static readonly long LastHeardEpochTicks = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc).Ticks;
+        public static int LastHeardBucket(DateTime lastHeardUtc)
+        {
+            if (lastHeardUtc.Ticks <= LastHeardEpochTicks) return 0;
+            long bucket = (lastHeardUtc.Ticks - LastHeardEpochTicks) / TimeSpan.TicksPerSecond / 15;
+            if (bucket < 0) return 0;
+            if (bucket > int.MaxValue) return int.MaxValue;
+            return (int)bucket;
+        }
+
         // Category tier levels (higher = ranked earlier in queue).
         // DEFAULT is always tier 0 (uses sort scores, not this table).
         public Dictionary<WsjtxClient.CallCategory, int> categoryWeight = new Dictionary<WsjtxClient.CallCategory, int>
@@ -110,7 +127,9 @@ namespace WSJTX_Controller
         public void RankMethodIdxChanged(int idx)
         {
             WsjtxClient.RankMethods method = (WsjtxClient.RankMethods)idx;
-            if (idx >= (int)WsjtxClient.RankMethods.AZ_NQUAD)
+            // Only the contiguous AZ_* block (6..13) is a beam heading -- a value past it
+            // (OLDEST_FIRST) is an ordinary sort method, not a beam direction.
+            if (idx >= (int)WsjtxClient.RankMethods.AZ_NQUAD && idx <= (int)WsjtxClient.RankMethods.AZ_NWQUAD)
                 ApplySortOrder(new List<WsjtxClient.RankMethods>(rankOrderList), method);
             else
                 ApplySortOrder(new List<WsjtxClient.RankMethods> { method }, null);
@@ -139,12 +158,25 @@ namespace WSJTX_Controller
             return rankOrderList.Count > 0 && rankOrderList[0] == method;
         }
 
+        // True when the current sort order depends on the authoritative last-heard value
+        // (MOST_RECENT / OLDEST_FIRST) as primary sort OR as a tie-breaker -- so a queued
+        // station's last-heard refresh should trigger a re-sort. Beam mode ranks purely by
+        // heading, so last-heard never affects order there.
+        public bool SortDependsOnLastHeard() =>
+            !rankBeamMethod.HasValue
+            && (rankOrderList.Contains(WsjtxClient.RankMethods.MOST_RECENT)
+                || rankOrderList.Contains(WsjtxClient.RankMethods.OLDEST_FIRST));
+
         public int RegularSortScore(WsjtxClient.RankMethods method, EnqueueDecodeMessage d)
         {
             switch (method)
             {
                 case WsjtxClient.RankMethods.CALL_ORDER:  return -1 * d.SequenceNumber;
-                case WsjtxClient.RankMethods.MOST_RECENT: return d.SequenceNumber;
+                // 2026-09-09: freshest station first (higher bucket -> higher rank -> earlier
+                // in the descending sort). SequenceNumber remains the deterministic final
+                // tie-breaker in Compare/CompareRank when two stations' last-heard are equal.
+                case WsjtxClient.RankMethods.MOST_RECENT:  return LastHeardBucket(d.LastHeardUtc);
+                case WsjtxClient.RankMethods.OLDEST_FIRST: return -LastHeardBucket(d.LastHeardUtc);
                 // Stage A6: Distance now comes from d.EffectiveClassification() (GeoMath,
                 // via ClassificationEngine) instead of directly off the wire.
                 case WsjtxClient.RankMethods.DIST_DECR:   return d.EffectiveClassification().Distance;
