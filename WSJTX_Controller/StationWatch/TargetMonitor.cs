@@ -262,6 +262,20 @@ namespace WSJTX_Controller
             return DateTime.UtcNow;
         }
 
+        // Shared with WsjtxClient.TryCaptureSmartStart. Is an operator-selected decode still
+        // fresh enough to act on immediately -- the SAME current-or-immediately-preceding-period
+        // window SeedSelectedDecode uses to decide a seed counts as genuine live evidence? A
+        // selection older than this identifies WHICH station only; the target may well have moved
+        // on since (KA1BMF live-radio audit, 2026-09-08: a ~50 s-old "to us" decode was selected
+        // while the target had already started working another station). `mode` picks the FT8 /
+        // FT4 T/R period length; `nowUtc` is the selection instant.
+        public static bool IsSelectionDecodeFresh(EnqueueDecodeMessage d, string mode, DateTime nowUtc)
+        {
+            if (d == null) return false;
+            double ageSeconds = Math.Max(0.0, (nowUtc - DecodeUtcOrNow(d)).TotalSeconds);
+            return ageSeconds <= PeriodSecondsForMode(mode) * SeedFreshLimitPeriods;
+        }
+
         // Starts the watch, or -- if one is already active -- explicitly replaces it. Either way
         // this raises exactly ONE fact, WatchStarted for the NEW call (spec: "explicitly replace
         // it and announce the new watched station" -- a single clean announcement, never a

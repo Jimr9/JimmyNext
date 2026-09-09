@@ -402,6 +402,7 @@ static class JimmyTests
         SmartStartRedundantRecaptureKeepsProgressTests();
         SmartStartOperatorPolicy20260908Tests();
         SmartStartYieldsToOtherQsoTests();
+        ActivePartnerYieldAndStaleSelectionTests();
         TargetMonitorBusyExpirationAfterYieldTests();
         SmartStartRepeatLimitSpansYieldsTests();
         TargetMonitorAnswersUsWhileArmedTests();
@@ -17272,6 +17273,176 @@ static class JimmyTests
             WsjtxClient.TestQuiesceAllDirectClients();
             if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
             else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // KA1BMF 30m live-radio audit (2026-09-08). Two shared policy fixes, one test:
+    //  (1) Smart Start ENABLED: an operator selection whose stored decode is a STALE "to us"
+    //      line no longer bypasses Smart Start straight into ReplyTo -- it goes under Smart
+    //      Start management (which then waits / yields / hands off on live evidence). A FRESH
+    //      "to us" selection still replies immediately; a fresh non-"to us" selection is still
+    //      captured by Smart Start. Both unchanged.
+    //  (2) ANY active contact (Smart Start off, or a Smart Start QSO after hand-off): when a
+    //      FRESH live decode proves the active partner is sending a report / R-report / RRR to
+    //      a real third station, Jimmy yields the contact (HALT_TX + disable) before another
+    //      over. A partner -> peer RR73 / 73 (a close, not an exchange) does NOT trigger it,
+    //      and a report the partner sends TO US never triggers it.
+    static void ActivePartnerYieldAndStaleSelectionTests()
+    {
+        Console.WriteLine("\n── KA1BMF audit: stale \"to us\" selection -> Smart Start; active partner working another -> yield ──");
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+        List<string> Seen() { lock (seenLock) return new List<string>(seen); }
+        bool Saw(string p) => Seen().Exists(c => c.StartsWith(p));
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_KA1BMF_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevDb = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "KA1BMF", peer = "N1UL";
+
+            WsjtxClient MakeWc(out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetDirectConnected(true);
+                wc.TestSetMode("FT8");
+                return wc;
+            }
+
+            EnqueueDecodeMessage ToUs(double ageSeconds) => new EnqueueDecodeMessage
+            {
+                Message = $"{myCall} {target} -20",
+                RxDate = DateTime.UtcNow.Date,
+                SinceMidnight = DateTime.UtcNow.TimeOfDay - TimeSpan.FromSeconds(ageSeconds),
+                DeltaFrequency = 1500, Snr = -4,
+            };
+            EnqueueDecodeMessage FreshCq() => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {target} FN31",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+            EnqueueDecodeMessage Dec(string msg) => new EnqueueDecodeMessage { Message = msg, DeltaFrequency = 1500, Snr = -6 };
+
+            DirectSnapshot Snap(ulong slot, string decodeFrom = null, string decodeMsg = null)
+            {
+                string decodes = decodeFrom == null ? "" :
+                    @"{ ""from"": """ + decodeFrom + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 10.136, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"]
+                }");
+            }
+
+            // ── A. Smart Start ENABLED, FRESH non-"to us" selection -> captured by Smart Start ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = true;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));
+                Check("A: fresh CQ selection is captured by Smart Start (not an immediate reply)",
+                    wc.TestTryCaptureSmartStart(target, FreshCq()), true);
+                Check("A: ...Smart Start is armed on the target", wc.TestSmartStartTarget == target, true);
+            }
+
+            // ── A2. Smart Start ENABLED, STALE "to us" selection -> now MANAGED by Smart Start ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = true;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));
+                Check("A2: stale 'to us' selection no longer bypasses Smart Start into ReplyTo",
+                    wc.TestTryCaptureSmartStart(target, ToUs(50)), true);
+                Check("A2: ...Smart Start is armed on the target instead", wc.TestSmartStartTarget == target, true);
+                Check("A2: ...with NO live evidence yet (a stale seed is context only)",
+                    wc.TestSmartStartHasLiveEvidence, false);
+            }
+
+            // ── B. Smart Start ENABLED, FRESH "to us" selection -> still an immediate reply ──
+            {
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = true;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));
+                Check("B: fresh 'to us' selection still falls through to the normal ReplyTo path",
+                    wc.TestTryCaptureSmartStart(target, ToUs(1)), false);
+                Check("B: ...Smart Start was NOT armed", wc.TestSmartStartTarget == null, true);
+            }
+
+            // ── C. Smart Start OFF, ordinary active QSO: partner -> peer report -> YIELD ──
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = false;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(200));
+                wc.callInProg = target;                                   // an ordinary Enter-started QSO
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(201, target, $"{peer} {target} -10"));
+                PumpUntil(() => Saw("HALT_TX"), 2000);
+                Check("C: partner working a third station (report) -> HALT_TX sent", Saw("HALT_TX"), true);
+                Check("C: ...the contact is ended (callInProg cleared)", wc.callInProg == null, true);
+            }
+
+            // ── C2. Same, but partner -> peer RR73 (a QSO close) -> NO yield ──
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = false;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(300));
+                wc.callInProg = target;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(301, target, $"{peer} {target} RR73"));
+                System.Threading.Thread.Sleep(40);
+                Check("C2: partner -> peer RR73 (close, not an exchange) -> NO HALT_TX", Saw("HALT_TX"), false);
+                Check("C2: ...the contact is untouched", wc.callInProg == target, true);
+            }
+
+            // ── C3. Partner's report is addressed TO US -> NO yield ──
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = false;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(400));
+                wc.callInProg = target;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(401, target, $"{myCall} {target} R-10"));
+                System.Threading.Thread.Sleep(40);
+                Check("C3: partner's report is TO US -> NO yield", Saw("HALT_TX"), false);
+                Check("C3: ...the contact continues", wc.callInProg == target, true);
+            }
+
+            // ── D. Smart Start-STARTED QSO after hand-off: same shared protection ──
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = true;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(500));
+                Check("D: Smart Start armed on a fresh CQ", wc.TestTryCaptureSmartStart(target, FreshCq()), true);
+                wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FN31"), true);   // one live CQ (parity/evidence)
+                wc.callInProg = target;
+                wc.TestSmartStartEnterAwaitingEngagement();
+                wc.TestFeedTargetMonitorsDecode(Dec($"{myCall} {target} R-03"), true);   // target answers us -> hand-off
+                Check("D: Smart Start handed off (no longer active)", wc.TestSmartStartTarget == null, true);
+                Check("D: ...ordinary sequencer keeps callInProg", wc.callInProg == target, true);
+                lock (seenLock) seen.Clear();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(501, target, $"{peer} {target} -12"));
+                PumpUntil(() => Saw("HALT_TX"), 2000);
+                Check("D: after hand-off, partner working another -> same yield (HALT_TX)", Saw("HALT_TX"), true);
+                Check("D: ...contact ended", wc.callInProg == null, true);
+            }
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevDb == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb);
             try { File.Delete(tmpDb); } catch { }
         }
     }

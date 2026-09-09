@@ -1138,6 +1138,25 @@ namespace WSJTX_Controller
             _callQueueStore.AddCall(callInProg, replyDecode);
         }
 
+        // KA1BMF live-radio audit (2026-09-08). Our active partner is demonstrably working a
+        // third station -- a fresh signal report / R-report / RRR from it to a real peer, not to
+        // us. Cease our attempt the same ordered way Escape / Alt+H does: requeue the call while
+        // callInProg / replyDecode are still valid, end the contact (EndContact bumps
+        // _contactEpoch so an in-flight REPLY cannot re-commit), then HALT_TX + SET_TX_ENABLED 0,
+        // and tell the operator plainly. This is a real operating transition, not a narration
+        // change -- no further RF goes to that station. Shared by every active-contact origin
+        // (an ordinary Enter/queue QSO, and a Smart Start QSO after hand-off); the Smart Start
+        // calling phase keeps its own YieldSmartStartToOtherQso, which additionally tracks the
+        // cumulative Repeat Limit / standby rounds.
+        private void YieldActiveContactToOtherQso(string partner, string other)
+        {
+            DebugOutput($"{Time()} active partner '{partner}' is working '{other}' -- ceasing our call (no further TX to it)");
+            RequeueAbortedCall();
+            CancelQso();
+            HaltAndDisableTx();
+            StatusView.ShowMessage($"{partner} is working {other}; stopped calling", true);
+        }
+
         public bool EnableMode()              //cq/listen mode selected
         {
             HaltTuning();
@@ -1700,6 +1719,34 @@ namespace WSJTX_Controller
                     // TO DE PAYLOAD message; a bare 2-word short reply has no payload token.
                     string[] w = dmsg.Message.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                     otherPartyStage = w.Length >= 3 ? w[w.Length - 1] : null;
+
+                    // KA1BMF live-radio audit (2026-09-08): our active partner just sent a
+                    // SUBSTANTIVE exchange message -- a signal report, R-report, or RRR -- to a
+                    // real third station, not to us. A live decode row is always the current
+                    // receive period, so this is fresh proof the partner is working someone
+                    // else; Jimmy must not send another report over to it. Yield exactly the way
+                    // an operator Escape would (YieldActiveContactToOtherQso). One shared guard
+                    // for every active-contact origin -- an ordinary Enter/queue-started QSO and
+                    // a Smart Start QSO after hand-off alike. The Smart Start *calling* phase
+                    // keeps its own richer yield (ServiceSmartStartAwaitingEngagement ->
+                    // YieldSmartStartToOtherQso, which carries the cumulative Repeat Limit /
+                    // standby-round accounting and its own "standing by" narration), so it is
+                    // deliberately left to that path. A partner -> peer RR73 / 73 is a QSO
+                    // *close*, not an active exchange, and is never treated as busy evidence
+                    // here (Smart Start / Work Now still read it as an opening).
+                    if (_directConnected && !isSpecOp && otherPartyForCallInProg != null)
+                    {
+                        var partnerSem = dmsg.EffectiveSemantic(myCall);
+                        bool smartStartCallingThisTarget =
+                            _smartStart.IsActive && _smartStart.AwaitingEngagement
+                            && string.Equals(callInProg, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase);
+                        if ((partnerSem.IsReport || partnerSem.IsRReport || partnerSem.IsRrr)
+                            && !partnerSem.AddressedToMe
+                            && !smartStartCallingThisTarget)
+                        {
+                            YieldActiveContactToOtherQso(callInProg, otherPartyForCallInProg);
+                        }
+                    }
                 }
             }
 

@@ -126,19 +126,25 @@ namespace WSJTX_Controller
             if (!ctrl.smartQsoStartEnabled) return false;
             if (string.IsNullOrEmpty(call) || dmsg == null) return false;
 
-            // An Enter on a decode that is already addressed to OUR callsign means "answer them
-            // now", not "wait for a good moment to start" -- fall through to the normal ReplyTo
-            // path (this is how Enter behaved before Smart Start existed). Smart Start is only for
-            // timing the START of a QSO with a station that is not yet working us.
+            // An Enter on a decode that is already addressed to OUR callsign normally means
+            // "answer them now", not "wait for a good moment to start" -- fall through to the
+            // normal ReplyTo path (how Enter behaved before Smart Start existed). BUT only when
+            // that decode is still FRESH. A stale queued/list "to us" selection (KA1BMF live
+            // radio, 2026-09-08 -- ~50 s old; the target had since started working another
+            // station on a different frequency) is no longer proof the target is calling us.
+            // Hand a stale "to us" selection to Smart Start management like any other stale
+            // selection: SeedSelectedDecode records it as context only, Smart Start waits for
+            // live evidence, and it still hands straight off to the normal QSO sequencer the
+            // instant the target really does address us again (HandOffSmartStartWhileWaiting) --
+            // or waits / yields while the target is demonstrably busy.
             // Nexus modernization Stage 8: "addressed to us" comes from EffectiveSemantic
             // (Nexus's parse when the cutover is on). Stage 5 proved AddressedToMe identical to
-            // WsjtxMessage.ToCall(..)==myCall for every valid decode; a queued/selected decode
-            // is always a valid one. This is the only parser call left in the Smart Start
-            // dispatch/arm/revalidate path -- RevalidateForAutoStart / AutoStartCheck and the
-            // 3-poll finality deferral all run on TargetMonitor STATE (Stage 7a already fed that
-            // from Nexus). The state machine, thresholds, yield/retry, Repeat Limit, and the
-            // 2.0.65 premature-TX guards are unchanged.
-            if (dmsg.EffectiveSemantic(myCall).AddressedToMe)
+            // WsjtxMessage.ToCall(..)==myCall for every valid decode. RevalidateForAutoStart /
+            // AutoStartCheck and the 3-poll finality deferral all run on TargetMonitor STATE.
+            // The state machine, thresholds, yield/retry, Repeat Limit, and the 2.0.65
+            // premature-TX guards are unchanged.
+            if (dmsg.EffectiveSemantic(myCall).AddressedToMe
+                && TargetMonitor.IsSelectionDecodeFresh(dmsg, mode, DateTime.UtcNow))
                 return false;
 
             _smartStart.SilenceThreshold = ctrl.smartStartSilencePeriods;
