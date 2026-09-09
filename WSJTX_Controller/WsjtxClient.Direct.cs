@@ -1764,6 +1764,7 @@ namespace WSJTX_Controller
             {
                 _directNoResponseAwaitingCall = callInProg;
                 _directNoResponseOpportunityComplete = false;
+                _directNoResponseFinalityPollsRemaining = 0;   // countdown starts at the next period boundary
             }
 
             // Mirrors the transmitting assignment above -- same root cause, same fix: without
@@ -2143,6 +2144,15 @@ namespace WSJTX_Controller
         // both stay on the transmitting->false edge, unchanged).
         private string _directNoResponseAwaitingCall;
         private bool _directNoResponseOpportunityComplete;
+        // 5N0YEN live-radio audit (2026-09-08): the slot number advancing is only the FIRST of
+        // the ~3 snapshots Nexus can spread one receive period's decodes across (same reason the
+        // deferred Smart Start auto-start holds for PendingAutoStartFinalityPolls). a7caf4a
+        // finalized "no response" on that first snapshot, so a target reply / activity decode
+        // landing a poll or two later still arrived after "no response" had been committed. When
+        // the period boundary is reached this is armed instead of finalizing immediately, and
+        // "no response" is only committed once the window has elapsed with the target still
+        // unheard and the radio still not transmitting.
+        private int _directNoResponseFinalityPollsRemaining;
 
         // "No response" is only truthful once the receive opportunity that FOLLOWS our last real
         // over has actually completed with its decodes processed. When we are not currently
@@ -2423,21 +2433,51 @@ namespace WSJTX_Controller
                 Notify?.OnPeriodBoundary();
                 FeedTargetMonitorsPeriodComplete(_directLastSlotSeen, directTargetMonitorEvenSlot, transmitting);
 
-                // Premature "no response" fix (see _directNoResponseAwaitingCall). This receive
-                // opportunity is now complete with its decodes processed. If Jimmy was NOT
-                // transmitting during it -- a genuine listening opportunity, a yielded nominal
-                // TX-side slot included -- a still-unanswered call may now legitimately render
-                // "no response". Force one status render so it lands right here, right after
-                // decode processing, rather than a whole cycle later at the next transmit-end.
+                // Premature "no response" fix (see _directNoResponseAwaitingCall). The receive
+                // opportunity's slot has advanced -- but Nexus can still deliver that period's
+                // decodes across the next ~few snapshots (5N0YEN live audit). Do NOT finalize
+                // "no response" here; arm the finality countdown so a late target
+                // reply / activity decode is processed FIRST. It is finalized below once the
+                // window has elapsed. A yielded nominal TX-side slot (radio never keyed) still
+                // counts as a listening opportunity -- the test is the real radio.Transmitting
+                // flag, not slot parity.
                 if (_directNoResponseAwaitingCall != null)
                 {
                     if (!string.Equals(_directNoResponseAwaitingCall, callInProg, StringComparison.OrdinalIgnoreCase))
-                        _directNoResponseAwaitingCall = null;   // contact ended or moved to another call
-                    else if (!transmitting)
                     {
-                        _directNoResponseOpportunityComplete = true;
-                        ShowStatus();
+                        _directNoResponseAwaitingCall = null;   // contact ended or moved to another call
+                        _directNoResponseFinalityPollsRemaining = 0;
                     }
+                    else if (!transmitting
+                             && !_directNoResponseOpportunityComplete
+                             && _directNoResponseFinalityPollsRemaining == 0)
+                    {
+                        // +1: this same tick's decrement below consumes the arm poll, leaving
+                        // PendingAutoStartFinalityPolls further passes -- the same net window the
+                        // deferred Smart Start auto-start holds.
+                        _directNoResponseFinalityPollsRemaining = PendingAutoStartFinalityPolls + 1;
+                    }
+                }
+            }
+
+            // Finalize a deferred "no response" once the post-boundary decode-spread window has
+            // elapsed with the target still unheard this opportunity (5N0YEN live audit). Runs
+            // every DirectApplyDecodes pass -- AFTER this pass's decodes were ingested above -- so
+            // the last of Nexus's spread snapshots has been processed before "no response" is
+            // committed and spoken. Cancels (without finalizing) if the contact moved on or the
+            // radio keyed up again -- the next real transmit-end re-arms.
+            if (_directNoResponseFinalityPollsRemaining > 0)
+            {
+                if (_directNoResponseAwaitingCall == null
+                    || !string.Equals(_directNoResponseAwaitingCall, callInProg, StringComparison.OrdinalIgnoreCase)
+                    || transmitting)
+                {
+                    _directNoResponseFinalityPollsRemaining = 0;
+                }
+                else if (--_directNoResponseFinalityPollsRemaining == 0)
+                {
+                    _directNoResponseOpportunityComplete = true;
+                    ShowStatus();
                 }
             }
 
@@ -3245,6 +3285,20 @@ namespace WSJTX_Controller
         {
             otherPartyForCallInProg = string.IsNullOrEmpty(forCall) ? null : forCall;
             otherPartyStage = string.IsNullOrEmpty(stage) ? null : stage;
+            // Composition tests want the fragment rendered -- stamp it fresh so ShowStatus's
+            // recency gate (5N0YEN live audit) does not hide it. TestSetOtherPartyStale() covers
+            // the aged-out case.
+            otherPartyForCallInProgUtc = (otherPartyForCallInProg != null || otherPartyStage != null)
+                ? DateTime.UtcNow : default;
+        }
+
+        // Test-only: drive the aged-out "callInProg to <peer>" state -- set the fields but stamp
+        // them older than ShowStatus's recency window so the fragment must NOT render.
+        internal void TestSetOtherPartyStale(string forCall, string stage)
+        {
+            otherPartyForCallInProg = string.IsNullOrEmpty(forCall) ? null : forCall;
+            otherPartyStage = string.IsNullOrEmpty(stage) ? null : stage;
+            otherPartyForCallInProgUtc = DateTime.UtcNow.AddSeconds(-120);
         }
 
         // Test-only: newSelection is private, set true only by the real select-a-call paths

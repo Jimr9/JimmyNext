@@ -1509,7 +1509,19 @@ namespace WSJTX_Controller
                                 // otherPartyStage's own field comment). Either half can be
                                 // missing: an unresolved <...> other-call leaves only the
                                 // message, a 2-word short reply leaves only the name.
-                                if (curCall != null && (otherPartyForCallInProg != null || otherPartyStage != null))
+                                // 5N0YEN live-radio audit (2026-09-08): weave the "callInProg to
+                                // <peer>, <payload>" fragment in ONLY while that decode is still
+                                // current -- within ~1.5 T/R periods. Older than that, the target
+                                // has not been heard working anyone for a full listen cycle, so a
+                                // stale peer fact must not keep riding every render (it was
+                                // gluing "5N0YEN to R6TA, 73" onto every "no response" line for
+                                // the whole 20-call effort). A fresh decode from the target
+                                // re-stamps otherPartyForCallInProgUtc; a target CQ / turn-to-us
+                                // clears it outright (ProcessDecodeMsg).
+                                double otherFreshMs = 1.5 * (trPeriod ?? 15000);
+                                bool otherPartyFresh = otherPartyForCallInProgUtc != default
+                                    && (DateTime.UtcNow - otherPartyForCallInProgUtc).TotalMilliseconds <= otherFreshMs;
+                                if (curCall != null && otherPartyFresh && (otherPartyForCallInProg != null || otherPartyStage != null))
                                 {
                                     string otherWhat = otherPartyStage != null ? SpacifyPayload(otherPartyStage) : "";
                                     // Open with the active call AND its " selected" marker so

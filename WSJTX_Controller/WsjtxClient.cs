@@ -331,6 +331,13 @@ namespace WSJTX_Controller
         // decode entirely) and cleared whenever callInProg changes or replies to us again.
         private string otherPartyForCallInProg = null;
         private string otherPartyStage = null;
+        // UTC of the decode that last set otherPartyForCallInProg/otherPartyStage. ShowStatus
+        // only weaves the "callInProg to <peer>, <payload>" fragment in while it is still current
+        // (5N0YEN live-radio audit, 2026-09-08): without this the field pinned a single "5N0YEN
+        // to R6TA, 73" decode and ShowStatus glued it onto every render -- including every
+        // "no response" line -- for the whole 20-call effort, long after the target had CQ'd and
+        // moved to a different peer.
+        private DateTime otherPartyForCallInProgUtc = default;
         private bool restartQueue = false;
 
         private ulong? lastDialFrequency = null;
@@ -1717,12 +1724,16 @@ namespace WSJTX_Controller
             // callInProg itself changes (SetCallInProg).
             if (callInProg != null && string.Equals(deCall, callInProg, StringComparison.OrdinalIgnoreCase))
             {
-                if (toMyCall)
+                if (toMyCall || dmsg.IsCQ())
                 {
+                    // Turned to us, or now calling CQ -> it is no longer working that other
+                    // station, so the "working <peer>" fact is stale immediately (5N0YEN live
+                    // audit: 5N0YEN CQ'd mid-effort and the old "to R6TA, 73" kept rendering).
                     otherPartyForCallInProg = null;
                     otherPartyStage = null;
+                    otherPartyForCallInProgUtc = default;
                 }
-                else if (!dmsg.IsCQ() && toCall != null)
+                else if (toCall != null)
                 {
                     string other = WsjtxMessage.RemoveAngleBrackets(toCall);
                     otherPartyForCallInProg = (string.IsNullOrEmpty(other) || other.Contains(".")) ? null : other;
@@ -1732,6 +1743,12 @@ namespace WSJTX_Controller
                     // TO DE PAYLOAD message; a bare 2-word short reply has no payload token.
                     string[] w = dmsg.Message.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                     otherPartyStage = w.Length >= 3 ? w[w.Length - 1] : null;
+                    // Recency stamp (5N0YEN live audit): the decode's own capture time when it
+                    // carries one (Direct decodes always do), else now. ShowStatus renders the
+                    // "to <peer>" fragment only while this is fresh.
+                    otherPartyForCallInProgUtc = dmsg.RxDate > new DateTime(2000, 1, 1)
+                        ? dmsg.RxDate.Add(dmsg.SinceMidnight)
+                        : DateTime.UtcNow;
 
                     // KA1BMF live-radio audit (2026-09-08): our active partner just sent a
                     // SUBSTANTIVE exchange message -- a signal report, R-report, or RRR -- to a
@@ -3280,6 +3297,7 @@ namespace WSJTX_Controller
             callInProg = call;
             otherPartyForCallInProg = null;
             otherPartyStage = null;
+            otherPartyForCallInProgUtc = default;
             // Item 1: the coordinator's AfterQso timing hook -- callInProg is the active-QSO
             // signal. Idempotent: the coordinator only acts on a genuine active -> inactive edge.
             Notify?.OnQsoActiveChanged(call != null);

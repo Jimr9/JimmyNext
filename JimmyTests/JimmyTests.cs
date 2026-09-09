@@ -334,6 +334,7 @@ static class JimmyTests
         SmartStartBusyTemplateMigrationTests();
         SmartStartWaitingTemplateSafetyTests();
         NoResponseOpportunityTimingTests();
+        StaleOtherPartyStatusTests();
         RoutineReceiveSideRoleScopeTests();
         RoutinePunctuationOnlyRemnantTests();
         ActiveQsoBareCallsignSuppressionTests();
@@ -10828,6 +10829,18 @@ static class JimmyTests
                 wc.callInProg = "WA4VLC";
             }
 
+            // A completed listening opportunity is not FINALIZED until the post-boundary
+            // decode-spread window has elapsed (5N0YEN live audit, 2026-09-08): apply the extra
+            // same-slot polls Nexus can still deliver that period's decodes across.
+            void PumpFinality(WsjtxClient wc, ulong slot)
+            {
+                for (int i = 0; i < 4; i++)
+                    wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                        ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                        ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": " + slot + @" },
+                        ""recentDecodes"": [] }"));
+            }
+
             // 1. Transmit just ended, listening opportunity NOT yet complete -> no "no response".
             {
                 var wc = MakeWc(out var ctrl);
@@ -10839,8 +10852,10 @@ static class JimmyTests
                     !ctrl.statusText.Text.Contains("no response"), true);
             }
 
-            // 2. The following receive slot completes (radio not transmitting, decodes processed)
-            //    with nothing from the target -> "no response" now, exactly once, at the boundary.
+            // 2. The receive slot advances, but "no response" is NOT finalized on that first
+            //    post-boundary poll -- only after the decode-spread window has elapsed with
+            //    nothing from the target. (Requirement: "no response" cannot be finalized before
+            //    relevant decodes from that listening opportunity have been processed.)
             {
                 var wc = MakeWc(out var ctrl);
                 ArmSameSlot(wc, 700);
@@ -10849,7 +10864,14 @@ static class JimmyTests
                     ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                     ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 701 },
                     ""recentDecodes"": [] }"));
-                Check("listening opportunity complete",
+                Check("slot advanced but decode-spread window not elapsed -> NOT finalized yet",
+                    wc.NoResponseOpportunityComplete("WA4VLC"), false);
+                wc.TestShowStatus();
+                Check("...and status does NOT say \"no response\" yet",
+                    !ctrl.statusText.Text.Contains("no response"), true);
+                PumpFinality(wc, 701);
+                wc.callInProg = "WA4VLC";
+                Check("decode-spread window elapsed, target still unheard -> now finalized",
                     wc.NoResponseOpportunityComplete("WA4VLC"), true);
                 Check("completed silent listening opportunity -> status now says \"no response\"",
                     ctrl.statusText.Text.Contains("no response"), true);
@@ -10865,8 +10887,38 @@ static class JimmyTests
                     ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                     ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 802 },
                     ""recentDecodes"": [] }"));
+                PumpFinality(wc, 802);
+                wc.callInProg = "WA4VLC";
+                wc.TestShowStatus();
                 Check("yielded nominal TX-side slot counts as listening -> \"no response\"",
                     ctrl.statusText.Text.Contains("no response"), true);
+            }
+
+            // 3b. A target reply that lands a poll or two AFTER the slot boundary (Nexus decode
+            //     spread) is processed BEFORE "no response" is finalized -> no false "no response".
+            {
+                var wc = MakeWc(out var ctrl);
+                ArmSameSlot(wc, 850);
+                wc.callInProg = "WA4VLC";
+                // slot advances, no decode yet
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 851 },
+                    ""recentDecodes"": [] }"));
+                Check("3b: not finalized on the first post-boundary poll",
+                    wc.NoResponseOpportunityComplete("WA4VLC"), false);
+                // the target's reply arrives on the NEXT poll, still the same slot
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 851 },
+                    ""recentDecodes"": [ { ""from"": ""WA4VLC"", ""snr"": -7, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""KB0UZT WA4VLC R-07"" } ] }"));
+                PumpFinality(wc, 851);
+                wc.callInProg = "WA4VLC";
+                wc.TestShowStatus();
+                Check("3b: late target reply processed first -> NO false \"no response\"",
+                    !ctrl.statusText.Text.Contains("no response"), true);
+                Check("3b: ...the received report is surfaced instead",
+                    ctrl.statusText.Text.Contains("received"), true);
             }
 
             // 4. The target answers us during that listening opportunity -> the "received" detail
@@ -10929,6 +10981,109 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  NoResponseOpportunityTimingTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // 5N0YEN live-radio audit (2026-09-08): ShowStatus's "callInProg to <peer>, <payload>"
+    // fragment (otherPartyForCallInProg / otherPartyStage) had no recency check and was not
+    // cleared on a target CQ, so a single "5N0YEN to R6TA, 73" decode stayed glued onto every
+    // render -- including every "no response" line -- for the whole 20-call effort, long after
+    // 5N0YEN had CQ'd and moved to a different peer.
+    static void StaleOtherPartyStatusTests()
+    {
+        Console.WriteLine("\n── Stale \"callInProg to <peer>\" status fragment expires / clears ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_StaleOther_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            WsjtxClient MakeWc(out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 400 },
+                    ""recentDecodes"": [] }"));
+                return wc;
+            }
+
+            // 1. A FRESH "5N0YEN to R6TA, 73" fact renders in the status line.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "5N0YEN";
+                wc.TestSetOtherParty("R6TA", "73");
+                wc.TestShowStatus();
+                Check("1: a fresh 'callInProg to <peer>' fact renders",
+                    ctrl.statusText.Text.Contains("5 N 0 Y E N to R 6 T A"), true);
+            }
+
+            // 2. The SAME fact, now older than the recency window, must NOT render -- the target
+            //    has not been heard working anyone for a full listen cycle.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "5N0YEN";
+                wc.TestSetOtherPartyStale("R6TA", "73");
+                wc.TestShowStatus();
+                Check("2: a stale 'callInProg to <peer>' fact does NOT render",
+                    !ctrl.statusText.Text.Contains("to R 6 T A"), true);
+            }
+
+            // 3. A live target CQ clears the "working <peer>" fact outright (5N0YEN CQ'd
+            //    mid-effort; the old "to R6TA, 73" must stop rendering immediately, not linger
+            //    for the rest of the recency window).
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "5N0YEN";
+                wc.TestSetOtherParty("R6TA", "73");
+                wc.TestShowStatus();
+                Check("3: fresh fact renders first", ctrl.statusText.Text.Contains("to R 6 T A"), true);
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 401 },
+                    ""recentDecodes"": [ { ""from"": ""5N0YEN"", ""snr"": -12, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""CQ 5N0YEN JJ16"" } ] }"));
+                wc.callInProg = "5N0YEN";
+                wc.TestShowStatus();
+                Check("3: after the target CQs, the 'to <peer>' fact is gone",
+                    !ctrl.statusText.Text.Contains("to R 6 T A"), true);
+            }
+
+            // 4. A fresh decode of the target working a NEW peer replaces (and re-stamps) the fact.
+            {
+                var wc = MakeWc(out var ctrl);
+                wc.callInProg = "5N0YEN";
+                wc.TestSetOtherPartyStale("R6TA", "73");
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 402 },
+                    ""recentDecodes"": [ { ""from"": ""5N0YEN"", ""snr"": -12, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""IS0AFM 5N0YEN -12"" } ] }"));
+                wc.callInProg = "5N0YEN";
+                wc.TestShowStatus();
+                Check("4: a fresh 'to <new peer>' decode renders (and the old R6TA fact is gone)",
+                    ctrl.statusText.Text.Contains("5 N 0 Y E N to I S 0 A F M") && !ctrl.statusText.Text.Contains("R 6 T A"), true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  StaleOtherPartyStatusTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally
@@ -11406,10 +11561,13 @@ static class JimmyTests
                     ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""tuning"": false, ""catOk"": true, ""slot"": 610 },
                     ""recentDecodes"": [],
                     ""qso"": { ""state"": ""awaitReport"", ""txNow"": ""WA4VLC KB0UZT EN34"" } }"));
-                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
-                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
-                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 611 },
-                    ""recentDecodes"": [] }"));
+                // slot advances, then the post-boundary decode-spread window elapses with nothing
+                // from the target -> "no response" is finalized (5N0YEN live audit deferral).
+                for (int i = 0; i < 5; i++)
+                    wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                        ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                        ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""catOk"": true, ""slot"": 611 },
+                        ""recentDecodes"": [] }"));
                 wc.callInProg = "WA4VLC";
                 wc.TestShowStatus();
                 CheckStr("D: unanswered calling phase -> 'no response' composes with the callsign once",
@@ -18626,6 +18784,42 @@ static class JimmyTests
             Check("Smart Start dispatched its REPLY", SawReply(), true);
             Check("Smart Start entered awaiting-engagement after the dispatch", wc.TestSmartStartAwaitingEngagement, true);
             Check("the observational Station Watch on that same call is left running", wc.TestStationWatchTargetCall == t2, true);
+            wc.TestCancelStationWatchPendingStart();
+            wc.StopStationWatch();
+            wc.callInProg = null;
+
+            // ══ 7. 5N0YEN live audit: during the calling phase a target -> peer report yields.
+            //      The decoded FACT (SmartStartTargetBusy) and the state-transition ACTION
+            //      (SmartStartYielded) are TWO DISTINCT lines by design -- with the SHIPPED
+            //      DEFAULT templates the yield line is a bare "Standing by." that does NOT
+            //      restate the busy fact, so there is no duplicate spoken narration. Both events
+            //      are recorded. (The operator's `n testing.ini` had customised
+            //      notifyTemplate_SmartStartYielded to "{Target} is busy; standing by.", which is
+            //      what restated the fact in the live run -- a template-content choice, not a
+            //      code duplication.) ══
+            CheckStr("7: shipped SmartStartYielded default template is a bare 'Standing by.' (no fact restated)",
+                NotificationDefaults.Policies[NotificationEventType.SmartStartYielded].Template, "Standing by.");
+            {
+                lock (fake.AllText) fake.AllText.Clear();
+                lock (seenLock) seen.Clear();
+                const string C = "N1UL";   // a peer not used earlier in this test (dedup is per-peer)
+                Check("7: re-armed", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
+                wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // parity/evidence
+                wc.callInProg = target;
+                wc.TestSmartStartEnterAwaitingEngagement();
+                wc.TestFeedTargetMonitorsDecode(Dec($"{C} {target} -07"), true);   // target -> peer report -> yield
+                PumpUntil(() => SeenCmds().Exists(c => c.StartsWith("HALT_TX")), 2000);
+                Check("7: the decoded busy FACT is spoken once", SaidCount($"{target} to {C}, minus 7") == 1, true);
+                Check("7: the yield ACTION is spoken once, as the bare default 'Standing by.'",
+                    SaidCount("Standing by.") == 1, true);
+                Check("7: the yield line does NOT restate the busy fact (default template)",
+                    Said().Exists(s => s.IndexOf("Standing by.", StringComparison.Ordinal) >= 0
+                                       && s.IndexOf(target, StringComparison.OrdinalIgnoreCase) >= 0), false);
+                Check("7: Smart Start stayed armed for the same target after the yield",
+                    wc.TestSmartStartTarget == target, true);
+                wc.callInProg = null;
+                wc.TestCancelStationWatchPendingStart();
+            }
         }
         finally
         {
