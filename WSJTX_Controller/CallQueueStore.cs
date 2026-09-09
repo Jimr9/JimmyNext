@@ -22,6 +22,17 @@ namespace WSJTX_Controller
             _wc = wc;
         }
 
+        // The decode's own capture instant -- Direct-mode decodes always stamp
+        // RxDate+SinceMidnight; anything without a real RxDate is, by definition, current.
+        // Mirrors TargetMonitor.DecodeUtcOrNow so a queued station's authoritative "last
+        // heard" agrees with Smart Start's own freshness clock.
+        private static DateTime DecodeUtc(EnqueueDecodeMessage d)
+        {
+            if (d != null && d.RxDate > new DateTime(2000, 1, 1))
+                return d.RxDate.Add(d.SinceMidnight);
+            return DateTime.UtcNow;
+        }
+
         //update call in call queue
         //if to myCall and has progressed in the FT8 QSO protocol, or
         //if priority increased or if grid now available;
@@ -32,9 +43,20 @@ namespace WSJTX_Controller
             EnqueueDecodeMessage dmsg;
             if (_wc.callDict.TryGetValue(call, out dmsg))
             {
+                // Authoritative last-heard refresh (2026-09-09): ANY qualifying decode for an
+                // already-queued station updates its freshness, whether or not the
+                // representative message is replaced below. This is NOT a new add -- the queue
+                // position, the stored message/grid/category/priority, and the call-added
+                // sound are all left alone (this path never plays that sound). A decode that
+                // happens to carry an older timestamp than what we already have never moves
+                // last-heard backwards.
+                var heardUtc = DecodeUtc(msg);
+                if (dmsg.LastHeardUtc < heardUtc) dmsg.LastHeardUtc = heardUtc;
+
                 if (WsjtxMessage.ToCall(msg.Message) == _wc.myCall && WsjtxMessage.ToCall(dmsg.Message) == _wc.myCall && WsjtxMessage.Progress(msg.Message) > WsjtxMessage.Progress(dmsg.Message))
                 {
                     _wc.DebugOutput($"{WsjtxClient.spacer}update stage/sequence '{msg.Message}' (was '{dmsg.Message}')");
+                    msg.LastHeardUtc = dmsg.LastHeardUtc;   // carry authoritative last-heard across the re-rank
                     RemoveCall(call);
                     return AddCall(call, msg);      //re-ranked
                 }
@@ -49,6 +71,7 @@ namespace WSJTX_Controller
                         if (_wc.IsCorrectTimePeriodForMode(msg))
                         {
                             _wc.DebugOutput($"{WsjtxClient.spacer}update priority/grid  '{msg.Message}' (was '{dmsg.Message}')");
+                            msg.LastHeardUtc = dmsg.LastHeardUtc;   // carry authoritative last-heard across the re-rank
                             RemoveCall(call);
                             return AddCall(call, msg);      //re-ranked
                         }
@@ -137,6 +160,13 @@ namespace WSJTX_Controller
                 _wc.callQueue = tmpQueue;
 
                 _wc.callDict.Add(call, msg);
+
+                // Authoritative last-heard: stamp on entry (2026-09-09). A later qualifying
+                // decode for this same call refreshes it via UpdateCall without replacing the
+                // stored message or replaying the call-added sound. Never moved backwards.
+                var addUtc = DecodeUtc(msg);
+                if (msg.LastHeardUtc < addUtc) msg.LastHeardUtc = addUtc;
+
                 _wc._lastAddCallCategoryPlayed = _wc.PlayCategorySound(msg);
 
                 // Feature 2: opposite-period alert — fires when an interesting call is queued
@@ -484,8 +514,17 @@ namespace WSJTX_Controller
             var ts = new TimeSpan(0, 0, ((int)_wc.trPeriod * _wc.ctrl.maxCallQueueAgePeriods) / 1000);    //total periods
 
             foreach (var entry in _wc.callDict)
-            {   //                              old call                                                          not manually selected
-                if (entry.Key != _wc.callInProg && (dtNow - (entry.Value.RxDate + entry.Value.SinceMidnight)) > ts && entry.Value.AutoGen)  //entry is older than wanted
+            {
+                // Expiry uses the authoritative last-heard (2026-09-09) -- refreshed by every
+                // qualifying decode, so a station still being heard never ages out even when
+                // its stored message never "improved". Fall back to the stored decode's own
+                // time for any entry whose LastHeardUtc was somehow never stamped (defensive;
+                // AddCall always stamps). Guards unchanged: never the active contact, and only
+                // automatically-generated (not manually selected) entries.
+                var lastHeard = entry.Value.LastHeardUtc > new DateTime(2000, 1, 1)
+                    ? entry.Value.LastHeardUtc
+                    : entry.Value.RxDate + entry.Value.SinceMidnight;
+                if (entry.Key != _wc.callInProg && (dtNow - lastHeard) > ts && entry.Value.AutoGen)  //entry is older than wanted
                 {
                     keys.Add(entry.Key);        //collect keys to delete
                 }

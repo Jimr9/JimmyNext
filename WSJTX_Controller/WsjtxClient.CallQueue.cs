@@ -429,6 +429,27 @@ namespace WSJTX_Controller
             return callQueue.ToArray()[idx];
         }
 
+        // Whole operating periods since a queued station was last heard in a qualifying decode
+        // -- computed from the ONE authoritative value (EnqueueDecodeMessage.LastHeardUtc,
+        // stamped by CallQueueStore.AddCall and refreshed by CallQueueStore.UpdateCall). This
+        // is the single definition of "Age" used by the Age row field, the "Most recent first"
+        // / "Oldest first" sort, call-queue expiration, and Smart Start stale-station wording.
+        // 0 = heard this period, or last-heard unknown (a decode not yet through the queue).
+        // The two-argument overload takes an explicit "now" for deterministic testing.
+        public int PeriodsSinceLastHeard(EnqueueDecodeMessage d) =>
+            PeriodsSinceLastHeard(d, DateTime.UtcNow);
+
+        public int PeriodsSinceLastHeard(EnqueueDecodeMessage d, DateTime nowUtc)
+        {
+            if (d == null) return 0;
+            DateTime lastHeard = d.LastHeardUtc;
+            if (lastHeard <= new DateTime(2000, 1, 1)) return 0;
+            int periodMs = trPeriod ?? 15000;
+            if (periodMs <= 0) periodMs = 15000;
+            double periods = (nowUtc - lastHeard).TotalMilliseconds / periodMs;
+            return periods <= 0 ? 0 : (int)periods;
+        }
+
         // Translates a display row index from the normal callListBox (which filters
         // callInProg) to the corresponding true callQueue position.
         // Returns displayIdx unchanged when no mapping exists (e.g., no active QSO).

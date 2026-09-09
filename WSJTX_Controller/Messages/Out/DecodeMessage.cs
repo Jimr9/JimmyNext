@@ -298,6 +298,16 @@ namespace WsjtxUdpLib.Messages.Out
         public int Rank { get; set; }
         public int SequenceNumber { get; set; }
         public int Quality { get; set; }
+
+        // Authoritative "last heard" instant for a queued station (2026-09-09). Stamped by
+        // CallQueueStore.AddCall when the call enters the queue and REFRESHED by
+        // CallQueueStore.UpdateCall on every later qualifying decode of the same station --
+        // independent of whether that decode replaces the representative queued message. This
+        // is the ONE value "Age" (operating periods since last heard) is derived from
+        // everywhere: the Age row field, the "Most recent first" / "Oldest first" sort, call-
+        // queue expiration, and Smart Start stale-station wording. default(DateTime) = never
+        // stamped (a bare decode not yet through the queue); consumers treat that as unknown.
+        public DateTime LastHeardUtc { get; set; }
         public WSJTX_Controller.WsjtxClient.CallCategory Category { get; set; }
         // Id of whichever actively-checked Rule Definition this message matched, if any --
         // set by DeriveCategory/CheckAwardAlert, read back for display (CategoryTag/raw
@@ -500,6 +510,7 @@ namespace WsjtxUdpLib.Messages.Out
             enqueueDecodeMessage.SequenceNumber = SequenceNumber;
             enqueueDecodeMessage.Quality = Quality;
             enqueueDecodeMessage.Rank = Rank;
+            enqueueDecodeMessage.LastHeardUtc = LastHeardUtc;
 
             return enqueueDecodeMessage;
         }

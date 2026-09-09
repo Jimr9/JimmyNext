@@ -212,6 +212,7 @@ static class JimmyTests
         CallQueueRankerCategoryTierTests();
         CallQueueRankerSortMethodTests();
         CallQueueRankerTieBreakTests();
+        StationLastHeardAgeTests();
         CallQueueRankerCategoryWeightValidationTests();
         CallQueueRankerCallingPrioritiesTests();
         CallQueueRankerBeamRankTests();
@@ -8802,6 +8803,48 @@ static class JimmyTests
         Check("Same-distance entries tie on the only configured sort method", first.Rank == second.Rank, true);
         int cmpFinal = ranker.Compare(first, second, null, false);
         Check("Final CALL_ORDER fallback: identical primary, older SequenceNumber sorts first", cmpFinal < 0, true);
+    }
+
+    // P1 (2026-09-09): the ONE authoritative last-heard value + the periods-since-last-heard
+    // helper every "Age" consumer (Age row field, "Most recent first" / "Oldest first" sort,
+    // call-queue expiration, Smart Start stale wording) is built on.
+    static void StationLastHeardAgeTests()
+    {
+        Console.WriteLine("\n── Station last-heard / Age: authoritative value + periods-since helper ──");
+
+        // The field defaults to "never stamped" and DeepCopy carries it.
+        var d0 = new EnqueueDecodeMessage { Message = $"{MY_CALL} K1ABC EM63" };
+        Check("LastHeardUtc defaults to default(DateTime) (never stamped)", d0.LastHeardUtc == default, true);
+        var stamped = new DateTime(2026, 9, 9, 12, 0, 0, DateTimeKind.Utc);
+        d0.LastHeardUtc = stamped;
+        Check("DeepCopy carries LastHeardUtc", d0.DeepCopy().LastHeardUtc == stamped, true);
+
+        var ctrl = NewMinimalCtrl();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var now = new DateTime(2026, 9, 9, 12, 0, 0, DateTimeKind.Utc);
+
+        Check("null decode -> 0 periods", wc.PeriodsSinceLastHeard(null, now) == 0, true);
+        var unset = new EnqueueDecodeMessage { Message = $"{MY_CALL} K2ABC EM63" };
+        Check("unstamped LastHeardUtc -> 0 periods (unknown, not 'infinitely old')",
+            wc.PeriodsSinceLastHeard(unset, now) == 0, true);
+
+        // FT8: 15 s periods.
+        wc.trPeriod = 15000;
+        EnqueueDecodeMessage AtAge(int secondsAgo) =>
+            new EnqueueDecodeMessage { Message = $"{MY_CALL} K3ABC EM63", LastHeardUtc = now.AddSeconds(-secondsAgo) };
+        Check("heard this period (10 s ago, FT8) -> 0 periods", wc.PeriodsSinceLastHeard(AtAge(10), now) == 0, true);
+        Check("44 s ago (FT8) floors to 2 periods", wc.PeriodsSinceLastHeard(AtAge(44), now) == 2, true);
+        Check("45 s ago (FT8) -> 3 periods", wc.PeriodsSinceLastHeard(AtAge(45), now) == 3, true);
+        Check("76 s ago (FT8) -> 5 periods", wc.PeriodsSinceLastHeard(AtAge(76), now) == 5, true);
+        Check("future last-heard is clamped to 0 periods", wc.PeriodsSinceLastHeard(AtAge(-30), now) == 0, true);
+
+        // FT4: 7.5 s periods -- same wall time, twice the period count.
+        wc.trPeriod = 7500;
+        Check("45 s ago (FT4) -> 6 periods", wc.PeriodsSinceLastHeard(AtAge(45), now) == 6, true);
+
+        // trPeriod not yet derived -> falls back to FT8's 15 s.
+        wc.trPeriod = null;
+        Check("trPeriod null -> FT8 fallback (45 s -> 3 periods)", wc.PeriodsSinceLastHeard(AtAge(45), now) == 3, true);
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()
