@@ -163,6 +163,28 @@ namespace WSJTX_Controller
         NextPeriodBoundary,
     }
 
+    // Added 2026-09-09: the operator-facing per-notification "status area" delivery choice --
+    // orthogonal to SpeakWhen/SpeakWhenSet (WHICH boundary) and SpeakCondition (WHETHER at
+    // all). Concise nontechnical labels in the UI: "Normal" / "Send immediately" /
+    // "Latest only". All three reuse existing NotificationCenter/SpeechCoordinator mechanisms.
+    public enum NotificationStatusDelivery
+    {
+        // Use the configured delivery boundaries and ordinary pending/coalescing behaviour.
+        // Every type's default -> nothing changes on upgrade.
+        Normal,
+
+        // Speak this notification at once (SpeakWhen collapsed to Now), regardless of the
+        // configured boundaries. The visible status line and Notification History are already
+        // immediate for every notification; this makes the SPOKEN nudge immediate too.
+        SendImmediately,
+
+        // Coalesce every pending occurrence of this event TYPE into one slot per boundary,
+        // ignoring the per-occurrence DedupKey -- so a newer occurrence replaces an older
+        // still-pending one of the same type ("only the latest matters"). Only affects this
+        // type's own pending items.
+        LatestOnly,
+    }
+
     // Per-event-type policy. One instance per NotificationEventType, held in
     // NotificationSettings.Policies. Mutable POCO (matches RadioSettings/JimmySettings'
     // plain-property style) -- LoadFromIni mutates a clone of the code default in place.
@@ -244,6 +266,11 @@ namespace WSJTX_Controller
         // events are rare and worth interrupting for).
         public bool DeferWhileTransmitting { get; set; } = false;
 
+        // Added 2026-09-09: the operator-facing "status area" delivery choice -- see the
+        // NotificationStatusDelivery enum. Default Normal -> no change on upgrade. Persisted as
+        // notifyStatusDelivery_{Type}.
+        public NotificationStatusDelivery StatusDelivery { get; set; } = NotificationStatusDelivery.Normal;
+
         // Added 2026-08-12: content-based suppression, distinct from RepeatSeconds' time-based
         // one -- when true, a formatted announcement identical to the last one actually
         // DELIVERED for this (EventType, DedupKey) is suppressed regardless of how much time has
@@ -263,6 +290,7 @@ namespace WSJTX_Controller
             SpeakWhen = SpeakWhen,
             SpeakWhenSet = SpeakWhenSet == null ? null : new System.Collections.Generic.List<SpeakWhen>(SpeakWhenSet),
             Condition = Condition,
+            StatusDelivery = StatusDelivery,
             Timing = Timing,
             DeferWhileTransmitting = DeferWhileTransmitting,
             SuppressUnchanged = SuppressUnchanged,

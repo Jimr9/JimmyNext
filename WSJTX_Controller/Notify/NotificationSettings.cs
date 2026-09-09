@@ -196,6 +196,11 @@ namespace WSJTX_Controller
                 if (ini.KeyExists($"notifySuppressUnchanged_{type}"))
                     policy.SuppressUnchanged = ini.Read($"notifySuppressUnchanged_{type}") == "True";
 
+                // 2026-09-09: the per-notification status-area delivery choice. Missing /
+                // unparseable -> the code default (Normal), so a pre-2026-09-09 INI is unchanged.
+                if (Enum.TryParse(ini.Read($"notifyStatusDelivery_{type}"), out NotificationStatusDelivery statusDelivery))
+                    policy.StatusDelivery = statusDelivery;
+
                 Policies[type] = policy;
             }
 
@@ -237,6 +242,7 @@ namespace WSJTX_Controller
                 ini.Write($"notifyTiming_{type}", policy.Timing.ToString());
                 ini.Write($"notifyDeferWhileTx_{type}", policy.DeferWhileTransmitting.ToString());
                 ini.Write($"notifySuppressUnchanged_{type}", policy.SuppressUnchanged.ToString());
+                ini.Write($"notifyStatusDelivery_{type}", policy.StatusDelivery.ToString());
             }
 
             ini.Write("notifyReceiveSideIdScope", ReceiveSideIdScope.ToString());

@@ -332,6 +332,7 @@ static class JimmyTests
         SpeechCoordinatorTests();
         SpeakWhenMigrationTests();
         MultiDeliveryNotificationTests();
+        NotificationStatusDeliveryTests();
         RenderStatusSpeechCoordinationTests();
         RenderStatusVisibleKeepsLastOnEmptyTests();
         RoutineClauseTemplateTests();
@@ -9199,6 +9200,97 @@ static class JimmyTests
         c5.OnTransmittingChanged(true);
         c5.OnTransmittingChanged(false);
         Check("Critical + multi-set: no extra deliveries at later boundaries", d5.AnnounceCount == 1, true);
+    }
+
+    // P7 (2026-09-09): the per-notification status-area delivery choice --
+    // Normal / Send immediately / Latest only. Default Normal -> no upgrade change.
+    static void NotificationStatusDeliveryTests()
+    {
+        Console.WriteLine("\n── Notifications: status-area delivery policy (Normal / Send immediately / Latest only) ──");
+
+        // Default + Clone + INI round-trip.
+        var p = new NotificationPolicy();
+        Check("StatusDelivery defaults to Normal", p.StatusDelivery == NotificationStatusDelivery.Normal, true);
+        p.StatusDelivery = NotificationStatusDelivery.LatestOnly;
+        Check("Clone() copies StatusDelivery", p.Clone().StatusDelivery == NotificationStatusDelivery.LatestOnly, true);
+
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyStatusDeliv_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            var s = new NotificationSettings();
+            s.Policies[NotificationEventType.StationWatchActivity].StatusDelivery = NotificationStatusDelivery.SendImmediately;
+            var ini = new IniFile(tmpIni);
+            s.SaveToIni(ini);
+            var s2 = new NotificationSettings();
+            s2.LoadFromIni(new IniFile(tmpIni));
+            Check("round-trip: StatusDelivery survives save/load",
+                s2.Policies[NotificationEventType.StationWatchActivity].StatusDelivery == NotificationStatusDelivery.SendImmediately, true);
+            // Missing key -> Normal.
+            var empty = new NotificationSettings();
+            empty.LoadFromIni(new IniFile(Path.Combine(Path.GetTempPath(), "JimmyStatusDelivE_" + Guid.NewGuid().ToString("N") + ".ini")));
+            Check("missing notifyStatusDelivery_ key -> Normal",
+                empty.Policies[NotificationEventType.StationWatchActivity].StatusDelivery == NotificationStatusDelivery.Normal, true);
+        }
+        finally { try { File.Delete(tmpIni); } catch { } }
+
+        // ── Send immediately: collapses configured future boundaries to "now" ──
+        var si = new NotificationSettings();
+        var siP = si.Policies[NotificationEventType.StationWatchActivity];
+        siP.RepeatSeconds = 0; siP.ThrottleMilliseconds = 0;
+        siP.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.AfterRx, SpeakWhen.AfterTx };   // all future
+        siP.StatusDelivery = NotificationStatusDelivery.SendImmediately;
+        var siD = new FakeNotificationDelivery();
+        var siC = new NotificationCenter(si, siD);
+        siC.Publish(new StationWatchActivityEvent("W9FTR CQ.", "W9FTR", null, null, "TargetCq"));
+        Check("Send immediately: spoken at once despite AfterRx/AfterTx being configured", siD.AnnounceCount == 1, true);
+        siC.OnPeriodBoundary();
+        siC.OnTransmittingChanged(true);
+        siC.OnTransmittingChanged(false);
+        Check("Send immediately: the collapsed-away boundaries do not also fire later", siD.AnnounceCount == 1, true);
+
+        // ── Latest only: a newer occurrence of the TYPE replaces an older pending one ──
+        var lo = new NotificationSettings();
+        var loP = lo.Policies[NotificationEventType.StationWatchActivity];
+        loP.RepeatSeconds = 0; loP.ThrottleMilliseconds = 0;
+        loP.SpeakWhen = SpeakWhen.AfterRx;   // single future boundary
+        loP.StatusDelivery = NotificationStatusDelivery.LatestOnly;
+        var loD = new FakeNotificationDelivery();
+        var loC = new NotificationCenter(lo, loD);
+        loC.Publish(new StationWatchActivityEvent("W9FTR to K1AAA, -12.", "W9FTR", "K1AAA", "-12", "TargetReport"));
+        loC.Publish(new StationWatchActivityEvent("W9FTR to K2BBB, RR73.", "W9FTR", "K2BBB", "RR73", "TargetRr73"));
+        Check("Latest only: both held, nothing spoken yet", loD.AnnounceCount == 0, true);
+        loC.OnPeriodBoundary();
+        Check("Latest only: exactly ONE delivery for two different-peer occurrences of the type",
+            loD.AnnounceCount == 1, true);
+        CheckStr("Latest only: it is the newest occurrence", loD.LastText, "W9FTR to K2BBB, RR73.");
+
+        // ── Latest only on type A does not disturb a different type B's pending item ──
+        var mix = new NotificationSettings();
+        var aP = mix.Policies[NotificationEventType.StationWatchActivity];
+        aP.RepeatSeconds = 0; aP.ThrottleMilliseconds = 0; aP.SpeakWhen = SpeakWhen.AfterRx;
+        aP.StatusDelivery = NotificationStatusDelivery.LatestOnly;
+        var bP = mix.Policies[NotificationEventType.SmartStartArmed];
+        bP.RepeatSeconds = 0; bP.ThrottleMilliseconds = 0; bP.SpeakWhen = SpeakWhen.AfterRx;
+        var mixD = new FakeNotificationDelivery();
+        var mixC = new NotificationCenter(mix, mixD);
+        mixC.Publish(new StationWatchActivityEvent("W9FTR CQ.", "W9FTR", null, null, "TargetCq"));
+        mixC.Publish(new SmartStartArmedEvent("W9FTR"));
+        mixC.Publish(new StationWatchActivityEvent("W9FTR to K3CCC, 73.", "W9FTR", "K3CCC", "73", "Target73"));
+        mixC.OnPeriodBoundary();
+        Check("Latest only on type A collapses A to one, but type B still delivers its own",
+            mixD.AnnounceCount == 2, true);
+
+        // ── Normal (default) is unchanged: coalesce by the per-occurrence DedupKey ──
+        var nrm = new NotificationSettings();
+        var nrmP = nrm.Policies[NotificationEventType.StationWatchActivity];
+        nrmP.RepeatSeconds = 0; nrmP.ThrottleMilliseconds = 0; nrmP.SpeakWhen = SpeakWhen.AfterRx;
+        var nrmD = new FakeNotificationDelivery();
+        var nrmC = new NotificationCenter(nrm, nrmD);
+        nrmC.Publish(new StationWatchActivityEvent("W9FTR to K1AAA, -12.", "W9FTR", "K1AAA", "-12", "TargetReport"));
+        nrmC.Publish(new StationWatchActivityEvent("W9FTR to K2BBB, RR73.", "W9FTR", "K2BBB", "RR73", "TargetRr73"));
+        nrmC.OnPeriodBoundary();
+        Check("Normal: two DIFFERENT identities both deliver (no type-wide collapse)",
+            nrmD.AnnounceCount == 2, true);
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()

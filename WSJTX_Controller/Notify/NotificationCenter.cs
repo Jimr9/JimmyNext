@@ -139,7 +139,16 @@ namespace WSJTX_Controller
             // dedup/throttle "last announced" bookkeeping is advanced by the FIRST boundary
             // that actually speaks (a shared once-guard), so several boundaries for one Publish
             // do not multiply-advance the repeat window.
-            string dedupKey = evt.DedupKey ?? "";
+            // 2026-09-09 per-notification status-area delivery choice (P7):
+            //   Normal          -> configured boundaries, coalesce by the per-occurrence DedupKey.
+            //   Send immediately -> collapse the boundaries to Now (visible line + history are
+            //                       already immediate; this makes the spoken nudge immediate too).
+            //   Latest only      -> coalesce by event TYPE alone (empty DedupKey), so a newer
+            //                       occurrence replaces an older still-pending one of the same
+            //                       type. Only this type's own pending items are affected.
+            string dedupKey = policy.StatusDelivery == NotificationStatusDelivery.LatestOnly
+                ? ""
+                : (evt.DedupKey ?? "");
             bool recorded = false;
             Action onSpokenOnce = () =>
             {
@@ -152,10 +161,12 @@ namespace WSJTX_Controller
             bool isWatch = WatchEventTypes.Contains(evt.EventType);
 
             // Critical bypasses delivery timing entirely (spoken the instant it is submitted),
-            // so submitting it once per boundary would just speak it several times. Collapse to
-            // a single submission for Critical; the configured set is irrelevant to it.
-            var boundaries = effectivePriority == NotificationPriority.Critical
-                ? new[] { policy.SpeakWhen }
+            // so submitting it once per boundary would just speak it several times. "Send
+            // immediately" likewise collapses to a single Now submission. Otherwise use the
+            // full configured set.
+            var boundaries =
+                effectivePriority == NotificationPriority.Critical ? new[] { policy.SpeakWhen }
+                : policy.StatusDelivery == NotificationStatusDelivery.SendImmediately ? new[] { SpeakWhen.Now }
                 : policy.EffectiveSpeakWhenSet();
             foreach (SpeakWhen when in boundaries)
             {
