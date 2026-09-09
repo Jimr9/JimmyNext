@@ -215,6 +215,7 @@ static class JimmyTests
         StationLastHeardAgeTests();
         AgeRowFieldTests();
         LastHeardSortTests();
+        MaxCallQueueAgeFloorTests();
         CallQueueRankerCategoryWeightValidationTests();
         CallQueueRankerCallingPrioritiesTests();
         CallQueueRankerBeamRankTests();
@@ -8984,6 +8985,46 @@ static class JimmyTests
         Check("SortDependsOnLastHeard: false for a distance-only sort", ranker.SortDependsOnLastHeard(), false);
         ranker.ApplySortOrder(new List<WsjtxClient.RankMethods> { WsjtxClient.RankMethods.MOST_RECENT }, WsjtxClient.RankMethods.AZ_NQUAD);
         Check("SortDependsOnLastHeard: false in beam mode (ranks by heading only)", ranker.SortDependsOnLastHeard(), false);
+    }
+
+    // P4 (2026-09-09): "Max call-queue age (periods)" floor lowered 4 -> 1. Default unchanged.
+    static void MaxCallQueueAgeFloorTests()
+    {
+        Console.WriteLine("\n── Max call-queue age: floor lowered to 1 period ──");
+
+        // Default is untouched.
+        Check("Controller.maxCallQueueAgePeriods default is still 16", new Controller().maxCallQueueAgePeriods == 16, true);
+
+        // Options numeric control now allows 1.
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.maxCallQueueAgePeriods = 1;   // a value the old floor of 4 would have rejected
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            using (var dlg = new OptionsDlg(wc, ctrl))
+            {
+                dlg.BuildGeneralTab();
+                var numeric = (System.Windows.Forms.NumericUpDown)typeof(OptionsDlg)
+                    .GetField("_maxCallQueueAgeNumeric", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                    .GetValue(dlg);
+                Check("Options numeric minimum is 1", numeric.Minimum == 1, true);
+                Check("Options numeric shows a stored value of 1 (not clamped up to 4)", numeric.Value == 1, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  MaxCallQueueAgeFloorTests (Options tab) threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+
+        // NOTE: the Controller INI-load bound (Controller.cs: "maxAgePeriods >= 1") mirrors the
+        // Options clamp above one-for-one; there is no isolated Controller settings-load test
+        // hook, so that bound is covered by inspection + the matching Options clamp + the P9
+        // full-suite/replay run rather than a unit test here.
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()

@@ -823,7 +823,10 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("maxQueuedCalls") && int.TryParse(iniFile.Read("maxQueuedCalls"), out maxQueued) && maxQueued >= 4 && maxQueued <= 100)
                     maxQueuedCallsBase = maxQueued;
                 int maxAgePeriods;
-                if (iniFile.KeyExists("maxCallQueueAgePeriods") && int.TryParse(iniFile.Read("maxCallQueueAgePeriods"), out maxAgePeriods) && maxAgePeriods >= 4 && maxAgePeriods <= 200)
+                // Floor lowered 4 -> 1 (2026-09-09) to match the Options numeric control; "1
+                // period" prunes a station one full receive period after its last qualifying
+                // decode. Default (16) unchanged.
+                if (iniFile.KeyExists("maxCallQueueAgePeriods") && int.TryParse(iniFile.Read("maxCallQueueAgePeriods"), out maxAgePeriods) && maxAgePeriods >= 1 && maxAgePeriods <= 200)
                     maxCallQueueAgePeriods = maxAgePeriods;
                 int statusBatchMs;
                 if (iniFile.KeyExists("statusBatchDelayMs") && int.TryParse(iniFile.Read("statusBatchDelayMs"), out statusBatchMs) && statusBatchMs >= 0 && statusBatchMs <= 5000)

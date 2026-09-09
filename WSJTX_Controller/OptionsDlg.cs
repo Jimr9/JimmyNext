@@ -299,7 +299,10 @@ namespace WSJTX_Controller
 
         // ===== GENERAL TAB =====
 
-        private void BuildGeneralTab()
+        // internal (not private): JimmyTests builds this tab directly to check the
+        // "Max call-queue age" numeric bounds (InternalsVisibleTo, see AssemblyInfo.Testing.cs)
+        // -- same pattern as BuildFrequenciesTab / BuildNotificationsTab.
+        internal void BuildGeneralTab()
         {
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
 
@@ -343,9 +346,13 @@ namespace WSJTX_Controller
                 Location              = new System.Drawing.Point(210, 87),
                 Size                  = new System.Drawing.Size(70, 20),
                 TabIndex              = 3,
-                Minimum               = 4,
+                // Floor lowered 4 -> 1 (2026-09-09): "1 period" means drop a station the moment
+                // one full receive period passes with no fresh qualifying decode. Age/expiry
+                // uses the authoritative last-heard, so a station still being heard is never
+                // pruned. Default stays 16.
+                Minimum               = 1,
                 Maximum               = 200,
-                Value                 = Math.Max(4, Math.Min(200, ctrl.maxCallQueueAgePeriods)),
+                Value                 = Math.Max(1, Math.Min(200, ctrl.maxCallQueueAgePeriods)),
                 Font                  = font,
             };
             generalPanel.Controls.Add(_maxCallQueueAgeNumeric);
@@ -479,7 +486,7 @@ namespace WSJTX_Controller
             // Smart QSO Start is applied by SaveTransmitTab now (controls moved to the Transmit tab).
 
             int maxAge = (int)(_maxCallQueueAgeNumeric?.Value ?? 16);
-            ctrl.maxCallQueueAgePeriods = Math.Max(4, Math.Min(200, maxAge));
+            ctrl.maxCallQueueAgePeriods = Math.Max(1, Math.Min(200, maxAge));
 
             // Moved here from SaveAdvancedUiTab, 2026-08-21 -- see BuildGeneralTab's own comment.
             int maxQueued = (int)(_maxQueuedCallsNumeric?.Value ?? 5);
