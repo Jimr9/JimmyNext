@@ -16,7 +16,7 @@ namespace WSJTX_Controller
         // list in this dialog. Never trimmed -- shrinking it would silently strip fields an
         // existing operator has already chosen.
         public static readonly string[] CallWaitingDefaultFields =
-            { "callp", "pri", "tag", "grid", "snr", "freq", "country", "distAz", "oe", "descr", "rankStr" };
+            { "callp", "pri", "tag", "grid", "snr", "freq", "country", "distAz", "age", "oe", "descr", "rankStr" };
 
         // The DEFAULT ORDER (which fields are checked, and in what order) for a fresh install,
         // a missing INI key, and the "Restore Default" button. Must stay identical to
@@ -29,7 +29,11 @@ namespace WSJTX_Controller
         {
             { "callp", "Call Sign" }, { "pri", "Reply Status" }, { "tag", "Alert" }, { "grid", "Grid" },
             { "snr", "SNR" }, { "freq", "Audio Frequency" }, { "country", "Country" }, { "distAz", "Distance and Direction" },
-            { "oe", "Age" }, { "descr", "Reason" }, { "rankStr", "Rank" }
+            // "age" (2026-09-09): operating periods since the station was last heard --
+            // "Now" / "1 period" / "N periods". Optional, unchecked by default, movable to any
+            // row position. Distinct from the debug-only "oe" (raw decode timestamp), which is
+            // relabelled here so the two are not both called "Age".
+            { "age", "Age" }, { "oe", "Decode time" }, { "descr", "Reason" }, { "rankStr", "Rank" }
         };
 
         // ── Raw Decodes row fields ────────────────────────────────────────────────

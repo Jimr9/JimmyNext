@@ -257,6 +257,12 @@ namespace WSJTX_Controller
 
             string oe = debug ? $", {d.SinceMidnight.Minutes.ToString().PadLeft(2, '0')}:{d.SinceMidnight.Seconds.ToString().PadLeft(2, '0')}" : "";
 
+            // "age" row field (opt-in via the Row Order editor; not in the default row):
+            // whole operating periods since this station was last heard in a qualifying decode,
+            // from the one authoritative EnqueueDecodeMessage.LastHeardUtc. "Now" = heard this
+            // period (or last-heard not yet known).
+            string age = ", " + AgeFieldText(PeriodsSinceLastHeard(d));
+
             string to = sem.CqTarget;
             string dirTo = (to == null ? "" : $" {to}");
             string callp = $"{Spacify(call)}";
@@ -275,7 +281,7 @@ namespace WSJTX_Controller
             var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 { "callp", callp }, { "pri", pri }, { "tag", tagStr }, { "grid", grid }, { "snr", snr },
-                { "freq", freq }, { "country", country }, { "distAz", distAz }, { "oe", oe },
+                { "freq", freq }, { "country", country }, { "distAz", distAz }, { "age", age }, { "oe", oe },
                 { "descr", descr }, { "rankStr", rankStr }
             };
             return RowFormatter.BuildOrderedRow(fieldMap, callWaitingRowOrderFields, fallback);

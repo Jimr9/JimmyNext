@@ -213,6 +213,7 @@ static class JimmyTests
         CallQueueRankerSortMethodTests();
         CallQueueRankerTieBreakTests();
         StationLastHeardAgeTests();
+        AgeRowFieldTests();
         CallQueueRankerCategoryWeightValidationTests();
         CallQueueRankerCallingPrioritiesTests();
         CallQueueRankerBeamRankTests();
@@ -8845,6 +8846,54 @@ static class JimmyTests
         // trPeriod not yet derived -> falls back to FT8's 15 s.
         wc.trPeriod = null;
         Check("trPeriod null -> FT8 fallback (45 s -> 3 periods)", wc.PeriodsSinceLastHeard(AtAge(45), now) == 3, true);
+    }
+
+    // P2 (2026-09-09): the optional "Age" row field for Stations Available -- a real field id
+    // "age" separate from the debug-only decode-timestamp "oe"; unchecked by default so the
+    // shipped default row is unchanged; concise "Now" / "1 period" / "N periods" wording.
+    static void AgeRowFieldTests()
+    {
+        Console.WriteLine("\n── Stations Available: optional 'Age' row field ──");
+
+        Check("'age' is in the Stations Available field universe",
+            RowDisplayOrderDlg.CallWaitingDefaultFields.Contains("age", StringComparer.OrdinalIgnoreCase), true);
+        Check("'age' has a Stations Available label",
+            RowDisplayOrderDlg.CallWaitingFieldLabels.TryGetValue("age", out var ageLabel) && ageLabel == "Age", true);
+        Check("'age' is NOT in the default checked row order (opt-in only -> default row unchanged)",
+            RowDisplayOrderDlg.CallWaitingDefaultOrder.Contains("age", StringComparer.OrdinalIgnoreCase), false);
+
+        // Old saved rows that used the debug-only decode-timestamp field still load, and it is
+        // no longer labelled "Age" (so the two are distinguishable in the editor).
+        Check("legacy 'oe' field id still accepted by the parser whitelist",
+            RowDisplayOrderDlg.CallWaitingDefaultFields.Contains("oe", StringComparer.OrdinalIgnoreCase), true);
+        Check("'oe' is no longer labelled 'Age'",
+            RowDisplayOrderDlg.CallWaitingFieldLabels["oe"] != "Age", true);
+
+        // ParseRowOrder accepts 'age' against the real allowed set and keeps it at the chosen
+        // position (movable to any row slot).
+        var parsed = Controller.ParseRowOrder("callp,age,snr", RowDisplayOrderDlg.CallWaitingDefaultFields);
+        Check("ParseRowOrder accepts 'age' and preserves its position",
+            parsed != null && parsed.SequenceEqual(new[] { "callp", "age", "snr" }), true);
+
+        // Wording.
+        CheckStr("Age wording: 0 periods -> 'Now'", WsjtxClient.AgeFieldText(0), "Now");
+        CheckStr("Age wording: negative clamps to 'Now'", WsjtxClient.AgeFieldText(-3), "Now");
+        CheckStr("Age wording: 1 -> '1 period'", WsjtxClient.AgeFieldText(1), "1 period");
+        CheckStr("Age wording: 2 -> '2 periods'", WsjtxClient.AgeFieldText(2), "2 periods");
+        CheckStr("Age wording: 5 -> '5 periods'", WsjtxClient.AgeFieldText(5), "5 periods");
+
+        // End-to-end through the shared row builder: an 'age' fragment lands where the order
+        // puts it, and drops its leading separator when it is the first field.
+        var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "callp", "K 1 A B C" }, { "snr", ", -12" }, { "age", ", 3 periods" },
+        };
+        CheckStr("row builder: age in the middle",
+            RowFormatter.BuildOrderedRow(fieldMap, new List<string> { "callp", "age", "snr" }, "FB"),
+            "K 1 A B C, 3 periods, -12");
+        CheckStr("row builder: age first drops its leading comma",
+            RowFormatter.BuildOrderedRow(fieldMap, new List<string> { "age", "callp" }, "FB"),
+            "3 periods, K 1 A B C");
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()

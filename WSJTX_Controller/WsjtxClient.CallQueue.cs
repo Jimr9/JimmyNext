@@ -450,6 +450,12 @@ namespace WSJTX_Controller
             return periods <= 0 ? 0 : (int)periods;
         }
 
+        // Concise operator-facing wording for the "Age" row field: "Now" when heard this period
+        // (or last-heard unknown), "1 period", then "N periods". Kept as one place so the row
+        // field reads consistently; Smart Start's stale-station wording is phrased separately.
+        public static string AgeFieldText(int periods) =>
+            periods <= 0 ? "Now" : periods == 1 ? "1 period" : $"{periods} periods";
+
         // Translates a display row index from the normal callListBox (which filters
         // callInProg) to the corresponding true callQueue position.
         // Returns displayIdx unchanged when no mapping exists (e.g., no active QSO).
