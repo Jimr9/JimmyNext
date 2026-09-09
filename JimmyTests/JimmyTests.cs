@@ -216,6 +216,7 @@ static class JimmyTests
         AgeRowFieldTests();
         LastHeardSortTests();
         MaxCallQueueAgeFloorTests();
+        SmartStartUnaffectedByLastHeardTests();
         CallQueueRankerCategoryWeightValidationTests();
         CallQueueRankerCallingPrioritiesTests();
         CallQueueRankerBeamRankTests();
@@ -9025,6 +9026,50 @@ static class JimmyTests
         // Options clamp above one-for-one; there is no isolated Controller settings-load test
         // hook, so that bound is covered by inspection + the matching Options clamp + the P9
         // full-suite/replay run rather than a unit test here.
+    }
+
+    // P5 (2026-09-09): Smart Start COMPATIBILITY check. The Station Age work (P1-P4) added
+    // EnqueueDecodeMessage.LastHeardUtc, re-scored the "Most recent first" sort, and lowered
+    // the queue-age floor -- none of which is meant to change Smart Start. This proves the new
+    // last-heard field is inert to TargetMonitor: an armed Smart Start monitor reaches
+    // byte-identical state whether or not the decodes it is fed carry a LastHeardUtc stamp
+    // (the fuller 3022947 Smart Start / TargetMonitor battery is run unchanged alongside this).
+    static void SmartStartUnaffectedByLastHeardTests()
+    {
+        Console.WriteLine("\n── Smart Start compatibility: LastHeardUtc is inert to TargetMonitor ──");
+
+        EnqueueDecodeMessage Stamped(string msg, DateTime lh)
+        {
+            var d = D(msg);
+            d.RxDate = new DateTime(2026, 9, 9, 0, 0, 0, DateTimeKind.Utc);
+            d.SinceMidnight = TimeSpan.FromHours(12);
+            d.LastHeardUtc = lh;   // as CallQueueStore.AddCall/UpdateCall would set it
+            return d;
+        }
+
+        (bool ready, bool busy, bool live, int silence, bool parityKnown) Run(bool stampLastHeard)
+        {
+            var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 3 };
+            tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+            DateTime lh = stampLastHeard ? new DateTime(2026, 9, 9, 12, 0, 0, DateTimeKind.Utc) : default;
+            // busy with a peer, then two silent periods, then a fresh CQ opening.
+            tm.ObserveDecode(Stamped($"W1ABC {THEIR_CALL} -08", lh), true, MY_CALL);
+            tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false);
+            tm.OnReceivePeriodComplete(4, true, "20m", "FT8", "tok1", false);
+            tm.ObserveDecode(Stamped($"CQ {THEIR_CALL} EM63", lh), true, MY_CALL);
+            return (tm.ReadyToStart, tm.BusyWithOther, tm.HasLiveTargetEvidence,
+                    tm.SilenceCount, tm.TargetEvenParity != null);
+        }
+
+        var withStamp = Run(true);
+        var without = Run(false);
+        Check("ReadyToStart identical with/without LastHeardUtc", withStamp.ready == without.ready, true);
+        Check("BusyWithOther identical", withStamp.busy == without.busy, true);
+        Check("HasLiveTargetEvidence identical", withStamp.live == without.live, true);
+        Check("SilenceCount identical", withStamp.silence == without.silence, true);
+        Check("parity establishment identical", withStamp.parityKnown == without.parityKnown, true);
+        // And the sequence actually did something meaningful (guards against a no-op test).
+        Check("the exercised sequence reaches 'ready' on the CQ opening", withStamp.ready, true);
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()
