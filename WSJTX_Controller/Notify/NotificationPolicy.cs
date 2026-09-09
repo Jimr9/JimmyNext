@@ -77,6 +77,15 @@ namespace WSJTX_Controller
         // WsjtxClient.ShowStatus only ever compares Now/AfterRx/AfterTx/AfterQso, which keep
         // their original values; the coordinator handles TxStart explicitly, not by ordinal.
         TxStart,
+
+        // Added 2026-09-09 (multi-delivery-point work). Deliver when a receive period BEGINS --
+        // the authoritative new-slot edge (SpeechCoordinator.OnReceivePeriodStarted()), fired
+        // from DirectApplyDecodes' new-slot detection BEFORE that period's decodes are
+        // processed. Distinct from AfterRx ("receive ends, after decodes"). Held while
+        // physically transmitting and released on the transmit falling edge instead, so a
+        // "receive begins" utterance is never spoken over a live over. Appended last, same
+        // reasoning as TxStart -- the coordinator handles it explicitly, never by ordinal.
+        RxStart,
     }
 
     // Added 2026-09-04. The operator-facing SPEECH ELIGIBILITY control: "under what operating
@@ -180,7 +189,36 @@ namespace WSJTX_Controller
         // Added 2026-09-02 (Item 1): the single operator-facing "when is this spoken" control.
         // Default Now = today's behaviour for every type. NotificationSettings.LoadFromIni
         // migrates a pre-existing Timing/DeferWhileTransmitting pair into this on first load.
+        //
+        // 2026-09-09: this stays as the PRIMARY delivery boundary -- everything that reads a
+        // single SpeakWhen (routine-status fragment composition in WsjtxClient.ShowStatus,
+        // pre-multi-delivery INIs) keeps working off it unchanged. The NEW capability is that a
+        // PUBLISHED notification can be delivered at MORE THAN ONE boundary at once; that set
+        // lives in SpeakWhenSet below and is authoritative for NotificationCenter.Deliver.
         public SpeakWhen SpeakWhen { get; set; } = SpeakWhen.Now;
+
+        // Added 2026-09-09: the full set of delivery boundaries a PUBLISHED notification speaks
+        // at -- one or more of Now / RxStart / AfterRx / TxStart / AfterTx / AfterQso.
+        // null = "not configured as a set" -> EffectiveSpeakWhenSet() falls back to { SpeakWhen }
+        // so every existing policy/INI produces byte-identical timing. SpeakWhen.Never as the
+        // sole element = never spoken (same as SpeakCondition.Never for delivery purposes).
+        // NotificationSettings persists this as notifySpeakWhenSet_ (a comma-joined list);
+        // SpeakWhen (singular) is kept in sync to the first element for back-compat.
+        public System.Collections.Generic.List<SpeakWhen> SpeakWhenSet { get; set; }
+
+        // The delivery boundaries to actually use: the configured set if present and non-empty,
+        // otherwise just the primary SpeakWhen. De-duplicated, order preserved. Never empty.
+        public System.Collections.Generic.IReadOnlyList<SpeakWhen> EffectiveSpeakWhenSet()
+        {
+            var result = new System.Collections.Generic.List<SpeakWhen>();
+            var source = (SpeakWhenSet != null && SpeakWhenSet.Count > 0)
+                ? (System.Collections.Generic.IEnumerable<SpeakWhen>)SpeakWhenSet
+                : new[] { SpeakWhen };
+            foreach (var w in source)
+                if (!result.Contains(w)) result.Add(w);
+            if (result.Count == 0) result.Add(SpeakWhen);
+            return result;
+        }
 
         // Added 2026-09-04: the operator-facing speech-eligibility control -- see the
         // SpeakCondition enum. Default Always = no change on upgrade for a policy that carried
@@ -223,6 +261,7 @@ namespace WSJTX_Controller
             ThrottleMilliseconds = ThrottleMilliseconds,
             Template = Template,
             SpeakWhen = SpeakWhen,
+            SpeakWhenSet = SpeakWhenSet == null ? null : new System.Collections.Generic.List<SpeakWhen>(SpeakWhenSet),
             Condition = Condition,
             Timing = Timing,
             DeferWhileTransmitting = DeferWhileTransmitting,

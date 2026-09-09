@@ -151,6 +151,29 @@ namespace WSJTX_Controller
                 else if (policy.DeferWhileTransmitting)
                     policy.SpeakWhen = SpeakWhen.AfterTx;
 
+                // SpeakWhenSet (2026-09-09 multi-delivery-point work): a published notification
+                // can be spoken at MORE THAN ONE boundary. notifySpeakWhenSet_ is a comma-joined
+                // list of SpeakWhen names and is authoritative when present. Absent -> leave
+                // SpeakWhenSet null, so NotificationPolicy.EffectiveSpeakWhenSet() falls back to
+                // { policy.SpeakWhen } and every pre-multi-delivery INI keeps byte-identical
+                // timing. Unparseable tokens are skipped; an all-invalid value is ignored
+                // (fail-safe, like every other key here). SpeakWhen (singular) is kept in sync
+                // to the first element for the back-compat readers (routine-status fragment
+                // composition, a clean rollback to an older build).
+                string speakWhenSetRaw = ini.Read($"notifySpeakWhenSet_{type}");
+                if (!string.IsNullOrWhiteSpace(speakWhenSetRaw))
+                {
+                    var set = new List<SpeakWhen>();
+                    foreach (var tok in speakWhenSetRaw.Split(','))
+                        if (Enum.TryParse(tok.Trim(), out SpeakWhen w) && !set.Contains(w))
+                            set.Add(w);
+                    if (set.Count > 0)
+                    {
+                        policy.SpeakWhenSet = set;
+                        policy.SpeakWhen = set[0];
+                    }
+                }
+
                 // SpeakCondition (2026-09-04): the 4-way eligibility control. An explicit
                 // notifyCondition_ key wins. Otherwise migrate:
                 //   legacy notifySpeakWhen_==Never       -> SpeakCondition.Never
@@ -201,6 +224,10 @@ namespace WSJTX_Controller
                 ini.Write($"notifyThrottleMs_{type}", policy.ThrottleMilliseconds.ToString());
                 ini.Write($"notifyTemplate_{type}", policy.Template);
                 ini.Write($"notifySpeakWhen_{type}", policy.SpeakWhen.ToString());
+                // The full multi-delivery set (2026-09-09). Always written from the effective
+                // set so a re-load is a faithful round trip even for a policy still on a single
+                // legacy boundary; notifySpeakWhen_ above stays the primary for older builds.
+                ini.Write($"notifySpeakWhenSet_{type}", string.Join(",", policy.EffectiveSpeakWhenSet()));
                 ini.Write($"notifyCondition_{type}", policy.Condition.ToString());
                 // Legacy key kept in sync for a clean rollback to a pre-2026-09-04 build
                 // (which only understands Suppress / SpeakNormally). DuringQsoOnly and Never

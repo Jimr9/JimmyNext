@@ -331,6 +331,7 @@ static class JimmyTests
         NotificationCenterDeferredDeliveryTests();
         SpeechCoordinatorTests();
         SpeakWhenMigrationTests();
+        MultiDeliveryNotificationTests();
         RenderStatusSpeechCoordinationTests();
         RenderStatusVisibleKeepsLastOnEmptyTests();
         RoutineClauseTemplateTests();
@@ -9070,6 +9071,134 @@ static class JimmyTests
         Check("parity establishment identical", withStamp.parityKnown == without.parityKnown, true);
         // And the sequence actually did something meaningful (guards against a no-op test).
         Check("the exercised sequence reaches 'ready' on the CQ opening", withStamp.ready, true);
+    }
+
+    // P6 (2026-09-09): a PUBLISHED notification can be delivered at MORE THAN ONE boundary at
+    // once. Additive on top of the existing single-SpeakWhen system -- an unset SpeakWhenSet
+    // means byte-identical timing to before, and a new SpeakWhen.RxStart ("receive begins").
+    static void MultiDeliveryNotificationTests()
+    {
+        Console.WriteLine("\n── Notifications: multiple simultaneous delivery boundaries ──");
+
+        // ── EffectiveSpeakWhenSet fallback + de-dup ──
+        var p = new NotificationPolicy { SpeakWhen = SpeakWhen.AfterRx };
+        Check("null SpeakWhenSet -> effective set is just the primary SpeakWhen",
+            p.EffectiveSpeakWhenSet().Count == 1 && p.EffectiveSpeakWhenSet()[0] == SpeakWhen.AfterRx, true);
+        p.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.AfterRx, SpeakWhen.Now };
+        var eff = p.EffectiveSpeakWhenSet();
+        Check("explicit set: de-duplicated, order preserved",
+            eff.Count == 2 && eff[0] == SpeakWhen.Now && eff[1] == SpeakWhen.AfterRx, true);
+        p.SpeakWhenSet = new List<SpeakWhen>();
+        Check("empty set -> falls back to the primary", p.EffectiveSpeakWhenSet().Count == 1, true);
+        // Clone is a deep copy of the list.
+        p.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.TxStart };
+        var clone = p.Clone();
+        clone.SpeakWhenSet.Add(SpeakWhen.AfterQso);
+        Check("Clone() copies SpeakWhenSet as an independent list",
+            p.SpeakWhenSet.Count == 1 && clone.SpeakWhenSet.Count == 2, true);
+
+        // ── INI round-trip + back-compat ──
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyMultiDeliv_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // Legacy INI: only notifySpeakWhen_ (no set key) -> identical single-timing, set left null.
+            var legacy = new IniFile(tmpIni);
+            legacy.Write("notifySpeakWhen_QsoStarted", "AfterTx");
+            var s1 = new NotificationSettings();
+            s1.LoadFromIni(legacy);
+            Check("legacy INI (no set key): primary SpeakWhen migrates as before",
+                s1.Policies[NotificationEventType.QsoStarted].SpeakWhen == SpeakWhen.AfterTx, true);
+            Check("legacy INI (no set key): SpeakWhenSet stays null (fallback to primary)",
+                s1.Policies[NotificationEventType.QsoStarted].SpeakWhenSet == null, true);
+
+            // Save then reload: the effective set round-trips; primary stays in sync.
+            s1.Policies[NotificationEventType.StationWatchActivity].SpeakWhenSet =
+                new List<SpeakWhen> { SpeakWhen.RxStart, SpeakWhen.AfterRx };
+            var outIni = new IniFile(tmpIni);
+            s1.SaveToIni(outIni);
+            var s2 = new NotificationSettings();
+            s2.LoadFromIni(new IniFile(tmpIni));
+            var rt = s2.Policies[NotificationEventType.StationWatchActivity].SpeakWhenSet;
+            Check("round-trip: multi-boundary set survives save/load",
+                rt != null && rt.Count == 2 && rt[0] == SpeakWhen.RxStart && rt[1] == SpeakWhen.AfterRx, true);
+            Check("round-trip: primary SpeakWhen kept in sync to the set's first element",
+                s2.Policies[NotificationEventType.StationWatchActivity].SpeakWhen == SpeakWhen.RxStart, true);
+
+            // notifySpeakWhenSet_ is authoritative over a conflicting notifySpeakWhen_.
+            var conflict = new IniFile(Path.Combine(Path.GetTempPath(), "JimmyMultiDelivC_" + Guid.NewGuid().ToString("N") + ".ini"));
+            conflict.Write("notifySpeakWhen_ClockSynced", "AfterQso");
+            conflict.Write("notifySpeakWhenSet_ClockSynced", "Now,AfterRx");
+            var s3 = new NotificationSettings();
+            s3.LoadFromIni(conflict);
+            var cs = s3.Policies[NotificationEventType.ClockSynced].SpeakWhenSet;
+            Check("notifySpeakWhenSet_ wins over notifySpeakWhen_",
+                cs != null && cs.Count == 2 && cs[0] == SpeakWhen.Now, true);
+        }
+        finally { try { File.Delete(tmpIni); } catch { } }
+
+        // ── SpeechCoordinator: RxStart edge ──
+        var said = new List<string>();
+        var coord = new SpeechCoordinator((t, cue) => said.Add(t));
+        coord.SubmitNotification("id|x|RxStart", "receive begins", SpeakWhen.RxStart, NotificationPriority.Normal);
+        Check("RxStart: held, not spoken at submit", said.Count == 0, true);
+        coord.OnReceiveCycleComplete();
+        Check("RxStart: NOT released by the receive-END signal", said.Count == 0, true);
+        coord.OnReceivePeriodStarted();
+        Check("RxStart: released by the receive-BEGINS signal", said.Count == 1 && said[0] == "receive begins", true);
+        // Held while transmitting; the TX falling edge owns the release.
+        said.Clear();
+        coord.OnPhysicalTxChanged(true);
+        coord.SubmitNotification("id|y|RxStart", "rx begins held", SpeakWhen.RxStart, NotificationPriority.Normal);
+        coord.OnReceivePeriodStarted();
+        Check("RxStart: not spoken over a live over", said.Count == 0, true);
+        coord.OnPhysicalTxChanged(false);
+        Check("RxStart: released on the transmit falling edge", said.Count == 1 && said[0] == "rx begins held", true);
+
+        // ── NotificationCenter: one Publish, two boundaries, each delivered once ──
+        var settings = new NotificationSettings();
+        var sw = settings.Policies[NotificationEventType.StationWatchActivity];
+        sw.RepeatSeconds = 0; sw.ThrottleMilliseconds = 0;
+        sw.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.AfterRx };
+        var delivery = new FakeNotificationDelivery();
+        var center = new NotificationCenter(settings, delivery);
+
+        center.Publish(new StationWatchActivityEvent("W9FTR CQ.", "W9FTR", null, null, "TargetCq"));
+        Check("multi-delivery: the Now boundary speaks immediately", delivery.AnnounceCount == 1, true);
+        center.OnPeriodBoundary();
+        Check("multi-delivery: the AfterRx boundary also speaks (same Publish, second occurrence)",
+            delivery.AnnounceCount == 2, true);
+        CheckStr("multi-delivery: both occurrences carry the same text", delivery.AllText[1], delivery.AllText[0]);
+        center.OnPeriodBoundary();
+        Check("multi-delivery: each boundary delivers at most once (no re-delivery)",
+            delivery.AnnounceCount == 2, true);
+
+        // ── two selected timings must not overwrite one another's pending occurrence ──
+        var s4 = new NotificationSettings();
+        var a = s4.Policies[NotificationEventType.StationWatchActivity];
+        a.RepeatSeconds = 0; a.ThrottleMilliseconds = 0;
+        a.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.RxStart, SpeakWhen.AfterRx };
+        var d4 = new FakeNotificationDelivery();
+        var c4 = new NotificationCenter(s4, d4);
+        c4.Publish(new StationWatchActivityEvent("W9FTR RR73.", "W9FTR", null, null, "TargetRr73"));
+        Check("both future boundaries held, nothing spoken yet", d4.AnnounceCount == 0, true);
+        c4.OnReceivePeriodStarted();
+        Check("RxStart boundary fires independently", d4.AnnounceCount == 1, true);
+        c4.OnPeriodBoundary();
+        Check("AfterRx boundary still fires (was not overwritten by the RxStart flush)",
+            d4.AnnounceCount == 2, true);
+
+        // ── Critical with a multi-set is spoken ONCE, not once per boundary ──
+        var s5 = new NotificationSettings();
+        var crit = s5.Policies[NotificationEventType.RadioCatLost];   // default Critical
+        crit.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.AfterRx, SpeakWhen.AfterTx };
+        var d5 = new FakeNotificationDelivery();
+        var c5 = new NotificationCenter(s5, d5);
+        c5.Publish(new RadioCatLostEvent("2028", "COM3", "38400", "RPRT -20"));
+        Check("Critical + multi-set: spoken exactly once at submit", d5.AnnounceCount == 1, true);
+        c5.OnPeriodBoundary();
+        c5.OnTransmittingChanged(true);
+        c5.OnTransmittingChanged(false);
+        Check("Critical + multi-set: no extra deliveries at later boundaries", d5.AnnounceCount == 1, true);
     }
 
     static void CallQueueRankerCategoryWeightValidationTests()

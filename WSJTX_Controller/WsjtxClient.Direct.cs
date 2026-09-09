@@ -2195,6 +2195,13 @@ namespace WSJTX_Controller
                 _directSeenDecodeSignatures.Clear();
                 _directReceiveCycleCompletedThisTick = true;
 
+                // "Receive period begins" (SpeakWhen.RxStart) -- the authoritative new-slot
+                // edge, raised BEFORE this pass processes the just-ended period's decodes and
+                // before the end-of-pass OnPeriodBoundary()/AfterRx signal below. The
+                // coordinator holds it while physically transmitting and releases it on the
+                // transmit falling edge instead.
+                Notify?.OnReceivePeriodStarted();
+
                 // Root-caused live, 2026-08-12: timeOffsets (WsjtxClient.cs) was already being
                 // populated in Direct mode (ProcessDecodeMsg -- the exact same shared method the
                 // UDP path uses -- adds dmsg.DeltaTime from every decode regardless of

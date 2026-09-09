@@ -63,6 +63,9 @@ namespace WSJTX_Controller
         // Forwarded to the one coordinator. Kept as the public names WsjtxClient already calls;
         // OnPeriodBoundary now means "a receive cycle completed" (SpeakWhen.AfterRx).
         public void OnPeriodBoundary() => _coordinator.OnReceiveCycleComplete();
+        // 2026-09-09: the "receive period begins" edge (SpeakWhen.RxStart), forwarded from
+        // DirectApplyDecodes' new-slot detection before that period's decodes are processed.
+        public void OnReceivePeriodStarted() => _coordinator.OnReceivePeriodStarted();
         public void OnTransmittingChanged(bool transmitting) => _coordinator.OnPhysicalTxChanged(transmitting);
         public void OnQsoActiveChanged(bool active) => _coordinator.OnQsoActiveChanged(active);
 
@@ -127,19 +130,44 @@ namespace WSJTX_Controller
             // deferred item that becomes QSO-suppressed by the time it would flush -- must not
             // advance RepeatSeconds / ThrottleMilliseconds / SuppressUnchanged state, or it
             // would silence a LATER occurrence that genuinely should be heard (Codex #12).
-            _coordinator.SubmitNotification(
-                identity: evt.EventType + "|" + (evt.DedupKey ?? ""),
-                text: text,
-                when: policy.SpeakWhen,
-                priority: effectivePriority,
-                condition: policy.Condition,
-                onSpoken: () =>
-                {
-                    _dedupThrottle.RecordFired(evt.EventType, evt.DedupKey);
-                    if (policy.SuppressUnchanged)
-                        _dedupThrottle.RecordText(evt.EventType, evt.DedupKey, text);
-                },
-                isWatchCategory: WatchEventTypes.Contains(evt.EventType));
+            //
+            // 2026-09-09 multi-delivery: a policy can name MORE THAN ONE delivery boundary
+            // (EffectiveSpeakWhenSet). Submit once per boundary, each with its OWN coordinator
+            // identity ("EventType|DedupKey|<when>"), so the boundaries are independent -- one
+            // timing never overwrites another's pending copy, and each occurrence is delivered
+            // at most once (the coordinator removes a pending item when it flushes it). The
+            // dedup/throttle "last announced" bookkeeping is advanced by the FIRST boundary
+            // that actually speaks (a shared once-guard), so several boundaries for one Publish
+            // do not multiply-advance the repeat window.
+            string dedupKey = evt.DedupKey ?? "";
+            bool recorded = false;
+            Action onSpokenOnce = () =>
+            {
+                if (recorded) return;
+                recorded = true;
+                _dedupThrottle.RecordFired(evt.EventType, evt.DedupKey);
+                if (policy.SuppressUnchanged)
+                    _dedupThrottle.RecordText(evt.EventType, evt.DedupKey, text);
+            };
+            bool isWatch = WatchEventTypes.Contains(evt.EventType);
+
+            // Critical bypasses delivery timing entirely (spoken the instant it is submitted),
+            // so submitting it once per boundary would just speak it several times. Collapse to
+            // a single submission for Critical; the configured set is irrelevant to it.
+            var boundaries = effectivePriority == NotificationPriority.Critical
+                ? new[] { policy.SpeakWhen }
+                : policy.EffectiveSpeakWhenSet();
+            foreach (SpeakWhen when in boundaries)
+            {
+                _coordinator.SubmitNotification(
+                    identity: evt.EventType + "|" + dedupKey + "|" + when,
+                    text: text,
+                    when: when,
+                    priority: effectivePriority,
+                    condition: policy.Condition,
+                    onSpoken: onSpokenOnce,
+                    isWatchCategory: isWatch);
+            }
         }
     }
 }

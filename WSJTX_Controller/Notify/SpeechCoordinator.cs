@@ -415,8 +415,10 @@ namespace WSJTX_Controller
 
             if (rising)
             {
-                // Stale receive status must not be spoken once TX has begun.
-                DropRoutineIf(p => p.When == SpeakWhen.AfterRx);
+                // Stale receive status must not be spoken once TX has begun -- neither an
+                // "after receive" nor a held "receive begins" routine line. A pending RxStart
+                // NOTIFICATION is kept: the next receive period's start edge will deliver it.
+                DropRoutineIf(p => p.When == SpeakWhen.AfterRx || p.When == SpeakWhen.RxStart);
 
                 // TxStart delivery: release anything held for the physical transmit-start edge.
                 FlushRoutineBucket(p => p.When == SpeakWhen.TxStart);
@@ -432,12 +434,31 @@ namespace WSJTX_Controller
                 DropRoutineIf(p => p.RenderedWhileTx && p.IsBase && p.When != SpeakWhen.AfterQso);
 
                 // AfterTx always releases here. AfterQso releases here too when the QSO has
-                // ALREADY ended during this over (Codex #11).
-                FlushRoutineBucket(p => p.When == SpeakWhen.AfterTx
+                // ALREADY ended during this over (Codex #11). RxStart also releases here: the
+                // transmit falling edge IS the start of a receive period, so a "receive begins"
+                // item held through the over is delivered now (the new-slot tick would also
+                // deliver it; whichever fires first wins, the other finds nothing).
+                FlushRoutineBucket(p => p.When == SpeakWhen.AfterTx || p.When == SpeakWhen.RxStart
                     || (p.When == SpeakWhen.AfterQso && !_qsoActive));
-                FlushNotificationsIf(p => p.When == SpeakWhen.AfterTx
+                FlushNotificationsIf(p => p.When == SpeakWhen.AfterTx || p.When == SpeakWhen.RxStart
                     || (p.When == SpeakWhen.AfterQso && !_qsoActive));
             }
+        }
+
+        // A receive period has BEGUN -- the authoritative new-slot edge, fired from
+        // DirectApplyDecodes' new-slot detection BEFORE that period's decodes are processed
+        // (WsjtxClient.Direct.cs). Releases SpeakWhen.RxStart. Never spoken over a live over:
+        // while physically transmitting a held RxStart routine line is dropped and the flush is
+        // skipped -- the transmit falling edge then owns the release.
+        public void OnReceivePeriodStarted()
+        {
+            if (_physicallyTransmitting)
+            {
+                DropRoutineIf(p => p.When == SpeakWhen.RxStart);
+                return;
+            }
+            FlushRoutineBucket(p => p.When == SpeakWhen.RxStart);
+            FlushNotificationsIf(p => p.When == SpeakWhen.RxStart);
         }
 
         // The receive period finished AND its decodes were processed (end of the Direct
