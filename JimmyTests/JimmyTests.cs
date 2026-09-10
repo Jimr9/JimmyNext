@@ -14187,9 +14187,11 @@ static class JimmyTests
         // --- the exact-RX wrapper shares the existing RX-offset path ---
         var seen = new System.Collections.Generic.List<string>();
         var seenLock = new object();
+        string[] rxResp = { "OK" };
         var listener = new StubEngineHost(line =>
         {
             lock (seenLock) seen.Add(line);
+            if (line.StartsWith("SET_RX_OFFSET")) return rxResp[0];
             return "OK";
         });
         try
@@ -14228,6 +14230,13 @@ static class JimmyTests
             Check("...confirmed Rx offset (the value the dialog reads) is now 1800", wc.CurrentRxOffsetHz == 1800, true);
             Check("...and the in-flight flag has cleared", wc.RxFrequencyChangeInFlight, false);
 
+            // Item 1 follow-up: the engine-CONFIRMED result the dialog mirrors is recorded, and
+            // only after the engine confirmed it.
+            CheckStr("engine-confirmed RX result is captured for the dialog status field",
+                wc.LastFreqControlResult, "Receive 1800 hertz");
+            int seqAfterOk = wc.LastFreqControlResultSeq;
+            Check("...with an advanced result sequence", seqAfterOk > 0, true);
+
             // Below the 200 Hz passband floor -> clamped by the SHARED path, not re-validated here.
             lock (seenLock) seen.Clear();
             wc.SetRxFrequencyHz(50);
@@ -14235,6 +14244,34 @@ static class JimmyTests
             var cmds2 = RxCmds();
             Check("SetRxFrequencyHz clamps a below-floor value through the shared ClampAudioOffset",
                 cmds2.Count == 1 && cmds2[0] == "SET_RX_OFFSET 200", true);
+
+            // A failed engine command is surfaced in that same field as "not confirmed",
+            // never as a success.
+            lock (seenLock) seen.Clear();
+            int seqBeforeErr = wc.LastFreqControlResultSeq;
+            rxResp[0] = "ERR nope";
+            wc.SetRxFrequencyHz(2200);
+            PumpUntil(() => wc.TestRxOffsetRequestsInFlight == 0 && wc.LastFreqControlResultSeq > seqBeforeErr);
+            CheckStr("a failed SET_RX_OFFSET is reported honestly, not as a confirmed value",
+                wc.LastFreqControlResult, "Receive frequency change not confirmed -- engine not responding");
+            Check("...and the failed value is NOT adopted as the confirmed Rx offset",
+                wc.CurrentRxOffsetHz == 200, true);
+            rxResp[0] = "OK";
+
+            // The dialog itself: its status field shows that captured result once state is
+            // otherwise ready (constructing the dialog does not open a window or start its timer).
+            using (var dlg = new RxTxFreqDlg(ctrl, wc))
+            {
+                dlg.RefreshStatusForTest();
+                var statusBox = System.Linq.Enumerable.FirstOrDefault(
+                    System.Linq.Enumerable.OfType<System.Windows.Forms.TextBox>(dlg.Controls),
+                    t => t.AccessibleName == "Status");
+                Check("dialog has a control accessibly named \"Status\"", statusBox != null, true);
+                // Engine is connected but this harness never fed a dial frequency, so the honest
+                // "band not known" state legitimately takes precedence over the stale result.
+                CheckStr("dialog status: band-unknown state wins over a stale result",
+                    statusBox?.Text, "Band not known yet. Frequency controls are disabled.");
+            }
         }
         catch (Exception ex)
         {

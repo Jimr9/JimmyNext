@@ -1443,11 +1443,30 @@ namespace WSJTX_Controller
         // not off the stale confirmed value; the in-flight counter clears it once the whole burst
         // settles (success OR failure), resyncing the next nudge to the engine's confirmed
         // SNAPSHOT value so pending state can never permanently drift from the engine.
+        // The most recent user-facing RX/TX audio-frequency outcome -- the SAME string
+        // ApplyManualTx/RxOffset already put in the main-window status line. RxTxFreqDlg mirrors
+        // it into its own status field so the operator sees the engine-confirmed result (or the
+        // honest "not confirmed" failure) without the dialog re-implementing any command,
+        // clamping, confirmation, or reporting logic. Seq bumps on every update so the dialog's
+        // refresh tick can tell a new result from the previous one.
+        internal string LastFreqControlResult { get; private set; } = "";
+        internal int LastFreqControlResultSeq { get; private set; }
+
+        // Announce an RX/TX audio-frequency outcome: main-window status line (unchanged), plus
+        // record it for RxTxFreqDlg. Only the ApplyManualTx/RxOffset call sites use this -- all
+        // of them already passed sound:false.
+        private void AnnounceFreqControlResult(string msg)
+        {
+            StatusView.ShowMessage(msg, false);
+            LastFreqControlResult = msg;
+            LastFreqControlResultSeq++;
+        }
+
         private void ApplyManualTxOffset(int hz, string prefix)
         {
             if (!_directConnected)
             {
-                StatusView.ShowMessage("Transmit frequency needs the native engine, which isn't currently reachable.", false);
+                AnnounceFreqControlResult("Transmit frequency needs the native engine, which isn't currently reachable.");
                 return;
             }
             int clamped = ClampAudioOffset(hz);
@@ -1466,7 +1485,7 @@ namespace WSJTX_Controller
                 string edge = clamped >= MaxAudioOffsetHz ? "maximum"
                     : clamped <= MinAudioOffsetHz ? "minimum" : null;
                 if (edge != null)
-                    StatusView.ShowMessage($"{prefix} frequency at {edge}, {clamped} hertz", false);
+                    AnnounceFreqControlResult($"{prefix} frequency at {edge}, {clamped} hertz");
                 return;
             }
 
@@ -1482,14 +1501,14 @@ namespace WSJTX_Controller
                     txOffset = (uint)clamped;
                     _manualFreqThisQso = true;
                     DebugOutput($"{Time()} {prefix}: manual txOffset confirmed:{clamped} _manualFreqThisQso:true");
-                    StatusView.ShowMessage($"{prefix} {clamped} hertz", false);
+                    AnnounceFreqControlResult($"{prefix} {clamped} hertz");
                 }
                 else
                 {
                     // Not confirmed -- _manualFreqThisQso deliberately left as-is so this failed
                     // request cannot suppress Best Free automatic placement.
                     DebugOutput($"{Time()} {prefix}: manual txOffset NOT confirmed -- _manualFreqThisQso left at {_manualFreqThisQso}");
-                    StatusView.ShowMessage($"{prefix} frequency change not confirmed -- engine not responding", false);
+                    AnnounceFreqControlResult($"{prefix} frequency change not confirmed -- engine not responding");
                 }
             });
         }
@@ -1501,7 +1520,7 @@ namespace WSJTX_Controller
         {
             if (!_directConnected)
             {
-                StatusView.ShowMessage("Receive frequency needs the native engine, which isn't currently reachable.", false);
+                AnnounceFreqControlResult("Receive frequency needs the native engine, which isn't currently reachable.");
                 return;
             }
             int clamped = ClampAudioOffset(hz);
@@ -1513,7 +1532,7 @@ namespace WSJTX_Controller
                 string edge = clamped >= MaxAudioOffsetHz ? "maximum"
                     : clamped <= MinAudioOffsetHz ? "minimum" : null;
                 if (edge != null)
-                    StatusView.ShowMessage($"Receive frequency at {edge}, {clamped} hertz", false);
+                    AnnounceFreqControlResult($"Receive frequency at {edge}, {clamped} hertz");
                 return;
             }
 
@@ -1528,12 +1547,12 @@ namespace WSJTX_Controller
                 {
                     rxOffset = (uint)clamped;
                     if (burstSettled) _pendingRxOffsetHz = null;
-                    StatusView.ShowMessage($"Receive {clamped} hertz", false);
+                    AnnounceFreqControlResult($"Receive {clamped} hertz");
                 }
                 else
                 {
                     if (burstSettled) _pendingRxOffsetHz = null;
-                    StatusView.ShowMessage("Receive frequency change not confirmed -- engine not responding", false);
+                    AnnounceFreqControlResult("Receive frequency change not confirmed -- engine not responding");
                 }
             });
         }

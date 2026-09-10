@@ -23,6 +23,12 @@ namespace WSJTX_Controller
         private readonly WsjtxClient _wc;
         private readonly Timer _refresh;
 
+        // Last engine-confirmed RX/TX frequency outcome shown in the status field, and the
+        // WsjtxClient result-sequence it came from -- initialised to the current sequence so a
+        // result produced before this window opened is not shown as if it just happened.
+        private int _lastResultSeq;
+        private string _lastResult = "";
+
         private readonly TextBox _bandBox, _dialBox, _modeBox, _rxBox, _txBox, _behBox, _stepBox, _statusBox;
         private readonly Button _rxDownBtn, _rxUpBtn, _txDownBtn, _txUpBtn, _rxFromTxBtn, _txFromRxBtn;
         private readonly NumericUpDown _txExactUpDown, _rxExactUpDown;
@@ -32,6 +38,7 @@ namespace WSJTX_Controller
         {
             _ctrl = ctrl;
             _wc = wc;
+            _lastResultSeq = wc.LastFreqControlResultSeq;
 
             Text = "RX/TX Audio Frequency Controls";
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -219,10 +226,22 @@ namespace WSJTX_Controller
             _txDownBtn.Enabled = _txUpBtn.Enabled = _txFromRxBtn.Enabled =
                 _txExactUpDown.Enabled = _txSetBtn.Enabled = txOk;
 
+            // Mirror the engine-confirmed RX/TX result (or the honest failure) that
+            // ApplyManualTx/RxOffset already produced -- captured here, not re-derived. A newer
+            // result supersedes the previous one; the honest engine/band/in-flight states still
+            // take precedence when they apply.
+            int resultSeq = _wc.LastFreqControlResultSeq;
+            if (resultSeq != _lastResultSeq)
+            {
+                _lastResultSeq = resultSeq;
+                _lastResult = _wc.LastFreqControlResult ?? "";
+            }
+
             string status =
                 !engineUp ? "Engine not available. Frequency controls are disabled." :
                 !bandKnown ? "Band not known yet. Frequency controls are disabled." :
                 (txBusy || rxBusy) ? "Applying a change; waiting for the engine to confirm." :
+                !string.IsNullOrEmpty(_lastResult) ? _lastResult :
                 "Ready.";
             SetText(_statusBox, status);
         }
@@ -231,6 +250,10 @@ namespace WSJTX_Controller
         {
             if (box.Text != text) box.Text = text;
         }
+
+        // Test-only hook (JimmyTests, InternalsVisibleTo): run one refresh pass without
+        // showing the window or starting the 500 ms timer.
+        internal void RefreshStatusForTest() => RefreshNow();
 
         private void OpenHelp()
         {
