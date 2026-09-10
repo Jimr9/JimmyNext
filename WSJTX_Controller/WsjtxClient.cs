@@ -1396,6 +1396,17 @@ namespace WSJTX_Controller
         public int AudioOffsetMaxHz => MaxAudioOffsetHz;
         public int CurrentFreqStepHz => FreqStepHz;
 
+        // Read-only operating context for the accessible RX/TX Audio Frequency Controls dialog
+        // (RxTxFreqDlg). 0 = no confirmed dial frequency yet -- the dialog treats that as
+        // "band/engine state unknown" and disables its adjustment controls.
+        public ulong CurrentDialFrequencyHz => dialFrequency;
+
+        // A manual Rx/Tx offset change is still awaiting engine confirmation. The dialog
+        // disables the matching side's controls while one is in flight (same _pendingXxOffsetHz
+        // burst accounting the Tx/Rx nudge hotkeys already use).
+        public bool TxFrequencyChangeInFlight => _txOffsetRequestsInFlight > 0;
+        public bool RxFrequencyChangeInFlight => _rxOffsetRequestsInFlight > 0;
+
         // Options > Transmit "Transmit frequency" radio group changed. Re-selecting "Best free
         // frequency" is an explicit request for automatic placement again, so it clears any
         // manual override that was suppressing the auto-pick.
@@ -1562,6 +1573,15 @@ namespace WSJTX_Controller
         public bool SetTxFrequencyHz(int hz)
         {
             ApplyManualTxOffset(hz, "Transmit");
+            return true;
+        }
+
+        // Exact receive-offset type-in for RxTxFreqDlg. Thin wrapper around the same
+        // ApplyManualRxOffset path NudgeRxFrequency / SetRxFromTx already use -- no separate
+        // clamping, pending-command, confirmation, or failure-reporting logic of its own.
+        public bool SetRxFrequencyHz(int hz)
+        {
+            ApplyManualRxOffset(hz);
             return true;
         }
 

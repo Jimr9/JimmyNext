@@ -35,6 +35,7 @@ namespace WSJTX_Controller
         TxFromRx,
         RxFromTx,
         SetTxFreq,
+        OpenRxTxFreqControls,
         PSKReporter,
         Prompts,
         UploadLotw,
@@ -109,6 +110,10 @@ namespace WSJTX_Controller
             [HotkeyAction.TxFromRx]        = Keys.Control | Keys.F12,
             [HotkeyAction.RxFromTx]        = Keys.Control | Keys.F11,
             [HotkeyAction.SetTxFreq]       = Keys.Alt | Keys.W,
+            // Requested 2026-09-10 (item 3): a discoverable, non-hotkey way into the RX/TX audio-
+            // frequency commands. No default key -- the operator assigns one under Options >
+            // Hotkeys if wanted; the Options > Transmit button is the primary entry point.
+            [HotkeyAction.OpenRxTxFreqControls] = Keys.None,
             [HotkeyAction.PSKReporter]     = Keys.Alt | Keys.R,
             [HotkeyAction.Prompts]         = Keys.Alt | Keys.P,
             [HotkeyAction.UploadLotw]      = Keys.Alt | Keys.U,
@@ -177,6 +182,7 @@ namespace WSJTX_Controller
             [HotkeyAction.TxFromRx]        = "Set Transmit Frequency to Receive",
             [HotkeyAction.RxFromTx]        = "Set Receive Frequency to Transmit",
             [HotkeyAction.SetTxFreq]       = "Set Transmit Frequency...",
+            [HotkeyAction.OpenRxTxFreqControls] = "Open RX/TX Audio Frequency Controls",
             [HotkeyAction.PSKReporter]     = "Toggle PSKReporter",
             [HotkeyAction.Prompts]         = "Show Command Prompts and Hotkeys",
             [HotkeyAction.UploadLotw]      = "Upload to Logbook of the World",
@@ -229,6 +235,9 @@ namespace WSJTX_Controller
             HotkeyAction.TxFromRx,
             HotkeyAction.RxFromTx,
             HotkeyAction.SetTxFreq,
+            // Item 3 (2026-09-10): ships unassigned by design -- the Options > Transmit button is
+            // the primary way in; a key is purely optional.
+            HotkeyAction.OpenRxTxFreqControls,
             // Station Watch (2.0.63): both have real defaults above, but the operator may still
             // unassign them (spec: "user may leave them unassigned").
             HotkeyAction.ToggleStationWatch,

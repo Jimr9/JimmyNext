@@ -161,6 +161,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox checkForUpdatesCheckBox;
         private System.Windows.Forms.CheckBox _smartQsoStartCheckBox;
         private System.Windows.Forms.NumericUpDown _smartStartSilencePeriodsNumeric;
+        private System.Windows.Forms.Button _rxTxFreqControlsButton;
 
         // Appearance tab
         private System.Windows.Forms.ComboBox appearanceThemeCombo;
@@ -463,6 +464,22 @@ namespace WSJTX_Controller
                 Font           = font,
             };
             smartStartGroup.Controls.Add(_smartStartSilencePeriodsNumeric);
+
+            // Item 3 (2026-09-10): launcher for the accessible RX/TX Audio Frequency Controls
+            // window. Lives here (not Options > Radio) because this tab already owns the
+            // transmit-frequency mode and the frequency step in Hz -- the same context those
+            // controls operate on. Modeless / single-instance (Controller owns the instance).
+            _rxTxFreqControlsButton = new System.Windows.Forms.Button
+            {
+                Text           = "RX/TX Audio Frequency Controls...",
+                AccessibleName = "RX/TX Audio Frequency Controls",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(10, 264),
+                TabIndex       = 2,
+                Font           = font,
+            };
+            _rxTxFreqControlsButton.Click += (s, e) => ctrl.OpenRxTxFreqControlsDialog();
+            transmitPanel.Controls.Add(_rxTxFreqControlsButton);
         }
 
         private void SaveTransmitTab()

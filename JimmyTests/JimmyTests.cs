@@ -248,6 +248,7 @@ static class JimmyTests
         HotkeyConfigNewActionConflictTests();
         HotkeyHelpReferenceParityTests();
         TxLevelPerBandDurablePersistenceTests();
+        RxTxFreqControlsFeatureTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
@@ -14112,6 +14113,128 @@ static class JimmyTests
         finally
         {
             listener.Stop();
+        }
+    }
+
+    // ── Item 3, 2026-09-10: accessible RX/TX Audio Frequency Controls ──
+    // The dialog (RxTxFreqDlg) is a thin shell over the existing Nudge/Set Rx/Tx methods plus
+    // read-only context accessors. These cover the parts that can run headless: the new
+    // configurable-but-unassigned hotkey behaves like the rest of the registry, and the exact
+    // RX type-in wrapper (SetRxFrequencyHz) goes through the SAME clamp + SET_RX_OFFSET path
+    // NudgeRxFrequency uses -- no second implementation.
+    static void RxTxFreqControlsFeatureTests()
+    {
+        Console.WriteLine("\n── Item 3: RX/TX Audio Frequency Controls (hotkey + exact-RX wrapper) ──");
+
+        // --- hotkey registry contract for the new action ---
+        try
+        {
+            Check("OpenRxTxFreqControls ships with no default key (operator assigns one if wanted)",
+                HotkeyConfig.Defaults[HotkeyAction.OpenRxTxFreqControls] == System.Windows.Forms.Keys.None, true);
+            Check("OpenRxTxFreqControls is an OptionalAction (leaving it unassigned is not an error)",
+                HotkeyConfig.OptionalActions.Contains(HotkeyAction.OpenRxTxFreqControls), true);
+            CheckStr("OpenRxTxFreqControls has the expected display name",
+                HotkeyConfig.DisplayNames[HotkeyAction.OpenRxTxFreqControls], "Open RX/TX Audio Frequency Controls");
+
+            string tmpIni = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                "JimmyRxTxFreqHotkey_" + Guid.NewGuid().ToString("N") + ".ini");
+            try
+            {
+                // Assigned, persisted, reloaded -- like any other hotkey.
+                int altShiftF6 = (int)(System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F6);
+                var seed = new IniFile(tmpIni);
+                seed.Write("OpenRxTxFreqControls", altShiftF6.ToString(), "Hotkeys");
+                var cfg = new HotkeyConfig();
+                cfg.LoadFromIni(new IniFile(tmpIni));
+                Check("a saved binding for OpenRxTxFreqControls loads back",
+                    cfg[HotkeyAction.OpenRxTxFreqControls] == (System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F6), true);
+
+                // Conflict-checked like the rest: point it at Alt+O (Options) and FindConflict reports it.
+                cfg.Apply(HotkeyAction.OpenRxTxFreqControls, System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.O);
+                Check("a clashing assignment is detected by FindConflict",
+                    cfg.FindConflict(System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.O, HotkeyAction.OpenRxTxFreqControls) == HotkeyAction.Options, true);
+
+                // Cleared back to None and saved -- round-trips as unassigned.
+                cfg.Apply(HotkeyAction.OpenRxTxFreqControls, System.Windows.Forms.Keys.None);
+                var outIni = new IniFile(tmpIni + ".out");
+                cfg.SaveToIni(outIni);
+                var reloaded = new HotkeyConfig();
+                reloaded.LoadFromIni(outIni);
+                Check("cleared OpenRxTxFreqControls round-trips as unassigned",
+                    reloaded[HotkeyAction.OpenRxTxFreqControls] == System.Windows.Forms.Keys.None, true);
+            }
+            finally
+            {
+                try { System.IO.File.Delete(tmpIni); } catch { }
+                try { System.IO.File.Delete(tmpIni + ".out"); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RxTxFreqControlsFeatureTests (hotkey) threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+
+        // --- the exact-RX wrapper shares the existing RX-offset path ---
+        var seen = new System.Collections.Generic.List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line =>
+        {
+            lock (seenLock) seen.Add(line);
+            return "OK";
+        });
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.freqStepHz = 60;
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // Fresh client: the read-only context the dialog shows is "unknown / idle".
+            Check("fresh client: no confirmed dial frequency (dialog shows band unknown)",
+                wc.CurrentDialFrequencyHz == 0, true);
+            Check("fresh client: no Tx frequency change in flight", wc.TxFrequencyChangeInFlight, false);
+            Check("fresh client: no Rx frequency change in flight", wc.RxFrequencyChangeInFlight, false);
+
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+
+            System.Collections.Generic.List<string> RxCmds()
+            {
+                lock (seenLock) return seen.FindAll(c => c.StartsWith("SET_RX_OFFSET"));
+            }
+
+            // Exact type-in -> exactly one SET_RX_OFFSET at the requested value, confirmed offset updated.
+            lock (seenLock) seen.Clear();
+            bool ret = wc.SetRxFrequencyHz(1800);
+            Check("SetRxFrequencyHz returns true (accepted)", ret, true);
+            PumpUntil(() => wc.TestRxOffsetRequestsInFlight == 0 && RxCmds().Count >= 1);
+            var cmds = RxCmds();
+            Check("SetRxFrequencyHz emits exactly one SET_RX_OFFSET", cmds.Count == 1, true);
+            Check("...at the requested 1800 Hz", cmds.Count == 1 && cmds[0] == "SET_RX_OFFSET 1800", true);
+            Check("...confirmed Rx offset (the value the dialog reads) is now 1800", wc.CurrentRxOffsetHz == 1800, true);
+            Check("...and the in-flight flag has cleared", wc.RxFrequencyChangeInFlight, false);
+
+            // Below the 200 Hz passband floor -> clamped by the SHARED path, not re-validated here.
+            lock (seenLock) seen.Clear();
+            wc.SetRxFrequencyHz(50);
+            PumpUntil(() => wc.TestRxOffsetRequestsInFlight == 0 && RxCmds().Count >= 1);
+            var cmds2 = RxCmds();
+            Check("SetRxFrequencyHz clamps a below-floor value through the shared ClampAudioOffset",
+                cmds2.Count == 1 && cmds2[0] == "SET_RX_OFFSET 200", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RxTxFreqControlsFeatureTests (wrapper) threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            try { listener.Dispose(); } catch { }
         }
     }
 

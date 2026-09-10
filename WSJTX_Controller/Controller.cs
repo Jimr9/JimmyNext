@@ -2603,6 +2603,11 @@ namespace WSJTX_Controller
                 OpenSetTxFrequencyDialog();
                 return true;
             }
+            if (keyData == hotkeyConfig[HotkeyAction.OpenRxTxFreqControls] && hotkeyConfig[HotkeyAction.OpenRxTxFreqControls] != Keys.None)
+            {
+                OpenRxTxFreqControlsDialog();
+                return true;
+            }
 
             if (keyData == hotkeyConfig[HotkeyAction.PowerSwr])
             {
@@ -5614,6 +5619,25 @@ namespace WSJTX_Controller
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 wsjtxClient.SetTxFrequencyHz(dlg.Hz);
             }
+        }
+
+        private RxTxFreqDlg _rxTxFreqDlg;
+
+        // Item 3 (2026-09-10): the accessible RX/TX Audio Frequency Controls window. Modeless
+        // and single-instance -- a second launch (Options > Transmit button, or an operator-
+        // assigned hotkey) just brings the existing one forward. No Owner, same pattern as the
+        // Help / Logbook / Call CQ windows. The dialog only ever calls the existing
+        // Nudge/Set Rx/Tx frequency methods; it holds no radio state of its own.
+        internal void OpenRxTxFreqControlsDialog()
+        {
+            if (_rxTxFreqDlg != null && !_rxTxFreqDlg.IsDisposed)
+            {
+                _rxTxFreqDlg.Activate();
+                return;
+            }
+            _rxTxFreqDlg = new RxTxFreqDlg(this, wsjtxClient);
+            _rxTxFreqDlg.FormClosed += (s, e) => _rxTxFreqDlg = null;
+            _rxTxFreqDlg.Show();
         }
 
         private void OpenManualCallDialog()

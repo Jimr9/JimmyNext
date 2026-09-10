@@ -97,6 +97,7 @@ namespace WSJTX_Controller
                 new Item(HotkeyAction.TxFromRx,     "Set the transmit audio frequency to the current receive frequency."),
                 new Item(HotkeyAction.RxFromTx,     "Set the receive audio frequency to the current transmit frequency."),
                 new Item(HotkeyAction.SetTxFreq,    "Set the transmit audio frequency to an exact value."),
+                new Item(HotkeyAction.OpenRxTxFreqControls, "Open the RX/TX Audio Frequency Controls window (also on Options, Transmit)."),
             }),
 
             new Section("Windows and tools", new[]
