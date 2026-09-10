@@ -4136,78 +4136,39 @@ namespace WSJTX_Controller
             ShowHelp(BuildHelpText());
         }
 
-        private string BuildHelpText()
+        // internal (not private): JimmyTests renders this directly to verify "Not assigned"
+        // and section coverage (InternalsVisibleTo, see AssemblyInfo.Testing.cs). The command
+        // list itself lives in HotkeyHelpReference -- one ordered definition shared with the
+        // parity test so a new HotkeyAction cannot be silently missing from Alt+K Help.
+        internal string BuildHelpText()
         {
-            string K(HotkeyAction a) => HotkeyConfig.FormatKeysForHelp(hotkeyConfig[a]);
+            string K(HotkeyAction a)
+            {
+                Keys k = hotkeyConfig[a];
+                return k == Keys.None ? "Not assigned" : HotkeyConfig.FormatKeysForHelp(k);
+            }
             string ver = Assembly.GetExecutingAssembly()
                 .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
                 ?.InformationalVersion ?? string.Empty;
 
-            return
-                $"{friendlyName} {ver}" +
-                $"{nl}{nl}{friendlyName} processes 'QSO's by selecting one of two modes:" +
-                $"{nl}'Call CQ' mode, and 'Listen for calls' mode." +
-                $"{nl}Stations you haven't worked yet are added to the 'Stations calling' list." +
-                $"{nl}Stations calling you directly have priority on this list, and are moved to the top." +
-                $"{nl}{nl}You can leave this window open, for reference, as you run {friendlyName}." +
+            var sb = new System.Text.StringBuilder();
+            sb.Append($"{friendlyName} {ver}");
+            sb.Append($"{nl}{nl}{friendlyName} processes 'QSO's by selecting one of two modes:");
+            sb.Append($"{nl}'Call CQ' mode, and 'Listen for calls' mode.");
+            sb.Append($"{nl}Stations you haven't worked yet are added to the 'Stations calling' list.");
+            sb.Append($"{nl}Stations calling you directly have priority on this list, and are moved to the top.");
+            sb.Append($"{nl}{nl}You can leave this window open, for reference, as you run {friendlyName}.");
+            sb.Append($"{nl}{nl}Each command shows your current key. 'Not assigned' means no key is set for it yet; you can add one under Options, Hotkeys.");
 
-                $"{nl}{nl}Command keys:" +
-                $"{nl}{K(HotkeyAction.RowOrder)}: Open stations available row order editor." +
-                $"{nl}{K(HotkeyAction.Options)}: Review or set options for processing 'QSO's." +
-                $"{nl}{K(HotkeyAction.CallCqMode)}: Start selected CQ mode (CQ only / CQ DX only / CQ and CQ DX). Does nothing in Listen mode." +
-                $"{nl}{K(HotkeyAction.CallCqOptions)}: Open Call CQ options (choose CQ only / CQ DX only / CQ and CQ DX, directed CQ, etc.)." +
-                $"{nl}{K(HotkeyAction.ListenMode)}: Select 'Listen for calls' mode." +
-                $"{nl}{K(HotkeyAction.EnableTx)}: Enable transmit, or re-enable timed out 'QSO'." +
-                $"{nl}{K(HotkeyAction.HaltTx)}: Halt transmit immediately." +
-                $"{nl}{K(HotkeyAction.NextCall)}: Skip to the next available station, very useful!" +
-                $"{nl}{K(HotkeyAction.ManualCall)}: Enter a callsign manually to call." +
-                $"{nl}{K(HotkeyAction.ToggleStationWatch)}: Start or stop watching the currently selected station (receive-only; never transmits)." +
-                $"{nl}{K(HotkeyAction.WorkWatchedStationNow)}: Work the watched station now, using its most recent decode." +
-
-                $"{nl}{K(HotkeyAction.AnalyzeSlot)}: Analyze transmit slot (find quietest audio frequency for CQ; requires 'Use best Tx frequency' enabled)." +
-                $"{nl}{K(HotkeyAction.ReportSlotAnalysis)}: Report the latest transmit slot analysis result without re-running it (normal Undo inside a text field)." +
-                $"{nl}{K(HotkeyAction.LookupStation)}: Look up selected station (shows callsign, country, state, LoTW status, and more)." +
-                $"{nl}{K(HotkeyAction.OpenLogbook)}: Open the Ham Radio Center logbook." +
-                $"{nl}{K(HotkeyAction.AddManualQso)}: Add a manually-logged QSO (e.g. worked on another mode or rig)." +
-                $"{nl}{K(HotkeyAction.OpenOtaSpots)}: Open POTA / SOTA spots, DX spots, band conditions, and space weather." +
-
-                $"{nl}{nl}Radio configuration keys:" +
-                $"{nl}{K(HotkeyAction.TuneMode)}: Toggle Tune mode, to determine correct audio output level to radio ({K(HotkeyAction.AudioUp)} and {K(HotkeyAction.AudioDown)} keys to adjust, {K(HotkeyAction.Prompts)} for fast or complete updates)." +
-                $"{nl}{K(HotkeyAction.AudioUp)} key: Increase audio output level to radio (during tune or transmit)." +
-                $"{nl}{K(HotkeyAction.AudioDown)} key: Decrease audio output level to radio (during tune or transmit)." +
-                $"{nl}{K(HotkeyAction.PowerSwr)}: Quick check of output power and SWR (during transmit) or audio input (during receive)." +
-                $"{nl}{K(HotkeyAction.BandUp)}: Select next higher band." +
-                $"{nl}{K(HotkeyAction.BandDown)}: Select next lower band." +
-                $"{nl}{K(HotkeyAction.AnnounceFreq)}: Announce current receive and transmit audio frequencies and mode." +
-                $"{nl}{K(HotkeyAction.TxFreqUp)} / {K(HotkeyAction.TxFreqDown)}: Move transmit audio frequency up / down (step set on the Transmit tab, default {WsjtxClient.DefaultFreqStepHz} Hz)." +
-                $"{nl}{K(HotkeyAction.RxFreqUp)} / {K(HotkeyAction.RxFreqDown)}: Move receive audio frequency up / down by the same step." +
-                $"{nl}{K(HotkeyAction.TxFromRx)}: Set transmit frequency to the current receive frequency." +
-                $"{nl}{K(HotkeyAction.RxFromTx)}: Set receive frequency to the current transmit frequency." +
-                $"{nl}{K(HotkeyAction.SetTxFreq)}: Set the transmit audio frequency to an exact value." +
-
-                $"{nl}{nl}Optional command keys:" +
-                $"{nl}{K(HotkeyAction.DeleteAllCalls)}: Delete all 'Stations calling'." +
-                $"{nl}Delete key: Delete selected call in 'Stations calling'." +
-                $"{nl}{K(HotkeyAction.TxPeriod)}: Toggle transmit period." +
-                $"{nl}{K(HotkeyAction.UploadLotw)}: Upload to Logbook of the World." +
-                $"{nl}{K(HotkeyAction.ToggleMode)}: Select operating mode (FT8 or FT4)." +
-                $"{nl}{K(HotkeyAction.Prompts)}: Toggle command prompts in {friendlyName} status." +
-                $"{nl}Escape key: Halt transmit, cancel current 'QSO', switch to Listen mode." +
-                $"{nl}{K(HotkeyAction.UpdateCheck)}: Check for update to {friendlyName}." +
-                $"{nl}{K(HotkeyAction.PSKReporter)}: Toggle sending spots to PSKReporter (leave 'Enabled' to help other hams)" +
-                $"{nl}{K(HotkeyAction.SortOrder)}: Open stations available sort order editor." +
-                $"{nl}{K(HotkeyAction.NotificationHistory)}: Open Notification History (time-stamped list of what {friendlyName} has announced this session)." +
-                $"{nl}{K(HotkeyAction.ResetWindowSize)}: Reset window size and position to default." +
-                $"{nl}{K(HotkeyAction.Help)}: Read the list of shortcut keys." +
-
-                $"{nl}{nl}Main navigation keys:" +
-                $"{nl}{K(HotkeyAction.NavStatus)}: Read QSO and radio status (Note that {K(HotkeyAction.NavStatus)} is the 'home' location!)." +
-                $"{nl}{K(HotkeyAction.NavCallList)}: Read and select from 'Stations calling' list." +
-
-                $"{nl}{nl}Optional navigation keys:" +
-                $"{nl}{K(HotkeyAction.NavLoggedList)}: Read 'Auto-logged calls' list." +
-                $"{nl}{K(HotkeyAction.NavLoggedCount)}: Read total number of 'Auto-logged calls'." +
-                $"{nl}{K(HotkeyAction.NavPendingCount)}: Read number of pending 'Stations calling'.";
+            foreach (var section in HotkeyHelpReference.Sections)
+            {
+                sb.Append($"{nl}{nl}{section.Title}:");
+                foreach (var item in section.Items)
+                    sb.Append($"{nl}{K(item.Action)}: {item.Description}");
+                foreach (var extra in section.ExtraLines)
+                    sb.Append($"{nl}{extra}");
+            }
+            return sb.ToString();
         }
 
         public void cqModeButton_Click(object sender, EventArgs e)

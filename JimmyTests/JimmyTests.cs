@@ -246,6 +246,7 @@ static class JimmyTests
         ParseRowOrderTests();
         RowOrderDefaultsSyncTests();
         HotkeyConfigNewActionConflictTests();
+        HotkeyHelpReferenceParityTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
@@ -17039,6 +17040,68 @@ static class JimmyTests
         finally
         {
             try { System.IO.File.Delete(tmpIni); } catch { }
+        }
+    }
+
+    // ── Alt+K Help: every registered HotkeyAction is in the reference exactly once ──
+    // Item 4, 2026-09-10: Alt+K's command list is now generated from HotkeyHelpReference
+    // (one ordered definition). This guard fails if a newly added HotkeyAction is left out
+    // of that list -- the exact regression that dropped Report Clock Sync Status and the
+    // four advanced-layout navigation commands from the old hand-maintained BuildHelpText.
+    static void HotkeyHelpReferenceParityTests()
+    {
+        Console.WriteLine("\n── Alt+K Help: HotkeyHelpReference covers every registered HotkeyAction ──");
+        try
+        {
+            var seen = new Dictionary<HotkeyAction, int>();
+            foreach (var section in HotkeyHelpReference.Sections)
+                foreach (var item in section.Items)
+                {
+                    seen.TryGetValue(item.Action, out int n);
+                    seen[item.Action] = n + 1;
+                }
+
+            foreach (HotkeyAction a in Enum.GetValues(typeof(HotkeyAction)))
+            {
+                seen.TryGetValue(a, out int count);
+                if (HotkeyHelpReference.ExcludedFromHelp.ContainsKey(a))
+                    Check($"{a}: documented exclusion, not listed in the Alt+K reference ({count} listings)", count == 0, true);
+                else
+                    Check($"{a}: appears exactly once in the Alt+K reference ({count} listings)", count == 1, true);
+            }
+
+            int registered = Enum.GetValues(typeof(HotkeyAction)).Length;
+            Check("Reference lists (or documents an exclusion for) every registered action",
+                seen.Count + HotkeyHelpReference.ExcludedFromHelp.Count == registered, true);
+
+            // The five commands missing from Alt+K before this change are now present.
+            foreach (var a in new[] { HotkeyAction.ClockStatus, HotkeyAction.NavAdvTx1,
+                HotkeyAction.NavAdvTx2, HotkeyAction.NavAdvRaw, HotkeyAction.NavSpotWatch })
+                Check($"{a} (previously missing) is now in the Alt+K reference", seen.ContainsKey(a), true);
+
+            // Rendered output: a customized binding wins over the default, an unassigned
+            // command shows as "Not assigned", and the newly added commands are present.
+            var ctrl = new Controller();
+            ctrl.hotkeyConfig = new HotkeyConfig();
+            ctrl.hotkeyConfig.Apply(HotkeyAction.LookupStation, System.Windows.Forms.Keys.None);
+            ctrl.hotkeyConfig.Apply(HotkeyAction.Options,
+                System.Windows.Forms.Keys.Control | System.Windows.Forms.Keys.Shift | System.Windows.Forms.Keys.F9);
+            string help = ctrl.BuildHelpText();
+
+            Check("Rendered Alt+K text marks an unassigned command as \"Not assigned\"",
+                help.Contains(": Look up the selected station") && help.Contains("Not assigned"), true);
+            Check("Rendered Alt+K text uses the operator's customized Options binding, not the default",
+                help.Contains("Ctrl, Shift, F 9: Review or set options"), true);
+            Check("Rendered Alt+K text includes Report clock sync status",
+                help.Contains("Report clock sync status"), true);
+            Check("Rendered Alt+K text includes the advanced-layout Spot Watch navigation command",
+                help.Contains("Focus the Spot Watch list.") &&
+                help.Contains("Advanced Call Layout navigation (Advanced Call Layout only):"), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  HotkeyHelpReferenceParityTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
         }
     }
 
