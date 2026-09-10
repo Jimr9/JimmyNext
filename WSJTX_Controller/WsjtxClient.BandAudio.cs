@@ -726,7 +726,16 @@ namespace WSJTX_Controller
             // a synchronous DirectSendCommand -- this runs on every confirmed band change, on the
             // UI thread (DirectApplyStatus), so a slow/hung engine host used to block band-change
             // handling for the full bounded connect/read wait.
-            EnqueueDirectCommand("SET_TX_LEVEL " + savedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture), null);
+            EnqueueDirectCommand("SET_TX_LEVEL " + savedLevel.ToString(System.Globalization.CultureInfo.InvariantCulture), resp =>
+            {
+                // Item 2 (2026-09-10): once the engine confirms the restore, re-assert it into
+                // the live cache. An initial poll SNAPSHOT that predates this restore
+                // (DirectApplyStatus: _engineTxLevel = radio.TxLevel) would otherwise leave
+                // F11/F12 and the Options spinner stepping from the engine's startup default
+                // instead of the level just restored for this band.
+                if (resp != null && resp.Length > 0 && !resp.StartsWith("ERR"))
+                    _engineTxLevel = savedLevel;
+            });
             DebugOutput($"{Time()} restored tx level {savedLevel:0.00} for band index {bandIdx}");
         }
 

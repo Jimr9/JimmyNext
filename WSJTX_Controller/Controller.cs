@@ -334,6 +334,15 @@ namespace WSJTX_Controller
         public System.Windows.Forms.Timer helpTimer;
         public System.Windows.Forms.Timer spotWatchAgeTimer;
 
+        // Item 2 (2026-09-10): debounced durable persistence for confirmed F11/F12 per-band TX
+        // audio levels. A confirmed SET_TX_LEVEL updates Radio.TxLevelByBand in memory right
+        // away (WsjtxClient.Direct.cs) and (re)starts this timer; only the settled value is
+        // written, so a burst of key presses is one profile write. Flushed before a band change,
+        // a profile switch, and every complete settings save so a forced close or an upgrade in
+        // between cannot lose the latest confirmed level. The complete save on clean shutdown
+        // stays as the backup path.
+        private System.Windows.Forms.Timer _txLevelPersistTimer;
+
         private string nl = Environment.NewLine;
         private static string alphaOnly = "[^A-Za-z]";         //match if any numeric
         private static string numericOnly = "[^0-9]";          //match if any alpha
@@ -375,6 +384,10 @@ namespace WSJTX_Controller
             spotWatchAgeTimer = new System.Windows.Forms.Timer();
             spotWatchAgeTimer.Interval = 60000;
             spotWatchAgeTimer.Tick += new System.EventHandler(spotWatchAgeTimer_Tick);
+            // Item 2: ~750 ms sits in the requested 500-1,000 ms debounce window.
+            _txLevelPersistTimer = new System.Windows.Forms.Timer();
+            _txLevelPersistTimer.Interval = 750;
+            _txLevelPersistTimer.Tick += new System.EventHandler(txLevelPersistTimer_Tick);
         }
 
 #if DEBUG
@@ -2018,6 +2031,11 @@ namespace WSJTX_Controller
             // operator unticked "Save current configuration first" on a profile switch -- see
             // _suppressSettingsSaveOnExit. Everything below (upload wait, CloseComm/engine halt)
             // still runs regardless.
+            // Item 2: stop the per-band level debounce timer now. When the save below runs it
+            // rewrites the level map as part of the complete save; when it is suppressed the
+            // operator deliberately discarded this session's changes, so a pending per-band
+            // level must be dropped with them, not sneaked to disk here.
+            _txLevelPersistTimer?.Stop();
             if (!_suppressSettingsSaveOnExit)
                 SaveAllSettingsToIniFile();
 
@@ -2095,9 +2113,61 @@ namespace WSJTX_Controller
             catch { }
         }
 
+        // Item 2 (2026-09-10): called on the UI thread from DirectSetEngineTxLevel's confirmed
+        // callback, after Radio.TxLevelByBand has already been updated in memory. Debounces the
+        // disk write -- each confirmed adjustment restarts the timer, so a run of rapid F11/F12
+        // presses settles to a single profile write of the final confirmed value.
+        internal void NoteTxLevelPerBandConfirmed()
+        {
+            if (iniFile == null || _txLevelPersistTimer == null) return;
+            _txLevelPersistTimer.Stop();
+            _txLevelPersistTimer.Start();
+        }
+
+        private void txLevelPersistTimer_Tick(object sender, EventArgs e)
+        {
+            _txLevelPersistTimer.Stop();
+            PersistTxLevelPerBandNow();
+        }
+
+        // Test-only hook (JimmyTests, see InternalsVisibleTo in AssemblyInfo.Testing.cs): point
+        // the debounced per-band persistence at a scratch ini so NoteTxLevelPerBandConfirmed /
+        // FlushPendingTxLevelPersist / PersistTxLevelPerBandNow can be exercised without a full
+        // Form_Load. Not used in production -- Form_Load resolves iniFile to the active profile.
+        internal void SetIniFileForTest(IniFile ini) => iniFile = ini;
+
+        // Writes ONLY the per-band F11/F12 level map, to the ACTIVE profile's ini -- iniFile is
+        // already resolved to that profile at startup (ResolveActiveIniPath), so this never
+        // writes into the default profile while a named profile is active. The map holds only
+        // engine-CONFIRMED values, so there is nothing unconfirmed to persist here.
+        internal void PersistTxLevelPerBandNow()
+        {
+            try
+            {
+                if (iniFile == null) return;
+                Radio.SaveTxLevelByBandToIni(iniFile);
+            }
+            catch { }
+        }
+
+        // Item 2: commit any pending debounced per-band level write immediately. Called before a
+        // confirmed band change and before every complete settings save / clean shutdown, so the
+        // latest confirmed level is on disk at those points no matter where the timer was.
+        internal void FlushPendingTxLevelPersist()
+        {
+            if (_txLevelPersistTimer == null) return;
+            bool wasPending = _txLevelPersistTimer.Enabled;
+            _txLevelPersistTimer.Stop();
+            if (wasPending) PersistTxLevelPerBandNow();
+        }
+
         public void SaveOptionsRelatedSettings()
         {
             if (iniFile == null) return;
+            // Item 2: a complete settings save rewrites the whole per-band level map below, so
+            // the pending debounced write is now redundant -- drop the timer rather than let it
+            // fire a second, identical write shortly after.
+            _txLevelPersistTimer?.Stop();
             Settings.SaveToIni(iniFile);
             Radio.SaveToIni(iniFile);
             Decode.SaveToIni(iniFile);

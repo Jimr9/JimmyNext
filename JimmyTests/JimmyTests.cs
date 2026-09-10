@@ -247,6 +247,7 @@ static class JimmyTests
         RowOrderDefaultsSyncTests();
         HotkeyConfigNewActionConflictTests();
         HotkeyHelpReferenceParityTests();
+        TxLevelPerBandDurablePersistenceTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
@@ -17040,6 +17041,106 @@ static class JimmyTests
         finally
         {
             try { System.IO.File.Delete(tmpIni); } catch { }
+        }
+    }
+
+    // ── Item 2, 2026-09-10: confirmed F11/F12 per-band TX levels are durable ──
+    // A confirmed SET_TX_LEVEL now writes the per-band level map to the active profile on a
+    // ~750 ms debounce instead of waiting for the next clean shutdown, so a forced close or
+    // an upgrade in between keeps the adjustment. These cover the serialization split and the
+    // flush/persist path; the debounce timer itself is thin WinForms glue over these.
+    static void TxLevelPerBandDurablePersistenceTests()
+    {
+        Console.WriteLine("\n── Item 2: F11/F12 per-band TX level durable (debounced) persistence ──");
+        string tmpIni = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "JimmyTxLevelDurable_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // 1. SaveTxLevelByBandToIni writes exactly the key the full SaveToIni writes, and
+            //    LoadFromIni round-trips it.
+            var r1 = new RadioSettings();
+            r1.RememberTxLevelPerBand = true;
+            r1.TxLevelByBand[5] = 0.42;
+            r1.TxLevelByBand[9] = 0.6;
+            var full = new IniFile(tmpIni + ".full");
+            r1.SaveToIni(full);
+            var partial = new IniFile(tmpIni + ".partial");
+            r1.SaveTxLevelByBandToIni(partial);
+            CheckStr("SaveTxLevelByBandToIni writes the same string as the full SaveToIni",
+                partial.Read("radioTxLevelByBand"), full.Read("radioTxLevelByBand"));
+
+            var r1b = new RadioSettings();
+            r1b.LoadFromIni(partial);
+            Check("map round-trips: band 5 == 0.42",
+                r1b.TxLevelByBand.TryGetValue(5, out double b5) && Math.Abs(b5 - 0.42) < 1e-9, true);
+            Check("map round-trips: band 9 == 0.6",
+                r1b.TxLevelByBand.TryGetValue(9, out double b9) && Math.Abs(b9 - 0.6) < 1e-9, true);
+
+            // 2. A partial write leaves other radio settings in the same file untouched.
+            var mixed = new IniFile(tmpIni + ".mixed");
+            mixed.Write("radioAudioStepPercent", "3.5");
+            mixed.Write("radioRememberTxLevelPerBand", "True");
+            var rMix = new RadioSettings();
+            rMix.TxLevelByBand[3] = 0.25;
+            rMix.SaveTxLevelByBandToIni(mixed);
+            CheckStr("partial write does not disturb radioAudioStepPercent",
+                mixed.Read("radioAudioStepPercent"), "3.5");
+            CheckStr("partial write does not disturb radioRememberTxLevelPerBand",
+                mixed.Read("radioRememberTxLevelPerBand"), "True");
+            CheckStr("partial write did persist the map key", mixed.Read("radioTxLevelByBand"), "3=0.25");
+
+            // 3. Controller.PersistTxLevelPerBandNow writes the current in-memory map to the
+            //    active-profile ini seam; a fresh RadioSettings reads it back.
+            var ctrl = new Controller();
+            var seamIni = new IniFile(tmpIni);
+            ctrl.SetIniFileForTest(seamIni);
+            ctrl.Radio.RememberTxLevelPerBand = true;
+            ctrl.Radio.TxLevelByBand[5] = 0.33;
+            ctrl.PersistTxLevelPerBandNow();
+            var reloaded = new RadioSettings();
+            reloaded.LoadFromIni(new IniFile(tmpIni));
+            Check("PersistTxLevelPerBandNow committed band 5 == 0.33",
+                reloaded.TxLevelByBand.TryGetValue(5, out double p5) && Math.Abs(p5 - 0.33) < 1e-9, true);
+
+            // 4. Note (arm debounce) then Flush writes the SETTLED value immediately; a run of
+            //    Notes with a changing map settles to only the final value.
+            ctrl.Radio.TxLevelByBand[5] = 0.40; ctrl.NoteTxLevelPerBandConfirmed();
+            ctrl.Radio.TxLevelByBand[5] = 0.45; ctrl.NoteTxLevelPerBandConfirmed();
+            ctrl.Radio.TxLevelByBand[5] = 0.50; ctrl.NoteTxLevelPerBandConfirmed();
+            ctrl.FlushPendingTxLevelPersist();
+            var afterFlush = new RadioSettings();
+            afterFlush.LoadFromIni(new IniFile(tmpIni));
+            Check("rapid confirmed adjustments then flush persist ONLY the final value (0.50)",
+                afterFlush.TxLevelByBand.TryGetValue(5, out double f5) && Math.Abs(f5 - 0.50) < 1e-9, true);
+
+            // 5. Flush with nothing pending is a no-op and does not throw.
+            ctrl.FlushPendingTxLevelPersist();
+            Check("Flush with nothing pending is a harmless no-op", true, true);
+
+            // 6. Safety: with no active ini (pre-Form_Load), arming the debounce must not throw.
+            var bare = new Controller();
+            bare.Radio.TxLevelByBand[1] = 0.9;
+            bare.NoteTxLevelPerBandConfirmed();
+            bare.FlushPendingTxLevelPersist();
+            Check("NoteTxLevelPerBandConfirmed with no ini yet: no throw, nothing written", true, true);
+
+            // 7. Safety constraint: an unknown current band is never persisted per band.
+            Check("ShouldRememberTxLevelForBand: unknown band (null) -> not remembered",
+                WsjtxClient.ShouldRememberTxLevelForBand(true, null, out _), false);
+            Check("ShouldRememberTxLevelForBand: feature off -> not remembered",
+                WsjtxClient.ShouldRememberTxLevelForBand(false, 5, out _), false);
+            Check("ShouldRememberTxLevelForBand: on + known band -> remembered under that band key",
+                WsjtxClient.ShouldRememberTxLevelForBand(true, 7, out int key7) && key7 == 7, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  TxLevelPerBandDurablePersistenceTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            foreach (string p in new[] { tmpIni, tmpIni + ".full", tmpIni + ".partial", tmpIni + ".mixed" })
+                try { System.IO.File.Delete(p); } catch { }
         }
     }
 

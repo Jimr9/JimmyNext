@@ -229,6 +229,17 @@ namespace WSJTX_Controller
             if (!string.IsNullOrEmpty(LastTier)) ini.Write("radioLastTier", LastTier);
             ini.Write("radioRememberTxLevelPerBand", RememberTxLevelPerBand.ToString());
             ini.Write("radioExplainMeterReadings", ExplainMeterReadings.ToString());
+            SaveTxLevelByBandToIni(ini);
+        }
+
+        // Just the per-band F11/F12 level map, as its own INI key. Split out (2026-09-10) so the
+        // debounced durable-persistence path (Controller.PersistTxLevelPerBandNow) can commit a
+        // freshly confirmed level to disk on its own, without rewriting every other radio setting
+        // on each F11/F12 press. Same serialization the full SaveToIni uses, so the two stay in
+        // lock-step. The map only ever holds engine-CONFIRMED values (WsjtxClient.Direct.cs's
+        // DirectSetEngineTxLevel), so there is nothing unconfirmed to leak here.
+        internal void SaveTxLevelByBandToIni(IniFile ini)
+        {
             ini.Write("radioTxLevelByBand", string.Join(";", System.Linq.Enumerable.Select(TxLevelByBand,
                 kv => $"{kv.Key}={kv.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)}")));
         }

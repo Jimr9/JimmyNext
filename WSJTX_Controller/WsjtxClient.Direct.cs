@@ -1409,7 +1409,14 @@ namespace WSJTX_Controller
             // confirmed band change (newBand, set just above), not every poll tick. See
             // RestoreTxLevelForBand's own comment (WsjtxClient.BandAudio.cs) -- shared with the
             // classic WSJT-X/UDP path.
-            if (newBand) RestoreTxLevelForBand();
+            // Item 2 (2026-09-10): commit any pending debounced per-band level write for the
+            // band we are LEAVING before the destination band's saved value is restored, so a
+            // just-made adjustment is durable across the band change.
+            if (newBand)
+            {
+                ctrl.FlushPendingTxLevelPersist();
+                RestoreTxLevelForBand();
+            }
 
             // One-time-per-connection startup fallback, requested live 2026-08-10: if the very
             // first band resolution attempt this session still comes back unknown (no CAT data
@@ -2943,7 +2950,14 @@ namespace WSJTX_Controller
                     // overwrite the just-confirmed value with a pre-change snapshot.
                     _engineTxLevel = next;
                     if (ShouldRememberTxLevelForBand(ctrl.Radio.RememberTxLevelPerBand, bandIdx, out int bandKey))
+                    {
                         ctrl.Radio.TxLevelByBand[bandKey] = next;
+                        // Item 2 (2026-09-10): also commit this confirmed level to the active
+                        // profile on disk, debounced (~750 ms) so a burst of F11/F12 presses is
+                        // one write -- it no longer waits for the next clean shutdown, so a
+                        // forced close or an upgrade in between keeps the adjustment.
+                        ctrl.NoteTxLevelPerBandConfirmed();
+                    }
                 }
                 _txLevelChangeInFlight = false;
                 onDone?.Invoke(ok, next);
