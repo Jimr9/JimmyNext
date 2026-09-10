@@ -382,7 +382,10 @@ namespace WSJTX_Controller
                 string freq = d.DeltaFrequency > 0 ? $", {d.DeltaFrequency} Hz" : "";
 
                 string g = d.EffectiveSemantic(myCall).Grid;   // Stage 6
-                string grid = ctrl.rawShowGrid && g != null ? $", {g}" : "";
+                // Present the grid through the same preference-aware formatter the callsign
+                // above uses (Spacify via SpacifyPayload). `g` itself stays raw -- GridToUsState
+                // below and every non-display use read the unspaced value.
+                string grid = ctrl.rawShowGrid && g != null ? $", {SpacifyPayload(g)}" : "";
 
                 string country = ctrl.rawShowCountry && classification.Country.Length > 0 ? $", {classification.Country}" : "";
                 if (ctrl.showUsStateCheckBox.Checked && classification.Country == "USA" && g != null)

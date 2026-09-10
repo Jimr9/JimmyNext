@@ -17244,11 +17244,17 @@ static class JimmyTests
             ctrl.spaceCallsignsAndGrids = false;
             CheckStr("unchecked: callsign KB0UZT is presented compact", wc.Spacify("KB0UZT"), "KB0UZT");
 
-            // 4 + 5. Grid spacing follows the preference (via SpacifyPayload's grid branch).
+            // 4 + 5. Grid spacing follows the preference -- ALL FOUR characters, consistent
+            //        with callsigns (correction to c5fc9d5, which produced "E N 34").
             ctrl.spaceCallsignsAndGrids = true;
-            CheckStr("checked: grid EN34 is presented spaced", wc.SpacifyPayload("EN34"), "E N 34");
+            CheckStr("checked: grid EN34 is presented as E N 3 4", wc.SpacifyPayload("EN34"), "E N 3 4");
             ctrl.spaceCallsignsAndGrids = false;
             CheckStr("unchecked: grid EN34 is presented compact", wc.SpacifyPayload("EN34"), "EN34");
+            // 6-char grid takes the same per-character path.
+            ctrl.spaceCallsignsAndGrids = true;
+            CheckStr("checked: 6-char grid EN34AB spaces every character", wc.SpacifyPayload("EN34AB"), "E N 3 4 A B");
+            ctrl.spaceCallsignsAndGrids = false;
+            CheckStr("unchecked: 6-char grid EN34AB stays compact", wc.SpacifyPayload("EN34AB"), "EN34AB");
 
             // 6. Roger reports keep their existing formatting in BOTH states.
             foreach (bool on in new[] { true, false })
@@ -17295,6 +17301,43 @@ static class JimmyTests
             Check("call queue holds the bare callsigns in order, unchanged",
                 string.Join(",", q1) == "KB0UZT,W1AW,EA3HMM" && string.Join(",", q2) == "KB0UZT,W1AW,EA3HMM", true);
             Check("queue never stores a spaced form", System.Array.IndexOf(q2, "K B 0 U Z T") < 0, true);
+
+            // Raw Decodes: the rendered row's callsign AND grid both follow the checkbox
+            // (grid used to be inserted raw). Isolate the two fields via a minimal row order so
+            // the raw "message" field (which keeps "EN34" verbatim by design) can't confuse the
+            // assertion.
+            var rctrl = new Controller();
+            rctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            rctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            rctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            rctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            rctrl.advancedCallLayout = true;
+            rctrl.advShowRaw = true;
+            rctrl.rawShowGrid = true;
+            var rwc = new WsjtxClient(rctrl, 2338, false, false, WsjtxClient.TxModes.LISTEN);
+            rwc.rawDecodeRowOrderFields = new System.Collections.Generic.List<string> { "callsign", "grid" };
+            rwc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 1 },
+                ""recentDecodes"": []
+            }"));
+            rwc.TestRawDecodeHistory.Add(new EnqueueDecodeMessage
+            {
+                Message = "CQ AA1AA EN34", SinceMidnight = new TimeSpan(0, 5, 2), AutoGen = true, New = true,
+            });
+
+            rctrl.spaceCallsignsAndGrids = true;
+            rwc.TestShowRawDecodes();
+            string rowChecked = string.Join(" | ", rctrl.advRawListBox.Items.Cast<string>());
+            Check("Raw Decodes, checked: callsign rendered as A A 1 A A", rowChecked.Contains("A A 1 A A"), true);
+            Check("Raw Decodes, checked: grid rendered as E N 3 4", rowChecked.Contains("E N 3 4"), true);
+
+            rctrl.spaceCallsignsAndGrids = false;
+            rwc.TestShowRawDecodes();
+            string rowUnchecked = string.Join(" | ", rctrl.advRawListBox.Items.Cast<string>());
+            Check("Raw Decodes, unchecked: callsign rendered compact AA1AA", rowUnchecked.Contains("AA1AA"), true);
+            Check("Raw Decodes, unchecked: grid rendered compact EN34", rowUnchecked.Contains("EN34"), true);
+            Check("Raw Decodes, unchecked: grid is NOT spaced", rowUnchecked.Contains("E N 3 4"), false);
         }
         catch (Exception ex)
         {

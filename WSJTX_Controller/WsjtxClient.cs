@@ -4243,20 +4243,11 @@ namespace WSJTX_Controller
             {
                 return s.Replace("+", " +");
             }
-            if (s.Contains("73"))
-            {
-                return Spacify(s);     // follows the preference via Spacify()
-            }
-            //grid
-            if (s.Length == 4)
-            {
-                if (ctrl != null && !ctrl.spaceCallsignsAndGrids) return s;
-                return s.Substring(0, 1) + " " + s.Substring(1, 1) + " " + s.Substring(2, 2);
-            }
-            else
-            {
-                return Spacify(s);
-            }
+            // Everything else -- a 4-character Maidenhead grid, 73 / RR73, or any other token --
+            // is spaced character-by-character when "Space callsigns and grids" is checked
+            // ("EN34" -> "E N 3 4", consistent with callsigns), and returned unchanged when
+            // unchecked ("EN34"). Spacify() applies that preference.
+            return Spacify(s);
         }
 
         // Public so other USA-state display sites (e.g. Controller.FormatSpotWatchRow)
