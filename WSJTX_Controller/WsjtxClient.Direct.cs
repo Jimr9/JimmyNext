@@ -3236,6 +3236,9 @@ namespace WSJTX_Controller
         // TestRawDecodeHistory directly with entries carrying whatever exact SinceMidnight it
         // needs, then render deterministically.
         internal void TestShowRawDecodes() => ShowRawDecodes();
+        // Test-only: the Normal Stations Available / Advanced TX1-TX2 row builder, so
+        // SpaceCallsignsAndGridsTests can prove its callsign + grid follow the checkbox.
+        internal string TestBuildCallWaitingRow(string call, EnqueueDecodeMessage d) => BuildCallWaitingRow(call, d);
         // Retired 2026-09-03: routine status is now ALWAYS rendered to the view immediately
         // (RenderStatusVisible) -- there is no pending/batched visible text any more, so this
         // always returns null. Kept as a harmless no-op so the few tests that still fall back to

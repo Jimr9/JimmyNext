@@ -4042,10 +4042,16 @@ namespace WSJTX_Controller
 
         private string FormatSpotWatchRow(string call, SpotInfo spot)
         {
-            if (spot == null) return $"{call} -- not yet spotted";
+            // Spot Watch is one of the five surfaces "Space callsigns and grids" opts into:
+            // the watched call, the spotter's call, and both grids follow the checkbox.
+            bool sp = spaceCallsignsAndGrids;
+            string dispCall = WsjtxClient.DisplayCallsign(call, sp);
+            if (spot == null) return $"{dispCall} -- not yet spotted";
 
-            string fallback = $"{call} -- last spotted {FormatSpotAge(spot.UtcTime)}, {spot.Band} {spot.Mode}, by {spot.SpotterCall}" +
-                (string.IsNullOrEmpty(spot.SpotterGrid) ? "" : $" ({spot.SpotterGrid})");
+            string spotterCall = WsjtxClient.DisplayCallsign(spot.SpotterCall, sp);
+            string spotterGridDisp = WsjtxClient.DisplayGrid(spot.SpotterGrid, sp);
+            string fallback = $"{dispCall} -- last spotted {FormatSpotAge(spot.UtcTime)}, {spot.Band} {spot.Mode}, by {spotterCall}" +
+                (string.IsNullOrEmpty(spot.SpotterGrid) ? "" : $" ({spotterGridDisp})");
 
             string country = "";
             if (wsjtxClient?.lookupManager != null && wsjtxClient.lookupManager.Enabled)
@@ -4112,22 +4118,26 @@ namespace WSJTX_Controller
 
             var fieldMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
-                { "callsign",       call },
+                { "callsign",       dispCall },
                 { "age",            $", last spotted {FormatSpotAge(spot.UtcTime)}" },
                 { "band",           string.IsNullOrEmpty(spot.Band) ? "" : $", {spot.Band}" },
                 { "frequency",      frequency },
                 { "mode",           string.IsNullOrEmpty(spot.Mode) ? "" : $", {spot.Mode}" },
                 { "evenOdd",        string.IsNullOrEmpty(spot.Mode) ? "" : $", {(DxSpotWatcher.IsEvenPeriod(spot.UtcTime, spot.Mode) ? "Even" : "Odd")}" },
                 { "snr",            spot.Snr.HasValue ? $", {spot.Snr.Value.ToString("+#;-#;0")}dB" : "" },
-                { "senderGrid",     string.IsNullOrEmpty(spot.SenderGrid) ? "" : $", grid {spot.SenderGrid}" },
+                { "senderGrid",     string.IsNullOrEmpty(spot.SenderGrid) ? "" : $", grid {WsjtxClient.DisplayGrid(spot.SenderGrid, sp)}" },
                 { "country",        country },
-                { "spottercall",    string.IsNullOrEmpty(spot.SpotterCall) ? "" : $", by {spot.SpotterCall}" },
+                { "spottercall",    string.IsNullOrEmpty(spot.SpotterCall) ? "" : $", by {spotterCall}" },
                 { "spottercountry", spotterCountry },
-                { "spottergrid",    string.IsNullOrEmpty(spot.SpotterGrid) ? "" : $" ({spot.SpotterGrid})" },
+                { "spottergrid",    string.IsNullOrEmpty(spot.SpotterGrid) ? "" : $" ({spotterGridDisp})" },
             };
 
             return RowFormatter.BuildOrderedRow(fieldMap, spotWatchRowOrderFields, fallback);
         }
+
+        // Test-only (JimmyTests, InternalsVisibleTo): SpaceCallsignsAndGridsTests renders a
+        // Spot Watch row to prove its callsigns/grids follow "Space callsigns and grids".
+        internal string TestFormatSpotWatchRow(string call, SpotInfo spot) => FormatSpotWatchRow(call, spot);
 
         private static string FormatSpotAge(DateTime utcTime)
         {

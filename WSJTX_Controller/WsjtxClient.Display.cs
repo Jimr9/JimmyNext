@@ -234,7 +234,9 @@ namespace WSJTX_Controller
             // Stage 5 proved Grid and CqTarget byte-identical between the two across the corpus.
             var sem = d.EffectiveSemantic(myCall);
             string g = sem.Grid;
-            string grid = g == null ? "" : $", {SpacifyPayload(g)}";
+            // Normal Stations Available + Advanced TX1/TX2 (this row builder feeds both):
+            // grid follows "Space callsigns and grids". `g` itself stays raw.
+            string grid = g == null ? "" : $", {DisplayGrid(g, ctrl.spaceCallsignsAndGrids)}";
 
             if (ctrl.showUsStateCheckBox.Checked &&
                 classification.Country == "USA" &&
@@ -265,7 +267,7 @@ namespace WSJTX_Controller
 
             string to = sem.CqTarget;
             string dirTo = (to == null ? "" : $" {to}");
-            string callp = $"{Spacify(call)}";
+            string callp = $"{DisplayCallsign(call, ctrl.spaceCallsignsAndGrids)}";
             string pri = (d.Priority == (int)CallPriority.TO_MYCALL) ? " replying" : (d.Priority == (int)CallPriority.WANTED_CQ ? dirTo : "");
 
             string rankStr = debug ? $", {d.Rank}" : "";
@@ -372,7 +374,7 @@ namespace WSJTX_Controller
                 tag = tag.Length > 0 ? $", {tag}" : "";
 
                 string callsign = d.DeCall();
-                callsign = string.IsNullOrEmpty(callsign) ? "" : $", {Spacify(callsign)}";
+                callsign = string.IsNullOrEmpty(callsign) ? "" : $", {DisplayCallsign(callsign, ctrl.spaceCallsignsAndGrids)}";
 
                 string message = $", {d.Message}";
 
@@ -382,10 +384,9 @@ namespace WSJTX_Controller
                 string freq = d.DeltaFrequency > 0 ? $", {d.DeltaFrequency} Hz" : "";
 
                 string g = d.EffectiveSemantic(myCall).Grid;   // Stage 6
-                // Present the grid through the same preference-aware formatter the callsign
-                // above uses (Spacify via SpacifyPayload). `g` itself stays raw -- GridToUsState
-                // below and every non-display use read the unspaced value.
-                string grid = ctrl.rawShowGrid && g != null ? $", {SpacifyPayload(g)}" : "";
+                // Raw Decodes grid follows "Space callsigns and grids", like its callsign
+                // above. `g` itself stays raw -- GridToUsState below reads the unspaced value.
+                string grid = ctrl.rawShowGrid && g != null ? $", {DisplayGrid(g, ctrl.spaceCallsignsAndGrids)}" : "";
 
                 string country = ctrl.rawShowCountry && classification.Country.Length > 0 ? $", {classification.Country}" : "";
                 if (ctrl.showUsStateCheckBox.Checked && classification.Country == "USA" && g != null)
@@ -1089,7 +1090,7 @@ namespace WSJTX_Controller
                             int n = SnapshotPriorityCount(CallPriority.TO_MYCALL, visibleCalls);
                             EnqueueDecodeMessage dmsg = new EnqueueDecodeMessage();
                             string c = PeekVisibleCall(out dmsg, visibleCalls);
-                            string pc = (c != null && (callInProg == null || timedOutCall != null || loggedCall != null)) ? $", {Spacify(c)} first" : "";
+                            string pc = (c != null && (callInProg == null || timedOutCall != null || loggedCall != null)) ? $", {DisplayCallsign(c, ctrl.spaceCallsignsAndGrids)} first" : "";
                             string pri = n > 0 ? $", {n} to you{pc}" : "";
 
                             n = SnapshotPriorityCount(CallPriority.NEW_COUNTRY, visibleCalls) + SnapshotPriorityCount(CallPriority.NEW_COUNTRY_ON_BAND, visibleCalls);
@@ -1189,7 +1190,7 @@ namespace WSJTX_Controller
                             // (expired / timed out) legitimately REASSIGNS inProg to a different
                             // call with different wording -- the "== standaloneInProg" guard in the
                             // other-party block leaves those alone.
-                            string standaloneInProg = curCall != null ? $", {Spacify(curCall)}{sel}" : "";
+                            string standaloneInProg = curCall != null ? $", {DisplayCallsign(curCall, ctrl.spaceCallsignsAndGrids)}{sel}" : "";
                             string inProg = standaloneInProg;
                             // Final-QSO notification ordering fix, 2026-08-24 (operator finding --
                             // "Logged" heard while transmitting the final 73, then "Sending 73"
@@ -1289,7 +1290,7 @@ namespace WSJTX_Controller
                                 // throws / never returns null for a non-null template, so a
                                 // "formatting failure" fallback is not a real case here.
                                 string loggedClause = RoutineClause(NotificationEventType.QsoCompleted,
-                                    ("Callsign", Spacify(loggedCall)),
+                                    ("Callsign", DisplayCallsign(loggedCall, ctrl.spaceCallsignsAndGrids)),
                                     ("Band", bandIdx != null ? $"{bands[(int)bandIdx]}m" : ""),
                                     ("Mode", mode ?? ""));
                                 if (!string.IsNullOrEmpty(loggedClause)) curTxMode = loggedClause + ", " + curTxMode;
@@ -1297,7 +1298,7 @@ namespace WSJTX_Controller
 
                             if (finalSignoffCall != null)
                             {
-                                curTxMode = $"{Spacify(finalSignoffCall)} final 73, " + curTxMode;
+                                curTxMode = $"{DisplayCallsign(finalSignoffCall, ctrl.spaceCallsignsAndGrids)} final 73, " + curTxMode;
                             }
 
                             if (consecNoDecodes >= maxNoDecodes)
@@ -1472,14 +1473,14 @@ namespace WSJTX_Controller
                                     {
                                         string rrClause = RoutineClause(NotificationEventType.ReceivedReply,
                                             ("Received", receivedPhrase), ("Previous", prevClean),
-                                            ("Callsign", curCall != null ? Spacify(curCall) : ""));
+                                            ("Callsign", curCall != null ? DisplayCallsign(curCall, ctrl.spaceCallsignsAndGrids) : ""));
                                         if (!string.IsNullOrEmpty(rrClause)) curRxStr = ", " + rrClause;
                                     }
                                 }
 
                                 if (expiredCall != null && ((txMode == TxModes.LISTEN && !txEnabled) || txMode == TxModes.CALL_CQ))
                                 {
-                                    inProg = $", {Spacify(expiredCall)}";
+                                    inProg = $", {DisplayCallsign(expiredCall, ctrl.spaceCallsignsAndGrids)}";
                                     cond = " expired";
                                     curRxStr = "";
                                     prevRxStr = "";
@@ -1487,7 +1488,7 @@ namespace WSJTX_Controller
                                 }
                                 else if (timedOutCall != null && ((txMode == TxModes.CALL_CQ && transmitting) || (txMode == TxModes.LISTEN && !txEnabled)))
                                 {
-                                    inProg = $", {Spacify(timedOutCall)}";
+                                    inProg = $", {DisplayCallsign(timedOutCall, ctrl.spaceCallsignsAndGrids)}";
                                     cond = " timed out,";
                                     timedOutCall = null;
                                     if (cmdPrompts && txMode == TxModes.LISTEN) prompt = $", use Alt E to resume QSO";
@@ -1535,11 +1536,11 @@ namespace WSJTX_Controller
                                     string otherWhat = otherPartyStage != null ? SpacifyPayload(otherPartyStage) : "";
                                     // Open with the active call AND its " selected" marker so
                                     // dropping the standalone inProg fragment below loses neither.
-                                    string activeHead = $", {Spacify(curCall)}{sel}";
+                                    string activeHead = $", {DisplayCallsign(curCall, ctrl.spaceCallsignsAndGrids)}{sel}";
                                     if (otherPartyForCallInProg != null && otherWhat != "")
-                                        otherStr = $"{activeHead} to {Spacify(otherPartyForCallInProg)}, {otherWhat}";
+                                        otherStr = $"{activeHead} to {DisplayCallsign(otherPartyForCallInProg, ctrl.spaceCallsignsAndGrids)}, {otherWhat}";
                                     else if (otherPartyForCallInProg != null)
-                                        otherStr = $"{activeHead} to {Spacify(otherPartyForCallInProg)}";
+                                        otherStr = $"{activeHead} to {DisplayCallsign(otherPartyForCallInProg, ctrl.spaceCallsignsAndGrids)}";
                                     else
                                         otherStr = $"{activeHead}, {otherWhat}";
                                     // otherStr now names the active station (root cause of the
@@ -1584,7 +1585,7 @@ namespace WSJTX_Controller
                                     // The render then falls through to the normal progress line
                                     // below, which still shows the station being worked.
                                     status = RoutineClause(NotificationEventType.QsoStarted,
-                                                 ("Callsign", Spacify(callInProg)),
+                                                 ("Callsign", DisplayCallsign(callInProg, ctrl.spaceCallsignsAndGrids)),
                                                  ("Band", bandIdx != null ? $"{bands[(int)bandIdx]}m" : ""),
                                                  ("Mode", mode ?? "")) ?? "";
                                 }
@@ -1732,6 +1733,8 @@ namespace WSJTX_Controller
                     // sent/received reports for this QSO so the row is a self-contained record
                     // of what was logged. The reports are a display-only snapshot captured at
                     // log time (_loggedReports); the row's key stays the bare callsign.
+                    // Auto-logged calls are OUT of scope for "Space callsigns and grids" -- this
+                    // stays on the checkbox-independent Spacify(), always spaced as before.
                     string line = $"{Spacify(call)}, {Country(call)}";
                     if (_loggedReports.TryGetValue(call, out string rpt) && !string.IsNullOrEmpty(rpt))
                         line += $", {rpt}";

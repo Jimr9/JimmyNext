@@ -11061,6 +11061,19 @@ static class JimmyTests
                 CheckStr("QsoStarted enabled -> default wording",
                     view.LastStatusText, "Working W 4 M A A, replying.");
 
+                // "Space callsigns and grids" is one of the five surfaces it controls -- OFF
+                // renders the main-status callsign compact; ON restores the spaced form.
+                ctrl.spaceCallsignsAndGrids = false;
+                wc.TestSetReplyingToCall("W4MAA");
+                wc.TestShowStatus();
+                CheckStr("Main status, 'Space callsigns and grids' OFF -> compact callsign",
+                    view.LastStatusText, "Working W4MAA, replying.");
+                ctrl.spaceCallsignsAndGrids = true;
+                wc.TestSetReplyingToCall("W4MAA");
+                wc.TestShowStatus();
+                CheckStr("Main status, back ON -> spaced callsign again",
+                    view.LastStatusText, "Working W 4 M A A, replying.");
+
                 ctrl.Notifications.Policies[NotificationEventType.QsoStarted].Template = "Now answering {Callsign}.";
                 wc.TestSetReplyingToCall("W4MAA");
                 wc.TestShowStatus();
@@ -17214,12 +17227,15 @@ static class JimmyTests
         }
     }
 
-    // ── Options > General "Space callsigns and grids" -- presentation-only preference ──
-    // Gates WsjtxClient.Spacify()/SpacifyPayload() only. Default checked (missing ini key),
-    // never touches transmitted text, internal values, the queue, or roger-report formatting.
+    // ── Options > General "Space callsigns and grids" -- NARROW presentation preference ──
+    // Applies to callsigns/grids ONLY at five opt-in surfaces: Normal Stations Available,
+    // Advanced TX1/TX2 lists, Raw Decodes, Spot Watch, Main status. The global Spacify() /
+    // SpacifyPayload() helpers stay preference-INDEPENDENT, so Auto-logged calls, 73 / RR73 /
+    // RRR, signal reports and every other payload render exactly as before commit c5fc9d5
+    // regardless of the checkbox.
     static void SpaceCallsignsAndGridsTests()
     {
-        Console.WriteLine("\n── Options > General: \"Space callsigns and grids\" (presentation only) ──");
+        Console.WriteLine("\n── Options > General: \"Space callsigns and grids\" (narrow, 5 surfaces) ──");
         string tmpIni = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
             "JimmySpaceCallsigns_" + Guid.NewGuid().ToString("N") + ".ini");
         try
@@ -17238,36 +17254,36 @@ static class JimmyTests
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             var wc = new WsjtxClient(ctrl, 2337, false, false, WsjtxClient.TxModes.LISTEN);
 
-            // 2 + 3. Callsign spacing follows the preference.
-            ctrl.spaceCallsignsAndGrids = true;
-            CheckStr("checked: callsign KB0UZT is presented spaced", wc.Spacify("KB0UZT"), "K B 0 U Z T");
-            ctrl.spaceCallsignsAndGrids = false;
-            CheckStr("unchecked: callsign KB0UZT is presented compact", wc.Spacify("KB0UZT"), "KB0UZT");
+            // 2-5. The narrow presentation helpers.
+            CheckStr("checked callsign: KB0UZT -> K B 0 U Z T", WsjtxClient.DisplayCallsign("KB0UZT", true), "K B 0 U Z T");
+            CheckStr("unchecked callsign: KB0UZT -> KB0UZT", WsjtxClient.DisplayCallsign("KB0UZT", false), "KB0UZT");
+            CheckStr("checked grid: EN34 -> E N 34", WsjtxClient.DisplayGrid("EN34", true), "E N 34");
+            CheckStr("unchecked grid: EN34 -> EN34", WsjtxClient.DisplayGrid("EN34", false), "EN34");
+            CheckStr("checked 6-char grid: EN34AB -> E N 3 4 A B", WsjtxClient.DisplayGrid("EN34AB", true), "E N 3 4 A B");
+            CheckStr("unchecked 6-char grid: EN34AB -> EN34AB", WsjtxClient.DisplayGrid("EN34AB", false), "EN34AB");
+            CheckStr("DisplayCallsign(null) -> \"\"", WsjtxClient.DisplayCallsign(null, true), "");
+            CheckStr("DisplayGrid(null) -> \"\"", WsjtxClient.DisplayGrid(null, true), "");
 
-            // 4 + 5. Grid spacing follows the preference -- ALL FOUR characters, consistent
-            //        with callsigns (correction to c5fc9d5, which produced "E N 34").
-            ctrl.spaceCallsignsAndGrids = true;
-            CheckStr("checked: grid EN34 is presented as E N 3 4", wc.SpacifyPayload("EN34"), "E N 3 4");
-            ctrl.spaceCallsignsAndGrids = false;
-            CheckStr("unchecked: grid EN34 is presented compact", wc.SpacifyPayload("EN34"), "EN34");
-            // 6-char grid takes the same per-character path.
-            ctrl.spaceCallsignsAndGrids = true;
-            CheckStr("checked: 6-char grid EN34AB spaces every character", wc.SpacifyPayload("EN34AB"), "E N 3 4 A B");
-            ctrl.spaceCallsignsAndGrids = false;
-            CheckStr("unchecked: 6-char grid EN34AB stays compact", wc.SpacifyPayload("EN34AB"), "EN34AB");
-
-            // 6. Roger reports keep their existing formatting in BOTH states.
+            // EXCLUDED behavior restored: the global helpers are NOT preference-aware.
             foreach (bool on in new[] { true, false })
             {
                 ctrl.spaceCallsignsAndGrids = on;
-                string tag = on ? "checked" : "unchecked";
-                CheckStr($"{tag}: report -06 formatting unchanged", wc.SpacifyPayload("-06"), " -06");
-                CheckStr($"{tag}: report R-04 formatting unchanged", wc.SpacifyPayload("R-04"), "R -04");
-                CheckStr($"{tag}: report +10 formatting unchanged", wc.SpacifyPayload("+10"), " +10");
+                string t = on ? "checked" : "unchecked";
+                CheckStr($"{t}: global Spacify(KB0UZT) is always spaced (Auto-logged path)", wc.Spacify("KB0UZT"), "K B 0 U Z T");
+                CheckStr($"{t}: 73 render unchanged", wc.SpacifyPayload("73"), "7 3");
+                CheckStr($"{t}: RR73 render unchanged", wc.SpacifyPayload("RR73"), "R R 7 3");
+                CheckStr($"{t}: RRR render unchanged", wc.SpacifyPayload("RRR"), "RRR");
+                CheckStr($"{t}: report -06 unchanged", wc.SpacifyPayload("-06"), " -06");
+                CheckStr($"{t}: report R-04 unchanged", wc.SpacifyPayload("R-04"), "R -04");
+                CheckStr($"{t}: report +10 unchanged", wc.SpacifyPayload("+10"), " +10");
+                CheckStr($"{t}: global SpacifyPayload grid EN34 is always \"E N 34\"", wc.SpacifyPayload("EN34"), "E N 34");
             }
 
-            // 7. Saves to and reloads from the active-profile ini (SetIniFileForTest stands in
-            //    for the resolved active profile; the loader rule is "!= \"False\"").
+            // 6. Auto-logged calls list row is unaffected by the checkbox (uses global Spacify).
+            //    (Direct proof: the render at WsjtxClient.Display.cs still calls Spacify(call),
+            //    which the loop above proved is preference-independent.)
+
+            // 7. Saves to / reloads from the active-profile ini.
             ctrl.SetIniFileForTest(new IniFile(tmpIni));
             ctrl.SetAndPersistSpaceCallsignsAndGrids(false);
             CheckStr("persisted as \"False\" in the active-profile ini",
@@ -17278,42 +17294,54 @@ static class JimmyTests
                 new IniFile(tmpIni).Read("spaceCallsignsAndGrids"), "True");
             Check("...reloads as checked", new IniFile(tmpIni).Read("spaceCallsignsAndGrids") != "False", true);
 
-            // 8. Internal / transmitted values stay compact and unmodified.
+            // 8. Internal / transmitted values untouched.
             string src = "KB0UZT";
-            ctrl.spaceCallsignsAndGrids = true;
-            wc.Spacify(src);
-            CheckStr("Spacify does not mutate its argument (source stays compact)", src, "KB0UZT");
+            WsjtxClient.DisplayCallsign(src, true);
+            CheckStr("DisplayCallsign does not mutate its argument", src, "KB0UZT");
             wc.myCall = "KB0UZT";
             ctrl.spaceCallsignsAndGrids = true;  string mc1 = wc.myCall;
             ctrl.spaceCallsignsAndGrids = false; string mc2 = wc.myCall;
             Check("internal myCall is untouched by the preference", mc1 == "KB0UZT" && mc2 == "KB0UZT", true);
 
-            // 9. Call queue contents / order are untouched by the preference.
+            // 9. Call queue contents / order untouched.
             wc.callQueue.Clear();
-            wc.callQueue.Enqueue("KB0UZT");
-            wc.callQueue.Enqueue("W1AW");
-            wc.callQueue.Enqueue("EA3HMM");
-            ctrl.spaceCallsignsAndGrids = true;
-            var q1 = wc.callQueue.ToArray();
-            ctrl.spaceCallsignsAndGrids = false;
-            var q2 = wc.callQueue.ToArray();
-            Check("call queue length unchanged by the preference", q1.Length == 3 && q2.Length == 3, true);
-            Check("call queue holds the bare callsigns in order, unchanged",
+            wc.callQueue.Enqueue("KB0UZT"); wc.callQueue.Enqueue("W1AW"); wc.callQueue.Enqueue("EA3HMM");
+            ctrl.spaceCallsignsAndGrids = true;  var q1 = wc.callQueue.ToArray();
+            ctrl.spaceCallsignsAndGrids = false; var q2 = wc.callQueue.ToArray();
+            Check("call queue holds the bare callsigns in order in both states",
                 string.Join(",", q1) == "KB0UZT,W1AW,EA3HMM" && string.Join(",", q2) == "KB0UZT,W1AW,EA3HMM", true);
             Check("queue never stores a spaced form", System.Array.IndexOf(q2, "K B 0 U Z T") < 0, true);
 
-            // Raw Decodes: the rendered row's callsign AND grid both follow the checkbox
-            // (grid used to be inserted raw). Isolate the two fields via a minimal row order so
-            // the raw "message" field (which keeps "EN34" verbatim by design) can't confuse the
-            // assertion.
+            // ---- Included surface: Normal Stations Available + Advanced TX1/TX2 (one builder) ----
+            var sctrl = new Controller();
+            sctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            sctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            sctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            sctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var swc = new WsjtxClient(sctrl, 2339, false, false, WsjtxClient.TxModes.LISTEN);
+            swc.callWaitingRowOrderFields = new System.Collections.Generic.List<string> { "callp", "grid" };
+            swc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 1 },
+                ""recentDecodes"": []
+            }"));
+            var sd = new EnqueueDecodeMessage { Message = "CQ AA1AA EN34", SinceMidnight = new TimeSpan(0, 5, 2), AutoGen = true, New = true };
+            sctrl.spaceCallsignsAndGrids = true;
+            string savRowOn = swc.TestBuildCallWaitingRow("AA1AA", sd);
+            Check("Stations Available, checked: callsign A A 1 A A + grid E N 34",
+                savRowOn.Contains("A A 1 A A") && savRowOn.Contains("E N 34"), true);
+            sctrl.spaceCallsignsAndGrids = false;
+            string savRowOff = swc.TestBuildCallWaitingRow("AA1AA", sd);
+            Check("Stations Available, unchecked: callsign AA1AA + grid EN34, not spaced",
+                savRowOff.Contains("AA1AA") && savRowOff.Contains("EN34") && !savRowOff.Contains("E N 34"), true);
+
+            // ---- Included surface: Raw Decodes ----
             var rctrl = new Controller();
             rctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
             rctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             rctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             rctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            rctrl.advancedCallLayout = true;
-            rctrl.advShowRaw = true;
-            rctrl.rawShowGrid = true;
+            rctrl.advancedCallLayout = true; rctrl.advShowRaw = true; rctrl.rawShowGrid = true;
             var rwc = new WsjtxClient(rctrl, 2338, false, false, WsjtxClient.TxModes.LISTEN);
             rwc.rawDecodeRowOrderFields = new System.Collections.Generic.List<string> { "callsign", "grid" };
             rwc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
@@ -17325,19 +17353,40 @@ static class JimmyTests
             {
                 Message = "CQ AA1AA EN34", SinceMidnight = new TimeSpan(0, 5, 2), AutoGen = true, New = true,
             });
-
             rctrl.spaceCallsignsAndGrids = true;
             rwc.TestShowRawDecodes();
             string rowChecked = string.Join(" | ", rctrl.advRawListBox.Items.Cast<string>());
-            Check("Raw Decodes, checked: callsign rendered as A A 1 A A", rowChecked.Contains("A A 1 A A"), true);
-            Check("Raw Decodes, checked: grid rendered as E N 3 4", rowChecked.Contains("E N 3 4"), true);
-
+            Check("Raw Decodes, checked: callsign A A 1 A A", rowChecked.Contains("A A 1 A A"), true);
+            Check("Raw Decodes, checked: grid E N 34 (follows the setting)", rowChecked.Contains("E N 34"), true);
             rctrl.spaceCallsignsAndGrids = false;
             rwc.TestShowRawDecodes();
             string rowUnchecked = string.Join(" | ", rctrl.advRawListBox.Items.Cast<string>());
-            Check("Raw Decodes, unchecked: callsign rendered compact AA1AA", rowUnchecked.Contains("AA1AA"), true);
-            Check("Raw Decodes, unchecked: grid rendered compact EN34", rowUnchecked.Contains("EN34"), true);
-            Check("Raw Decodes, unchecked: grid is NOT spaced", rowUnchecked.Contains("E N 3 4"), false);
+            Check("Raw Decodes, unchecked: callsign AA1AA", rowUnchecked.Contains("AA1AA"), true);
+            Check("Raw Decodes, unchecked: grid EN34, not spaced",
+                rowUnchecked.Contains("EN34") && !rowUnchecked.Contains("E N 34"), true);
+
+            // ---- Included surface: Spot Watch ----
+            var pctrl = new Controller();
+            pctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            pctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            pctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            pctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var pwc = new WsjtxClient(pctrl, 2340, false, false, WsjtxClient.TxModes.LISTEN);
+            pctrl.spotWatchRowOrderFields = new System.Collections.Generic.List<string> { "callsign", "senderGrid", "spottercall", "spottergrid" };
+            var spot = new SpotInfo
+            {
+                Band = "20m", Mode = "FT8", UtcTime = DateTime.UtcNow,
+                SpotterCall = "K1ABC", SpotterGrid = "FN42", SenderGrid = "EN34",
+            };
+            pctrl.spaceCallsignsAndGrids = true;
+            string spotOn = pctrl.TestFormatSpotWatchRow("AA1AA", spot);
+            Check("Spot Watch, checked: watched call, spotter call and both grids are spaced",
+                spotOn.Contains("A A 1 A A") && spotOn.Contains("K 1 A B C") && spotOn.Contains("E N 34") && spotOn.Contains("F N 42"), true);
+            pctrl.spaceCallsignsAndGrids = false;
+            string spotOff = pctrl.TestFormatSpotWatchRow("AA1AA", spot);
+            Check("Spot Watch, unchecked: all compact, nothing spaced",
+                spotOff.Contains("AA1AA") && spotOff.Contains("K1ABC") && spotOff.Contains("EN34") && spotOff.Contains("FN42")
+                && !spotOff.Contains("A A 1 A A") && !spotOff.Contains("E N 34"), true);
         }
         catch (Exception ex)
         {

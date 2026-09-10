@@ -4193,16 +4193,15 @@ namespace WSJTX_Controller
             return dmsg.IsPota();
         }
 
-        // internal (not private): JimmyTests exercises the "Space callsigns and grids"
-        // presentation preference directly (InternalsVisibleTo, see AssemblyInfo.Testing.cs).
+        // ORIGINAL behavior, restored -- this global helper is deliberately NOT aware of the
+        // "Space callsigns and grids" preference (Options > General). It is used in places that
+        // must always space characters regardless of the checkbox (e.g. the Auto-logged calls
+        // list). Preference-aware spacing lives only in DisplayCallsign / DisplayGrid below,
+        // applied at exactly five opt-in display surfaces. internal (not private) only so
+        // SpaceCallsignsAndGridsTests can assert this helper stays preference-independent.
         internal string Spacify(string s)
         {
             if (s == null) return "";
-
-            // Options > General "Space callsigns and grids" -- unchecked returns the value
-            // unchanged (compact). Presentation only: every caller uses the result to build
-            // display / speech text, never as data (verified across all call sites).
-            if (ctrl != null && !ctrl.spaceCallsignsAndGrids) return s;
 
             var a = s.ToArray();
             var sb = new StringBuilder();
@@ -4228,26 +4227,65 @@ namespace WSJTX_Controller
             return $"{Spacify(sa[0])}, {Spacify(sa[1])}{pl}";
         }
 
-        // internal (not private): see Spacify's comment. Only the callsign/grid-style character
-        // spacing here follows the "Space callsigns and grids" preference -- the roger-report
-        // formatting (" -06", " +10", "R -04") is deliberately left exactly as it was.
+        // ORIGINAL behavior, restored -- also NOT preference-aware. 73 / RR73 / RRR, roger
+        // reports, and every payload token render exactly as they did before c5fc9d5, whatever
+        // the checkbox. internal only for the regression test that proves that.
         internal string SpacifyPayload(string s)
         {
             if (s == null) return "";
             if (s == "" || s == "CQ" || s == "RRR") return s;
-            if (s.Contains("-"))        //neg roger report -- report formatting, preference-independent
+            if (s.Contains("-"))        //neg roger report
             {
                 return s.Replace("-", " -");
             }
-            if (s.Contains("+"))        //pos roger report -- report formatting, preference-independent
+            if (s.Contains("+"))        //pos roger report
             {
                 return s.Replace("+", " +");
             }
-            // Everything else -- a 4-character Maidenhead grid, 73 / RR73, or any other token --
-            // is spaced character-by-character when "Space callsigns and grids" is checked
-            // ("EN34" -> "E N 3 4", consistent with callsigns), and returned unchanged when
-            // unchecked ("EN34"). Spacify() applies that preference.
-            return Spacify(s);
+            if (s.Contains("73"))
+            {
+                return Spacify(s);
+            }
+            //grid
+            if (s.Length == 4)
+            {
+                return s.Substring(0, 1) + " " + s.Substring(1, 1) + " " + s.Substring(2, 2);
+            }
+            else
+            {
+                return Spacify(s);
+            }
+        }
+
+        // Options > General "Space callsigns and grids" -- a NARROW presentation choice applied
+        // at exactly five opt-in display surfaces and nowhere else: Normal Stations Available,
+        // Advanced TX1/TX2 station lists, Raw Decodes, Spot Watch, and Main status. `spaced` is
+        // Controller.spaceCallsignsAndGrids. When false, the value is returned unchanged. When
+        // true it uses the same character spacing Jimmy has always used. Static + self-contained
+        // (no dependency on Spacify/SpacifyPayload) so the global helpers can stay preference-
+        // free; both WsjtxClient (display code) and Controller (Spot Watch rows) call these.
+        internal static string DisplayCallsign(string call, bool spaced)
+        {
+            if (string.IsNullOrEmpty(call) || !spaced) return call ?? "";
+            return SpaceEveryChar(call);
+        }
+
+        internal static string DisplayGrid(string grid, bool spaced)
+        {
+            if (string.IsNullOrEmpty(grid) || !spaced) return grid ?? "";
+            // 4-char Maidenhead: "EN34" -> "E N 34" (the long-standing grid rendering).
+            if (grid.Length == 4)
+                return grid.Substring(0, 1) + " " + grid.Substring(1, 1) + " " + grid.Substring(2, 2);
+            // 6-char or other: space every character, matching the old SpacifyPayload fallback.
+            return SpaceEveryChar(grid);
+        }
+
+        private static string SpaceEveryChar(string s)
+        {
+            var sb = new StringBuilder();
+            foreach (char c in s)
+                if (c != ' ') { sb.Append(c); sb.Append(' '); }
+            return sb.ToString().Trim();
         }
 
         // Public so other USA-state display sites (e.g. Controller.FormatSpotWatchRow)
