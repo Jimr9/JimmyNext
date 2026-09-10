@@ -14135,6 +14135,15 @@ static class JimmyTests
                 HotkeyConfig.OptionalActions.Contains(HotkeyAction.OpenRxTxFreqControls), true);
             CheckStr("OpenRxTxFreqControls has the expected display name",
                 HotkeyConfig.DisplayNames[HotkeyAction.OpenRxTxFreqControls], "Open RX/TX Audio Frequency Controls");
+            Check("OpenRxTxFreqControls is listed in the Options > Hotkeys assign list",
+                Array.IndexOf(OptionsDlg.HotkeysTabGeneralActions, HotkeyAction.OpenRxTxFreqControls) >= 0, true);
+            Check("...exactly once (no duplicate list entry)",
+                System.Linq.Enumerable.Count(OptionsDlg.HotkeysTabGeneralActions, a => a == HotkeyAction.OpenRxTxFreqControls) == 1, true);
+            Check("...and it sits with the other frequency commands (right after Set Transmit Frequency)",
+                Array.IndexOf(OptionsDlg.HotkeysTabGeneralActions, HotkeyAction.OpenRxTxFreqControls)
+                    == Array.IndexOf(OptionsDlg.HotkeysTabGeneralActions, HotkeyAction.SetTxFreq) + 1, true);
+            foreach (var a in OptionsDlg.HotkeysTabGeneralActions)
+                Check($"Hotkeys-list action {a} has a display name", HotkeyConfig.DisplayNames.ContainsKey(a), true);
 
             string tmpIni = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
                 "JimmyRxTxFreqHotkey_" + Guid.NewGuid().ToString("N") + ".ini");

@@ -4912,63 +4912,71 @@ namespace WSJTX_Controller
             _actionListBox.SelectedIndex = 0;
         }
 
+        // The Options > Hotkeys action list, in display order. Curated: a HotkeyAction that is
+        // reached only through its own button/menu need not appear here. internal static so a
+        // JimmyTests regression check can confirm a newly added, operator-assignable action was
+        // not forgotten from this list (as HotkeyAction.OpenRxTxFreqControls was on first add).
+        internal static readonly HotkeyAction[] HotkeysTabGeneralActions =
+        {
+            HotkeyAction.Options,
+            HotkeyAction.Help,
+            HotkeyAction.UpdateCheck,
+            HotkeyAction.CallCqMode,
+            HotkeyAction.CallCqOptions,
+            HotkeyAction.ListenMode,
+            HotkeyAction.EnableTx,
+            HotkeyAction.HaltTx,
+            HotkeyAction.NextCall,
+            HotkeyAction.ManualCall,
+            HotkeyAction.DeleteAllCalls,
+            HotkeyAction.TxPeriod,
+            HotkeyAction.TuneMode,
+            HotkeyAction.AudioUp,
+            HotkeyAction.AudioDown,
+            HotkeyAction.PowerSwr,
+            HotkeyAction.BandUp,
+            HotkeyAction.BandDown,
+            HotkeyAction.ToggleMode,
+            HotkeyAction.AnnounceFreq,
+            HotkeyAction.TxFreqUp,
+            HotkeyAction.TxFreqDown,
+            HotkeyAction.RxFreqUp,
+            HotkeyAction.RxFreqDown,
+            HotkeyAction.TxFromRx,
+            HotkeyAction.RxFromTx,
+            HotkeyAction.SetTxFreq,
+            HotkeyAction.OpenRxTxFreqControls,
+            HotkeyAction.PSKReporter,
+            HotkeyAction.Prompts,
+            HotkeyAction.UploadLotw,
+            HotkeyAction.SortOrder,
+            HotkeyAction.RowOrder,
+            HotkeyAction.AnalyzeSlot,
+            HotkeyAction.ClockStatus,
+            HotkeyAction.LookupStation,
+            HotkeyAction.OpenLogbook,
+            HotkeyAction.AddManualQso,
+            HotkeyAction.OpenOtaSpots,
+            HotkeyAction.ResetWindowSize,
+        };
+
+        internal static readonly HotkeyAction[] HotkeysTabNavActions =
+        {
+            HotkeyAction.NavStatus,
+            HotkeyAction.NavCallList,
+            HotkeyAction.NavPendingCount,
+            HotkeyAction.NavLoggedList,
+            HotkeyAction.NavLoggedCount,
+            HotkeyAction.NavAdvTx1,
+            HotkeyAction.NavAdvTx2,
+            HotkeyAction.NavAdvRaw,
+            HotkeyAction.NavSpotWatch,
+        };
+
         private void BuildActionList()
         {
-            var generalActions = new HotkeyAction[]
-            {
-                HotkeyAction.Options,
-                HotkeyAction.Help,
-                HotkeyAction.UpdateCheck,
-                HotkeyAction.CallCqMode,
-                HotkeyAction.CallCqOptions,
-                HotkeyAction.ListenMode,
-                HotkeyAction.EnableTx,
-                HotkeyAction.HaltTx,
-                HotkeyAction.NextCall,
-                HotkeyAction.ManualCall,
-                HotkeyAction.DeleteAllCalls,
-                HotkeyAction.TxPeriod,
-                HotkeyAction.TuneMode,
-                HotkeyAction.AudioUp,
-                HotkeyAction.AudioDown,
-                HotkeyAction.PowerSwr,
-                HotkeyAction.BandUp,
-                HotkeyAction.BandDown,
-                HotkeyAction.ToggleMode,
-                HotkeyAction.AnnounceFreq,
-                HotkeyAction.TxFreqUp,
-                HotkeyAction.TxFreqDown,
-                HotkeyAction.RxFreqUp,
-                HotkeyAction.RxFreqDown,
-                HotkeyAction.TxFromRx,
-                HotkeyAction.RxFromTx,
-                HotkeyAction.SetTxFreq,
-                HotkeyAction.PSKReporter,
-                HotkeyAction.Prompts,
-                HotkeyAction.UploadLotw,
-                HotkeyAction.SortOrder,
-                HotkeyAction.RowOrder,
-                HotkeyAction.AnalyzeSlot,
-                HotkeyAction.ClockStatus,
-                HotkeyAction.LookupStation,
-                HotkeyAction.OpenLogbook,
-                HotkeyAction.AddManualQso,
-                HotkeyAction.OpenOtaSpots,
-                HotkeyAction.ResetWindowSize,
-            };
-
-            var navActions = new HotkeyAction[]
-            {
-                HotkeyAction.NavStatus,
-                HotkeyAction.NavCallList,
-                HotkeyAction.NavPendingCount,
-                HotkeyAction.NavLoggedList,
-                HotkeyAction.NavLoggedCount,
-                HotkeyAction.NavAdvTx1,
-                HotkeyAction.NavAdvTx2,
-                HotkeyAction.NavAdvRaw,
-                HotkeyAction.NavSpotWatch,
-            };
+            var generalActions = HotkeysTabGeneralActions;
+            var navActions = HotkeysTabNavActions;
 
             // Group header folded into the first real item's own text (e.g. "General
             // Commands: Options") instead of a separate list row -- a standalone header
