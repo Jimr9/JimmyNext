@@ -4193,9 +4193,16 @@ namespace WSJTX_Controller
             return dmsg.IsPota();
         }
 
-        private string Spacify(string s)
+        // internal (not private): JimmyTests exercises the "Space callsigns and grids"
+        // presentation preference directly (InternalsVisibleTo, see AssemblyInfo.Testing.cs).
+        internal string Spacify(string s)
         {
             if (s == null) return "";
+
+            // Options > General "Space callsigns and grids" -- unchecked returns the value
+            // unchanged (compact). Presentation only: every caller uses the result to build
+            // display / speech text, never as data (verified across all call sites).
+            if (ctrl != null && !ctrl.spaceCallsignsAndGrids) return s;
 
             var a = s.ToArray();
             var sb = new StringBuilder();
@@ -4221,25 +4228,29 @@ namespace WSJTX_Controller
             return $"{Spacify(sa[0])}, {Spacify(sa[1])}{pl}";
         }
 
-        private string SpacifyPayload(string s)
+        // internal (not private): see Spacify's comment. Only the callsign/grid-style character
+        // spacing here follows the "Space callsigns and grids" preference -- the roger-report
+        // formatting (" -06", " +10", "R -04") is deliberately left exactly as it was.
+        internal string SpacifyPayload(string s)
         {
             if (s == null) return "";
             if (s == "" || s == "CQ" || s == "RRR") return s;
-            if (s.Contains("-"))        //neg roger report
+            if (s.Contains("-"))        //neg roger report -- report formatting, preference-independent
             {
                 return s.Replace("-", " -");
             }
-            if (s.Contains("+"))        //pos roger report
+            if (s.Contains("+"))        //pos roger report -- report formatting, preference-independent
             {
                 return s.Replace("+", " +");
             }
             if (s.Contains("73"))
             {
-                return Spacify(s);
+                return Spacify(s);     // follows the preference via Spacify()
             }
             //grid
             if (s.Length == 4)
             {
+                if (ctrl != null && !ctrl.spaceCallsignsAndGrids) return s;
                 return s.Substring(0, 1) + " " + s.Substring(1, 1) + " " + s.Substring(2, 2);
             }
             else

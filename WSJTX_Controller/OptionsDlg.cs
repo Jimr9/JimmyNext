@@ -159,6 +159,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox pskReporterCheckBox;
         private System.Windows.Forms.CheckBox moveFocusToStatusCheckBox;
         private System.Windows.Forms.CheckBox checkForUpdatesCheckBox;
+        private System.Windows.Forms.CheckBox spaceCallsignsAndGridsCheckBox;
         private System.Windows.Forms.CheckBox _smartQsoStartCheckBox;
         private System.Windows.Forms.NumericUpDown _smartStartSilencePeriodsNumeric;
         private System.Windows.Forms.Button _rxTxFreqControlsButton;
@@ -398,6 +399,21 @@ namespace WSJTX_Controller
             };
             generalPanel.Controls.Add(checkForUpdatesCheckBox);
 
+            // Presentation-only: spaces callsign and grid characters ("K B 0 U Z T", "E N 34")
+            // for screen readers at the display/speech sites that already use Spacify() /
+            // SpacifyPayload(). Default checked (preserves current behavior).
+            spaceCallsignsAndGridsCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text                  = "Space callsigns and grids",
+                AccessibleName        = "Space callsigns and grids",
+                AutoSize              = true,
+                Location              = new System.Drawing.Point(10, 140),
+                TabIndex              = 5,
+                Checked               = ctrl.spaceCallsignsAndGrids,
+                Font                  = font,
+            };
+            generalPanel.Controls.Add(spaceCallsignsAndGridsCheckBox);
+
             // "Announce important notifications when focus is elsewhere" moved to
             // Options > Notifications > Global speech behaviour (2026-09-04) so all automatic-
             // speech behaviour is configured in one place. Same Controller setting / INI key.
@@ -499,6 +515,9 @@ namespace WSJTX_Controller
 
             ctrl.moveFocusToStatusOnCallSelect = moveFocusToStatusCheckBox?.Checked ?? false;
             ctrl.checkForUpdatesOnStartup = checkForUpdatesCheckBox?.Checked ?? false;
+            // Presentation-only; applied live (next status render) and persisted to the active
+            // profile immediately. Default true if the control is somehow absent.
+            ctrl.SetAndPersistSpaceCallsignsAndGrids(spaceCallsignsAndGridsCheckBox?.Checked ?? true);
             // announceImportantAlertsWhenFocusElsewhere is applied by SaveNotificationsTab now.
             // Smart QSO Start is applied by SaveTransmitTab now (controls moved to the Transmit tab).
 

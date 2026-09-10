@@ -137,6 +137,14 @@ namespace WSJTX_Controller
         public bool keepListPositionDuringRefresh = false;
         public bool moveFocusToStatusOnCallSelect = false;
         public bool checkForUpdatesOnStartup = false;
+
+        // Options > General "Space callsigns and grids" -- presentation only. true (the default,
+        // and the behavior when the ini key is absent): WsjtxClient.Spacify()/SpacifyPayload()
+        // space callsign and grid characters for screen readers ("K B 0 U Z T", "E N 34").
+        // false: those helpers return the compact form. Never touches transmitted text, stored
+        // or decoded values, parsing, comparisons, the call queue, logging, or any notification
+        // configuration -- only the rendered text at sites that already call those helpers.
+        public bool spaceCallsignsAndGrids = true;
         // Added 2026-08-19: gates UiaAlertNotificationDelivery (WSJTX_Controller/Notify/
         // NotificationDelivery.cs) -- when true, an Important-priority notification may also
         // announce via UI Automation's Notification event (RaiseAccessibleAlert) even while
@@ -849,6 +857,9 @@ namespace WSJTX_Controller
                 keepListPositionDuringRefresh = iniFile.Read("keepListPositionDuringRefresh") == "True";
                 moveFocusToStatusOnCallSelect = iniFile.Read("moveFocusToStatusOnCallSelect") == "True";
                 checkForUpdatesOnStartup = iniFile.Read("checkForUpdatesOnStartup") == "True";
+                // Default checked when the key is absent (== "False" test) so an upgrade keeps
+                // today's spaced-callsign presentation until the operator opts out.
+                spaceCallsignsAndGrids = iniFile.Read("spaceCallsignsAndGrids") != "False";
                 announceImportantAlertsWhenFocusElsewhere = iniFile.Read("announceImportantAlertsWhenFocusElsewhere") == "True";
                 // 2.0.58: default true (== "False" test, so a missing/blank key stays true) --
                 // the testing-phase default; the operator can turn it off in the Notification
@@ -1545,6 +1556,7 @@ namespace WSJTX_Controller
                 iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
                 iniFile.Write("moveFocusToStatusOnCallSelect", moveFocusToStatusOnCallSelect.ToString());
                 iniFile.Write("checkForUpdatesOnStartup", checkForUpdatesOnStartup.ToString());
+                iniFile.Write("spaceCallsignsAndGrids", spaceCallsignsAndGrids.ToString());
                 iniFile.Write("announceImportantAlertsWhenFocusElsewhere", announceImportantAlertsWhenFocusElsewhere.ToString());
                 iniFile.Write("notificationHistoryIncludeRoutineStatus", notificationHistoryIncludeRoutineStatus.ToString());
                 iniFile.Write("routineStatusSpeakWhen", routineStatusSpeakWhen.ToString());
@@ -2085,6 +2097,16 @@ namespace WSJTX_Controller
         // Reply). code is a 2-letter continent code or "" / null; anything invalid normalizes
         // to null ("not specified"), which keeps the existing conservative DX-classification
         // fallback. Written straight to the ini so it survives even an unclean shutdown.
+        // Options > General "Space callsigns and grids": apply the choice live (the next status
+        // render, ~1 s away, picks it up -- no restart) and write it to the active-profile ini
+        // right now, so it survives an unclean shutdown. Mirrors SetAndPersistMyContinent.
+        // Presentation only -- see the spaceCallsignsAndGrids field comment.
+        public void SetAndPersistSpaceCallsignsAndGrids(bool on)
+        {
+            spaceCallsignsAndGrids = on;
+            iniFile?.Write("spaceCallsignsAndGrids", on.ToString());
+        }
+
         public void SetAndPersistMyContinent(string code)
         {
             string norm = WsjtxClient.NormalizeContinent(code);

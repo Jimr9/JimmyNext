@@ -249,6 +249,7 @@ static class JimmyTests
         HotkeyHelpReferenceParityTests();
         TxLevelPerBandDurablePersistenceTests();
         RxTxFreqControlsFeatureTests();
+        SpaceCallsignsAndGridsTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
@@ -17205,6 +17206,99 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  HotkeyConfigNewActionConflictTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            try { System.IO.File.Delete(tmpIni); } catch { }
+        }
+    }
+
+    // ── Options > General "Space callsigns and grids" -- presentation-only preference ──
+    // Gates WsjtxClient.Spacify()/SpacifyPayload() only. Default checked (missing ini key),
+    // never touches transmitted text, internal values, the queue, or roger-report formatting.
+    static void SpaceCallsignsAndGridsTests()
+    {
+        Console.WriteLine("\n── Options > General: \"Space callsigns and grids\" (presentation only) ──");
+        string tmpIni = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "JimmySpaceCallsigns_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // 1. Missing ini key -> checked. Field default and the parse rule the loader uses.
+            Check("fresh Controller: spaceCallsignsAndGrids defaults to true (checked)",
+                new Controller().spaceCallsignsAndGrids, true);
+            Check("loader rule: absent key ( \"\" != \"False\" ) -> checked", "" != "False", true);
+            Check("loader rule: \"False\" -> unchecked", "False" != "False", false);
+            Check("loader rule: \"True\" -> checked", "True" != "False", true);
+
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2337, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // 2 + 3. Callsign spacing follows the preference.
+            ctrl.spaceCallsignsAndGrids = true;
+            CheckStr("checked: callsign KB0UZT is presented spaced", wc.Spacify("KB0UZT"), "K B 0 U Z T");
+            ctrl.spaceCallsignsAndGrids = false;
+            CheckStr("unchecked: callsign KB0UZT is presented compact", wc.Spacify("KB0UZT"), "KB0UZT");
+
+            // 4 + 5. Grid spacing follows the preference (via SpacifyPayload's grid branch).
+            ctrl.spaceCallsignsAndGrids = true;
+            CheckStr("checked: grid EN34 is presented spaced", wc.SpacifyPayload("EN34"), "E N 34");
+            ctrl.spaceCallsignsAndGrids = false;
+            CheckStr("unchecked: grid EN34 is presented compact", wc.SpacifyPayload("EN34"), "EN34");
+
+            // 6. Roger reports keep their existing formatting in BOTH states.
+            foreach (bool on in new[] { true, false })
+            {
+                ctrl.spaceCallsignsAndGrids = on;
+                string tag = on ? "checked" : "unchecked";
+                CheckStr($"{tag}: report -06 formatting unchanged", wc.SpacifyPayload("-06"), " -06");
+                CheckStr($"{tag}: report R-04 formatting unchanged", wc.SpacifyPayload("R-04"), "R -04");
+                CheckStr($"{tag}: report +10 formatting unchanged", wc.SpacifyPayload("+10"), " +10");
+            }
+
+            // 7. Saves to and reloads from the active-profile ini (SetIniFileForTest stands in
+            //    for the resolved active profile; the loader rule is "!= \"False\"").
+            ctrl.SetIniFileForTest(new IniFile(tmpIni));
+            ctrl.SetAndPersistSpaceCallsignsAndGrids(false);
+            CheckStr("persisted as \"False\" in the active-profile ini",
+                new IniFile(tmpIni).Read("spaceCallsignsAndGrids"), "False");
+            Check("...reloads as unchecked", new IniFile(tmpIni).Read("spaceCallsignsAndGrids") != "False", false);
+            ctrl.SetAndPersistSpaceCallsignsAndGrids(true);
+            CheckStr("persisted as \"True\" after re-check",
+                new IniFile(tmpIni).Read("spaceCallsignsAndGrids"), "True");
+            Check("...reloads as checked", new IniFile(tmpIni).Read("spaceCallsignsAndGrids") != "False", true);
+
+            // 8. Internal / transmitted values stay compact and unmodified.
+            string src = "KB0UZT";
+            ctrl.spaceCallsignsAndGrids = true;
+            wc.Spacify(src);
+            CheckStr("Spacify does not mutate its argument (source stays compact)", src, "KB0UZT");
+            wc.myCall = "KB0UZT";
+            ctrl.spaceCallsignsAndGrids = true;  string mc1 = wc.myCall;
+            ctrl.spaceCallsignsAndGrids = false; string mc2 = wc.myCall;
+            Check("internal myCall is untouched by the preference", mc1 == "KB0UZT" && mc2 == "KB0UZT", true);
+
+            // 9. Call queue contents / order are untouched by the preference.
+            wc.callQueue.Clear();
+            wc.callQueue.Enqueue("KB0UZT");
+            wc.callQueue.Enqueue("W1AW");
+            wc.callQueue.Enqueue("EA3HMM");
+            ctrl.spaceCallsignsAndGrids = true;
+            var q1 = wc.callQueue.ToArray();
+            ctrl.spaceCallsignsAndGrids = false;
+            var q2 = wc.callQueue.ToArray();
+            Check("call queue length unchanged by the preference", q1.Length == 3 && q2.Length == 3, true);
+            Check("call queue holds the bare callsigns in order, unchanged",
+                string.Join(",", q1) == "KB0UZT,W1AW,EA3HMM" && string.Join(",", q2) == "KB0UZT,W1AW,EA3HMM", true);
+            Check("queue never stores a spaced form", System.Array.IndexOf(q2, "K B 0 U Z T") < 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SpaceCallsignsAndGridsTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally
