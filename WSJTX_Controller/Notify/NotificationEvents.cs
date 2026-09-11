@@ -59,12 +59,21 @@ namespace WSJTX_Controller
         public string Callsign { get; }
         public string Band { get; }
         public string Mode { get; }
+        // Bare values only ("-10", "-14"), never fixed wording -- a template supplies its own
+        // labels, e.g. "S {SentReport}, R {ReceivedReport}". "" (never invented) when the
+        // completed QSO carried no such report. Optional so every existing 3-arg call site
+        // (tests included) keeps compiling unchanged.
+        public string SentReport { get; }
+        public string ReceivedReport { get; }
 
-        public QsoCompletedEvent(string callsign, string band, string mode)
+        public QsoCompletedEvent(string callsign, string band, string mode,
+            string sentReport = "", string receivedReport = "")
         {
             Callsign = callsign ?? "";
             Band = band ?? "";
             Mode = mode ?? "";
+            SentReport = sentReport ?? "";
+            ReceivedReport = receivedReport ?? "";
         }
 
         public NotificationEventType EventType => NotificationEventType.QsoCompleted;
@@ -75,6 +84,8 @@ namespace WSJTX_Controller
             ["Callsign"] = Callsign,
             ["Band"] = Band,
             ["Mode"] = Mode,
+            ["SentReport"] = SentReport,
+            ["ReceivedReport"] = ReceivedReport,
         };
     }
 

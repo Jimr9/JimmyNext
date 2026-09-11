@@ -1247,6 +1247,10 @@ namespace WSJTX_Controller
         private System.Windows.Forms.ComboBox _notifyReceiveCountScopeComboBox;
         private ReceiveSideScope _pendingReceiveSideIdScope;
         private ReceiveSideScope _pendingReceiveCountScope;
+        // 2026-09-10: Receive cycle summary's own opt-in "clear when it becomes empty" checkbox.
+        // A plain checkbox (no pending variable needed) -- read directly from .Checked in
+        // SaveNotificationsTab, same as _suppressReceiveDuringTxCheckBox / _notifyAnnounceOffFocusCheckBox.
+        private System.Windows.Forms.CheckBox _notifyClearReceiveCycleSummaryWhenEmptyCheckBox;
         // Combo position -> ReceiveSideScope. Order matches the enum so position == (int)value.
         private static readonly ReceiveSideScope[] _receiveSideScopeValues =
         {
@@ -3145,7 +3149,27 @@ namespace WSJTX_Controller
             };
             resetThisButton.Click += ResetThisNotification_Click;
             selGroup.Controls.Add(resetThisButton);
-            selGroup.Height = gy + 36;
+            gy += 36;
+
+            // 2026-09-10: belongs to Receive cycle summary specifically -- not applicable to any
+            // other event (one-time/sticky events have no repeatedly-recalculated "became empty"
+            // lifecycle to clear; see Controller.RenderStatusVisible's own eligibility rule).
+            // Shown/enabled only while that event is the one selected above -- LoadSelectedNotifyType
+            // sets .Visible. Default off (unchecked): an existing profile's status area behaves
+            // exactly as before.
+            _notifyClearReceiveCycleSummaryWhenEmptyCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Clear the display when this summary becomes empty",
+                AccessibleName = "Clear the display when this summary becomes empty",
+                Location = new System.Drawing.Point(gx, gy), Size = new System.Drawing.Size(gw, 20),
+                TabIndex = tabIdx++, Font = font,
+                Checked = ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty,
+                Visible = false,
+            };
+            selGroup.Controls.Add(_notifyClearReceiveCycleSummaryWhenEmptyCheckBox);
+            gy += 24;
+
+            selGroup.Height = gy + 12;
             y += selGroup.Height + 8;
 
             // ── D. Delivery ─────────────────────────────────────────────────────────────────
@@ -3548,6 +3572,11 @@ namespace WSJTX_Controller
             _notifyRepeatSecondsUpDown.Enabled = has && !isClause;
             _notifyThrottleMsUpDown.Enabled = has && !isClause;
             _notifyClauseNoteLabel.Visible = isClause;
+            // Receive cycle summary's own opt-in "clear when empty" checkbox -- not applicable
+            // to any other event (see its own construction comment).
+            bool isReceiveCycleSummary = has && type == NotificationEventType.ReceiveCycleSummary;
+            _notifyClearReceiveCycleSummaryWhenEmptyCheckBox.Visible = isReceiveCycleSummary;
+            _notifyClearReceiveCycleSummaryWhenEmptyCheckBox.Enabled = isReceiveCycleSummary;
             if (!has) { _notifyDeliveryExplainLabel.Text = ""; return; }
 
             _notifyUpdatingFields = true;
@@ -3936,6 +3965,7 @@ namespace WSJTX_Controller
             ctrl.routineStatusCondition = _pendingRoutineStatusCondition;
             ctrl.Notifications.ReceiveSideIdScope = _pendingReceiveSideIdScope;
             ctrl.Notifications.ReceiveCountScope = _pendingReceiveCountScope;
+            ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = _notifyClearReceiveCycleSummaryWhenEmptyCheckBox?.Checked ?? false;
             ctrl.PersistRoutineStatusSpeakWhen();
         }
 

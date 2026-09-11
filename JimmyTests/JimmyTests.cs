@@ -250,6 +250,8 @@ static class JimmyTests
         TxLevelPerBandDurablePersistenceTests();
         RxTxFreqControlsFeatureTests();
         SpaceCallsignsAndGridsTests();
+        AutoLoggedReportsAndQsoCompletedTokensTests();
+        ClearStaleReceiveCycleSummaryTests();
         LogbookDbUploadSyncStatusTests();
         QrzIsDuplicateReasonTests();
         HrdLogClassifyResponseTests();
@@ -10063,7 +10065,8 @@ static class JimmyTests
         public string LastSpokenText;         // last text CoordinatedSpeak was asked to say
         public int CoordinatedSpeakCount;
 
-        public bool RenderStatusVisible(string headingText, string statusText, System.Drawing.Color foreColor, System.Drawing.Color backColor)
+        public bool RenderStatusVisible(string headingText, string statusText, System.Drawing.Color foreColor, System.Drawing.Color backColor,
+            bool isReceiveCycleSummaryRender = false)
         {
             LastStatusText = statusText;
             RenderStatusCount++;
@@ -10869,6 +10872,103 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  RenderStatusVisibleKeepsLastOnEmptyTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── Options > Notifications > Receive cycle summary > "Clear previous summary when it
+    //    becomes empty" (2026-09-10, opt-in, default off) ── Drives Controller.RenderStatusVisible
+    // directly with its new isReceiveCycleSummaryRender parameter -- the exact same seam
+    // RenderStatusVisibleKeepsLastOnEmptyTests uses for the ordinary keep-last behaviour above,
+    // so this proves the new option coexists with it rather than replacing it.
+    static void ClearStaleReceiveCycleSummaryTests()
+    {
+        Console.WriteLine("\n── Receive cycle summary: opt-in clear when it becomes empty ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ClearStaleSummary_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var green = System.Drawing.Color.FromArgb(0, 128, 0);
+            var yellow = System.Drawing.Color.Yellow;
+            var red = System.Drawing.Color.Red;
+            var white = System.Drawing.Color.White;
+
+            // 8. Option OFF (the default): behaves EXACTLY like RenderStatusVisibleKeepsLastOnEmptyTests,
+            //    even though this render IS the idle Receive-cycle-summary lifecycle.
+            {
+                var ctrl = new Controller();
+                Check("default: ClearReceiveCycleSummaryWhenEmpty is off", ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty, false);
+                ctrl.RenderStatusVisible("20m FT8", "1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
+                CheckStr("option off: summary text set", ctrl.statusText.Text, "1 wanted.");
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("option off: wordless idle render KEEPS the stale summary (unchanged behaviour)",
+                    ctrl.statusText.Text, "1 wanted.");
+            }
+
+            // 9 + 10. Option ON: a previous Receive cycle summary is cleared once it becomes
+            //         wordless -- no speech (RenderStatusVisible never speaks), no history entry.
+            {
+                var ctrl = new Controller();
+                ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
+                ctrl.RenderStatusVisible("20m FT8", "1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
+                CheckStr("option on: summary text set", ctrl.statusText.Text, "1 wanted.");
+                int historyCountBeforeClear = ctrl.NotificationHistory.Count;
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("option on: stale summary is CLEARED once it becomes wordless", ctrl.statusText.Text, "");
+                Check("clearing adds NO Notification History entry",
+                    ctrl.NotificationHistory.Count == historyCountBeforeClear, true);
+            }
+
+            // 11. A newer message (a QSO line, standing in for CAT/error/upload/Smart Start/
+            //     Station Watch -- all of which reach statusText through a render with
+            //     isReceiveCycleSummaryRender:false, or a direct write outside RenderStatusVisible
+            //     entirely) is never cleared by a later empty summary render.
+            {
+                var ctrl = new Controller();
+                ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
+                ctrl.RenderStatusVisible("20m FT8", "1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
+                ctrl.RenderStatusVisible("20m FT8", "Working W 1 A W, replying.", green, yellow, isReceiveCycleSummaryRender: false);
+                CheckStr("a newer QSO message replaced the summary", ctrl.statusText.Text, "Working W 1 A W, replying.");
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("a later empty summary render does NOT clear the newer QSO message",
+                    ctrl.statusText.Text, "Working W 1 A W, replying.");
+            }
+
+            // 12a. Disabling the event is NOT reinterpreted as "became empty this cycle" -- the
+            //      stale text from while it WAS enabled is left exactly as the option-off default
+            //      behaviour would leave it.
+            {
+                var ctrl = new Controller();
+                ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
+                ctrl.RenderStatusVisible("20m FT8", "1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Enabled = false;
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("disabling the event: stale text is preserved, not cleared",
+                    ctrl.statusText.Text, "1 wanted.");
+            }
+
+            // 12b. A template deliberately containing no {Field} references is NOT reinterpreted
+            //      as "became empty this cycle" either -- it never had real content to begin
+            //      with, so there is nothing for the new lifecycle to authoritatively clear.
+            {
+                var ctrl = new Controller();
+                ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
+                ctrl.RenderStatusVisible("20m FT8", "1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template = "";
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("fields-free template: stale text is preserved, not cleared",
+                    ctrl.statusText.Text, "1 wanted.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  ClearStaleReceiveCycleSummaryTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally
@@ -17399,6 +17499,159 @@ static class JimmyTests
         }
     }
 
+    // ── Auto-logged report labels ("S -10, R -14") + QsoCompleted {SentReport}/{ReceivedReport} ──
+    // 2026-09-10. Reuses the exact proven Direct-mode completion path (allCallDict + qso.txNow ->
+    // LogQso -> RequestLog) an existing test already drives; TestApplyDirectSnapshot never calls
+    // ShowStatus on its own, so loggedCall/loggedSentReport/loggedReceivedReport stay set until
+    // the test explicitly calls TestShowStatus() -- letting each assertion below check them
+    // before AND after that one-shot consumption.
+    static void AutoLoggedReportsAndQsoCompletedTokensTests()
+    {
+        Console.WriteLine("\n── Auto-logged report labels + QsoCompleted {SentReport}/{ReceivedReport} ──");
+        string tmpDb = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+            "JimmyTest_QsoReports_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2341, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.StatusView = ctrl;
+            // TestApplyDirectSnapshot calls DirectApplyStatus directly (bypassing the real
+            // async poll callback that would otherwise promote this), so ShowStatus()'s own
+            // "still waiting to connect" guard needs this set explicitly -- same as MakeWc's
+            // helper in RoutineClauseTemplateTests -- or every TestShowStatus() call below
+            // returns immediately without ever reaching the QsoCompleted clause.
+            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+
+            const string myCall = "KB0UZT", myGrid = "FN42";
+            int slot = 3001;
+
+            // Drives the SAME real completion path Scenario 5 (DirectModePlumbingParityTests)
+            // already proves: a roger-report decode in allCallDict, then the engine's own
+            // tx_now "... 73" logs the QSO via LogQso -> RequestLog.
+            void CompleteQso(string call, int snrHeard, string reportWord)
+            {
+                wc.callInProg = call;
+                wc.allCallDict[call] = new System.Collections.Generic.List<EnqueueDecodeMessage>
+                {
+                    new EnqueueDecodeMessage
+                    {
+                        Message = $"{myCall} {call} {reportWord}",
+                        Snr = snrHeard,
+                        RxDate = DateTime.UtcNow.Date,
+                        SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                    },
+                };
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot++ + @" },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""awaitReport"", ""txNow"": """ + call + " " + myCall + @" -12"" }
+                }"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot++ + @" },
+                    ""recentDecodes"": [],
+                    ""qso"": { ""state"": ""done"", ""txNow"": """ + call + " " + myCall + @" 73"" }
+                }"));
+            }
+
+            // ---- QSO A: distinct sent/received values, default template ----
+            const string callA = "AA1AA";
+            CompleteQso(callA, snrHeard: -10, reportWord: "R-14");
+            Check("QSO A: logged", wc.logList.Contains(callA), true);
+
+            // 2. {SentReport}/{ReceivedReport} contain the correct SEPARATE values.
+            CheckStr("QSO A: sent report is -10 (from the decode SNR)", wc.TestLoggedReportSent(callA), "-10");
+            CheckStr("QSO A: received report is -14 (from the roger-report text)", wc.TestLoggedReportReceived(callA), "-14");
+            CheckStr("QSO A: one-shot SentReport token == -10 (not yet consumed by ShowStatus)", wc.TestLoggedSentReportToken, "-10");
+            CheckStr("QSO A: one-shot ReceivedReport token == -14 (not yet consumed by ShowStatus)", wc.TestLoggedReceivedReportToken, "-14");
+
+            // 1. Auto-logged row shows "S -10, R -14" -- sent first, received second, labelled.
+            var rowsA = ctrl.logListBox.Items.Cast<string>().ToList();
+            Check("QSO A: Auto-logged row contains 'S -10, R -14'", rowsA.Exists(r => r.Contains("S -10, R -14")), true);
+
+            // 6. Default template and wording are unchanged: "{Callsign} logged".
+            CheckStr("QsoCompleted default template is unchanged", ctrl.Notifications.Policies[NotificationEventType.QsoCompleted].Template, "{Callsign} logged");
+            wc.TestShowStatus();
+            CheckStr("QSO A: default-template clause reads 'A A 1 A A logged' (unchanged wording)",
+                wc.TestClauseText(NotificationEventType.QsoCompleted), "A A 1 A A logged");
+            // The one-shot tokens are consumed by that same render.
+            Check("QSO A: one-shot tokens cleared after ShowStatus consumes them",
+                wc.TestLoggedSentReportToken == null && wc.TestLoggedReceivedReportToken == null, true);
+
+            // ---- QSO B: custom SHORT-label template, different values -- proves no leak from A ----
+            const string callB = "BB2BB";
+            ctrl.Notifications.Policies[NotificationEventType.QsoCompleted].Template = "{Callsign} logged, S {SentReport}, R {ReceivedReport}";
+            CompleteQso(callB, snrHeard: -5, reportWord: "R-09");
+            CheckStr("QSO B: sent report is -05 (independent of QSO A's -10)", wc.TestLoggedReportSent(callB), "-05");
+            CheckStr("QSO B: received report is -09 (independent of QSO A's -14)", wc.TestLoggedReportReceived(callB), "-09");
+            wc.TestShowStatus();
+            CheckStr("QSO B: custom short-label template renders 'B B 2 B B logged, S -05, R -09'",
+                wc.TestClauseText(NotificationEventType.QsoCompleted), "B B 2 B B logged, S -05, R -09");
+
+            // 7. Reports cannot leak between two completed QSOs -- A's stored pair is untouched
+            //    by B's completion.
+            CheckStr("No leak: QSO A's sent report is still -10 after QSO B logged", wc.TestLoggedReportSent(callA), "-10");
+            CheckStr("No leak: QSO A's received report is still -14 after QSO B logged", wc.TestLoggedReportReceived(callA), "-14");
+            // The Auto-logged row always spaces the callsign (checkbox-independent Spacify), so
+            // match on the spaced form -- "A A 1 A A", not "AA1AA".
+            var rowsB = ctrl.logListBox.Items.Cast<string>().ToList();
+            Check("No leak: Auto-logged rows show A's own reports and B's own reports separately",
+                rowsB.Exists(r => r.Contains(WsjtxClient.DisplayCallsign(callA, true)) && r.Contains("S -10, R -14")) &&
+                rowsB.Exists(r => r.Contains(WsjtxClient.DisplayCallsign(callB, true)) && r.Contains("S -05, R -09")), true);
+
+            // ---- QSO C: custom LONG-label template ----
+            const string callC = "CC3CC";
+            ctrl.Notifications.Policies[NotificationEventType.QsoCompleted].Template = "{Callsign} logged, sent {SentReport}, received {ReceivedReport}";
+            CompleteQso(callC, snrHeard: -3, reportWord: "R-07");
+            wc.TestShowStatus();
+            CheckStr("QSO C: custom long-label template renders correctly",
+                wc.TestClauseText(NotificationEventType.QsoCompleted), "C C 3 C C logged, sent -03, received -07");
+
+            // 4. A template containing only ONE report field works.
+            const string callD = "DD4DD";
+            ctrl.Notifications.Policies[NotificationEventType.QsoCompleted].Template = "{ReceivedReport}";
+            CompleteQso(callD, snrHeard: -2, reportWord: "R-06");
+            wc.TestShowStatus();
+            CheckStr("QSO D: a template with only {ReceivedReport} renders just the bare value",
+                wc.TestClauseText(NotificationEventType.QsoCompleted), "-06");
+
+            // 5. Missing reports are empty, never invented -- RequestLog directly (LogQso's own
+            //    gate can never actually pass a non-report message through in real operation; see
+            //    TestRequestLog's own comment), a plain "RRR" carries no parseable report.
+            const string callE = "EE5EE";
+            var rrrMsg = new EnqueueDecodeMessage
+            {
+                Message = $"{myCall} {callE} RRR", Snr = -8,
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+            };
+            wc.TestRequestLog(callE, rrrMsg, null);
+            Check("QSO E (RRR, no numeric report): still logged", wc.logList.Contains(callE), true);
+            CheckStr("QSO E: sent report still captured (-08, from the decode SNR)", wc.TestLoggedReportSent(callE), "-08");
+            CheckStr("QSO E: missing received report is \"\" -- never invented", wc.TestLoggedReportReceived(callE), "");
+            var rowsE = ctrl.logListBox.Items.Cast<string>().ToList();
+            Check("QSO E: Auto-logged row shows only the sent report, no dangling 'R' label",
+                rowsE.Exists(r => r.Contains(WsjtxClient.DisplayCallsign(callE, true)) && r.Contains("S -08")
+                    && !r.Contains("R -08") && !r.Contains(", R")), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  AutoLoggedReportsAndQsoCompletedTokensTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { System.IO.File.Delete(tmpDb); } catch { }
+        }
+    }
+
     // ── Item 2, 2026-09-10: confirmed F11/F12 per-band TX levels are durable ──
     // A confirmed SET_TX_LEVEL now writes the per-band level map to the active profile on a
     // ~750 ms debounce instead of waiting for the next clean shutdown, so a forced close or
@@ -19795,7 +20048,7 @@ static class JimmyTests
             ctrl.smartQsoStartEnabled = true;
             ctrl.smartStartSilencePeriods = 6;
 
-            const string myCall = "KB0UZT", target = "N4BP";
+            const string target = "N4BP";
             EnqueueDecodeMessage FreshCq() => new EnqueueDecodeMessage
             {
                 Message = $"CQ {target} EL96",

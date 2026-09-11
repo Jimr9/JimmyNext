@@ -3299,9 +3299,30 @@ namespace WSJTX_Controller
         // Post-ship 2.0.70: drive the reply-dispatch seam directly (advanced-layout txFirst sync
         // lives at the top of ReplyTo(EnqueueDecodeMessage) now, covering Smart Start / Work Now).
         internal void TestReplyTo(EnqueueDecodeMessage dmsg) => ReplyTo(dmsg);
+        // Test-only: calls RequestLog directly, bypassing LogQso's own "must be a parseable
+        // Report/RogerReport" gate -- both real callers (LogQso and the "late log" path) enforce
+        // that gate BEFORE ever reaching RequestLog, so a missing/unparseable received report can
+        // never actually reach it through production code. This is the one seam that can still
+        // exercise RequestLog's own "never invent a value" contract directly.
+        internal void TestRequestLog(string call, EnqueueDecodeMessage reptMsg, EnqueueDecodeMessage recdMsg)
+            => RequestLog(call, reptMsg, recdMsg);
         // Presentation-only "<sent>, <rcvd>" report pair the auto-logged list shows on the call's
         // row; null when nothing captured. Proves it is populated at log time and cleared with logList.
-        internal string TestLoggedReport(string call) => _loggedReports.TryGetValue(call, out var r) ? r : null;
+        internal string TestLoggedReport(string call) => _loggedReports.TryGetValue(call, out var r) ? $"{r.Sent}, {r.Received}" : null;
+        // The same pair, as its own structured (Sent, Received) values -- so a test can assert
+        // each side independently instead of parsing the combined display string above.
+        internal string TestLoggedReportSent(string call) => _loggedReports.TryGetValue(call, out var r) ? r.Sent : null;
+        internal string TestLoggedReportReceived(string call) => _loggedReports.TryGetValue(call, out var r) ? r.Received : null;
+        // {SentReport}/{ReceivedReport} exactly as the QsoCompleted routine clause would see them
+        // for the QSO most recently logged this render cycle (null once ShowStatus has consumed
+        // and cleared loggedCall).
+        internal string TestLoggedSentReportToken => loggedSentReport;
+        internal string TestLoggedReceivedReportToken => loggedReceivedReport;
+        // A routine clause's own formatted text from the MOST RECENT ShowStatus render --
+        // exactly what RoutineClause(type, ...) returned, independent of how ShowStatus wove it
+        // into the larger composed status line. null if that type's row didn't render this tick
+        // (disabled, or never reached -- e.g. QsoCompleted with no logged call this render).
+        internal string TestClauseText(NotificationEventType t) => _clauseTextsThisRender.TryGetValue(t, out var s) ? s : null;
         // Test-only: stand in for ReplyTo's success callback committing the handoff, so a test
         // can exercise the awaiting-engagement / yield / resume logic without the async REPLY
         // round trip (the real dispatch + REPLY is covered by SmartStartStaleEvidenceTransmitSafetyTests).

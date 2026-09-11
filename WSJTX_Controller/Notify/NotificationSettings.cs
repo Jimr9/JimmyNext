@@ -40,6 +40,17 @@ namespace WSJTX_Controller
         public ReceiveSideScope ReceiveSideIdScope { get; set; } = ReceiveSideScope.Both;
         public ReceiveSideScope ReceiveCountScope { get; set; } = ReceiveSideScope.Both;
 
+        // Opt-in, default off (2026-09-10): when the idle Receive cycle summary was showing real
+        // words (e.g. "1 wanted") and a later receive cycle recalculates it with nothing to say,
+        // clear that stale text from the visible status area instead of leaving Jimmy's ordinary
+        // "keep the last real line" behaviour show it forever. Speaks nothing, records no
+        // Notification History entry either way. Never engages for a disabled row or a template
+        // with no {Field} references at all (Controller.RenderStatusVisible's own guard) -- only
+        // for a currently-enabled, genuinely data-driven summary whose fields happen to have
+        // nothing to report THIS cycle. Default false: an existing profile's status area behaves
+        // exactly as before.
+        public bool ClearReceiveCycleSummaryWhenEmpty { get; set; } = false;
+
         private static Dictionary<NotificationEventType, NotificationPolicy> ClonePolicies(
             Dictionary<NotificationEventType, NotificationPolicy> source)
         {
@@ -215,6 +226,9 @@ namespace WSJTX_Controller
                 ReceiveCountScope = countScope;
             else
                 ReceiveCountScope = ReceiveSideScope.Both;
+
+            // Default false (missing key) -- an existing profile's status area is unchanged.
+            ClearReceiveCycleSummaryWhenEmpty = ini.Read("notifyClearReceiveCycleSummaryWhenEmpty") == "True";
         }
 
         public void SaveToIni(IniFile ini)
@@ -247,6 +261,7 @@ namespace WSJTX_Controller
 
             ini.Write("notifyReceiveSideIdScope", ReceiveSideIdScope.ToString());
             ini.Write("notifyReceiveCountScope", ReceiveCountScope.ToString());
+            ini.Write("notifyClearReceiveCycleSummaryWhenEmpty", ClearReceiveCycleSummaryWhenEmpty.ToString());
         }
     }
 }

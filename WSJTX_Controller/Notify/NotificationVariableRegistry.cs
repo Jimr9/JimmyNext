@@ -83,6 +83,8 @@ namespace WSJTX_Controller
                 new NotificationVariable("Callsign", "The station just logged."),
                 new NotificationVariable("Band", "The band the QSO was made on."),
                 new NotificationVariable("Mode", "FT8 or FT4."),
+                new NotificationVariable("SentReport", "The signal report you sent, e.g. \"-10\" (empty if not available). Bare value only -- add your own label, e.g. \"S {SentReport}\"."),
+                new NotificationVariable("ReceivedReport", "The signal report you received, e.g. \"-14\" (empty if not available). Bare value only -- add your own label, e.g. \"R {ReceivedReport}\"."),
             },
             [NotificationEventType.TxMessageChanged] = new List<NotificationVariable>
             {

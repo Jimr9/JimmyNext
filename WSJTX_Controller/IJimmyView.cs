@@ -21,7 +21,16 @@ namespace WSJTX_Controller
         // ActiveForm == this && GetForegroundWindow() == handle) -- the caller passes that to
         // SpeechCoordinator.SubmitRoutineStatus as the "would this have nudged the screen reader"
         // hint. The screen-reader nudge itself is CoordinatedSpeak below, driven by the coordinator.
-        bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor);
+        //
+        // isReceiveCycleSummaryRender (2026-09-10): true only for the idle Receive-cycle-summary
+        // render (WsjtxClient.ShowStatus's callInProg==null/deferEligible branch), false for
+        // every other kind of status (QSO/CAT/error/upload/Smart Start/Station Watch, or a direct
+        // operator-feedback message). Lets the implementation safely clear a STALE summary line
+        // when Options > Notifications > "Clear previous summary when it becomes empty" is on --
+        // see Controller.RenderStatusVisible's own comment for the full eligibility rule. Default
+        // false so every other call site (including every existing test) is unaffected.
+        bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor,
+            bool isReceiveCycleSummaryRender = false);
 
         // The ONE screen-reader nudge seam, driven only by SpeechCoordinator -- for BOTH a
         // coordinated typed notification and a coordinated routine-status line. Idempotently

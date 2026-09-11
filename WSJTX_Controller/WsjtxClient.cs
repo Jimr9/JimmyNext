@@ -360,10 +360,14 @@ namespace WSJTX_Controller
         private string txMsg = null;            //msg for the most-recent Tx
         internal List<string> logList = new List<string>();      //calls logged for current mode/band for this session
 
-        // Presentation only: "<sent>, <rcvd>" report pair captured at log time so the auto-logged
-        // list can show what was exchanged on the same row as the callsign. Keyed by callsign,
-        // cleared in lockstep with logList (ClearCalls). Never read by any machine-readable path.
-        private readonly Dictionary<string, string> _loggedReports = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Presentation only: the sent/received report pair captured at log time so the
+        // auto-logged list can show what was exchanged on the same row as the callsign. A small
+        // structured (Sent, Received) pair -- not a combined string -- so the row builder and the
+        // QsoCompleted routine clause each read the value they need directly, instead of
+        // re-parsing a shared "sent, rcvd" display string. Keyed by callsign, cleared in lockstep
+        // with logList (ClearCalls). Never read by any machine-readable path.
+        private readonly Dictionary<string, (string Sent, string Received)> _loggedReports
+            = new Dictionary<string, (string Sent, string Received)>(StringComparer.OrdinalIgnoreCase);
 
         // Dedup guard for a QSO logged via Direct mode's own real completion detection
         // (DirectApplyStatus's curTxMsg/callInProg/Is73orRR73 -> LogQso -> RequestLog,
@@ -549,6 +553,12 @@ namespace WSJTX_Controller
         //for status display only
         private string curTxPayload = null;
         private string loggedCall = null;
+        // Captured alongside loggedCall, for the SAME completed QSO, so the QsoCompleted routine
+        // clause can offer {SentReport}/{ReceivedReport}. Never invented: "" when RstRecd()
+        // couldn't determine a received report. Reset alongside loggedCall (WsjtxClient.
+        // Display.cs) so a later QSO can never inherit an earlier one's values.
+        private string loggedSentReport = null;
+        private string loggedReceivedReport = null;
         private string finalSignoffCall = null;
         private bool modePrompt = true;
         private bool replyFromInProg = false;
@@ -2787,9 +2797,13 @@ namespace WSJTX_Controller
             if (!localWriteFailed)
             {
                 logList.Add(call);
-                _loggedReports[call] = $"{rstSent}, {rstRecd}";   // presentation only -- see field comment
+                // rstRecd can be null (RstRecd() found no report/roger-report to parse) -- never
+                // invented, stored/offered as "" per the field's own contract.
+                _loggedReports[call] = (rstSent ?? "", rstRecd ?? "");   // presentation only -- see field comment
                 ShowLogged();
                 loggedCall = call;
+                loggedSentReport = rstSent ?? "";
+                loggedReceivedReport = rstRecd ?? "";
             }
             lCall = call;
             CancelDiscardCall();

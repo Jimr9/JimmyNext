@@ -868,6 +868,10 @@ namespace WSJTX_Controller
             // and for the special-case branches within ACTIVE (tuning, replyFromInProg,
             // etc.) -- only the plain, nothing-special case is ever eligible to wait.
             bool deferEligible = false;
+            // Set true only inside the idle "routine receive line" branch below -- passed to
+            // RenderStatusVisible so it (and only it) may ever consider the new opt-in
+            // "clear a stale Receive cycle summary" behaviour for THIS render.
+            bool isIdleReceiveCycleSummaryRender = false;
 
             string k = cmdPrompts ? $", use Alt, K, for command key list" : "";
 
@@ -1292,7 +1296,12 @@ namespace WSJTX_Controller
                                 string loggedClause = RoutineClause(NotificationEventType.QsoCompleted,
                                     ("Callsign", DisplayCallsign(loggedCall, ctrl.spaceCallsignsAndGrids)),
                                     ("Band", bandIdx != null ? $"{bands[(int)bandIdx]}m" : ""),
-                                    ("Mode", mode ?? ""));
+                                    ("Mode", mode ?? ""),
+                                    // Bare values only ("-10", "-14") -- no fixed wording, so a
+                                    // template supplies its own labels: "S {SentReport}, R
+                                    // {ReceivedReport}". "" (never invented) when not captured.
+                                    ("SentReport", loggedSentReport ?? ""),
+                                    ("ReceivedReport", loggedReceivedReport ?? ""));
                                 if (!string.IsNullOrEmpty(loggedClause)) curTxMode = loggedClause + ", " + curTxMode;
                             }
 
@@ -1609,6 +1618,10 @@ namespace WSJTX_Controller
                                 }
                                 else if (callInProg == null && deferEligible)
                                 {
+                                    // This IS the idle Receive-cycle-summary lifecycle -- tells
+                                    // RenderStatusVisible below whether the new opt-in "clear a
+                                    // stale summary" behaviour may even consider this render.
+                                    isIdleReceiveCycleSummaryRender = true;
                                     // The routine idle receive line -- up to three independently
                                     // toggleable/retimeable clauses (state verb, "N available
                                     // stations" counts, operating-mode descriptor), composed
@@ -1645,6 +1658,8 @@ namespace WSJTX_Controller
 
                             _wasTransmittingLastShowStatus = transmitting;
                             loggedCall = null;
+                            loggedSentReport = null;
+                            loggedReceivedReport = null;
                             finalSignoffCall = null;
                             modePrompt = false;
                             newTxFirst = false;
@@ -1678,7 +1693,8 @@ namespace WSJTX_Controller
                 // VISIBLE status + Notification History: ALWAYS immediate, every call. Never
                 // gated on whether/when the line is spoken (Item 2). Returns whether Jimmy is
                 // really foregrounded right now.
-                bool foregroundNow = StatusView.RenderStatusVisible(bandMode, status, foreColor, backColor);
+                bool foregroundNow = StatusView.RenderStatusVisible(bandMode, status, foreColor, backColor,
+                    isIdleReceiveCycleSummaryRender);
 
                 // SPEECH goes through the one SpeechCoordinator as an ordered set of clause
                 // fragments (see BuildRoutineFragments). The "_base" skeleton uses the global
@@ -1731,13 +1747,21 @@ namespace WSJTX_Controller
                 {
                     // Callsign, then country (or US state when that option is on), then the
                     // sent/received reports for this QSO so the row is a self-contained record
-                    // of what was logged. The reports are a display-only snapshot captured at
-                    // log time (_loggedReports); the row's key stays the bare callsign.
+                    // of what was logged -- labelled ("S -10, R -14") so the two aren't
+                    // ambiguous. The reports are a display-only snapshot captured at log time
+                    // (_loggedReports); the row's key stays the bare callsign.
                     // Auto-logged calls are OUT of scope for "Space callsigns and grids" -- this
                     // stays on the checkbox-independent Spacify(), always spaced as before.
                     string line = $"{Spacify(call)}, {Country(call)}";
-                    if (_loggedReports.TryGetValue(call, out string rpt) && !string.IsNullOrEmpty(rpt))
-                        line += $", {rpt}";
+                    if (_loggedReports.TryGetValue(call, out var rpt))
+                    {
+                        string sentPart = string.IsNullOrEmpty(rpt.Sent) ? "" : $"S {rpt.Sent}";
+                        string rcvdPart = string.IsNullOrEmpty(rpt.Received) ? "" : $"R {rpt.Received}";
+                        string reportsPart = sentPart.Length > 0 && rcvdPart.Length > 0 ? $"{sentPart}, {rcvdPart}"
+                            : sentPart.Length > 0 ? sentPart
+                            : rcvdPart;
+                        if (reportsPart.Length > 0) line += $", {reportsPart}";
+                    }
                     logItems.Add(line);
                     logKeys.Add(call);
                 }

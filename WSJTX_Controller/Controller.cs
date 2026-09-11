@@ -3413,13 +3413,26 @@ namespace WSJTX_Controller
         private string _lastAnnouncedStatusText;
         private DateTime _lastAnnouncedStatusTime = DateTime.MinValue;
 
+        // 2026-09-10: the exact text the idle Receive cycle summary render most recently wrote to
+        // statusText, or null if the currently-displayed text did not come from that render (a
+        // QSO/CAT/error/upload/Smart Start/Station Watch line, a direct operator-feedback message,
+        // or nothing has been shown yet). Set ONLY inside the `speakable` branch below, and only
+        // when isReceiveCycleSummaryRender is true -- any other kind of real status write (a
+        // different ShowStatus branch, or ANY of Controller/WsjtxClient's other direct
+        // `statusText.Text =` sites) naturally makes this null on its next real render, since
+        // those all pass isReceiveCycleSummaryRender:false (the interface's own default). This is
+        // what lets a later empty summary render tell "the box still shows exactly what I last
+        // wrote" from "something newer has replaced it" -- see ShouldClearStaleReceiveCycleSummary.
+        private string _lastReceiveCycleSummaryText;
+
         // Item 1/2 split, 2026-09-03: this is now VISIBLE + HISTORY only -- it never nudges the
         // screen reader. WsjtxClient.ShowStatus() calls this every time (so the on-screen status
         // is always live) and separately hands the text to SpeechCoordinator.SubmitRoutineStatus,
         // which owns the WHEN of speech and drives CoordinatedSpeak() below. Returns whether
         // Jimmy is really foregrounded/focused right now, for the coordinator's "would this have
         // been spoken now" hint.
-        public bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor)
+        public bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor,
+            bool isReceiveCycleSummaryRender = false)
         {
             // Heading / accessible name track the current band+mode (never wordless -- "17m FT8"
             // or "Status:"), so keep them in sync on every render.
@@ -3435,6 +3448,15 @@ namespace WSJTX_Controller
             // pre-redesign behaviour where the box always kept the last non-empty line. Speech is
             // unaffected: SpeechCoordinator already discards a wordless routine line, and
             // ShowStatus still composes/submits its fragments independently of this method.
+            //
+            // 2026-09-10 exception, opt-in and default off (Options > Notifications > Receive
+            // cycle summary > "Clear previous summary when it becomes empty"): when THIS wordless
+            // render is specifically the idle Receive-cycle-summary lifecycle, the box is still
+            // showing exactly what that same lifecycle last wrote (nothing newer has replaced it),
+            // and the summary itself is a genuinely live, currently-enabled, field-driven
+            // template (not disabled, not a fields-free literal) -- clear the stale text instead
+            // of leaving it. No speech (this method never speaks), no Notification History entry
+            // (the RecordRoutineStatus call below is reached only from the `speakable` branch).
             if (WsjtxClient.HasSpeakableContent(statusText))
             {
                 this.statusText.ForeColor = foreColor;
@@ -3442,6 +3464,7 @@ namespace WSJTX_Controller
                 this.statusText.Text = statusText;
                 this.statusText.SelectionStart = 0;
                 this.statusText.SelectionLength = 0;
+                _lastReceiveCycleSummaryText = isReceiveCycleSummaryRender ? statusText : null;
 
                 // 2.0.58 Notification History: the routine status render path -- recorded HERE,
                 // immediately and independent of whether/when the line is spoken. Opt-in (default
@@ -3450,8 +3473,34 @@ namespace WSJTX_Controller
                 if (notificationHistoryIncludeRoutineStatus)
                     NotificationHistory?.RecordRoutineStatus(statusText);
             }
+            else if (isReceiveCycleSummaryRender
+                && _lastReceiveCycleSummaryText != null
+                && this.statusText.Text == _lastReceiveCycleSummaryText
+                && ShouldClearStaleReceiveCycleSummary())
+            {
+                this.statusText.Text = "";
+                this.statusText.SelectionStart = 0;
+                this.statusText.SelectionLength = 0;
+                _lastReceiveCycleSummaryText = null;
+            }
 
             return this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
+        }
+
+        // The new clear-when-empty option only ever engages for a genuinely live, currently
+        // ENABLED Receive cycle summary whose template can actually vary (at least one {Field}
+        // reference) -- never for a disabled row (a static off switch, not a "recalculated to
+        // nothing" event) and never for a template that is permanently wordless by design (plain
+        // literal text or "" with no fields at all -- it never had real content to lose). This is
+        // what keeps "the event is disabled" / "the template deliberately has no fields" /
+        // "the enabled live summary currently has nothing to report" three genuinely different
+        // states -- the new behaviour applies only to the last one.
+        private bool ShouldClearStaleReceiveCycleSummary()
+        {
+            if (!Notifications.ClearReceiveCycleSummaryWhenEmpty) return false;
+            if (!Notifications.Policies.TryGetValue(NotificationEventType.ReceiveCycleSummary, out var policy)) return false;
+            if (!policy.Enabled) return false;
+            return NotificationTemplateEngine.ExtractVariableNames(policy.Template).Count > 0;
         }
 
         // Item 1/2, 2026-09-03: the ONE screen-reader nudge seam. Called only by
