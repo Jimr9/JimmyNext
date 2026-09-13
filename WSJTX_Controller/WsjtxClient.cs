@@ -1336,7 +1336,9 @@ namespace WSJTX_Controller
             UpdateMaxTxRepeat();
             StartStatusTimer();
             Sounds.PlaySoundEvent(ctrl.soundEnabled_TxEnabled, ctrl.soundFile_TxEnabled);
-            Notify?.Publish(new AutoTxResumeEvent(callInProg));
+            // "Space callsigns and grids" (2026-09-12): extended to Notifications -- see SC()'s
+            // own comment (WsjtxClient.StationWatch.cs) for scope/rationale.
+            Notify?.Publish(new AutoTxResumeEvent(SC(callInProg)));
             DebugOutput($"{Time()} HandleUnsolicitedTxResume, callInProg:'{callInProg}' cqPaused:{cqPaused} txMode:{txMode}");
         }
 
@@ -4355,13 +4357,16 @@ namespace WSJTX_Controller
             }
         }
 
-        // Options > General "Space callsigns and grids" -- a NARROW presentation choice applied
-        // at exactly five opt-in display surfaces and nowhere else: Normal Stations Available,
-        // Advanced TX1/TX2 station lists, Raw Decodes, Spot Watch, and Main status. `spaced` is
-        // Controller.spaceCallsignsAndGrids. When false, the value is returned unchanged. When
-        // true it uses the same character spacing Jimmy has always used. Static + self-contained
-        // (no dependency on Spacify/SpacifyPayload) so the global helpers can stay preference-
-        // free; both WsjtxClient (display code) and Controller (Spot Watch rows) call these.
+        // Options > General "Space callsigns and grids" -- a presentation choice applied at five
+        // opt-in display surfaces (Normal Stations Available, Advanced TX1/TX2 station lists, Raw
+        // Decodes, Spot Watch, and Main status) plus, since 2026-09-12, the WHOLE Notification
+        // system (Station Watch/Smart Start narration and on-demand status hotkeys, and any other
+        // notification carrying a bare callsign token -- see WsjtxClient.StationWatch.cs's SC()
+        // wrapper for where that's applied). `spaced` is Controller.spaceCallsignsAndGrids. When
+        // false, the value is returned unchanged. When true it uses the same character spacing
+        // Jimmy has always used. Static + self-contained (no dependency on Spacify/SpacifyPayload)
+        // so the global helpers can stay preference-free; WsjtxClient (display + notification
+        // code) and Controller (Spot Watch rows) call this directly or via SC().
         internal static string DisplayCallsign(string call, bool spaced)
         {
             if (string.IsNullOrEmpty(call) || !spaced) return call ?? "";

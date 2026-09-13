@@ -547,6 +547,7 @@ static class JimmyTests
         StationWatchHotkeyDefaultsTests();
         SmartStartNarrationPresentationTests();
         SmartStartSeedNoImmediateCqTests();
+        NotificationSpaceCallsignsAndGridsTests();
         NotificationJoiningTests();
         DeliberateRepeatBypassTests();
         SemanticBoundaryAndJoinTimingTests();
@@ -10233,6 +10234,125 @@ static class JimmyTests
         finally
         {
             listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── "Space callsigns and grids" extended to the Notification system (2026-09-12) ──
+    // Jim's live-testing finding: the on-demand Smart Start/Station Watch status hotkeys (and,
+    // it turns out, the whole Station Watch/Smart Start notification family) did not honor the
+    // Options > General "Space callsigns and grids" preference, unlike the five display surfaces
+    // SpaceCallsignsAndGridsTests covers. Fixed via WsjtxClient.StationWatch.cs's SC() helper,
+    // applied at every point a raw TargetMonitor callsign becomes presentation text (event
+    // token or narration phrase) -- never at the points it's used for internal state/comparison.
+    // This test proves both the real live-narration path (Notify.Publish, station Watch's
+    // "Watching X"/Smart Start's "Waiting to work X") and the two new on-demand status hotkeys
+    // honor the SAME preference, in both states.
+    static void NotificationSpaceCallsignsAndGridsTests()
+    {
+        Console.WriteLine("\n── Notifications honor 'Space callsigns and grids' (Station Watch / Smart Start) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_NotifySpace_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            (WsjtxClient wc, FakeNotificationDelivery fake, FakeStatusView view) MakeClient(bool spaced)
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var _ = ctrl.Handle;
+                ctrl.spaceCallsignsAndGrids = spaced;
+                ctrl.smartQsoStartEnabled = true;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetDirectConnected(true);
+                wc.TestSetMode("FT8");
+                var fake = new FakeNotificationDelivery();
+                wc.Notify = NewTestNotificationCenter(ctrl.Notifications, fake);
+                var view = new FakeStatusView();
+                wc.StatusView = view;
+                return (wc, fake, view);
+            }
+
+            // ── Station Watch: live narration (Notify.Publish) ──
+            {
+                var (wc, fake, _) = MakeClient(spaced: true);
+                wc.StartOrReplaceStationWatch("AA1AA");
+                CheckStr("checked: Station Watch start narration is spaced",
+                    fake.LastText, "Watching A A 1 A A.");
+            }
+            {
+                var (wc, fake, _) = MakeClient(spaced: false);
+                wc.StartOrReplaceStationWatch("AA1AA");
+                CheckStr("unchecked: Station Watch start narration is NOT spaced",
+                    fake.LastText, "Watching AA1AA.");
+            }
+
+            // ── Station Watch: the new on-demand status hotkey (StatusView.ShowMessage) ──
+            {
+                var (wc, _, view) = MakeClient(spaced: true);
+                wc.StartOrReplaceStationWatch("AA1AA");
+                wc.ReportStationWatchStatus();
+                CheckStr("checked: Report Station Watch Status is spaced",
+                    view.LastShowMessageText, "Watching A A 1 A A.");
+            }
+            {
+                var (wc, _, view) = MakeClient(spaced: false);
+                wc.StartOrReplaceStationWatch("AA1AA");
+                wc.ReportStationWatchStatus();
+                CheckStr("unchecked: Report Station Watch Status is NOT spaced",
+                    view.LastShowMessageText, "Watching AA1AA.");
+            }
+
+            EnqueueDecodeMessage FreshCq(string call) => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {call} FK92",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+
+            // ── Smart Start: live narration (Notify.Publish) ──
+            {
+                var (wc, fake, _) = MakeClient(spaced: true);
+                wc.TestTryCaptureSmartStart("AA1AA", FreshCq("AA1AA"));
+                Check("checked: Smart Start armed narration is spaced",
+                    fake.AllText.Exists(s => s.IndexOf("Waiting to work A A 1 A A", StringComparison.OrdinalIgnoreCase) >= 0), true);
+            }
+            {
+                var (wc, fake, _) = MakeClient(spaced: false);
+                wc.TestTryCaptureSmartStart("AA1AA", FreshCq("AA1AA"));
+                Check("unchecked: Smart Start armed narration is NOT spaced",
+                    fake.AllText.Exists(s => s.IndexOf("Waiting to work AA1AA", StringComparison.OrdinalIgnoreCase) >= 0), true);
+            }
+
+            // ── Smart Start: the new on-demand status hotkey (StatusView.ShowMessage) ──
+            {
+                var (wc, _, view) = MakeClient(spaced: true);
+                wc.TestTryCaptureSmartStart("AA1AA", FreshCq("AA1AA"));
+                wc.ReportSmartStartStatus();
+                CheckStr("checked: Report Smart Start Status is spaced",
+                    view.LastShowMessageText, "Waiting to work A A 1 A A.");
+            }
+            {
+                var (wc, _, view) = MakeClient(spaced: false);
+                wc.TestTryCaptureSmartStart("AA1AA", FreshCq("AA1AA"));
+                wc.ReportSmartStartStatus();
+                CheckStr("unchecked: Report Smart Start Status is NOT spaced",
+                    view.LastShowMessageText, "Waiting to work AA1AA.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NotificationSpaceCallsignsAndGridsTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
             WsjtxClient.TestQuiesceAllDirectClients();
             if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
             else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
