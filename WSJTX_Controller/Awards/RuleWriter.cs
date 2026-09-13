@@ -45,8 +45,29 @@ namespace WSJTX_Controller
 
             sb.AppendLine("[Target]");
             sb.AppendLine($"Type={def.Target}");
+            // Basis defaults to WORKED and is only meaningful for Count/Levels (RuleLoader
+            // rejects Basis=CONFIRMED with Type=ALL); omitted when default to keep an ordinary
+            // award's file exactly as plain as before this existed.
+            if (def.Basis != RuleBasis.Worked)
+                sb.AppendLine($"Basis={def.Basis}");
             if (def.Target == RuleTargetType.Count)
-                sb.AppendLine($"Threshold={def.Threshold}");
+            {
+                // ThresholdFrom (e.g. Honor Roll's "DXCC_CURRENT minus 9") takes over from a
+                // literal Threshold=; writing both would leave a stale/unused Threshold in the
+                // file, and writing neither -- as this used to, before ThresholdFrom existed --
+                // would silently reset a dynamic-threshold award to Threshold=0 (instantly
+                // "complete") the first time anything re-saved it, e.g. toggling Enabled in the
+                // Rule Definition Manager.
+                if (!string.IsNullOrWhiteSpace(def.ThresholdFrom))
+                {
+                    sb.AppendLine($"ThresholdFrom={def.ThresholdFrom}");
+                    sb.AppendLine($"ThresholdOffset={def.ThresholdOffset}");
+                }
+                else
+                {
+                    sb.AppendLine($"Threshold={def.Threshold}");
+                }
+            }
             sb.AppendLine();
 
             if (def.Target == RuleTargetType.Levels && def.Levels.Count > 0)

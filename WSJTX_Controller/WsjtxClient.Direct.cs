@@ -1367,17 +1367,16 @@ namespace WSJTX_Controller
                 ClearCalls();
                 EndContact(ContactEndReason.ContextReset);
                 ResetBandSession();
-                // dialFrequency must be updated to the new band BEFORE LoadHrcCache()/
-                // RefreshStillNeedCache() run: both rebuild their per-band live-tag caches off
-                // wsjtxClient.CurrentBandStr, which is derived from dialFrequency. Assigning it
-                // only after this block (as the code below still does, harmlessly) left both
-                // caches rebuilt against the band just LEFT -- so after e.g. 160m -> 40m, a
-                // WAS_160M-type per-band award stayed live and every 40m decode from a
-                // still-needed state got tagged "Worked All States - 160m Needed" until the
-                // next band change (which then repeated the mistake one band later).
+                // dialFrequency must be updated to the new band BEFORE RefreshStillNeedCache()
+                // runs: it rebuilds its per-band live-tag cache off wsjtxClient.CurrentBandStr,
+                // which is derived from dialFrequency. Assigning it only after this block (as
+                // the code below still does, harmlessly) left the cache rebuilt against the
+                // band just LEFT -- so after e.g. 160m -> 40m, a WAS_160M-type per-band award
+                // stayed live and every 40m decode from a still-needed state got tagged
+                // "Worked All States - 160m Needed" until the next band change (which then
+                // repeated the mistake one band later).
                 dialFrequency = newDialFrequency;
                 lastDialFrequency = dialFrequency;
-                ctrl.LoadHrcCache();
                 ctrl.RefreshStillNeedCache();
                 StatusView.ShowMessage($"Band changed to {FreqToBandStr(newDialFrequency / 1e6)}", false);
             }
@@ -2522,6 +2521,18 @@ namespace WSJTX_Controller
             // working another station" decode for the just-completed receive period is seen and
             // can abort the start before it transmits (2.0.64 -- see ArmPendingAutoStart).
             ServicePendingAutoStart();
+
+            // 2026-09-11 semantic-boundary correction (KF0VZS live-radio audit): THIS is the real
+            // end of everything one DirectApplyDecodes pass can publish to the Now-batch --
+            // confirmed by tracing the actual call order, not assumed from Notify.OnPeriodBoundary()'s
+            // name. OnPeriodBoundary() above (called from inside the _directReceiveCycleCompletedThisTick
+            // block, well before this point) fires BEFORE FeedTargetMonitorsPeriodComplete's own
+            // "not heard" publish and BEFORE ServicePendingAutoStart's possible publish just above
+            // -- so a real busy/yield/not-heard cluster spanning 232ms in one pass was landing as
+            // three separate micro-batches instead of one joined utterance. Runs every tick
+            // (ServicePendingAutoStart above does too); a no-op when the Now-batch has nothing
+            // open or gap-waiting.
+            Notify?.OnDecodePassComplete();
         }
 
         // Double-click-to-reply equivalent -- calls Engine::call_station_ctx directly via the

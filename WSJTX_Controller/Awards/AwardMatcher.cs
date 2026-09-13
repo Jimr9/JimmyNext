@@ -21,43 +21,63 @@ namespace WSJTX_Controller
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
             string call, string state, string continent,
             Func<int> cqZoneLookup, Func<int> dxccLookup)
+            => MatchSet(activeAwardTags, tag => tag.Set, call, state, continent, cqZoneLookup, dxccLookup);
+
+        // Same matching logic as Match, against each active award's UnconfirmedSet (worked but
+        // not confirmed) instead of its Set (never worked) -- backs the generalized "{Award}
+        // Unconf" live decode tag (AwardTagger.CategoryTag), the replacement for the old
+        // hardcoded WAS_UNCONFIRMED/DXCC_UNCONFIRMED categories. Checked only after Match itself
+        // finds nothing (see AwardTagger.DeriveCategory) -- a station that's still genuinely
+        // needed is reported as needed, never as merely unconfirmed.
+        public static string MatchUnconfirmed(
+            Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
+            string call, string state, string continent,
+            Func<int> cqZoneLookup, Func<int> dxccLookup)
+            => MatchSet(activeAwardTags, tag => tag.UnconfirmedSet, call, state, continent, cqZoneLookup, dxccLookup);
+
+        private static string MatchSet(
+            Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags,
+            Func<WsjtxClient.ActiveAwardTag, HashSet<string>> setSelector,
+            string call, string state, string continent,
+            Func<int> cqZoneLookup, Func<int> dxccLookup)
         {
             if (activeAwardTags == null || activeAwardTags.Count == 0) return null;
             if (string.IsNullOrEmpty(call)) return null;
 
             foreach (var tag in activeAwardTags.Values)
             {
-                if (tag.Set.Count == 0) continue;
+                var set = setSelector(tag);
+                if (set == null || set.Count == 0) continue;
                 bool match;
                 switch (tag.GroupBy)
                 {
                     case RuleGroupBy.Callsign:
-                        match = tag.Set.Contains(call);
+                        match = set.Contains(call);
                         break;
 
                     case RuleGroupBy.State:
                         // UsGridStateMap.StateSetContains, not a plain Contains(state) -- state
                         // can be a compound border-straddling grid.dat value like "MN-WI", which
-                        // must match if EITHER component state is in this award's still-needed
-                        // set (see that method's own comment). Release-audit finding, 2026-08-20.
-                        match = UsGridStateMap.StateSetContains(state, tag.Set);
+                        // must match if EITHER component state is in this award's set (see that
+                        // method's own comment). Release-audit finding, 2026-08-20.
+                        match = UsGridStateMap.StateSetContains(state, set);
                         break;
 
                     case RuleGroupBy.CqZone:
                     {
                         int zone = cqZoneLookup != null ? cqZoneLookup() : 0;
-                        match = zone > 0 && tag.Set.Contains(zone.ToString());
+                        match = zone > 0 && set.Contains(zone.ToString());
                         break;
                     }
 
                     case RuleGroupBy.Continent:
-                        match = !string.IsNullOrEmpty(continent) && tag.Set.Contains(continent);
+                        match = !string.IsNullOrEmpty(continent) && set.Contains(continent);
                         break;
 
                     case RuleGroupBy.Dxcc:
                     {
                         int dxcc = dxccLookup != null ? dxccLookup() : 0;
-                        match = dxcc > 0 && tag.Set.Contains(dxcc.ToString());
+                        match = dxcc > 0 && set.Contains(dxcc.ToString());
                         break;
                     }
 

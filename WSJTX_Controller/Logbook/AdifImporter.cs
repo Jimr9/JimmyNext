@@ -326,6 +326,85 @@ namespace WSJTX_Controller
             return $"{call.ToUpperInvariant()}|{(band ?? "").ToLowerInvariant()}|{(mode ?? "").ToUpperInvariant()}|{qsoDate}|{t4}";
         }
 
+        // Vendor-specific "APP_<program>_" field prefixes each service's own ADIF export
+        // stamps on every record it writes -- the same APP_QRZLOG_STATUS/APP_QRZLOG_QSLDATE
+        // fields Normalize() above already reads for QRZ are also the most reliable signal
+        // that a file came from QRZ in the first place. Checked against every record (not
+        // just the first) so one odd/incomplete leading record can't misclassify a whole file.
+        private static readonly (string prefix, string source)[] VendorFieldMarkers =
+        {
+            ("APP_QRZLOG_",  "QRZ"),
+            ("APP_LOTW_",    "LOTW"),
+            ("APP_CLUBLOG_", "CLUBLOG"),
+        };
+
+        // Auto-detects which logging service produced an ADIF file, for the manual "Import
+        // ADIF File" button -- the only Import() caller that doesn't already know its source
+        // (the QRZ/LoTW/Club Log refresh buttons fetch directly from that service and tag it
+        // themselves). Lets an operator who downloads their own confirmations by hand and
+        // imports the file still get an accurate qso.source (QRZ/LOTW/CLUBLOG/WSJTX), matching
+        // what the built-in refresh buttons would have tagged the same data with, instead of
+        // everything collapsing into an undifferentiated "MANUAL".
+        //
+        // Primary signal: each service's own vendor field prefix, majority vote across every
+        // record (ties broken by VendorFieldMarkers' own order). Falls back to the ADIF
+        // header/comment text (e.g. WSJT-X's own export names itself there) when no record
+        // carries a vendor field. Never invents a source it isn't reasonably sure of --
+        // anything unrecognized stays "MANUAL", exactly today's behavior, so a hand-typed or
+        // unfamiliar-program ADIF is never mislabeled.
+        public static string DetectSource(string adifText, IEnumerable<Dictionary<string, string>> records)
+        {
+            var counts = new Dictionary<string, int>();
+            foreach (var rec in records)
+            {
+                foreach (var key in rec.Keys)
+                {
+                    foreach (var (prefix, source) in VendorFieldMarkers)
+                    {
+                        if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                        {
+                            counts.TryGetValue(source, out int n);
+                            counts[source] = n + 1;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (counts.Count > 0)
+            {
+                string best = null;
+                int bestCount = -1;
+                foreach (var (_, source) in VendorFieldMarkers)
+                {
+                    if (counts.TryGetValue(source, out int n) && n > bestCount)
+                    {
+                        best = source;
+                        bestCount = n;
+                    }
+                }
+                if (best != null) return best;
+            }
+
+            string header = adifText ?? "";
+            int eoh = header.IndexOf("<EOH", StringComparison.OrdinalIgnoreCase);
+            header = eoh > 0 ? header.Substring(0, eoh) : (header.Length > 4000 ? header.Substring(0, 4000) : header);
+
+            if (header.IndexOf("logbook of the world", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                header.IndexOf("lotw", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "LOTW";
+            if (header.IndexOf("qrz", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "QRZ";
+            if (header.IndexOf("club log", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                header.IndexOf("clublog", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "CLUBLOG";
+            if (header.IndexOf("wsjt-x", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                header.IndexOf("wsjtx", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "WSJTX";
+
+            return "MANUAL";
+        }
+
         // internal (not private): reused by AdifRecordBuilder callers that need the
         // same freq-to-band table for QRZ/Club Log upload records.
         internal static string NormalizeBand(string band, string freqStr)

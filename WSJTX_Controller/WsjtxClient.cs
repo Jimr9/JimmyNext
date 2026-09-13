@@ -338,6 +338,42 @@ namespace WSJTX_Controller
         // "no response" line -- for the whole 20-call effort, long after the target had CQ'd and
         // moved to a different peer.
         private DateTime otherPartyForCallInProgUtc = default;
+
+        // Shared target-activity unification (2026-09-11): whether the CURRENT
+        // otherPartyForCallInProg/otherPartyStage fact is this ordinary path's turn to SPEAK this
+        // period -- false whenever Smart Start or Station Watch already owns callInProg (their
+        // own classification submits to the SAME shared tracker instead; see ProcessDecodeMsg),
+        // or when the shared tracker itself says this exact fact was already announced. The
+        // VISIBLE status line (otherStr in WsjtxClient.Display.cs) is deliberately UNAFFECTED by
+        // this flag -- it keeps rendering the current fact unconditionally, exactly as before;
+        // only the SPOKEN line (statusForSpeech) consults it.
+        private bool otherPartyActivitySpeakable = false;
+        // Test-only: precise observation of the ordinary path's own per-decode speech decision,
+        // without relying on fragile string matching against the composed status line.
+        internal bool TestOtherPartyActivitySpeakable => otherPartyActivitySpeakable;
+        internal TargetActivityTracker TestGetActivityTracker(string target) => GetActivityTracker(target);
+
+        // One shared TargetActivityTracker per target callsign currently being narrated by any of
+        // Smart Start / Station Watch / this ordinary path -- see TargetActivityTracker.cs's own
+        // header. Defensively capped rather than precisely cleaned up per watcher stop/start (a
+        // real band/mode/session change -- the only discontinuity that actually matters -- clears
+        // it outright in ResetBandSession); a handful of stale single-target entries surviving
+        // between unrelated efforts is harmless (worst case: one extra announce next time that
+        // exact call comes up again, never a missed one).
+        private readonly System.Collections.Generic.Dictionary<string, TargetActivityTracker> _targetActivityTrackers
+            = new System.Collections.Generic.Dictionary<string, TargetActivityTracker>(StringComparer.OrdinalIgnoreCase);
+
+        private TargetActivityTracker GetActivityTracker(string target)
+        {
+            if (!_targetActivityTrackers.TryGetValue(target, out var tracker))
+            {
+                if (_targetActivityTrackers.Count > 8) _targetActivityTrackers.Clear();
+                tracker = new TargetActivityTracker();
+                _targetActivityTrackers[target] = tracker;
+            }
+            return tracker;
+        }
+
         private bool restartQueue = false;
 
         private ulong? lastDialFrequency = null;
@@ -666,8 +702,19 @@ namespace WSJTX_Controller
             WAS_NEEDED,          // 9 — US state needed for WAS award (HRC database)
             WAS_UNCONFIRMED,     // 10 — US state worked but unconfirmed (HRC database)
             DXCC_UNCONFIRMED,    // 11 — DXCC entity worked but unconfirmed (HRC database)
-            ZONE_NEEDED,         // 12 — CQ zone needed for WAZ award (HRC database)
+            ZONE_NEEDED,         // 12 — kept only so a persisted categoryWeights/callingPriorities
+                                 //      INI value from before the HRC/Still-Need unification still
+                                 //      parses; DeriveCategory never assigns 9-12 any more (see
+                                 //      STILL_NEEDED/STILL_UNCONFIRMED below). Never renumber/remove
+                                 //      an existing value here -- INI persistence is by enum name
+                                 //      (Controller.FormatCategoryWeights/FormatCallingPriorities),
+                                 //      and ParseCategoryWeights discards an operator's ENTIRE
+                                 //      custom weight table on the first name it can't parse.
             STILL_NEEDED,        // 13 — matches the Rule Definition selected in the Still Need tab
+                                 //      (any checked award, not just WAS/DXCC/WAZ)
+            STILL_UNCONFIRMED,   // 14 — worked but not (yet) confirmed, for any checked award
+                                 //      (RuleResult.WorkedUnconfirmed) -- the generalized
+                                 //      replacement for the old WAS_UNCONFIRMED/DXCC_UNCONFIRMED
         }
 
         public enum RankMethods
@@ -715,28 +762,22 @@ namespace WSJTX_Controller
         // DxSpotWatcher tracks for "last spotted" reporting via the PSKReporter MQTT feed.
         public HashSet<string> spotWatchCalls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // HRC database caches — populated from the local Ham Radio Center database at startup,
-        // after each import, and after each band change.  All lookups are in-memory.
-        public HashSet<string> hrcNeededStates      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        public HashSet<string> hrcUnconfirmedStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        public HashSet<int>    hrcUnconfirmedDxcc   = new HashSet<int>();
-        public HashSet<int>    hrcNeededZones       = new HashSet<int>();
-
-        // One entry per Rule Definition currently checked for live tagging in the
-        // Logbook window's Still Need tab (see Controller.RefreshStillNeedCache()).
-        // Independent of the fixed HRC sets above: this supports any enabled Rule
-        // Definition, not just WAS/DXCC/WAZ, and several can be active at once.
-        // Only GroupBy kinds with a fast decode-time field are usable (see
-        // RuleEngine.SupportsLiveTag). A rule is simply absent from this dictionary
-        // whenever it isn't checked, its GroupBy isn't one of those kinds, or it has
-        // no fixed still-needed checklist (e.g. Target=COUNT/LEVELS awards never
-        // produce one).
+        // One entry per Rule Definition currently checked for live tagging in the Logbook
+        // window's Still Need tab (see Controller.RefreshStillNeedCache()) -- WAS/DXCC/WAZ are
+        // just three ordinary entries here now (auto-checked for every install, see
+        // Controller's activeAwardRuleIds migration), not a separate hardcoded HRC-database
+        // cache the way they used to be. Any enabled Rule Definition can appear, and several
+        // can be active at once. Only GroupBy kinds with a fast decode-time field are usable
+        // (see RuleEngine.SupportsLiveTag). A rule is simply absent from this dictionary
+        // whenever it isn't checked, its GroupBy isn't one of those kinds, or evaluation
+        // failed (e.g. its universe couldn't be resolved).
         public class ActiveAwardTag
         {
             public string          RuleId;
             public string          RuleName;
             public RuleGroupBy     GroupBy;
-            public HashSet<string> Set;
+            public HashSet<string> Set;              // still-needed (never worked); Target=All only
+            public HashSet<string> UnconfirmedSet;    // worked but not confirmed; any Target type
         }
         public Dictionary<string, ActiveAwardTag> activeAwardTags = new Dictionary<string, ActiveAwardTag>();
 
@@ -849,7 +890,14 @@ namespace WSJTX_Controller
                     () => ctrl.announceImportantAlertsWhenFocusElsewhere),
                 // 2026-09-03: a delivered notification's fact goes to Notification History HERE,
                 // immediately, since it no longer passes through ShowMsg (which used to record it).
-                recordHistory: text => ctrl.NotificationHistory?.Record(text, null));
+                recordHistory: text => ctrl.NotificationHistory?.Record(text, null),
+                // Notification-joining support (2026-09-11): explicit real scheduler/clock,
+                // owned for this WsjtxClient's lifetime (Timer.Tick fires on the UI thread, same
+                // guarantee _directPollTimer already relies on -- see NowBatchScheduling.cs).
+                scheduler: new WinFormsNowBatchScheduler(), clock: new SystemMonotonicClock(),
+                // Batch lifecycle diagnostics (2026-09-11) -- routed through the same diagnostic
+                // log every other [ANNOUNCE]/[DIRECT]/[SMART] tag already uses.
+                logDiagnostic: text => DebugOutput(text));
             InitTargetMonitors();
             LiveQsoUploader = new LiveQsoUploadOrchestrator(
                 credentials: () => new LiveUploadCredentials
@@ -898,6 +946,18 @@ namespace WSJTX_Controller
                 if (diagLog)
                 {
                     DebugOutput($"{nl}{nl}{nl}{DateTime.UtcNow.ToString("yyyy-MM-dd HHmmss")} UTC ###################### {pgmName} v{pgmVer} starting....");
+                    // Notification-joining timing (2026-09-11 semantic-boundary correction):
+                    // hidden, INI-only settings (no Options UI) -- NotificationSettings.
+                    // LoadFromIni has already validated/clamped/defaulted them. Logged once here
+                    // so a support log always shows the effective values without needing to
+                    // inspect the INI directly. Restart required for a changed value to take
+                    // effect -- there is no live-reload path (NotificationCenter's constructor
+                    // calls SpeechCoordinator.UpdateJoinTiming exactly once, at construction,
+                    // unlike UpdateJoinOrder which Options can call again later).
+                    DebugOutput($"{Time()} [NOTIFY-JOIN] quietMs={ctrl.Notifications.NotificationJoinQuietMs} " +
+                        $"(source: {ctrl.Notifications.NotificationJoinQuietMsSource}) " +
+                        $"maxMs={ctrl.Notifications.NotificationJoinMaxMs} (source: {ctrl.Notifications.NotificationJoinMaxMsSource}) " +
+                        $"gapMs={ctrl.Notifications.NotificationJoinGapMs} (source: {ctrl.Notifications.NotificationJoinGapMsSource})");
                 }
             }
 
@@ -1796,6 +1856,7 @@ namespace WSJTX_Controller
                     otherPartyForCallInProg = null;
                     otherPartyStage = null;
                     otherPartyForCallInProgUtc = default;
+                    otherPartyActivitySpeakable = false;
                 }
                 else if (toCall != null)
                 {
@@ -1813,6 +1874,28 @@ namespace WSJTX_Controller
                     otherPartyForCallInProgUtc = dmsg.RxDate > new DateTime(2000, 1, 1)
                         ? dmsg.RxDate.Add(dmsg.SinceMidnight)
                         : DateTime.UtcNow;
+
+                    // Shared target-activity unification (2026-09-11): the SPEECH decision for
+                    // this identical fact, gated through the SAME per-target tracker Smart Start
+                    // and Station Watch submit to. Deliberately deferred entirely to whichever
+                    // watcher is active on this call -- when NEITHER is, this ordinary path is
+                    // the sole narrator, exactly like today, just via the shared tracker so a
+                    // later watcher hand-off inherits ledger continuity (no duplicate, no gap).
+                    // The VISIBLE status line (otherStr) never reads this flag's producer path --
+                    // only ShowStatus's own statusForSpeech consults otherPartyActivitySpeakable.
+                    bool watcherOwnsThisTarget =
+                        (_smartStart.IsActive && string.Equals(_smartStart.TargetCall, callInProg, StringComparison.OrdinalIgnoreCase)) ||
+                        (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, callInProg, StringComparison.OrdinalIgnoreCase));
+                    if (watcherOwnsThisTarget)
+                    {
+                        otherPartyActivitySpeakable = false;
+                    }
+                    else
+                    {
+                        var fact = TargetActivityClassifier.ClassifyPeerActivity(dmsg, callInProg, myCall);
+                        otherPartyActivitySpeakable = fact.HasValue &&
+                            ShouldAnnounceTargetActivity(fact.Value.Target, fact.Value.Peer, fact.Value.Kind, fact.Value.Value);
+                    }
 
                     // KA1BMF live-radio audit (2026-09-08): our active partner just sent a
                     // SUBSTANTIVE exchange message -- a signal report, R-report, or RRR -- to a
@@ -2206,7 +2289,6 @@ namespace WSJTX_Controller
                 UpdateModeVisible();
                 UpdateBandComboBox();
                 UpdateCallListAccessibleName();
-                ctrl.LoadHrcCache();    //refresh HRC sets (band-independent; harmless to re-run here)
                 ctrl.RefreshStillNeedCache();    //reload Still Need live-tag cache now that the current band is known
                 ctrl.OnJimmyReachedActive();    //kicks off automatic logbook sync, once per session, after a short delay
                 DebugOutput($"{Time()} opMode START -> ACTIVE");
@@ -2488,6 +2570,10 @@ namespace WSJTX_Controller
             // a hidden dormant watch (explicit user decision for band/mode; a full session reset
             // is at least as invalidating).
             StopTargetMonitorsForContextChange();
+            // Shared target-activity ledger (2026-09-11): same staleness reasoning as the watches
+            // above -- a band/mode/session change makes any captured "last announced fact" for
+            // every tracked target stale, so it must not silently carry into the new session.
+            _targetActivityTrackers.Clear();
 
             timeoutCallDict.Clear();
             allCallDict.Clear();
@@ -2956,15 +3042,12 @@ namespace WSJTX_Controller
             string newSide = willBeTxFirst ? "first" : "second";
             ctrl.statusText.ForeColor = Color.Black;
             ctrl.statusText.BackColor = Color.Yellow;
-            ctrl.statusText.Text = $"Tx {newSide} selected, halted";
-            ctrl.statusText.SelectionStart  = 0;
-            ctrl.statusText.SelectionLength = 0;
-            // Force NVDA/JAWS to announce this pending status immediately, same guard and
-            // reasoning as Controller.RenderStatus (only send to the foreground window).
-            // Hardened 2026-08-19 (release-blocker follow-up) to also require real OS-level
-            // foreground state -- see Controller.ShowMsg's own comment for the full writeup.
-            if (ctrl.statusText.Focused && Form.ActiveForm == ctrl && ctrl.IsJimmyForegrounded())
-                SendKeys.Send("{UP}");
+            // 2026-09-11 (notification-joining fix, inventory finding): this used to carry its
+            // OWN third independent copy of the foreground-check-and-SendKeys logic, with no
+            // [ANNOUNCE] diagnostic logging and no Notification History recording. Routed through
+            // StatusView.CoordinatedSpeak, the one shared nudge primitive every other spoken
+            // status update funnels through -- see Controller.ShowMsg's own comment.
+            StatusView.CoordinatedSpeak($"Tx {newSide} selected, halted");
             return true;
         }
 
@@ -3366,6 +3449,7 @@ namespace WSJTX_Controller
             otherPartyForCallInProg = null;
             otherPartyStage = null;
             otherPartyForCallInProgUtc = default;
+            otherPartyActivitySpeakable = false;
             // Item 1: the coordinator's AfterQso timing hook -- callInProg is the active-QSO
             // signal. Idempotent: the coordinator only acts on a genuine active -> inactive edge.
             Notify?.OnQsoActiveChanged(call != null);
@@ -4343,16 +4427,16 @@ namespace WSJTX_Controller
             return count;
         }
 
-        // Counts visible decodes by their "Needed" tag text (WAS Needed, DXCC Unconf, Zone
-        // Needed, or a specific checked Rule Definition's own name + " Needed"), grouped by
-        // exact tag text since several different awards can be checked/matched at once. Feeds
-        // the periodic status summary so it names which award(s) have a station waiting, not
-        // just a bare count -- mirrors SnapshotPriorityCount's visible-vs-all fallback, but
-        // keys on Category + CategoryTag() instead of Priority, since these five categories
-        // are only ever assigned in DeriveCategory()'s default case (Priority itself doesn't
-        // distinguish them -- see DeriveCategory()'s comment on Category being separate from
-        // Priority). Reuses CategoryTag() rather than a separate naming scheme so the status
-        // bar never disagrees with what the row itself displays.
+        // Counts visible decodes by their "Needed"/"Unconf" tag text (WAS Needed, DXCC Unconf,
+        // Zone Needed, or a specific checked Rule Definition's own name + " Needed"/" Unconf"),
+        // grouped by exact tag text since several different awards can be checked/matched at
+        // once. Feeds the periodic status summary so it names which award(s) have a station
+        // waiting, not just a bare count -- mirrors SnapshotPriorityCount's visible-vs-all
+        // fallback, but keys on Category + CategoryTag() instead of Priority, since
+        // STILL_NEEDED/STILL_UNCONFIRMED are only ever assigned in DeriveCategory()'s default
+        // case (Priority itself doesn't distinguish them -- see DeriveCategory()'s comment on
+        // Category being separate from Priority). Reuses CategoryTag() rather than a separate
+        // naming scheme so the status bar never disagrees with what the row itself displays.
         private Dictionary<string, int> SnapshotNeededAwardCounts(HashSet<string> visibleCalls)
         {
             var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -4364,9 +4448,7 @@ namespace WSJTX_Controller
                 if (StringComparer.OrdinalIgnoreCase.Equals(call, callInProg)) continue;
                 EnqueueDecodeMessage d;
                 if (!callDict.TryGetValue(call, out d)) continue;
-                if (d.Category != CallCategory.WAS_NEEDED && d.Category != CallCategory.WAS_UNCONFIRMED &&
-                    d.Category != CallCategory.DXCC_UNCONFIRMED &&
-                    d.Category != CallCategory.ZONE_NEEDED && d.Category != CallCategory.STILL_NEEDED) continue;
+                if (d.Category != CallCategory.STILL_NEEDED && d.Category != CallCategory.STILL_UNCONFIRMED) continue;
 
                 string tag = _awardTagger.CategoryTag(d);
                 if (string.IsNullOrEmpty(tag)) continue;

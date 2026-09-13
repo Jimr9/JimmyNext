@@ -281,6 +281,7 @@ namespace WSJTX_Controller
                     case CallCategory.DXCC_UNCONFIRMED:
                     case CallCategory.ZONE_NEEDED:
                     case CallCategory.STILL_NEEDED:
+                    case CallCategory.STILL_UNCONFIRMED:
                         isAdmitted = IsCallingEnabled(emsg.Category);
                         break;
                     case CallCategory.DEFAULT:
@@ -337,6 +338,7 @@ namespace WSJTX_Controller
                         emsg.Category == CallCategory.DXCC_UNCONFIRMED ||
                         emsg.Category == CallCategory.ZONE_NEEDED ||
                         emsg.Category == CallCategory.STILL_NEEDED ||
+                        emsg.Category == CallCategory.STILL_UNCONFIRMED ||
                         (addedWantedCall = CanAddWantedCall(deCall, emsg, isWantedCall, emsgIsEven)))
                     {
                         int prevTo = 0;
@@ -477,7 +479,9 @@ namespace WSJTX_Controller
 
         // Called every time Controller.RefreshStillNeedCache() rebuilds activeAwardTags (e.g.
         // right after a QSO is logged) so a call already sitting in the queue tagged "Needed"
-        // drops that tag immediately instead of keeping it for the rest of the session.
+        // or "Unconf" drops/updates that tag immediately instead of keeping a stale one for
+        // the rest of the session (e.g. a fresh QRZ/LoTW import confirms a station that was
+        // showing "Unconf").
         // AddSelectedCall only re-derives Category for *new* decodes; a decode of a call
         // already in the queue short-circuits at "if (callQueue.Contains(deCall))" and is
         // handed to CallQueueStore.UpdateCall, which only replaces the stored entry (and its
@@ -490,7 +494,7 @@ namespace WSJTX_Controller
             foreach (string call in callQueue.ToArray())
             {
                 if (!callDict.TryGetValue(call, out EnqueueDecodeMessage d)) continue;
-                if (d.Category != CallCategory.STILL_NEEDED) continue;
+                if (d.Category != CallCategory.STILL_NEEDED && d.Category != CallCategory.STILL_UNCONFIRMED) continue;
 
                 CallCategory newCategory = _awardTagger.DeriveCategory(d);
                 if (newCategory != d.Category)

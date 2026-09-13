@@ -97,5 +97,19 @@ namespace WSJTX_Controller
         SmartStartTargetBusy,
         SmartStartYielded,
         SmartStartEngaged,
+
+        // Notification-joining support (2026-09-11 speech-batching fix). A pseudo-category, NOT a
+        // real publishable event -- no INotificationEvent class exists for it, and
+        // NotificationCenter.Publish is never called with it. It exists only so the operator's
+        // configurable notification-join-order list (Options > Notifications > Notification
+        // order...) has a slot representing "wherever the already-composed routine RX/TX/QSO
+        // status line (built by WsjtxClient.ShowStatus's existing RoutineFragment/Compose
+        // pipeline -- 'N new DXCC, N available stations, Listen mode' etc.) sits relative to the
+        // Smart Start/Station Watch/Awards facts" when SpeechCoordinator reconciles a Now-batch
+        // with a lifecycle boundary's own content into one utterance. Still needs a Policies entry
+        // and a DisplayNames entry like every other member (enforced by
+        // NotificationSettingsTests/DisplayNames coverage tests), even though its policy is never
+        // actually consulted for delivery timing/eligibility.
+        RoutineStatusLine,
     }
 }

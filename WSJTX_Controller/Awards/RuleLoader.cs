@@ -175,14 +175,41 @@ namespace WSJTX_Controller
                 return null;
             }
 
+            RuleBasis basis;
+            string basisStr = file.Get("Target", "Basis", "WORKED");
+            if (!Enum.TryParse(basisStr, true, out basis))
+            {
+                error = $"[Target] Basis='{basisStr}' is not recognized. Supported: WORKED, CONFIRMED.";
+                return null;
+            }
+            if (basis == RuleBasis.Confirmed && targetType == RuleTargetType.All)
+            {
+                error = "[Target] Basis=CONFIRMED is not supported with Type=ALL -- a checklist-style award " +
+                        "always tracks Worked for completion (see FinishGrouped's own comment); use Type=COUNT " +
+                        "or LEVELS for a confirmation-gated award.";
+                return null;
+            }
+
             int threshold = 0;
+            string thresholdFrom = file.Get("Target", "ThresholdFrom");
+            int thresholdOffset = 0;
             var levels = new List<RuleLevel>();
 
             if (targetType == RuleTargetType.Count)
             {
-                if (!int.TryParse(file.Get("Target", "Threshold"), out threshold) || threshold <= 0)
+                if (!string.IsNullOrWhiteSpace(thresholdFrom))
                 {
-                    error = "[Target] Threshold is required and must be a positive integer when Type=COUNT.";
+                    if (!int.TryParse(file.Get("Target", "ThresholdOffset", "0"), out thresholdOffset) || thresholdOffset < 0)
+                    {
+                        error = "[Target] ThresholdOffset must be a non-negative integer when ThresholdFrom is set.";
+                        return null;
+                    }
+                    // Threshold itself is resolved dynamically at evaluation time (see
+                    // RuleEngine.EvaluateCore) -- a literal [Target] Threshold= is not required.
+                }
+                else if (!int.TryParse(file.Get("Target", "Threshold"), out threshold) || threshold <= 0)
+                {
+                    error = "[Target] Threshold is required and must be a positive integer when Type=COUNT (unless ThresholdFrom is set).";
                     return null;
                 }
             }
@@ -235,7 +262,10 @@ namespace WSJTX_Controller
                 DateTo          = file.Get("Match", "DateTo"),
                 Confirmation    = confirmation,
                 Target          = targetType,
+                Basis           = basis,
                 Threshold       = threshold,
+                ThresholdFrom   = thresholdFrom,
+                ThresholdOffset = thresholdOffset,
                 Levels          = levels,
                 SourceFile      = path,
             };

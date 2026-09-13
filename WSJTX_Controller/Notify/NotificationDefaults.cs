@@ -302,6 +302,23 @@ namespace WSJTX_Controller
                 Template = "{Phrase}",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
+                // 2026-09-11 target-activity unification: this type can now carry "unchanged
+                // repeat" traffic gated by the shared TargetActivityTracker (see
+                // WsjtxClient.ShouldAnnounceTargetActivity). LatestOnly here is a correctness net
+                // for an operator who reconfigures SpeakWhen away from Now (a boundary-held
+                // occurrence then correctly replaces a stale still-pending one instead of queuing
+                // behind it) -- at the SHIPPED Now default it has no effect: Now submissions never
+                // reach the _pendingNotifications bucket LatestOnly's dedupKey affects. Unlike
+                // SmartStartTargetBusy below, this type carries no SmartStartCorrelation, so it has
+                // no StateSeq fallback either -- a genuine change arriving within the SAME still-open
+                // Now-batch window as a stale unchanged repeat would compose alongside it rather
+                // than superseding it. Not fixed: that race needs two DECODE EVENTS for the
+                // identical target inside one batch's own quiet/ceiling window, hard-capped at
+                // notificationJoinMaxMs<=5000ms (NotificationSettings.MaxJoinMaxMs) -- shorter than
+                // any supported real T/R period, so real FT8/FT4 decode cadence cannot reach it.
+                // See NotificationSettings.LoadFromIni's own migration note for the persisted-value
+                // migration this default change needed.
+                StatusDelivery = NotificationStatusDelivery.LatestOnly,
             },
             // Heard the watched target, but the payload didn't parse into a known form --
             // history/status only by default (Enabled so it still shows in Notification History
@@ -349,10 +366,29 @@ namespace WSJTX_Controller
             {
                 Enabled = true,
                 Priority = NotificationPriority.Normal,
-                RepeatSeconds = 30,
+                // 2026-09-11 target-activity unification: the wall-clock RepeatSeconds fold is
+                // superseded by the shared TargetActivityTracker's period-based repeat gate (see
+                // WsjtxClient.ShouldAnnounceTargetActivity) -- a peer/report/kind change always
+                // announces regardless of elapsed wall time, and an unchanged fact repeats at
+                // most once per real decode period (or never), never once per 30 real seconds
+                // (wrong on any T/R period shorter than 30s -- FT8's 15s included). See
+                // NotificationSettings.LoadFromIni's own migration note for existing profiles.
+                RepeatSeconds = 0,
                 Template = "{Phrase}",
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
+                // LatestOnly is the correctness net if SpeakWhen is ever reconfigured away from
+                // Now -- see StationWatchActivity's own comment above for exactly what it does and
+                // does not do. At the SHIPPED Now default, THIS type's actual protection against a
+                // stale repeat outliving a genuine change is the PRE-EXISTING
+                // SmartStartCorrelation/StateSeq fold in SpeechCoordinator.ResolveBatch (unrelated
+                // to this option -- built for the join-order feature, and already correctly wired
+                // since HandleSmartStartObservation's own _smartStart.AdvanceStateSeq() calls were
+                // left untouched): SmartStartTargetBusyEvent implements ISmartStartCorrelatedEvent,
+                // so two occurrences for the same (Target, ArmGeneration, Group=Observation)
+                // correctly keep only the higher-StateSeq one, even within the same still-open
+                // Now-batch window.
+                StatusDelivery = NotificationStatusDelivery.LatestOnly,
             },
             // RepeatSeconds folds the repeated "appears available" nudge (one per clean receive
             // opportunity once the silence threshold is met) down to one line per 30 s.
@@ -396,6 +432,54 @@ namespace WSJTX_Controller
                 SpeakWhen = SpeakWhen.Now,
                 Condition = SpeakCondition.Always,
             },
+
+            // Notification-joining support (2026-09-11): RoutineStatusLine is never published
+            // (see NotificationEventType.cs's own comment) -- this row exists only so every enum
+            // member has a Policies entry (NotificationSettingsTests enforces that), and so the
+            // type has SOME policy object to satisfy code that walks Policies generically. None of
+            // these fields are ever consulted for actual delivery -- the routine status line's own
+            // real timing/eligibility is governed entirely by WsjtxClient.ShowStatus's existing
+            // RoutineFragment mechanism, unchanged by this row.
+            [NotificationEventType.RoutineStatusLine] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                // No {tokens} -- this type is never formatted through the template engine (it is
+                // never published; see NotificationEventType.cs's own comment), so there is
+                // nothing for NotificationVariableRegistry to validate against. An empty literal
+                // keeps NotificationDefaultsAllTemplatesValidTests's generic "every default
+                // template validates" sweep honest without inventing an unused token.
+                Template = "",
+                SpeakWhen = SpeakWhen.AfterRx,
+                Condition = SpeakCondition.Always,
+            },
+        };
+
+        // Notification-joining support (2026-09-11): the default order in which the joinable
+        // categories (the 11 StationWatch*/SmartStart* WatchEventTypes, plus AwardsNeeded and the
+        // RoutineStatusLine pseudo-category -- see NotificationCenter.WatchEventTypes and
+        // SpeechCoordinator's reconciliation) are composed into one utterance when more than one
+        // lands in the same reconciled set. Fully operator-reorderable via Options > Notifications
+        // > "Notification order..." (NotificationJoinOrderDlg) -- this is only the fresh-install /
+        // missing-INI-key / Restore Defaults value. RoutineStatusLine is placed last: an operator
+        // who has never touched this screen hears Smart Start/Station Watch narration first and
+        // the routine counts/idle summary trailing, matching how "Waiting to work EA6Y. EA6Y to
+        // KX4I, R minus 14. 1 new DXCC." naturally reads.
+        public static readonly NotificationEventType[] DefaultJoinOrder =
+        {
+            NotificationEventType.StationWatchStarted,
+            NotificationEventType.SmartStartArmed,
+            NotificationEventType.SmartStartCallStarting,
+            NotificationEventType.StationWatchActivity,
+            NotificationEventType.SmartStartTargetBusy,
+            NotificationEventType.SmartStartTargetAvailable,
+            NotificationEventType.SmartStartYielded,
+            NotificationEventType.SmartStartEngaged,
+            NotificationEventType.StationWatchAmbiguous,
+            NotificationEventType.SmartStartWaiting,
+            NotificationEventType.StationWatchStopped,
+            NotificationEventType.AwardsNeeded,
+            NotificationEventType.RoutineStatusLine,
         };
 
         // Human-readable name shown in the configurable-notifications UI's first list --
@@ -431,6 +515,7 @@ namespace WSJTX_Controller
             [NotificationEventType.SmartStartTargetBusy] = "Smart Start target working another station",
             [NotificationEventType.SmartStartYielded] = "Smart Start standing by (target busy)",
             [NotificationEventType.SmartStartEngaged] = "Smart Start target engaged (QSO takeover)",
+            [NotificationEventType.RoutineStatusLine] = "Routine receive/transmit status",
         };
     }
 }

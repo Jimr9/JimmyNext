@@ -38,7 +38,17 @@ namespace WSJTX_Controller
         // exact/near-immediate duplicate suppression, then SendKeys("{UP}"). Records NO history
         // (that already happened upstream, at render / deliver time). Never self-voices, never
         // moves focus, never calls a screen-reader API directly.
-        void CoordinatedSpeak(string text);
+        //
+        // isDeliberateRepeat (2026-09-11, notification-joining fix): bypasses ONLY the 3-second
+        // near-duplicate gate for THIS call -- for an explicit operator request to (re-)hear the
+        // CURRENT status right now (Controller's NavStatus hotkey handler, MoveFocusToStatusIfEnabled).
+        // Pressing that command twice must announce twice even when nothing changed. It still
+        // updates the dedup bookkeeping afterward exactly as an ordinary call does, so a ROUTINE
+        // automatic announcement immediately after a deliberate repeat is still correctly
+        // deduplicated against what was just said. Default false -- every other, ordinary
+        // automatic caller (SpeechCoordinator's own SpeakNow, ShowMsg, everything else) is
+        // completely unaffected and cannot accidentally take this path.
+        void CoordinatedSpeak(string text, bool isDeliberateRepeat = false);
 
         // Wraps the existing (currently no-op) Controller.ShowMsg -- direct one-shot operator
         // feedback (hotkey results, upload status, "not in queue", ...). NOT the routine-status

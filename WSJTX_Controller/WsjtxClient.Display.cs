@@ -363,8 +363,15 @@ namespace WSJTX_Controller
                     string catTag;
                     if (d.Category == CallCategory.WANTED_CQ)
                         catTag = d.EffectiveSemantic(myCall).CqTarget ?? "Dir CQ";   // Stage 6
-                    else if (d.Category == CallCategory.STILL_NEEDED)
-                        catTag = _awardTagger.AwardDisplayName(d) + " Needed";
+                    else if (d.Category == CallCategory.STILL_NEEDED || d.Category == CallCategory.STILL_UNCONFIRMED)
+                        // Reuses the same method the main call-waiting list uses (CategoryTag),
+                        // not a separate "+ Needed"/"+ Unconf" computation here -- that used to
+                        // diverge silently: WAS/DXCC/WAZ's short legacy labels ("WAS Needed",
+                        // "Zone Needed") are special-cased in CategoryTag, but this file's own
+                        // "AwardDisplayName(d) + \" Needed\"" didn't know about that, so Raw
+                        // Decodes would show "Worked All States Needed" for the exact same
+                        // decode the main list already showed as "WAS Needed" for.
+                        catTag = _awardTagger.CategoryTag(d);
                     else
                         RawTagLabels.TryGetValue(d.Category, out catTag);
                     if (!string.IsNullOrEmpty(catTag)) tag = catTag;
@@ -853,6 +860,12 @@ namespace WSJTX_Controller
         {
             _clauseTextsThisRender.Clear();
             string status = "";
+            // Shared target-activity unification (2026-09-11): null until the ONE branch that
+            // can carry otherStr's fragment sets it explicitly; the finally block falls back to
+            // `status` itself for every other branch (none of which reference otherStr at all).
+            // See that branch's own comment for why VISIBLE (status) and SPOKEN (statusForSpeech)
+            // must diverge here specifically.
+            string statusForSpeech = null;
             // Set true by a render whose whole point is a persistent condition that the
             // dedicated edge-triggered notifications already speak (currently: CAT link down
             // while idle). The line is still shown on screen and recorded in history -- it just
@@ -1361,6 +1374,20 @@ namespace WSJTX_Controller
                                     status = $"{curTxMode}{cond}{inProg}{callsWaiting}{desc}{prompt}.";
                                     foreColor = Color.White;
                                     backColor = Color.Green;
+                                    // 2026-09-11 fix (KB0UZT live-radio report): a CQ-paused idle
+                                    // render builds the SAME "N wanted"/"N available stations" text
+                                    // (via callsWaiting) as the non-paused idle summary below, but
+                                    // this whole cqPaused branch never tagged itself as the receive-
+                                    // cycle-summary render RenderStatusVisible's "Clear previous
+                                    // summary when it becomes empty" option tracks -- so a stale
+                                    // "1 wanted." from one advanced-layout side's last real render
+                                    // kept sitting on screen through however many later CQ-paused
+                                    // renders the OTHER side's own turn genuinely had nothing to
+                                    // report, even with that setting turned ON. Same gate as the
+                                    // non-paused idle branch below (callInProg == null &&
+                                    // deferEligible) -- a genuinely idle, nothing-special-happening
+                                    // paused render, not a one-shot transition mid-render.
+                                    if (callInProg == null && deferEligible) isIdleReceiveCycleSummaryRender = true;
                                 }
                             }
                             else    //not paused
@@ -1648,6 +1675,19 @@ namespace WSJTX_Controller
                                 else  //not a special case
                                 {
                                     status = $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{otherStr}{txStr}{callsWaiting}{desc}{prompt}.";
+                                    // Shared target-activity unification (2026-09-11): the VISIBLE
+                                    // line (status, above) always shows the current otherStr fact,
+                                    // unconditionally -- Item 2's "visible always immediate, never
+                                    // gated on speech" rule is untouched. The SPOKEN line omits
+                                    // otherStr's fragment specifically when the shared tracker says
+                                    // this exact fact must not speak again this period -- already
+                                    // spoken via Smart Start / Station Watch's own submission this
+                                    // period, or "Repeat unchanged QSO activity each period" is off
+                                    // and nothing changed (otherPartyActivitySpeakable, set in
+                                    // WsjtxClient.cs's ProcessDecodeMsg at classification time).
+                                    statusForSpeech = (otherStr == "" || otherPartyActivitySpeakable)
+                                        ? status
+                                        : $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{""}{txStr}{callsWaiting}{desc}{prompt}.";
                                 }
                             }
                             DebugOutput($"{spacer}curCall:'{curCall}' sinceMidnight:{sinceMidnight}");
@@ -1689,6 +1729,9 @@ namespace WSJTX_Controller
                 // ", ."). A no-op for the default all-clauses-enabled wording, so existing
                 // status strings -- and the replay-suite assertions on them -- are unchanged.
                 status = NormalizeStatusLine(status);
+                // Falls back to the (already-normalized) visible text for every branch that never
+                // set it -- i.e. every branch except the one that can carry otherStr's fragment.
+                statusForSpeech = statusForSpeech == null ? status : NormalizeStatusLine(statusForSpeech);
 
                 // VISIBLE status + Notification History: ALWAYS immediate, every call. Never
                 // gated on whether/when the line is spoken (Item 2). Returns whether Jimmy is
@@ -1719,7 +1762,7 @@ namespace WSJTX_Controller
                     (callInProg == null && deferEligible && trPeriod != null)
                         ? SpeakWhen.AfterRx : ctrl.routineStatusSpeakWhen;
 
-                var fragments = BuildRoutineFragments(status, baseWhen, ctrl.routineStatusCondition);
+                var fragments = BuildRoutineFragments(statusForSpeech, baseWhen, ctrl.routineStatusCondition);
 
                 // suppressRoutineSpeechThisRender: a render that only re-states a persistent
                 // condition the edge-triggered notifications already speak (CAT link down while
@@ -1747,9 +1790,14 @@ namespace WSJTX_Controller
                 {
                     // Callsign, then country (or US state when that option is on), then the
                     // sent/received reports for this QSO so the row is a self-contained record
-                    // of what was logged -- labelled ("S -10, R -14") so the two aren't
+                    // of what was logged -- labelled ("R -14, S -10") so the two aren't
                     // ambiguous. The reports are a display-only snapshot captured at log time
                     // (_loggedReports); the row's key stays the bare callsign.
+                    // 2026-09-11 fix (tester feedback: the ordering here read as contradicting the
+                    // status line, which always describes "received..." before "...sending" --
+                    // same two numbers, just presented in the opposite order). Received now leads,
+                    // Sent follows, matching the status line's own order; the S/R labels
+                    // themselves are unchanged.
                     // Auto-logged calls are OUT of scope for "Space callsigns and grids" -- this
                     // stays on the checkbox-independent Spacify(), always spaced as before.
                     string line = $"{Spacify(call)}, {Country(call)}";
@@ -1757,9 +1805,9 @@ namespace WSJTX_Controller
                     {
                         string sentPart = string.IsNullOrEmpty(rpt.Sent) ? "" : $"S {rpt.Sent}";
                         string rcvdPart = string.IsNullOrEmpty(rpt.Received) ? "" : $"R {rpt.Received}";
-                        string reportsPart = sentPart.Length > 0 && rcvdPart.Length > 0 ? $"{sentPart}, {rcvdPart}"
-                            : sentPart.Length > 0 ? sentPart
-                            : rcvdPart;
+                        string reportsPart = rcvdPart.Length > 0 && sentPart.Length > 0 ? $"{rcvdPart}, {sentPart}"
+                            : rcvdPart.Length > 0 ? rcvdPart
+                            : sentPart;
                         if (reportsPart.Length > 0) line += $", {reportsPart}";
                     }
                     logItems.Add(line);

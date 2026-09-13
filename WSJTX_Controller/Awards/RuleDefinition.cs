@@ -17,6 +17,14 @@ namespace WSJTX_Controller
 
     public enum RuleTargetType { All, Count, Levels }
 
+    // What "progress" counts against Target/Threshold -- Worked (the default, and the only
+    // option for Target=All; see RuleEngine.FinishGrouped's own comment on why Target=All's
+    // StillNeeded/Completed are always Worked-based, confirmation tracked separately) or
+    // Confirmed (opt-in, Count/Levels only -- e.g. ARRL Honor Roll, which by its real-world
+    // definition counts CONFIRMED entities, not merely worked ones). Defaulting every existing
+    // award to Worked means this is purely additive: nothing already shipped changes behavior.
+    public enum RuleBasis { Worked, Confirmed }
+
     public class RuleLevel
     {
         public string Name;
@@ -53,8 +61,17 @@ namespace WSJTX_Controller
         public RuleConfirmation Confirmation = RuleConfirmation.Any;
 
         public RuleTargetType  Target;
-        public int              Threshold;              // Target=Count
+        public RuleBasis        Basis = RuleBasis.Worked;  // Target=Count/Levels only; see RuleBasis
+        public int              Threshold;              // Target=Count; ignored when ThresholdFrom is set
         public List<RuleLevel>  Levels = new List<RuleLevel>();  // Target=Levels, ascending by Threshold
+
+        // Optional Target=Count dynamic threshold: instead of a fixed Threshold=N written in
+        // the file, resolve a Universe (e.g. "DXCC_CURRENT") at evaluation time and use
+        // (that universe's count - ThresholdOffset) instead -- e.g. ARRL Honor Roll's
+        // threshold moves as DXCC entities come in/out of existence, expressed here as
+        // "current active entity count minus 9" rather than a number that goes stale.
+        public string ThresholdFrom;      // e.g. "DXCC_CURRENT"; null/empty = use the fixed Threshold
+        public int    ThresholdOffset;    // subtracted from the resolved universe's count
 
         public RuleEndorsements Endorsements;    // null if the file has no [Endorsements] section
 

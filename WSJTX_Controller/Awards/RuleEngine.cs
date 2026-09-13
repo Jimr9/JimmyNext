@@ -23,7 +23,20 @@ namespace WSJTX_Controller
         public int    UniverseSize = -1;   // -1 = not applicable / not resolvable
         public bool   Completed;
         public string CurrentTier;         // Target=Levels only
+        public int    EffectiveThreshold;  // Target=Count only; def.Threshold, or the resolved
+                                            // value when def.ThresholdFrom is set (e.g. Honor
+                                            // Roll's "current active DXCC entities minus 9")
         public List<string> StillNeeded;   // Target=All only; null if not resolvable
+
+        // Worked but not (yet) confirmed -- workedSet minus confirmedSet. Unlike StillNeeded,
+        // this is computed for EVERY GroupBy'd rule regardless of Target type (All or Count),
+        // since "I worked this one but need a QSL for it" is a real, useful fact for a
+        // Count-target award (e.g. DXCC) just as much as an All-target one (e.g. WAS) --
+        // there's no checklist-completion concept here, just "which of the ones I've worked
+        // still need a confirmation". Null only when GroupBy'd evaluation didn't run at all
+        // (GroupBy=None, or a universe/limitTo resolution failure). See AwardTagger/
+        // AwardMatcher for how this backs the live "{Award} Unconf" decode tag.
+        public List<string> WorkedUnconfirmed;
         public string EvaluationError;     // e.g. universe unavailable
         public List<RuleEndorsementResult> Endorsements = new List<RuleEndorsementResult>();
 
@@ -284,7 +297,28 @@ namespace WSJTX_Controller
             else
                 EvaluateGrouped(def, conn, GroupByExpression(def.GroupBy), where, parms, confirmExpr, universe, limitTo, result);
 
-            ApplyTarget(def, result, universe);
+            // Dynamic Target=Count threshold (def.ThresholdFrom set, e.g. Honor Roll) --
+            // resolved independently of the grouped query above, right before it's consumed.
+            // A resolution failure (e.g. Club Log data not downloaded yet) doesn't discard the
+            // Worked/Confirmed counts already computed above; it just marks the result unusable
+            // for anything that needs a real Completed/EffectiveThreshold (same EvaluationError
+            // contract Target=All's own universe-resolution failure uses).
+            int effectiveThreshold = def.Threshold;
+            if (def.Target == RuleTargetType.Count && !string.IsNullOrWhiteSpace(def.ThresholdFrom))
+            {
+                string thresholdError;
+                var thresholdUniverse = RuleUniverse.Resolve(def.ThresholdFrom, RuleLoader.ListsFolder, clubLog, out thresholdError);
+                if (thresholdUniverse == null)
+                {
+                    result.EvaluationError = "Target.ThresholdFrom: " + (thresholdError ?? "could not be resolved.");
+                }
+                else
+                {
+                    effectiveThreshold = Math.Max(0, thresholdUniverse.Count - def.ThresholdOffset);
+                }
+            }
+
+            ApplyTarget(def, result, universe, effectiveThreshold);
             return result;
         }
 
@@ -462,19 +496,35 @@ namespace WSJTX_Controller
             // StillNeeded is always worked-based -- a station drops off the needed list as
             // soon as it's logged, not once it's separately confirmed via LoTW/QRZ. Confirmed/
             // ConfirmedItems are still tracked above (via the real confirmExpr) purely as an
-            // informational annotation the Awards tab shows per item; Confirmation no longer
-            // gates completion for any Rule Definition, regardless of its Requires= setting.
+            // informational annotation the Awards tab shows per item; Confirmation never gates
+            // completion for a Target=All Rule Definition, regardless of its Requires= setting
+            // (a Count/Levels award MAY opt into confirmation-gated completion via Basis=
+            // CONFIRMED -- see ApplyTarget and RuleBasis's own comment -- but Target=All's
+            // checklist semantics are deliberately never overridable this way).
             if (def.Target == RuleTargetType.All && universe != null)
             {
                 result.StillNeeded = universe.Where(u => !workedSet.Contains(u)).OrderBy(u => u).ToList();
             }
+
+            // Independent of Target/StillNeeded above -- see the field's own comment on
+            // RuleResult. Computed from the same workedSet/confirmedSet already adjusted for
+            // limitTo/universe restriction above, so a Target=All award's Unconfirmed set is
+            // checklist-scoped the same way StillNeeded is, and a Target=Count award (e.g.
+            // DXCC, no universe) simply uses every distinct worked value.
+            result.WorkedUnconfirmed = workedSet.Where(w => !confirmedSet.Contains(w))
+                .OrderBy(w => w, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
-        // basis is always Worked -- see the FinishGrouped comment above. Applies uniformly to
-        // Target=All (via StillNeeded/Completed above), Count, and Levels.
-        private static void ApplyTarget(RuleDefinition def, RuleResult result, HashSet<string> universe)
+        // basis is Worked by default for every Target type -- Target=All is ALWAYS Worked,
+        // never overridable (see FinishGrouped's own comment); Count/Levels use def.Basis,
+        // which defaults to Worked too, so every award that doesn't explicitly opt in via
+        // Basis=CONFIRMED is completely unaffected. effectiveThreshold is def.Threshold
+        // unless def.ThresholdFrom resolved a dynamic value (see EvaluateCore).
+        private static void ApplyTarget(RuleDefinition def, RuleResult result, HashSet<string> universe, int effectiveThreshold)
         {
-            int basis = result.Worked;
+            result.EffectiveThreshold = effectiveThreshold;
+            int basis = (def.Target != RuleTargetType.All && def.Basis == RuleBasis.Confirmed)
+                ? result.Confirmed : result.Worked;
 
             switch (def.Target)
             {
@@ -484,7 +534,7 @@ namespace WSJTX_Controller
                     break;
 
                 case RuleTargetType.Count:
-                    result.Completed = basis >= def.Threshold;
+                    result.Completed = basis >= effectiveThreshold;
                     break;
 
                 case RuleTargetType.Levels:

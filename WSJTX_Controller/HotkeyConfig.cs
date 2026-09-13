@@ -63,6 +63,15 @@ namespace WSJTX_Controller
         // Station Watch (2.0.63).
         ToggleStationWatch,
         WorkWatchedStationNow,
+        // On-demand Smart Start / Station Watch status readout (operator request, 2026-09-12):
+        // both features run silently in the background, and the operator has no way to ask
+        // "is one of these actually doing anything right now?" without waiting for the next
+        // narration. Two SEPARATE actions/hotkeys (operator feedback, same day: a combined line
+        // that always mentions BOTH features reads as confusing/contradictory when only one is
+        // actually being asked about) -- see WsjtxClient.StationWatch.cs's ReportSmartStartStatus/
+        // ReportStationWatchStatus.
+        SmartStartStatus,
+        StationWatchStatus,
     }
 
     public class HotkeyConfig
@@ -151,6 +160,10 @@ namespace WSJTX_Controller
             // with every default above.
             [HotkeyAction.ToggleStationWatch]     = Keys.Control | Keys.Shift | Keys.W,
             [HotkeyAction.WorkWatchedStationNow]  = Keys.Control | Keys.Shift | Keys.Return,
+            // No default key (operator request, 2026-09-12) -- the operator assigns one under
+            // Options > Hotkeys if wanted, same as OpenRxTxFreqControls above.
+            [HotkeyAction.SmartStartStatus]       = Keys.None,
+            [HotkeyAction.StationWatchStatus]     = Keys.None,
         };
 
         public static readonly Dictionary<HotkeyAction, string> DisplayNames = new Dictionary<HotkeyAction, string>
@@ -208,6 +221,8 @@ namespace WSJTX_Controller
             [HotkeyAction.NavSpotWatch]    = "Focus Spot Watch List",
             [HotkeyAction.ToggleStationWatch]    = "Toggle Station Watch",
             [HotkeyAction.WorkWatchedStationNow] = "Work Watched Station Now",
+            [HotkeyAction.SmartStartStatus]      = "Report Smart Start Status",
+            [HotkeyAction.StationWatchStatus]    = "Report Station Watch Status",
         };
 
         // Actions that may be left unassigned (Keys.None) without triggering a validation error.
@@ -242,6 +257,10 @@ namespace WSJTX_Controller
             // unassign them (spec: "user may leave them unassigned").
             HotkeyAction.ToggleStationWatch,
             HotkeyAction.WorkWatchedStationNow,
+            // Ships with no default key (operator request, 2026-09-12) -- unassigned is expected,
+            // not an error.
+            HotkeyAction.SmartStartStatus,
+            HotkeyAction.StationWatchStatus,
         };
 
         private static readonly HashSet<Keys> ReservedKeys = new HashSet<Keys>

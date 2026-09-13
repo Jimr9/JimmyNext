@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using WsjtxUdpLib.Messages.Out;
 
@@ -85,6 +86,79 @@ namespace WSJTX_Controller
         public bool StationWatchActive => _stationWatch.IsActive;
         public string StationWatchTarget => _stationWatch.TargetCall;
 
+        // On-demand status readout (operator request, 2026-09-12): both Smart Start and Station
+        // Watch run silently -- there is no ongoing UI for either -- so the operator has no way
+        // to ask "is one of these actually doing anything right now?" without waiting for the
+        // next narration (which may be minutes away, or may never come if the target stays
+        // quiet). Two SEPARATE hotkeys/methods (operator feedback, same day: one combined line
+        // reading "Not watching" right after a Smart Start fact read like Station Watch itself
+        // was off/broken, when it simply wasn't the thing being asked about). Wording is pulled
+        // from the SAME Notification event classes + the operator's own configured Template in
+        // Options > Notifications (via NotificationTemplateEngine.Format) rather than a second,
+        // separately-invented copy of the phrase -- if the operator customizes e.g. "Watching
+        // {Target}.", this on-demand report reflects that customization too, and can never drift
+        // from what the live narration actually says for the same fact.
+        private string RenderNotificationPhrase(NotificationEventType type, IReadOnlyDictionary<string, string> tokens)
+        {
+            if (!ctrl.Notifications.Policies.TryGetValue(type, out NotificationPolicy policy)) return "";
+            return NotificationTemplateEngine.Format(policy.Template, tokens);
+        }
+
+        // Shared with HandleSmartStartObservation's SmartStartWaiting narration -- ONE place
+        // builds this phrase, so the on-demand report can never say something different from
+        // what was (or will be) actually spoken for the identical fact.
+        private static string BuildSmartStartWaitingPhrase(string target, string progress) =>
+            $"{target} not heard, {progress}.";
+
+        public bool ReportSmartStartStatus()
+        {
+            string msg;
+            if (!ctrl.smartQsoStartEnabled)
+                // No Notification event models "the feature is off" -- that's a Jimmy setting,
+                // not an on-air fact -- so there is nothing to source this one from.
+                msg = "Smart Start is off.";
+            else if (_smartStart.AwaitingEngagement)
+                msg = RenderNotificationPhrase(NotificationEventType.SmartStartCallStarting,
+                    new SmartStartCallStartingEvent(_smartStart.TargetCall).ToTokens());
+            else if (_smartStart.IsActive)
+            {
+                if (_smartStart.BusyWithOther)
+                {
+                    var busy = new SmartStartTargetBusyEvent(_smartStart.TargetCall, _smartStart.ApparentPeer ?? "");
+                    msg = RenderNotificationPhrase(NotificationEventType.SmartStartTargetBusy, busy.ToTokens());
+                }
+                else if (_smartStart.SilenceCount > 0)
+                {
+                    string progress = $"{_smartStart.SilenceCount} of {_smartStart.SilenceThreshold}";
+                    var waiting = new SmartStartWaitingEvent(_smartStart.TargetCall,
+                        BuildSmartStartWaitingPhrase(_smartStart.TargetCall, progress), progress);
+                    msg = RenderNotificationPhrase(NotificationEventType.SmartStartWaiting, waiting.ToTokens());
+                }
+                else
+                    msg = RenderNotificationPhrase(NotificationEventType.SmartStartArmed,
+                        new SmartStartArmedEvent(_smartStart.TargetCall).ToTokens());
+            }
+            else
+                // Armed-but-idle (enabled, nothing captured yet) is also not an on-air fact --
+                // no Notification event exists for it either.
+                msg = "Smart Start is on, no target.";
+
+            if (string.IsNullOrEmpty(msg)) msg = "Smart Start status unavailable.";
+            StatusView.ShowMessage(msg, false);
+            return true;
+        }
+
+        public bool ReportStationWatchStatus()
+        {
+            string msg = _stationWatch.IsActive
+                ? RenderNotificationPhrase(NotificationEventType.StationWatchStarted,
+                    new StationWatchLifecycleEvent(NotificationEventType.StationWatchStarted, _stationWatch.TargetCall).ToTokens())
+                : "Not watching any station.";
+            if (string.IsNullOrEmpty(msg)) msg = "Station Watch status unavailable.";
+            StatusView.ShowMessage(msg, false);
+            return true;
+        }
+
         // Called once from the constructor.
         private void InitTargetMonitors()
         {
@@ -135,7 +209,8 @@ namespace WSJTX_Controller
             if (_stationWatch.LastUsableDecode == null)
             {
                 Notify?.Publish(new SmartStartWaitingEvent(_stationWatch.TargetCall,
-                    $"Waiting for another decode from {_stationWatch.TargetCall}."));
+                    $"Waiting for another decode from {_stationWatch.TargetCall}.",
+                    armGeneration: _stationWatch.ArmGeneration, stateSeq: _stationWatch.AdvanceStateSeq()));
                 StatusView.ShowMessage($"Waiting for another decode from {_stationWatch.TargetCall}", false);
                 return;
             }
@@ -262,7 +337,7 @@ namespace WSJTX_Controller
             string target = _smartStart.TargetCall;
             DebugOutput($"{Time()} [SMART] {target} addressed us while Smart Start was waiting -- answering now; normal QSO sequencing owns it");
             ClearPendingAutoStart();
-            Notify?.Publish(new SmartStartEngagedEvent(target));
+            Notify?.Publish(new SmartStartEngagedEvent(target, _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
             if (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, target, StringComparison.OrdinalIgnoreCase))
                 StopStationWatch();
             RecordSmartStartHandoffOrigin(target);
@@ -286,7 +361,7 @@ namespace WSJTX_Controller
             {
                 string target = _smartStart.TargetCall;
                 DebugOutput($"{Time()} [SMART] {target} answered our call -- Smart Start done; normal QSO sequencing owns it");
-                Notify?.Publish(new SmartStartEngagedEvent(target));
+                Notify?.Publish(new SmartStartEngagedEvent(target, _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
                 // Decision (2026-09-07): the target has actually engaged us, so the normal QSO
                 // sequencer now owns the contact. A Station Watch the operator set on this SAME
                 // call stops here too, so routine QSO speech takes over cleanly -- matching the
@@ -340,7 +415,7 @@ namespace WSJTX_Controller
             ClearPendingAutoStart();
             _smartStart.ResumeAfterHandoff(target, CurrentBandStr, mode, _directExpectedSessionToken,
                 carriedCallCount, ctrl.smartStartSilencePeriods);
-            Notify?.Publish(new SmartStartYieldedEvent(target));
+            Notify?.Publish(new SmartStartYieldedEvent(target, _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
             DebugOutput($"{Time()} [SMART] {target} moved to another station mid-QSO -- Smart Start resumes ownership (cumulative calls: {carriedCallCount})");
         }
 
@@ -365,7 +440,7 @@ namespace WSJTX_Controller
             HaltAndDisableTx();     // HALT_TX + SET_TX_ENABLED 0
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
-            Notify?.Publish(new SmartStartYieldedEvent(target));
+            Notify?.Publish(new SmartStartYieldedEvent(target, _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
             if (_smartStart.NoteStandbyRoundAndCheckGiveUp(MaxSmartStartStandbyRounds))
                 SmartStartStoodDownBusy(target);
         }
@@ -526,7 +601,7 @@ namespace WSJTX_Controller
                     StatusView.ShowMessage(why, false);
                 else if (check == AutoStartCheck.TargetBusy)
                 {
-                    Notify?.Publish(new SmartStartYieldedEvent(monitor.TargetCall));
+                    Notify?.Publish(new SmartStartYieldedEvent(monitor.TargetCall, monitor.ArmGeneration, monitor.AdvanceStateSeq()));
                     // A "looked ready, revalidated busy" round for the Smart Start monitor --
                     // after enough of these on one target, stop chasing the pileup (below).
                     if (ReferenceEquals(monitor, _smartStart)
@@ -537,7 +612,8 @@ namespace WSJTX_Controller
                     }
                 }
                 else
-                    Notify?.Publish(new SmartStartWaitingEvent(monitor.TargetCall, why));
+                    Notify?.Publish(new SmartStartWaitingEvent(monitor.TargetCall, why,
+                        armGeneration: monitor.ArmGeneration, stateSeq: monitor.AdvanceStateSeq()));
                 // Leave the monitor armed and watching -- a later fresh decode / cleared-busy
                 // state can still start it; it simply did not fire this time.
                 return;
@@ -546,7 +622,7 @@ namespace WSJTX_Controller
             _targetMonitorStartDispatching = true;
             try
             {
-                Notify?.Publish(new SmartStartCallStartingEvent(monitor.TargetCall));
+                Notify?.Publish(new SmartStartCallStartingEvent(monitor.TargetCall, monitor.ArmGeneration, monitor.AdvanceStateSeq()));
                 ReplyTo(monitor.LastUsableDecode);
             }
             finally
@@ -581,7 +657,7 @@ namespace WSJTX_Controller
                 if (obs.Purpose == TargetPurpose.StationWatch)
                     Notify?.Publish(new StationWatchLifecycleEvent(NotificationEventType.StationWatchStarted, obs.Target));
                 else
-                    Notify?.Publish(new SmartStartArmedEvent(obs.Target));
+                    Notify?.Publish(new SmartStartArmedEvent(obs.Target, _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
                 return;
             }
             if (obs.Kind == TargetObservationKind.WatchStopped)
@@ -607,9 +683,33 @@ namespace WSJTX_Controller
                 return;
             }
 
+            // Shared target-activity unification (2026-09-11): every "target working ANOTHER
+            // station" fact (including a bare CQ, which counts as "available") routes through
+            // the SAME per-target gate Smart Start and the ordinary callInProg path use, so at
+            // most one of the three ever narrates a given decode period's fact -- see
+            // TargetActivityTracker.cs's own header. TargetAddressingUs is a different fact
+            // entirely (the peer is US) and stays fully independent, ungated.
+            if (obs.Kind != TargetObservationKind.TargetAddressingUs
+                && !ShouldAnnounceTargetActivity(obs.Target, obs.Peer ?? "", obs.Kind, obs.Value ?? ""))
+                return;
+
             string phrase = BuildActivityPhrase(obs);
             if (string.IsNullOrEmpty(phrase)) return;
             Notify?.Publish(new StationWatchActivityEvent(phrase, obs.Target, obs.Peer, obs.Value, obs.Kind.ToString()));
+        }
+
+        // The ONE gate Smart Start, Station Watch, and the ordinary callInProg path (WsjtxClient.
+        // cs's ProcessDecodeMsg) all submit the identical structured fact through, keyed on target
+        // callsign + decode-period identity -- never on which context observed it. Returns true
+        // exactly when the caller should still publish its OWN (context-selected) wording this
+        // period; false means an identical fact already spoke this period (from any of the three
+        // contexts), or "Repeat unchanged QSO activity each period" is off and nothing changed.
+        private bool ShouldAnnounceTargetActivity(string target, string peer, TargetObservationKind kind, string rawValue)
+        {
+            if (string.IsNullOrEmpty(target)) return false;
+            var fact = new TargetActivityFact(target, peer ?? "", kind, rawValue ?? "");
+            return GetActivityTracker(target).Evaluate(fact, _directLastSlotSeen,
+                ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod) == TargetActivityDecision.Announce;
         }
 
         // Smart Start's own narration -- deliberately a SUBSET of what Station Watch reports:
@@ -630,7 +730,8 @@ namespace WSJTX_Controller
                     // guard). `obs.Value` is "1 of 2" ... "2 of 2" (the operator's own silence
                     // setting -- the final period is now narrated too, operator policy rule 6).
                     Notify?.Publish(new SmartStartWaitingEvent(
-                        obs.Target, $"{obs.Target} not heard, {obs.Value}.", obs.Value));
+                        obs.Target, $"{obs.Target} not heard, {obs.Value}.", obs.Value,
+                        armGeneration: _smartStart.ArmGeneration, stateSeq: _smartStart.AdvanceStateSeq()));
                     return;
                 case TargetObservationKind.SmartStartTargetAvailable:
                     // Operator policy (2026-09-08): no dispatch-sounding "appears available" from
@@ -665,11 +766,13 @@ namespace WSJTX_Controller
                     // (ObserveDecode), where _smartStartSeeding is false, and still announces.
                     if (_smartStartSeeding) return;
                     // Operator policy rule 1: a CQ from the target is the opening. Narrate the
-                    // fact ("N4BP calling CQ.") -- "Calling {Target}." follows at dispatch.
-                    // Shares SmartStartTargetBusy's config row + per-target RepeatSeconds fold,
-                    // so a target that keeps CQing without hearing us is not re-announced every
-                    // period.
-                    Notify?.Publish(SmartStartTargetBusyEvent.Cq(obs.Target));
+                    // fact ("N4BP calling CQ.") -- "Calling {Target}." follows at dispatch. Gated
+                    // through the shared target-activity tracker (2026-09-11) -- see
+                    // ShouldAnnounceTargetActivity's own comment -- so a target that keeps CQing
+                    // without hearing us, or that Station Watch/the ordinary path already
+                    // narrated this period, is not re-announced.
+                    if (!ShouldAnnounceTargetActivity(obs.Target, "", TargetObservationKind.TargetCq, "")) return;
+                    Notify?.Publish(SmartStartTargetBusyEvent.Cq(obs.Target, _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
                     return;
                 case TargetObservationKind.TargetAddressingOther:
                 case TargetObservationKind.TargetReport:
@@ -679,11 +782,15 @@ namespace WSJTX_Controller
                 case TargetObservationKind.Target73:
                 case TargetObservationKind.OtherPartyObserved:
                     // The decoded FT8 fact about what the target is doing -- "N4BP to KZ4MW, -15."
-                    // / "N4BP to KZ4MW, RR73." etc. (no translated state like "finishing").
-                    // Deduped per-peer by the policy's RepeatSeconds so several decodes for the
-                    // SAME peer collapse; a move to a NEW station re-announces.
+                    // / "N4BP to KZ4MW, RR73." etc. (no translated state like "finishing"). Gated
+                    // through the shared target-activity tracker so a peer/report/kind change
+                    // always re-announces, an unchanged fact repeats at most once per applicable
+                    // period (or never, per the operator's setting), and Station Watch / the
+                    // ordinary otherStr path never double up on the identical fact.
+                    if (!ShouldAnnounceTargetActivity(obs.Target, obs.Peer ?? "", obs.Kind, obs.Value ?? "")) return;
                     Notify?.Publish(new SmartStartTargetBusyEvent(
-                        obs.Target, obs.Peer ?? "", SpokenReport(obs.Value)));
+                        obs.Target, obs.Peer ?? "", SpokenReport(obs.Value),
+                        _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
                     return;
             }
         }

@@ -96,6 +96,24 @@ namespace WSJTX_Controller
         public string TargetCall { get; private set; }
         public bool IsActive => TargetCall != null;
 
+        // Notification-joining support (2026-09-11 speech-batching fix). ArmGeneration identifies
+        // ONE continuous armed effort on a target -- bumped only by Start() (a genuinely new
+        // watch), never by ReturnToWaiting()/ResumeAfterHandoff() (both are documented as
+        // continuing the SAME effort). Used so a Smart Start narration event can prove it belongs
+        // to the same logical attempt as another one, not merely the same callsign (the operator
+        // can Stop() and later re-Start() on the identical call, which must NOT be treated as one
+        // continuous attempt for supersession purposes -- see SpeechCoordinator's Posture/
+        // Observation grouping). StateSeq is a separate, purely-additive monotonic counter,
+        // advanced once per SmartStart lifecycle-event PUBLISH (WsjtxClient.StationWatch.cs), that
+        // keeps counting across a ReturnToWaiting()/ResumeAfterHandoff() cycle -- deliberately NOT
+        // reset by them, since a later event in the SAME ArmGeneration (e.g. Waiting after an
+        // earlier Yielded) must compare as newer, and only a monotonic sequence -- not a fixed
+        // "tier" -- can express that a state machine that can legitimately move backward (busy ->
+        // yielded -> waiting -> busy again) still has one unambiguous newest fact at any instant.
+        public int ArmGeneration { get; private set; }
+        private int _stateSeq;
+        public int AdvanceStateSeq() => ++_stateSeq;
+
         // The station the target itself appears to be working right now (from the target's own
         // decoded traffic only), or null (target idle / calling CQ / unknown).
         public string ApparentPeer { get; private set; }
@@ -284,6 +302,7 @@ namespace WSJTX_Controller
         {
             if (string.IsNullOrEmpty(call)) return;
 
+            ArmGeneration++;
             TargetCall = call;
             ApparentPeer = null;
             TargetEvenParity = null;

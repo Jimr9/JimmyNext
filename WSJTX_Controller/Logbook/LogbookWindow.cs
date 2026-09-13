@@ -1442,35 +1442,42 @@ namespace WSJTX_Controller
                 return;
             }
 
-            // Worked is always the basis now -- RuleEngine gates completion on Worked
-            // regardless of Confirmation, so this must match or the summary line could
-            // show a "Complete!" that disagrees with a smaller confirmed count. The
-            // confirmed count is still shown as an informational side-note when this
-            // rule tracks confirmation and it differs from Worked (e.g. some items
-            // worked but not yet confirmed via LoTW/QRZ).
-            string basisLabel = "worked";
-            int basis = result.Worked;
-            bool showConfirmedNote = def.Confirmation != RuleConfirmation.None && result.Confirmed != result.Worked;
+            // Target=All is ALWAYS Worked-based, never overridable (RuleEngine.FinishGrouped's
+            // own comment) -- RuleEngine gates its completion on Worked regardless of
+            // Confirmation, so this must match or the summary line could show a "Complete!"
+            // that disagrees with a smaller confirmed count. Count/Levels honor the
+            // definition's own Basis (defaults to Worked; opt into Confirmed via Basis=
+            // CONFIRMED, e.g. DXCC Honor Roll) -- whichever ISN'T the basis is still shown as
+            // an informational side-note when it differs (e.g. some items worked but not yet
+            // confirmed via LoTW/QRZ, or vice versa for a Confirmed-basis award).
+            bool basisIsConfirmed = def.Target != RuleTargetType.All && def.Basis == RuleBasis.Confirmed;
+            string basisLabel = basisIsConfirmed ? "confirmed" : "worked";
+            int basis      = basisIsConfirmed ? result.Confirmed : result.Worked;
+            int sideValue  = basisIsConfirmed ? result.Worked    : result.Confirmed;
+            string sideLabel = basisIsConfirmed ? "worked" : "confirmed";
+            bool showSideNote = basisIsConfirmed
+                ? result.Worked != result.Confirmed
+                : def.Confirmation != RuleConfirmation.None && result.Confirmed != result.Worked;
+            string sideNote = showSideNote ? $"  ({sideValue} {sideLabel})" : "";
 
             switch (def.Target)
             {
                 case RuleTargetType.All:
-                    string confirmedNote = showConfirmedNote ? $"  ({result.Confirmed} confirmed)" : "";
-                    _awardsProgressLbl.Text = $"{basis} / {result.UniverseSize} {basisLabel}{confirmedNote}" +
+                    _awardsProgressLbl.Text = $"{basis} / {result.UniverseSize} {basisLabel}{sideNote}" +
                         (result.Completed ? "  — Complete!" : "");
                     break;
 
                 case RuleTargetType.Count:
-                    string confirmedNoteCount = showConfirmedNote ? $"  ({result.Confirmed} confirmed)" : "";
-                    _awardsProgressLbl.Text = $"{basis} / {def.Threshold} {basisLabel}{confirmedNoteCount}" +
+                    // result.EffectiveThreshold, not def.Threshold -- a dynamic ThresholdFrom
+                    // award (e.g. Honor Roll) has no meaningful literal Threshold of its own.
+                    _awardsProgressLbl.Text = $"{basis} / {result.EffectiveThreshold} {basisLabel}{sideNote}" +
                         (result.Completed ? "  — Complete!" : "");
                     break;
 
                 case RuleTargetType.Levels:
                     string tierText = result.CurrentTier != null ? $"Current: {result.CurrentTier}" : "No level reached yet";
                     string next = NextLevelText(def, basis);
-                    string confirmedNoteLvl = showConfirmedNote ? $"  ({result.Confirmed} confirmed)" : "";
-                    _awardsProgressLbl.Text = $"{basis} {basisLabel}{confirmedNoteLvl}  —  {tierText}" +
+                    _awardsProgressLbl.Text = $"{basis} {basisLabel}{sideNote}  —  {tierText}" +
                         (next != null ? $"  (next: {next})" : "");
                     break;
             }
@@ -1789,7 +1796,7 @@ namespace WSJTX_Controller
             })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                await RunImport(dlg.FileName, "MANUAL");
+                await RunImport(dlg.FileName);
             }
         }
 
@@ -2003,14 +2010,21 @@ namespace WSJTX_Controller
             _db.LogImportFinish(logId, 0, 0, 0, 0, 0, message);
         }
 
-        private async Task RunImport(string filePath, string source)
+        // Used only by the manual "Import ADIF File" button -- the file's source (QRZ/LOTW/
+        // CLUBLOG/WSJTX/MANUAL) isn't known up front the way it is for the QRZ/LoTW/Club Log
+        // refresh buttons below, which call RunImportFromText directly with their own source
+        // already in hand. AdifImporter.DetectSource infers it from the file itself so a
+        // service's data imported by hand still gets tagged accurately instead of everything
+        // collapsing into "MANUAL".
+        private async Task RunImport(string filePath)
         {
             SetBusy(true);
             SetStatus($"Reading {Path.GetFileName(filePath)}…");
             try
             {
                 string text = await Task.Run(() => File.ReadAllText(filePath)).ConfigureAwait(true);
-                await RunImportFromText(text, source, null);
+                string source = await Task.Run(() => AdifImporter.DetectSource(text, AdifParser.Parse(text))).ConfigureAwait(true);
+                await RunImportFromText(text, source, null, detected: true);
             }
             catch (Exception ex)
             {
@@ -2019,7 +2033,7 @@ namespace WSJTX_Controller
             finally { SetBusy(false); }
         }
 
-        private async Task RunImportFromText(string adifText, string source, string metaKey)
+        private async Task RunImportFromText(string adifText, string source, string metaKey, bool detected = false)
         {
             SetBusy(true);
             int logId = _db.LogImportStart(source);
@@ -2049,7 +2063,8 @@ namespace WSJTX_Controller
                 if (metaKey != null && string.IsNullOrWhiteSpace(result.Errors))
                     _ini?.Write(metaKey, DateTime.UtcNow.ToString("o"));
 
-                SetStatus($"{source} import complete: {result.NewQsos:N0} new, {result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged.");
+                string sourceLabel = detected ? $"Detected source: {source}." : $"{source} import complete:";
+                SetStatus($"{sourceLabel} {result.NewQsos:N0} new, {result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged.");
 
                 if (!string.IsNullOrWhiteSpace(result.Errors))
                 {
@@ -2067,7 +2082,7 @@ namespace WSJTX_Controller
             catch (Exception ex)
             {
                 _db.LogImportFinish(logId, 0, 0, 0, 0, 0, ex.Message);
-                SetStatus($"{source} import error: " + ex.Message);
+                SetStatus($"{(detected ? $"Detected source: {source}." : source)} import error: " + ex.Message);
             }
             finally { SetBusy(false); }
         }

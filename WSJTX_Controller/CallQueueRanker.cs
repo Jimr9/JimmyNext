@@ -65,6 +65,7 @@ namespace WSJTX_Controller
             { WsjtxClient.CallCategory.DXCC_UNCONFIRMED,    0 },
             { WsjtxClient.CallCategory.ZONE_NEEDED,         0 },
             { WsjtxClient.CallCategory.STILL_NEEDED,        0 },
+            { WsjtxClient.CallCategory.STILL_UNCONFIRMED,   0 },
         };
 
         // Categories that Alt+N is allowed to call. DEFAULT is never callable by Alt+N.

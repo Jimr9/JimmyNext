@@ -983,6 +983,26 @@ namespace WSJTX_Controller
                     string oldId = iniFile.Read("stillNeedLiveTagRuleId");
                     if (!string.IsNullOrWhiteSpace(oldId)) activeAwardRuleIds = new HashSet<string> { oldId };
                 }
+
+                // One-time migration: WAS/DXCC/WAZ used to tag unconditionally via a separate
+                // hardcoded HRC-database cache (LoadHrcCache/AwardTagger.IsHrc*), regardless of
+                // what was checked here -- retired in favor of the one generic Rule Definition
+                // engine driving ALL live award tagging (see AwardTagger.DeriveCategory). So
+                // every install (existing and fresh) gets these three auto-checked here ONCE,
+                // preserving the exact tagging behavior they already had. A dedicated flag (not
+                // just "are they currently present") is what makes this genuinely one-time --
+                // from this point on they're ordinary checkboxes the operator can turn off in
+                // Still Need, same as any other award, which the old hardcoded tagging never
+                // allowed; re-adding them on every startup just because they're absent would
+                // silently undo that choice.
+                if (!string.Equals(iniFile.Read("hrcAwardsMigratedToRuleEngine"), "True", StringComparison.OrdinalIgnoreCase))
+                {
+                    bool addedAny = false;
+                    foreach (string id in new[] { "WAS", "DXCC", "WAZ" })
+                        if (activeAwardRuleIds.Add(id)) addedAny = true;
+                    if (addedAny) iniFile.Write("activeAwardRuleIds", FormatActiveAwardRuleIds(activeAwardRuleIds));
+                    iniFile.Write("hrcAwardsMigratedToRuleEngine", "True");
+                }
             }
 
             txMode = mode ? WsjtxClient.TxModes.LISTEN : WsjtxClient.TxModes.CALL_CQ;
@@ -1094,6 +1114,41 @@ namespace WSJTX_Controller
                 iniFile.Write("callingPriorities",
                     FormatCallingPriorities(wsjtxClient.Ranker.callingEnabled));
             }
+            // Same migration, for the same reason, for STILL_UNCONFIRMED (the generalized
+            // WAS_UNCONFIRMED/DXCC_UNCONFIRMED replacement -- see AwardTagger.DeriveCategory).
+            // A saved list from before the HRC/Still-Need unification has WAS_UNCONFIRMED/
+            // DXCC_UNCONFIRMED baked in (those enum values are kept for exactly this reason --
+            // never removed, see CallCategory's own comment), but DeriveCategory never assigns
+            // them any more, so Alt+N would silently lose the ability to call a worked-but-
+            // unconfirmed station unless STILL_UNCONFIRMED takes their place here once.
+            if (!string.IsNullOrWhiteSpace(callingPrioritiesStr)
+                && !wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.STILL_UNCONFIRMED))
+            {
+                wsjtxClient.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);
+                iniFile.Write("callingPriorities",
+                    FormatCallingPriorities(wsjtxClient.Ranker.callingEnabled));
+            }
+            // Cleanup, every load (not one-time): WAS_NEEDED/WAS_UNCONFIRMED/DXCC_UNCONFIRMED/
+            // ZONE_NEEDED are permanently inert now (DeriveCategory never assigns them -- see
+            // CallCategory's own comment; the two migrations just above already preserve their
+            // real live behavior via STILL_NEEDED/STILL_UNCONFIRMED). Leaving them checked in
+            // Row Order's Call Filters list is actively misleading -- confirmed live,
+            // 2026-09-11: an operator unchecked "DXCC Worked, Unconfirmed" expecting it to stop
+            // DXCC Unconf tags, and nothing changed, because that box has done nothing since
+            // the unification landed; the real switch is "Still Need (worked, unconfirmed)" a
+            // few rows below it in the same list. Stripped every load, not just once -- there
+            // is no scenario where re-adding one of these would restore real function, so
+            // there's nothing a one-time flag would need to protect against re-doing.
+            var deadCallingCategories = new[]
+            {
+                WsjtxClient.CallCategory.WAS_NEEDED, WsjtxClient.CallCategory.WAS_UNCONFIRMED,
+                WsjtxClient.CallCategory.DXCC_UNCONFIRMED, WsjtxClient.CallCategory.ZONE_NEEDED,
+            };
+            bool removedDeadCalling = false;
+            foreach (var deadCat in deadCallingCategories)
+                if (wsjtxClient.Ranker.callingEnabled.Remove(deadCat)) removedDeadCalling = true;
+            if (removedDeadCalling)
+                iniFile.Write("callingPriorities", FormatCallingPriorities(wsjtxClient.Ranker.callingEnabled));
             wsjtxClient.ApplyWantedCalls(ParseWantedCalls(wantedCallsStr));
             wsjtxClient.ApplySpotWatchCalls(ParseSpotWatchCalls(spotWatchCallsStr));
 
@@ -1133,7 +1188,6 @@ namespace WSJTX_Controller
             wsjtxClient.lookupManager     = lookupManager;
             wsjtxClient.lotwBoostEnabled  = lotwBoostEnabled;
             BackfillMissingStates();
-            LoadHrcCache();
             // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
             // SafeBeginInvoke (see its own comment) instead of a raw BeginInvoke -- an in-flight
             // auto-lookup that completes after this form starts closing must not throw
@@ -2641,6 +2695,16 @@ namespace WSJTX_Controller
                 return wsjtxClient.ReportClockStatus();
             }
 
+            if (keyData == hotkeyConfig[HotkeyAction.SmartStartStatus] && hotkeyConfig[HotkeyAction.SmartStartStatus] != Keys.None)
+            {
+                return wsjtxClient.ReportSmartStartStatus();
+            }
+
+            if (keyData == hotkeyConfig[HotkeyAction.StationWatchStatus] && hotkeyConfig[HotkeyAction.StationWatchStatus] != Keys.None)
+            {
+                return wsjtxClient.ReportStationWatchStatus();
+            }
+
             if (keyData == hotkeyConfig[HotkeyAction.TuneMode])
             {
                 return wsjtxClient.ToggleTuningProcess();
@@ -2818,10 +2882,11 @@ namespace WSJTX_Controller
             this.Size = this.MinimumSize;   // natural size for the currently visible lists
             ApplyAdvancedLayout();
 
-            statusText.Text = "Window size and position reset to default.";
+            // 2026-09-11 (notification-joining fix): routed through CoordinatedSpeak, the one
+            // shared nudge primitive, instead of its own raw write+nudge -- see ShowMsg's own
+            // comment for why. The operator-requested focus move stays exactly as before.
             if (!statusText.Focused) statusText.Focus();
-            // Force NVDA/JAWS to re-announce the new status text (see RenderStatus).
-            BeginInvoke((Action)(() => SendKeys.Send("{UP}")));
+            BeginInvoke((Action)(() => CoordinatedSpeak("Window size and position reset to default.")));
         }
 
         // Natural (unstretched) bottom Y of the advanced lists block for however many of
@@ -2957,8 +3022,8 @@ namespace WSJTX_Controller
         // but catches a fresh gap automatically if one ever reappears from a source this
         // doesn't already cover. Offline only (FCC ULS/cached QRZ data via lookupManager.Build,
         // then grid.dat) -- never a live query. Must run after lookupManager is initialized and
-        // before LoadHrcCache()/RefreshStillNeedCache() so the first cache build already
-        // reflects any corrected states.
+        // before RefreshStillNeedCache() so the first cache build already reflects any
+        // corrected states.
         private void BackfillMissingStates()
         {
             try
@@ -2973,46 +3038,20 @@ namespace WSJTX_Controller
             catch { /* best-effort repair -- must never block startup */ }
         }
 
-        // Loads the HRC database filter sets into WsjtxClient's in-memory caches.
-        // Checks the whole log regardless of band -- WAS/DXCC/WAZ don't require a
-        // state/entity/zone to be confirmed on any particular band, so a station
-        // confirmed on 20m must not show as "needed" again just because the radio
-        // is now on 10m. (Previously this always filtered to the current band,
-        // which meant changing bands could wrongly resurrect nearly everything as
-        // "needed" -- see JimmyTests.RuleEngineBandIndependenceTests for the
-        // regression guard.) Safe to call any time; silently skips if the DB is
-        // unavailable or empty.
-        public void LoadHrcCache()
-        {
-            if (wsjtxClient == null) return;
-            try
-            {
-                using (var db = new LogbookDb())
-                {
-                    HashSet<string> neededStates;
-                    HashSet<string> unconfirmedStates;
-                    HashSet<int>    unconfirmedDxcc;
-                    HashSet<int>    neededZones;
-                    db.LoadHrcCache(out neededStates, out unconfirmedStates, out unconfirmedDxcc, out neededZones);
-                    wsjtxClient.hrcNeededStates      = neededStates;
-                    wsjtxClient.hrcUnconfirmedStates = unconfirmedStates;
-                    wsjtxClient.hrcUnconfirmedDxcc   = unconfirmedDxcc;
-                    wsjtxClient.hrcNeededZones       = neededZones;
-                }
-            }
-            catch { }
-        }
-
         // Rebuilds WsjtxClient's live-tag cache from every Rule Definition currently checked
-        // in activeAwardRuleIds. Several awards can be tracked at once; each gets its own entry
-        // in wsjtxClient.activeAwardTags. Only evaluates the RuleEngine here, at selection/refresh
+        // in activeAwardRuleIds -- the ONE engine behind every live award tag now (WAS/DXCC/WAZ
+        // included; see Controller's activeAwardRuleIds migration and AwardTagger.DeriveCategory,
+        // which retired the old separate hardcoded HRC-database cache). Several awards can be
+        // tracked at once; each gets its own entry in wsjtxClient.activeAwardTags, carrying both
+        // a Needed set (Target=All only) and an Unconfirmed set (any Target type -- see
+        // RuleResult.WorkedUnconfirmed). Only evaluates the RuleEngine here, at selection/refresh
         // time; decode-time matching is a plain HashSet lookup per active award. Safe to call any
-        // time. Rules that can't be found, fail RuleEngine.SupportsLiveTag(def), or have no fixed
-        // still-needed checklist (e.g. a Target=COUNT/LEVELS award) are simply left out.
+        // time. Rules that can't be found, fail RuleEngine.SupportsLiveTag(def), or whose
+        // universe/limitTo failed to resolve are simply left out.
         //
         // Only scoped to the current band when the award definition itself restricts to specific
-        // bands ([Match] Bands=) -- mirrors LoadHrcCache()'s per-band semantics for that case. Most
-        // shipped awards (Colonies13, DXCC, WAS, WAZ, ...) don't set Bands=, since they all count a
+        // bands ([Match] Bands=). Most shipped awards (Colonies13, DXCC, WAS, WAZ, ...) don't set
+        // Bands=, since they all count a
         // station worked on any band -- for those, evaluating against the current band only was a
         // bug: work a station on 20m, switch to 15m, and it would wrongly show as still needed
         // again. Matches the Still Need tab's own "All Bands" default for the same reason.
@@ -3035,14 +3074,25 @@ namespace WSJTX_Controller
                 {
                     string band = def.Bands.Count > 0 ? wsjtxClient.CurrentBandStr : null;
                     var result = RuleEngine.EvaluateBand(def, band);
-                    if (result.StillNeeded == null) continue;   // no fixed checklist to tag against
+                    if (result.EvaluationError != null) continue;   // e.g. universe unresolvable
 
+                    // StillNeeded (Target=All only) drives "Needed"; WorkedUnconfirmed (any
+                    // Target type -- see its own comment on RuleResult) drives "Unconf". A
+                    // Target=Count award like DXCC has no Set, only an UnconfirmedSet, and that
+                    // alone is still worth an entry here -- this used to require StillNeeded !=
+                    // null, which is exactly why DXCC could never retire the old hardcoded
+                    // DXCC_UNCONFIRMED HRC category (see RuleEngineCountTargetStillNeededTests).
                     tags[ruleId] = new WsjtxClient.ActiveAwardTag
                     {
-                        RuleId   = ruleId,
-                        RuleName = def.Name,
-                        GroupBy  = def.GroupBy,
-                        Set      = new HashSet<string>(result.StillNeeded, StringComparer.OrdinalIgnoreCase),
+                        RuleId         = ruleId,
+                        RuleName       = def.Name,
+                        GroupBy        = def.GroupBy,
+                        Set            = result.StillNeeded != null
+                            ? new HashSet<string>(result.StillNeeded, StringComparer.OrdinalIgnoreCase)
+                            : new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                        UnconfirmedSet = result.WorkedUnconfirmed != null
+                            ? new HashSet<string>(result.WorkedUnconfirmed, StringComparer.OrdinalIgnoreCase)
+                            : new HashSet<string>(StringComparer.OrdinalIgnoreCase),
                     };
                 }
                 catch { /* skip this rule, keep the others */ }
@@ -3074,7 +3124,7 @@ namespace WSJTX_Controller
                     // SafeBeginInvoke -- an import running in the child LogbookWindow can finish
                     // after this parent form starts closing.
                     onImportComplete: () => SafeBeginInvoke(() =>
-                        { PruneStaleActiveAwardRuleIds(); LoadHrcCache(); RefreshStillNeedCache(); }),
+                        { PruneStaleActiveAwardRuleIds(); RefreshStillNeedCache(); }),
                     initialActiveAwardRuleIds: activeAwardRuleIds,
                     onActiveAwardRuleIdsChanged: (ruleId, isTracked) =>
                     {
@@ -3303,47 +3353,25 @@ namespace WSJTX_Controller
             // be audible; hotkeys, Escape, and invalid-key rejection must stay silent. `sound`
             // is kept as a parameter (unused now) so every existing call site stays valid.
 
-            statusText.Text = text;
-            statusText.SelectionStart = 0;
-            statusText.SelectionLength = 0;
-            // Force NVDA/JAWS to announce this immediately, same guard as RenderStatus --
-            // ShowStatus() will naturally overwrite this text on the next status rebuild
-            // (see ToggleTxFirst for the same accepted pattern), which is fine: by then
-            // the screen reader has already started speaking this message.
-            // Hardened 2026-08-19 (release-blocker follow-up): announced now also requires real
-            // OS-level foreground state (GetForegroundWindow() == this.Handle), not just the two
-            // WinForms-internal tracking properties. Root-caused live: on a genuine first-run
-            // launch, Controller.ApplyEngineMode()'s new config-check message (see its own
-            // comment) fires synchronously from inside Form_Load, before the window has
-            // necessarily become the REAL OS foreground window -- confirmed via live
-            // instrumentation that statusText.Focused/Form.ActiveForm and the real
-            // GetForegroundWindow() result can disagree at that exact point (this specific
-            // session's own test happened to read the WinForms-internal pair as already false,
-            // skipping SendKeys that time, but nothing guaranteed that on every machine/timing --
-            // this closes the gap structurally rather than relying on a race). See Form_Load's
-            // own end-of-method comment (the ORIGINAL, pre-existing "SendKeys fired too early
-            // leaves keyboard input going nowhere" finding, 2026-07-10) for the exact failure
-            // class this guards against: SendKeys.Send's journal-hook mechanism targets whatever
-            // window Windows currently considers the real foreground, and firing it while that's
-            // NOT this window can leave real keyboard input going to the wrong place for the rest
-            // of the session. This is the single choke point every ShowMsg caller shares, so
-            // hardening it here protects all of them, not just the one call site that surfaced it.
-            bool announced = statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
-            // [ANNOUNCE] tag: enable the UDP diag log (Options/Setup) to get a millisecond-
-            // timestamped record of every real screen-reader announcement -- added 2026-08-07
-            // to pin down live reports of announcements landing partway into the next period,
-            // which is very hard to time by ear alone. announced=False means the text was
-            // updated but JAWS/NVDA was never actually nudged (statusText wasn't focused).
-            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}] '{text}'");
-            if (announced)
-                SendKeys.Send("{UP}");
+            // 2026-09-11 (notification-joining fix, inventory finding): this used to carry its
+            // OWN independent statusText write + foreground check + SendKeys.Send -- a second,
+            // completely uncoordinated nudge path that could interleave with SpeechCoordinator's
+            // own Now-batch nudges (an operator pressing a hotkey at the exact instant a Smart
+            // Start narration fires could reproduce the very swallowing bug this whole feature
+            // fixes). Now routed through CoordinatedSpeak, the SAME one primitive every other
+            // spoken status update funnels through -- this is a direct, one-shot operator-
+            // feedback message, so it is the Immediate lane's DEFER case (speaks now, unmodified,
+            // never touches a pending Now-batch; see SpeechCoordinator's own header comment).
+            CoordinatedSpeak(text);
 
-            // 2.0.58 Notification History: this is the single final seam every direct operator
-            // message AND every delivered NotificationCenter notification funnels through
-            // (StatusViewNotificationDelivery.Announce -> ShowMessage -> here). A
-            // policy-suppressed notification never reaches this point, so it is correctly not
-            // recorded. _activeHotkeyOrigin tags a message produced synchronously inside a
-            // hotkey handler; it is null otherwise.
+            // 2.0.58 Notification History: recorded HERE, unconditionally, for every direct
+            // operator-feedback message -- independent of whether it was actually spoken (that is
+            // CoordinatedSpeak's own, separate decision). A delivered NotificationCenter
+            // notification does NOT come through here; it calls CoordinatedSpeak directly via
+            // StatusViewNotificationDelivery.Announce and records its own History entry earlier,
+            // in NotificationCenter.Deliver (before the coordinator even sees it) -- see that
+            // method's own comment. _activeHotkeyOrigin tags a message produced synchronously
+            // inside a hotkey handler; it is null otherwise.
             NotificationHistory?.Record(text, _activeHotkeyOrigin);
         }
 
@@ -3512,9 +3540,19 @@ namespace WSJTX_Controller
         // RenderStatus path -- they are accessibility-load-bearing, not cosmetic), then
         // SendKeys("{UP}"). Records NO history. Does NOT raise the off-focus UIA alert -- that
         // stays UiaAlertNotificationDelivery's job, so it decorates this exactly as before.
-        public void CoordinatedSpeak(string text)
+        public void CoordinatedSpeak(string text, bool isDeliberateRepeat = false)
         {
-            if (text == null) return;
+            // 2026-09-11 root-cause fix (traced live): a genuinely blank string is just as
+            // pointless to nudge as null -- there is no legitimate case where speaking silence
+            // helps the operator. Live evidence: ShowStatus rendered a wordless idle summary
+            // ("status:''") at one point in a session; 95 seconds later, selecting a call in the
+            // list triggered MoveFocusToStatusIfEnabled's "announce whatever is currently
+            // displayed" nudge, which found that same blank text still sitting in statusText and
+            // fired SendKeys into it anyway -- an [ANNOUNCE announced=True] '' entry with nothing
+            // for the screen reader to actually say. RenderStatusVisible's own deliberate
+            // "clear a stale summary" writes still go straight to statusText, unaffected -- this
+            // guard is scoped to the ONE nudge seam every spoken path shares.
+            if (string.IsNullOrEmpty(text)) return;
             if (this.statusText.Text != text)
             {
                 this.statusText.Text = text;
@@ -3532,10 +3570,14 @@ namespace WSJTX_Controller
             // sending EN34." text, heard as a doubled/garbled announcement). Now that both the
             // routine-status and typed-notification paths land here, this one shared window also
             // stops a notification and an identical routine line from running into each other.
-            bool nearImmediateRepeat = foreground && text == _lastAnnouncedStatusText
-                && (DateTime.UtcNow - _lastAnnouncedStatusTime) < RepeatStatusAnnounceSuppressWindow;
+            // isDeliberateRepeat bypasses ONLY this gate -- see IJimmyStatusView.CoordinatedSpeak's
+            // own comment. The check itself is factored into IsNearImmediateRepeat (a pure,
+            // side-effect-free predicate) so it is unit-testable without any real OS focus state.
+            bool nearImmediateRepeat = foreground &&
+                IsNearImmediateRepeat(text, _lastAnnouncedStatusText, _lastAnnouncedStatusTime,
+                    DateTime.UtcNow, RepeatStatusAnnounceSuppressWindow, isDeliberateRepeat);
             bool announced = foreground && !nearImmediateRepeat;
-            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}]{(nearImmediateRepeat ? " (repeat suppressed)" : "")} '{text}'");
+            wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}]{(nearImmediateRepeat ? " (repeat suppressed)" : "")}{(isDeliberateRepeat ? " (deliberate repeat)" : "")} '{text}'");
             if (announced)
             {
                 SendKeys.Send("{UP}");  //triggers screen reader
@@ -3543,6 +3585,17 @@ namespace WSJTX_Controller
                 _lastAnnouncedStatusTime = DateTime.UtcNow;
             }
         }
+
+        // Pure predicate behind CoordinatedSpeak's near-duplicate gate -- factored out so it can
+        // be unit-tested directly, since real OS foreground/focus state (and therefore SendKeys
+        // actually firing) cannot be driven headlessly in an automated test. isDeliberateRepeat
+        // (2026-09-11) always returns false (never a "repeat", so never suppressed) -- this is
+        // the ONE thing that lets NavStatus/MoveFocusToStatusIfEnabled announce twice on two
+        // presses of the same text; every ordinary automatic caller passes isDeliberateRepeat:
+        // false (CoordinatedSpeak's default), so this bypass cannot be reached by accident.
+        internal static bool IsNearImmediateRepeat(string candidateText, string lastAnnouncedText,
+            DateTime lastAnnouncedUtc, DateTime nowUtc, TimeSpan suppressWindow, bool isDeliberateRepeat) =>
+            !isDeliberateRepeat && candidateText == lastAnnouncedText && (nowUtc - lastAnnouncedUtc) < suppressWindow;
 
         public void ShowMessage(string text, bool sound) => ShowMsg(text, sound);
 
@@ -4745,8 +4798,13 @@ namespace WSJTX_Controller
                 {
                     statusText.Focus();
                 }
-                // Force NVDA/JAWS to (re-)announce the status text on demand (see RenderStatus).
-                BeginInvoke((Action)(() => SendKeys.Send("{UP}")));
+                // 2026-09-11 (notification-joining fix): routed through CoordinatedSpeak instead
+                // of a raw SendKeys -- see ShowMsg's own comment. The operator explicitly asked to
+                // (re-)hear the current status text, so this re-announces whatever is already
+                // displayed there. isDeliberateRepeat:true -- pressing this hotkey twice in a row
+                // on unchanged text must announce twice, not be silently swallowed by the ordinary
+                // 3-second near-duplicate gate.
+                BeginInvoke((Action)(() => CoordinatedSpeak(statusText.Text, isDeliberateRepeat: true)));
             }
 
             //past this point all keys cause tuning to halt
@@ -5205,6 +5263,7 @@ namespace WSJTX_Controller
             WsjtxClient.CallCategory.DXCC_UNCONFIRMED,
             WsjtxClient.CallCategory.ZONE_NEEDED,
             WsjtxClient.CallCategory.STILL_NEEDED,
+            WsjtxClient.CallCategory.STILL_UNCONFIRMED,
             WsjtxClient.CallCategory.DEFAULT,
         };
 
@@ -5598,8 +5657,21 @@ namespace WSJTX_Controller
             // Defence in depth for every caller: never let the injected Up combine with a
             // still-held modifier into a different command. If any modifier is currently down
             // (a chorded hotkey the operator has not released yet), skip the read nudge.
+            //
+            // 2026-09-11 correction (KF0VZS live-radio audit): every call site of this method
+            // (callListBox_KeyDown, AdvTx1/Tx2/RawListBox_KeyDown -- traced exhaustively) is
+            // AUTOMATIC FOCUS PLACEMENT performed as part of selecting/starting work on a
+            // station, NOT an explicit "repeat/read current status" request the way the NavStatus
+            // hotkey is. isDeliberateRepeat WAS being passed true here, which bypassed the
+            // near-duplicate gate and force-announced WHATEVER text happened to be sitting in
+            // statusText at that exact synchronous instant -- live evidence: at 3:20:23 this fired
+            // 95ms before the real Smart Start narration for the very same selection had a chance
+            // to land, forcing a stale, unrelated "1 Worked All States - 80m Needed." repeat right
+            // before "Waiting to work KF0VZS...". Reverted to the ordinary (default false) path:
+            // if the status text has not genuinely changed yet, nothing extra is said; the real
+            // narration still announces normally, on its own, once it arrives.
             if (sendReadNudge && (Control.ModifierKeys & (Keys.Control | Keys.Shift | Keys.Alt)) == Keys.None)
-                BeginInvoke((Action)(() => SendKeys.Send("{UP}")));
+                BeginInvoke((Action)(() => CoordinatedSpeak(statusText.Text)));
         }
 
         private void statusText_TextChanged(object sender, EventArgs e)

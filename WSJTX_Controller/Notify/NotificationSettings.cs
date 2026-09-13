@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace WSJTX_Controller
 {
@@ -51,6 +52,80 @@ namespace WSJTX_Controller
         // exactly as before.
         public bool ClearReceiveCycleSummaryWhenEmpty { get; set; } = false;
 
+        // "Repeat unchanged QSO activity each period" (2026-09-11 target-activity unification).
+        // Governs ONLY the shared "target working peer" fact's repeat cadence across Smart Start,
+        // Station Watch, and the ordinary callInProg path (WsjtxClient.ShouldAnnounceTargetActivity
+        // / TargetActivityTracker) -- never lifecycle announcements, ordinary QSO progress,
+        // logging confirmations, alerts, errors, or unrelated routine status.
+        //   true  (default): the still-current fact is announced once per applicable decode
+        //          period even when unchanged -- matches otherStr's own long-standing periodic
+        //          behavior (it was never suppressed before this unification existed), now
+        //          shared across all three contexts instead of duplicated between them.
+        //   false: only a genuine state change announces; an unchanged fact stays silent.
+        // Read live at each decision point (no snapshot, no restart -- same as
+        // ClearReceiveCycleSummaryWhenEmpty above).
+        public bool RepeatUnchangedTargetActivityEachPeriod { get; set; } = true;
+
+        // Notification-joining support (2026-09-11): the order in which the joinable categories
+        // (NotificationCenter.WatchEventTypes, plus AwardsNeeded and the RoutineStatusLine
+        // pseudo-category) compose into one utterance when more than one lands in the same
+        // reconciled set -- see SpeechCoordinator.UpdateJoinOrder / NotificationJoinOrderDlg.
+        // Defaults to NotificationDefaults.DefaultJoinOrder verbatim; LoadFromIni migrates a saved
+        // list through the shared OrderedListMigration.Merge (same algorithm as
+        // callWaitingRowOrder/rawDecodeRowOrder/spotWatchRowOrder) so an operator's own reordering
+        // is preserved across a release that adds a new joinable category.
+        public List<NotificationEventType> NotificationJoinOrder { get; set; } =
+            new List<NotificationEventType>(NotificationDefaults.DefaultJoinOrder);
+
+        // Notification-joining timing (2026-09-11 semantic-boundary correction). Hidden,
+        // INI-only, no Options UI -- for field tuning while the 75/500/150 starting points
+        // (proposed after the KF0VZS live-radio audit showed the ORIGINAL 40/120/150 was too
+        // narrow: a real busy/yield/not-heard cluster spanned 232ms) are validated against more
+        // real sessions. Scoped EXCLUSIVELY to SpeechCoordinator's Now-batch composition -- no
+        // other timing in the app reads these. Read once at startup (WsjtxClient.cs) and handed
+        // to SpeechCoordinator.UpdateJoinTiming(); there is no live-reload path, so a changed INI
+        // value takes effect only after Jimmy Next is restarted. LoadFromIni validates each value
+        // against its own safe range and falls back to the code default for a missing, blank,
+        // unparseable, or out-of-range value -- never a thrown exception, matching every other
+        // setting in this class.
+        //   notificationJoinQuietMs -- debounce: a new joinable item resets this short timer;
+        //     exceeded only when nothing new has arrived in a while.
+        //   notificationJoinMaxMs -- hard ceiling from the batch's first item; also now the pure
+        //     SAFETY FALLBACK behind the new decode-pass-complete semantic signal (see
+        //     WsjtxClient.Direct.cs's DirectApplyDecodes) -- it should only ever fire for content
+        //     NOT produced during a decode pass (an operator-initiated Smart Start capture) or if
+        //     that signal is ever delayed/skipped, not as the routine way one decode pass's
+        //     narration gets divided into two utterances.
+        //   notificationJoinGapMs -- minimum spacing a SCHEDULED batch flush must respect since
+        //     the last utterance of any kind before it actually speaks.
+        public int NotificationJoinQuietMs { get; set; } = SpeechCoordinator.DefaultQuietPeriodMs;
+        public int NotificationJoinMaxMs { get; set; } = SpeechCoordinator.DefaultMaxBatchWindowMs;
+        public int NotificationJoinGapMs { get; set; } = SpeechCoordinator.DefaultMinSequentialGapMs;
+
+        // Safe min/max validation range for each of the three settings above -- an INI value
+        // outside its range is treated exactly like an unparseable one (falls back to default).
+        public const int MinJoinQuietMs = 10, MaxJoinQuietMs = 500;
+        public const int MinJoinMaxMs = 100, MaxJoinMaxMs = 5000;
+        public const int MinJoinGapMs = 0, MaxJoinGapMs = 2000;
+
+        // Returns "default" or "ini" for each value, purely for the startup diagnostic line
+        // (WsjtxClient.cs logs "[NOTIFY-JOIN] quietMs=.. maxMs=.. gapMs=.. (source: ..)") -- set
+        // by LoadFromIni, read-only elsewhere.
+        public string NotificationJoinQuietMsSource { get; private set; } = "default";
+        public string NotificationJoinMaxMsSource { get; private set; } = "default";
+        public string NotificationJoinGapMsSource { get; private set; } = "default";
+
+        private static int ReadValidatedInt(IniFile ini, string key, int defaultValue, int min, int max, out string source)
+        {
+            source = "default";
+            string raw = ini.Read(key);
+            if (string.IsNullOrWhiteSpace(raw)) return defaultValue;
+            if (!int.TryParse(raw, out int value)) return defaultValue;
+            if (value < min || value > max) return defaultValue;
+            source = "ini";
+            return value;
+        }
+
         private static Dictionary<NotificationEventType, NotificationPolicy> ClonePolicies(
             Dictionary<NotificationEventType, NotificationPolicy> source)
         {
@@ -78,7 +153,20 @@ namespace WSJTX_Controller
                     policy.Priority = priority;
 
                 if (int.TryParse(ini.Read($"notifyRepeatSeconds_{type}"), out int repeatSeconds) && repeatSeconds >= 0)
-                    policy.RepeatSeconds = repeatSeconds;
+                {
+                    // 2026-09-11 target-activity-unification migration: SmartStartTargetBusy's own
+                    // wall-clock RepeatSeconds=30 fold is superseded by the shared
+                    // TargetActivityTracker's period-based repeat gate (WsjtxClient's
+                    // ShouldAnnounceTargetActivity) -- a saved "30" is every profile's shipped
+                    // 2.0.67-2.0.71 default, unconditionally written by every prior SaveToIni, not
+                    // necessarily a deliberate operator choice. Treated as "unedited" -- dropped so
+                    // the new code default (0, i.e. the tracker alone decides) takes over. An
+                    // operator who deliberately chose exactly 30 gets the acceptable false-positive
+                    // (RepeatSeconds=0 does not re-enable the old wall-clock behaviour either way,
+                    // since the tracker's own gate already replaces it).
+                    bool isPreUnificationDefault = type == NotificationEventType.SmartStartTargetBusy && repeatSeconds == 30;
+                    if (!isPreUnificationDefault) policy.RepeatSeconds = repeatSeconds;
+                }
 
                 if (int.TryParse(ini.Read($"notifyThrottleMs_{type}"), out int throttleMs) && throttleMs >= 0)
                     policy.ThrottleMilliseconds = throttleMs;
@@ -210,7 +298,21 @@ namespace WSJTX_Controller
                 // 2026-09-09: the per-notification status-area delivery choice. Missing /
                 // unparseable -> the code default (Normal), so a pre-2026-09-09 INI is unchanged.
                 if (Enum.TryParse(ini.Read($"notifyStatusDelivery_{type}"), out NotificationStatusDelivery statusDelivery))
-                    policy.StatusDelivery = statusDelivery;
+                {
+                    // 2026-09-11 target-activity-unification migration: SmartStartTargetBusy and
+                    // StationWatchActivity move to LatestOnly (an older still-pending "unchanged
+                    // repeat" is superseded by a newer period's repeat, and a genuine state change
+                    // always supersedes a stale pending one -- see the shared TargetActivityTracker
+                    // writeup). A saved "Normal" for these two types specifically is every
+                    // profile's shipped default before this change, not necessarily a deliberate
+                    // choice -- treated as "unedited", dropped so the new default takes over. Any
+                    // OTHER saved value (an operator who deliberately chose SendImmediately, or
+                    // LatestOnly already) is left untouched.
+                    bool isPreUnificationDefault =
+                        (type == NotificationEventType.SmartStartTargetBusy || type == NotificationEventType.StationWatchActivity)
+                        && statusDelivery == NotificationStatusDelivery.Normal;
+                    if (!isPreUnificationDefault) policy.StatusDelivery = statusDelivery;
+                }
 
                 Policies[type] = policy;
             }
@@ -229,6 +331,36 @@ namespace WSJTX_Controller
 
             // Default false (missing key) -- an existing profile's status area is unchanged.
             ClearReceiveCycleSummaryWhenEmpty = ini.Read("notifyClearReceiveCycleSummaryWhenEmpty") == "True";
+
+            // Default true (missing key) -- matches otherStr's own pre-existing periodic-repeat
+            // behavior, so an upgrading profile with no saved key hears no change.
+            RepeatUnchangedTargetActivityEachPeriod =
+                !ini.KeyExists("notifyRepeatUnchangedTargetActivityEachPeriod")
+                || ini.Read("notifyRepeatUnchangedTargetActivityEachPeriod") == "True";
+
+            // Notification join order (2026-09-11): a missing/empty key merges to
+            // DefaultJoinOrder verbatim (OrderedListMigration.Merge's own empty-saved-list rule).
+            string joinOrderRaw = ini.Read("notificationJoinOrder");
+            var savedJoinOrder = new List<NotificationEventType>();
+            if (!string.IsNullOrWhiteSpace(joinOrderRaw))
+                foreach (var tok in joinOrderRaw.Split(','))
+                    if (Enum.TryParse(tok.Trim(), out NotificationEventType t)) savedJoinOrder.Add(t);
+            NotificationJoinOrder = OrderedListMigration.Merge(
+                savedJoinOrder,
+                NotificationCenter.WatchEventTypes
+                    .Concat(new[] { NotificationEventType.AwardsNeeded, NotificationEventType.RoutineStatusLine })
+                    .ToList(),
+                NotificationDefaults.DefaultJoinOrder);
+
+            NotificationJoinQuietMs = ReadValidatedInt(ini, "notificationJoinQuietMs",
+                SpeechCoordinator.DefaultQuietPeriodMs, MinJoinQuietMs, MaxJoinQuietMs, out var quietSrc);
+            NotificationJoinQuietMsSource = quietSrc;
+            NotificationJoinMaxMs = ReadValidatedInt(ini, "notificationJoinMaxMs",
+                SpeechCoordinator.DefaultMaxBatchWindowMs, MinJoinMaxMs, MaxJoinMaxMs, out var maxSrc);
+            NotificationJoinMaxMsSource = maxSrc;
+            NotificationJoinGapMs = ReadValidatedInt(ini, "notificationJoinGapMs",
+                SpeechCoordinator.DefaultMinSequentialGapMs, MinJoinGapMs, MaxJoinGapMs, out var gapSrc);
+            NotificationJoinGapMsSource = gapSrc;
         }
 
         public void SaveToIni(IniFile ini)
@@ -262,6 +394,8 @@ namespace WSJTX_Controller
             ini.Write("notifyReceiveSideIdScope", ReceiveSideIdScope.ToString());
             ini.Write("notifyReceiveCountScope", ReceiveCountScope.ToString());
             ini.Write("notifyClearReceiveCycleSummaryWhenEmpty", ClearReceiveCycleSummaryWhenEmpty.ToString());
+            ini.Write("notifyRepeatUnchangedTargetActivityEachPeriod", RepeatUnchangedTargetActivityEachPeriod.ToString());
+            ini.Write("notificationJoinOrder", string.Join(",", NotificationJoinOrder));
         }
     }
 }

@@ -39,14 +39,31 @@ namespace WSJTX_Controller
         // its own history in Controller.RenderStatusVisible.) Null in tests that don't care.
         private readonly Action<string> _recordHistory;
 
+        // scheduler/clock (2026-09-11): default to the real, fully-working production
+        // implementations when omitted -- NOT a no-op/synchronous stand-in -- so an existing or
+        // future caller that does not pass them explicitly still gets real batching, never a
+        // silently-disabled version of it. Production wiring (WsjtxClient.cs) passes them
+        // explicitly anyway, for clarity and so it can own their lifetime.
         public NotificationCenter(NotificationSettings settings, INotificationDelivery delivery,
-            Action<string> recordHistory = null)
+            Action<string> recordHistory = null, INowBatchScheduler scheduler = null, IMonotonicClock clock = null,
+            Action<string> logDiagnostic = null)
         {
             _settings = settings;
             _delivery = delivery;
             _recordHistory = recordHistory;
-            _coordinator = new SpeechCoordinator((text, cue) => _delivery.Announce(text, cue));
+            _coordinator = new SpeechCoordinator((text, cue) => _delivery.Announce(text, cue),
+                scheduler ?? new WinFormsNowBatchScheduler(), clock ?? new SystemMonotonicClock(), logDiagnostic);
+            _coordinator.UpdateJoinOrder(
+                (System.Collections.Generic.IReadOnlyList<NotificationEventType>)settings?.NotificationJoinOrder
+                    ?? NotificationDefaults.DefaultJoinOrder);
+            if (settings != null)
+                _coordinator.UpdateJoinTiming(settings.NotificationJoinQuietMs, settings.NotificationJoinMaxMs, settings.NotificationJoinGapMs);
         }
+
+        // Options > Notifications > "Notification order..." calls this after the operator saves a
+        // new order, so the change takes effect immediately without restarting Jimmy Next.
+        public void UpdateJoinOrder(System.Collections.Generic.IReadOnlyList<NotificationEventType> order) =>
+            _coordinator.UpdateJoinOrder(order);
 
         public void Publish(INotificationEvent evt)
         {
@@ -68,6 +85,11 @@ namespace WSJTX_Controller
         public void OnReceivePeriodStarted() => _coordinator.OnReceivePeriodStarted();
         public void OnTransmittingChanged(bool transmitting) => _coordinator.OnPhysicalTxChanged(transmitting);
         public void OnQsoActiveChanged(bool active) => _coordinator.OnQsoActiveChanged(active);
+        // 2026-09-11 semantic-boundary correction: the confirmed end of ONE decode-processing
+        // pass (WsjtxClient.Direct.cs's DirectApplyDecodes, called AFTER ServicePendingAutoStart)
+        // -- see SpeechCoordinator.OnDecodePassComplete's own comment for why OnPeriodBoundary
+        // above fires too early to be that signal on its own.
+        public void OnDecodePassComplete() => _coordinator.OnDecodePassComplete();
 
         // Station Watch (2.0.63): forwarded to the coordinator's routine-suppression gate --
         // see SpeechCoordinator.SetStationWatchSuppression's own comment.
@@ -75,8 +97,12 @@ namespace WSJTX_Controller
 
         // Every notification type whose speech should bypass the Station-Watch suppression gate
         // (Station Watch/Smart Start's own observations) -- everything else is routine/ordinary
-        // notification speech and is muted while a receive-only watch is active.
-        private static readonly HashSet<NotificationEventType> WatchEventTypes = new HashSet<NotificationEventType>
+        // notification speech and is muted while a receive-only watch is active. Reused
+        // (2026-09-11) as the JOINABLE category set for SpeechCoordinator's Now-batch/notification-
+        // join-order feature -- this is the same, already-established "Station Watch/Smart Start
+        // speech" boundary in the code, so the join-order feature does not need (and must not
+        // maintain) a second copy of the same eleven-type list.
+        internal static readonly HashSet<NotificationEventType> WatchEventTypes = new HashSet<NotificationEventType>
         {
             NotificationEventType.StationWatchStarted,
             NotificationEventType.StationWatchStopped,
@@ -160,6 +186,21 @@ namespace WSJTX_Controller
             };
             bool isWatch = WatchEventTypes.Contains(evt.EventType);
 
+            // Notification-joining support (2026-09-11): correlation data for SpeechCoordinator's
+            // Posture/Observation supersession, present only for the seven SmartStart lifecycle
+            // types (see NotificationEvents.cs's ISmartStartCorrelatedEvent). null for everything
+            // else, including Station Watch's own four observation types -- those always join,
+            // never supersede, so they need no correlation.
+            SmartStartCorrelation correlation = evt is ISmartStartCorrelatedEvent corr
+                ? new SmartStartCorrelation
+                {
+                    Target = corr.Target,
+                    ArmGeneration = corr.ArmGeneration,
+                    StateSeq = corr.StateSeq,
+                    Group = corr.Group,
+                }
+                : null;
+
             // Critical bypasses delivery timing entirely (spoken the instant it is submitted),
             // so submitting it once per boundary would just speak it several times. "Send
             // immediately" likewise collapses to a single Now submission. Otherwise use the
@@ -177,7 +218,9 @@ namespace WSJTX_Controller
                     priority: effectivePriority,
                     condition: policy.Condition,
                     onSpoken: onSpokenOnce,
-                    isWatchCategory: isWatch);
+                    isWatchCategory: isWatch,
+                    eventType: evt.EventType,
+                    correlation: correlation);
             }
         }
     }

@@ -93,6 +93,116 @@ static class JimmyTests
         }
     }
 
+    // ── SpeechCoordinator test doubles (2026-09-11 notification-joining fix) ───────────────────
+    // Deliberately NOT DateTime.UtcNow-based -- SpeechCoordinator's own debounce/ceiling/gap
+    // timing is built on IMonotonicClock precisely so it can be advanced deterministically here,
+    // with no real Sleep and no flakiness. The clock and scheduler MUST share one instance (the
+    // scheduler stamps due-times off the SAME clock SpeechCoordinator reads) -- NewTestCoordinator
+    // below is the one place that wires them together correctly; every test should go through it
+    // rather than constructing a SpeechCoordinator directly.
+    sealed class FakeMonotonicClock : IMonotonicClock
+    {
+        public long ElapsedMilliseconds { get; private set; }
+        public void Advance(long ms) => ElapsedMilliseconds += ms;
+    }
+
+    sealed class FakeNowBatchScheduler : INowBatchScheduler
+    {
+        private sealed class Entry
+        {
+            public long DueAt;
+            public Action Callback;
+            public bool Cancelled;
+            public bool Fired;
+        }
+        private readonly FakeMonotonicClock _clock;
+        private readonly List<Entry> _entries = new List<Entry>();
+
+        // AutoFire (default false): when true, Schedule() immediately advances the shared clock
+        // by the requested delay and invokes the callback synchronously ("time travel") instead of
+        // waiting for an explicit Advance() call. This is what lets every PRE-EXISTING test written
+        // before the notification-joining feature existed -- which expects a joinable Now
+        // submission to be reflected the instant the call returns, with no knowledge of debounce/
+        // ceiling/gap timing at all -- keep passing completely unchanged: from the test's point of
+        // view, real time genuinely elapsed and the batch resolved, exactly as it always appeared
+        // to (synchronous behavior), even though the underlying mechanism is now the real
+        // debounce/ceiling/gap machinery running against a clock that time-travels forward on
+        // demand rather than one that never advances. A reschedule (e.g. the MinSequentialGapMs
+        // gap-check failing) keeps advancing the clock by its own requested delta each time, so it
+        // always converges -- it cannot loop forever the way a scheduler that never advances time
+        // at all would. Tests that need to inspect the IN-BETWEEN pending state (this feature's own
+        // new joining/arbitration tests) construct with autoFire:false and drive time explicitly
+        // via Advance().
+        public bool AutoFire { get; set; }
+        public FakeNowBatchScheduler(FakeMonotonicClock clock, bool autoFire = false) { _clock = clock; AutoFire = autoFire; }
+
+        public object Schedule(int delayMs, Action callback)
+        {
+            if (AutoFire)
+            {
+                _clock.Advance(delayMs);
+                callback();
+                return new Entry { Fired = true };
+            }
+            var e = new Entry { DueAt = _clock.ElapsedMilliseconds + delayMs, Callback = callback };
+            _entries.Add(e);
+            return e;
+        }
+
+        public void Cancel(object token)
+        {
+            if (token is Entry e) e.Cancelled = true;
+        }
+
+        // Advances the shared clock, then fires (in due-time order) every not-cancelled,
+        // not-yet-fired entry whose due time has now arrived. A callback that reschedules during
+        // this call gets a due-time in the future relative to the NEW current time and is
+        // correctly NOT picked up in this same Advance() -- matching a real timer.
+        public void Advance(long ms)
+        {
+            _clock.Advance(ms);
+            long now = _clock.ElapsedMilliseconds;
+            foreach (var e in _entries.Where(x => !x.Cancelled && !x.Fired && x.DueAt <= now)
+                                       .OrderBy(x => x.DueAt).ToList())
+            {
+                if (e.Cancelled || e.Fired) continue;
+                e.Fired = true;
+                e.Callback();
+            }
+        }
+
+        public int PendingCount => _entries.Count(e => !e.Cancelled && !e.Fired);
+    }
+
+    // Every SpeechCoordinator test should construct through this helper (not `new
+    // SpeechCoordinator(...)` directly) so the clock/scheduler pairing is always correct. Returns
+    // the scheduler too, for tests that need to advance time; most existing (pre-batching) tests
+    // never touch it at all, since only isWatchCategory:true submissions ever schedule anything.
+    // autoFire:false (the default for THIS overload) -- callers of the `out scheduler` form are,
+    // in practice, always this feature's own tests wanting to inspect pending/in-between state and
+    // drive time explicitly via scheduler.Advance(...).
+    static SpeechCoordinator NewTestCoordinator(Action<string, AlertCue> speak, out FakeNowBatchScheduler scheduler, bool autoFire = false)
+    {
+        var clock = new FakeMonotonicClock();
+        scheduler = new FakeNowBatchScheduler(clock, autoFire);
+        return new SpeechCoordinator(speak, scheduler, clock);
+    }
+    // autoFire:true -- every test written before the notification-joining feature existed
+    // expects a joinable Now submission to be reflected synchronously; see FakeNowBatchScheduler's
+    // own AutoFire comment for why this is a faithful, not a fake, way to preserve that.
+    static SpeechCoordinator NewTestCoordinator(Action<string, AlertCue> speak) =>
+        NewTestCoordinator(speak, out _, autoFire: true);
+
+    // Matches NewTestCoordinator's role, for the (many) tests that construct a NotificationCenter
+    // directly instead of a bare SpeechCoordinator. autoFire:true for the same reason.
+    static NotificationCenter NewTestNotificationCenter(NotificationSettings settings, INotificationDelivery delivery,
+        Action<string> recordHistory = null)
+    {
+        var clock = new FakeMonotonicClock();
+        var scheduler = new FakeNowBatchScheduler(clock, autoFire: true);
+        return new NotificationCenter(settings, delivery, recordHistory, scheduler, clock);
+    }
+
     // Replicates the AP-suffix stripping from DecodeMessage.Parse() and
     // EnqueueDecodeMessage.Parse() — tested here independently so failures
     // are caught before checking downstream classifiers.
@@ -193,7 +303,7 @@ static class JimmyTests
         SlashCallNoCountryTests();
         FoxHoundTests();
         HrcEnumTests();
-        HrcCacheTests();
+        RuleEngineWorkedUnconfirmedTests();
         RuleUniverseBuiltInTests();
         RuleUniverseClubLogTests();
         ClubLogBigCtyResolutionTests();
@@ -202,12 +312,16 @@ static class JimmyTests
         RuleEngineBandIndependenceTests();
         RuleEngineWorkedBandsTests();
         RuleEngineCountTargetStillNeededTests();
+        RuleLoaderShippedAwardsParseTests();
+        RuleLoaderBasisAndDynamicThresholdTests();
+        RuleEngineDynamicThresholdAndBasisTests();
         AdifRecordBuilderTests();
         AdifExporterTests();
         LogbookDbEditLogTests();
         LogbookDbAuthoritativeSourceOverrideTests();
         LogbookDbNewlyConfirmedVsCorrectedTests();
         LogbookDbDownloadMarksUploadedTests();
+        LogbookDbSourceUpgradeNeverDowngradeTests();
         Colonies13RosterRegressionTest();
         CallQueueRankerCategoryTierTests();
         CallQueueRankerSortMethodTests();
@@ -267,6 +381,7 @@ static class JimmyTests
         StateSetContainsTests();
         AdifImporterLiveLoggedStateFallbackTests();
         AdifImporterBackfillsMissingDxccTests();
+        AdifImporterDetectSourceTests();
         AdifImportMixedValidErrorRetainsValidRowsTests();
         DxSpotWatcherIsEvenPeriodTests();
         FccUlsProviderParseLineTests();
@@ -279,6 +394,7 @@ static class JimmyTests
         GeoMathEllipsoidCrossValidationTests();
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
+        StillUnconfirmedReachesQueueTests();
         DirectDtoStage3SnapshotFieldsTests();
         DirectDtoStage4DecodeSemanticsTests();
         SemanticShadowCorpusTests();
@@ -431,6 +547,11 @@ static class JimmyTests
         StationWatchHotkeyDefaultsTests();
         SmartStartNarrationPresentationTests();
         SmartStartSeedNoImmediateCqTests();
+        NotificationJoiningTests();
+        DeliberateRepeatBypassTests();
+        SemanticBoundaryAndJoinTimingTests();
+        OrderedListMigrationTests();
+        TargetActivityUnificationTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -692,97 +813,131 @@ static class JimmyTests
         Check("ZONE_NEEDED == 12",        (int)WsjtxClient.CallCategory.ZONE_NEEDED         == 12, true);
     }
 
-    // ── HRC cache SQL logic ───────────────────────────────────────────────────
-    // Creates a throwaway SQLite database, inserts known QSOs, calls LoadHrcCache(),
-    // and verifies the three output HashSets are computed correctly.
-    // No network access, no WSJT-X, no real HRC data path involved.
-    static void HrcCacheTests()
+    // ── RuleEngine.WorkedUnconfirmed: the generalized replacement for the old HRC cache ──
+    // Same fixture/assertions as the retired HrcCacheTests (LogbookDb.LoadHrcCache, deleted
+    // with the rest of the hardcoded HRC subsystem -- see AwardTagger.DeriveCategory), now
+    // proven through the one engine that drives WAS/DXCC/WAZ live tagging: WAS.ini/WAZ.ini-
+    // shaped (GroupBy=State/CqZone, Target=All) rules use StillNeeded for "needed" and
+    // WorkedUnconfirmed for "unconfirmed"; DXCC.ini-shaped (GroupBy=Dxcc, Target=Count) has no
+    // StillNeeded checklist at all (see RuleEngineCountTargetStillNeededTests) but still gets a
+    // WorkedUnconfirmed set -- exactly the fix for the old "DXCC Unconf never worked once WAS
+    // was checked" style gap. No network access, no WSJT-X.
+    static void RuleEngineWorkedUnconfirmedTests()
     {
-        Console.WriteLine("\n── HRC Cache (LoadHrcCache SQL logic) ──");
+        Console.WriteLine("\n── RuleEngine.WorkedUnconfirmed (generalized HRC replacement) ──");
         string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_HRC_" + Guid.NewGuid().ToString("N") + ".db");
+            "JimmyTest_WorkedUnconfirmed_" + Guid.NewGuid().ToString("N") + ".db");
         try
         {
             using (var db = new LogbookDb(tmpDb))
             {
-                // TX confirmed via LoTW → TX must NOT be in neededStates or unconfirmedStates
-                InsertQso(db, "W5TX",   "TX", dxcc: 100, zone: 4, lotwRcvd: "Y");
-                // CA worked but unconfirmed → CA MUST be in unconfirmedStates, NOT neededStates
-                // (never-worked and worked-unconfirmed are now a WAS/DXCC-parity split, not one bucket)
-                InsertQso(db, "W6CA",   "CA", dxcc: 100, zone: 3);
-                // WY: never worked at all → WY MUST be in neededStates (no QSO inserted)
+                // Six QSOs, deliberately overlapping on zone 3 and DXCC 100 (a zone/entity is
+                // grouped across every QSO that shares it, MAX(confirmed) style -- one
+                // confirmed QSO makes the whole group confirmed, per FinishGrouped/
+                // EvaluateGrouped's own SQL): W6CA's zone-3/DXCC-100 QSO is itself unconfirmed,
+                // but VE3TST's zone-3 QSO and W5TX's DXCC-100 QSO ARE confirmed, so both zone 3
+                // and DXCC 100 end up counted as confirmed overall -- exactly the real-world
+                // "worked this entity/zone more than once, only one QSL ever came back" case.
+                InsertQso(db, "W5TX",   "TX", dxcc: 100, zone: 4,  lotwRcvd: "Y"); // TX confirmed; DXCC 100 confirmed (via this one)
+                InsertQso(db, "W6CA",   "CA", dxcc: 100, zone: 3);                 // CA unconfirmed; zone 3 (unconfirmed on its own)
+                InsertQso(db, "OE1TST", "  ", dxcc: 200, zone: 15);                // DXCC 200 unconfirmed; zone 15 unconfirmed
+                InsertQso(db, "VK2TST", "  ", dxcc: 300, zone: 29, lotwRcvd: "Y"); // DXCC 300 confirmed; zone 29 confirmed
+                InsertQso(db, "VE3TST", "ON", dxcc: 400, zone: 3,  lotwRcvd: "Y"); // DXCC 400 confirmed; zone 3 confirmed (via this one)
+                InsertQso(db, "W0TST",  "CO", dxcc: 100, zone: 5);                 // CO unconfirmed; zone 5 unconfirmed
+                // WY / zone 20: never worked at all → MUST be needed (no QSO inserted)
 
-                // DXCC 100 has a confirmed QSO (W5TX) → 100 must NOT be in unconfirmedDxcc
-                // DXCC 200 worked, never confirmed → 200 MUST be in unconfirmedDxcc
-                InsertQso(db, "OE1TST", "  ", dxcc: 200, zone: 15);
-                // DXCC 300 confirmed → 300 must NOT be in unconfirmedDxcc
-                InsertQso(db, "VK2TST", "  ", dxcc: 300, zone: 29, lotwRcvd: "Y");
+                var wasLike = new RuleDefinition
+                {
+                    Id = "WAS", Name = "Worked All States", FormatVersion = 1, Enabled = true,
+                    GroupBy = RuleGroupBy.State, Target = RuleTargetType.All, Universe = "US_50_STATES",
+                    Confirmation = RuleConfirmation.Any,
+                };
+                var wasResult = RuleEngine.Evaluate(wasLike, tmpDb, null);
 
-                // Zone 3 confirmed (VE3TST) → zone 3 must NOT be in neededZones
-                InsertQso(db, "VE3TST", "ON", dxcc: 400, zone: 3,  lotwRcvd: "Y");
-                // Zone 5 worked but unconfirmed → zone 5 MUST be in neededZones
-                InsertQso(db, "W0TST",  "CO", dxcc: 100, zone: 5);
-                // Zone 20: never worked → zone 20 MUST be in neededZones
+                // ── WAS needed (StillNeeded) ──────────────────────────────────
+                // Worked US states in this fixture: TX (confirmed), CA (unconfirmed), CO
+                // (unconfirmed) -- ON isn't a US state, excluded by the universe intersection.
+                // All three move off the needed list once worked, regardless of confirmation.
+                Check("WAS StillNeeded: TX confirmed → NOT in set",     wasResult.StillNeeded.Contains("TX"), false);
+                Check("WAS StillNeeded: CA worked/unconfirmed → NOT in set (moved to WorkedUnconfirmed)",
+                      wasResult.StillNeeded.Contains("CA"), false);
+                Check("WAS StillNeeded: CO worked/unconfirmed → NOT in set (moved to WorkedUnconfirmed)",
+                      wasResult.StillNeeded.Contains("CO"), false);
+                Check("WAS StillNeeded: WY (no QSO) → in set",          wasResult.StillNeeded.Contains("WY"), true);
+                Check("WAS StillNeeded: count ≤ 50",                    wasResult.StillNeeded.Count <= 50,    true);
+                // TX, CA, CO are no longer "never worked", so 47 states remain needed
+                Check("WAS StillNeeded: count == 47",                   wasResult.StillNeeded.Count == 47,    true);
+                Check("WAS StillNeeded: DC never present",              wasResult.StillNeeded.Contains("DC"), false);
 
-                HashSet<string> neededStates;
-                HashSet<string> unconfirmedStates;
-                HashSet<int>    unconfirmedDxcc;
-                HashSet<int>    neededZones;
-                db.LoadHrcCache(out neededStates, out unconfirmedStates, out unconfirmedDxcc, out neededZones);
+                // ── WAS unconfirmed (WorkedUnconfirmed) ───────────────────────
+                Check("WAS WorkedUnconfirmed: TX confirmed → NOT in set", wasResult.WorkedUnconfirmed.Contains("TX"), false);
+                Check("WAS WorkedUnconfirmed: CA worked/unconfirmed → in set", wasResult.WorkedUnconfirmed.Contains("CA"), true);
+                Check("WAS WorkedUnconfirmed: CO worked/unconfirmed → in set", wasResult.WorkedUnconfirmed.Contains("CO"), true);
+                Check("WAS WorkedUnconfirmed: WY never worked → NOT in set",   wasResult.WorkedUnconfirmed.Contains("WY"), false);
+                Check("WAS WorkedUnconfirmed: count == 2",                     wasResult.WorkedUnconfirmed.Count == 2,     true);
 
-                // ── States ──────────────────────────────────────────────────
-                // Worked states in this fixture: TX (confirmed), CA (unconfirmed),
-                // and CO (unconfirmed, via the W0TST zone-5 QSO below) — all three
-                // move out of neededStates now that it means "never worked".
-                Check("neededStates: TX confirmed → NOT in set",     neededStates.Contains("TX"), false);
-                Check("neededStates: CA worked/unconfirmed → NOT in set (moved to unconfirmedStates)",
-                      neededStates.Contains("CA"), false);
-                Check("neededStates: CO worked/unconfirmed → NOT in set (moved to unconfirmedStates)",
-                      neededStates.Contains("CO"), false);
-                Check("neededStates: WY (no QSO) → in set",          neededStates.Contains("WY"), true);
-                Check("neededStates: count ≤ 50",                    neededStates.Count <= 50,    true);
-                // TX, CA, and CO are all no longer "never worked", so 47 states remain needed
-                Check("neededStates: count == 47",                   neededStates.Count == 47,    true);
-                // DC must never appear — it is not a state
-                Check("neededStates: DC never present",              neededStates.Contains("DC"), false);
+                var dxccLike = new RuleDefinition
+                {
+                    Id = "DXCC", Name = "DXCC (Mixed)", FormatVersion = 1, Enabled = true,
+                    GroupBy = RuleGroupBy.Dxcc, Target = RuleTargetType.Count, Threshold = 100,
+                    Confirmation = RuleConfirmation.Any,
+                };
+                var dxccResult = RuleEngine.Evaluate(dxccLike, tmpDb, null);
 
-                // ── States unconfirmed ────────────────────────────────────────
-                Check("unconfirmedStates: TX confirmed → NOT in set", unconfirmedStates.Contains("TX"), false);
-                Check("unconfirmedStates: CA worked/unconfirmed → in set", unconfirmedStates.Contains("CA"), true);
-                Check("unconfirmedStates: CO worked/unconfirmed → in set", unconfirmedStates.Contains("CO"), true);
-                Check("unconfirmedStates: WY never worked → NOT in set",   unconfirmedStates.Contains("WY"), false);
-                Check("unconfirmedStates: count == 2",                     unconfirmedStates.Count == 2,     true);
+                Check("DXCC (Target=Count) StillNeeded is null -- no fixed checklist",
+                      dxccResult.StillNeeded == null, true);
+                // ── DXCC unconfirmed ──────────────────────────────────────────
+                Check("DXCC WorkedUnconfirmed: 100 has a confirmed QSO (W5TX) → NOT in set",
+                      dxccResult.WorkedUnconfirmed.Contains("100"), false);
+                Check("DXCC WorkedUnconfirmed: 200 worked/unconfirmed → in set",
+                      dxccResult.WorkedUnconfirmed.Contains("200"), true);
+                Check("DXCC WorkedUnconfirmed: 300 confirmed → NOT in set",
+                      dxccResult.WorkedUnconfirmed.Contains("300"), false);
+                Check("DXCC WorkedUnconfirmed: 400 confirmed (VE3TST) → NOT in set",
+                      dxccResult.WorkedUnconfirmed.Contains("400"), false);
+                Check("DXCC WorkedUnconfirmed: count == 1 (only 200)",
+                      dxccResult.WorkedUnconfirmed.Count == 1, true);
 
-                // ── DXCC unconfirmed ─────────────────────────────────────────
-                // DXCC 100 has a confirmed QSO → NOT unconfirmed
-                Check("unconfirmedDxcc: DXCC 100 has confirmed → NOT in set",
-                      unconfirmedDxcc.Contains(100), false);
-                // DXCC 200: worked, no confirmation → IS unconfirmed
-                Check("unconfirmedDxcc: DXCC 200 worked/unconfirmed → in set",
-                      unconfirmedDxcc.Contains(200), true);
-                // DXCC 300: confirmed → NOT unconfirmed
-                Check("unconfirmedDxcc: DXCC 300 confirmed → NOT in set",
-                      unconfirmedDxcc.Contains(300), false);
+                var wazLike = new RuleDefinition
+                {
+                    Id = "WAZ", Name = "CQ Worked All Zones", FormatVersion = 1, Enabled = true,
+                    GroupBy = RuleGroupBy.CqZone, Target = RuleTargetType.All, Universe = "CQ_ZONES",
+                    Confirmation = RuleConfirmation.Any,
+                };
+                var wazResult = RuleEngine.Evaluate(wazLike, tmpDb, null);
 
-                // ── Zones ────────────────────────────────────────────────────
-                // Zone 3: VE3TST confirmed → NOT needed
-                Check("neededZones: zone 3 confirmed (VE3TST) → NOT in set", neededZones.Contains(3),  false);
-                // Zone 4: W5TX confirmed → NOT needed (W5TX has zone=4, lotwRcvd='Y')
-                Check("neededZones: zone 4 confirmed (W5TX) → NOT in set",   neededZones.Contains(4),  false);
-                Check("neededZones: zone 5 unconfirmed → in set",             neededZones.Contains(5),  true);
-                Check("neededZones: zone 20 (no QSO) → in set",              neededZones.Contains(20), true);
-                // Zone 29: VK2TST confirmed → NOT needed
-                Check("neededZones: zone 29 confirmed (VK2TST) → NOT in set", neededZones.Contains(29), false);
-                Check("neededZones: count ≤ 40",                               neededZones.Count <= 40,  true);
-                // Zones 3, 4, and 29 confirmed → 40 - 3 = 37 zones needed
-                Check("neededZones: count == 37",                              neededZones.Count == 37,  true);
-                // Zone 41 must never be added — only zones 1-40 are valid
-                Check("neededZones: zone 41 never present",                   neededZones.Contains(41), false);
+                // ── WAZ needed ─────────────────────────────────────────────────
+                // Zone 3 has both an unconfirmed QSO (W6CA) and a confirmed one (VE3TST) --
+                // worked either way, so it's off the needed list regardless.
+                Check("WAZ StillNeeded: zone 3 worked (W6CA + VE3TST) → NOT in set", wazResult.StillNeeded.Contains("3"),  false);
+                Check("WAZ StillNeeded: zone 4 worked (W5TX) → NOT in set",   wazResult.StillNeeded.Contains("4"),  false);
+                Check("WAZ StillNeeded: zone 5 worked/unconfirmed (W0TST) → NOT in set (worked, not never-worked)",
+                      wazResult.StillNeeded.Contains("5"),  false);
+                Check("WAZ StillNeeded: zone 15 worked/unconfirmed (OE1TST) → NOT in set",
+                      wazResult.StillNeeded.Contains("15"), false);
+                Check("WAZ StillNeeded: zone 20 (no QSO) → in set",           wazResult.StillNeeded.Contains("20"), true);
+                Check("WAZ StillNeeded: zone 29 worked (VK2TST) → NOT in set", wazResult.StillNeeded.Contains("29"), false);
+                Check("WAZ StillNeeded: count ≤ 40",                          wazResult.StillNeeded.Count <= 40,    true);
+                // Zones 3, 4, 5, 15, and 29 all worked → 40 - 5 = 35 zones remain needed
+                Check("WAZ StillNeeded: count == 35",                         wazResult.StillNeeded.Count == 35,    true);
+                Check("WAZ StillNeeded: zone 41 never present",               wazResult.StillNeeded.Contains("41"), false);
+
+                // ── WAZ unconfirmed (available even though WAZ has no dedicated legacy tag) ──
+                Check("WAZ WorkedUnconfirmed: zone 5 worked/unconfirmed → in set", wazResult.WorkedUnconfirmed.Contains("5"), true);
+                Check("WAZ WorkedUnconfirmed: zone 15 worked/unconfirmed → in set", wazResult.WorkedUnconfirmed.Contains("15"), true);
+                // Zone 3 has a confirmed QSO (VE3TST) too, so the GROUP counts as confirmed
+                // even though W6CA's own zone-3 QSO wasn't.
+                Check("WAZ WorkedUnconfirmed: zone 3 has a confirmed QSO (VE3TST) → NOT in set",
+                      wazResult.WorkedUnconfirmed.Contains("3"), false);
+                Check("WAZ WorkedUnconfirmed: zone 4/29 confirmed → NOT in set",
+                      !wazResult.WorkedUnconfirmed.Contains("4") && !wazResult.WorkedUnconfirmed.Contains("29"), true);
+                Check("WAZ WorkedUnconfirmed: count == 2 (zones 5 and 15)",
+                      wazResult.WorkedUnconfirmed.Count == 2, true);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  FAIL  HrcCacheTests threw: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"  FAIL  RuleEngineWorkedUnconfirmedTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally
@@ -1939,6 +2094,155 @@ static class JimmyTests
         }
     }
 
+    // ── STILL_UNCONFIRMED actually reaches the queue -- THE FIX ─────────────────────────
+    // Regression guard for a real bug found while generalizing WAS_UNCONFIRMED/
+    // DXCC_UNCONFIRMED into the one STILL_UNCONFIRMED category (see AwardTagger.
+    // DeriveCategory): the category existed and DeriveCategory correctly assigned it, but
+    // nothing added it to the Call Filters admission switch in AddSelectedCall -- so a
+    // decode classified STILL_UNCONFIRMED fell through to that switch's `default:
+    // isAdmitted = false` and was silently REJECTED from the queue every time, regardless
+    // of the tag text being computed correctly. Drives the real pipeline end to end
+    // (TestApplyDirectSnapshot -> DirectApplyDecodes -> ProcessDecodeMsg -> DeriveCategory
+    // -> AddSelectedCall), the same way DirectModePlumbingParityTests does, rather than
+    // asserting on DeriveCategory's return value in isolation -- that alone would have
+    // passed even with this bug present, since DeriveCategory itself was never wrong.
+    static void StillUnconfirmedReachesQueueTests()
+    {
+        Console.WriteLine("\n── STILL_UNCONFIRMED queue admission -- THE FIX ──");
+
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_StillUnconfirmedQueue_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            // W9NEED (TestFixtureLookupProvider) resolves to DXCC 291 (USA). Logged here on
+            // 40m, unconfirmed -- worked (so not a "new country" any more), but NOT on the 20m
+            // band the snapshot below dials up, so classification.IsNewCallOnBand is still true
+            // and the decode clears the EARLIER "already worked on this band" gate
+            // (AwardMatcher.ShouldRejectAlreadyWorked) independently of anything this test is
+            // actually targeting -- isolates the ONE gate this bug lived in (the Call Filters
+            // admission switch), not the already-worked gate (a separate, intentionally
+            // Needed-only exception -- see its own comment in WsjtxClient.CallQueue.cs).
+            // W5WEAK is a second dxcc=291 fixture call (TestFixtureLookupProvider, Country
+            // already normalized to "USA" -- unlike K3ZK's own fixture entry, deliberately raw
+            // "United States", which is its own separate country-normalization test elsewhere
+            // and not a confound this test needs), used below for the negative-control scenario
+            // via its own independent client. A third, already-CONFIRMED dxcc=291 QSO on 20m (a
+            // different call, K4YT) keeps classification.IsNewCountryOnBand false for the 20m
+            // decodes below -- DXCC 291 itself is already worked+confirmed on 20m, so W9NEED/
+            // W5WEAK's own Priority stays DEFAULT (ordinary CQ) instead of NEW_COUNTRY_ON_BAND,
+            // which would otherwise short-circuit DeriveCategory before it ever reaches the
+            // STILL_UNCONFIRMED path this test targets. classification.IsNewCallOnBand (per-
+            // CALLSIGN, not per-entity) stays true for W9NEED/W5WEAK regardless, since neither
+            // call has itself been worked on 20m.
+            using (var db = new LogbookDb(tmpDb))
+            {
+                InsertQso(db, "W9NEED", "", dxcc: 291, zone: 5, band: "40m");
+                InsertQso(db, "W5WEAK", "", dxcc: 291, zone: 5, band: "40m");
+                InsertQso(db, "K4YT",   "", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
+            }
+
+            // Each scenario gets its own fully independent Controller/WsjtxClient (same pattern
+            // as DirectLogRetryAndEarlyRrrTests' own MakeClient below) -- no state (queue,
+            // callDict, period/slot tracking) is shared between them, so each is a clean,
+            // single-decode pipeline run.
+            WsjtxClient MakeClient(bool includeStillUnconfirmedInCallingEnabled)
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.replyDxCheckBox.Checked = true;
+                ctrl.replyLocalCheckBox.Checked = true;
+
+                var lookupManager = new LookupManager();
+                lookupManager.RegisterProviderFirst(new TestFixtureLookupProvider());
+                lookupManager.Initialize(
+                    useLookupData: true,
+                    qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                    lotwEnabled: true, lotwDays: 1,
+                    clubLogAppKey: null, clubLogDays: 1,
+                    fccUlsEnabled: false);
+
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.lookupManager = lookupManager;
+
+                // Stands in for Controller.RefreshStillNeedCache() building this from
+                // RuleLibrary -- a DXCC-like award with 291 in its UnconfirmedSet (worked, not
+                // confirmed), no Needed set at all (matches the real DXCC.ini: Target=Count has
+                // no StillNeeded). Deliberately hand-fed rather than computed by the real
+                // RuleEngine (which, given K4YT's confirmed 20m QSO above, would actually
+                // resolve DXCC 291 as CONFIRMED overall -- WAS/DXCC/WAZ awards are band-
+                // independent by design) -- this test's target is purely "does AddSelectedCall
+                // admit a decode already carrying this activeAwardTags state", not RuleEngine's
+                // own computation (see RuleEngineWorkedUnconfirmedTests for that).
+                wc.activeAwardTags["DXCC"] = new WsjtxClient.ActiveAwardTag
+                {
+                    RuleId = "DXCC", RuleName = "DXCC (Mixed)", GroupBy = RuleGroupBy.Dxcc,
+                    Set = new HashSet<string>(),
+                    UnconfirmedSet = new HashSet<string> { "291" },
+                };
+                // Stands in for Controller's activeAwardRuleIds migration (Controller.cs) --
+                // production guarantees this is enabled; this test doesn't exercise that
+                // migration itself (it's ini-load-only), only what depends on its end state.
+                if (includeStillUnconfirmedInCallingEnabled)
+                    wc.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);
+                return wc;
+            }
+
+            var wc = MakeClient(includeStillUnconfirmedInCallingEnabled: true);
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"",
+                ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 2000 },
+                ""recentDecodes"": [
+                    { ""from"": ""W9NEED"", ""snr"": -10, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""CQ W9NEED EM63"" }
+                ]
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap);
+
+            Check("Setup: W9NEED's category resolved to STILL_UNCONFIRMED",
+                  wc.callDict.TryGetValue("W9NEED", out var d) && d.Category == WsjtxClient.CallCategory.STILL_UNCONFIRMED, true);
+            Check("THE FIX: a STILL_UNCONFIRMED decode actually reaches the call queue",
+                  wc.TestCallQueueString.Contains("W9NEED"), true);
+
+            // Negative control: an otherwise-identical fresh client, WITHOUT STILL_UNCONFIRMED
+            // in callingEnabled (the pre-fix production state for anyone who'd never upgraded
+            // through the migration) -- the same decode shape must be rejected, proving the
+            // admission switch's case is what actually gates this, not some other path quietly
+            // admitting everything.
+            var wcControl = MakeClient(includeStillUnconfirmedInCallingEnabled: false);
+            var snap2 = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"",
+                ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 2000 },
+                ""recentDecodes"": [
+                    { ""from"": ""W5WEAK"", ""snr"": -10, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""CQ W5WEAK EM63"" }
+                ]
+            }");
+            wcControl.TestApplyDirectSnapshot("KB0UZT", "FN42", snap2);
+            // No "category resolved correctly" check here, unlike the scenario above -- a
+            // rejected decode is never stored in callDict at all (AddSelectedCall returns
+            // before that point), so there's nothing to inspect its Category on; that's exactly
+            // the state this negative control is proving.
+            Check("Control: with STILL_UNCONFIRMED NOT in callingEnabled, the decode is rejected -- never reaches the queue",
+                  wcControl.TestCallQueueString.Contains("W5WEAK"), false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  StillUnconfirmedReachesQueueTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
     // ── Read-only audit, 2026-08-28: (1) "Log early, after RRR" went dead when the UDP
     // ProcessTxEnd() was removed -- IsLogEarly() has had no callers since -- so a QSO with both
     // reports exchanged plus the DX's bare RRR was only logged if a trailing 73/RR73 later got
@@ -2399,7 +2703,7 @@ static class JimmyTests
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             wc.lookupManager = lm;
             var notify = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(new NotificationSettings(), notify);
+            wc.Notify = NewTestNotificationCenter(new NotificationSettings(), notify);
             wc.TestSetDirectConnected(true);
             wc.TestSetMode("FT8");
             return (wc, notify);
@@ -3448,7 +3752,7 @@ static class JimmyTests
             ctrl.anyMsgRadioButton.Checked = true;
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             var notify = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(new NotificationSettings(), notify);
+            wc.Notify = NewTestNotificationCenter(new NotificationSettings(), notify);
             wc.TestSetDirectConnected(true);
             wc.TestSetMode("FT8");
             return (wc, notify);
@@ -5600,7 +5904,7 @@ static class JimmyTests
             var settings = new NotificationSettings();
             settings.Policies[NotificationEventType.ErrorWarning].RepeatSeconds = 0;
             var delivery = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(settings, delivery);
+            wc.Notify = NewTestNotificationCenter(settings, delivery);
 
             const string myCall = "KB0UZT";
             const string myGrid = "FN42";
@@ -7272,6 +7576,70 @@ static class JimmyTests
         }
     }
 
+    // ── AdifImporter.DetectSource: auto-detects which service an ADIF file came from ────────
+    // Backs the manual "Import ADIF File" button (LogbookWindow.RunImport) -- a file the
+    // operator downloads by hand from QRZ/LoTW/Club Log and imports themselves must still get
+    // tagged with that service (not a blanket "MANUAL"), so qso.source, the Source column,
+    // and the export-by-source filter all stay accurate for a fully self-managed workflow.
+    static void AdifImporterDetectSourceTests()
+    {
+        Console.WriteLine("\n── AdifImporter.DetectSource ──");
+        try
+        {
+            const string header = "Some export\r\n<ADIF_VER:5>3.1.4\r\n<EOH>\r\n";
+
+            string qrzText = header +
+                "<CALL:5>K1ABC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1200" +
+                "<APP_QRZLOG_STATUS:1>C<EOR>\r\n";
+            Check("QRZ export (APP_QRZLOG_* field) detected as QRZ",
+                AdifImporter.DetectSource(qrzText, AdifParser.Parse(qrzText)) == "QRZ", true);
+
+            string lotwText = header +
+                "<CALL:5>K1ABC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1200" +
+                "<APP_LOTW_RXQSO:1>Y<EOR>\r\n";
+            Check("LoTW export (APP_LoTW_* field) detected as LOTW",
+                AdifImporter.DetectSource(lotwText, AdifParser.Parse(lotwText)) == "LOTW", true);
+
+            string clubLogText = header +
+                "<CALL:5>K1ABC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1200" +
+                "<APP_CLUBLOG_STATUS:1>Y<EOR>\r\n";
+            Check("Club Log export (APP_ClubLog_* field) detected as CLUBLOG",
+                AdifImporter.DetectSource(clubLogText, AdifParser.Parse(clubLogText)) == "CLUBLOG", true);
+
+            string wsjtxHeader = "WSJT-X ADIF Export\r\n<ADIF_VER:5>3.1.4\r\n<PROGRAMID:6>WSJT-X\r\n<EOH>\r\n";
+            string wsjtxText = wsjtxHeader +
+                "<CALL:5>K1ABC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1200<EOR>\r\n";
+            Check("Plain WSJT-X export (no vendor field, header names WSJT-X) detected as WSJTX",
+                AdifImporter.DetectSource(wsjtxText, AdifParser.Parse(wsjtxText)) == "WSJTX", true);
+
+            string plainText = header +
+                "<CALL:5>K1ABC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1200<EOR>\r\n";
+            Check("No vendor field and no recognizable header falls back to MANUAL (never guesses wrong)",
+                AdifImporter.DetectSource(plainText, AdifParser.Parse(plainText)) == "MANUAL", true);
+
+            // Majority vote: three QRZ-marked records and one LoTW-marked record -> QRZ.
+            string mixedText = header +
+                "<CALL:5>K1AAA<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1200<APP_QRZLOG_STATUS:1>C<EOR>\r\n" +
+                "<CALL:5>K1BBB<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1201<APP_QRZLOG_STATUS:1>C<EOR>\r\n" +
+                "<CALL:5>K1CCC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1202<APP_QRZLOG_STATUS:1>C<EOR>\r\n" +
+                "<CALL:5>K1DDD<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1203<APP_LOTW_RXQSO:1>Y<EOR>\r\n";
+            Check("Mixed markers: majority (3 QRZ vs 1 LoTW) wins",
+                AdifImporter.DetectSource(mixedText, AdifParser.Parse(mixedText)) == "QRZ", true);
+
+            // No per-record vendor field at all, but the header text itself names the service --
+            // the fallback path used when a service's export doesn't stamp APP_ fields per record.
+            string headerOnlyLotw = "ARRL Logbook of the World report\r\n<ADIF_VER:5>3.1.4\r\n<EOH>\r\n" +
+                "<CALL:5>K1ABC<BAND:3>20m<MODE:3>FT8<QSO_DATE:8>20260101<TIME_ON:4>1200<EOR>\r\n";
+            Check("Header-only signal ('Logbook of the World') detected as LOTW when no field marker present",
+                AdifImporter.DetectSource(headerOnlyLotw, AdifParser.Parse(headerOnlyLotw)) == "LOTW", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  AdifImporterDetectSourceTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
     // ── Independent audit finding 3, 2026-08-23 (CONFIRMED bug): AdifImporter's ImportResult
     // contract that BOTH LogbookWindow.RunImportFromText and LogbookAutoSync.ImportAndReport's
     // checkpoint-write gating depend on -- valid records are retained even when ANOTHER record
@@ -8068,16 +8436,16 @@ static class JimmyTests
         }
     }
 
-    // ── RuleEngine / LoadHrcCache band independence ────────────────────────────
-    // Regression guard for two real bugs: the live Still Need cache
-    // (Controller.RefreshStillNeedCache) and the HRC cache (LoadHrcCache) both
-    // silently scoped "still needed" to the current band even though the award
-    // itself has no [Match] Bands= restriction -- which is every shipped award.
-    // EvaluateBand(def, null) / LoadHrcCache(..., band: null) is the correct call
-    // for those awards; passing a real band is a genuinely different, deliberately
-    // restricted view (used by the Still Need tab's manual band filter). This
-    // pins down both halves of that contract: unrestricted finds cross-band work,
-    // and a real band filter genuinely does restrict (so the mechanism itself is
+    // ── RuleEngine band independence ────────────────────────────────────────────
+    // Regression guard for a real bug: the live Still Need cache
+    // (Controller.RefreshStillNeedCache) used to silently scope "still needed" to the
+    // current band even though the award itself has no [Match] Bands= restriction --
+    // which is every shipped award (WAS/DXCC/WAZ included, now that they're ordinary
+    // RuleEngine-evaluated awards too -- see AwardTagger.DeriveCategory). EvaluateBand(def,
+    // null) is the correct call for those awards; passing a real band is a genuinely
+    // different, deliberately restricted view (used by the Still Need tab's manual band
+    // filter). This pins down both halves of that contract: unrestricted finds cross-band
+    // work, and a real band filter genuinely does restrict (so the mechanism itself is
     // proven to work, not just always empty/always full).
     static void RuleEngineBandIndependenceTests()
     {
@@ -8109,16 +8477,20 @@ static class JimmyTests
                 Check("EvaluateBand(band:'20m'): restricting to the actual band still finds it",
                       rightBand.WorkedItems != null && rightBand.WorkedItems.Contains("K2BAND"), true);
 
-                // Same mechanism, older HRC cache code path: state confirmed on 20m only.
+                // Same mechanism, WAS-shaped rule this time: state confirmed on 20m only.
                 InsertQso(db, "W5TX", "TX", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
+                var wasDef = new RuleDefinition
+                {
+                    Id = "TEST_BANDIND_WAS", Name = "Test WAS", FormatVersion = 1, Enabled = true,
+                    GroupBy = RuleGroupBy.State, Target = RuleTargetType.All, Universe = "US_50_STATES",
+                    Confirmation = RuleConfirmation.Any,
+                };
+                var neededNoBand   = RuleEngine.EvaluateBand(wasDef, null, tmpDb, null).StillNeeded;
+                var neededWithBand = RuleEngine.EvaluateBand(wasDef, "10m", tmpDb, null).StillNeeded;
 
-                HashSet<string> neededNoBand, neededWithBand;
-                db.LoadHrcCache(out neededNoBand, out _, out _, out _, band: null);
-                db.LoadHrcCache(out neededWithBand, out _, out _, out _, band: "10m");
-
-                Check("LoadHrcCache(band:null): TX confirmed on 20m -> not needed (all-time view)",
+                Check("EvaluateBand(band:null): TX confirmed on 20m -> not needed (all-time view)",
                       !neededNoBand.Contains("TX"), true);
-                Check("LoadHrcCache(band:'10m'): TX confirmed only on 20m -> needed again for 10m",
+                Check("EvaluateBand(band:'10m'): TX confirmed only on 20m -> needed again for 10m",
                       neededWithBand.Contains("TX"), true);
             }
         }
@@ -8239,6 +8611,92 @@ static class JimmyTests
         }
     }
 
+    // ── LogbookDb.Upsert: source label upgrades but never downgrades -- THE FIX ────────
+    // A QSO's stored `source` used to freeze at whatever import created the row first
+    // (Upsert's ON CONFLICT clause never touched it) -- a plain/headerless ADIF imported
+    // before ever downloading from QRZ/LoTW left the row permanently labeled "MANUAL", even
+    // once genuinely confirmed by a real service. That never affected award-progress
+    // counting (LotwConfirmedQsos/QrzConfirmedQsos/RuleEngine's ConfirmationExpression all
+    // read the real lotw_qsl_rcvd/qrz_qsl_rcvd flags directly, never this column), but it did
+    // undercount LogbookDb.TotalQsos/ConfirmedQsos when called WITH a source filter -- the
+    // Sync tab's per-service "QSOs: N" tally specifically. Fixed: source now upgrades from
+    // MANUAL to a real, specific origin the first time one becomes known, and once it's a
+    // real value it is never overwritten again by anything -- a later manual re-import, or a
+    // download from a DIFFERENT real service.
+    static void LogbookDbSourceUpgradeNeverDowngradeTests()
+    {
+        Console.WriteLine("\n── LogbookDb.Upsert: source upgrades but never downgrades -- THE FIX ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_SourceUpgrade_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                void DoUpsert(string call, string key, string source)
+                {
+                    db.Upsert(call, "20m", "FT8", "20260706", "1200", "1215",
+                        14_074_000, "-10", "-05", "", "", 0, 0,
+                        "", "", "", "", "", "", "",
+                        "", "", "", "",
+                        source, "", key,
+                        "", 0, "", "", "", "", "", "", "", "", "", "");
+                }
+                string SourceOf(string call) =>
+                    db.SearchQsos(call, null, null, null).Single().Source;
+
+                // Scenario 1: plain/headerless ADIF first (tagged MANUAL by AdifImporter.
+                // DetectSource), then a real QRZ download for the exact same QSO -- source
+                // must upgrade from MANUAL to QRZ.
+                string keyA = AdifImporter.BuildDedupKey("W1AW", "20m", "FT8", "20260706", "1200");
+                DoUpsert("W1AW", keyA, "MANUAL");
+                CheckStr("Fresh manual import: source is MANUAL", SourceOf("W1AW"), "MANUAL");
+                DoUpsert("W1AW", keyA, "QRZ");
+                CheckStr("THE FIX: a later QRZ download upgrades source MANUAL -> QRZ", SourceOf("W1AW"), "QRZ");
+
+                // Scenario 2: once real, NEVER downgraded by a later manual (re-)import --
+                // e.g. re-importing an old WSJT-X export of the same log after QRZ already
+                // confirmed it.
+                DoUpsert("W1AW", keyA, "MANUAL");
+                CheckStr("THE FIX: a later MANUAL import does NOT downgrade an already-real source",
+                    SourceOf("W1AW"), "QRZ");
+
+                // Scenario 3: once real, not swapped for a DIFFERENT real service either --
+                // the first real source known wins; LoTW confirming the same QSO later
+                // doesn't relabel it away from QRZ (per-service confirmation flags already
+                // track LoTW/QRZ independently regardless of this label -- see the class
+                // comment above).
+                DoUpsert("W1AW", keyA, "LOTW");
+                CheckStr("THE FIX: a different real source (LOTW) does not steal the label from QRZ",
+                    SourceOf("W1AW"), "QRZ");
+
+                // Scenario 4: the reverse order -- QRZ download FIRST, then a later plain
+                // manual import of the same QSO -- must never downgrade it either.
+                string keyB = AdifImporter.BuildDedupKey("K1XYZ", "20m", "FT8", "20260706", "1201");
+                DoUpsert("K1XYZ", keyB, "QRZ");
+                DoUpsert("K1XYZ", keyB, "MANUAL");
+                CheckStr("THE FIX: QRZ-first then a later MANUAL import still stays QRZ",
+                    SourceOf("K1XYZ"), "QRZ");
+
+                // Scenario 5: a QSO that's genuinely only ever seen manually stays MANUAL --
+                // this isn't a blanket "always overwrite," only an upgrade path.
+                string keyC = AdifImporter.BuildDedupKey("N3ABC", "20m", "FT8", "20260706", "1202");
+                DoUpsert("N3ABC", keyC, "MANUAL");
+                DoUpsert("N3ABC", keyC, "MANUAL");
+                CheckStr("A QSO only ever imported manually stays MANUAL (no false upgrade)",
+                    SourceOf("N3ABC"), "MANUAL");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  LogbookDbSourceUpgradeNeverDowngradeTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
     // ── RuleEngine "Band(s) worked" column ─────────────────────────────────────
     // The Awards tab's "Band(s) worked" column (RuleResult.WorkedBands) must
     // list every band a station was worked on, low-to-high, regardless of the
@@ -8340,6 +8798,237 @@ static class JimmyTests
         finally
         {
             try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // ── RuleLoader: every shipped award definition parses cleanly ───────────────────────
+    // Smoke test over the real shipped RuleDefinitions folder (source of truth for both
+    // first-run seeding and "Restore Default Awards" -- RuleLoader.SeedIfMissing/
+    // RuleDefinitionManagerDlg), using the same RuleLoader.ParseAndValidate every real
+    // load path uses. Catches a malformed award .ini (bad FormatVersion, duplicate Id,
+    // typo'd enum value) regardless of which file introduces it -- specifically added
+    // alongside the new DXCC_80M/40M/20M/15M/10M.ini per-band awards (mirroring the
+    // existing WAS_*M.ini pattern), but general on purpose so it guards every future
+    // addition too.
+    static void RuleLoaderShippedAwardsParseTests()
+    {
+        Console.WriteLine("\n── RuleLoader: shipped RuleDefinitions all parse ──");
+        try
+        {
+            string wasIniPath = FindRepoFile(Path.Combine("WSJTX_Controller", "RuleDefinitions", "WAS.ini"));
+            if (wasIniPath == null)
+            {
+                Console.WriteLine("  SKIP  RuleLoaderShippedAwardsParseTests -- repo RuleDefinitions folder not found (out-of-tree build?)");
+                return;
+            }
+            string rulesFolder = Path.GetDirectoryName(wasIniPath);
+
+            var byId = new Dictionary<string, RuleDefinition>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in Directory.GetFiles(rulesFolder, "*.ini"))
+            {
+                string error;
+                var def = RuleLoader.ParseAndValidate(path, out error);
+                Check($"{Path.GetFileName(path)} parses without error" + (error != null ? $" ({error})" : ""),
+                      def != null, true);
+                if (def != null) byId[def.Id] = def;
+            }
+
+            // Spot-check the 5 new per-band DXCC awards specifically -- same shape as the
+            // existing WAS_*M.ini files, one independent Target=Count(100) award per band.
+            foreach (var (id, band) in new[] { ("DXCC_80M", "80m"), ("DXCC_40M", "40m"), ("DXCC_20M", "20m"), ("DXCC_15M", "15m"), ("DXCC_10M", "10m") })
+            {
+                RuleDefinition def;
+                bool found = byId.TryGetValue(id, out def);
+                Check($"{id}: loaded", found, true);
+                if (!found) continue;
+                Check($"{id}: GroupBy=Dxcc", def.GroupBy == RuleGroupBy.Dxcc, true);
+                Check($"{id}: Target=Count, Threshold=100", def.Target == RuleTargetType.Count && def.Threshold == 100, true);
+                Check($"{id}: restricted to {band} only",
+                      def.Bands.Count == 1 && def.Bands[0].Equals(band, StringComparison.OrdinalIgnoreCase), true);
+                Check($"{id}: SupportsLiveTag (same as plain DXCC)", RuleEngine.SupportsLiveTag(def), true);
+            }
+
+            // Spot-check DXCC Honor Roll -- Basis=CONFIRMED + a dynamic ThresholdFrom, not a
+            // literal Threshold (see RuleLoaderBasisAndDynamicThresholdTests for the engine
+            // behavior this shape actually drives).
+            RuleDefinition honorRoll;
+            Check("DXCC_HONOR_ROLL: loaded", byId.TryGetValue("DXCC_HONOR_ROLL", out honorRoll), true);
+            if (honorRoll != null)
+            {
+                Check("DXCC_HONOR_ROLL: GroupBy=Dxcc", honorRoll.GroupBy == RuleGroupBy.Dxcc, true);
+                Check("DXCC_HONOR_ROLL: Target=Count", honorRoll.Target == RuleTargetType.Count, true);
+                Check("DXCC_HONOR_ROLL: Basis=Confirmed", honorRoll.Basis == RuleBasis.Confirmed, true);
+                CheckStr("DXCC_HONOR_ROLL: ThresholdFrom=DXCC_CURRENT", honorRoll.ThresholdFrom, "DXCC_CURRENT");
+                Check("DXCC_HONOR_ROLL: ThresholdOffset=9", honorRoll.ThresholdOffset == 9, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RuleLoaderShippedAwardsParseTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
+    // ── RuleLoader: Target.Basis / Target.ThresholdFrom parsing ─────────────────────────
+    // Basis=CONFIRMED and the dynamic ThresholdFrom/ThresholdOffset pair are both new,
+    // Honor-Roll-motivated additions to the [Target] section -- this proves the loader's
+    // validation independent of any real .ini file (a temp one per case), covering both the
+    // accept and reject paths RuleEngineDynamicThresholdAndBasisTests then exercises live.
+    static void RuleLoaderBasisAndDynamicThresholdTests()
+    {
+        Console.WriteLine("\n── RuleLoader: Target.Basis / ThresholdFrom parsing ──");
+        string tmpDir = Path.Combine(Path.GetTempPath(), "JimmyTest_RuleLoaderTarget_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tmpDir);
+
+            string Write(string body)
+            {
+                string path = Path.Combine(tmpDir, Guid.NewGuid().ToString("N") + ".ini");
+                File.WriteAllText(path,
+                    "[Award]\nId=TEST\nName=Test\nFormatVersion=1\nEnabled=Y\nDescription=Test\n\n" +
+                    "[Match]\nGroupBy=Dxcc\n\n[Confirmation]\nRequires=ANY\n\n[Target]\n" + body);
+                return path;
+            }
+
+            // Baseline: Basis omitted entirely -- must still work exactly as before this existed.
+            string err;
+            var plain = RuleLoader.ParseAndValidate(Write("Type=COUNT\nThreshold=100\n"), out err);
+            Check("Basis omitted: parses", plain != null, true);
+            if (plain != null) Check("Basis omitted: defaults to Worked", plain.Basis == RuleBasis.Worked, true);
+
+            // Basis=CONFIRMED + ThresholdFrom -- the Honor Roll shape. No literal Threshold=.
+            var honorRollShape = RuleLoader.ParseAndValidate(
+                Write("Type=COUNT\nBasis=CONFIRMED\nThresholdFrom=DXCC_CURRENT\nThresholdOffset=9\n"), out err);
+            Check("Basis=CONFIRMED + ThresholdFrom, no literal Threshold: parses", honorRollShape != null, true);
+            if (honorRollShape != null)
+            {
+                Check("...Basis=Confirmed",       honorRollShape.Basis == RuleBasis.Confirmed, true);
+                CheckStr("...ThresholdFrom",       honorRollShape.ThresholdFrom, "DXCC_CURRENT");
+                Check("...ThresholdOffset=9",      honorRollShape.ThresholdOffset == 9, true);
+            }
+
+            // ThresholdOffset omitted -- defaults to 0, not a parse error.
+            var noOffset = RuleLoader.ParseAndValidate(Write("Type=COUNT\nThresholdFrom=DXCC_CURRENT\n"), out err);
+            Check("ThresholdFrom with no ThresholdOffset: parses, defaults to 0",
+                  noOffset != null && noOffset.ThresholdOffset == 0, true);
+
+            // THE GUARD: Basis=CONFIRMED with Type=ALL is rejected -- a checklist-style award's
+            // completion is never confirmation-gated (see FinishGrouped's own comment). This
+            // check runs before Type=ALL's own Universe requirement, so a missing Universe=
+            // here is not what's being tested -- confirmed by the specific error text below.
+            string basisAllErr;
+            var basisAll = RuleLoader.ParseAndValidate(Write("Type=ALL\nBasis=CONFIRMED\n"), out basisAllErr);
+            Check("Basis=CONFIRMED + Type=ALL: rejected", basisAll == null, true);
+            Check("...with a specific reason", !string.IsNullOrEmpty(basisAllErr) && basisAllErr.Contains("CONFIRMED"), true);
+
+            // Unrecognized Basis value: rejected, not silently defaulted.
+            string badBasisErr;
+            var badBasis = RuleLoader.ParseAndValidate(Write("Type=COUNT\nThreshold=100\nBasis=SOMETHING\n"), out badBasisErr);
+            Check("Unrecognized Basis value: rejected", badBasis == null, true);
+
+            // Negative ThresholdOffset: rejected.
+            string badOffsetErr;
+            var badOffset = RuleLoader.ParseAndValidate(
+                Write("Type=COUNT\nThresholdFrom=DXCC_CURRENT\nThresholdOffset=-1\n"), out badOffsetErr);
+            Check("Negative ThresholdOffset: rejected", badOffset == null, true);
+
+            // Type=COUNT with neither Threshold nor ThresholdFrom: still rejected exactly as
+            // before this feature existed -- ThresholdFrom is an alternative, not a loophole.
+            string noThresholdErr;
+            var noThreshold = RuleLoader.ParseAndValidate(Write("Type=COUNT\n"), out noThresholdErr);
+            Check("Type=COUNT with neither Threshold nor ThresholdFrom: still rejected", noThreshold == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RuleLoaderBasisAndDynamicThresholdTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { Directory.Delete(tmpDir, true); } catch { }
+        }
+    }
+
+    // ── RuleEngine: Basis=CONFIRMED + dynamic ThresholdFrom, end to end (Honor Roll) ────
+    // Proves the actual evaluation behavior the DXCC_HonorRoll.ini shape drives: completion
+    // gated on Confirmed (not Worked, the default/every-other-award basis), and a threshold
+    // resolved live from a universe's count instead of a stale number baked into the file.
+    // Fixture ClubLogProvider, same technique RuleUniverseClubLogTests uses -- no network.
+    static void RuleEngineDynamicThresholdAndBasisTests()
+    {
+        Console.WriteLine("\n── RuleEngine: Basis=CONFIRMED + dynamic ThresholdFrom (Honor Roll shape) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_HonorRoll_" + Guid.NewGuid().ToString("N") + ".db");
+        string tmpRoot = Path.Combine(Path.GetTempPath(), "JimmyTest_HonorRollClubLog_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            // 5 active entities + 1 deleted (deleted must never count toward the threshold).
+            Directory.CreateDirectory(Path.Combine(tmpRoot, "ClubLog"));
+            string xml =
+                "<clublog><entities>" +
+                "<ENTITY><adif>1</adif><name>A</name><prefix>A</prefix><deleted>FALSE</deleted><cqz>1</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>2</adif><name>B</name><prefix>B</prefix><deleted>FALSE</deleted><cqz>1</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>3</adif><name>C</name><prefix>C</prefix><deleted>FALSE</deleted><cqz>1</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>4</adif><name>D</name><prefix>D</prefix><deleted>FALSE</deleted><cqz>1</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>5</adif><name>E</name><prefix>E</prefix><deleted>FALSE</deleted><cqz>1</cqz><cont>NA</cont></ENTITY>" +
+                "<ENTITY><adif>999</adif><name>DELETED</name><prefix>Z</prefix><deleted>TRUE</deleted><cqz>1</cqz><cont>NA</cont></ENTITY>" +
+                "</entities></clublog>";
+            File.WriteAllText(Path.Combine(tmpRoot, "ClubLog", "clublog_cty.xml"), xml);
+            var clubLog = new ClubLogProvider(tmpRoot);
+            clubLog.Configure(true, "");
+            clubLog.Load();
+            Check("Fixture: 5 active + 1 deleted entity loaded", clubLog.EntityCount == 6, true);
+
+            var honorRollLike = new RuleDefinition
+            {
+                Id = "TEST_HONOR_ROLL", Name = "Test Honor Roll", FormatVersion = 1, Enabled = true,
+                GroupBy = RuleGroupBy.Dxcc, Target = RuleTargetType.Count, Basis = RuleBasis.Confirmed,
+                ThresholdFrom = "DXCC_CURRENT", ThresholdOffset = 2,
+                Confirmation = RuleConfirmation.Any,
+            };
+
+            using (var db = new LogbookDb(tmpDb))
+            {
+                // 3 entities worked, only 2 confirmed.
+                InsertQso(db, "K1AAA", "", dxcc: 1, zone: 1, lotwRcvd: "Y");
+                InsertQso(db, "K2BBB", "", dxcc: 2, zone: 1, lotwRcvd: "Y");
+                InsertQso(db, "K3CCC", "", dxcc: 3, zone: 1); // worked, NOT confirmed
+
+                var result = RuleEngine.Evaluate(honorRollLike, tmpDb, clubLog);
+
+                Check("No EvaluationError", result.EvaluationError == null, true);
+                // 5 active entities - ThresholdOffset(2) = 3.
+                Check("EffectiveThreshold == 3 (5 active entities - offset 2)", result.EffectiveThreshold == 3, true);
+                Check("Worked == 3", result.Worked == 3, true);
+                Check("Confirmed == 2", result.Confirmed == 2, true);
+                // THE POINT: Completed is gated on Confirmed (2), NOT Worked (3) -- 2 < 3, so
+                // NOT complete, even though Worked alone would have reached the threshold.
+                Check("THE FIX: Completed is false -- gated on Confirmed (2 < 3), not Worked (3 >= 3)",
+                      result.Completed, false);
+
+                // Confirm one more entity -- now Confirmed (3) reaches the threshold (3).
+                InsertQso(db, "K4DDD", "", dxcc: 4, zone: 1, lotwRcvd: "Y");
+                var result2 = RuleEngine.Evaluate(honorRollLike, tmpDb, clubLog);
+                Check("After a 4th confirmed entity: Confirmed == 3", result2.Confirmed == 3, true);
+                Check("THE FIX: now Completed (Confirmed 3 >= EffectiveThreshold 3)", result2.Completed, true);
+            }
+
+            // Club Log data unavailable (e.g. fresh install, nothing downloaded yet): the
+            // dynamic threshold can't be resolved -- must fail closed (EvaluationError set,
+            // never a fluke Completed=true from a phantom EffectiveThreshold of 0).
+            var unavailable = RuleEngine.Evaluate(honorRollLike, tmpDb, null);
+            Check("No Club Log data: EvaluationError is set (fails closed, never a fluke Completed)",
+                  unavailable.EvaluationError != null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  RuleEngineDynamicThresholdAndBasisTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            try { File.Delete(tmpDb); } catch { }
+            try { Directory.Delete(tmpRoot, true); } catch { }
         }
     }
 
@@ -9147,7 +9836,7 @@ static class JimmyTests
 
         // ── SpeechCoordinator: RxStart edge ──
         var said = new List<string>();
-        var coord = new SpeechCoordinator((t, cue) => said.Add(t));
+        var coord = NewTestCoordinator((t, cue) => said.Add(t));
         coord.SubmitNotification("id|x|RxStart", "receive begins", SpeakWhen.RxStart, NotificationPriority.Normal);
         Check("RxStart: held, not spoken at submit", said.Count == 0, true);
         coord.OnReceiveCycleComplete();
@@ -9169,7 +9858,7 @@ static class JimmyTests
         sw.RepeatSeconds = 0; sw.ThrottleMilliseconds = 0;
         sw.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.AfterRx };
         var delivery = new FakeNotificationDelivery();
-        var center = new NotificationCenter(settings, delivery);
+        var center = NewTestNotificationCenter(settings, delivery);
 
         center.Publish(new StationWatchActivityEvent("W9FTR CQ.", "W9FTR", null, null, "TargetCq"));
         Check("multi-delivery: the Now boundary speaks immediately", delivery.AnnounceCount == 1, true);
@@ -9187,7 +9876,7 @@ static class JimmyTests
         a.RepeatSeconds = 0; a.ThrottleMilliseconds = 0;
         a.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.RxStart, SpeakWhen.AfterRx };
         var d4 = new FakeNotificationDelivery();
-        var c4 = new NotificationCenter(s4, d4);
+        var c4 = NewTestNotificationCenter(s4, d4);
         c4.Publish(new StationWatchActivityEvent("W9FTR RR73.", "W9FTR", null, null, "TargetRr73"));
         Check("both future boundaries held, nothing spoken yet", d4.AnnounceCount == 0, true);
         c4.OnReceivePeriodStarted();
@@ -9201,7 +9890,7 @@ static class JimmyTests
         var crit = s5.Policies[NotificationEventType.RadioCatLost];   // default Critical
         crit.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.Now, SpeakWhen.AfterRx, SpeakWhen.AfterTx };
         var d5 = new FakeNotificationDelivery();
-        var c5 = new NotificationCenter(s5, d5);
+        var c5 = NewTestNotificationCenter(s5, d5);
         c5.Publish(new RadioCatLostEvent("2028", "COM3", "38400", "RPRT -20"));
         Check("Critical + multi-set: spoken exactly once at submit", d5.AnnounceCount == 1, true);
         c5.OnPeriodBoundary();
@@ -9233,11 +9922,19 @@ static class JimmyTests
             s2.LoadFromIni(new IniFile(tmpIni));
             Check("round-trip: StatusDelivery survives save/load",
                 s2.Policies[NotificationEventType.StationWatchActivity].StatusDelivery == NotificationStatusDelivery.SendImmediately, true);
-            // Missing key -> Normal.
+            // Missing key -> the type's own code default. SmartStartArmed (untouched by the
+            // 2026-09-11 target-activity unification, unlike StationWatchActivity/
+            // SmartStartTargetBusy below) is used here so this stays a clean test of the GENERIC
+            // "missing key -> code default" mechanism, independent of which default any one type
+            // happens to carry.
             var empty = new NotificationSettings();
             empty.LoadFromIni(new IniFile(Path.Combine(Path.GetTempPath(), "JimmyStatusDelivE_" + Guid.NewGuid().ToString("N") + ".ini")));
-            Check("missing notifyStatusDelivery_ key -> Normal",
-                empty.Policies[NotificationEventType.StationWatchActivity].StatusDelivery == NotificationStatusDelivery.Normal, true);
+            Check("missing notifyStatusDelivery_ key -> the type's code default (Normal)",
+                empty.Policies[NotificationEventType.SmartStartArmed].StatusDelivery == NotificationStatusDelivery.Normal, true);
+            // StationWatchActivity's OWN code default changed to LatestOnly (2026-09-11) -- a
+            // missing key must load THAT default, not the generic Normal.
+            Check("missing notifyStatusDelivery_ key for StationWatchActivity -> its own default (LatestOnly)",
+                empty.Policies[NotificationEventType.StationWatchActivity].StatusDelivery == NotificationStatusDelivery.LatestOnly, true);
         }
         finally { try { File.Delete(tmpIni); } catch { } }
 
@@ -9248,7 +9945,7 @@ static class JimmyTests
         siP.SpeakWhenSet = new List<SpeakWhen> { SpeakWhen.AfterRx, SpeakWhen.AfterTx };   // all future
         siP.StatusDelivery = NotificationStatusDelivery.SendImmediately;
         var siD = new FakeNotificationDelivery();
-        var siC = new NotificationCenter(si, siD);
+        var siC = NewTestNotificationCenter(si, siD);
         siC.Publish(new StationWatchActivityEvent("W9FTR CQ.", "W9FTR", null, null, "TargetCq"));
         Check("Send immediately: spoken at once despite AfterRx/AfterTx being configured", siD.AnnounceCount == 1, true);
         siC.OnPeriodBoundary();
@@ -9263,7 +9960,7 @@ static class JimmyTests
         loP.SpeakWhen = SpeakWhen.AfterRx;   // single future boundary
         loP.StatusDelivery = NotificationStatusDelivery.LatestOnly;
         var loD = new FakeNotificationDelivery();
-        var loC = new NotificationCenter(lo, loD);
+        var loC = NewTestNotificationCenter(lo, loD);
         loC.Publish(new StationWatchActivityEvent("W9FTR to K1AAA, -12.", "W9FTR", "K1AAA", "-12", "TargetReport"));
         loC.Publish(new StationWatchActivityEvent("W9FTR to K2BBB, RR73.", "W9FTR", "K2BBB", "RR73", "TargetRr73"));
         Check("Latest only: both held, nothing spoken yet", loD.AnnounceCount == 0, true);
@@ -9280,25 +9977,41 @@ static class JimmyTests
         var bP = mix.Policies[NotificationEventType.SmartStartArmed];
         bP.RepeatSeconds = 0; bP.ThrottleMilliseconds = 0; bP.SpeakWhen = SpeakWhen.AfterRx;
         var mixD = new FakeNotificationDelivery();
-        var mixC = new NotificationCenter(mix, mixD);
+        var mixC = NewTestNotificationCenter(mix, mixD);
         mixC.Publish(new StationWatchActivityEvent("W9FTR CQ.", "W9FTR", null, null, "TargetCq"));
         mixC.Publish(new SmartStartArmedEvent("W9FTR"));
         mixC.Publish(new StationWatchActivityEvent("W9FTR to K3CCC, 73.", "W9FTR", "K3CCC", "73", "Target73"));
         mixC.OnPeriodBoundary();
-        Check("Latest only on type A collapses A to one, but type B still delivers its own",
-            mixD.AnnounceCount == 2, true);
+        // 2026-09-11 correction: both type A's (LatestOnly-collapsed) surviving fact and type B's
+        // fact are eligible at the SAME AfterRx boundary -- they are now merged into ONE
+        // Compose()/SpeakNow call (never two separate, zero-gap announcements) exactly like the
+        // Now-batch/routine-status-line pairing this whole feature exists to fix. "Collapses A to
+        // one" still means only A's NEWEST occurrence (K3CCC) survives into that merge, not both.
+        Check("Latest only on type A collapses A to one, merged with type B into ONE delivery",
+            mixD.AnnounceCount == 1, true);
+        Check("The merged text carries type A's NEWEST occurrence, not the collapsed-away older one",
+            mixD.LastText != null && mixD.LastText.Contains("K3CCC") && !mixD.LastText.Contains("TargetCq") && !mixD.LastText.Contains("CQ."), true);
+        Check("The merged text also carries type B's fact", mixD.LastText != null && mixD.LastText.Contains("Waiting to work W9FTR"), true);
 
-        // ── Normal (default) is unchanged: coalesce by the per-occurrence DedupKey ──
+        // ── Normal (default): two different identities of the SAME type both survive the
+        //    per-occurrence DedupKey (no type-wide collapse) but STILL merge into ONE delivery ──
         var nrm = new NotificationSettings();
         var nrmP = nrm.Policies[NotificationEventType.StationWatchActivity];
         nrmP.RepeatSeconds = 0; nrmP.ThrottleMilliseconds = 0; nrmP.SpeakWhen = SpeakWhen.AfterRx;
+        // Explicit: StationWatchActivity's own code default is now LatestOnly (2026-09-11), so
+        // this "Normal (default)" scenario must set it deliberately to keep testing Normal's own
+        // behavior rather than silently exercising LatestOnly instead.
+        nrmP.StatusDelivery = NotificationStatusDelivery.Normal;
         var nrmD = new FakeNotificationDelivery();
-        var nrmC = new NotificationCenter(nrm, nrmD);
+        var nrmC = NewTestNotificationCenter(nrm, nrmD);
         nrmC.Publish(new StationWatchActivityEvent("W9FTR to K1AAA, -12.", "W9FTR", "K1AAA", "-12", "TargetReport"));
         nrmC.Publish(new StationWatchActivityEvent("W9FTR to K2BBB, RR73.", "W9FTR", "K2BBB", "RR73", "TargetRr73"));
         nrmC.OnPeriodBoundary();
-        Check("Normal: two DIFFERENT identities both deliver (no type-wide collapse)",
-            nrmD.AnnounceCount == 2, true);
+        Check("Normal: two different identities are NOT type-wide collapsed (both survive) " +
+              "but still deliver as ONE merged utterance, never two zero-gap announcements",
+            nrmD.AnnounceCount == 1, true);
+        Check("The merged text contains both identities' facts, in arrival order",
+            nrmD.LastText == "W9FTR to K1AAA, -12. W9FTR to K2BBB, RR73.", true);
     }
 
     // P8 (2026-09-09): the Options > Notifications tab exposes the multi-delivery "also speak
@@ -9431,7 +10144,7 @@ static class JimmyTests
             ctrl.smartStartSilencePeriods = 6;
 
             var fake = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(ctrl.Notifications, fake);
+            wc.Notify = NewTestNotificationCenter(ctrl.Notifications, fake);
 
             const string myCall = "KB0UZT", myGrid = "FN42", target = "J38DX", peer = "W6PAN";
             List<string> Said() { lock (fake.AllText) return new List<string>(fake.AllText); }
@@ -10073,7 +10786,7 @@ static class JimmyTests
             return ForegroundValue;
         }
         public int CoordinatedSpeakInvokeCount;   // times the seam was called at all
-        public void CoordinatedSpeak(string text)
+        public void CoordinatedSpeak(string text, bool isDeliberateRepeat = false)
         {
             CoordinatedSpeakInvokeCount++;
             // Model Controller.CoordinatedSpeak's real foreground gate: it only actually nudges
@@ -10160,7 +10873,7 @@ static class JimmyTests
 
         var settings = new NotificationSettings();
         var delivery = new FakeNotificationDelivery();
-        var center = new NotificationCenter(settings, delivery);
+        var center = NewTestNotificationCenter(settings, delivery);
 
         // QsoCompleted is a routine-status wording row now (not normally published), but the
         // Publish pipeline still formats it from its template -- exercise that here.
@@ -10498,7 +11211,7 @@ static class JimmyTests
         Console.WriteLine("\n── SpeechCoordinator: SpeakWhen, obsolescence, coalescing, Critical bypass ──");
 
         var said = new List<string>();
-        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+        SpeechCoordinator NewCoord() { said.Clear(); return NewTestCoordinator((t, imp) => said.Add(t)); }
 
         // Now -> speak immediately.
         var c = NewCoord();
@@ -10714,7 +11427,7 @@ static class JimmyTests
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
                 wc.StatusView = view;
-                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                wc.Notify = NewTestNotificationCenter(new NotificationSettings(),
                     new StatusViewNotificationDelivery(view));
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
@@ -10965,6 +11678,70 @@ static class JimmyTests
                 CheckStr("fields-free template: stale text is preserved, not cleared",
                     ctrl.statusText.Text, "1 wanted.");
             }
+
+            // 13. The CQ-paused idle render (WsjtxClient.Display.cs's own separate "marker1"
+            //     cqPaused branch) must ALSO engage this option -- 2026-09-11 fix (live-radio
+            //     report): it builds the same "wanted" text via callsWaiting but, before this fix,
+            //     never tagged itself as the receive-cycle-summary render this option tracks -- so
+            //     a stale "1 wanted." from one advanced-layout side's last real render never
+            //     cleared while the operator stayed CQ-paused, even with the option ON. Drives the
+            //     REAL ShowStatus() pipeline (not RenderStatusVisible directly), so this proves the
+            //     fix's actual wiring, not just RenderStatusVisible's own contract (already proven
+            //     by 8-12b above). ReceiveStateSummary/OperatingModeSummary disabled to match the
+            //     reporting operator's own minimal profile (curTxMode/desc both "") -- with them at
+            //     their enabled defaults, "Receiving"/"Listen mode" wording would keep the render
+            //     speakable even at zero wanted, masking the exact bug being fixed here.
+            {
+                string tmpDb2 = Path.Combine(Path.GetTempPath(), "JimmyTest_ClearStalePaused_" + Guid.NewGuid().ToString("N") + ".db");
+                string prevDb2 = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+                Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb2);
+                try
+                {
+                    var ctrl = new Controller();
+                    ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                    ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                    ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                    ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                    ctrl.anyMsgRadioButton.Checked = true;
+                    ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
+                    ctrl.Notifications.Policies[NotificationEventType.ReceiveStateSummary].Enabled = false;
+                    ctrl.Notifications.Policies[NotificationEventType.OperatingModeSummary].Enabled = false;
+                    // A minimal template that is genuinely wordless with nothing wanted -- the
+                    // default template always says "no available stations", which is never
+                    // wordless and would not exercise the clear-when-empty path at all.
+                    ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template = "{Wanted}";
+                    ctrl.advancedCallLayout = false;   // simple layout -- no side-name clause to strip out
+                    var _ = ctrl.Handle;
+                    var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                    wc.TestSetMode("FT8");
+                    wc.cqPaused = true;   // the exact condition from the live report
+                    WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                    wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
+                        ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                        ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""catOk"": true, ""slot"": 900 },
+                        ""recentDecodes"": [] }"));
+
+                    // A wanted (Directed CQ) call is queued -- the summary genuinely has something
+                    // to report. SnapshotPriorityCount's simple-layout fallback (CallQueuePriorityCount)
+                    // reads callDict directly, not callQueue -- no need to touch the latter here.
+                    wc.callDict["K4JC"] = new EnqueueDecodeMessage { Priority = (int)WsjtxClient.CallPriority.WANTED_CQ, Message = "CQ POTA K4JC DN50" };
+                    wc.TestShowStatus();
+                    CheckStr("13a: CQ-paused render with a wanted call shows the fact",
+                        ctrl.statusText.Text, "1 wanted.");
+
+                    // The wanted call leaves the queue -- still CQ-paused, still idle, nothing left
+                    // to report. Before the fix, this stayed stuck on "1 wanted." forever.
+                    wc.callDict.Remove("K4JC");
+                    wc.TestShowStatus();
+                    CheckStr("13b: CQ-paused render with nothing wanted CLEARS the stale text (the fix)",
+                        ctrl.statusText.Text, "");
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb2);
+                    try { File.Delete(tmpDb2); } catch { }
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -11002,7 +11779,7 @@ static class JimmyTests
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
                 wc.StatusView = view;
-                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                wc.Notify = NewTestNotificationCenter(new NotificationSettings(),
                     new StatusViewNotificationDelivery(view));
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
@@ -11231,7 +12008,7 @@ static class JimmyTests
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
                 wc.StatusView = view;
-                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                wc.Notify = NewTestNotificationCenter(new NotificationSettings(),
                     new StatusViewNotificationDelivery(view));
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
@@ -11638,7 +12415,7 @@ static class JimmyTests
                 wc.TestSetDirectConnected(true);   // Direct is the only transport; the no-response gate is Direct-scoped
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
-                wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
+                wc.Notify = NewTestNotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
                     ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -11888,7 +12665,7 @@ static class JimmyTests
                 // on case 4's report decode.
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
-                wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
+                wc.Notify = NewTestNotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
                     ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -11998,7 +12775,7 @@ static class JimmyTests
                 wc.TestSetMode("FT8");
                 wc.cqPaused = false;
                 wc.StatusView = view;
-                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                wc.Notify = NewTestNotificationCenter(new NotificationSettings(),
                     new StatusViewNotificationDelivery(view));
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
@@ -12167,7 +12944,7 @@ static class JimmyTests
         // 2. SpeechCoordinator.Compose (exercised via SubmitRoutineStatus): a punctuation-only
         //    routine line is never spoken; a real one keeps its trailing period.
         var said = new List<string>();
-        var co = new SpeechCoordinator((t, imp) => said.Add(t));
+        var co = NewTestCoordinator((t, imp) => said.Add(t));
         foreach (var junk in new[] { ".", ",", ",.", ", .", "   .", "  " })
         {
             said.Clear();
@@ -12204,7 +12981,7 @@ static class JimmyTests
                 wc.TestSetMode("FT8");
                 wc.cqPaused = cqPaused;
                 wc.StatusView = view;
-                wc.Notify = new NotificationCenter(new NotificationSettings(),
+                wc.Notify = NewTestNotificationCenter(new NotificationSettings(),
                     new StatusViewNotificationDelivery(view));
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
@@ -12361,7 +13138,7 @@ static class JimmyTests
                 // COUNT independently of the StatusView, so both halves of the requirement
                 // (status area + history, and "no routine speech submitted") are checked for
                 // real rather than through a test double that might not mirror production wiring.
-                wc.Notify = new NotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
+                wc.Notify = NewTestNotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
                 WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
                     ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
@@ -12499,7 +13276,7 @@ static class JimmyTests
         Console.WriteLine("\n── QSO speech profile: SpeakCondition.OutsideQsoOnly (keep quiet during a contact) ──");
 
         var said = new List<string>();
-        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+        SpeechCoordinator NewCoord() { said.Clear(); return NewTestCoordinator((t, imp) => said.Add(t)); }
 
         // 1. No QSO active -> a normal notification speaks normally.
         var c = NewCoord();
@@ -12601,7 +13378,7 @@ static class JimmyTests
             settings.Policies[NotificationEventType.ErrorWarning].RepeatSeconds = 0;
             var delivery = new FakeNotificationDelivery();
             var history = new List<string>();
-            var nc = new NotificationCenter(settings, delivery, t => history.Add(t));
+            var nc = NewTestNotificationCenter(settings, delivery, t => history.Add(t));
             nc.OnQsoActiveChanged(true);
             nc.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "antenna warning"));
             Check("full path: Warning + Suppress + QSO active -> not spoken", delivery.AnnounceCount == 0, true);
@@ -12624,7 +13401,7 @@ static class JimmyTests
             settings.Policies[NotificationEventType.ErrorWarning].Condition = SpeakCondition.OutsideQsoOnly;
             settings.Policies[NotificationEventType.ErrorWarning].RepeatSeconds = 3600;   // long window
             var delivery = new FakeNotificationDelivery();
-            var nc = new NotificationCenter(settings, delivery, _ => { });
+            var nc = NewTestNotificationCenter(settings, delivery, _ => { });
 
             nc.OnQsoActiveChanged(true);
             nc.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "Radio", "SWR high"));   // suppressed
@@ -12645,7 +13422,7 @@ static class JimmyTests
             settings.Policies[NotificationEventType.ClockOutOfSync].SpeakWhen = SpeakWhen.Never;
             settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 3600;
             var delivery = new FakeNotificationDelivery();
-            var nc = new NotificationCenter(settings, delivery, _ => { });
+            var nc = NewTestNotificationCenter(settings, delivery, _ => { });
             nc.Publish(new ClockOutOfSyncEvent(2.4, "FT8"));                 // Never -> silent
             settings.Policies[NotificationEventType.ClockOutOfSync].SpeakWhen = SpeakWhen.Now;
             nc.Publish(new ClockOutOfSyncEvent(2.4, "FT8"));                 // now must speak
@@ -12661,7 +13438,7 @@ static class JimmyTests
         Console.WriteLine("\n── SpeakCondition x SpeakWhen (4-way eligibility, TxStart, contradictions) ──");
 
         var said = new List<string>();
-        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+        SpeechCoordinator NewCoord() { said.Clear(); return NewTestCoordinator((t, imp) => said.Add(t)); }
         void Sub(SpeechCoordinator c, string id, string text, SpeakWhen w, SpeakCondition cond,
                  NotificationPriority pri = NotificationPriority.Normal)
             => c.SubmitNotification(id, text, w, pri, cond);
@@ -12765,7 +13542,7 @@ static class JimmyTests
     {
         Console.WriteLine("\n── SpeechCoordinator: routine composite (per-clause timing, one utterance per boundary) ──");
         var said = new List<string>();
-        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, imp) => said.Add(t)); }
+        SpeechCoordinator NewCoord() { said.Clear(); return NewTestCoordinator((t, imp) => said.Add(t)); }
         RoutineFragment F(string key, int order, string text, SpeakWhen w, SpeakCondition c = SpeakCondition.Always, bool sticky = false)
             => new RoutineFragment { Key = key, Order = order, Text = text, When = w, Condition = c, Sticky = sticky };
 
@@ -12862,7 +13639,7 @@ static class JimmyTests
         Console.WriteLine("\n── Correction pass: boundary-based timing, clause composition, invalid-template notice ──");
 
         var said = new List<string>();
-        SpeechCoordinator NewCoord() { said.Clear(); return new SpeechCoordinator((t, cue) => said.Add(t)); }
+        SpeechCoordinator NewCoord() { said.Clear(); return NewTestCoordinator((t, cue) => said.Add(t)); }
         RoutineFragment F(string key, int order, string text, SpeakWhen w, SpeakCondition c = SpeakCondition.Always, bool sticky = false)
             => new RoutineFragment { Key = key, Order = order, Text = text, When = w, Condition = c, Sticky = sticky };
 
@@ -13062,7 +13839,7 @@ static class JimmyTests
         settings.Policies[NotificationEventType.AwardsNeeded].Timing = NotificationTiming.NextPeriodBoundary;
         settings.Policies[NotificationEventType.AwardsNeeded].DeferWhileTransmitting = false;
         var delivery = new FakeNotificationDelivery();
-        var center = new NotificationCenter(settings, delivery);
+        var center = NewTestNotificationCenter(settings, delivery);
 
         center.Publish(new AwardsNeededEvent("K4YT", 1, new[] { "WAS" }, "1 award needed"));
         Check("NextPeriodBoundary-timed event does not deliver immediately from Publish",
@@ -13099,7 +13876,7 @@ static class JimmyTests
         txSettings.Policies[NotificationEventType.QsoStarted].SpeakWhen = SpeakWhen.AfterTx;
         txSettings.Policies[NotificationEventType.QsoStarted].RepeatSeconds = 0;
         var txDelivery = new FakeNotificationDelivery();
-        var txCenter = new NotificationCenter(txSettings, txDelivery);
+        var txCenter = NewTestNotificationCenter(txSettings, txDelivery);
 
         txCenter.OnTransmittingChanged(true);
         txCenter.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));
@@ -13122,7 +13899,7 @@ static class JimmyTests
         bothSettings.Policies[NotificationEventType.AwardsNeeded].RepeatSeconds = 0;
         bothSettings.Policies[NotificationEventType.AwardsNeeded].ThrottleMilliseconds = 0;
         var bothDelivery = new FakeNotificationDelivery();
-        var bothCenter = new NotificationCenter(bothSettings, bothDelivery);
+        var bothCenter = NewTestNotificationCenter(bothSettings, bothDelivery);
 
         bothCenter.OnTransmittingChanged(true);
         bothCenter.Publish(new AwardsNeededEvent("K4YT", 1, new[] { "WAS" }, "1 award needed"));
@@ -13145,7 +13922,7 @@ static class JimmyTests
         suSettings.Policies[NotificationEventType.QsoStarted].RepeatSeconds = 0;
         suSettings.Policies[NotificationEventType.QsoStarted].SuppressUnchanged = true;
         var suDelivery = new FakeNotificationDelivery();
-        var suCenter = new NotificationCenter(suSettings, suDelivery);
+        var suCenter = NewTestNotificationCenter(suSettings, suDelivery);
 
         suCenter.Publish(new QsoStartedEvent("K4YT", "20m", "FT8"));
         int afterFirstSu = suDelivery.AnnounceCount;
@@ -13225,7 +14002,7 @@ static class JimmyTests
         settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 0;
         settings.Policies[NotificationEventType.ClockSynced].RepeatSeconds = 0;
         var delivery = new FakeNotificationDelivery();
-        wc.Notify = new NotificationCenter(settings, delivery);
+        wc.Notify = NewTestNotificationCenter(settings, delivery);
 
         const string myCall = "KB0UZT";
         const string myGrid = "FN42";
@@ -13298,7 +14075,7 @@ static class JimmyTests
         var boundarySettings = new NotificationSettings();
         var boundaryDelivery = new FakeNotificationDelivery();
         var boundaryWc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
-        boundaryWc.Notify = new NotificationCenter(boundarySettings, boundaryDelivery);
+        boundaryWc.Notify = NewTestNotificationCenter(boundarySettings, boundaryDelivery);
         ulong bSlot = 6000;
         void PublishBoundaryDt(double dt)
         {
@@ -13331,7 +14108,7 @@ static class JimmyTests
         ft4Settings.Policies[NotificationEventType.ClockSynced].RepeatSeconds = 0;
         var ft4Delivery = new FakeNotificationDelivery();
         var ft4Wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
-        ft4Wc.Notify = new NotificationCenter(ft4Settings, ft4Delivery);
+        ft4Wc.Notify = NewTestNotificationCenter(ft4Settings, ft4Delivery);
         ft4Wc.TestSetMode("FT4");
         ulong ft4Slot = 7000;
         void PublishFt4Dt(double dt)
@@ -13388,7 +14165,7 @@ static class JimmyTests
         settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 0;
         settings.Policies[NotificationEventType.ClockSynced].RepeatSeconds = 0;
         var delivery = new FakeNotificationDelivery();
-        wc.Notify = new NotificationCenter(settings, delivery);
+        wc.Notify = NewTestNotificationCenter(settings, delivery);
 
         const string myCall = "KB0UZT";
         const string myGrid = "FN42";
@@ -14094,7 +14871,7 @@ static class JimmyTests
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             var notify = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(new NotificationSettings(), notify);
+            wc.Notify = NewTestNotificationCenter(new NotificationSettings(), notify);
             void Reconnect() { wc.DisconnectDirectEngine(); wc.ConnectDirectEngine(myCall, myGrid); }
             wc.ConnectDirectEngine(myCall, myGrid);
             wc.TestSetMode("FT8");
@@ -14762,7 +15539,7 @@ static class JimmyTests
             var settings = new NotificationSettings();
             settings.Policies[NotificationEventType.ErrorWarning].RepeatSeconds = 0;
             var delivery = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(settings, delivery);
+            wc.Notify = NewTestNotificationCenter(settings, delivery);
 
             wc.ConnectDirectEngine("KB0UZT", "FN42", expectedToken);
             wc.TestStopPollTimer();
@@ -16399,7 +17176,7 @@ static class JimmyTests
             ctrl.Radio.BaudRate = "115200";
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             var delivery = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(new NotificationSettings(), delivery);
+            wc.Notify = NewTestNotificationCenter(new NotificationSettings(), delivery);
             return (wc, delivery);
         }
 
@@ -16705,7 +17482,7 @@ static class JimmyTests
         var settings = new NotificationSettings();
         settings.Policies[NotificationEventType.ConnectionLost].RepeatSeconds = 0;
         var delivery = new FakeNotificationDelivery();
-        wc.Notify = new NotificationCenter(settings, delivery);
+        wc.Notify = NewTestNotificationCenter(settings, delivery);
 
         var savedNegoState = WsjtxMessage.NegoState;
         try
@@ -17572,9 +18349,12 @@ static class JimmyTests
             CheckStr("QSO A: one-shot SentReport token == -10 (not yet consumed by ShowStatus)", wc.TestLoggedSentReportToken, "-10");
             CheckStr("QSO A: one-shot ReceivedReport token == -14 (not yet consumed by ShowStatus)", wc.TestLoggedReceivedReportToken, "-14");
 
-            // 1. Auto-logged row shows "S -10, R -14" -- sent first, received second, labelled.
+            // 1. Auto-logged row shows "R -14, S -10" -- received first, sent second, labelled.
+            // 2026-09-11: reordered to match the status line's own "received..., sending..."
+            // order (tester feedback: the two displays showed the same numbers in opposite
+            // sequence, reading as contradictory even though both were correct).
             var rowsA = ctrl.logListBox.Items.Cast<string>().ToList();
-            Check("QSO A: Auto-logged row contains 'S -10, R -14'", rowsA.Exists(r => r.Contains("S -10, R -14")), true);
+            Check("QSO A: Auto-logged row contains 'R -14, S -10'", rowsA.Exists(r => r.Contains("R -14, S -10")), true);
 
             // 6. Default template and wording are unchanged: "{Callsign} logged".
             CheckStr("QsoCompleted default template is unchanged", ctrl.Notifications.Policies[NotificationEventType.QsoCompleted].Template, "{Callsign} logged");
@@ -17603,8 +18383,8 @@ static class JimmyTests
             // match on the spaced form -- "A A 1 A A", not "AA1AA".
             var rowsB = ctrl.logListBox.Items.Cast<string>().ToList();
             Check("No leak: Auto-logged rows show A's own reports and B's own reports separately",
-                rowsB.Exists(r => r.Contains(WsjtxClient.DisplayCallsign(callA, true)) && r.Contains("S -10, R -14")) &&
-                rowsB.Exists(r => r.Contains(WsjtxClient.DisplayCallsign(callB, true)) && r.Contains("S -05, R -09")), true);
+                rowsB.Exists(r => r.Contains(WsjtxClient.DisplayCallsign(callA, true)) && r.Contains("R -14, S -10")) &&
+                rowsB.Exists(r => r.Contains(WsjtxClient.DisplayCallsign(callB, true)) && r.Contains("R -09, S -05")), true);
 
             // ---- QSO C: custom LONG-label template ----
             const string callC = "CC3CC";
@@ -19761,7 +20541,7 @@ static class JimmyTests
             ctrl.smartStartSilencePeriods = 6;   // high -> silence never drives readiness in this test
 
             var fake = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(ctrl.Notifications, fake);
+            wc.Notify = NewTestNotificationCenter(ctrl.Notifications, fake);
 
             const string myCall = "KB0UZT", myGrid = "FN42", target = "KV4CW", A = "W6PAN";
             List<string> Said() { lock (fake.AllText) return new List<string>(fake.AllText); }
@@ -20092,7 +20872,7 @@ static class JimmyTests
         Console.WriteLine("\n── SpeechCoordinator: Station Watch routine-suppression gate ──");
 
         var said = new List<string>();
-        var c = new SpeechCoordinator((t, cue) => said.Add(t));
+        var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
 
         // Routine speech is normal before the watch starts.
         c.SubmitRoutineStatus("Receiving, 3 available stations", true, SpeakWhen.Now);
@@ -20116,7 +20896,14 @@ static class JimmyTests
         c.SubmitNotification("id.b", "Logged K4YT", SpeakWhen.Now, NotificationPriority.Normal);
         Check("Ordinary (non-Watch) notification speech is muted while Station Watch is active", said.Count == 0, true);
 
+        // 2026-09-11 (notification-joining fix): a joinable (isWatchCategory) submission is now
+        // collected into a short debounce/ceiling window rather than spoken inline -- advance the
+        // fake clock/scheduler past the ceiling to let it resolve and speak.
         c.SubmitNotification("id.c", "Watching K4YT.", SpeakWhen.Now, NotificationPriority.Normal, isWatchCategory: true);
+        Check("Joinable speech is held in the Now-batch, not spoken inline", said.Count == 0, true);
+        // Ceiling AND the minimum gap since the very first "Routine speech flows normally" speech
+        // earlier in this test (the fake clock never advanced in between) both have to clear.
+        sched.Advance(c.MaxBatchWindowMs + c.MinSequentialGapMs);
         Check("Watch-category speech is NOT suppressed while Station Watch is active", said.Count == 1 && said[0] == "Watching K4YT.", true);
 
         said.Clear();
@@ -20128,6 +20915,918 @@ static class JimmyTests
         c.SetStationWatchSuppression(false);
         c.SubmitRoutineStatus("Receiving, 2 available stations", true, SpeakWhen.Now);
         Check("Routine speech resumes once Station Watch suppression is lifted", said.Count == 1, true);
+    }
+
+    // ── Notification-joining fix (2026-09-11) ───────────────────────────────────────────────────
+    // Covers the approved Revision 3 + Revision 4 design: TargetMonitor correlation (ArmGeneration/
+    // AdvanceStateSeq), Posture/Observation join-vs-supersede, lifecycle-boundary reconciliation
+    // (not discard), and the final Critical/Important/Immediate arbitration table. All timing uses
+    // NewTestCoordinator's paired fake clock/scheduler -- no Thread.Sleep, fully deterministic.
+    static void NotificationJoiningTests()
+    {
+        Console.WriteLine("\n── Notification joining: correlation, reconciliation, arbitration ──");
+
+        // ── TargetMonitor correlation primitives ──
+        {
+            var tm = new TargetMonitor(TargetPurpose.SmartStart);
+            Check("ArmGeneration starts at 0 before any Start()", tm.ArmGeneration == 0, true);
+            tm.Start("EA6Y", "20m", "FT8", "tok");
+            Check("Start() bumps ArmGeneration to 1", tm.ArmGeneration == 1, true);
+            int s1 = tm.AdvanceStateSeq();
+            int s2 = tm.AdvanceStateSeq();
+            Check("AdvanceStateSeq() is strictly increasing", s2 > s1, true);
+            tm.ReturnToWaiting();
+            Check("ReturnToWaiting() does NOT bump ArmGeneration (same effort continues)", tm.ArmGeneration == 1, true);
+            int s3 = tm.AdvanceStateSeq();
+            Check("AdvanceStateSeq() keeps counting across ReturnToWaiting()", s3 > s2, true);
+            tm.Start("EA6Y", "20m", "FT8", "tok");
+            Check("A genuinely new Start() on the SAME call bumps ArmGeneration again", tm.ArmGeneration == 2, true);
+        }
+
+        // ── Posture + Observation JOIN (the corrected Revision-3 worked example) ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed, NotificationEventType.SmartStartTargetBusy });
+
+            var armed = new SmartStartArmedEvent("EA6Y", armGeneration: 1, stateSeq: 1);
+            var busy = new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", armGeneration: 1, stateSeq: 1);
+            SubmitCorrelated(c, armed, "Waiting to work EA6Y.");
+            SubmitCorrelated(c, busy, "EA6Y to KX4I, R minus 14.");
+            Check("Both Posture and Observation facts are held, not spoken inline", said.Count == 0, true);
+            sched.Advance(c.MaxBatchWindowMs);
+            Check("Posture + Observation for the same target JOIN into one utterance", said.Count == 1, true);
+            CheckStr("Joined utterance matches the worked example, in configured order",
+                said.Count == 1 ? said[0] : "<none>", "Waiting to work EA6Y. EA6Y to KX4I, R minus 14.");
+        }
+
+        // ── Reordering the join order changes the utterance (Move Up/Down effect) ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartTargetBusy, NotificationEventType.SmartStartArmed });
+
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            SubmitCorrelated(c, new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", 1, 1), "EA6Y to KX4I, R minus 14.");
+            sched.Advance(c.MaxBatchWindowMs);
+            CheckStr("Moving TargetBusy ahead of Armed in the join order changes the utterance",
+                said.Count == 1 ? said[0] : "<none>", "EA6Y to KX4I, R minus 14. Waiting to work EA6Y.");
+        }
+
+        // ── Posture supersession: newest StateSeq wins, NOT highest "tier" ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed, NotificationEventType.SmartStartYielded });
+
+            // Yielded (seq 5) then, in the SAME batch, a LATER Waiting (seq 6) for the same
+            // (target, generation) -- Waiting must win despite being the "earlier-looking" state.
+            SubmitCorrelated(c, new SmartStartYieldedEvent("EA6Y", 1, 5), "Standing by.");
+            var waitingEvt = new SmartStartWaitingEvent("EA6Y", "EA6Y not heard, 1 of 2.", "1 of 2", 1, 6);
+            SubmitCorrelated(c, waitingEvt, "EA6Y not heard, 1 of 2.");
+            sched.Advance(c.MaxBatchWindowMs);
+            Check("Only ONE Posture fact survives (superseded by recency, not tier)", said.Count == 1, true);
+            CheckStr("The NEWER StateSeq (Waiting) wins over the OLDER (Yielded), even though Yielded 'looks' more advanced",
+                said.Count == 1 ? said[0] : "<none>", "EA6Y not heard, 1 of 2.");
+        }
+
+        // ── Different ArmGeneration for the same Target never supersedes ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed });
+
+            // Different text so the exact-duplicate FOLD (keyed on text, not on ArmGeneration)
+            // cannot be what collapses these -- isolates the supersession-grouping behavior.
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", armGeneration: 1, stateSeq: 1), "Waiting to work EA6Y.");
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", armGeneration: 2, stateSeq: 1), "Waiting to work EA6Y again.");
+            sched.Advance(c.MaxBatchWindowMs);
+            Check("Two different ArmGenerations for the same callsign are independent supersession " +
+                  "groups -- BOTH survive (a Stop()+re-Start() is not the same logical attempt)",
+                  said.Count == 1 && said[0] == "Waiting to work EA6Y. Waiting to work EA6Y again.", true);
+        }
+
+        // ── Lifecycle boundary RECONCILES a pending batch with routine content -- never discards ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed, NotificationEventType.RoutineStatusLine });
+
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            Check("Now-batch item pending, not yet spoken", said.Count == 0, true);
+            c.SubmitRoutineComposite(new[]
+            {
+                new RoutineFragment { Key = "_base", Order = 0, Text = "1 new DXCC", When = SpeakWhen.AfterRx, Condition = SpeakCondition.Always },
+            }, speakNow: false);
+            c.OnReceiveCycleComplete();
+            Check("Boundary reconciles routine + Now-batch into ONE utterance", said.Count == 1, true);
+            CheckStr("Reconciled utterance contains both facts in configured order",
+                said.Count == 1 ? said[0] : "<none>", "Waiting to work EA6Y. 1 new DXCC");
+        }
+
+        // ── Lifecycle boundary with NOTHING of its own still flushes the Now-batch, never drops it ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            c.OnReceiveCycleComplete();   // nothing eligible in the routine/notification buckets
+            Check("A boundary with no content of its own still speaks the pending Now-batch (early flush, not a drop)",
+                said.Count == 1 && said[0] == "Waiting to work EA6Y.", true);
+        }
+
+        // ── Integration-level: exact final-delivery call count for every combination at one
+        //    boundary, not just bucket/dictionary state (2026-09-11 correction). Traces the SAME
+        //    three cases raised in review: (b) Now+Routine+one held notification, (c) multiple
+        //    held notifications with nothing else, plus the (a) Now+Routine baseline. ──
+        {
+            // (a) Now-batch + RoutineStatusLine only -- baseline, must stay ONE call.
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed, NotificationEventType.RoutineStatusLine });
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            c.SubmitRoutineComposite(new[]
+            {
+                new RoutineFragment { Key = "_base", Order = 0, Text = "1 new DXCC", When = SpeakWhen.AfterRx, Condition = SpeakCondition.Always },
+            }, speakNow: false);
+            c.OnReceiveCycleComplete();
+            Check("(a) Now-batch + routine line -> exactly ONE SpeakNow call", said.Count == 1, true);
+        }
+        {
+            // (b) Now-batch + RoutineStatusLine + one _pendingNotifications entry, ALL eligible at
+            //     the same boundary -- must still be exactly ONE call, not a compose-then-speak
+            //     zero-gap pair.
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed, NotificationEventType.AwardsNeeded, NotificationEventType.RoutineStatusLine });
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            c.SubmitRoutineComposite(new[]
+            {
+                new RoutineFragment { Key = "_base", Order = 0, Text = "1 new DXCC", When = SpeakWhen.AfterRx, Condition = SpeakCondition.Always },
+            }, speakNow: false);
+            // A held notification (stands in for AwardsNeeded once wired) due at the SAME boundary.
+            c.SubmitNotification("awd1", "K7ABC needs Ohio.", SpeakWhen.AfterRx, NotificationPriority.Normal,
+                eventType: NotificationEventType.AwardsNeeded);
+            c.OnReceiveCycleComplete();
+            Check("(b) Now-batch + routine line + one held notification -> exactly ONE SpeakNow call " +
+                  "(no zero-gap compose-then-speak pair)", said.Count == 1, true);
+            CheckStr("(b) all three facts are present in the single utterance, in configured order",
+                said.Count == 1 ? said[0] : "<none>", "Waiting to work EA6Y. K7ABC needs Ohio. 1 new DXCC");
+        }
+        {
+            // (c) Multiple DIFFERENT _pendingNotifications identities eligible together, with NO
+            //     Now-batch/routine content at all -- must still be exactly ONE call, not one
+            //     SpeakNow per identity in a zero-gap loop.
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.AwardsNeeded });
+            c.SubmitNotification("awd1", "K7ABC needs Ohio.", SpeakWhen.AfterRx, NotificationPriority.Normal,
+                eventType: NotificationEventType.AwardsNeeded);
+            c.SubmitNotification("awd2", "W1XYZ needs Vermont.", SpeakWhen.AfterRx, NotificationPriority.Normal,
+                eventType: NotificationEventType.AwardsNeeded);
+            Check("(c) both held, nothing spoken yet", said.Count == 0, true);
+            c.OnReceiveCycleComplete();
+            Check("(c) two different held-notification identities at one boundary -> exactly ONE " +
+                  "SpeakNow call (never a zero-gap loop of separate announcements)", said.Count == 1, true);
+            CheckStr("(c) the merged utterance carries both facts",
+                said.Count == 1 ? said[0] : "<none>", "K7ABC needs Ohio. W1XYZ needs Vermont.");
+        }
+
+        // ── Critical, INVALIDATING type: REPLACE (discard, never a zero-gap flush-then-speak) ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            bool armedSpoken = false;
+            c.SubmitNotification("armed", "Waiting to work EA6Y.", SpeakWhen.Now, NotificationPriority.Normal,
+                onSpoken: () => armedSpoken = true, isWatchCategory: true,
+                eventType: NotificationEventType.SmartStartArmed);
+            c.SubmitNotification("catlost", "Radio CAT link lost.", SpeakWhen.Now, NotificationPriority.Critical,
+                eventType: NotificationEventType.RadioCatLost);
+            Check("Critical (invalidating) speaks exactly once, immediately", said.Count == 1 && said[0] == "Radio CAT link lost.", true);
+            Check("The discarded batch item's onSpoken never fires (not silently double-counted)", armedSpoken, false);
+            sched.Advance(c.MaxBatchWindowMs);
+            Check("The discarded batch never speaks later either", said.Count == 1, true);
+        }
+
+        // ── Critical, NON-invalidating type (mechanism only): MERGE, Critical sorted first ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            const NotificationEventType syntheticNonInvalidating = NotificationEventType.ClockSynced;
+            SpeechCoordinator.NonInvalidatingCriticalTypes.Add(syntheticNonInvalidating);
+            try
+            {
+                c.SubmitNotification("armed", "Waiting to work EA6Y.", SpeakWhen.Now, NotificationPriority.Normal,
+                    isWatchCategory: true, eventType: NotificationEventType.SmartStartArmed);
+                c.SubmitNotification("upload", "Upload to Club Log failed.", SpeakWhen.Now, NotificationPriority.Critical,
+                    eventType: syntheticNonInvalidating);
+                Check("Non-invalidating Critical speaks exactly once, merged with the pending batch",
+                    said.Count == 1, true);
+                CheckStr("Critical text is sorted FIRST regardless of the configured join order",
+                    said.Count == 1 ? said[0] : "<none>", "Upload to Club Log failed. Waiting to work EA6Y.");
+            }
+            finally { SpeechCoordinator.NonInvalidatingCriticalTypes.Remove(syntheticNonInvalidating); }
+        }
+
+        // ── Important: DEFER -- never touches a pending batch, never zero-gap flush-then-speak ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed });
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            c.SubmitNotification("autotx", "Resumed calling KB0UZT automatically.", SpeakWhen.Now, NotificationPriority.Important);
+            Check("Important speaks immediately, alone", said.Count == 1 && said[0] == "Resumed calling KB0UZT automatically.", true);
+            Check("The pending batch is left UNTOUCHED by Important (not cancelled, not flushed)", c.OpenBatchCount == 1, true);
+            // Ceiling (120ms) AND the post-Important minimum gap (150ms, since Important already
+            // consumed the "last speech" slot at T=0) both have to clear before this speaks.
+            sched.Advance(c.MaxBatchWindowMs + c.MinSequentialGapMs);
+            Check("The batch still speaks later, on its own, after Important", said.Count == 2 && said[1] == "Waiting to work EA6Y.", true);
+        }
+
+        // ── Ordinary Immediate (non-Watch) notification: same DEFER treatment as Important. This
+        //    is the SpeechCoordinator-level proxy for Controller.ShowMsg's direct-operator-
+        //    feedback messages ("Window size and position reset to default.", etc.), which route
+        //    through the identical primitive (CoordinatedSpeak) one layer up in Controller.cs. ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed });
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            c.SubmitNotification("winreset", "Window size and position reset to default.", SpeakWhen.Now, NotificationPriority.Normal);
+            Check("The ordinary immediate message speaks right away, alone", said.Count == 1 && said[0] == "Window size and position reset to default.", true);
+            Check("An ordinary immediate message does not disturb a pending batch", c.OpenBatchCount == 1, true);
+            sched.Advance(c.MaxBatchWindowMs + c.MinSequentialGapMs);
+            Check("The pending batch still speaks afterward, on its own", said.Count == 2 && said[1] == "Waiting to work EA6Y.", true);
+        }
+
+        // ── The gap-defer proof: a scheduled batch flush never lands zero-gap after a just-spoken
+        //    Important/Critical/Immediate utterance -- it reschedules until the gap has elapsed. ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed });
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            // An Important message speaks immediately (T=0), stamping _lastSpeechElapsedMs.
+            c.SubmitNotification("autotx", "Resumed calling KB0UZT automatically.", SpeakWhen.Now, NotificationPriority.Important);
+            Check("Important spoke at T=0", said.Count == 1, true);
+            // The batch's own debounce (quiet) timer fires at ~75ms -- well inside
+            // MinSequentialGapMs (150ms) of the Important utterance at T=0 -- so it must NOT be
+            // allowed to speak yet at that point; it should reschedule instead.
+            sched.Advance(c.QuietPeriodMs);   // T=75ms -- inside the 150ms gap
+            Check("At T=75ms (inside the gap), the batch has NOT spoken -- it rescheduled instead",
+                said.Count == 1, true);
+            sched.Advance(c.MinSequentialGapMs);   // T=225ms -- now well past the gap
+            Check("Once the gap has elapsed, the batch speaks -- two utterances total, genuinely spaced, never zero-gap",
+                said.Count == 2 && said[1] == "Waiting to work EA6Y.", true);
+        }
+
+        // ── Duplicate exact text folds to one spoken instance; every duplicate's onSpoken fires ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            int fired = 0;
+            c.SubmitNotification("id1", "F5UKW not heard, 1 of 2.", SpeakWhen.Now, NotificationPriority.Normal,
+                onSpoken: () => fired++, isWatchCategory: true, eventType: NotificationEventType.SmartStartWaiting);
+            c.SubmitNotification("id1", "F5UKW not heard, 1 of 2.", SpeakWhen.Now, NotificationPriority.Normal,
+                onSpoken: () => fired++, isWatchCategory: true, eventType: NotificationEventType.SmartStartWaiting);
+            sched.Advance(c.MaxBatchWindowMs);
+            Check("An exact duplicate is spoken once", said.Count == 1, true);
+            Check("Both occurrences' onSpoken still fire", fired == 2, true);
+        }
+    }
+
+    // Helper: submit an ISmartStartCorrelatedEvent through SpeechCoordinator exactly the way
+    // NotificationCenter.Deliver does (extracting Target/ArmGeneration/StateSeq/Group into a
+    // SmartStartCorrelation), without needing a full NotificationCenter/NotificationSettings
+    // wiring for each test case.
+    static void SubmitCorrelated(SpeechCoordinator c, ISmartStartCorrelatedEvent evt, string text, Action onSpoken = null)
+    {
+        c.SubmitNotification(evt.EventType + "|" + evt.DedupKey, text, SpeakWhen.Now, NotificationPriority.Normal,
+            onSpoken: onSpoken, isWatchCategory: true, eventType: evt.EventType,
+            correlation: new SmartStartCorrelation
+            {
+                Target = evt.Target,
+                ArmGeneration = evt.ArmGeneration,
+                StateSeq = evt.StateSeq,
+                Group = evt.Group,
+            });
+    }
+
+    static void OrderedListMigrationTests()
+    {
+        Console.WriteLine("\n── OrderedListMigration.Merge: notification-join-order worked example ──");
+
+        // Fresh install / no saved list -> the default verbatim.
+        var fresh = OrderedListMigration.Merge(null, new[] { "A", "B", "C" }, new[] { "A", "B", "C" });
+        Check("Empty saved list returns the default verbatim",
+            fresh.Count == 3 && fresh[0] == "A" && fresh[1] == "B" && fresh[2] == "C", true);
+
+        // The exact worked example from the design writeup: operator has customized order
+        // [TargetBusy, Started, Yielded, Armed], a new type "Retrying" is added to the CODE
+        // default right after TargetBusy -> Retrying lands right after TargetBusy's CURRENT
+        // (operator-chosen, moved-to-front) position, not at the tail and not at its own
+        // absolute index in the new default.
+        var saved = new[] { "TargetBusy", "Started", "Yielded", "Armed" };
+        var oldDefault = new[] { "Started", "Armed", "TargetBusy", "Yielded" };
+        var newDefault = new[] { "Started", "Armed", "TargetBusy", "Retrying", "Yielded" };
+        var merged = OrderedListMigration.Merge(saved, newDefault, newDefault);
+        CheckStr("New type inserted right after its nearest PRECEDING neighbor's CURRENT position",
+            string.Join(",", merged), "TargetBusy,Retrying,Started,Yielded,Armed");
+
+        // Unknown/removed saved id is dropped silently.
+        var withStale = new[] { "TargetBusy", "NoLongerValid", "Armed" };
+        var merged2 = OrderedListMigration.Merge(withStale, new[] { "TargetBusy", "Armed", "Yielded" },
+            new[] { "TargetBusy", "Armed", "Yielded" });
+        CheckStr("An unrecognized saved id is dropped, everything else keeps its order",
+            string.Join(",", merged2), "TargetBusy,Armed,Yielded");
+    }
+
+    // ── Deliberate-repeat bypass for NavStatus / MoveFocusToStatusIfEnabled (2026-09-11) ────────
+    // Controller.IsNearImmediateRepeat is a pure, side-effect-free predicate factored out of
+    // CoordinatedSpeak specifically so this is testable without any real OS focus/foreground state
+    // (SendKeys cannot be driven headlessly -- see Controller.CoordinatedSpeak's own comment).
+    static void DeliberateRepeatBypassTests()
+    {
+        Console.WriteLine("\n── Deliberate-repeat bypass: NavStatus / MoveFocusToStatusIfEnabled ──");
+
+        var now = DateTime.UtcNow;
+        var window = TimeSpan.FromSeconds(3);
+
+        Check("Automatic: identical text within the window IS suppressed as a near-immediate repeat",
+            Controller.IsNearImmediateRepeat("X", "X", now.AddMilliseconds(-500), now, window, isDeliberateRepeat: false),
+            true);
+        Check("Deliberate repeat: identical text within the window is NOT suppressed",
+            Controller.IsNearImmediateRepeat("X", "X", now.AddMilliseconds(-500), now, window, isDeliberateRepeat: true),
+            false);
+        Check("Automatic: different text is never treated as a repeat regardless of timing",
+            Controller.IsNearImmediateRepeat("X", "Y", now.AddMilliseconds(-500), now, window, isDeliberateRepeat: false),
+            false);
+        Check("Automatic: identical text OUTSIDE the window is not suppressed (a genuine later repeat)",
+            Controller.IsNearImmediateRepeat("X", "X", now.AddSeconds(-5), now, window, isDeliberateRepeat: false),
+            false);
+        Check("Deliberate repeat: also not suppressed outside the window (bypass covers the inside-window case too)",
+            Controller.IsNearImmediateRepeat("X", "X", now.AddSeconds(-5), now, window, isDeliberateRepeat: true),
+            false);
+
+        // Regression guard, same pattern as NotificationParkedEventTypesGuardTests: the
+        // isDeliberateRepeat:true bypass must only ever be reachable from the two operator-
+        // requested-repeat call sites, never from an ordinary automatic announcement path (which
+        // would silently weaken deduplication for everything, not just deliberate repeats).
+        string srcRoot = FindRepoFile("WSJTX_Controller");
+        if (srcRoot == null || !Directory.Exists(srcRoot))
+        {
+            Console.WriteLine("  SKIP  Deliberate-repeat bypass guard: WSJTX_Controller source tree not found from this binary's location");
+        }
+        else
+        {
+            int bypassCallSites = 0;
+            var offendingFiles = new List<string>();
+            foreach (string file in Directory.GetFiles(srcRoot, "*.cs", SearchOption.AllDirectories))
+            {
+                string text = File.ReadAllText(file);
+                int count = 0;
+                int idx = 0;
+                while ((idx = text.IndexOf("isDeliberateRepeat: true", idx, StringComparison.Ordinal)) >= 0)
+                {
+                    count++;
+                    idx += 1;
+                }
+                if (count > 0)
+                {
+                    bypassCallSites += count;
+                    string name = Path.GetFileName(file);
+                    if (name != "Controller.cs") offendingFiles.Add($"{name} ({count})");
+                }
+            }
+            // 2026-09-11 correction: MoveFocusToStatusIfEnabled no longer bypasses -- it is
+            // AUTOMATIC focus placement (selecting a call), not an explicit repeat-status
+            // request. Only the NavStatus hotkey handler is left.
+            Check("Exactly ONE production call site passes isDeliberateRepeat:true (NavStatus only), in Controller.cs",
+                bypassCallSites == 1 && offendingFiles.Count == 0, true);
+        }
+    }
+
+    // ── Semantic decode-pass-complete boundary + hidden join-timing INI settings + batch
+    //    lifecycle diagnostics (2026-09-11 correction) ──────────────────────────────────────────
+    static void SemanticBoundaryAndJoinTimingTests()
+    {
+        Console.WriteLine("\n── Semantic decode-pass boundary, join-timing INI settings, batch diagnostics ──");
+
+        // ── OnDecodePassComplete reproduces the KF0VZS fix. The live incident's three facts were
+        //    232ms apart in real wall-clock time (39ms, then 193ms) -- wider than even the fixed
+        //    ceiling can safely be set without adding real latency to routine cases. What actually
+        //    makes this work in PRODUCTION is not "a longer timer": WsjtxClient.Direct.cs's
+        //    DirectApplyDecodes runs synchronously start-to-finish, and a WinForms Timer's own
+        //    Tick literally cannot fire mid-call unless something inside pumps the message loop
+        //    (SendKeys.Send does; nothing does here because nothing has SPOKEN yet -- the whole
+        //    point of batching is that it doesn't). So as long as nothing in the cluster has
+        //    resolved+spoken yet, the quiet/ceiling timers are inert regardless of their ms value,
+        //    and whichever trigger reaches the (still fully open) batch FIRST decides how it
+        //    resolves -- in production, OnDecodePassComplete, called synchronously at the
+        //    confirmed end of the pass, always wins that race. This test models exactly that:
+        //    all three submitted with NO clock advance in between (nothing pumped the message
+        //    loop), then the semantic signal resolves them together. ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.UpdateJoinOrder(new[] {
+                NotificationEventType.SmartStartTargetBusy,
+                NotificationEventType.SmartStartYielded,
+                NotificationEventType.SmartStartWaiting,
+            });
+
+            SubmitCorrelated(c, new SmartStartTargetBusyEvent("KF0VZS", "K3ATA", "", 1, 1), "KF0VZS to K3ATA.");
+            SubmitCorrelated(c, new SmartStartYieldedEvent("KF0VZS", 1, 2), "KF0VZS is busy; standing by.");
+            SubmitCorrelated(c, new SmartStartWaitingEvent("KF0VZS", "KF0VZS not heard, 1 of 2.", "1 of 2", 1, 3), "KF0VZS not heard, 1 of 2.");
+            Check("All three still open, nothing spoken yet", said.Count == 0, true);
+
+            c.OnDecodePassComplete();
+            Check("OnDecodePassComplete flushes the whole cluster as ONE utterance", said.Count == 1, true);
+            CheckStr("Observation (TargetBusy) always joins; within Posture, the NEWEST StateSeq " +
+                "(Waiting, seq 3) supersedes the older one (Yielded, seq 2) -- exactly the live " +
+                "incident's own correct-per-design outcome, now actually reachable in one utterance",
+                said.Count == 1 ? said[0] : "<none>", "KF0VZS to K3ATA. KF0VZS not heard, 1 of 2.");
+
+            // The OLD, now-superseded failure mode: if each item HAD been allowed to resolve on
+            // its own fixed timer before the next arrived (simulating a message-pump yield
+            // happening between them, e.g. because something else spoke), they would NOT join --
+            // this is what the semantic signal exists to prevent, not a claim that timers alone
+            // could never do it with a big enough number.
+        }
+
+        // ── A batch with nothing to do is a harmless no-op ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.OnDecodePassComplete();
+            Check("OnDecodePassComplete with an empty batch does nothing", said.Count == 0, true);
+        }
+
+        // ── OnDecodePassComplete does not fire early for content that ISN'T ready (defensive --
+        //    e.g. a batch that just resolved a MOMENT ago and is now gap-waiting still gets its
+        //    gap respected, not force-spoken) ──
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.SubmitNotification("autotx", "Resumed calling KB0UZT automatically.", SpeakWhen.Now, NotificationPriority.Important);
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            c.OnDecodePassComplete();   // resolves the open batch into frozen, but the gap since
+                                        // Important (T=0) has not elapsed yet
+            Check("Resolved into frozen but NOT spoken yet -- the post-urgent gap still applies " +
+                  "even at the semantic boundary", said.Count == 1 /* only the Important so far */, true);
+            sched.Advance(c.MinSequentialGapMs);
+            Check("Once the gap clears, the frozen content speaks on its own", said.Count == 2, true);
+        }
+
+        // ── Hidden INI settings: validated, clamped, defaulted, source-tracked ──
+        {
+            string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyJoinTiming_" + Guid.NewGuid().ToString("N") + ".ini");
+            try
+            {
+                // Missing key -> code default, source "default".
+                var s1 = new NotificationSettings();
+                s1.LoadFromIni(new IniFile(tmpIni));
+                Check("Missing notificationJoinQuietMs -> code default", s1.NotificationJoinQuietMs == SpeechCoordinator.DefaultQuietPeriodMs, true);
+                Check("Missing notificationJoinMaxMs -> code default", s1.NotificationJoinMaxMs == SpeechCoordinator.DefaultMaxBatchWindowMs, true);
+                Check("Missing notificationJoinGapMs -> code default", s1.NotificationJoinGapMs == SpeechCoordinator.DefaultMinSequentialGapMs, true);
+                CheckStr("Missing key source is 'default'", s1.NotificationJoinQuietMsSource, "default");
+
+                // Valid, in-range values are honored, source "ini".
+                var ini2 = new IniFile(tmpIni);
+                ini2.Write("notificationJoinQuietMs", "100");
+                ini2.Write("notificationJoinMaxMs", "600");
+                ini2.Write("notificationJoinGapMs", "200");
+                var s2 = new NotificationSettings();
+                s2.LoadFromIni(ini2);
+                Check("Valid notificationJoinQuietMs is honored", s2.NotificationJoinQuietMs == 100, true);
+                Check("Valid notificationJoinMaxMs is honored", s2.NotificationJoinMaxMs == 600, true);
+                Check("Valid notificationJoinGapMs is honored", s2.NotificationJoinGapMs == 200, true);
+                CheckStr("Valid value source is 'ini'", s2.NotificationJoinQuietMsSource, "ini");
+
+                // Out-of-range and unparseable values both fall back to the code default.
+                var ini3 = new IniFile(tmpIni);
+                ini3.Write("notificationJoinQuietMs", "5");        // below MinJoinQuietMs (10)
+                ini3.Write("notificationJoinMaxMs", "999999");     // above MaxJoinMaxMs (5000)
+                ini3.Write("notificationJoinGapMs", "not-a-number");
+                var s3 = new NotificationSettings();
+                s3.LoadFromIni(ini3);
+                Check("Below-minimum value falls back to the code default", s3.NotificationJoinQuietMs == SpeechCoordinator.DefaultQuietPeriodMs, true);
+                Check("Above-maximum value falls back to the code default", s3.NotificationJoinMaxMs == SpeechCoordinator.DefaultMaxBatchWindowMs, true);
+                Check("Unparseable value falls back to the code default", s3.NotificationJoinGapMs == SpeechCoordinator.DefaultMinSequentialGapMs, true);
+                CheckStr("An out-of-range/invalid value's source is still 'default'", s3.NotificationJoinMaxMsSource, "default");
+
+                // NotificationCenter actually wires the (already-validated) settings into the
+                // coordinator's timing, not just holding them inertly.
+                var delivery = new FakeNotificationDelivery();
+                var settings = new NotificationSettings { NotificationJoinQuietMs = 999, NotificationJoinMaxMs = 999, NotificationJoinGapMs = 999 };
+                var clock = new FakeMonotonicClock();
+                var sched = new FakeNowBatchScheduler(clock);
+                var center = new NotificationCenter(settings, delivery, scheduler: sched, clock: clock);
+                center.Publish(new SmartStartArmedEvent("EA6Y"));
+                sched.Advance(SpeechCoordinator.DefaultQuietPeriodMs);   // the OLD/code-default 75ms
+                Check("A quiet period shorter than the WIRED custom 999ms setting does not flush yet",
+                    delivery.AnnounceCount == 0, true);
+                sched.Advance(999);
+                Check("The wired custom 999ms quiet period does flush", delivery.AnnounceCount == 1, true);
+            }
+            finally { try { File.Delete(tmpIni); } catch { } }
+        }
+
+        // ── Batch lifecycle diagnostics: open/item/resolve/speak lines are actually emitted ──
+        {
+            var said = new List<string>();
+            var diag = new List<string>();
+            var clock = new FakeMonotonicClock();
+            var sched = new FakeNowBatchScheduler(clock);
+            var c = new SpeechCoordinator((t, cue) => said.Add(t), sched, clock, text => diag.Add(text));
+            c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed, NotificationEventType.SmartStartTargetBusy });
+
+            SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
+            SubmitCorrelated(c, new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", 1, 1), "EA6Y to KX4I, R minus 14.");
+            Check("A diagnostic line was emitted when the batch opened", diag.Any(l => l.Contains("opened") && l.Contains("SmartStartArmed")), true);
+            Check("A diagnostic line was emitted for the second item added", diag.Any(l => l.Contains("+item") && l.Contains("SmartStartTargetBusy")), true);
+
+            c.OnDecodePassComplete();
+            Check("A diagnostic line records the resolve decision with reason=decode-pass-complete",
+                diag.Any(l => l.Contains("resolve") && l.Contains("reason=decode-pass-complete") && l.Contains("survivors=2")), true);
+            Check("A diagnostic line records the final spoken text and nudge count",
+                diag.Any(l => l.Contains("speak") && l.Contains("nudges=1") && l.Contains("Waiting to work EA6Y")), true);
+        }
+    }
+
+    // Target-activity unification (2026-09-11): the shared TargetActivityFact/TargetActivityTracker
+    // gate Smart Start, Station Watch, and the ordinary callInProg (otherStr) narration all submit
+    // the identical structured fact through -- see TargetActivityTracker.cs and WsjtxClient.
+    // ShouldAnnounceTargetActivity's own comments. Eight focused groups, one per approved core
+    // invariant; no per-wording/mode/source cross-product duplication -- existing tests already
+    // cover formatting, lifecycle, and lower-level notification plumbing.
+    static void TargetActivityUnificationTests()
+    {
+        Console.WriteLine("\n── Target-activity unification: shared fact, period-based repeat gate ──");
+
+        // ══ 1. Equivalent facts -> at most one announcement per period (regardless of source) ══
+        {
+            var busy = new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetRr73, "");
+            foreach (bool repeatUnchanged in new[] { true, false })
+            {
+                var t = new TargetActivityTracker();
+                Check($"1a ({(repeatUnchanged ? "enabled" : "disabled")}): first observation of a period announces",
+                    t.Evaluate(busy, 500, repeatUnchanged) == TargetActivityDecision.Announce, true);
+                // Two MORE sources (Smart Start, Station Watch, or the ordinary path) observing
+                // the IDENTICAL decode in the SAME period -- never a second announcement, in
+                // either mode. This is not "unchanged repeat" policy; it is the same single
+                // observation surfacing more than once.
+                Check($"1b ({(repeatUnchanged ? "enabled" : "disabled")}): a second source, same fact, same period -> suppressed",
+                    t.Evaluate(busy, 500, repeatUnchanged) == TargetActivityDecision.Suppress, true);
+                Check($"1c ({(repeatUnchanged ? "enabled" : "disabled")}): a third source, same fact, same period -> suppressed",
+                    t.Evaluate(busy, 500, repeatUnchanged) == TargetActivityDecision.Suppress, true);
+            }
+
+            // 1d. Cross-route field identity: TargetActivityClassifier.ClassifyPeerActivity (the
+            // ordinary path's own classifier) must produce the SAME Value TargetMonitor.Raise()
+            // uses for the identical decode -- the raw payload for every kind except
+            // AddressingOther -- or the same real decode would classify to a DIFFERENT
+            // TargetActivityFact depending on which of the three contexts observed it, silently
+            // defeating cross-route dedup at exactly a Smart-Start/Station-Watch <-> ordinary-path
+            // handoff. (Found and fixed here: Rr73/73/Rrr were hardcoded to "" in the classifier.)
+            var crossRouteCases = new (string label, string message, TargetObservationKind kind, string expectedValue)[]
+            {
+                ("RR73", "DL4JG N3TBB RR73", TargetObservationKind.TargetRr73, "RR73"),
+                ("73", "DL4JG N3TBB 73", TargetObservationKind.Target73, "73"),
+                ("RRR", "DL4JG N3TBB RRR", TargetObservationKind.TargetRrr, "RRR"),
+                ("R-report", "DL4JG N3TBB R-05", TargetObservationKind.TargetRReport, "R-05"),
+                ("report", "DL4JG N3TBB -11", TargetObservationKind.TargetReport, "-11"),
+            };
+            foreach (var (label, message, expectedKind, expectedValue) in crossRouteCases)
+            {
+                var dmsg = new EnqueueDecodeMessage { Message = message, DeltaFrequency = 1500, Snr = -6 };
+                var fact = TargetActivityClassifier.ClassifyPeerActivity(dmsg, "N3TBB", "KB0UZT");
+                Check($"1d {label}: classifier produces the expected Kind", fact.HasValue && fact.Value.Kind == expectedKind, true);
+                CheckStr($"1d {label}: classifier's Value matches TargetMonitor's own raw payload (cross-route identity)",
+                    fact.Value.Value, expectedValue);
+            }
+        }
+
+        // ══ 2. Unchanged fact repeats in a LATER applicable period only when enabled ══
+        {
+            var busy = new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetRr73, "");
+
+            var enabled = new TargetActivityTracker();
+            Check("2a: period 1 announces", enabled.Evaluate(busy, 1, true) == TargetActivityDecision.Announce, true);
+            Check("2b (enabled): the SAME unchanged fact in period 2 announces again",
+                enabled.Evaluate(busy, 2, true) == TargetActivityDecision.Announce, true);
+            Check("2c (enabled): and again in period 3",
+                enabled.Evaluate(busy, 3, true) == TargetActivityDecision.Announce, true);
+
+            var disabled = new TargetActivityTracker();
+            Check("2d: period 1 announces", disabled.Evaluate(busy, 1, false) == TargetActivityDecision.Announce, true);
+            Check("2e (disabled): the SAME unchanged fact in period 2 stays silent",
+                disabled.Evaluate(busy, 2, false) == TargetActivityDecision.Suppress, true);
+            Check("2f (disabled): and stays silent in period 3 too",
+                disabled.Evaluate(busy, 3, false) == TargetActivityDecision.Suppress, true);
+        }
+
+        // ══ 3. Target / peer / observation-kind / report-value changes ALWAYS announce ══
+        {
+            var baseline = new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetReport, "-11");
+            var changes = new (string label, TargetActivityFact fact)[]
+            {
+                ("target change", new TargetActivityFact("K4YT", "DL4JG", TargetObservationKind.TargetReport, "-11")),
+                ("peer change", new TargetActivityFact("N3TBB", "W1AW", TargetObservationKind.TargetReport, "-11")),
+                ("observation-kind change (Report -> RRR)", new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetRrr, "")),
+                ("report-value change, same peer/kind", new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetReport, "-08")),
+            };
+            foreach (var (label, changed) in changes)
+            {
+                foreach (bool repeatUnchanged in new[] { true, false })
+                {
+                    var t = new TargetActivityTracker();
+                    t.Evaluate(baseline, 10, repeatUnchanged);   // establish the baseline, period 10
+                    // Same period as the baseline -- a real change must still announce even though
+                    // it has not reached a NEW period yet (the same-period gate in section 1 only
+                    // ever applies to an EXACT repeat, never to a genuine change).
+                    Check($"3 {label} ({(repeatUnchanged ? "enabled" : "disabled")}): announces even within the SAME period",
+                        t.Evaluate(changed, 10, repeatUnchanged) == TargetActivityDecision.Announce, true);
+                }
+            }
+        }
+
+        // ══ 4. FT8 and FT4 both use the engine's own period-slot identity, never a wall clock ══
+        {
+            string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_TAU_Period_" + Guid.NewGuid().ToString("N") + ".db");
+            string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+            try
+            {
+                foreach (string modeName in new[] { "FT8", "FT4" })
+                {
+                    var ctrl = new Controller();
+                    ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                    ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                    ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                    ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                    ctrl.anyMsgRadioButton.Checked = true;
+                    ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+                    var _ = ctrl.Handle;
+                    var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                    wc.TestSetMode(modeName);
+                    wc.cqPaused = false;
+                    var fake = new FakeNotificationDelivery();
+                    wc.Notify = NewTestNotificationCenter(ctrl.Notifications, fake);
+                    WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                    wc.callInProg = "N3TBB";
+
+                    // Two consecutive real periods, back-to-back with NO elapsed wall time between
+                    // them (this whole test method runs in well under a real T/R period either
+                    // way) -- if unchanged-repeat suppression were still wall-clock-based (the old
+                    // RepeatSeconds=30 fold), a millisecond-apart pair like this would be
+                    // suppressed regardless of mode. It is NOT suppressed, because the gate is the
+                    // engine's own slot number (here 900 -> 901), identical mechanism for both
+                    // modes -- FT4's shorter real period never needs a separate code path.
+                    DirectSnapshot Snap(ulong slot) => ParseDirectSnapshot(@"{
+                        ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                        ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""catOk"": true, ""slot"": " + slot + @" },
+                        ""recentDecodes"": [ { ""from"": ""N3TBB"", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""DL4JG N3TBB RR73"" } ] }");
+                    wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(900));
+                    Check($"4 {modeName}: period 900 announces the fresh fact",
+                        wc.TestOtherPartyActivitySpeakable, true);
+                    wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(901));
+                    Check($"4 {modeName}: period 901 (unchanged, next engine slot, no real time elapsed) still announces -- slot-based, not wall-clock",
+                        wc.TestOtherPartyActivitySpeakable, true);
+                }
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+                try { File.Delete(tmpDb); } catch { }
+            }
+        }
+
+        // ══ 5. Ordinary QSO / Smart Start / Station Watch overlap -> exactly one announcement, ══
+        // ══    including a context-transition case ══
+        {
+            string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_TAU_Overlap_" + Guid.NewGuid().ToString("N") + ".db");
+            string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+            try
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.AfterRx;
+                ctrl.spaceCallsignsAndGrids = false;   // deterministic plain-text assertions below
+                ctrl.smartQsoStartEnabled = true;
+                ctrl.smartStartSilencePeriods = 6;
+                var _ = ctrl.Handle;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                var fake = new FakeNotificationDelivery();
+                wc.Notify = NewTestNotificationCenter(ctrl.Notifications, fake);
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                const string target = "N3TBB", peer = "DL4JG";
+                wc.callInProg = target;
+
+                DirectSnapshot Snap(ulong slot, string msg) => ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""catOk"": true, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [ { ""from"": """ + target + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + msg + @""" } ] }");
+                List<string> Said() { lock (fake.AllText) return new List<string>(fake.AllText); }
+                bool SaidContains(string sub) => Said().Exists(s => s.IndexOf(sub, StringComparison.OrdinalIgnoreCase) >= 0);
+
+                // 5a: no watcher armed -- the ordinary path is the sole narrator. otherStr's own
+                // speech submission only happens inside ShowStatus -- TestApplyDirectSnapshot
+                // classifies the decode (TestOtherPartyActivitySpeakable) but does not itself
+                // render/speak the status line.
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(700, $"{peer} {target} -11"));
+                Check("5a: ordinary path announces with no watcher active", wc.TestOtherPartyActivitySpeakable, true);
+                // ShowStatus() only SUBMITS the routine fragment (into the coordinator's held
+                // routine bucket, per its own configured SpeakWhen boundary) -- it does not itself
+                // flush/speak it. The real production flush is the NEXT receive-cycle boundary
+                // (TestApplyDirectSnapshot's own automatic Notify.OnPeriodBoundary() call, driven
+                // by the engine's slot advancing); forced explicitly here so this assertion does
+                // not depend on timing a further snapshot.
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("5a: the fact reaches Speechify via the shared status pipeline",
+                    SaidContains($"to {peer}") || SaidContains(peer), true);
+
+                // 5b: Smart Start arms on the SAME target (context transition, still period 700's
+                // fact family but a NEW period/fact -- a genuine RR73 close). Only Smart Start's
+                // own submission should reach the tracker's Announce slot this time; the ordinary
+                // path defers entirely (ShouldAnnounceTargetActivity is never even reached for it).
+                lock (fake.AllText) fake.AllText.Clear();
+                Check("5b: Smart Start captures the same target", wc.TestTryCaptureSmartStart(target,
+                    new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }), true);
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(701, $"{peer} {target} RR73"));
+                Check("5b: the ordinary path defers while Smart Start owns this target (no duplicate submission)",
+                    wc.TestOtherPartyActivitySpeakable, false);
+                Check("5b: exactly one announcement of the RR73 fact reached the operator",
+                    Said().FindAll(s => s.IndexOf(peer, StringComparison.OrdinalIgnoreCase) >= 0).Count == 1, true);
+
+                // 5c: Smart Start relinquishes the target (cancel path) -- the ordinary path
+                // resumes as sole narrator for a LATER, genuinely new period/fact, with no gap and
+                // no re-announcement of what Smart Start already said.
+                wc.TestCancelStationWatchPendingStart();
+                lock (fake.AllText) fake.AllText.Clear();
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(702, $"{peer} {target} -09"));
+                Check("5c: after Smart Start relinquishes the target, the ordinary path resumes narrating a genuine change",
+                    wc.TestOtherPartyActivitySpeakable, true);
+                wc.TestShowStatus();
+                wc.Notify.OnPeriodBoundary();
+                Check("5c: no gap -- the new fact still reaches the operator", SaidContains(peer), true);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+                try { File.Delete(tmpDb); } catch { }
+            }
+        }
+
+        // ══ 6. Callsign / grid formatting never affects fact identity ══
+        {
+            // The classifier itself never sees the spacing option at all -- ClassifyPeerActivity
+            // takes no such parameter, and TargetActivityFact stores raw, unformatted strings.
+            // Two facts built from identical raw content are equal regardless of what a LATER
+            // presentation step would render them as ("N3TBB" vs "N 3 T B B").
+            var raw = new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetRr73, "");
+            var rawAgain = new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetRr73, "");
+            Check("6a: two facts built from identical raw content are Equal (spacing is a presentation-time concern, not identity)",
+                raw.Equals(rawAgain), true);
+
+            var t = new TargetActivityTracker();
+            Check("6b: first observation announces", t.Evaluate(raw, 20, true) == TargetActivityDecision.Announce, true);
+            Check("6c: the identical raw fact, even if the OPERATOR toggled spacing between periods, still reads as unchanged -- announces once per period under 'enabled', never twice for the same period",
+                t.Evaluate(rawAgain, 20, true) == TargetActivityDecision.Suppress, true);
+        }
+
+        // ══ 7. A genuine state change supersedes a stale pending unchanged repeat (FT4 backlog) ══
+        {
+            // Mirrors the existing "Latest only" coverage in NotificationStatusDeliveryTests,
+            // applied to SmartStartTargetBusy's OWN shipped default (StatusDelivery=LatestOnly,
+            // 2026-09-11) -- proving the shipped policy, not a hand-set one, actually supersedes.
+            var settings = new NotificationSettings();
+            var policy = settings.Policies[NotificationEventType.SmartStartTargetBusy];
+            Check("7a: SmartStartTargetBusy's shipped default is LatestOnly (the backlog-supersession policy)",
+                policy.StatusDelivery == NotificationStatusDelivery.LatestOnly, true);
+            policy.SpeakWhen = SpeakWhen.AfterRx;   // held pending, not spoken immediately -- see below
+            var delivery = new FakeNotificationDelivery();
+            var center = NewTestNotificationCenter(settings, delivery);
+
+            // An "unchanged repeat" occurrence for peer DL4JG, still pending...
+            center.Publish(new SmartStartTargetBusyEvent("N3TBB", "DL4JG", "RR73", 1, 1));
+            // ...then a GENUINE state change (a new peer) arrives before the boundary ever flushes
+            // -- exactly the FT4-speed scenario where a fast period could otherwise queue several
+            // near-identical utterances.
+            center.Publish(new SmartStartTargetBusyEvent("N3TBB", "W1AW", "minus 5", 1, 2));
+            Check("7b: nothing spoken yet (still held for the AfterRx boundary)", delivery.AnnounceCount == 0, true);
+            center.OnPeriodBoundary();
+            Check("7c: exactly ONE delivery -- the stale repeat never queues behind the real change",
+                delivery.AnnounceCount == 1, true);
+            CheckStr("7d: the surviving text is the genuine change, not the superseded stale repeat",
+                delivery.LastText, "N3TBB to W1AW, minus 5.");
+
+            // 7e-g: the SAME race against SmartStartTargetBusy's ACTUAL shipped SpeakWhen (Now,
+            // untouched here) -- the Now-batch path, not _pendingNotifications. Non-autofire
+            // scheduler so the still-open batch window can be inspected before it resolves.
+            //
+            // 2026-09-11 correction (found while re-verifying for the live-test sign-off): the
+            // mechanism that supersedes here is NOT StatusDelivery=LatestOnly -- LatestOnly only
+            // ever affects _pendingNotifications' dedupKey (7a-d above), and this type's shipped
+            // SpeakWhen=Now never reaches that bucket. What actually supersedes the stale repeat
+            // is the PRE-EXISTING Posture/Observation correlation fold in ResolveBatch
+            // (SmartStartTargetBusyEvent implements ISmartStartCorrelatedEvent; both submissions
+            // below share (Target, ArmGeneration, Group=Observation), so only the higher StateSeq
+            // survives -- built for the join-order feature, unrelated to this option, and already
+            // correctly wired since HandleSmartStartObservation's existing
+            // _smartStart.AdvanceStateSeq() calls were left untouched). LatestOnly remains a
+            // correct (if here redundant) safety net ONLY for an operator who reconfigures this
+            // type's SpeakWhen away from Now.
+            var clock2 = new FakeMonotonicClock();
+            var sched2 = new FakeNowBatchScheduler(clock2, autoFire: false);
+            var settings2 = new NotificationSettings();
+            var delivery2 = new FakeNotificationDelivery();
+            var center2 = new NotificationCenter(settings2, delivery2, scheduler: sched2, clock: clock2);
+            center2.Publish(new SmartStartTargetBusyEvent("N3TBB", "DL4JG", "RR73", 1, 1));   // opens the batch
+            center2.Publish(new SmartStartTargetBusyEvent("N3TBB", "W1AW", "minus 5", 1, 2)); // arrives before the quiet timer fires
+            Check("7e: nothing spoken yet (still inside the open batch's own quiet window)", delivery2.AnnounceCount == 0, true);
+            sched2.Advance(settings2.NotificationJoinQuietMs);
+            Check("7f: exactly one utterance results (never a zero-gap pair)", delivery2.AnnounceCount == 1, true);
+            CheckStr("7g: the surviving text is the genuine change ONLY -- the stale repeat is " +
+                "superseded (StateSeq-based correlation fold), not composed alongside it",
+                delivery2.LastText, "N3TBB to W1AW, minus 5.");
+
+            // 7h: StationWatchActivity carries NO correlation (Station Watch's four observation
+            // types deliberately always join, never supersede -- see NotificationCenter.Deliver's
+            // own comment) -- so it has no StateSeq fallback if this race were ever reachable for
+            // it. It is NOT reachable in practice: notificationJoinMaxMs is hard-capped at 5000ms
+            // (NotificationSettings.MaxJoinMaxMs), always shorter than any supported real T/R
+            // period, so only two DECODE EVENTS for the identical target within that sub-5s window
+            // could ever trigger this race -- not two distinct periods, which real FT8/FT4 protocol
+            // timing (one decode per station per period) does not produce. Documented here as a
+            // known, structurally-bounded asymmetry rather than "fixed", since fixing it would mean
+            // adding correlation to Station Watch's events -- a design decision beyond this option's
+            // scope, not something either race can currently reach.
+            var clock3 = new FakeMonotonicClock();
+            var sched3 = new FakeNowBatchScheduler(clock3, autoFire: false);
+            var settings3 = new NotificationSettings();
+            var delivery3 = new FakeNotificationDelivery();
+            var center3 = new NotificationCenter(settings3, delivery3, scheduler: sched3, clock: clock3);
+            center3.Publish(new StationWatchActivityEvent("N3TBB to DL4JG, RR73.", "N3TBB", "DL4JG", "RR73", "TargetRr73"));
+            center3.Publish(new StationWatchActivityEvent("N3TBB to W1AW, minus 5.", "N3TBB", "W1AW", "minus 5", "TargetReport"));
+            sched3.Advance(settings3.NotificationJoinQuietMs);
+            Check("7h: StationWatchActivity has no correlation fold -- both facts compose together " +
+                "in this (structurally unreachable via real decode cadence) race, rather than one " +
+                "superseding the other -- documented limitation, not a functional loss",
+                delivery3.LastText == "N3TBB to DL4JG, RR73. N3TBB to W1AW, minus 5.", true);
+        }
+
+        // ══ 8. The option's enabled default, INI persistence, and live behavior ══
+        {
+            Check("8a: RepeatUnchangedTargetActivityEachPeriod defaults to true",
+                new NotificationSettings().RepeatUnchangedTargetActivityEachPeriod, true);
+
+            string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTAU_Opt_" + Guid.NewGuid().ToString("N") + ".ini");
+            try
+            {
+                var s = new NotificationSettings { RepeatUnchangedTargetActivityEachPeriod = false };
+                var ini = new IniFile(tmpIni);
+                s.SaveToIni(ini);
+                var s2 = new NotificationSettings();
+                s2.LoadFromIni(new IniFile(tmpIni));
+                Check("8b: round-trip persists false", s2.RepeatUnchangedTargetActivityEachPeriod, false);
+
+                var empty = new NotificationSettings();
+                empty.LoadFromIni(new IniFile(Path.Combine(Path.GetTempPath(), "JimmyTAU_OptE_" + Guid.NewGuid().ToString("N") + ".ini")));
+                Check("8c: missing key -> the true default (an upgrading profile hears no change)",
+                    empty.RepeatUnchangedTargetActivityEachPeriod, true);
+            }
+            finally { try { File.Delete(tmpIni); } catch { } }
+
+            // Live behavior: the SAME settings object, read fresh by ShouldAnnounceTargetActivity
+            // on every call -- no restart, no snapshot, exactly like ClearReceiveCycleSummaryWhenEmpty.
+            {
+                var settings = new NotificationSettings { RepeatUnchangedTargetActivityEachPeriod = true };
+                var ctrl = new Controller { Notifications = settings };
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var _ = ctrl.Handle;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                var tracker = wc.TestGetActivityTracker("N3TBB");
+                var fact = new TargetActivityFact("N3TBB", "DL4JG", TargetObservationKind.TargetRr73, "");
+                Check("8d: period 1 announces", tracker.Evaluate(fact, 1, settings.RepeatUnchangedTargetActivityEachPeriod) == TargetActivityDecision.Announce, true);
+                Check("8e (enabled): period 2, unchanged, still announces",
+                    tracker.Evaluate(fact, 2, settings.RepeatUnchangedTargetActivityEachPeriod) == TargetActivityDecision.Announce, true);
+                // Flip the SAME live settings object -- no reconstruction of wc/tracker/settings.
+                settings.RepeatUnchangedTargetActivityEachPeriod = false;
+                Check("8f: after flipping live, period 3 (unchanged) is now suppressed -- no restart needed",
+                    tracker.Evaluate(fact, 3, settings.RepeatUnchangedTargetActivityEachPeriod) == TargetActivityDecision.Suppress, true);
+            }
+        }
     }
 
     static void StationWatchHotkeyDefaultsTests()
@@ -20216,7 +21915,7 @@ static class JimmyTests
         // NotificationCenter (WatchEventTypes is private).
         {
             var gateFake = new FakeNotificationDelivery();
-            var gated = new NotificationCenter(new NotificationSettings(), gateFake);
+            var gated = NewTestNotificationCenter(new NotificationSettings(), gateFake);
             gated.SetStationWatchActive(true);
             var watchEvents = new INotificationEvent[]
             {
@@ -20261,7 +21960,7 @@ static class JimmyTests
             // Real Controller stays wired as StatusView; a FakeNotificationDelivery under a fresh
             // NotificationCenter (real default policies) records every spoken utterance.
             var fake = new FakeNotificationDelivery();
-            wc.Notify = new NotificationCenter(ctrl.Notifications, fake);
+            wc.Notify = NewTestNotificationCenter(ctrl.Notifications, fake);
 
             const string myCall = "KB0UZT", myGrid = "FN42", target = "J38DX", A = "W6PAN", B = "KD2VCE";
             List<string> Said() { lock (fake.AllText) return new List<string>(fake.AllText); }
@@ -20316,9 +22015,18 @@ static class JimmyTests
             wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // target now working A
             Check("Smart Start names the station the target is working, with its report",
                 SaidContains($"{target} to {A}, minus 7"), true);
-            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} R-05"), true);  // SAME peer, same busy episode
-            Check("a repeat for the SAME peer within RepeatSeconds is deduped -- said once",
-                SaidCount($"{target} to {A}") == 1, true);
+            // 2026-09-11 target-activity unification: a roger-report (RReport, "R-05") is a
+            // DIFFERENT structured fact from the plain report (TargetReport, "-07") just spoken --
+            // Kind and Value both changed -- so it always announces, regardless of elapsed wall
+            // time or unchanged peer. This corrects the pre-unification RepeatSeconds=30 wall-clock
+            // fold, which used to swallow exactly this real roger-report because it fell within 30
+            // real seconds of the prior report to the SAME peer (identity was Target|Peer only,
+            // blind to Kind/Value) -- see the design's own "report-value change must announce"
+            // requirement. A genuinely UNCHANGED repeat (same Kind AND Value) is covered by the
+            // dedicated TargetActivityTrackerTests below, not here.
+            wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} R-05"), true);
+            Check("a changed report (kind AND value) to the SAME peer still announces -- not swallowed",
+                SaidContains($"{target} to {A}, R minus 5"), true);
             wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -09"), true);   // target MOVES to a new station
             Check("moving to a NEW station re-announces (peer folded into the dedup key)",
                 SaidContains($"{target} to {B}, minus 9"), true);

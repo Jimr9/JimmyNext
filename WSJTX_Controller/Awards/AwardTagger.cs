@@ -39,15 +39,23 @@ namespace WSJTX_Controller
                         cat = WsjtxClient.CallCategory.ALWAYS_WANTED;
                     else if (_wc.IsPotaCall(d)) cat = WsjtxClient.CallCategory.POTA;
                     else if (IsSotaCall(d)) cat = WsjtxClient.CallCategory.SOTA;
-                    else if (IsHrcWasNeeded(d))       cat = WsjtxClient.CallCategory.WAS_NEEDED;
-                    else if (IsHrcWasUnconfirmed(d))  cat = WsjtxClient.CallCategory.WAS_UNCONFIRMED;
-                    else if (IsHrcDxccUnconfirmed(d)) cat = WsjtxClient.CallCategory.DXCC_UNCONFIRMED;
-                    else if (IsHrcZoneNeeded(d))      cat = WsjtxClient.CallCategory.ZONE_NEEDED;
                     else
                     {
-                        string matchedRuleId = MatchedAwardRuleId(d);
-                        if (matchedRuleId != null) { cat = WsjtxClient.CallCategory.STILL_NEEDED; d.MatchedAwardRuleId = matchedRuleId; }
-                        else cat = WsjtxClient.CallCategory.DEFAULT;
+                        // Any actively-checked award (WAS/DXCC/WAZ included -- they're auto-
+                        // checked for every install, see Controller's activeAwardRuleIds
+                        // migration, so this covers what the old hardcoded HRC-database checks
+                        // used to) is tried Needed-first, then Unconfirmed -- a station that's
+                        // still genuinely needed is reported as needed, never as merely
+                        // unconfirmed, even if it happens to also be worked-unconfirmed for a
+                        // different checked award.
+                        string neededRuleId = MatchedAwardRuleId(d);
+                        if (neededRuleId != null) { cat = WsjtxClient.CallCategory.STILL_NEEDED; d.MatchedAwardRuleId = neededRuleId; }
+                        else
+                        {
+                            string unconfirmedRuleId = MatchedUnconfirmedAwardRuleId(d);
+                            if (unconfirmedRuleId != null) { cat = WsjtxClient.CallCategory.STILL_UNCONFIRMED; d.MatchedAwardRuleId = unconfirmedRuleId; }
+                            else cat = WsjtxClient.CallCategory.DEFAULT;
+                        }
                     }
                     break;
             }
@@ -112,78 +120,6 @@ namespace WSJTX_Controller
             return dmsg.IsSota();
         }
 
-        // ── HRC (Ham Radio Center) category helpers ─────────────────────────────────
-        // All three read only in-memory HashSets populated at startup / after import.
-        // If the HRC database is unavailable, the sets remain empty and these return false.
-
-        // Each guarded by activeAwardTags (the realized, actually-live-tagging cache) rather
-        // than activeAwardRuleIds (the raw checkbox state), so it auto-retires only once the
-        // equivalent generic award (WAS/DXCC/WAZ) is BOTH checked in the new Still Need list
-        // AND actually producing usable live tags -- e.g. checking "DXCC" alone does not
-        // suppress this, since the shipped DXCC.ini is Target=COUNT and so never enters
-        // activeAwardTags (RuleResult.StillNeeded is only ever populated for Target=All; see
-        // Controller.RefreshStillNeedCache()). Previously checked activeAwardRuleIds directly,
-        // which silently disabled DXCC-needed alerts the moment the box was checked even though
-        // the new system was never actually going to tag anything in its place.
-        public bool IsHrcWasNeeded(EnqueueDecodeMessage d)
-        {
-            if (_wc.hrcNeededStates.Count == 0 || _wc.activeAwardTags.ContainsKey("WAS")) return false;
-
-            string qrzState = null;
-            string call = d.DeCall();
-            if (!string.IsNullOrEmpty(call) && _wc.lookupManager != null && _wc.lookupManager.Enabled)
-            {
-                var rec = _wc.lookupManager.Build(call);
-                qrzState = rec.State;
-            }
-            string grid = WsjtxMessage.Grid(d.Message);
-            string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
-            // UsGridStateMap.StateSetContains, not a plain Contains(state) -- state can be a
-            // compound border-straddling value like "MN-WI"; see that method's own comment.
-            return UsGridStateMap.StateSetContains(state, _wc.hrcNeededStates);
-        }
-
-        public bool IsHrcWasUnconfirmed(EnqueueDecodeMessage d)
-        {
-            if (_wc.hrcUnconfirmedStates.Count == 0 || _wc.activeAwardTags.ContainsKey("WAS")) return false;
-
-            string qrzState = null;
-            string call = d.DeCall();
-            if (!string.IsNullOrEmpty(call) && _wc.lookupManager != null && _wc.lookupManager.Enabled)
-            {
-                var rec = _wc.lookupManager.Build(call);
-                qrzState = rec.State;
-            }
-            string grid = WsjtxMessage.Grid(d.Message);
-            string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
-            // UsGridStateMap.StateSetContains, not a plain Contains(state) -- state can be a
-            // compound border-straddling value like "MN-WI"; see that method's own comment.
-            return UsGridStateMap.StateSetContains(state, _wc.hrcUnconfirmedStates);
-        }
-
-        // Dxcc/CqZone come from Jimmy's own offline Club Log/Big CTY data, same as
-        // ClassificationEngine's Country/Continent/Dxcc resolution -- must not depend on
-        // the "Use Lookup Data" master switch (that switch only gates the optional,
-        // account-backed providers). Build() when Enabled (unchanged), BuildOffline()
-        // otherwise so ClubLog still resolves the entity instead of nothing at all.
-        public bool IsHrcDxccUnconfirmed(EnqueueDecodeMessage d)
-        {
-            if (_wc.hrcUnconfirmedDxcc.Count == 0 || _wc.activeAwardTags.ContainsKey("DXCC")) return false;
-            string call = d.DeCall();
-            if (string.IsNullOrEmpty(call)) return false;
-            var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : _wc.lookupManager.BuildOffline(call);
-            return rec.Dxcc > 0 && _wc.hrcUnconfirmedDxcc.Contains(rec.Dxcc);
-        }
-
-        public bool IsHrcZoneNeeded(EnqueueDecodeMessage d)
-        {
-            if (_wc.hrcNeededZones.Count == 0 || _wc.activeAwardTags.ContainsKey("WAZ")) return false;
-            string call = d.DeCall();
-            if (string.IsNullOrEmpty(call)) return false;
-            var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : _wc.lookupManager.BuildOffline(call);
-            return rec.CqZone > 0 && _wc.hrcNeededZones.Contains(rec.CqZone);
-        }
-
         // Matches a decode against every actively-checked award (activeAwardTags), built by
         // Controller.RefreshStillNeedCache() from whichever Rule Definitions are checked in
         // the Still Need tab. Only a fast in-memory lookup happens here -- the RuleEngine
@@ -220,7 +156,36 @@ namespace WSJTX_Controller
                 dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; });
         }
 
-        // Category tag shown in the call-waiting row (e.g. "New DXCC", "WAS Needed").
+        // Same as MatchedAwardRuleId, against each active award's UnconfirmedSet instead of its
+        // Set -- see AwardMatcher.MatchUnconfirmed's own comment.
+        public string MatchedUnconfirmedAwardRuleId(EnqueueDecodeMessage d)
+        {
+            string call = d.DeCall();
+            if (string.IsNullOrEmpty(call)) return null;
+
+            string qrzState = null;
+            if (_wc.lookupManager != null && _wc.lookupManager.Enabled)
+            {
+                var stateRec = _wc.lookupManager.Build(call);
+                qrzState = stateRec.State;
+            }
+            string grid = WsjtxMessage.Grid(d.Message);
+            string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
+
+            return AwardMatcher.MatchUnconfirmed(
+                _wc.activeAwardTags, call, state, d.EffectiveClassification().Continent,
+                cqZoneLookup: () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.CqZone ?? 0; },
+                dxccLookup:   () => { var rec = _wc.lookupManager.Enabled ? _wc.lookupManager.Build(call) : null; return rec?.Dxcc   ?? 0; });
+        }
+
+        // Category tag shown in the call-waiting row (e.g. "New DXCC", "WAS Needed"). WAS_NEEDED/
+        // WAS_UNCONFIRMED/DXCC_UNCONFIRMED/ZONE_NEEDED are never assigned by DeriveCategory any
+        // more (see its own comment) -- their cases stay only as a harmless fallback, matching
+        // the enum's own "never remove" comment. STILL_NEEDED/STILL_UNCONFIRMED are the real
+        // path for every checked award now, WAS/DXCC/WAZ included; the three keep their original
+        // short wording (WAS Needed/WAS Unconf/DXCC Unconf/Zone Needed) since operators already
+        // know those, while any other award (including new ones like 5-Band DXCC) gets its own
+        // Rule Definition name.
         public string CategoryTag(EnqueueDecodeMessage d)
         {
             switch (d.Category)
@@ -236,7 +201,14 @@ namespace WSJTX_Controller
                 case WsjtxClient.CallCategory.WAS_UNCONFIRMED:     return "WAS Unconf";
                 case WsjtxClient.CallCategory.DXCC_UNCONFIRMED:    return "DXCC Unconf";
                 case WsjtxClient.CallCategory.ZONE_NEEDED:         return "Zone Needed";
-                case WsjtxClient.CallCategory.STILL_NEEDED:        return AwardDisplayName(d) + " Needed";
+                case WsjtxClient.CallCategory.STILL_NEEDED:
+                    if (d.MatchedAwardRuleId == "WAS") return "WAS Needed";
+                    if (d.MatchedAwardRuleId == "WAZ") return "Zone Needed";
+                    return AwardDisplayName(d) + " Needed";
+                case WsjtxClient.CallCategory.STILL_UNCONFIRMED:
+                    if (d.MatchedAwardRuleId == "WAS")  return "WAS Unconf";
+                    if (d.MatchedAwardRuleId == "DXCC") return "DXCC Unconf";
+                    return AwardDisplayName(d) + " Unconf";
                 default:                               return "";
             }
         }

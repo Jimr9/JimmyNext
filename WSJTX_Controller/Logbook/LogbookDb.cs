@@ -476,11 +476,14 @@ namespace WSJTX_Controller
             // Columns the ON CONFLICT clause below can modify. Compared before/after so
             // "updated" only counts rows whose data actually changed, instead of every
             // already-known QSO the source re-sends (which is nearly all of them).
+            // Appended at the END, not inserted earlier -- ConfirmColumnIndices (below) is a
+            // fixed pair of ordinal positions into this exact list (lotw_qsl_rcvd, qrz_qsl_rcvd),
+            // and appending here leaves every existing index untouched.
             const string mutableCols =
                 "lotw_qsl_sent, lotw_qsl_rcvd, qrz_qsl_sent, qrz_qsl_rcvd, country, state, name, grid, " +
                 "dxcc, cq_zone, continent, itu_zone, county, iota, sig, sig_info, my_sig, my_sig_info, " +
                 "darc_dok, wpx_prefix, exchange_sent, exchange_rcvd, qrz_uploaded_at, clublog_uploaded_at, " +
-                "lotw_uploaded_at, hrdlog_uploaded_at";
+                "lotw_uploaded_at, hrdlog_uploaded_at, source";
 
             lock (_lock)
             {
@@ -527,6 +530,17 @@ INSERT INTO qso (
     CASE WHEN @source='HRDLOG'  THEN @imported_at ELSE '' END
 )
 ON CONFLICT(dedup_key) DO UPDATE SET
+    -- Upgrade-only, never downgrade: 'source' only ever moves from the generic MANUAL
+    -- toward a real, specific origin (QRZ/LOTW/CLUBLOG/HRDLOG/WSJTX) the first time one
+    -- becomes known, and once it's a real value it is never overwritten again -- by a
+    -- later manual import, or by a download from a DIFFERENT real service. Confirmation
+    -- (lotw_qsl_rcvd/qrz_qsl_rcvd below) already tracks each service independently of this
+    -- column and is never affected by it; this only fixes the Source column / export
+    -- filter / Sync tab's per-service QSO-count tally, which read this column directly
+    -- (LogbookDb.TotalQsos/ConfirmedQsos with a source argument) and could otherwise
+    -- undercount a QSO that was manually imported before ever being downloaded from the
+    -- service that actually confirmed it.
+    source = CASE WHEN qso.source='MANUAL' AND excluded.source!='MANUAL' THEN excluded.source ELSE qso.source END,
     lotw_qsl_sent = CASE WHEN excluded.source='LOTW' AND excluded.lotw_qsl_sent!='' THEN excluded.lotw_qsl_sent ELSE qso.lotw_qsl_sent END,
     lotw_qsl_rcvd = CASE WHEN qso.lotw_qsl_rcvd='Y' THEN 'Y' WHEN excluded.source='LOTW' AND excluded.lotw_qsl_rcvd!='' THEN excluded.lotw_qsl_rcvd ELSE qso.lotw_qsl_rcvd END,
     qrz_qsl_sent  = CASE WHEN excluded.source='QRZ'  AND excluded.qrz_qsl_sent !='' THEN excluded.qrz_qsl_sent  ELSE qso.qrz_qsl_sent  END,
@@ -1494,93 +1508,6 @@ WHERE id=@id;";
         public SQLiteTransaction BeginTransaction() => _conn.BeginTransaction();
 
         // ── Helpers ───────────────────────────────────────────────────────────────
-
-        // ── HRC cache (used by Jimmy's tag/filter system) ─────────────────────────
-
-        private static readonly string[] UsStates50 =
-        {
-            "AK","AL","AR","AZ","CA","CO","CT","DE","FL","GA","HI","IA","ID","IL","IN",
-            "KS","KY","LA","MA","MD","ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ",
-            "NM","NV","NY","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VA","VT","WA",
-            "WI","WV","WY"
-        };
-
-        // Computes the four HRC filter sets used by Jimmy's decode processor.
-        // neededStates = never worked; unconfirmedStates = worked but not confirmed
-        // (mirrors unconfirmedDxcc's worked-minus-confirmed split for WAS/DXCC parity).
-        // All computation is local — no network access.
-        // band: ADIF-style string (e.g. "20m"); null means all-band.
-        public void LoadHrcCache(
-            out HashSet<string> neededStates,
-            out HashSet<string> unconfirmedStates,
-            out HashSet<int>    unconfirmedDxcc,
-            out HashSet<int>    neededZones,
-            string band = null)
-        {
-            string bf = BandFilter(band);
-            var confirmedSt = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var workedSt    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var workedDx    = new HashSet<int>();
-            var confirmedDx = new HashSet<int>();
-            var confirmedZn = new HashSet<int>();
-
-            lock (_lock)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        $"SELECT DISTINCT UPPER(TRIM(state)) FROM qso " +
-                        $"WHERE UPPER(TRIM(state)) IN ({WasInList}) " +
-                        $"AND (lotw_qsl_rcvd='Y' OR qrz_qsl_rcvd='Y'){bf};";
-                    using (var r = cmd.ExecuteReader())
-                        while (r.Read()) if (!r.IsDBNull(0)) confirmedSt.Add(r.GetString(0));
-                }
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        $"SELECT DISTINCT UPPER(TRIM(state)) FROM qso " +
-                        $"WHERE UPPER(TRIM(state)) IN ({WasInList}){bf};";
-                    using (var r = cmd.ExecuteReader())
-                        while (r.Read()) if (!r.IsDBNull(0)) workedSt.Add(r.GetString(0));
-                }
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = $"SELECT DISTINCT dxcc FROM qso WHERE dxcc>0{bf};";
-                    using (var r = cmd.ExecuteReader())
-                        while (r.Read()) workedDx.Add(r.GetInt32(0));
-                }
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        $"SELECT DISTINCT dxcc FROM qso WHERE dxcc>0 " +
-                        $"AND (lotw_qsl_rcvd='Y' OR qrz_qsl_rcvd='Y'){bf};";
-                    using (var r = cmd.ExecuteReader())
-                        while (r.Read()) confirmedDx.Add(r.GetInt32(0));
-                }
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        $"SELECT DISTINCT cq_zone FROM qso WHERE cq_zone>0 AND cq_zone<=40 " +
-                        $"AND (lotw_qsl_rcvd='Y' OR qrz_qsl_rcvd='Y'){bf};";
-                    using (var r = cmd.ExecuteReader())
-                        while (r.Read()) confirmedZn.Add(r.GetInt32(0));
-                }
-            }
-
-            neededStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var st in UsStates50)
-                if (!workedSt.Contains(st)) neededStates.Add(st);
-
-            unconfirmedStates = new HashSet<string>(workedSt, StringComparer.OrdinalIgnoreCase);
-            unconfirmedStates.ExceptWith(confirmedSt);
-
-            unconfirmedDxcc = new HashSet<int>(workedDx);
-            unconfirmedDxcc.ExceptWith(confirmedDx);
-
-            neededZones = new HashSet<int>();
-            for (int z = 1; z <= 40; z++)
-                if (!confirmedZn.Contains(z)) neededZones.Add(z);
-        }
 
         private void Exec(string sql)
         {

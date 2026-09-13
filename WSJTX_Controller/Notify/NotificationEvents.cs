@@ -21,6 +21,36 @@ namespace WSJTX_Controller
         IReadOnlyDictionary<string, string> ToTokens();
     }
 
+    // Notification-joining support (2026-09-11 speech-batching fix). Which of two INDEPENDENT
+    // correlation groups a Smart Start lifecycle event belongs to, for SpeechCoordinator's
+    // supersession within one (Target, ArmGeneration): Posture is Jimmy's OWN current
+    // relationship to the target (armed/waiting/calling/yielded/engaged); Observation is what was
+    // most recently decoded the TARGET doing (busy with someone else / appears available). The two
+    // never compete -- a surviving Posture fact and a surviving Observation fact for the same
+    // target both join into one utterance (e.g. "Waiting to work EA6Y. EA6Y to KX4I, R minus 14.")
+    // -- only members of the SAME group ever supersede each other, decided by StateSeq, not by
+    // NotificationEventType identity or arrival order (TargetMonitor.ReturnToWaiting() proves the
+    // state machine can cycle Yielded -> Waiting within one ArmGeneration, so a fixed "tier" is
+    // wrong; only a monotonic sequence captured at the moment each event is raised is correct).
+    public enum SmartStartGroup
+    {
+        Posture,
+        Observation,
+    }
+
+    // Implemented by all seven SmartStart*Event classes. Target/ArmGeneration/StateSeq/Group are
+    // read only by SpeechCoordinator's Now-batch resolution -- they are never formatted into
+    // spoken text themselves (Target already appears via each event's own {Target}/{Phrase}
+    // token). ArmGeneration/StateSeq come from the SAME TargetMonitor instance
+    // (WsjtxClient.StationWatch.cs's _smartStart) that raised the underlying observation.
+    public interface ISmartStartCorrelatedEvent : INotificationEvent
+    {
+        string Target { get; }
+        int ArmGeneration { get; }
+        int StateSeq { get; }
+        SmartStartGroup Group { get; }
+    }
+
     // Routine-status wording rows (2026-09-04). These four types are NOT published through
     // NotificationCenter -- NotificationParkedEventTypesGuardTests enforces that no production
     // file constructs them. Instead WsjtxClient.ShowStatus reads each type's policy Template
@@ -337,17 +367,23 @@ namespace WSJTX_Controller
     // suspenders for any other hand-crafted "{Progress}" template, ToTokens() never emits an
     // empty {Progress} -- it falls back to the fully-worded Phrase so the sentence is always
     // complete and truthful, never a dangling "waiting .".
-    public sealed class SmartStartWaitingEvent : INotificationEvent
+    public sealed class SmartStartWaitingEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
         public string Phrase { get; }
         public string Progress { get; }
+        public int ArmGeneration { get; }
+        public int StateSeq { get; }
+        public SmartStartGroup Group => SmartStartGroup.Posture;
 
-        public SmartStartWaitingEvent(string target, string phrase, string progress = "")
+        public SmartStartWaitingEvent(string target, string phrase, string progress = "",
+            int armGeneration = 0, int stateSeq = 0)
         {
             Target = target ?? "";
             Phrase = phrase ?? "";
             Progress = progress ?? "";
+            ArmGeneration = armGeneration;
+            StateSeq = stateSeq;
         }
 
         public NotificationEventType EventType => NotificationEventType.SmartStartWaiting;
@@ -367,10 +403,18 @@ namespace WSJTX_Controller
     // shape; each is its own type only so the operator can turn them on/off and re-word them
     // independently in Options > Notifications (they carry genuinely distinct operational
     // meaning -- request taken / target busy elsewhere / Jimmy standing by / target engaged us).
-    public sealed class SmartStartArmedEvent : INotificationEvent
+    public sealed class SmartStartArmedEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
-        public SmartStartArmedEvent(string target) { Target = target ?? ""; }
+        public int ArmGeneration { get; }
+        public int StateSeq { get; }
+        public SmartStartGroup Group => SmartStartGroup.Posture;
+        public SmartStartArmedEvent(string target, int armGeneration = 0, int stateSeq = 0)
+        {
+            Target = target ?? "";
+            ArmGeneration = armGeneration;
+            StateSeq = stateSeq;
+        }
         public NotificationEventType EventType => NotificationEventType.SmartStartArmed;
         public string DedupKey => Target;
         public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
@@ -387,20 +431,26 @@ namespace WSJTX_Controller
     // DedupKey folds in the peer so the line re-announces each time the target turns to a NEW
     // station (naturally the right cadence in FT8 and FT4 alike), while several decodes for the
     // SAME peer in one exchange still collapse via RepeatSeconds.
-    public sealed class SmartStartTargetBusyEvent : INotificationEvent
+    public sealed class SmartStartTargetBusyEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
         public string Peer { get; }
         public string Report { get; }
         public string Phrase { get; }
+        public int ArmGeneration { get; private set; }
+        public int StateSeq { get; private set; }
+        public SmartStartGroup Group => SmartStartGroup.Observation;
 
         // `report` is the SPOKEN form ("minus 8", "R minus 5"), "" when the decode carried none.
-        public SmartStartTargetBusyEvent(string target, string peer = "", string report = "")
+        public SmartStartTargetBusyEvent(string target, string peer = "", string report = "",
+            int armGeneration = 0, int stateSeq = 0)
         {
             Target = target ?? "";
             Peer = peer ?? "";
             Report = report ?? "";
             Phrase = BuildPhrase(Target, Peer, Report);
+            ArmGeneration = armGeneration;
+            StateSeq = stateSeq;
         }
 
         private SmartStartTargetBusyEvent(string target, string phrase, bool _)
@@ -415,8 +465,9 @@ namespace WSJTX_Controller
         // "busy" fact, but it rides this same event's config row / per-target dedup + 30 s
         // RepeatSeconds fold so a target that keeps CQing without hearing us is narrated once,
         // not every period. "{Phrase}" (the default template) renders "X calling CQ."
-        public static SmartStartTargetBusyEvent Cq(string target) =>
-            new SmartStartTargetBusyEvent(target ?? "", $"{target} calling CQ.", false);
+        public static SmartStartTargetBusyEvent Cq(string target, int armGeneration = 0, int stateSeq = 0) =>
+            new SmartStartTargetBusyEvent(target ?? "", $"{target} calling CQ.", false)
+                { ArmGeneration = armGeneration, StateSeq = stateSeq };
 
         // N4BP live-radio audit -- fix 3: the decoded FT8 fact, not a translated state. "N4BP to
         // KZ4MW, minus 15." / "N4BP to KZ4MW, RR73." / "N4BP to KZ4MW." / "N4BP working another
@@ -439,10 +490,18 @@ namespace WSJTX_Controller
         };
     }
 
-    public sealed class SmartStartYieldedEvent : INotificationEvent
+    public sealed class SmartStartYieldedEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
-        public SmartStartYieldedEvent(string target) { Target = target ?? ""; }
+        public int ArmGeneration { get; }
+        public int StateSeq { get; }
+        public SmartStartGroup Group => SmartStartGroup.Posture;
+        public SmartStartYieldedEvent(string target, int armGeneration = 0, int stateSeq = 0)
+        {
+            Target = target ?? "";
+            ArmGeneration = armGeneration;
+            StateSeq = stateSeq;
+        }
         public NotificationEventType EventType => NotificationEventType.SmartStartYielded;
         public string DedupKey => Target;
         public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
@@ -451,10 +510,18 @@ namespace WSJTX_Controller
         };
     }
 
-    public sealed class SmartStartEngagedEvent : INotificationEvent
+    public sealed class SmartStartEngagedEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
-        public SmartStartEngagedEvent(string target) { Target = target ?? ""; }
+        public int ArmGeneration { get; }
+        public int StateSeq { get; }
+        public SmartStartGroup Group => SmartStartGroup.Posture;
+        public SmartStartEngagedEvent(string target, int armGeneration = 0, int stateSeq = 0)
+        {
+            Target = target ?? "";
+            ArmGeneration = armGeneration;
+            StateSeq = stateSeq;
+        }
         public NotificationEventType EventType => NotificationEventType.SmartStartEngaged;
         public string DedupKey => Target;
         public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
@@ -463,11 +530,19 @@ namespace WSJTX_Controller
         };
     }
 
-    public sealed class SmartStartTargetAvailableEvent : INotificationEvent
+    public sealed class SmartStartTargetAvailableEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
+        public int ArmGeneration { get; }
+        public int StateSeq { get; }
+        public SmartStartGroup Group => SmartStartGroup.Observation;
 
-        public SmartStartTargetAvailableEvent(string target) { Target = target ?? ""; }
+        public SmartStartTargetAvailableEvent(string target, int armGeneration = 0, int stateSeq = 0)
+        {
+            Target = target ?? "";
+            ArmGeneration = armGeneration;
+            StateSeq = stateSeq;
+        }
 
         public NotificationEventType EventType => NotificationEventType.SmartStartTargetAvailable;
         public string DedupKey => Target;
@@ -478,11 +553,19 @@ namespace WSJTX_Controller
         };
     }
 
-    public sealed class SmartStartCallStartingEvent : INotificationEvent
+    public sealed class SmartStartCallStartingEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
+        public int ArmGeneration { get; }
+        public int StateSeq { get; }
+        public SmartStartGroup Group => SmartStartGroup.Posture;
 
-        public SmartStartCallStartingEvent(string target) { Target = target ?? ""; }
+        public SmartStartCallStartingEvent(string target, int armGeneration = 0, int stateSeq = 0)
+        {
+            Target = target ?? "";
+            ArmGeneration = armGeneration;
+            StateSeq = stateSeq;
+        }
 
         public NotificationEventType EventType => NotificationEventType.SmartStartCallStarting;
         public string DedupKey => Target;

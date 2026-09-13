@@ -1212,6 +1212,7 @@ namespace WSJTX_Controller
         // Moved here from the General tab (2026-09-04) so all automatic-speech behaviour is in
         // one place. Same Controller.announceImportantAlertsWhenFocusElsewhere setting/key.
         private System.Windows.Forms.CheckBox _notifyAnnounceOffFocusCheckBox;
+        private System.Windows.Forms.CheckBox _notifyRepeatUnchangedTargetActivityCheckBox;
         private System.Windows.Forms.NumericUpDown _notifyRepeatSecondsUpDown;
         private System.Windows.Forms.NumericUpDown _notifyThrottleMsUpDown;
         private System.Windows.Forms.CheckBox _notifySuppressUnchangedCheckBox;
@@ -3311,7 +3312,7 @@ namespace WSJTX_Controller
             var globalGroup = new System.Windows.Forms.GroupBox
             {
                 Text = "Global speech behaviour", Location = new System.Drawing.Point(L, y),
-                Size = new System.Drawing.Size(W, 192), Font = font,
+                Size = new System.Drawing.Size(W, 218), Font = font,
             };
             notificationsPanel.Controls.Add(globalGroup);
             globalGroup.Controls.Add(new System.Windows.Forms.Label
@@ -3446,6 +3447,21 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++, Font = font, Checked = ctrl.announceImportantAlertsWhenFocusElsewhere,
             };
             globalGroup.Controls.Add(_notifyAnnounceOffFocusCheckBox);
+
+            // Target-activity unification (2026-09-11): the ONE knob for how often the shared
+            // "target is working peer" fact (Smart Start / Station Watch / ordinary callInProg
+            // narration alike) repeats while unchanged -- see TargetActivityTracker.cs. Default
+            // ON: matches otherStr's own long-standing periodic behavior, so an upgrading
+            // profile hears no change. Turning it off asks for change-only narration instead.
+            _notifyRepeatUnchangedTargetActivityCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Repeat unchanged QSO activity each period",
+                AccessibleName = "Repeat unchanged QSO activity each period",
+                Location = new System.Drawing.Point(12, 184), Size = new System.Drawing.Size(W - 24, 20),
+                TabIndex = tabIdx++, Font = font,
+                Checked = ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod,
+            };
+            globalGroup.Controls.Add(_notifyRepeatUnchangedTargetActivityCheckBox);
             y += globalGroup.Height + 10;
 
             // ── G. Reset ────────────────────────────────────────────────────────────────────
@@ -3466,7 +3482,30 @@ namespace WSJTX_Controller
             resetGlobalButton.Click += ResetGlobalSpeech_Click;
             notificationsPanel.Controls.Add(resetGlobalButton);
 
+            // Notification-joining support (2026-09-11): opens NotificationJoinOrderDlg, applying
+            // immediately (like Controller.OpenRowDisplayOrderEditor's row-order dialogs) rather
+            // than deferring to this dialog's own OK -- it is a self-contained OK/Cancel dialog of
+            // its own.
+            var notificationOrderButton = new System.Windows.Forms.Button
+            {
+                Text = "Notification order...", Location = new System.Drawing.Point(L + 444, y),
+                Size = new System.Drawing.Size(180, 27), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "Notification order",
+            };
+            notificationOrderButton.Click += NotificationOrder_Click;
+            notificationsPanel.Controls.Add(notificationOrderButton);
+
             _notifyTypesListBox.SelectedIndex = 0;
+        }
+
+        private void NotificationOrder_Click(object sender, EventArgs e)
+        {
+            using (var dlg = new NotificationJoinOrderDlg(new List<NotificationEventType>(ctrl.Notifications.NotificationJoinOrder)))
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                ctrl.Notifications.NotificationJoinOrder = dlg.SelectedOrder;
+                ctrl.wsjtxClient?.Notify?.UpdateJoinOrder(dlg.SelectedOrder);
+            }
         }
 
         // Timing-combo items depend on the chosen condition: "After the QSO ends" is dropped for
@@ -3942,6 +3981,7 @@ namespace WSJTX_Controller
             _notifyReceiveCountScopeComboBox.SelectedIndex = (int)_pendingReceiveCountScope;
             _suppressReceiveDuringTxCheckBox.Checked = false;
             _notifyAnnounceOffFocusCheckBox.Checked = false;
+            _notifyRepeatUnchangedTargetActivityCheckBox.Checked = true;
             _notifyUpdatingFields = false;
         }
 
@@ -3966,6 +4006,7 @@ namespace WSJTX_Controller
             ctrl.Notifications.ReceiveSideIdScope = _pendingReceiveSideIdScope;
             ctrl.Notifications.ReceiveCountScope = _pendingReceiveCountScope;
             ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = _notifyClearReceiveCycleSummaryWhenEmptyCheckBox?.Checked ?? false;
+            ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod = _notifyRepeatUnchangedTargetActivityCheckBox?.Checked ?? true;
             ctrl.PersistRoutineStatusSpeakWhen();
         }
 
@@ -5002,6 +5043,8 @@ namespace WSJTX_Controller
             HotkeyAction.RowOrder,
             HotkeyAction.AnalyzeSlot,
             HotkeyAction.ClockStatus,
+            HotkeyAction.SmartStartStatus,
+            HotkeyAction.StationWatchStatus,
             HotkeyAction.LookupStation,
             HotkeyAction.OpenLogbook,
             HotkeyAction.AddManualQso,

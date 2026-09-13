@@ -53,11 +53,17 @@ namespace WSJTX_Controller
             { WsjtxClient.CallCategory.MANUAL_SEL,          "Manual selection" },
             { WsjtxClient.CallCategory.WANTED_CQ,           "Directed CQ" },
             { WsjtxClient.CallCategory.DEFAULT,             "Ordinary CQ" },
-            { WsjtxClient.CallCategory.WAS_NEEDED,          "WAS Needed" },
-            { WsjtxClient.CallCategory.WAS_UNCONFIRMED,     "WAS Worked, Unconfirmed" },
-            { WsjtxClient.CallCategory.DXCC_UNCONFIRMED,    "DXCC Worked, Unconfirmed" },
-            { WsjtxClient.CallCategory.ZONE_NEEDED,         "Zones Needed" },
+            // WAS_NEEDED/WAS_UNCONFIRMED/DXCC_UNCONFIRMED/ZONE_NEEDED deliberately NOT listed
+            // here any more (removed 2026-09-12) -- DeriveCategory has never assigned them
+            // since the HRC/Still-Need unification (see CallCategory's own comment), so a
+            // checkbox for them is pure clutter that actively misleads: confirmed live, an
+            // operator unchecked "DXCC Worked, Unconfirmed" expecting it to stop DXCC Unconf
+            // tags, and nothing changed, because that box had already done nothing since the
+            // unification landed -- the real switch is STILL_UNCONFIRMED below. Controller.cs
+            // strips these four out of a loaded callingEnabled every startup, so they never
+            // reach this dialog's `calling` list either.
             { WsjtxClient.CallCategory.STILL_NEEDED,        "Still Need (selected award)" },
+            { WsjtxClient.CallCategory.STILL_UNCONFIRMED,   "Still Need (worked, unconfirmed)" },
         };
 
         // POTA, SOTA, and MANUAL_SEL are hidden from user-facing lists.
@@ -79,11 +85,8 @@ namespace WSJTX_Controller
             WsjtxClient.CallCategory.ALWAYS_WANTED,
             WsjtxClient.CallCategory.TO_MYCALL,
             WsjtxClient.CallCategory.WANTED_CQ,
-            WsjtxClient.CallCategory.WAS_NEEDED,
-            WsjtxClient.CallCategory.WAS_UNCONFIRMED,
-            WsjtxClient.CallCategory.DXCC_UNCONFIRMED,
-            WsjtxClient.CallCategory.ZONE_NEEDED,
             WsjtxClient.CallCategory.STILL_NEEDED,
+            WsjtxClient.CallCategory.STILL_UNCONFIRMED,
         };
 
         // ── Constructor ────────────────────────────────────────────────────────
@@ -110,11 +113,8 @@ namespace WSJTX_Controller
             WsjtxClient.CallCategory.ALWAYS_WANTED,
             WsjtxClient.CallCategory.TO_MYCALL,
             WsjtxClient.CallCategory.WANTED_CQ,
-            WsjtxClient.CallCategory.WAS_NEEDED,
-            WsjtxClient.CallCategory.WAS_UNCONFIRMED,
-            WsjtxClient.CallCategory.DXCC_UNCONFIRMED,
-            WsjtxClient.CallCategory.ZONE_NEEDED,
             WsjtxClient.CallCategory.STILL_NEEDED,
+            WsjtxClient.CallCategory.STILL_UNCONFIRMED,
             WsjtxClient.CallCategory.DEFAULT,
         };
 
