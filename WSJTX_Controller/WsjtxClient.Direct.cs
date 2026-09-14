@@ -526,6 +526,27 @@ namespace WSJTX_Controller
         //                     Completed, HaltTx, or a reconnect.
         private string _finishingCall;
 
+        // Operator finding, 2026-09-13 (CT2HEX/LX1TI live session): _finishingCall had NO
+        // expiration -- it protected the engine's legitimate closing-tail repeats forever,
+        // however long that took. That is right for the REAL closing tail (bounded by Nexus's
+        // own wall-clock watchdog, per _finishingCall's own comment), but a station's radio can
+        // also spontaneously re-transmit its own OLD closing message minutes after the contact
+        // is long done and gone quiet -- a wholly separate, later event, not part of the
+        // original tail. Because that decode still matches _finishingCall (never cleared, since
+        // the station never sent anything more to clear it), it was exempted from the runaway
+        // backstop just the same, letting Jimmy answer it with a fresh RR73 with NO safety net,
+        // indefinitely, every time it happened.
+        // Fix: cap how many orphaned overs the exemption can protect for ONE finishing episode
+        // (MaxFinishingTailExemptedOvers, incremented only at the transmitting-just-ended edge,
+        // mirroring how _directOrphanTxOvers itself only counts at that same edge -- never on
+        // every poll a matching decode happens to be in view). Once the cap is spent, ANY further
+        // repeat to that station -- whether five seconds or five minutes later -- is treated as a
+        // genuine orphan by the ordinary counter above, which itself still tolerates one more
+        // before halting and announcing on the second. Reset alongside _finishingCall itself
+        // (both set and cleared) so a fresh finishing episode always gets its own full allowance.
+        private int _finishingTailExemptedOvers;
+        private const int MaxFinishingTailExemptedOvers = 1;
+
         // Live-radio audit fix, 2026-09-08 (Problem 1 / KB2SLO). Nexus can decode the DX's
         // closing RR73 at the LEADING EDGE of one of Jimmy's own TX slots: it advances qso.txNow
         // to the closing "73" and Jimmy's level-triggered completion block logs + clears
@@ -723,6 +744,7 @@ namespace WSJTX_Controller
             _directRr73LogRetries = 0;
             _directWriteFailRetries = 0;
             _finishingCall = null;
+            _finishingTailExemptedOvers = 0;
             _finishingCallSetThisPoll = false;
             _directOrphanExemptSlot = null;
             if (_lastCatOk == false || _catLostAtUtc.HasValue)
@@ -1789,24 +1811,36 @@ namespace WSJTX_Controller
             // FIRST such over is tolerated, the SECOND trips HALT_TX + SET_TX_ENABLED 0 (exactly
             // as Escape does) and announces. Not gated on ctrl.freqCheckBox or any mode flag
             // beyond "LISTEN, no contact, not tuning".
-            // S3 (2026-09-08): the "is this over a closing 73/RR73?" test stays on the RETAINED
-            // curTxMsg (the last real TX text -- there is no qsoTxSemantics envelope for a
-            // retained value, and the engine may already report qso.txNow == null during the
-            // tail). NormalizeDecodedMessage already unwrapped any hashed compound call in it,
-            // so there is no W1AW/2 bug here. Partner identity, though, now also accepts Nexus's
-            // authoritative Qso.Dxcall -- a strictly wider "this belongs to the finishing
-            // exchange, don't count it as a runaway orphan", which only ever makes this
-            // transmit-safety backstop less trigger-happy during a legitimate closing tail.
-            bool finishingTailOver = _finishingCall != null
+            // S3 (2026-09-08) / Phase C (2026-09-14): the "is this over a closing 73/RR73?"
+            // test now reads _curTxMsgSemantic -- the semantics cached the poll curTxMsg was
+            // set, from that poll's own fresh qsoTxSemantics envelope -- rather than re-parsing
+            // the RETAINED curTxMsg text on every poll (the engine may already report
+            // qso.txNow == null during the tail, long after the envelope that matched the real
+            // text was last on the wire). Partner identity also accepts Nexus's authoritative
+            // Qso.Dxcall -- a strictly wider "this belongs to the finishing exchange, don't
+            // count it as a runaway orphan", which only ever makes this transmit-safety
+            // backstop less trigger-happy during a legitimate closing tail.
+            bool finishingTailOverCandidate = _finishingCall != null
                 && !string.IsNullOrEmpty(curTxMsg)
-                && WsjtxMessage.Is73orRR73(curTxMsg)
-                && (string.Equals(WsjtxMessage.ToCall(curTxMsg), _finishingCall, StringComparison.OrdinalIgnoreCase)
+                && _curTxMsgSemantic != null && (_curTxMsgSemantic.IsRr73 || _curTxMsgSemantic.Is73)
+                && (string.Equals(_curTxMsgSemantic.To, _finishingCall, StringComparison.OrdinalIgnoreCase)
                     || string.Equals(snap.Qso?.Dxcall, _finishingCall, StringComparison.OrdinalIgnoreCase));
+            // 2026-09-13 fix: only still exempt while under the per-episode cap (see
+            // _finishingTailExemptedOvers's own comment) -- a repeat that arrives after the cap
+            // is spent is no longer treated as the legitimate closing tail, however well it still
+            // matches _finishingCall/curTxMsg, and falls through to ordinary orphan counting.
+            bool finishingTailOver = finishingTailOverCandidate
+                && _finishingTailExemptedOvers < MaxFinishingTailExemptedOvers;
 
             if (callInProg != null || txMode != TxModes.LISTEN || tuning || finishingTailOver)
             {
                 _directOrphanTxOvers = 0;
                 _directOrphanExemptSlot = null;   // a real contact / finishing tail -- no stale exemption
+                // Consume one unit of the exemption -- only at the actual transmitting-just-ended
+                // edge (mirrors _directOrphanTxOvers's own increment site below), never on every
+                // poll a matching decode merely stays in view.
+                if (finishingTailOver && wasTransmitting && !transmitting)
+                    _finishingTailExemptedOvers++;
             }
             else if (wasTransmitting && !transmitting)
             {
@@ -1893,6 +1927,12 @@ namespace WSJTX_Controller
                 curTxMsg = newTxMsg;
                 txMsg = newTxMsg;
                 curTxPayload = null;
+                // Phase C (2026-09-14): capture the TX semantics THIS poll, while
+                // snap.QsoTxSemantics is still fresh for the exact text just adopted -- reused
+                // on every later poll curTxMsg stays retained/unchanged (below), rather than
+                // re-deriving it from the text on every read, even on a poll whose OWN envelope
+                // happens to be transiently absent.
+                _curTxMsgSemantic = SemanticExtensions.EffectiveTxSemantic(newTxMsg, snap.QsoTxSemantics, myCall);
             }
 
             // ── Post-Stage-12 cleanup S3 (2026-09-08): the transmitted-message PROTOCOL FACTS
@@ -1913,16 +1953,25 @@ namespace WSJTX_Controller
             //    does not have that problem. When the envelope is absent (older host, listening
             //    edge, rollback) the bracket-free curTxMsg (NormalizeDecodedMessage) +
             //    WsjtxMessage.ToCall keeps the exact prior behaviour, W1AW/2 fix included.
-            var txSem = SemanticExtensions.EffectiveTxSemantic(curTxMsg, snap.QsoTxSemantics, myCall);
+            // Phase C: reuse the semantics cached when curTxMsg was set, above -- not a fresh
+            // re-derivation from curTxMsg's text on every poll. Falls back to a direct compute
+            // only if somehow nothing was ever cached (e.g. curTxMsg pre-dates this field).
+            var txSem = _curTxMsgSemantic ?? SemanticExtensions.EffectiveTxSemantic(curTxMsg, snap.QsoTxSemantics, myCall);
             bool txSemFromNexus = SemanticCutover.UseNexusSemantics && snap.QsoTxSemantics != null;
             string engineQsoPartner = snap.Qso?.Dxcall;
             // "The current TX over is addressed to <who>." Nexus's Dxcall is authoritative when
-            // the TX envelope is on the wire; the text parse of curTxMsg is the fallback.
+            // the TX envelope is on the wire; otherwise _curTxMsgSemantic.To -- the semantics
+            // cached when curTxMsg was set (Phase C), NOT a fresh re-parse of curTxMsg's text.
+            // Safe to compare directly against a bare callInProg (unlike before Stage 13):
+            // SemanticDecode.FromNexus now canonicalizes a hashed compound call's brackets on
+            // ingestion (the same fix that closed the VP5/K5UR incident), and EffectiveTxSemantic
+            // -> FromNexus is the exact same code path this field is built from, so it can no
+            // longer reopen the W1AW/2 wedge this comment used to warn about.
             bool TxOverAddressedTo(string who) =>
                 !string.IsNullOrEmpty(who)
                 && (txSemFromNexus && !string.IsNullOrEmpty(engineQsoPartner)
                     ? string.Equals(engineQsoPartner, who, StringComparison.OrdinalIgnoreCase)
-                    : string.Equals(WsjtxMessage.ToCall(curTxMsg), who, StringComparison.Ordinal));
+                    : string.Equals(_curTxMsgSemantic?.To, who, StringComparison.Ordinal));
 
             if (!string.IsNullOrEmpty(curTxMsg) && callInProg != null && TxOverAddressedTo(callInProg))
             {
@@ -1999,10 +2048,12 @@ namespace WSJTX_Controller
                     // to log, which also reach this else. While set, the runaway backstop below
                     // does not count the engine's RR73/73 closing overs to this station as
                     // orphans (Nexus owns that exchange and its own wall-clock watchdog bounds a
-                    // silent tail); it is cleared by that station's own 73/RR73/RRR decode.
+                    // silent tail) -- up to MaxFinishingTailExemptedOvers of them (2026-09-13);
+                    // it is also cleared by that station's own 73/RR73/RRR decode.
                     if (onRecord)
                     {
                         _finishingCall = justWorkedCall;
+                        _finishingTailExemptedOvers = 0;   // a fresh episode gets its own full allowance
                         // Problem 1 / KB2SLO fix (Part A): mark that the finishing latch was set
                         // THIS poll tick, so the DX's own signoff decode -- which, when its RR73
                         // lands on a Jimmy TX-slot edge, is the SAME decode that just completed
@@ -2046,11 +2097,15 @@ namespace WSJTX_Controller
                     // whatever gets selected/replied-to next. (curTxMsg is deliberately left alone
                     // -- see the "only ever overwrite curTxMsg with a REAL message" comment above;
                     // it is flushed on a confirmed band change instead, T19, ClearTransientBandState.)
-                    if (justWorkedCall.Equals(WsjtxMessage.DeCall(curCmd ?? ""), StringComparison.OrdinalIgnoreCase))
+                    // Phase C (2026-09-14): reads the identity cached alongside curCmd at the
+                    // moment it was built (_curCmdSemantic), not a re-parse of curCmd's text --
+                    // closes the gap the Stage 12 audit flagged as intentionally retained.
+                    if (justWorkedCall.Equals(_curCmdSemantic?.From, StringComparison.OrdinalIgnoreCase))
                     {
                         curCmd = null;
                         replyCmd = null;
                         replyDecode = null;
+                        _curCmdSemantic = null;
                     }
 
                     // Release-audit finding, 2026-08-20 (Call-CQ auto-resume): the classic UDP
@@ -2394,24 +2449,41 @@ namespace WSJTX_Controller
                     // semOld is only for the parity log above.
                     if (envForRow != null)
                         enq.Semantic = semNew;
+                    else
+                        // Phase B (2026-09-14): store canonical identity/semantics AT INGRESS
+                        // unconditionally, not only when a real envelope exists -- so every
+                        // downstream consumer (CallQueueRanker, AwardTagger, TargetMonitor, ...)
+                        // can read enq.Semantic directly, with no myCall and no re-parsing.
+                        // Reuses EffectiveSemantic's own Phase-A-hardened decision (live decode
+                        // -> rejected/unknown identity; test mode -> the WsjtxMessage fallback;
+                        // explicit rollback -> the same fallback, sanctioned) instead of
+                        // duplicating that logic here. enq.Semantic is still null at this exact
+                        // point, so this correctly falls through to that decision rather than
+                        // re-reading a value that isn't set yet.
+                        enq.Semantic = enq.EffectiveSemantic(myCallForSem);
                 }
 
                 // Finishing (see _finishingCall): the just-worked station's own closing over --
                 // 73, RR73, or a bare RRR -- means both sides are done, so end Finishing right
                 // away. Its repeated R-reports are handled entirely by the engine (Nexus keeps
                 // re-sending RR73); Jimmy neither counts nor acts on those.
-                // Stage 10: classify this decode via EffectiveSemantic (Nexus's parse when the
-                // cutover is on). Stage 5 proved AddressedToMe / IsRr73 / Is73 / IsRrr identical
-                // to the WsjtxMessage equivalents. enq.DeCall() (the sender) stays a DTO method.
+                // Stage 10/12: classify this decode via EffectiveSemantic (Nexus's parse when
+                // the cutover is on). Stage 5 proved AddressedToMe / IsRr73 / Is73 / IsRrr
+                // identical to the WsjtxMessage equivalents. Stage 12 audit (2026-09-14): the
+                // sender check migrates too (was enq.DeCall(), left as a DTO method at the time)
+                // -- this gates a real safety net (the orphan-TX backstop's Finishing exemption),
+                // so it should agree with finSem's other facts rather than risk disagreeing with
+                // its own AddressedToMe/IsRr73 on the same decode.
                 var finSem = enq.EffectiveSemantic(myCall);
                 if (_finishingCall != null
                     && !_finishingCallSetThisPoll   // Problem 1 / KB2SLO: not the SAME decode that just completed the QSO
-                    && string.Equals(enq.DeCall(), _finishingCall, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(finSem.From, _finishingCall, StringComparison.OrdinalIgnoreCase)
                     && finSem.AddressedToMe
                     && (finSem.IsRr73 || finSem.Is73 || finSem.IsRrr))
                 {
                     DebugOutput($"{Time()} [DIRECT] finishing: '{_finishingCall}' sent its own closing over -- QSO fully closed");
                     _finishingCall = null;
+                    _finishingTailExemptedOvers = 0;
                 }
 
                 // Mirrors the UDP path's own raw-decode-history population (WsjtxClient.Protocol.cs)
@@ -3307,6 +3379,18 @@ namespace WSJTX_Controller
         // target must not reset these (TJ1GD live-radio finding, 2026-09-08).
         internal int TestSmartStartSilenceCount => _smartStart.SilenceCount;
         internal bool? TestSmartStartTargetEvenParity => _smartStart.TargetEvenParity;
+        // Test-only (2026-09-13, operator-adjustable time limit): exercises the exact same
+        // check-and-teardown FeedTargetMonitorsPeriodComplete performs every real receive period,
+        // but with an explicit `nowUtc` instead of DateTime.UtcNow -- the wall-clock backstop can
+        // then be proven deterministically (a synthetic "10 minutes later") without a real sleep.
+        // Returns true iff the limit had been reached and the teardown ran.
+        internal bool TestCheckSmartStartTimeLimit(DateTime nowUtc)
+        {
+            if (!_smartStart.IsActive) return false;
+            if (!_smartStart.ExceedsTimeLimit(nowUtc, ctrl.smartStartTimeLimitMinutes)) return false;
+            SmartStartTimeLimitReached();
+            return true;
+        }
         // Post-ship 2.0.70: drive the reply-dispatch seam directly (advanced-layout txFirst sync
         // lives at the top of ReplyTo(EnqueueDecodeMessage) now, covering Smart Start / Work Now).
         internal void TestReplyTo(EnqueueDecodeMessage dmsg) => ReplyTo(dmsg);
@@ -3454,7 +3538,12 @@ namespace WSJTX_Controller
         // internal (not private): T19 regression coverage (ConfirmedBandChangeFlushesStale
         // TxStateTests) needs to seed old-band curCmd/replyCmd/replyDecode directly to prove the
         // confirmed-band-change flush clears them, without needing a full real-Reply round trip.
-        internal void TestSetCurCmd(string v) => curCmd = v;
+        // Phase C (2026-09-14): also caches _curCmdSemantic, the same way every real curCmd
+        // assignment site now does -- test mode is explicitly exempt from the no-fallback
+        // contract (Phase A), so computing it here via FromWsjtxMessage is the correct
+        // simulation of "whatever real assignment site would have cached at this exact
+        // moment," not a production reliance on the old parser.
+        internal void TestSetCurCmd(string v) { curCmd = v; _curCmdSemantic = v == null ? null : SemanticDecode.FromWsjtxMessage(v, myCall); }
         // internal (not private): Rx/Tx frequency-control tests seed the analyzed best-free
         // offsets directly (a real slot analysis needs a live decode stream) so ReplyTo's
         // BestFree branch has a non-zero offset to send.
@@ -3479,6 +3568,11 @@ namespace WSJTX_Controller
         // Puts ShowStatus into the "just decided to reply to callInProg" render (the QSO-start
         // clause branch) -- for the QsoStarted enabled/edited/disabled end-to-end test.
         internal void TestSetReplyingToCall(string call) { callInProg = call; replyFromInProg = true; }
+        // Drives the REAL SetCallInProg transition (not a raw field assignment) -- for
+        // QsoStartedAnnouncesOnceThenSuppressesTests, which needs the genuine
+        // "_qsoStartedAnnouncedForCall resets only when callInProg actually changes" behavior,
+        // not just the field's current value.
+        internal void TestSetCallInProg(string call) => SetCallInProg(call);
         // internal (not private): T14 regression coverage (DiscardCallTwoClockDivergenceTests)
         // proves the discard tracker stays ARMED (not disarmed) while txEnabled is still true.
         internal string TestDiscardCall => discardCall;

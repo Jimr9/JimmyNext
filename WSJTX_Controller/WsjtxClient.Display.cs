@@ -13,7 +13,10 @@ namespace WSJTX_Controller
     {
         internal bool PlayCategorySound(EnqueueDecodeMessage msg)
         {
-            string call = msg.DeCall();
+            // Stage 12 audit (2026-09-14): operational -- `call` selects a per-callsign
+            // drop-in sound file override (PlaySoundEvent -> ResolveSoundPath), not just a
+            // display label. Sourced from EffectiveSemantic (was msg.DeCall()).
+            string call = msg.EffectiveSemantic(myCall).From;
             switch (msg.Category)
             {
                 case CallCategory.TO_MYCALL:
@@ -380,8 +383,12 @@ namespace WSJTX_Controller
                     tag = tag.Length > 0 ? $"{tag}, Possible F/H" : "Possible F/H";
                 tag = tag.Length > 0 ? $", {tag}" : "";
 
-                string callsign = d.DeCall();
-                callsign = string.IsNullOrEmpty(callsign) ? "" : $", {DisplayCallsign(callsign, ctrl.spaceCallsignsAndGrids)}";
+                // Stage 12 audit (2026-09-14): operational -- this same value becomes part of
+                // `keys` below, which QueueView uses to identify a Raw Decodes row for
+                // double-click dispatch, not just display text. Sourced from EffectiveSemantic
+                // (was d.DeCall()).
+                string rawDeCall = d.EffectiveSemantic(myCall).From;
+                string callsign = string.IsNullOrEmpty(rawDeCall) ? "" : $", {DisplayCallsign(rawDeCall, ctrl.spaceCallsignsAndGrids)}";
 
                 string message = $", {d.Message}";
 
@@ -401,7 +408,7 @@ namespace WSJTX_Controller
                     string qrzState = null;
                     if (lookupManager != null && lookupManager.Enabled)
                     {
-                        var rec = lookupManager.Build(d.DeCall());
+                        var rec = lookupManager.Build(rawDeCall);
                         qrzState = rec.State;
                     }
                     string state = ResolveUsState(qrzState, GridToUsState(g));
@@ -427,7 +434,7 @@ namespace WSJTX_Controller
                     { "snr", snr }, { "freq", freq }, { "grid", grid }, { "country", country }, { "distAz", distAz },
                 };
                 items.Add(RowFormatter.BuildOrderedRow(fieldMap, rawDecodeRowOrderFields, fallback));
-                keys.Add($"{d.DeCall()}|{d.Message}|{d.SinceMidnight.Ticks}");
+                keys.Add($"{rawDeCall}|{d.Message}|{d.SinceMidnight.Ticks}");
                 categories.Add(d.Category);
             }
             if (ctrl.rawNewestFirst) { items.Reverse(); keys.Reverse(); categories.Reverse(); }
@@ -441,14 +448,18 @@ namespace WSJTX_Controller
             // Stage A6: classification-derived fields below all read from
             // EffectiveClassification() instead of directly off the wire.
             ClassifiedCall classification = d.EffectiveClassification();
+            // Stage 12 audit (2026-09-14): operational -- this filter gates which decodes are
+            // even visible/selectable in Raw Decodes, including via NextBestPriorityCallFromRaw's
+            // Alt+N selection. Sourced from EffectiveSemantic (was d.DeCall() / d.IsCQ()).
+            var rawSem = d.EffectiveSemantic(myCall);
 
             // Advanced filter: only decodes with a callsign
-            if (ctrl.rawOnlyCallsigns && string.IsNullOrEmpty(d.DeCall())) return false;
+            if (ctrl.rawOnlyCallsigns && string.IsNullOrEmpty(rawSem.From)) return false;
 
             // rawOnlyUnworked: station must be new on the current band (not in WSJT-X log)
             if (ctrl.rawOnlyUnworked)
             {
-                if (string.IsNullOrEmpty(d.DeCall())) return false;
+                if (string.IsNullOrEmpty(rawSem.From)) return false;
                 if (!classification.IsNewCallOnBand) return false;
             }
 
@@ -457,10 +468,10 @@ namespace WSJTX_Controller
             // OR new-country-on-band with checkbox, OR directed alert with checkbox).
             if (ctrl.rawOnlyRanked)
             {
-                if (string.IsNullOrEmpty(d.DeCall())) return false;
+                if (string.IsNullOrEmpty(rawSem.From)) return false;
 
                 bool isNewCtyOnBand    = classification.IsNewCountryOnBand;
-                bool isDirAlert        = d.IsCQ() && IsDirectedAlert(d.EffectiveSemantic(myCall).CqTarget, classification.IsDx);   // Stage 6
+                bool isDirAlert        = rawSem.IsCq && IsDirectedAlert(rawSem.CqTarget, classification.IsDx);   // Stage 6
                 bool isWantedDirected  = ctrl.replyDirCqCheckBox.Checked && isDirAlert;
 
                 if (!isNewCtyOnBand && !isWantedDirected)
@@ -482,10 +493,10 @@ namespace WSJTX_Controller
             // Classify message type
             bool isPota   = d.Message.Contains("POTA");
             bool isSota   = d.Message.Contains("SOTA");
-            bool isDxCq   = d.IsCQ() && d.Message.Contains(" DX ");
-            bool isCq     = d.IsCQ() && !isPota && !isSota && !isDxCq;
-            bool isRR73   = d.IsRR73();
-            bool is73     = d.Is73();
+            bool isDxCq   = rawSem.IsCq && d.Message.Contains(" DX ");
+            bool isCq     = rawSem.IsCq && !isPota && !isSota && !isDxCq;
+            bool isRR73   = rawSem.IsRr73;   // Phase D (was d.IsRR73())
+            bool is73     = rawSem.Is73;     // Phase D (was d.Is73())
 
             // For non-CQ, non-terminal messages determine report vs directed.
             // WsjtxMessage.DirectedTo() returns null for non-CQ messages, so use
@@ -494,7 +505,7 @@ namespace WSJTX_Controller
             bool isDirected = false;
             if (!isCq && !isDxCq && !isPota && !isSota && !isRR73 && !is73)
             {
-                var semR = d.EffectiveSemantic(myCall);   // Stage 6: report / roger-report facts
+                var semR = rawSem;   // Stage 6/Phase D: report / roger-report facts, same decode
                 isReport   = semR.IsReport || semR.IsRReport;
                 isDirected = !isReport;
             }
@@ -606,7 +617,11 @@ namespace WSJTX_Controller
             // when some message types are hidden.
             var d = GetFilteredRawDecode(listIdx);
             if (d == null) return;
-            string deCall = d.DeCall();
+            // Stage 12 audit (2026-09-14): operational -- this is the "double-click a Raw
+            // Decode row to work it" dispatch; it must match the SAME identity callQueue's
+            // entries are keyed by (the semantic-derived one) or the lookup below silently
+            // never finds the call. Sourced from EffectiveSemantic (was d.DeCall()).
+            string deCall = d.EffectiveSemantic(myCall).From;
             if (string.IsNullOrEmpty(deCall)) return;
             if (!ConnectedToWsjtx()) return;
 
@@ -633,16 +648,18 @@ namespace WSJTX_Controller
         // that need an actual callsign (e.g. station lookup) should use this instead.
         public string GetCallAtRawIndex(int listIdx)
         {
+            // Stage 12 audit (2026-09-14): operational -- feeds a station-lookup action.
             var d = GetFilteredRawDecode(listIdx);
-            return d?.DeCall();
+            return d?.EffectiveSemantic(myCall).From;
         }
 
         public string GetRawDecodeCallOrText(int listIdx)
         {
-            // Use filter-aware lookup so Ctrl+C copies the call the user actually sees.
+            // Use filter-aware lookup so Ctrl+C copies the call the user actually sees --
+            // consistent with ShowRawDecodes' own rendering, sourced the same way.
             var d = GetFilteredRawDecode(listIdx);
             if (d == null) return null;
-            string deCall = d.DeCall();
+            string deCall = d.EffectiveSemantic(myCall).From;
             return string.IsNullOrEmpty(deCall) ? d.Message : deCall;
         }
 
@@ -1412,10 +1429,16 @@ namespace WSJTX_Controller
                                     string p = SpacifyPayload(curTxPayload);
                                     // "Transmit message" clause -- clean phrase ("sending 73");
                                     // ShowStatus adds the ", " separator. Disabled -> absent.
+                                    // Phase C (2026-09-14): reads _curTxMsgSemantic (cached the
+                                    // poll curTxMsg was set) instead of re-parsing curTxMsg's
+                                    // text -- closes the gap the Stage 12 audit flagged as
+                                    // intentionally retained. curCall (the admission-gate-
+                                    // derived identity) still wins whenever it is known; this is
+                                    // the fallback only.
                                     string txClause = p != null
                                         ? RoutineClause(NotificationEventType.TxMessageChanged,
                                                ("Message", p),
-                                               ("Callsign", curCall ?? WsjtxMessage.ToCall(curTxMsg) ?? ""),
+                                               ("Callsign", curCall ?? _curTxMsgSemantic?.To ?? ""),
                                                ("Band", bandIdx != null ? $"{bands[(int)bandIdx]}m" : ""),
                                                ("Mode", mode ?? ""))
                                         : null;
@@ -1431,7 +1454,9 @@ namespace WSJTX_Controller
                                     if (allCallDict.TryGetValue(curCall, out msgList))
                                     {
                                         EnqueueDecodeMessage rmsg = msgList[msgList.Count - 1];
-                                        if (!rmsg.IsCQ())
+                                        // Stage 12 audit (2026-09-14): operational -- gates whether
+                                        // the "received X" status clause below is populated at all.
+                                        if (!rmsg.EffectiveSemantic(myCall).IsCq)
                                         {
                                             var sec = (sinceMidnight - rmsg.SinceMidnight).TotalSeconds;
                                             //DebugOutput($"{spacer}rmsg:'{rmsg.Message}' rmsg.SinceMidnight:{rmsg.SinceMidnight} TotalSeconds:{sec}");
@@ -1442,7 +1467,7 @@ namespace WSJTX_Controller
                                                 if (!rmsg.Is73orRR73() && msgList.Count >= 2)
                                                 {   //Rx period previous to the one that just ended
                                                     rmsg = msgList[msgList.Count - 2];
-                                                    if (!rmsg.IsCQ())
+                                                    if (!rmsg.EffectiveSemantic(myCall).IsCq)
                                                     {
                                                         prevRxPayload = SpacifyPayload(WsjtxMessage.Payload(rmsg.Message));
                                                         //DebugOutput($"{spacer}found prev:{prevRxPayload}");
@@ -1469,9 +1494,12 @@ namespace WSJTX_Controller
                                     string recClean = "";
                                     if (curRxPayload != null)
                                         recClean = $"received {curRxPayload}";
+                                    // Phase C (2026-09-14): reads _curTxMsgSemantic instead of
+                                    // re-parsing curTxMsg's text, same as the TxMessageChanged
+                                    // clause above -- closes the gap the Stage 12 audit flagged.
                                     else if (callInProg != null && curCall == callInProg && !transmitting
                                              && curTxMsg != null
-                                             && string.Equals(WsjtxMessage.ToCall(curTxMsg), callInProg, StringComparison.OrdinalIgnoreCase)
+                                             && string.Equals(_curTxMsgSemantic?.To, callInProg, StringComparison.OrdinalIgnoreCase)
                                              // Premature "no response" fix (KR4NO / K4JC live-radio
                                              // audit, 2026-09-08): not at the transmit-ended edge --
                                              // only once the following receive opportunity has
@@ -1643,8 +1671,18 @@ namespace WSJTX_Controller
                                     // failure never produces two utterances.
                                     suppressRoutineSpeechThisRender = true;
                                 }
-                                else if (callInProg == null && deferEligible)
+                                else if (callInProg == null && deferEligible && !transmitting)
                                 {
+                                    // 2026-09-13 (CT2HEX live finding): added `&& !transmitting`.
+                                    // This branch assumed "no callInProg" meant genuinely idle, but
+                                    // an orphaned Finishing-tail retransmission (WsjtxClient.
+                                    // Direct.cs's _finishingCall mechanism) transmits with
+                                    // callInProg == null by design -- so a real, active over was
+                                    // landing here and being rendered as the bare idle summary,
+                                    // silently DROPPING the already-built txStr ("Sending ___")
+                                    // entirely. Any genuine transmission now falls through to the
+                                    // normal composition below, which includes txStr.
+                                    //
                                     // This IS the idle Receive-cycle-summary lifecycle -- tells
                                     // RenderStatusVisible below whether the new opt-in "clear a
                                     // stale summary" behaviour may even consider this render.
@@ -1818,6 +1856,10 @@ namespace WSJTX_Controller
             LogView.RenderLoggedList($"Auto-logged calls: {logList.Count}", logItems, logKeys);
         }
 
+        // Stage 12 audit (2026-09-14): this whole method is diagnostic-only display (the
+        // debug-labels panel, gated on `debug`/ctrl's Advanced-tab checkbox) -- every
+        // WsjtxMessage.DeCall()/ToCall() call inside it is intentionally left on the old
+        // parser; none of them feed any admission/ranking/awards/reply decision.
         public void UpdateDebug()
         {
             if (!debug) return;

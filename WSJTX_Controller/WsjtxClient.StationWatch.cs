@@ -76,12 +76,16 @@ namespace WSJTX_Controller
         // target that is genuinely mid-report to a peer, and rule 7 (yield the moment the target
         // sends someone else a report) is the recovery when the DX does choose another station.
 
-        // After this many dead-end readiness rounds for one armed target (revalidation declined
-        // it as busy, or a dispatched call yielded before engagement) with NO calling over out,
-        // Smart Start disarms and tells the operator. Under the 2026-09-08 policy a positive
-        // opening normally reaches an actual calling over (which resets this), so it now only
-        // guards a pathological "opening always immediately contradicted, zero RF" loop.
-        private const int MaxSmartStartStandbyRounds = 4;
+        // After this many dead-end readiness rounds IN A ROW for one armed target, Smart Start
+        // disarms and tells the operator. A "round" is EITHER revalidation declining a dispatch
+        // as busy right before transmitting (no call sent that round) OR a call that WAS
+        // dispatched being yielded because the target turned to answer someone else before
+        // answering us (a real over did go out, but engagement was never reached) -- either way
+        // it's a dead end. TargetMonitor.EnterAwaitingEngagement resets the count to zero the
+        // moment a fresh dispatch actually goes out, so this really guards "N consecutive
+        // non-productive rounds with no clean dispatch resetting the count in between" -- not
+        // literally "N tries total, zero RF". Operator-adjustable (2026-09-13, was a fixed
+        // constant of 4) -- ctrl.smartStartMaxStandbyRounds, Options > Transmit.
 
         public bool StationWatchActive => _stationWatch.IsActive;
         public string StationWatchTarget => _stationWatch.TargetCall;
@@ -455,23 +459,50 @@ namespace WSJTX_Controller
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
             Notify?.Publish(new SmartStartYieldedEvent(SC(target), _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
-            if (_smartStart.NoteStandbyRoundAndCheckGiveUp(MaxSmartStartStandbyRounds))
+            if (_smartStart.NoteStandbyRoundAndCheckGiveUp(ctrl.smartStartMaxStandbyRounds))
                 SmartStartStoodDownBusy(target);
         }
 
-        // Smart Start has churned through MaxSmartStartStandbyRounds "looked ready -> was busy"
-        // rounds for this armed target WITHOUT ever getting a real calling over out (revalidation
-        // kept declining it as busy). This is a SEPARATE terminal policy from the Repeat Limit:
-        // it fires on dead-end busy churn where zero calls happened, so "20 actual calls" is NOT
-        // promised under all busy-churn conditions -- a hot CQing pileup has no lull to wait for,
-        // and a plain Enter + the Repeat Limit is the tool for that. Its message is deliberately
-        // distinct from the Repeat-Limit "expired" wording so the operator can tell them apart.
+        // Smart Start has churned through ctrl.smartStartMaxStandbyRounds dead-end "looked ready
+        // -> turned out busy" rounds in a row for this armed target (see the field's own comment
+        // for exactly what counts as one round -- NOT necessarily zero calls sent). This is a
+        // SEPARATE terminal policy from the Repeat Limit (which only counts actual transmitted
+        // calls) and the time limit below (which is purely wall-clock): it exists because a hot
+        // CQing pileup has no lull to wait for, so a plain Enter + the Repeat Limit is the tool
+        // for that case. Its message is deliberately distinct from the Repeat-Limit "expired"
+        // wording so the operator can tell the two apart.
         private void SmartStartStoodDownBusy(string target)
         {
-            DebugOutput($"{Time()} [SMART] {target} stayed busy across {MaxSmartStartStandbyRounds} standby rounds with no call out -- disarming Smart Start");
+            DebugOutput($"{Time()} [SMART] {target} stayed busy across {ctrl.smartStartMaxStandbyRounds} standby rounds with no call out -- disarming Smart Start");
             ClearPendingAutoStart();
             _smartStart.Stop(announce: false);
             StatusView.ShowMessage($"{SC(target)} stayed busy; Smart Start stopped, no calls made", true);
+        }
+
+        // Operator request (2026-09-13): an absolute wall-clock backstop, independent of both the
+        // Repeat Limit and the busy-churn cap above -- "so they know an hour later their radio
+        // will not start trying to call the station," regardless of how many calls or busy-
+        // declines happened along the way. ctrl.smartStartTimeLimitMinutes <= 0 means no limit
+        // (default, and today's unchanged behavior). Mirrors SmartStartRepeatLimitReached's own
+        // teardown exactly -- same halt/disarm sequence, different reason and wording so the
+        // operator can tell the two apart.
+        private void SmartStartTimeLimitReached()
+        {
+            string target = _smartStart.TargetCall;
+            int limitMinutes = ctrl.smartStartTimeLimitMinutes;
+            DebugOutput($"{Time()} [SMART] Time limit ({limitMinutes} min) reached for {target} -- no further calls, disarming Smart Start");
+            ClearPendingAutoStart();
+            if (string.Equals(callInProg, target, StringComparison.OrdinalIgnoreCase))
+            {
+                RequeueAbortedCall();                       // while callInProg / replyDecode are still valid
+                if (!transmitting) expiredCall = target;    // existing "<call> expired" operator status/announcement
+                CancelQso();                                // clears QSO state + bumps _contactEpoch
+                HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
+            }
+            _smartStart.Stop(announce: false);
+            string minuteWord = limitMinutes == 1 ? "minute" : "minutes";
+            StatusView.ShowMessage(
+                $"Smart Start time limit reached after {limitMinutes} {minuteWord} calling {SC(target)}, no contact completed", true);
         }
 
         // The Smart Start Repeat Limit -- (int)ctrl.timeoutNumUpDown.Value, the operator's own
@@ -512,6 +543,14 @@ namespace WSJTX_Controller
             if (_stationWatch.IsActive)
                 _stationWatch.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
             if (!_smartStart.IsActive) return;
+            // Operator-configurable wall-clock backstop (2026-09-13) -- checked BEFORE the
+            // ordinary readiness machinery below, and regardless of AwaitingEngagement, so it is
+            // an absolute limit on the whole effort, not just the waiting phase. 0 = no limit.
+            if (_smartStart.ExceedsTimeLimit(DateTime.UtcNow, ctrl.smartStartTimeLimitMinutes))
+            {
+                SmartStartTimeLimitReached();
+                return;
+            }
             _smartStart.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
             // While awaiting engagement (already calling) the readiness machinery is dormant --
             // OnReceivePeriodComplete won't SignalReady, but gate the consume too for clarity.
@@ -619,7 +658,7 @@ namespace WSJTX_Controller
                     // A "looked ready, revalidated busy" round for the Smart Start monitor --
                     // after enough of these on one target, stop chasing the pileup (below).
                     if (ReferenceEquals(monitor, _smartStart)
-                        && _smartStart.NoteStandbyRoundAndCheckGiveUp(MaxSmartStartStandbyRounds))
+                        && _smartStart.NoteStandbyRoundAndCheckGiveUp(ctrl.smartStartMaxStandbyRounds))
                     {
                         SmartStartStoodDownBusy(monitor.TargetCall);
                         return;

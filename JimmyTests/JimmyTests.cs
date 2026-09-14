@@ -297,6 +297,8 @@ static class JimmyTests
         CqTests();
         ContestTests();
         ToFromCallTests();
+        ReservedProtocolWordNotMisreadAsCallsignTests();
+        NexusSemanticIdentityAdmissionTests();
         ReplyTests();
         InvalidTypeTests();
         ApChainTests();
@@ -404,6 +406,10 @@ static class JimmyTests
         SemanticStage9StartPathParityTests();
         SemanticStage10CompletionParityTests();
         PostS12_S2_SemanticEnvelopeContractTests();
+        NexusIdentityCanonicalizationTests();
+        NoFallbackContractTests();
+        SemanticIngressStorageTests();
+        SyntheticSemanticEnvelopeInfrastructureTests();
         PostS12_S3_TxCompletionViaNexusTests();
         LiveAudit_MidTxCompletionDoesNotFalseHaltTests();
         DirectRunawayRr73HaltsEngineTests();
@@ -468,6 +474,7 @@ static class JimmyTests
         RoutineReceiveSideRoleScopeTests();
         RoutinePunctuationOnlyRemnantTests();
         ActiveQsoBareCallsignSuppressionTests();
+        QsoStartedAnnouncesOnceThenSuppressesTests();
         RoutineCompositeTests();
         NotificationCorrectionPassTests();
         DuringQsoSuppressionTests();
@@ -542,6 +549,7 @@ static class JimmyTests
         SmartStartAnswersTargetCallingUsTests();
         SmartStartAdvancedLayoutTxSideFlipTests();
         SmartStartPileupBackoffTests();
+        SmartStartConfigurableLimitsTests();
         SmartStartManualStopSurfaceTests();
         SpeechCoordinatorStationWatchSuppressionTests();
         StationWatchHotkeyDefaultsTests();
@@ -698,6 +706,217 @@ static class JimmyTests
         CheckStr("DeCall: directed CQ POTA",     WsjtxMessage.DeCall($"CQ POTA {THEIR_CALL}"), THEIR_CALL);
         CheckStr("ToCall: contest to me",        WsjtxMessage.ToCall($"{MY_CALL} {THEIR_CALL} 2A MO"), MY_CALL);
         CheckStr("ToCall: contest to other",     WsjtxMessage.ToCall($"{THEIR_CALL} K9AVT 559 TX"), THEIR_CALL);
+    }
+
+    // Jim's log finding, 2026-09-13: a malformed decode with a missing middle field --
+    // "KP4PW RR73" instead of the normal "<to> <de> RR73" -- was parsed as if "RR73" were the
+    // SENDER's callsign, putting a fake "RR73" station in the calling queue (6 times in one
+    // session's log, tagged as a new-country DX opportunity). Fix: WsjtxMessage.IsInvalidCall
+    // now rejects the three reserved FT8/FT4 protocol words (RRR, RR73, 73) as callsigns
+    // outright, by exact match only -- RRR/73 were already caught by the pre-existing all-
+    // letters/all-digits checks; RR73 was the one that slipped through (its shape -- two
+    // letters then a 2-digit run -- is indistinguishable from a real callsign to those checks).
+    static void ReservedProtocolWordNotMisreadAsCallsignTests()
+    {
+        Console.WriteLine("\n── Reserved protocol words (RRR/RR73/73) are never a callsign ──");
+
+        // The three reserved words are always invalid as a callsign, standalone.
+        Check("IsInvalidCall: RRR",   WsjtxMessage.IsInvalidCall("RRR"), true);
+        Check("IsInvalidCall: 73",    WsjtxMessage.IsInvalidCall("73"), true);
+        Check("IsInvalidCall: RR73 (THE fix -- previously slipped through)",
+              WsjtxMessage.IsInvalidCall("RR73"), true);
+
+        // THE actual bug, reproduced verbatim from today's log: a 2-word decode with the
+        // trailing protocol word landing in the "de" position must no longer be read as a
+        // callsign. ToCall (the genuinely real "to" field) is unaffected either way.
+        CheckStr("DeCall: malformed 2-word 'KP4PW RR73' -> null (not a fake 'RR73' station)",
+              WsjtxMessage.DeCall("KP4PW RR73"), null);
+        CheckStr("ToCall: malformed 2-word 'KP4PW RR73' -> still reads the real to-call",
+              WsjtxMessage.ToCall("KP4PW RR73"), "KP4PW");
+
+        // A NORMAL, well-formed 3-word RR73 closing message -- overwhelmingly the more common
+        // case RR73 appears in -- must keep working exactly as before. This is the critical
+        // regression check: the fix must not reject legitimate RR73 sign-offs.
+        CheckStr("DeCall: normal 3-word RR73 close still resolves the real sender",
+              WsjtxMessage.DeCall($"{MY_CALL} {THEIR_CALL} RR73"), THEIR_CALL);
+        CheckStr("ToCall: normal 3-word RR73 close still resolves the real recipient",
+              WsjtxMessage.ToCall($"{MY_CALL} {THEIR_CALL} RR73"), MY_CALL);
+        CheckStr("Payload: normal 3-word RR73 close still reads 'RR73'",
+              WsjtxMessage.Payload($"{MY_CALL} {THEIR_CALL} RR73"), "RR73");
+
+        // Real callsigns are never false-positived by the new exact-match check.
+        Check("IsInvalidCall: a real callsign (MY_CALL) is still valid", WsjtxMessage.IsInvalidCall(MY_CALL), false);
+        Check("IsInvalidCall: a real callsign (THEIR_CALL) is still valid", WsjtxMessage.IsInvalidCall(THEIR_CALL), false);
+        Check("IsInvalidCall: a similarly-shaped but different callsign (AB73) is still valid",
+              WsjtxMessage.IsInvalidCall("AB73"), false);
+        Check("IsInvalidCall: a compound/portable call is untouched by the new check",
+              WsjtxMessage.IsInvalidCall("RR73/P"), false);
+    }
+
+    // ── Nexus semantic cutover, Stage 11 (2026-09-14): queue-admission reads identity from
+    //    EffectiveSemantic (Nexus's own FT8/FT4 grammar parse), not WsjtxMessage.DeCall()/
+    //    ToCall()/IsCallTo()/IsCQ()/IsInvalidType() directly -- ProcessDecodeMsg's own top gate
+    //    AND AddSelectedCall's independent overheard-CQ admission (the two real queue-admission
+    //    entry points; AddSelectedCall used to recompute deCall/toCall on its own straight off
+    //    WsjtxMessage, explicitly deferred as "Stage 9 work" in its own old comment). Root cause
+    //    of the live incident: a garbled 2-token decode ("N7WR2 RR73" instead of the real
+    //    3-token "<to> <de> RR73") had WsjtxMessage.DeCall() guess the trailing control word as
+    //    the sender -- later DXCC-classified via its "RR" prefix as a phantom Russian station,
+    //    admitted to the queue as "New DXCC". Confirmed against Nexus's own grammar
+    //    (tempo-core/src/message.rs::parse): this exact shape matches no real message rule (a
+    //    2-token form requires at least one hashed/compound token; RR73 needs exactly 3
+    //    tokens) and falls to Msg::Other with from/to both null -- decode_semantics.rs then
+    //    reports kind:"other" -- so a real v1.10.3 host's own envelope rejects it independent of
+    //    WsjtxMessage.IsInvalidCall's reserved-word fallback, which is the belt-and-suspenders
+    //    layer for whenever no envelope is attached (older host / UDP path / the .ini rollback).
+    static void NexusSemanticIdentityAdmissionTests()
+    {
+        Console.WriteLine("\n── Nexus semantic identity at queue admission (ProcessDecodeMsg + AddSelectedCall) ──");
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42";
+            WsjtxClient MakeClient(out Controller ctrlOut)
+            {
+                var ctrl = new Controller();
+                var _ = ctrl.Handle;
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.replyDxCheckBox.Checked = true;
+                ctrl.replyLocalCheckBox.Checked = true;
+                ctrl.advancedCallLayout = true;   // bypass T/R period gating -- irrelevant here
+                ctrlOut = ctrl;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetDirectConnected(true);
+                wc.TestSetMode("FT8");
+                return wc;
+            }
+
+            // decodeFrom/decodeMsg = the overheard decode. env* != null attaches a Stage 4
+            // decodeSemantics envelope for that SAME raw text (schemaVersion 1), simulating
+            // exactly what a real EngineHost would report.
+            DirectSnapshot Snap(ulong slot, string decodeFrom, string decodeMsg,
+                string envKind = null, string envFrom = null, string envTo = null, bool envAddr = false)
+            {
+                string sem = envKind == null ? "" : (@",
+                    ""decodeSemantics"": [ { ""schemaVersion"": 1, ""rawMessage"": """ + decodeMsg + @""",
+                        ""kind"": """ + envKind + @""",
+                        ""from"": " + (envFrom == null ? "null" : $"\"{envFrom}\"") + @",
+                        ""to"": " + (envTo == null ? "null" : $"\"{envTo}\"") + @",
+                        ""addressedToMe"": " + (envAddr ? "true" : "false") + @" } ]");
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""txEnabled"": true, ""catOk"": true, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [{ ""from"": """ + decodeFrom + @""", ""snr"": -10, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }]" + sem + @" }");
+            }
+
+            // 1. THE regression, no envelope attached (fallback path: WsjtxMessage's own
+            //    reserved-word rejection still catches it) -- overheard, not directed at me.
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100, "N7WR2", "N7WR2 RR73"));
+                Check("malformed 'N7WR2 RR73' (no envelope) -> never queued as a phantom station",
+                      wc.callQueue.Contains("RR73") || wc.callQueue.Contains("N7WR2"), false);
+            }
+
+            // 2. THE SAME regression, WITH a Nexus envelope explicitly matching what the real
+            //    grammar produces for this shape (kind:"other", from/to both null) -- proves the
+            //    admission gate is reading EffectiveSemantic's attached result, not merely
+            //    falling back to the reserved-word check by coincidence.
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(110, "JF3RR2", "JF3RR2 RR73", envKind: "other", envFrom: null, envTo: null));
+                Check("malformed 'JF3RR2 RR73' WITH a Nexus 'other' envelope -> never queued",
+                      wc.callQueue.Contains("RR73") || wc.callQueue.Contains("JF3RR2"), false);
+            }
+
+            // 3. WIRING PROOF: a raw text that WsjtxMessage's own positional parser reads just
+            //    fine ("W9AB2 K1JT2 RR73" -- both tokens real-shaped calls) is rejected anyway
+            //    once a Nexus envelope for that SAME text says kind:"other"/from:null -- this
+            //    can only happen if the admission gate is truly reading the attached Semantic,
+            //    not re-deriving identity from the raw text on its own.
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(120, "K1JT2", "W9AB2 K1JT2 RR73", envKind: "other", envFrom: null, envTo: null));
+                Check("well-formed-looking text overridden by an 'other' envelope -> rejected (envelope wins)",
+                      wc.callQueue.Contains("K1JT2"), false);
+            }
+
+            // 4. ROLLBACK CONTROL: the exact same envelope-carrying decode as #3, but with
+            //    SemanticCutover.UseNexusSemantics = false -- must now fall back to
+            //    WsjtxMessage's own parse of the raw text (a normal RR73 close between two
+            //    real-shaped, otherwise-unseen stations -- admitted as an ordinary new call)
+            //    instead of honoring the "other" envelope. Direct A/B contrast with #3's
+            //    rejection using the identical decode. Restores the flag afterward regardless of
+            //    outcome so no other test is affected.
+            bool prevCutover = SemanticCutover.UseNexusSemantics;
+            try
+            {
+                SemanticCutover.UseNexusSemantics = false;
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(130, "K1JT3", "W9AB3 K1JT3 RR73", envKind: "other", envFrom: null, envTo: null));
+                Check("rollback (UseNexusSemantics=false) -> envelope ignored, old WsjtxMessage parse admits it normally",
+                      wc.callQueue.Contains("K1JT3"), true);
+            }
+            finally { SemanticCutover.UseNexusSemantics = prevCutover; }
+
+            // 5. NON-REGRESSION: an ordinary CQ, no envelope, still admits normally.
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(140, "K4YT2", "CQ K4YT2 EM63"));
+                Check("ordinary CQ (no envelope) -> still queued normally", wc.callQueue.Contains("K4YT2"), true);
+            }
+
+            // 6. NON-REGRESSION: a report directed AT ME still reaches the toMyCall path.
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(150, "K4YT2", $"{myCall} K4YT2 -05"));
+                Check("report addressed to me (no envelope) -> still queued/reachable",
+                      wc.callQueue.Contains("K4YT2"), true);
+            }
+
+            // 7. THE VP5/K5UR live incident, reproduced exactly (2026-09-14, log_9-14-2026.txt
+            //    14:54:57): an active QSO with a COMPOUND call, callInProg already the plain
+            //    "VP5/K5UR" (however it was captured earlier). A later report reply from the
+            //    SAME station arrives with a Nexus envelope reporting the hashed/bracketed
+            //    "<VP5/K5UR>" -- that specific over really was transmitted i3=4-hashed on the
+            //    air (Nexus issue #84: a compound call can't ride an ordinary frame bare, so a
+            //    pileup DXpedition answering several callers at once sends it hashed). Before
+            //    the Stage 13 canonicalization fix, this decode failed to match callInProg,
+            //    got "Country unknown", and queued as a separate bracketed phantom entry
+            //    (confirmed in the live log). Must now match cleanly.
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.callInProg = "VP5/K5UR";
+                wc.TestApplyDirectSnapshot(myCall, myGrid,
+                    Snap(160, "VP5/K5UR", $"{myCall} VP5/K5UR +05",
+                        envKind: "report", envFrom: "<VP5/K5UR>", envTo: myCall, envAddr: true));
+                Check("7: the hashed reply does NOT create a separate bracketed phantom queue entry",
+                      wc.callQueue.Contains("<VP5/K5UR>"), false);
+                Check("7: ...it is recognised under the SAME canonical key as callInProg",
+                      wc.callQueue.Contains("VP5/K5UR"), true);
+                Check("7: ...callInProg itself is untouched (still the same active QSO)",
+                      wc.callInProg == "VP5/K5UR", true);
+                Check("7: ...allCallDict recorded it under the canonical key, not the bracketed one",
+                      wc.allCallDict.ContainsKey("VP5/K5UR") && !wc.allCallDict.ContainsKey("<VP5/K5UR>"), true);
+
+                // The station's later RR73 close, observed live to arrive un-hashed (a
+                // different over, standard encoding) -- must resolve to the IDENTICAL
+                // canonical key, so the SAME queue entry (not a second one) is what completes.
+                wc.TestApplyDirectSnapshot(myCall, myGrid,
+                    Snap(162, "VP5/K5UR", $"{myCall} VP5/K5UR RR73",
+                        envKind: "rr73", envFrom: "VP5/K5UR", envTo: myCall, envAddr: true));
+                Check("7: the RR73 close (arrives un-hashed) still matches the SAME canonical key",
+                      wc.callQueue.Contains("<VP5/K5UR>"), false);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NexusSemanticIdentityAdmissionTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
     }
 
     static void ReplyTests()
@@ -2883,29 +3102,48 @@ static class JimmyTests
             Check("Setup: callInProg is cleared once the RR73 goes out", wc.callInProg == null, true);
             Check("Finishing entered: _finishingCall is the just-worked station", wc.TestFinishingCall == qsoCall, true);
 
-            // ══ 2. The engine's RR73 closing tail to the worked station is NEVER halted by Jimmy
-            //       (Nexus owns it; its own wall-clock watchdog bounds a silent run) ══
+            // ══ 2. The Finishing exemption now protects only MaxFinishingTailExemptedOvers
+            //       (2026-09-13 fix) -- a stale, never-clearing "closing tail" must eventually be
+            //       treated as a genuine problem, not tolerated forever. The concrete live finding
+            //       that prompted this: a worked station's radio can also spontaneously
+            //       re-transmit its own OLD closing message MINUTES after the QSO is long done and
+            //       gone quiet -- a wholly separate, later event, not the engine's real closing
+            //       tail -- and with no cap that got exempted forever too, indefinitely, every
+            //       time it happened. With the cap at 1: the FIRST closing over is exempted as
+            //       before; the SECOND already falls through to ordinary orphan counting
+            //       (tolerated once, same as any other orphan); a THIRD trips the existing
+            //       2-strike halt. ══
             lock (seenLock) seen.Clear();
-            for (ulong s = 2010; s < 2030; s += 2) FinishingOver(s);   // 10 closing overs
-            Check("10 RR73 closing overs to the worked station do NOT halt and never count as orphans",
+            FinishingOver(2010);
+            Check("the first RR73 closing over to the worked station is exempted -- no halt, no orphan count",
                   !SeenCmd("HALT_TX") && wc.TestOrphanTxOvers == 0 && wc.TestFinishingCall == qsoCall, true);
+            FinishingOver(2012);
+            Check("the exemption is already spent -- the SECOND closing over counts as an ordinary orphan (still just tolerated)",
+                  !SeenCmd("HALT_TX") && wc.TestOrphanTxOvers == 1 && wc.TestFinishingCall == qsoCall, true);
+            FinishingOver(2014);
+            PumpUntil(() => SeenCmd("HALT_TX"));
+            Check("a THIRD repeat trips the ordinary 2-strike halt -- an indefinitely-repeating stale tail can no longer hide behind Finishing forever",
+                  SeenCmd("HALT_TX") && SeenCmd("SET_TX_ENABLED 0"), true);
+            Check("orphan counter resets after firing", wc.TestOrphanTxOvers == 0, true);
 
-            // ══ 3. A repeated R-report from the worked station is handled entirely by the engine
-            //       -- Jimmy neither halts nor changes state ══
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2040, null, qsoCall, $"{myCall} {qsoCall} R-08"));
-            for (ulong s = 2042; s < 2050; s += 2) FinishingOver(s);
-            Check("a repeated R-report + more RR73 closing overs still do not halt",
-                  !SeenCmd("HALT_TX") && wc.TestFinishingCall == qsoCall, true);
-
-            // ══ 4. The worked station's own closing over (73, RR73, or bare RRR) ends Finishing ══
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2060, null, qsoCall, $"{myCall} {qsoCall} 73"));
+            // ══ 3. The worked station's own closing over (73, RR73, or bare RRR) still clears
+            //       Finishing cleanly, and a FRESH completion gets its own full exemption
+            //       allowance again -- the cap is per-episode, not a one-time lifetime budget ══
+            lock (seenLock) seen.Clear();   // section 2 deliberately tripped HALT_TX -- don't let that leak into these checks
+            CompleteQso(2100);
+            Check("Setup: Finishing re-entered for the next QSO", wc.TestFinishingCall == qsoCall, true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2110, null, qsoCall, $"{myCall} {qsoCall} 73"));
             Check("the worked station's own 73 clears Finishing -- clean close, nothing halted",
                   wc.TestFinishingCall == null && !SeenCmd("HALT_TX"), true);
             // ...and a bare RRR does it too (fresh contact -> its RRR).
-            CompleteQso(2100);
-            Check("Setup: Finishing re-entered for the next QSO", wc.TestFinishingCall == qsoCall, true);
-            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2110, null, qsoCall, $"{myCall} {qsoCall} RRR"));
+            CompleteQso(2130);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2140, null, qsoCall, $"{myCall} {qsoCall} RRR"));
             Check("a bare RRR from the worked station also clears Finishing", wc.TestFinishingCall == null, true);
+            lock (seenLock) seen.Clear();
+            CompleteQso(2150);
+            FinishingOver(2160);
+            Check("a fresh completion's exemption is NOT still spent from an earlier episode -- one exempted over is tolerated again",
+                  !SeenCmd("HALT_TX") && wc.TestOrphanTxOvers == 0 && wc.TestFinishingCall == qsoCall, true);
 
             // ══ 5. With Finishing cleared, an UNRELATED orphaned Tx still halts fast (at the 2nd) ══
             lock (seenLock) seen.Clear();
@@ -2955,6 +3193,27 @@ static class JimmyTests
 
     static DirectSnapshot ParseDirectSnapshot(string json) =>
         System.Text.Json.JsonSerializer.Deserialize<DirectSnapshot>(json, WsjtxClient.DirectJsonOptions);
+
+    // ── Phase E (2026-09-14): synthesizes a decodeSemantics envelope JSON fragment for ONE
+    //    decode, so a test's own Snap()/recentDecodes helper can attach a real-shaped envelope
+    //    instead of relying on the no-envelope test-mode fallback (Phase A's own exemption --
+    //    this exists specifically so that exemption stops being the ONLY way most of the
+    //    corpus passes). Computed via SemanticDecode.FromWsjtxMessage, which is exactly the
+    //    parser this migration exists to retire from PRODUCTION -- using it here, in test-only
+    //    code, to build a synthetic fixture is not the same thing as a production fallback.
+    //    Embed the result inside a "decodeSemantics": [ ... ] array, ordinal-aligned with the
+    //    matching "recentDecodes" entry carrying the SAME rawMessage text.
+    static string SyntheticSemanticEnvelope(string rawMessage, string myCall)
+    {
+        var sem = SemanticDecode.FromWsjtxMessage(rawMessage, myCall);
+        string J(string s) => s == null ? "null" : "\"" + s.Replace("\"", "\\\"") + "\"";
+        string signoff = sem.IsRrr ? "rrr" : sem.IsRr73 ? "rr73" : sem.Is73 ? "sevenThree" : null;
+        return @"{ ""schemaVersion"": 1, ""rawMessage"": " + J(rawMessage) + @", ""kind"": " + J(sem.Kind) + @", " +
+               @"""from"": " + J(sem.From) + @", ""to"": " + J(sem.To) + @", ""cqDirection"": " + J(sem.CqTarget) + @", " +
+               @"""grid"": " + J(sem.Grid) + @", ""reportDb"": " + (sem.ReportDb?.ToString() ?? "null") + @", " +
+               @"""addressedToMe"": " + (sem.AddressedToMe ? "true" : "false") + @", ""signoff"": " + J(signoff) + @", " +
+               @"""callForm"": " + J(sem.CallForm) + @", ""qsoRelation"": ""none"" }";
+    }
 
     // ── Nexus modernization Stage 3: the Direct DTO now RETAINS the per-decode and per-QSO
     //    semantic facts Nexus already puts on every snapshot (DecodeRow.is_cq/directed_to_me/
@@ -3853,6 +4112,232 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  PostS12_S2_SemanticEnvelopeContractTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Stage 13 (2026-09-14, VP5/K5UR live incident): SemanticDecode.FromNexus canonicalizes
+    //    From/To identity, resolving Nexus's own i3=4 hash notation for a COMPOUND call
+    //    (tempo-core/src/message.rs's resolve_hashed/Msg::unhashed, Nexus issue #84 --
+    //    deliberately preserved for what Nexus TRANSMITS, wrong for Jimmy's identity/matching
+    //    layer). Confirmed live: the SAME station's +05 report envelope carried
+    //    From="<VP5/K5UR>" while its later RR73 carried From="VP5/K5UR" -- a real, per-message
+    //    encoding difference Nexus's own s1_hash_resolution_follows_nexus_fine_grained_rules
+    //    test names explicitly ("a consumer matching this against a bare 'W1AW/2' must compare
+    //    bracket-insensitively"). NOT a re-parse of message text -- CanonicalizeIdentity only
+    //    resolves the ONE encoding artifact on a string Nexus already told us is the sender/
+    //    recipient; it never calls WsjtxMessage.DeCall()/ToCall().
+    static void NexusIdentityCanonicalizationTests()
+    {
+        Console.WriteLine("\n── Stage 13: SemanticDecode.FromNexus canonicalizes Nexus's own hash notation ──");
+        try
+        {
+            const string myCall = "KB0UZT";
+            SemanticDecode Sem(string rawMessage, string from, string to, bool addressedToMe = false) =>
+                SemanticDecode.FromNexus(
+                    new DirectDecodeRow { Message = rawMessage },
+                    new DirectDecodeSemantics
+                    {
+                        SchemaVersion = 1, RawMessage = rawMessage, Kind = "report",
+                        From = from, To = to, AddressedToMe = addressedToMe, CallForm = "compound",
+                    },
+                    myCall);
+
+            // 1. THE live incident itself, reproduced exactly: VP5/K5UR's +05 report envelope
+            //    carries a hashed (bracketed) From -- must canonicalize to the plain compound
+            //    call, not the bracketed encoding notation.
+            var report = Sem("KB0UZT VP5/K5UR +05", "<VP5/K5UR>", "KB0UZT", addressedToMe: true);
+            CheckStr("1: hashed compound From -> canonical plain compound call", report.From, "VP5/K5UR");
+            Check("1: ...FromWasHashed records the raw encoding was hashed", report.FromWasHashed, true);
+            Check("1: ...ToWasHashed is false (To was never bracketed here)", report.ToWasHashed, false);
+
+            // 2. The SAME station's RR73 close, as actually observed -- From arrives already
+            //    plain (that specific over used standard, non-hashed encoding) -- untouched,
+            //    and canonicalizes to the IDENTICAL string as case 1, so a straight string
+            //    comparison against callInProg ("VP5/K5UR") now succeeds for BOTH decodes.
+            var rr73 = Sem("KB0UZT VP5/K5UR RR73", "VP5/K5UR", "KB0UZT", addressedToMe: true);
+            CheckStr("2: plain compound From (not hashed this time) -> unchanged", rr73.From, "VP5/K5UR");
+            Check("2: ...FromWasHashed is false", rr73.FromWasHashed, false);
+            Check("2: both decodes of the same station now canonicalize identically",
+                  report.From == rr73.From, true);
+
+            // 3. A hashed To (we are the one being addressed hashed, the "hc" shape from Nexus's
+            //    own Rust test) -- same resolution, other role.
+            var toHashed = Sem("<VP5/K5UR> KB0UZT -07", "KB0UZT", "<VP5/K5UR>");
+            CheckStr("3: hashed compound To -> canonical plain compound call", toHashed.To, "VP5/K5UR");
+            Check("3: ...ToWasHashed records it", toHashed.ToWasHashed, true);
+
+            // 4. Unresolved hash ("<...>", the decoder-hasn't-heard-it-yet marker) must NEVER
+            //    become a plausible-looking identity -- canonicalizes to null, matching
+            //    WsjtxMessage.IsInvalid's own Contains("...") rejection on the text-parsed path,
+            //    and Nexus's OWN an_unresolved_hash_is_not_turned_into_a_callsign test.
+            var unresolved = Sem("KD9TAW <...> EN37", "<...>", "KD9TAW");
+            Check("4: unresolved hash From -> null, not the literal '...' or '<...>'", unresolved.From == null, true);
+            Check("4: ...never marked as a resolved hash", unresolved.FromWasHashed, false);
+
+            // 5. A hashed STANDARD call (Nexus already resolves this one itself before the
+            //    envelope reaches C# -- see s1's case (c)) -- if it ever DID arrive still
+            //    bracketed, canonicalization must still resolve it the same way, defensively.
+            var hashedStandard = Sem("KD9TAW <W9XYZ> EN37", "<W9XYZ>", "KD9TAW");
+            CheckStr("5: hashed standard From (defensive case) -> canonical plain call", hashedStandard.From, "W9XYZ");
+
+            // 6. Null/empty From or To -> null, no exception.
+            var noFrom = Sem("CQ K1JT EM51", null, null);
+            Check("6: null From stays null", noFrom.From == null, true);
+            Check("6: null To stays null", noFrom.To == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NexusIdentityCanonicalizationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Phase A (2026-09-14): the no-fallback contract -- a LIVE received decode with the
+    //    cutover on and no attached Nexus envelope must resolve to an unknown identity, not
+    //    silently re-parse with WsjtxMessage (the exact silent degrade that let the
+    //    VP5/K5UR bug hide). Test mode stays exempt so today's envelope-less test corpus
+    //    keeps working (Phase E migrates that separately). TestModeGuard.TestForceIsTestMode
+    //    is the one way to simulate "live" from inside the JimmyTests process itself, where
+    //    the entry-assembly check would otherwise always report test mode.
+    static void NoFallbackContractTests()
+    {
+        Console.WriteLine("\n── Phase A: live decodes with no Nexus envelope are rejected, not silently re-parsed ──");
+        const string myCall = "KB0UZT";
+        bool? prevForce = TestModeGuard.TestForceIsTestMode;
+        bool prevCutover = SemanticCutover.UseNexusSemantics;
+        try
+        {
+            var bare = new EnqueueDecodeMessage { Message = "KB0UZT K1JT2 -05" };   // .Semantic left null
+
+            // 1. Live, cutover ON, no envelope -> unknown identity, not a WsjtxMessage re-parse.
+            TestModeGuard.TestForceIsTestMode = false;
+            SemanticCutover.UseNexusSemantics = true;
+            var live = bare.EffectiveSemantic(myCall);
+            Check("1: live + no envelope -> From is null (rejected), not the text-parsed 'K1JT2'",
+                  live.From == null, true);
+            CheckStr("1: ...Source records the contract gap", live.Source, "nexus-missing");
+
+            // 2. Test mode (the normal case while running under JimmyTests) -> unaffected,
+            //    still falls back to WsjtxMessage exactly as before Phase A.
+            TestModeGuard.TestForceIsTestMode = null;   // real detection -> true, entry assembly is JimmyTests
+            var testMode = bare.EffectiveSemantic(myCall);
+            CheckStr("2: test mode + no envelope -> still the WsjtxMessage text parse", testMode.From, "K1JT2");
+
+            // 3. Rollback (UseNexusSemantics=false) wins regardless of live/test -- the ONE
+            //    sanctioned route back to WsjtxMessage.
+            TestModeGuard.TestForceIsTestMode = false;   // still "live"
+            SemanticCutover.UseNexusSemantics = false;
+            var rollback = bare.EffectiveSemantic(myCall);
+            CheckStr("3: rollback + live + no envelope -> WsjtxMessage parse (explicit, not silent)", rollback.From, "K1JT2");
+
+            // 4. Live, cutover ON, envelope DOES exist -> returns it normally, contract intact.
+            SemanticCutover.UseNexusSemantics = true;
+            var withEnvelope = new EnqueueDecodeMessage { Message = "KB0UZT K1JT2 -05" };
+            withEnvelope.Semantic = SemanticDecode.FromNexus(
+                new DirectDecodeRow { Message = withEnvelope.Message },
+                new DirectDecodeSemantics { SchemaVersion = 1, RawMessage = withEnvelope.Message, Kind = "report", From = "K1JT2", To = myCall, AddressedToMe = true },
+                myCall);
+            var attached = withEnvelope.EffectiveSemantic(myCall);
+            CheckStr("4: live + envelope present -> the real Nexus-derived identity, unaffected", attached.From, "K1JT2");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NoFallbackContractTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            TestModeGuard.TestForceIsTestMode = prevForce;
+            SemanticCutover.UseNexusSemantics = prevCutover;
+        }
+    }
+
+    // ── Phase B (2026-09-14): DirectApplyDecodes stores canonical identity/semantics AT
+    //    INGRESS unconditionally -- even when no real Nexus envelope is attached (test mode,
+    //    or an older host) -- so downstream code (CallQueueRanker and others) can read
+    //    d.Semantic directly with no myCall and no re-parsing. Before this phase, .Semantic
+    //    stayed null in exactly that case and only EffectiveSemantic(myCall)'s on-demand
+    //    fallback ever computed a value.
+    static void SemanticIngressStorageTests()
+    {
+        Console.WriteLine("\n── Phase B: canonical identity/semantics stored at ingress, envelope or not ──");
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42";
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+            ctrl.advancedCallLayout = true;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+
+            // No decodeSemantics array at all (the ordinary shape of most of today's test
+            // corpus) -- test mode, so admitted via the WsjtxMessage fallback as always, but
+            // NOW that fallback result is cached onto the decode's own .Semantic at ingress.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 500 },
+                ""recentDecodes"": [{ ""from"": ""K1ABC2"", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""CQ K1ABC2 EM63"" }] }"));
+
+            EnqueueDecodeMessage d;
+            Check("ingress admitted the CQ to the call queue", wc.callDict.TryGetValue("K1ABC2", out d), true);
+            Check("Semantic is populated at ingress even with no envelope attached", d?.Semantic != null, true);
+            CheckStr("...and carries the correct canonical From, computed once", d?.Semantic?.From, "K1ABC2");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SemanticIngressStorageTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Phase E (2026-09-14): SyntheticSemanticEnvelope actually produces a working envelope --
+    //    a decode fed through TestApplyDirectSnapshot with one attached resolves via the REAL
+    //    Nexus-shaped path (Source == "nexus"), not the WsjtxMessage fallback (Source ==
+    //    "wsjts"). This is the infrastructure piece a broader test-helper migration builds on;
+    //    it is not itself that full migration -- most of today's ~129 recentDecodes-
+    //    constructing tests still rely on the no-envelope fallback and are tracked separately.
+    static void SyntheticSemanticEnvelopeInfrastructureTests()
+    {
+        Console.WriteLine("\n── Phase E: synthetic decodeSemantics envelope helper produces a real Nexus-shaped result ──");
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42";
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+            ctrl.advancedCallLayout = true;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+
+            const string msg = "CQ K1JT4 EM63";
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 700 },
+                ""recentDecodes"": [{ ""from"": ""K1JT4"", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + msg + @""" }],
+                ""decodeSemantics"": [ " + SyntheticSemanticEnvelope(msg, myCall) + @" ] }"));
+
+            EnqueueDecodeMessage d;
+            Check("the decode was admitted under the synthetic envelope's identity", wc.callDict.TryGetValue("K1JT4", out d), true);
+            CheckStr("Semantic.Source is the REAL Nexus-shaped path, not the WsjtxMessage fallback", d?.Semantic?.Source, "nexus");
+            Check("...and the identity/kind facts match", d?.Semantic?.From == "K1JT4" && (d?.Semantic?.IsCq ?? false), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SyntheticSemanticEnvelopeInfrastructureTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
@@ -10167,11 +10652,15 @@ static class JimmyTests
 
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));   // establish band / mode
 
+            // "Space callsigns and grids" defaults ON -- narration renders the SPACED callsign
+            // form (SC()/DisplayCallsign); built via the real helper so it can't drift.
+            string targetSp = WsjtxClient.DisplayCallsign(target, true);
+
             // 1) Arming from a cached CQ -> "Waiting to work X." but NOT "X calling CQ."
             Check("cached CQ captured Smart Start", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
-            Check("activation speaks 'Waiting to work X'", SaidHas($"Waiting to work {target}"), true);
+            Check("activation speaks 'Waiting to work X'", SaidHas($"Waiting to work {targetSp}"), true);
             Check("activation does NOT re-announce 'X calling CQ' from the cached decode",
-                SaidHas($"{target} calling CQ"), false);
+                SaidHas($"{targetSp} calling CQ"), false);
 
             // 5) The cached decode is still recorded for the reply -- a fresh-CQ seed makes it
             //    ready and arms the pending auto-start (ArmPendingAutoStart no-ops without a
@@ -10181,23 +10670,24 @@ static class JimmyTests
             try { listener.WaitForCommand(c => c.StartsWith("REPLY"), 3000); } catch (TimeoutException) { }
             PumpUntil(SawReply, 2000);
             Check("the initial REPLY is constructed and sent from the cached decode", SawReply(), true);
-            Check("...and 'Calling X.' is announced at the real dispatch", SaidHas($"Calling {target}"), true);
+            Check("...and 'Calling X.' is announced at the real dispatch", SaidHas($"Calling {targetSp}"), true);
             wc.TestCancelStationWatchPendingStart();
             wc.callInProg = null;
 
             // 2) A NEW CQ decoded AFTER activation (via the live feed) DOES announce "calling CQ".
             ClearSaid();
             Check("re-armed from a cached CQ (still no immediate 'calling CQ')",
-                wc.TestTryCaptureSmartStart(target, FreshCq(target)) && !SaidHas($"{target} calling CQ"), true);
+                wc.TestTryCaptureSmartStart(target, FreshCq(target)) && !SaidHas($"{targetSp} calling CQ"), true);
             wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // genuinely new on-air CQ
             Check("a live CQ decoded after activation announces 'X calling CQ'",
-                SaidHas($"{target} calling CQ"), true);
+                SaidHas($"{targetSp} calling CQ"), true);
 
             // 3) A new message showing the target working somebody else still announces it.
             ClearSaid();
             wc.TestFeedTargetMonitorsDecode(Dec($"{peer} {target} -07"), true);
+            string peerSp = WsjtxClient.DisplayCallsign(peer, true);
             Check("target working another station still announces that activity",
-                SaidHas($"{target} to {peer}, minus 7"), true);
+                SaidHas($"{targetSp} to {peerSp}, minus 7"), true);
             wc.TestCancelStationWatchPendingStart();
 
             // 4) Replies addressed to the operator, and 73 / RR73, are unchanged. A stale "to us"
@@ -10223,7 +10713,7 @@ static class JimmyTests
             ClearSaid();
             wc.TestFeedTargetMonitorsDecode(Dec($"{peer} {t73} RR73"), true);  // target -> peer RR73 (finishing)
             Check("a target -> peer RR73 still narrates the fact (73/RR73 path unchanged)",
-                SaidHas($"{t73} to {peer}, RR73"), true);
+                SaidHas($"{WsjtxClient.DisplayCallsign(t73, true)} to {peerSp}, RR73"), true);
             wc.TestCancelStationWatchPendingStart();
         }
         catch (Exception ex)
@@ -13389,6 +13879,87 @@ static class JimmyTests
         }
     }
 
+    // ── "Working {Callsign}" (QsoStarted) fires ONCE per contact, not on every reply within the
+    //    SAME ongoing exchange ──
+    // Live finding, 2026-09-13 (KF8TOZ session): the code that sets replyFromInProg=true (the
+    // ONE thing that makes ShowStatus render the QsoStarted "Working X" clause) ran on EVERY
+    // reply to the same ongoing contact -- the roger-report reply, not just the initial one --
+    // so "Working KF8TOZ" was announced a second time moments before the QSO logged, sounding
+    // like a duplicated notification. Fix: `_qsoStartedAnnouncedForCall` is a one-shot latch per
+    // contact, reset only when callInProg actually CHANGES (SetCallInProg) -- same shape as the
+    // pre-existing `_manualFreqThisQso` latch right above it. This drives the REAL
+    // ProcessDecodeMsg "deCall == callInProg, not 73/RR73" reply branch via genuine decode
+    // injection through the Direct pipeline (NOT the TestSetReplyingToCall shortcut, which sets
+    // replyFromInProg directly and would never exercise the latch at all).
+    static void QsoStartedAnnouncesOnceThenSuppressesTests()
+    {
+        Console.WriteLine("\n── 'Working {Callsign}' (QsoStarted) fires once per contact, not on every reply ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_QsoStartedOnce_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42", qsoCall = "KF8TOZ";
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.anyMsgRadioButton.Checked = true;
+            ctrl.replyDxCheckBox.Checked = true;
+            ctrl.replyLocalCheckBox.Checked = true;
+            ctrl.advancedCallLayout = true;   // bypass T/R period gating -- irrelevant to this bug
+            ctrl.spaceCallsignsAndGrids = false;   // keep assertions on the compact callsign form
+            ctrl.routineStatusSpeakWhen = SpeakWhen.Now;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetMode("FT8");
+            wc.cqPaused = false;
+            wc.Notify = NewTestNotificationCenter(ctrl.Notifications, new FakeNotificationDelivery());
+            WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+
+            DirectSnapshot Snap(ulong slot, string decodeMsg) => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""txEnabled"": true, ""catOk"": true, ""slot"": " + slot + @" },
+                ""recentDecodes"": [{ ""from"": """ + qsoCall + @""", ""snr"": -5, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }] }");
+
+            wc.callInProg = qsoCall;
+
+            // 1. First reply within the contact (a signal report from them) -> "Working KF8TOZ" fires.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(600, $"{myCall} {qsoCall} -05"));
+            CheckStr("first reply to callInProg -> 'Working' announced",
+                ctrl.statusText.Text, "Working KF8TOZ, replying.");
+
+            // 2. Second reply, SAME ongoing contact (their roger-report) -> NOT announced again.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(602, $"{myCall} {qsoCall} R-05"));
+            string second = ctrl.statusText.Text;
+            Check("second reply, same contact -> 'Working' NOT repeated",
+                second == null || !second.Contains("Working"), true);
+
+            // 3. A genuinely NEW contact (real SetCallInProg transition) resets the latch -> the
+            //    next reply to the new call announces "Working" again.
+            wc.TestSetCallInProg(null);
+            const string qsoCall2 = "W1AW";
+            wc.TestSetCallInProg(qsoCall2);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""txEnabled"": true, ""catOk"": true, ""slot"": 700 },
+                ""recentDecodes"": [{ ""from"": """ + qsoCall2 + @""", ""snr"": -5, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + myCall + @" " + qsoCall2 + @" -03"" }] }"));
+            CheckStr("a fresh contact (new SetCallInProg) gets its own 'Working' announcement again",
+                ctrl.statusText.Text, "Working W1AW, replying.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  QsoStartedAnnouncesOnceThenSuppressesTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
     // ── QSO speech profile: SpeakCondition.OutsideQsoOnly silences an occurrence WHILE a QSO is active,
     // keeps the fact in history, never replays it after the QSO, and never blocks Critical ────
     static void DuringQsoSuppressionTests()
@@ -14961,6 +15532,16 @@ static class JimmyTests
             // 7. …and it recovers the moment a snapshot reports TX armed again.
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: false, txEnabled: true, 7));
             Check("…and re-announces once the engine re-arms TX with the QSO still up",
+                  wc.HasActiveTxOrCycle, true);
+
+            // 8. THE 2026-09-13 FIX (CT2HEX live finding): armed (txEnabled), LISTEN, no active
+            //    call/CQ -- exactly the state an orphaned Finishing-tail retransmission leaves TX
+            //    in right after Escape disables it. The three pre-existing cases above all missed
+            //    this combination, so Escape correctly halted TX but never confirmed it -> a
+            //    silent "Tx halted". Must announce.
+            wc = MakeClient();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(transmitting: false, tuning: false, txEnabled: true, 8));
+            Check("armed, LISTEN, no active call/CQ (orphaned Finishing-tail retransmission) -> announce",
                   wc.HasActiveTxOrCycle, true);
         }
         catch (Exception ex)
@@ -20584,8 +21165,13 @@ static class JimmyTests
             Check("...callInProg cleared", wc.callInProg == null, true);
             // Part 5 / N4BP live audit: concise terminal message naming the actual call count,
             // distinct from the busy-churn stand-down wording.
+            // "Space callsigns and grids" defaults ON (Controller.spaceCallsignsAndGrids), and
+            // this Notification path renders through SC()/DisplayCallsign like every other
+            // Smart Start narration line -- the expected text must be the SPACED form
+            // ("J 3 8 D X", not "J38DX"). Built via the real helper rather than a hand-typed
+            // literal so it can never drift from what SC() actually produces.
             Check("...a Repeat-Limit terminal message is shown, naming the count and target",
-                statusView.LastShowMessageText == $"Repeat limit reached after 3 calls to {target}, no contact completed", true);
+                statusView.LastShowMessageText == $"Repeat limit reached after 3 calls to {WsjtxClient.DisplayCallsign(target, true)}, no contact completed", true);
 
             // disarmed for good: a later calling over cannot happen
             lock (seenLock) seen.Clear();
@@ -20711,8 +21297,9 @@ static class JimmyTests
                 SaidContains("working another station"), false);
             // N4BP live audit -- fix 4: a target report to us while Smart Start is only waiting is
             // engagement, not mere availability -- it hands straight to the normal QSO sequencer.
+            // Spaced form -- see SmartStartRepeatLimitSpansYieldsTests' own comment on why.
             Check("...announces the engaged hand-off instead",
-                SaidContains($"{target} answered you"), true);
+                SaidContains($"{WsjtxClient.DisplayCallsign(target, true)} answered you"), true);
         }
         finally
         {
@@ -20915,6 +21502,191 @@ static class JimmyTests
             if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
             else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
             try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // Operator request (2026-09-13): the busy-churn round cap (was a fixed constant of 4) and a
+    // brand-new overall wall-clock time limit (0 = no limit, default) are both now adjustable in
+    // Options > Transmit. Covers: the pure TargetMonitor.ExceedsTimeLimit math (deterministic,
+    // synthetic `nowUtc` -- no sleep); the real WsjtxClient wiring for BOTH new ctrl properties,
+    // proven through the actual code paths (a real busy-decline round with the cap set to 1, and
+    // the same period-complete check FeedTargetMonitorsPeriodComplete performs, via
+    // TestCheckSmartStartTimeLimit's explicit-nowUtc test seam); and JimmySettings persistence
+    // (round-trip + out-of-range/missing-key defaults), mirroring JimmySettingsRoundTripTests'
+    // own style.
+    static void SmartStartConfigurableLimitsTests()
+    {
+        Console.WriteLine("\n── Smart Start: adjustable busy-round cap + overall time limit (2026-09-13) ──");
+        try
+        {
+            // ── TargetMonitor.ExceedsTimeLimit: pure logic, no sleep needed ──
+            {
+                var tm = new TargetMonitor(TargetPurpose.SmartStart);
+                tm.Start("W1ABC", "20m", "FT8", "sess1");
+                DateTime armedAbout = DateTime.UtcNow;
+                Check("0 (no limit) never exceeds, even far in the future",
+                    tm.ExceedsTimeLimit(armedAbout.AddDays(1), 0), false);
+                Check("under the limit -> false",
+                    tm.ExceedsTimeLimit(armedAbout.AddMinutes(4), 5), false);
+                Check("at the limit -> true",
+                    tm.ExceedsTimeLimit(armedAbout.AddMinutes(5), 5), true);
+                Check("well past the limit -> true",
+                    tm.ExceedsTimeLimit(armedAbout.AddMinutes(30), 5), true);
+                Check("an inactive monitor (never Start()'d) never exceeds",
+                    new TargetMonitor(TargetPurpose.SmartStart).ExceedsTimeLimit(DateTime.UtcNow.AddDays(1), 5), false);
+            }
+
+            // ── TargetMonitor.NoteStandbyRoundAndCheckGiveUp: the parameter itself was already
+            //    generic before this change -- quick direct confirmation a small custom cap is
+            //    honored (the WsjtxClient-level test below proves the real wiring reads it). ──
+            {
+                var tm = new TargetMonitor(TargetPurpose.SmartStart);
+                tm.Start("W1ABC", "20m", "FT8", "sess1");
+                Check("cap=1: the very first dead-end round gives up immediately",
+                    tm.NoteStandbyRoundAndCheckGiveUp(1), true);
+            }
+
+            (Controller ctrl, WsjtxClient wc, FakeStatusView view, StubEngineHost listener, List<string> seen, string tmpDb, string prevTestDbPath) MakeClient()
+            {
+                var seenLock = new object();
+                var seenList = new List<string>();
+                var listener = new StubEngineHost(line => { lock (seenLock) seenList.Add(line); return "OK"; });
+                string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartLimits_" + Guid.NewGuid().ToString("N") + ".db");
+                string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+                Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var _ = ctrl.Handle;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                var view = new FakeStatusView();
+                wc.StatusView = view;
+                wc.TestSetDirectConnected(true);
+                wc.TestSetMode("FT8");
+                ctrl.smartQsoStartEnabled = true;
+                ctrl.smartStartSilencePeriods = 6;
+                return (ctrl, wc, view, listener, seenList, tmpDb, prevTestDbPath);
+            }
+            void Cleanup(WsjtxClient wc, StubEngineHost listener, string tmpDb, string prevTestDbPath)
+            {
+                listener.Stop();
+                WsjtxClient.TestQuiesceAllDirectClients();
+                if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+                else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+                try { File.Delete(tmpDb); } catch { }
+            }
+
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "4D3UNC", peer = "W6PAN";
+            EnqueueDecodeMessage FreshCq() => new EnqueueDecodeMessage
+            {
+                Message = $"CQ {target} FK92",
+                RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                DeltaFrequency = 1500, Snr = -6,
+            };
+            DirectSnapshot Snap(ulong slot) => ParseDirectSnapshot(@"{ ""mycall"":""" + myCall + @""",""mygrid"":""" + myGrid + @""",
+                ""radio"":{ ""dialMhz"":14.074,""transmitting"":false,""slot"":" + slot + @" }, ""recentDecodes"":[] }");
+
+            // ── WsjtxClient wiring, round cap: ctrl.smartStartMaxStandbyRounds=1 -> the FIRST
+            //    "looked ready, revalidated busy" round (a straggler decode landing during the
+            //    3-poll finality window) stands Smart Start down immediately -- with the OLD fixed
+            //    constant of 4 this exact scenario would NOT have stood down yet (proven by
+            //    SmartStartPileupBackoffTests' own "straggler" sub-case leaving Smart Start armed). ──
+            {
+                var (ctrl, wc, view, listener, _, tmpDb, prevTestDbPath) = MakeClient();
+                try
+                {
+                    ctrl.smartStartMaxStandbyRounds = 1;
+                    wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2000));
+                    Check("fresh CQ captured + auto-start armed", wc.TestTryCaptureSmartStart(target, FreshCq()) && wc.TestAutoStartPending, true);
+                    wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }, true);
+                    // A straggler "target working a peer" decode during the finality window -> the
+                    // deferred dispatch declines as TargetBusy -> ONE dead-end round.
+                    wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{peer} {target} -09", DeltaFrequency = 1500, Snr = -6 }, true);
+                    for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2000));
+                    Check("cap=1: Smart Start stands itself down after just ONE busy dead-end round",
+                        view.LastShowMessageText != null && view.LastShowMessageText.Contains("stayed busy"), true);
+                    Check("...and is no longer armed", wc.TestSmartStartTarget == null, true);
+                }
+                finally { Cleanup(wc, listener, tmpDb, prevTestDbPath); }
+            }
+
+            // ── WsjtxClient wiring, time limit: ctrl.smartStartTimeLimitMinutes wired through
+            //    TestCheckSmartStartTimeLimit's explicit-nowUtc seam -- the SAME check
+            //    FeedTargetMonitorsPeriodComplete runs every real receive period. ──
+            {
+                var (ctrl, wc, view, listener, _, tmpDb, prevTestDbPath) = MakeClient();
+                try
+                {
+                    ctrl.smartStartTimeLimitMinutes = 5;
+                    wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(3000));
+                    Check("armed and waiting", wc.TestTryCaptureSmartStart(target, FreshCq()), true);
+                    Check("well within the 5-minute limit -> no teardown yet",
+                        wc.TestCheckSmartStartTimeLimit(DateTime.UtcNow.AddMinutes(2)), false);
+                    Check("...still armed", wc.TestSmartStartTarget == target, true);
+                    Check("past the 5-minute limit -> teardown runs",
+                        wc.TestCheckSmartStartTimeLimit(DateTime.UtcNow.AddMinutes(10)), true);
+                    Check("...no longer armed", wc.TestSmartStartTarget == null, true);
+                    Check("...the operator is told why (distinct wording from the Repeat Limit / busy-churn messages)",
+                        view.LastShowMessageText != null && view.LastShowMessageText.Contains("time limit reached"), true);
+                }
+                finally { Cleanup(wc, listener, tmpDb, prevTestDbPath); }
+            }
+
+            // ── 0 = no limit (the default) -- never trips, no matter how far in the future ──
+            {
+                var (ctrl, wc, view, listener, _, tmpDb, prevTestDbPath) = MakeClient();
+                try
+                {
+                    Check("smartStartTimeLimitMinutes defaults to 0 (no limit)", ctrl.smartStartTimeLimitMinutes == 0, true);
+                    wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(4000));
+                    Check("armed", wc.TestTryCaptureSmartStart(target, FreshCq()), true);
+                    Check("even a year later, 0 never trips",
+                        wc.TestCheckSmartStartTimeLimit(DateTime.UtcNow.AddYears(1)), false);
+                    Check("...still armed", wc.TestSmartStartTarget == target, true);
+                }
+                finally { Cleanup(wc, listener, tmpDb, prevTestDbPath); }
+            }
+
+            // ── JimmySettings persistence: round-trip + out-of-range/missing-key defaults ──
+            {
+                string tmpIni = Path.Combine(Path.GetTempPath(), "JimmySmartLimits_" + Guid.NewGuid().ToString("N") + ".ini");
+                try
+                {
+                    var s = new JimmySettings();
+                    Check("SmartStartMaxStandbyRounds defaults to 4", s.SmartStartMaxStandbyRounds == 4, true);
+                    Check("SmartStartTimeLimitMinutes defaults to 0", s.SmartStartTimeLimitMinutes == 0, true);
+
+                    s.SmartStartMaxStandbyRounds = 10;
+                    s.SmartStartTimeLimitMinutes = 45;
+                    s.SaveToIni(new IniFile(tmpIni));
+
+                    var reloaded = new JimmySettings();
+                    reloaded.LoadFromIni(new IniFile(tmpIni));
+                    Check("SmartStartMaxStandbyRounds round-trips", reloaded.SmartStartMaxStandbyRounds == 10, true);
+                    Check("SmartStartTimeLimitMinutes round-trips", reloaded.SmartStartTimeLimitMinutes == 45, true);
+
+                    // Out-of-range / garbage values in the ini are rejected -- the code default
+                    // (or whatever was already loaded) survives, exactly like the existing
+                    // smartStartSilencePeriods bounds-check this mirrors.
+                    var ini2 = new IniFile(tmpIni);
+                    ini2.Write("smartStartMaxStandbyRounds", "0");     // below minimum (1)
+                    ini2.Write("smartStartTimeLimitMinutes", "-5");    // below minimum (0)
+                    var rejected = new JimmySettings();
+                    rejected.LoadFromIni(ini2);
+                    Check("out-of-range smartStartMaxStandbyRounds (0) is rejected -> default (4) kept",
+                        rejected.SmartStartMaxStandbyRounds == 4, true);
+                    Check("out-of-range smartStartTimeLimitMinutes (-5) is rejected -> default (0) kept",
+                        rejected.SmartStartTimeLimitMinutes == 0, true);
+                }
+                finally { try { File.Delete(tmpIni); } catch { } }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SmartStartConfigurableLimitsTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
         }
     }
 
@@ -22118,7 +22890,11 @@ static class JimmyTests
             //      dedicated SmartStartSeedNoImmediateCqTests. Still never a preliminary /
             //      dispatch-sounding "appears available".
             Check("Smart Start captured", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
-            Check("arming Smart Start speaks its own 'Waiting to work' line", SaidContains($"Waiting to work {target}"), true);
+            // "Space callsigns and grids" defaults ON -- narration renders the SPACED callsign
+            // form (SC()/DisplayCallsign), built via the real helper below rather than a
+            // hand-typed literal.
+            string targetSp = WsjtxClient.DisplayCallsign(target, true);
+            Check("arming Smart Start speaks its own 'Waiting to work' line", SaidContains($"Waiting to work {targetSp}"), true);
             Check("arming Smart Start does NOT emit Station Watch's 'Watching X' lifecycle line", SaidContains("Watching"), false);
             Check("arming from a cached CQ does NOT re-announce 'X calling CQ' at activation",
                 SaidContains($"{target} calling CQ"), false);
@@ -22133,8 +22909,9 @@ static class JimmyTests
             Check("re-armed", wc.TestTryCaptureSmartStart(target, FreshCq(target)), true);
             wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // live CQ -> parity/evidence
             wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // target now working A
+            string spA = WsjtxClient.DisplayCallsign(A, true);
             Check("Smart Start names the station the target is working, with its report",
-                SaidContains($"{target} to {A}, minus 7"), true);
+                SaidContains($"{targetSp} to {spA}, minus 7"), true);
             // 2026-09-11 target-activity unification: a roger-report (RReport, "R-05") is a
             // DIFFERENT structured fact from the plain report (TargetReport, "-07") just spoken --
             // Kind and Value both changed -- so it always announces, regardless of elapsed wall
@@ -22146,19 +22923,20 @@ static class JimmyTests
             // dedicated TargetActivityTrackerTests below, not here.
             wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} R-05"), true);
             Check("a changed report (kind AND value) to the SAME peer still announces -- not swallowed",
-                SaidContains($"{target} to {A}, R minus 5"), true);
+                SaidContains($"{targetSp} to {spA}, R minus 5"), true);
             wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -09"), true);   // target MOVES to a new station
+            string spB = WsjtxClient.DisplayCallsign(B, true);
             Check("moving to a NEW station re-announces (peer folded into the dedup key)",
-                SaidContains($"{target} to {B}, minus 9"), true);
+                SaidContains($"{targetSp} to {spB}, minus 9"), true);
 
             // ══ 3. Both monitors on the same call: no doubled target fact ══
             wc.TestStartStationWatch(target);
             lock (fake.AllText) fake.AllText.Clear();
             wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -12"), true);
             Check("Station Watch still gives the fuller shared observation",
-                SaidContains($"{target} working {B}"), true);
+                SaidContains($"{targetSp} working {spB}"), true);
             Check("Smart Start does NOT repeat the target-busy fact while Station Watch covers it",
-                SaidContains($"{target} to {B}, minus"), false);
+                SaidContains($"{targetSp} to {spB}, minus"), false);
             wc.TestCancelStationWatchPendingStart();
             wc.StopStationWatch();
 
@@ -22166,7 +22944,7 @@ static class JimmyTests
             lock (fake.AllText) fake.AllText.Clear();
             wc.TestStartStationWatch(target);
             wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);
-            Check("Station Watch alone still narrates the target's CQ", SaidContains($"{target} CQ"), true);
+            Check("Station Watch alone still narrates the target's CQ", SaidContains($"{targetSp} CQ"), true);
             wc.StopStationWatch();
 
             // ══ 5. Engagement handoff: engaged line + Station Watch on the SAME call stops ══
@@ -22178,7 +22956,7 @@ static class JimmyTests
             wc.callInProg = target;
             wc.TestSmartStartEnterAwaitingEngagement();
             wc.TestFeedTargetMonitorsDecode(Dec($"{myCall} {target} R-03"), true);   // target answers us
-            Check("engagement speaks the QSO-takeover line", SaidContains($"{target} answered you"), true);
+            Check("engagement speaks the QSO-takeover line", SaidContains($"{targetSp} answered you"), true);
             Check("Station Watch on the same call stops at the real engagement handoff",
                 wc.TestStationWatchTargetCall == null, true);
             Check("Smart Start itself is done after engagement", wc.TestSmartStartTarget == null, true);
@@ -22223,12 +23001,13 @@ static class JimmyTests
                 wc.TestSmartStartEnterAwaitingEngagement();
                 wc.TestFeedTargetMonitorsDecode(Dec($"{C} {target} -07"), true);   // target -> peer report -> yield
                 PumpUntil(() => SeenCmds().Exists(c => c.StartsWith("HALT_TX")), 2000);
-                Check("7: the decoded busy FACT is spoken once", SaidCount($"{target} to {C}, minus 7") == 1, true);
+                string spC = WsjtxClient.DisplayCallsign(C, true);
+                Check("7: the decoded busy FACT is spoken once", SaidCount($"{targetSp} to {spC}, minus 7") == 1, true);
                 Check("7: the yield ACTION is spoken once, as the bare default 'Standing by.'",
                     SaidCount("Standing by.") == 1, true);
                 Check("7: the yield line does NOT restate the busy fact (default template)",
                     Said().Exists(s => s.IndexOf("Standing by.", StringComparison.Ordinal) >= 0
-                                       && s.IndexOf(target, StringComparison.OrdinalIgnoreCase) >= 0), false);
+                                       && s.IndexOf(targetSp, StringComparison.OrdinalIgnoreCase) >= 0), false);
                 Check("7: Smart Start stayed armed for the same target after the yield",
                     wc.TestSmartStartTarget == target, true);
                 wc.callInProg = null;

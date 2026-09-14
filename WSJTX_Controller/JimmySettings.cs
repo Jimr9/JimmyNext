@@ -37,6 +37,22 @@ namespace WSJTX_Controller
         // TargetMonitor.OnReceivePeriodComplete's own comment for exactly what counts).
         public int SmartStartSilencePeriods { get; set; } = 2;
 
+        // Operator request (2026-09-13): the busy-churn give-up cap ("looked ready -> turned out
+        // busy" dead-end rounds with no successful new dispatch resetting the count in between)
+        // used to be a fixed constant (4) -- now adjustable, 1-20, default 4 so nothing changes
+        // for an operator who never visits Options for it. See TargetMonitor.
+        // NoteStandbyRoundAndCheckGiveUp's own comment for exactly what counts as one round.
+        public int SmartStartMaxStandbyRounds { get; set; } = 4;
+
+        // Operator request (2026-09-13): an absolute wall-clock backstop on the WHOLE Smart Start
+        // effort, independent of the Repeat Limit (which only counts actual transmitted calls) and
+        // the busy-churn cap above (which only counts dead-end rounds) -- "so they know an hour
+        // later their radio will not start trying to call the station," regardless of how many
+        // calls/busy-declines happened. Minutes; 0 = no limit (today's behavior, and the default).
+        // Counts from the ORIGINAL arm time and is NOT reset by a busy-yield/resume cycle -- only
+        // a fresh Start() (arming on a target) resets it. See TargetMonitor.ArmedAtUtc.
+        public int SmartStartTimeLimitMinutes { get; set; } = 0;
+
         // Appearance (list font size + colors) -- defaults match the app's original
         // hardcoded look exactly, so nothing changes for anyone who never opens the
         // new Appearance tab. Colors are stored as ARGB ints (unambiguous, no named-
@@ -100,6 +116,10 @@ namespace WSJTX_Controller
             SmartQsoStartEnabled = ini.Read("smartQsoStartEnabled") == "True";
             if (int.TryParse(ini.Read("smartStartSilencePeriods"), out int silencePeriods) && silencePeriods >= 1 && silencePeriods <= 10)
                 SmartStartSilencePeriods = silencePeriods;
+            if (int.TryParse(ini.Read("smartStartMaxStandbyRounds"), out int maxStandbyRounds) && maxStandbyRounds >= 1 && maxStandbyRounds <= 20)
+                SmartStartMaxStandbyRounds = maxStandbyRounds;
+            if (int.TryParse(ini.Read("smartStartTimeLimitMinutes"), out int timeLimitMinutes) && timeLimitMinutes >= 0 && timeLimitMinutes <= 999)
+                SmartStartTimeLimitMinutes = timeLimitMinutes;
 
             if (int.TryParse(ini.Read("listFontSize"), out int fontSize) && fontSize >= 8 && fontSize <= 18)
                 ListFontSize = fontSize;
@@ -123,6 +143,8 @@ namespace WSJTX_Controller
             ini.Write("showSpotWatch", ShowSpotWatch.ToString());
             ini.Write("smartQsoStartEnabled", SmartQsoStartEnabled.ToString());
             ini.Write("smartStartSilencePeriods", SmartStartSilencePeriods.ToString());
+            ini.Write("smartStartMaxStandbyRounds", SmartStartMaxStandbyRounds.ToString());
+            ini.Write("smartStartTimeLimitMinutes", SmartStartTimeLimitMinutes.ToString());
 
             ini.Write("listFontSize", ListFontSize.ToString());
             ini.Write("listBackColor", ListBackColor.ToArgb().ToString());

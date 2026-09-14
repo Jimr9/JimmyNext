@@ -34,7 +34,12 @@ namespace WSJTX_Controller
                 case (int)WsjtxClient.CallPriority.MANUAL_SEL:          cat = WsjtxClient.CallCategory.MANUAL_SEL; break;
                 case (int)WsjtxClient.CallPriority.WANTED_CQ:           cat = WsjtxClient.CallCategory.WANTED_CQ; break;
                 default:
-                    string deCall = d.DeCall();
+                    // Nexus semantic cutover, Stage 11 (2026-09-14): identity comes from
+                    // EffectiveSemantic rather than the DeCall() DTO method -- defense-in-depth
+                    // alongside the queue-admission gate (ProcessDecodeMsg/AddSelectedCall),
+                    // since this method is also called from other sites (WsjtxClient.CallQueue.cs,
+                    // WsjtxClient.cs) that don't all funnel through that same gate first.
+                    string deCall = d.EffectiveSemantic(_wc.myCall).From;
                     if (_wc.wantedCalls.Count > 0 && !string.IsNullOrEmpty(deCall) && _wc.wantedCalls.Contains(deCall))
                         cat = WsjtxClient.CallCategory.ALWAYS_WANTED;
                     else if (_wc.IsPotaCall(d)) cat = WsjtxClient.CallCategory.POTA;
@@ -59,7 +64,7 @@ namespace WSJTX_Controller
                     }
                     break;
             }
-            if (_wc.debug) _wc.DebugOutput($"{WsjtxClient.spacer}DeriveCategory: '{d.DeCall()}' pri:{d.Priority} → {cat}");
+            if (_wc.debug) _wc.DebugOutput($"{WsjtxClient.spacer}DeriveCategory: '{d.EffectiveSemantic(_wc.myCall).From}' pri:{d.Priority} → {cat}");
             return cat;
         }
 
@@ -76,7 +81,7 @@ namespace WSJTX_Controller
         public void CheckAwardAlert(EnqueueDecodeMessage d)
         {
             if (_wc.activeAwardTags.Count == 0) return;
-            string call = d.DeCall();
+            string call = d.EffectiveSemantic(_wc.myCall).From;   // Stage 11 (was d.DeCall())
             if (string.IsNullOrEmpty(call)) return;
 
             // Added 2026-08-10: never interrupt an active exchange with an award-needed alert
@@ -115,7 +120,7 @@ namespace WSJTX_Controller
         public bool IsSotaCall(EnqueueDecodeMessage emsg)
         {
             if (emsg.IsSota()) return true;
-            EnqueueDecodeMessage dmsg = _wc.CqMsg(emsg.DeCall());
+            EnqueueDecodeMessage dmsg = _wc.CqMsg(emsg.EffectiveSemantic(_wc.myCall).From);   // Stage 11 (was emsg.DeCall())
             if (dmsg == null) return false;
             return dmsg.IsSota();
         }
@@ -135,7 +140,7 @@ namespace WSJTX_Controller
         // GroupBy actually needs it.
         public string MatchedAwardRuleId(EnqueueDecodeMessage d)
         {
-            string call = d.DeCall();
+            string call = d.EffectiveSemantic(_wc.myCall).From;   // Stage 11 (was d.DeCall())
             if (string.IsNullOrEmpty(call)) return null;
 
             string qrzState = null;
@@ -144,7 +149,8 @@ namespace WSJTX_Controller
                 var stateRec = _wc.lookupManager.Build(call);
                 qrzState = stateRec.State;
             }
-            string grid = WsjtxMessage.Grid(d.Message);
+            // Phase D (2026-09-14): canonical Semantic (was WsjtxMessage.Grid(d.Message)).
+            string grid = d.EffectiveSemantic(_wc.myCall).Grid;
             string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
 
             // Stage A6: Continent now comes from d.EffectiveClassification() (Jimmy's own
@@ -160,7 +166,7 @@ namespace WSJTX_Controller
         // Set -- see AwardMatcher.MatchUnconfirmed's own comment.
         public string MatchedUnconfirmedAwardRuleId(EnqueueDecodeMessage d)
         {
-            string call = d.DeCall();
+            string call = d.EffectiveSemantic(_wc.myCall).From;   // Stage 11 (was d.DeCall())
             if (string.IsNullOrEmpty(call)) return null;
 
             string qrzState = null;
@@ -169,7 +175,8 @@ namespace WSJTX_Controller
                 var stateRec = _wc.lookupManager.Build(call);
                 qrzState = stateRec.State;
             }
-            string grid = WsjtxMessage.Grid(d.Message);
+            // Phase D (2026-09-14): canonical Semantic (was WsjtxMessage.Grid(d.Message)).
+            string grid = d.EffectiveSemantic(_wc.myCall).Grid;
             string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
 
             return AwardMatcher.MatchUnconfirmed(

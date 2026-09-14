@@ -95,6 +95,8 @@ namespace WSJTX_Controller
         public bool showSpotWatch { get => Settings.ShowSpotWatch; set => Settings.ShowSpotWatch = value; }
         public bool smartQsoStartEnabled { get => Settings.SmartQsoStartEnabled; set => Settings.SmartQsoStartEnabled = value; }
         public int smartStartSilencePeriods { get => Settings.SmartStartSilencePeriods; set => Settings.SmartStartSilencePeriods = value; }
+        public int smartStartMaxStandbyRounds { get => Settings.SmartStartMaxStandbyRounds; set => Settings.SmartStartMaxStandbyRounds = value; }
+        public int smartStartTimeLimitMinutes { get => Settings.SmartStartTimeLimitMinutes; set => Settings.SmartStartTimeLimitMinutes = value; }
         public bool rawShowCq = true;
         public bool rawShowDirected = true;
         public bool rawShowReports = true;

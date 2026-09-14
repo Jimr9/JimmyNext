@@ -7,9 +7,18 @@ namespace WSJTX_Controller
     //
     //   * When SemanticCutover.UseNexusSemantics is on AND this decode carries a Nexus-derived
     //     SemanticDecode (attached by DirectApplyDecodes), return THAT -- Nexus's own parse.
-    //   * Otherwise (rollback via the .ini key, or the UDP path, or a decode the snapshot did
-    //     not carry semantics for) build one from WsjtxMessage on the fly -- Jimmy's own parser,
-    //     exactly as before.
+    //   * Rollback (UseNexusSemantics=false via the .ini key, transitional -- see its own
+    //     comment): build one from WsjtxMessage on the fly, exactly as before the migration.
+    //   * Stage 14 (2026-09-14, the no-fallback contract): a LIVE received decode with the
+    //     cutover ON and no attached envelope is no longer silently re-parsed with
+    //     WsjtxMessage -- that silent degrade is exactly what let the VP5/K5UR bracket bug
+    //     hide. It now resolves to an UNKNOWN identity (the same shape as a genuinely
+    //     unparseable Nexus decode, e.g. Msg::Other), which existing admission gates already
+    //     reject on a null From/To. WsjtxClient.Direct.cs's own S2 contract check has already
+    //     told the operator EngineHost is not doing its job by the time this runs. Test mode
+    //     (TestModeGuard.IsTestMode) is exempt: most of today's test corpus does not yet
+    //     attach a synthetic envelope to every snapshot (tracked separately -- Phase E) and
+    //     must keep working unchanged while that migration completes.
     //
     // Both sources are still computed side by side in DirectApplyDecodes for the parity log,
     // so flipping the valve never discards either. Stage 5 proved the core migrateable facts
@@ -21,8 +30,11 @@ namespace WSJTX_Controller
         public static SemanticDecode EffectiveSemantic(this EnqueueDecodeMessage d, string myCall)
         {
             if (d == null) return new SemanticDecode();
-            if (SemanticCutover.UseNexusSemantics && d.Semantic != null)
-                return d.Semantic;
+            if (SemanticCutover.UseNexusSemantics)
+            {
+                if (d.Semantic != null) return d.Semantic;
+                if (!TestModeGuard.IsTestMode) return new SemanticDecode { Source = "nexus-missing" };
+            }
             return SemanticDecode.FromWsjtxMessage(d.Message, myCall);
         }
 

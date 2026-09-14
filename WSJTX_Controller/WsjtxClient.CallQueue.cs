@@ -35,17 +35,28 @@ namespace WSJTX_Controller
             // EffectiveClassification() instead of directly off the wire.
             ClassifiedCall classification = emsg.EffectiveClassification();
 
-            // Nexus modernization Stage 6: the message-type facts below come from
-            // EffectiveSemantic (Nexus's parse when the cutover is on). Stage 5 proved
-            // CqTarget / Kind=="reply" / IsRr73|Is73 / Grid byte-identical to WsjtxMessage's
-            // DirectedTo / IsReply / Is73orRR73 / Grid across the corpus. deCall/toCall stay on
-            // WsjtxMessage for now -- they carry the "CQ"/null convention that this method's
-            // callers depend on; migrating them is Stage 9 (shared start path) work.
+            // Nexus modernization Stage 6/11: the message-type AND identity facts below come
+            // from EffectiveSemantic (Nexus's own FT8/FT4 grammar parse when the cutover is on).
+            // Stage 5 proved CqTarget / Kind=="reply" / IsRr73|Is73 / Grid byte-identical to
+            // WsjtxMessage's DirectedTo / IsReply / Is73orRR73 / Grid across the corpus. Stage 11
+            // (2026-09-14, live N6S/N7WRO/JF3RRP finding) migrates deCall/toCall too -- this is
+            // the OVERHEARD-CQ admission path (ProcessDecodeMsg routes every non-toMyCall decode
+            // here), and it is where a malformed decode with a missing/garbled middle field (a
+            // 2-token "KP4PW RR73" instead of the real 3-token "<to> <de> RR73") used to get
+            // WsjtxMessage.DeCall()'s positional-split guess ("RR73", read as a real callsign,
+            // then DXCC-classified via its "RR" prefix as a phantom Russian station) admitted as
+            // a new-country CQ. Nexus's real protocol grammar has no rule that shape matches
+            // (RR73 requires exactly 3 tokens; the only 2-token form is an i3=4 hashed/compound
+            // reply, which "KP4PW RR73" isn't), so From/To are correctly null and the existing
+            // `deCall == null` reject below now catches it directly. SemanticDecode.To is
+            // deliberately null for a CQ (see its own NullIfCq comment) -- materialized back to
+            // the literal "CQ" here so every downstream comparison in this method (toCall !=
+            // myCall, debug logging) keeps its existing convention unchanged.
             var sem = emsg.EffectiveSemantic(myCall);
-            string deCall = WsjtxMessage.DeCall(msg);       //known to not be null
-            string toCall = WsjtxMessage.ToCall(msg);       //known to not be null
+            string deCall = sem.From;
+            string toCall = sem.IsCq ? "CQ" : sem.To;
             string directedTo = sem.CqTarget;
-            bool isCq = emsg.IsCQ();                //CQ format check
+            bool isCq = sem.IsCq;                   //CQ format check   (Stage 11, was emsg.IsCQ())
             bool isPota = emsg.IsPota();
             bool isSota = emsg.IsSota();
             bool isDirectedAlert = isCq && IsDirectedAlert(directedTo, classification.IsDx);
@@ -80,7 +91,8 @@ namespace WSJTX_Controller
             if (replyDecode != null)
             {
                 //DebugOutput($"{spacer}replyDecode.Message: {replyDecode.Message} replyDecode.Priority:{replyDecode.Priority}");
-                if (!RecdAnyMsg(replyDecode.DeCall())) replyDecodePriority = replyDecode.Priority;
+                // Stage 12 audit (2026-09-14): operational -- feeds replyDecodePriority below.
+                if (!RecdAnyMsg(replyDecode.EffectiveSemantic(myCall).From)) replyDecodePriority = replyDecode.Priority;
             }
 
             UpdateMaxTxRepeat();
@@ -121,7 +133,7 @@ namespace WSJTX_Controller
 
                 if (deCall == callInProg)
                 {
-                    if (isCq || emsg.Is73orRR73() || emsg.IsRogers())
+                    if (isCq || sem.Is73 || sem.IsRr73 || sem.IsRrr)
                     {
                         toCallStatus = "ready";
                         callInProgLastActivity = isCq ? "calling CQ" : "sent 73";
@@ -585,7 +597,11 @@ namespace WSJTX_Controller
             callQueue.Clear();
             foreach (EnqueueDecodeMessage d in list)
             {
-                callQueue.Enqueue(d.DeCall());
+                // Stage 12 audit (2026-09-14): operational -- this must reproduce the EXACT
+                // string callDict is keyed by (the semantic-derived identity the admission gate
+                // resolved when d was added), or callQueue silently diverges from callDict.
+                // Sourced from EffectiveSemantic (was d.DeCall()) for that reason.
+                callQueue.Enqueue(d.EffectiveSemantic(myCall).From);
             }
 
             ShowQueue();

@@ -58,8 +58,48 @@ namespace WSJTX_Controller
         // is the authority and this is one of the facts Stage 5 is meant to prove.
         public string CallForm { get; set; } = "unknown";
 
+        // True when the raw Nexus envelope reported From/To wrapped in i3=4 hash notation
+        // (`<VP5/K5UR>`) before CanonicalizeIdentity resolved it below -- diagnostic only,
+        // never read for any admission/matching/logging decision. False for FromWsjtxMessage
+        // (the text-parsed path never carries hash notation; NormalizeDecodedMessage already
+        // resolved it upstream of the text FromWsjtxMessage parses).
+        public bool FromWasHashed { get; set; }
+        public bool ToWasHashed { get; set; }
+
         private static string NullIfCq(string toCall) =>
             (toCall == null || string.Equals(toCall, "CQ", StringComparison.Ordinal)) ? null : toCall;
+
+        // Stage 13 (2026-09-14, VP5/K5UR live incident): Nexus's own transmit-fidelity rule
+        // (tempo-core/src/message.rs's resolve_hashed/Msg::unhashed, Nexus issue #84)
+        // deliberately keeps a hashed COMPOUND call bracketed in From/To -- correct for what
+        // Nexus TRANSMITS (a compound call cannot ride an ordinary 77-bit frame, so the
+        // encoding must survive to the air), wrong for Jimmy's identity/matching layer, which
+        // has always used the resolved plain form for a compound call (WsjtxMessage.
+        // NormalizeDecodedMessage, 2.0.50). Nexus's own decode_semantics.rs test
+        // (s1_hash_resolution_follows_nexus_fine_grained_rules) documents this exact hazard:
+        // "a consumer matching this against a bare 'W1AW/2' must compare bracket-insensitively."
+        // This is that one seam -- applied once, at ingress, so every consumer of From/To
+        // downstream (queue keys, callInProg matching, DXCC lookup, logging) gets the same
+        // canonical identity automatically, the same way NormalizeDecodedMessage normalizes
+        // the raw text once rather than requiring every reader to remember to.
+        // NOT a re-parse of message text -- this only resolves the ONE encoding artifact
+        // (a hash wrapper) on a string Nexus already told us is the sender/recipient.
+        // An unresolved hash (env's own "<...>") is not a callsign either way (Nexus's own
+        // qso.rs test an_unresolved_hash_is_not_turned_into_a_callsign agrees) -- canonicalizes
+        // to null, matching WsjtxMessage.IsInvalid's Contains("...") rejection on the text path.
+        private static string CanonicalizeIdentity(string raw, out bool wasHashed)
+        {
+            wasHashed = false;
+            if (string.IsNullOrEmpty(raw)) return null;
+            if (raw.Length >= 2 && raw[0] == '<' && raw[raw.Length - 1] == '>')
+            {
+                string inner = raw.Substring(1, raw.Length - 2);
+                if (inner == "...") return null;
+                wasHashed = true;
+                return inner;
+            }
+            return raw;
+        }
 
         private static string DeriveKind(SemanticDecode d)
         {
@@ -142,8 +182,10 @@ namespace WSJTX_Controller
             bool rowSignoff = row.Signoff; // true for RR73 | 73 (not RRR)
 
             {
-                d.From = string.IsNullOrEmpty(env.From) ? null : env.From;
-                d.To = string.IsNullOrEmpty(env.To) ? null : env.To;
+                d.From = CanonicalizeIdentity(env.From, out bool fromHashed);
+                d.To = CanonicalizeIdentity(env.To, out bool toHashed);
+                d.FromWasHashed = fromHashed;
+                d.ToWasHashed = toHashed;
                 d.CqTarget = string.IsNullOrEmpty(env.CqDirection) ? null : env.CqDirection;
                 d.IsDirectedCq = string.Equals(env.Kind, "directedCq", StringComparison.Ordinal);
                 d.AddressedToMe = env.AddressedToMe;

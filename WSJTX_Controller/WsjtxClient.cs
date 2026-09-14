@@ -260,6 +260,15 @@ namespace WSJTX_Controller
         // Only meaningful when TxFreqMode == BestFree (the other modes never auto-pick anyway).
         private bool _manualFreqThisQso = false;
 
+        // Operator finding, 2026-09-13 (KF8TOZ live session): the "Working {Callsign}" QsoStarted
+        // clause is documented as "shown once, when Jimmy decides to reply to callInProg" -- but
+        // the code that set replyFromInProg=true ran on EVERY reply to the SAME ongoing contact
+        // (the roger-report reply, not just the initial one), so it announced "Working KF8TOZ"
+        // a second time moments before the QSO logged, sounding like a duplicated notification.
+        // Scoped exactly like _manualFreqThisQso above -- reset in SetCallInProg whenever
+        // callInProg actually changes, so it is a genuine one-shot per contact, not per-reply.
+        private bool _qsoStartedAnnouncedForCall = false;
+
         // Read-only audit finding 3, 2026-08-27: rapid Tx/Rx nudge presses must ACCUMULATE even
         // while earlier SET_TX_OFFSET / SET_RX_OFFSET commands are still in flight -- three +60
         // presses from 1500 must target 1560, 1620, 1680, not 1560 three times. txOffset/rxOffset
@@ -292,6 +301,13 @@ namespace WSJTX_Controller
         private string replyCmd = null;     //"reply to" cmd last sent (REPLY text); null = not replying
         private string curCmd = null;       //cmd last issued -- a REPLY text or a CQ
         private EnqueueDecodeMessage replyDecode = null;   //the decode replyCmd/curCmd derived from
+        // Phase C (2026-09-14): curCmd's identity/kind, captured the SAME moment curCmd is set
+        // -- either borrowed directly from the real decode it replies to (which already
+        // carries its own canonical .Semantic from ingress, Phase B) or synthesized for a CQ
+        // Jimmy built itself (Jimmy already knows exactly what it constructed). Every reader
+        // that used to re-derive this by calling WsjtxMessage.DeCall()/IsCQ() on curCmd's TEXT
+        // reads this instead, and it is cleared everywhere curCmd itself is cleared.
+        private SemanticDecode _curCmdSemantic = null;
         public string callInProg = null;    //the station this contact is working; null = no contact
         // Monotonic "the current contact is no longer the one an in-flight async command belongs
         // to" counter. Explicitly bumped (Interlocked.Increment) at each point a contact/context
@@ -617,6 +633,11 @@ namespace WSJTX_Controller
         private string tuneResult = null;
         private string timedOutCall = null;
         private string curTxMsg = null;
+        // Phase C (2026-09-14): curTxMsg's TX semantics, captured the SAME poll curTxMsg is set
+        // from that poll's own (then-fresh) snap.QsoTxSemantics -- reused on every LATER poll
+        // where curTxMsg is retained unchanged, even if that poll's own envelope happens to be
+        // transiently absent. Replaces re-deriving it from curTxMsg's TEXT on demand every read.
+        private SemanticDecode _curTxMsgSemantic = null;
         private bool newSelection = false;
         private int decodeCount = 0;
         private int consecNoDecodes = 0;
@@ -1133,16 +1154,16 @@ namespace WSJTX_Controller
                     // Was the contact half of ClearCalls(true): the band/mode context is entirely
                     // new, so flush the last-command and last-Tx-text fields too (T16/T19 -- old-band
                     // "73" text must not survive onto the new band).
-                    curCmd = null; replyCmd = null; replyDecode = null;
-                    curTxMsg = null; txMsg = null; curTxPayload = null;
+                    curCmd = null; replyCmd = null; replyDecode = null; _curCmdSemantic = null;
+                    curTxMsg = null; txMsg = null; curTxPayload = null; _curTxMsgSemantic = null;
                     xmitCycleCount = 0;
                     timedOutCall = null;
                     break;
 
                 case ContactEndReason.SessionReset:
                     // ContextReset plus what ResetOpMode also cleared on top of ClearCalls(true).
-                    curCmd = null; replyCmd = null; replyDecode = null;
-                    curTxMsg = null; txMsg = null; curTxPayload = null;
+                    curCmd = null; replyCmd = null; replyDecode = null; _curCmdSemantic = null;
+                    curTxMsg = null; txMsg = null; curTxPayload = null; _curTxMsgSemantic = null;
                     xmitCycleCount = 0;
                     timedOutCall = null;
                     txTimeout = false;
@@ -1154,7 +1175,10 @@ namespace WSJTX_Controller
             // _finishingCall just before calling this) -- every other reason ends the QSO for
             // good, so the engine's RR73 tail is no longer expected: clear it.
             if (reason != ContactEndReason.Completed)
+            {
                 _finishingCall = null;
+                _finishingTailExemptedOvers = 0;
+            }
 
             // Invalidate any TX-arming Direct command still in flight for the contact that just
             // ended (ReplyTo / SetupCq / DirectSendReply / DirectSendCq / DirectSetTxEnabled(true)
@@ -1187,11 +1211,19 @@ namespace WSJTX_Controller
         //   - active QSO between TX slots -> txEnabled && callInProg != null
         //   - active CQ cycle            -> txEnabled && txMode == CALL_CQ
         //   - Tune                       -> tuning
+        //   - armed with no active call/CQ (an orphaned Finishing-tail retransmission
+        //     that just ended, still armed to fire again) -> txEnabled, LISTEN, callInProg
+        //     null -- added 2026-09-13 (CT2HEX live finding): this is exactly the state a
+        //     stray post-QSO repeat leaves TX in, and the three conditions above all missed
+        //     it, so Escape correctly disabled TX (preventing the next repeat) but never
+        //     confirmed it -- silent "Tx halted". Genuine idle Listen never has txEnabled
+        //     true with nothing armed, so this cannot produce a phantom halt announcement.
         //   - truly idle Listen          -> none of the above -> silent
         public bool HasActiveTxOrCycle =>
             transmitting
             || tuning
-            || (txEnabled && (txMode == TxModes.CALL_CQ || callInProg != null));
+            || (txEnabled && (txMode == TxModes.CALL_CQ || callInProg != null))
+            || (txEnabled && callInProg == null && txMode == TxModes.LISTEN);
 
         // Operator-initiated abort of the current contact / CQ cycle -- the single ordered
         // sequence behind Escape and Alt+H (Controller.cs), previously open-coded identically at
@@ -1369,7 +1401,7 @@ namespace WSJTX_Controller
                 //remove any RR73 messages in call queue
                 foreach (var entry in callDict)
                 {
-                    if (entry.Value.IsRR73()) calls.Add(entry.Key);
+                    if (entry.Value.Semantic?.IsRr73 ?? entry.Value.IsRR73()) calls.Add(entry.Key);
                 }
             }
 
@@ -1821,12 +1853,31 @@ namespace WSJTX_Controller
                 return;
             }
 
-            string deCall = dmsg.DeCall();
-            string toCall = dmsg.ToCall();
+            // Nexus semantic cutover, Stage 11 (2026-09-14): the single point every admission /
+            // ranking / awards / reply decision below flows from. Nexus's own FT8/FT4 grammar
+            // parser (tempo_core::message::Msg::parse) validates a message's real protocol
+            // shape -- unlike WsjtxMessage's positional split, it never guesses a sender out of
+            // text that matches no real message grammar. Root-caused live: a garbled/2-token
+            // decode like "KP4PW RR73" (missing its real 3-token "<to> <de> RR73" middle field)
+            // matches no Nexus grammar rule (RR73 needs exactly 3 tokens; the only 2-token form
+            // is an i3=4 hashed/compound reply, which this isn't), so Nexus parses it Msg::Other
+            // with From/To both null -- rejected right here, rather than being handed a fake
+            // "RR73" sender the old heuristic accepted (later DXCC-classified via its "RR"
+            // prefix as a phantom Russian station -- the live N6S/N7WRO/JF3RRP incidents).
+            // WsjtxMessage.IsInvalidCall's own exact-match reserved-word rejection (RRR/RR73/73)
+            // stays as defense-in-depth for whenever Nexus semantics aren't available (the .ini
+            // rollback, an older EngineHost, or the UDP path).
+            var idSem = dmsg.EffectiveSemantic(myCall);
+            string deCall = idSem.From;
+            // SemanticDecode.To is deliberately null for a CQ (see its own NullIfCq comment) --
+            // materialized back to the literal "CQ" here so every downstream comparison in this
+            // method (the isContest exception below, debug logging) keeps its existing
+            // convention unchanged, without touching SemanticDecode's own canonical shape.
+            string toCall = idSem.IsCq ? "CQ" : idSem.To;
             bool isContest = false;
             bool isInvalidType = false;
 
-            if ((isContest = dmsg.IsContest()) || (isInvalidType = dmsg.IsInvalidType()) || deCall == null || toCall == null)
+            if ((isContest = dmsg.IsContest()) || (isInvalidType = string.Equals(idSem.Kind, "other", StringComparison.Ordinal)) || deCall == null || toCall == null)
             {
                 // Contest/FD-format message directed to my callsign — the caller must reach the waiting list
                 if (isContest && toCall == myCall && deCall != null) { }
@@ -1839,7 +1890,7 @@ namespace WSJTX_Controller
                 }
             }
 
-            bool toMyCall = dmsg.IsCallTo(myCall);
+            bool toMyCall = idSem.AddressedToMe;   // Stage 11 (was dmsg.IsCallTo(myCall))
 
             // Root-caused live, 2026-08-11: AddAllCallDict only ever keeps a decode addressed to
             // myCall or a CQ, so a callInProg decode heard working someone ELSE was silently
@@ -1850,7 +1901,7 @@ namespace WSJTX_Controller
             // callInProg itself changes (SetCallInProg).
             if (callInProg != null && string.Equals(deCall, callInProg, StringComparison.OrdinalIgnoreCase))
             {
-                if (toMyCall || dmsg.IsCQ())
+                if (toMyCall || idSem.IsCq)   // Stage 11 (was dmsg.IsCQ())
                 {
                     // Turned to us, or now calling CQ -> it is no longer working that other
                     // station, so the "working <peer>" fact is stale immediately (5N0YEN live
@@ -1937,7 +1988,13 @@ namespace WSJTX_Controller
             // untouched -- every consumer downstream reads dmsg.EffectiveClassification()
             // instead (Classification/ClassificationCutover.cs), which returns this
             // computed value or falls back to the wire fields per the rollback flag.
-            dmsg.Classified = Classifier.Classify(deCall, CurrentBandStr, dmsg.Message, myGrid, myContinent);
+            // Phase G-prep (2026-09-14): pass idSem.Grid (already computed above from Nexus
+            // semantics, canonicalized the same way that closed the VP5/K5UR bracket bug) as
+            // canonicalGrid so Classify() doesn't re-parse dmsg.Message's raw text for the grid
+            // that drives its real Distance/Azimuth ranking output (CallQueueRanker's
+            // DIST_DECR/DIST_INCR and beam ranking) -- confirmed via tracing this is not
+            // display-only.
+            dmsg.Classified = Classifier.Classify(deCall, CurrentBandStr, dmsg.Message, myGrid, myContinent, idSem.Grid);
             // T15 fix, 2026-08-23 (LIKELY bug -- KJ5OUL, 2026-08-21): Classify() is stateless per
             // decode -- a CQ carrying a grid resolves real distance/bearing/country/continent,
             // but a later report/73/RR73 from the SAME station in the SAME band session often
@@ -1970,9 +2027,9 @@ namespace WSJTX_Controller
             // directed (e.g. CQ POTA) is a property of the message, not of the operator's filter
             // settings.  The Call Filters decide whether the classified call is admitted; the
             // classification itself must not depend on filter state.
-            if (dmsg.Priority == (int)CallPriority.DEFAULT && dmsg.IsCQ())
+            if (dmsg.Priority == (int)CallPriority.DEFAULT && idSem.IsCq)   // Stage 11 (was dmsg.IsCQ())
             {
-                string directedTo = dmsg.EffectiveSemantic(myCall).CqTarget;   // Stage 9 (was WsjtxMessage.DirectedTo)
+                string directedTo = idSem.CqTarget;   // Stage 9 (was WsjtxMessage.DirectedTo)
                 if (IsDirectedAlert(directedTo, classification.IsDx))
                     dmsg.Priority = (int)CallPriority.WANTED_CQ;
             }
@@ -1990,6 +2047,8 @@ namespace WSJTX_Controller
             //current msg (not to myCall) might be replaceable by a previous msg (to myCall)
             //rec'd later in the QSO cycle than this msg;
             //this is the case when a caller stops calling myCall
+            // Stage 12 audit (2026-09-14): dead code (block comment) -- the DeCall()/ToCall()/
+            // IsCQ() calls inside it never execute. Not converted.
             /*//and starts CQing again or is new country replying to another caller
             if (!toMyCall && dmsg.AutoGen && !logList.Contains(deCall) && !recdPrevSignoff && (dmsg.IsCQ() || dmsg.IsNewCountryOnBand))
             {
@@ -2035,7 +2094,7 @@ namespace WSJTX_Controller
                 int maxTo = MaxTimeoutsForMsg(isPota);
                 timeoutCallDict.TryGetValue(deCall, out prevTo);
                 DebugOutput($"{spacer}prevTo:{prevTo} maxTo:{maxTo}");
-                if (!dmsg.Is73orRR73() && !dmsg.IsRogers() && prevTo >= maxTo)        //trouble finishing signal report(s)
+                if (!(idSem.Is73 || idSem.IsRr73) && !idSem.IsRrr && prevTo >= maxTo)        //trouble finishing signal report(s)
                 {
                     StatusView.ShowMessage($"Blocking {deCall} temporarily...", false);
                     DebugOutput($"{spacer}ignoring call, prevTo:{prevTo} restartQueue:{restartQueue}");
@@ -2048,7 +2107,7 @@ namespace WSJTX_Controller
                 //if call not already logged: save Report (...+03) and RogerReport (...R-02) decodes for out-of-order call processing
                 //except save RR73 and 73 for later recdPrevSignoff check, also needed for status display
                 //don't save if a substituted message
-                if ((!logList.Contains(deCall) || dmsg.Is73orRR73()) && dmsg.OffAir)
+                if ((!logList.Contains(deCall) || idSem.Is73 || idSem.IsRr73) && dmsg.OffAir)
                 {
                     AddAllCallDict(deCall, dmsg);
                 }
@@ -2083,7 +2142,7 @@ namespace WSJTX_Controller
                     && ctrl.ignoreNonDxCheckBox.Checked
                     && !callQueue.Contains(deCall)
                     && !SentAnyMsg(deCall)
-                    && !dmsg.Is73orRR73()
+                    && !(idSem.Is73 || idSem.IsRr73)
                     )
                 {
                     StatusView.ShowMessage($"{deCall} ignored (not DX)", false);
@@ -2104,14 +2163,14 @@ namespace WSJTX_Controller
                 // this session/band, a repeat RRR is never a new contact opportunity -- it must
                 // not silently re-add them to the queue as if unworked (see project notes,
                 // 2026-07-07: AC7WY reappearing in the list after being logged).
-                bool ignore = (dmsg.Is73() || dmsg.IsRogers() || (dmsg.IsRR73() && !ctrl.replyRR73CheckBox.Checked)) && logList.Contains(deCall);
+                bool ignore = (idSem.Is73 || idSem.IsRrr || (idSem.IsRr73 && !ctrl.replyRR73CheckBox.Checked)) && logList.Contains(deCall);
                 if (ignore)
                 {
                     finalSignoffCall = deCall;
                     ShowStatus();
                 }
 
-                if (!txEnabled && deCall != null && !dmsg.Is73orRR73() && !ignore)
+                if (!txEnabled && deCall != null && !(idSem.Is73 || idSem.IsRr73) && !ignore)
                 {
                     if (!callQueue.Contains(deCall))
                     {
@@ -2148,7 +2207,7 @@ namespace WSJTX_Controller
                     }
                     else
                     {
-                        if (!dmsg.Is73orRR73() && !ignore)       //not a 73 or RR73 (or an already-logged repeat signoff)
+                        if (!(idSem.Is73 || idSem.IsRr73) && !ignore)       //not a 73 or RR73 (or an already-logged repeat signoff)
                         {
                             DebugOutput($"{spacer}not a 73 or RR73");
                             if (deCall != callInProg)
@@ -2188,7 +2247,16 @@ namespace WSJTX_Controller
 
                                     if ((txEnabled && txMode == TxModes.LISTEN) || (!cqPaused && txMode == TxModes.CALL_CQ))
                                     {
-                                        replyFromInProg = true;       //special status shown when callInProg will be replied to
+                                        // "Working {Callsign}" (QsoStarted) is meant to announce
+                                        // ONCE per contact -- the moment Jimmy first commits to
+                                        // replying -- not again on a later reply within the SAME
+                                        // ongoing exchange (e.g. the roger-report reply). See
+                                        // _qsoStartedAnnouncedForCall's own comment.
+                                        if (!_qsoStartedAnnouncedForCall)
+                                        {
+                                            replyFromInProg = true;       //special status shown when callInProg will be replied to
+                                            _qsoStartedAnnouncedForCall = true;
+                                        }
                                         DebugOutput($"{spacer}replyFromInProg:{replyFromInProg}");
                                         ShowStatus();
                                     }
@@ -2205,13 +2273,13 @@ namespace WSJTX_Controller
                         }
                         else        //decode is 73 or RR73 msg
                         {
-                            DebugOutput($"{spacer}decode is 73 or RR73, IsRR73:{dmsg.IsRR73()} isSpecOp:{isSpecOp} checked:{ctrl.replyRR73CheckBox.Checked} priority:{Priority(deCall)} contains:{logList.Contains(deCall)}");
+                            DebugOutput($"{spacer}decode is 73 or RR73, IsRR73:{idSem.IsRr73} isSpecOp:{isSpecOp} checked:{ctrl.replyRR73CheckBox.Checked} priority:{Priority(deCall)} contains:{logList.Contains(deCall)}");
                             if (deCall == callInProg)       ///check for ignore 73 or RR73
                             {
                                 //                 WSJT-X will not reply automatically to RR73 for F/H msg
-                                if (dmsg.Is73() || (dmsg.IsRR73() && isSpecOp) || !logList.Contains(deCall) || (!ctrl.replyRR73CheckBox.Checked && Priority(deCall) > (int)CallPriority.NEW_COUNTRY_ON_BAND))     //if new country, RR73 gets a 73 reply
+                                if (idSem.Is73 || (idSem.IsRr73 && isSpecOp) || !logList.Contains(deCall) || (!ctrl.replyRR73CheckBox.Checked && Priority(deCall) > (int)CallPriority.NEW_COUNTRY_ON_BAND))     //if new country, RR73 gets a 73 reply
                                 {
-                                    if (dmsg.IsRR73()) DebugOutput($"{spacer}WSJT-X not replying to RR73");
+                                    if (idSem.IsRr73) DebugOutput($"{spacer}WSJT-X not replying to RR73");
                                     restartQueue = true;
                                     DebugOutput($"{spacer}call is in progress, restartQueue:{restartQueue}");
                                     if ((decodesProcessed && !cqPaused) || transmitting)
@@ -2237,7 +2305,7 @@ namespace WSJTX_Controller
                                 // reproducing the W5PF post-completion queue-reappearance bug this same
                                 // pass fixed in DirectApplyStatus. A DIFFERENT already-logged station's
                                 // courtesy-RR73 (the case this branch exists for) is unaffected.
-                                if (isCorrectTimePeriod && logList.Contains(deCall) && dmsg.IsRR73() && !_completedThisPollTick.Contains(deCall) && (ctrl.replyRR73CheckBox.Checked || Priority(deCall) <= (int)CallPriority.NEW_COUNTRY_ON_BAND))        //call not in queue, enqueue the call data
+                                if (isCorrectTimePeriod && logList.Contains(deCall) && idSem.IsRr73 && !_completedThisPollTick.Contains(deCall) && (ctrl.replyRR73CheckBox.Checked || Priority(deCall) <= (int)CallPriority.NEW_COUNTRY_ON_BAND))        //call not in queue, enqueue the call data
                                 {
                                     AddTimeoutCall(deCall);
                                     //allow RR73 to be processed
@@ -2390,10 +2458,15 @@ namespace WSJTX_Controller
 
                     if (newDirCq)
                     {
-                        string cqMsg = $"CQ{NextDirCq()} {myCall} {myGrid}";
+                        // Captured once (Phase C) so the SAME token both appears in curCmd's
+                        // text AND feeds the cached semantic below -- calling NextDirCq() twice
+                        // could hand each purpose a different random pick.
+                        string dirCq = NextDirCq();
+                        string cqMsg = $"CQ{dirCq} {myCall} {myGrid}";
                         replyCmd = null;        //invalidate last reply cmd since not replying
                         replyDecode = null;
                         curCmd = cqMsg;
+                        _curCmdSemantic = BuildOwnCqSemantic(dirCq);
                         newDirCq = false;
                         DebugOutput($"{spacer}newDirCq:{newDirCq}");
                         if (settingChanged)
@@ -2469,6 +2542,29 @@ namespace WSJTX_Controller
         internal bool IsEvenCall(EnqueueDecodeMessage d)
         {
             return IsEvenPeriod((d.SinceMidnight.Minutes * 60) + d.SinceMidnight.Seconds);
+        }
+
+        // Phase C (2026-09-14): a synthetic SemanticDecode for a CQ Jimmy just built itself --
+        // there is nothing to parse, since Jimmy already knows exactly what it constructed (a
+        // CQ from myCall, optionally directed). `dirCqToken` is NextDirCq()'s own return shape
+        // (either "" for a plain CQ, or a bare directed-CQ token like "DX"/"POTA" with no
+        // surrounding whitespace) -- CqTarget mirrors WsjtxMessage.DirectedTo's null-for-plain
+        // convention so a consumer reading either source sees the same shape.
+        private SemanticDecode BuildOwnCqSemantic(string dirCqToken)
+        {
+            string dir = string.IsNullOrEmpty(dirCqToken) ? null : dirCqToken.Trim();
+            bool directed = !string.IsNullOrEmpty(dir);
+            return new SemanticDecode
+            {
+                Source = "jimmy-tx-cq",
+                Kind = directed ? "directedCq" : "cq",
+                IsCq = true,
+                IsDirectedCq = directed,
+                CqTarget = dir,
+                From = myCall,
+                To = null,
+                CallForm = "standard",
+            };
         }
 
         private string NextDirCq()
@@ -2779,7 +2875,10 @@ namespace WSJTX_Controller
             if (gridMsg == null) gridMsg = cqMsg;
             if (gridMsg != null)
             {
-                string g = WsjtxMessage.Grid(gridMsg.Message);
+                // Phase D (2026-09-14): the logbook record's own grid field -- reads the
+                // canonical Semantic cached at ingress (Phase B) instead of re-parsing the
+                // decode's text.
+                string g = gridMsg.Semantic?.Grid ?? WsjtxMessage.Grid(gridMsg.Message);
                 if (g != null) grid = g;                //CQ does have a grid
             }
             string freq = ((dialFrequency + txOffset) / 1e6).ToString("F6", System.Globalization.CultureInfo.InvariantCulture);
@@ -3088,7 +3187,10 @@ namespace WSJTX_Controller
             foreach (var d in _rawDecodeHistory)
             {
                 if (!PassesRawDecodeFilter(d)) continue;
-                string deCall = d.DeCall();
+                // Stage 12 audit (2026-09-14): operational -- must match the SAME identity
+                // convention callQueue/callDict's keys use (the semantic-derived one), or a
+                // raw decode's rank entry silently never matches here.
+                string deCall = d.EffectiveSemantic(myCall).From;
                 if (!string.IsNullOrEmpty(deCall)) rawCallSet.Add(deCall);
             }
             NextBestPriorityCallFiltered(call => rawCallSet.Contains(call));
@@ -3395,9 +3497,13 @@ namespace WSJTX_Controller
         //keep only one CQ and reply for a call, but update grid/dist/az info if necessary
         private void AddAllCallDict(string call, EnqueueDecodeMessage emsg)
         {
-            if ((!emsg.IsCallTo(myCall) && !emsg.IsCQ())) return;
+            // Stage 12 audit (2026-09-14): operational -- gates whether this decode is recorded
+            // at all, and whether a CQ is deduped against an existing one. Sourced from
+            // EffectiveSemantic (was emsg.IsCallTo(myCall) / emsg.IsCQ()).
+            var addAllSem = emsg.EffectiveSemantic(myCall);
+            if ((!addAllSem.AddressedToMe && !addAllSem.IsCq)) return;
             //  is CQ          already added a CQ from call
-            if (emsg.IsCQ() && CqMsg(call) != null) return;         //don't duplicate CQs
+            if (addAllSem.IsCq && CqMsg(call) != null) return;         //don't duplicate CQs
 
             List<EnqueueDecodeMessage> vlist;
             //create new List for call if nothing entered yet into the Dictionary
@@ -3414,7 +3520,7 @@ namespace WSJTX_Controller
 
             // A new contact begins -> the previous QSO's "Finishing" RR73 tail is over, whatever
             // the engine still thinks (Nexus starts a fresh Station on the new call).
-            if (call != null) _finishingCall = null;
+            if (call != null) { _finishingCall = null; _finishingTailExemptedOvers = 0; }
 
             // Smart Start hand-off origin marker (see WsjtxClient.StationWatch.cs): valid only
             // while callInProg IS that exact call. Any move off it -- contact ended (call == null),
@@ -3446,6 +3552,11 @@ namespace WSJTX_Controller
             // (all route through here) -- ends that scope so the next CQ/reply gets the
             // automatic "Best free frequency" treatment again.
             if (call != callInProg) _manualFreqThisQso = false;
+
+            // "Working X" (QsoStarted) one-shot scope -- same transition rule as
+            // _manualFreqThisQso above, so a genuinely new contact gets its own single
+            // announcement again.
+            if (call != callInProg) _qsoStartedAnnouncedForCall = false;
 
             callInProg = call;
             otherPartyForCallInProg = null;
@@ -3549,6 +3660,7 @@ namespace WSJTX_Controller
             // An explicit Halt during a "Finishing" RR73 tail ends it -- the operator (or a
             // safety halt) has stopped the closing exchange deliberately.
             _finishingCall = null;
+            _finishingTailExemptedOvers = 0;
             // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard HaltTx
             // message (msg type 8, gated on udpClient2 being open) is removed -- route through
             // the control port's own HALT_TX command instead. AutoOnly is explicitly false
@@ -3648,7 +3760,10 @@ namespace WSJTX_Controller
         private void ProcessDecodeTimer2Tick(object sender, EventArgs e)
         {
             processDecodeTimer2.Stop();
-            string toCall = WsjtxMessage.ToCall(curTxMsg);
+            // Phase C (2026-09-14): reads _curTxMsgSemantic (cached the poll curTxMsg was set)
+            // instead of re-parsing curTxMsg's text -- closes the gap the Stage 12 audit
+            // flagged as intentionally retained.
+            string toCall = _curTxMsgSemantic?.To;
             DebugOutput($"{nl}{Time()} ProcessDecodeTimer2Tick, processDecodeTimer2 stop, toCall:{toCall} lastTxMsg:'{curTxMsg}' cqPaused:{cqPaused} transmitting:{transmitting} restartQueue:{restartQueue}");
             if (toCall == callInProg) _callQueueStore.RemoveCall(toCall);       //late decode caused WSJT-X to transmit a new response after the original transmit started
 
@@ -3801,7 +3916,10 @@ namespace WSJTX_Controller
             }
             else
             {
-                if (replyDecode != null && callInProg != null && replyDecode.DeCall() == call) priority = replyDecode.Priority;
+                // Stage 12 audit (2026-09-14): operational -- Priority() feeds real admission/
+                // reply decisions elsewhere (e.g. the RR73 auto-reply gate). Sourced from
+                // EffectiveSemantic (was replyDecode.DeCall() == call).
+                if (replyDecode != null && callInProg != null && replyDecode.EffectiveSemantic(myCall).From == call) priority = replyDecode.Priority;
             }
             return priority;
         }
@@ -3825,7 +3943,7 @@ namespace WSJTX_Controller
             }
             else
             {
-                if (replyDecode != null && callInProg != null && replyDecode.DeCall() == call)
+                if (replyDecode != null && callInProg != null && replyDecode.EffectiveSemantic(myCall).From == call)
                 {
                     msg = replyDecode;
                     country = replyDecode.EffectiveClassification().Country;
@@ -3840,7 +3958,9 @@ namespace WSJTX_Controller
                 // entirely instead of falling back to QRZ. Same QRZ-first/grid.dat-fallback
                 // priority as ResolveUsState's other call sites (BuildCallWaitingRow, Raw
                 // Decodes row, IsHrcWasNeeded, MatchedAwardRuleId).
-                string g = WsjtxMessage.Grid(msg.Message);
+                // Phase D (2026-09-14): canonical Semantic cached at ingress (Phase B) instead
+                // of re-parsing msg's text.
+                string g = msg.Semantic?.Grid ?? WsjtxMessage.Grid(msg.Message);
                 string qrzState = null;
                 if (lookupManager != null && lookupManager.Enabled)
                 {
@@ -3948,6 +4068,7 @@ namespace WSJTX_Controller
                 replyCmd = null;        //invalidate last reply cmd since not replying
                 replyDecode = null;
                 curCmd = cqMsg;
+                _curCmdSemantic = BuildOwnCqSemantic(dirCq);
                 DebugOutput($"{spacer}replyCmd:'{replyCmd}' newDirCq:{newDirCq}");
                 if (enableTx) EnableTx();             //sets WSJT-X "Enable Tx" button state
             });
@@ -4007,18 +4128,22 @@ namespace WSJTX_Controller
                 return;
             }
 
-            // Nexus modernization Stage 9: this is the ONE shared reply/start dispatch. Plain
+            // Nexus modernization Stage 9/11: this is the ONE shared reply/start dispatch. Plain
             // Enter (NextCall), Work-Watched-Station-Now, and the Smart Start dispatch all reach
             // here; each differs only in the policy gate BEFORE the call. Jimmy resolves the
-            // station (dmsg.DeCall()) and RX/TX side, prepares the log row, and sends exactly
-            // one Direct REPLY -- Nexus (Engine::call_station_ctx) owns TX parity, message
-            // construction, advancement, retry and termination. Jimmy does NOT sequence.
+            // station and RX/TX side, prepares the log row, and sends exactly one Direct REPLY --
+            // Nexus (Engine::call_station_ctx) owns TX parity, message construction, advancement,
+            // retry and termination. Jimmy does NOT sequence.
             // The decode-derived facts read below come from EffectiveSemantic; Stage 5 proved
             // To / IsCq / AddressedToMe / CqTarget identical, so which station this works and
-            // which side it presents are unchanged. dmsg.DeCall() (the station) stays a DTO
-            // method -- unchanged on both paths.
-            string nCall = dmsg.DeCall();
+            // which side it presents are unchanged. Stage 11 (2026-09-14) migrates the sender
+            // identity itself too -- nCall used to stay on the dmsg.DeCall() DTO method
+            // unconditionally; by the time a decode reaches ReplyTo it has already passed the
+            // queue-admission gate above (which now rejects a null Nexus identity outright), so
+            // this is defense-in-depth for any dmsg constructed outside that gate, not an active
+            // bug fix here.
             var replySem = dmsg.EffectiveSemantic(myCall);
+            string nCall = replySem.From;
             string toCall = replySem.To;
             DebugOutput($"{Time()} ReplyTo, nCall:'{nCall}' toCall:{toCall}");
 
@@ -4076,9 +4201,10 @@ namespace WSJTX_Controller
             // which is always what the operator wants when working a specific station.
             if (nCall != callInProg) _manualFreqThisQso = false;
             uint theirHz = dmsg.DeltaFrequency > 0 ? (uint)dmsg.DeltaFrequency : 0;
-            // Stage 9: curCmd is OUR last transmitted text (not a decode) -> stays on
-            // WsjtxMessage; the decode facts come from EffectiveSemantic.
-            bool answeringOurCq = curCmd != null && WsjtxMessage.IsCQ(curCmd)
+            // Phase C (2026-09-14): curCmd's own cached identity (_curCmdSemantic, captured
+            // when curCmd was built) instead of a re-parse of its text; the decode facts still
+            // come from EffectiveSemantic, same as before.
+            bool answeringOurCq = curCmd != null && (_curCmdSemantic?.IsCq ?? false)
                 && !replySem.IsCq
                 && replySem.AddressedToMe;
 
@@ -4167,6 +4293,10 @@ namespace WSJTX_Controller
                 replyCmd = dmsg.Message;            //save the last reply cmd to determine which call is in progress
                 replyDecode = dmsg.DeepCopy();      //save the decode the reply cmd derived from
                 curCmd = dmsg.Message;
+                // Phase C (2026-09-14): borrow the identity straight from the decode being
+                // replied to -- it already carries its own canonical .Semantic from ingress
+                // (Phase B) -- rather than ever re-deriving curCmd's identity from its text.
+                _curCmdSemantic = dmsg.Semantic ?? dmsg.EffectiveSemantic(myCall);
                 SetCallInProg(nCall);
                 //toCallTxStart = null to flag intentional interruption
                 if (transmitting) SetTxStartInfo(DateTime.UtcNow, null);  //because tx-start event already happened
@@ -4286,9 +4416,14 @@ namespace WSJTX_Controller
         //return true if call is (or associated with a previous) "CQ POTA"
         internal bool IsPotaCall(EnqueueDecodeMessage emsg)
         {
-            if (emsg.IsCQ()) return emsg.IsPota();
+            // Stage 12 audit (2026-09-14): operational -- feeds POTA classification (admission
+            // category, award tagging). Sourced from EffectiveSemantic (was emsg.IsCQ() /
+            // emsg.DeCall()); IsPota() itself stays a DTO/WsjtxMessage text check (POTA has no
+            // Nexus Kind of its own -- it is Jimmy's own directed-CQ-token convention).
+            var sem = emsg.EffectiveSemantic(myCall);
+            if (sem.IsCq) return emsg.IsPota();
 
-            EnqueueDecodeMessage dmsg = CqMsg(emsg.DeCall());
+            EnqueueDecodeMessage dmsg = CqMsg(sem.From);
             if (dmsg == null) return false;         //never a CQ POTA from deCall
             return dmsg.IsPota();
         }
@@ -4578,9 +4713,13 @@ namespace WSJTX_Controller
             // whatever case the operator typed, decoded wire text is always uppercase, and a
             // plain == here always missed a genuine match under Jimmy Native, which could
             // incorrectly remove a call actually directed at us on a low-quality decode.
-            if (!ctrl.cqOnlyRadioButton.Checked || dmsg.ToCall().Equals(myCall, StringComparison.OrdinalIgnoreCase)) return;
+            // Stage 12 audit (2026-09-14): operational -- sourced from EffectiveSemantic (was
+            // dmsg.ToCall().Equals(myCall, ...), the exact fact AddressedToMe already carries;
+            // also removes a latent NRE if ToCall() ever returned null here).
+            bool addressedToMe = dmsg.EffectiveSemantic(myCall).AddressedToMe;
+            if (!ctrl.cqOnlyRadioButton.Checked || addressedToMe) return;
 
-            if (!dmsg.ToCall().Equals(myCall, StringComparison.OrdinalIgnoreCase) && dmsg.Quality < (int)EnqueueDecodeMessage.Qualities.MEDIUM)
+            if (!addressedToMe && dmsg.Quality < (int)EnqueueDecodeMessage.Qualities.MEDIUM)
             {
                 _callQueueStore.RemoveCall(call);
                 if (debugDetail) DebugOutput($"{Time()} UpdateCallQueue: removed call:'{call}' msg:{dmsg.Message} quality:{dmsg.Quality}");

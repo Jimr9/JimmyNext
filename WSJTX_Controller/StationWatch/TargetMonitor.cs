@@ -96,6 +96,21 @@ namespace WSJTX_Controller
         public string TargetCall { get; private set; }
         public bool IsActive => TargetCall != null;
 
+        // Operator request (2026-09-13): an absolute wall-clock backstop on the WHOLE Smart Start
+        // effort ("an hour later their radio will not start trying to call the station,
+        // regardless"), separate from the Repeat Limit (counts actual transmitted calls) and the
+        // busy-churn standby cap (counts dead-end rounds). Set once by Start() -- the ORIGINAL arm
+        // time for this effort -- and deliberately NOT touched by ReturnToWaiting() or
+        // ResumeAfterHandoff() (both continue the SAME effort, exactly like ArmGeneration just
+        // above), so a busy-yield/resume cycle never resets the clock. Only Stop()+a fresh Start()
+        // (a genuinely new capture) resets it. Station Watch never reads this (no time limit).
+        public DateTime ArmedAtUtc { get; private set; }
+
+        // True once `limitMinutes` real minutes have elapsed since ArmedAtUtc. `limitMinutes <= 0`
+        // means "no limit" (the default) and always returns false.
+        public bool ExceedsTimeLimit(DateTime nowUtc, int limitMinutes) =>
+            limitMinutes > 0 && TargetCall != null && (nowUtc - ArmedAtUtc).TotalMinutes >= limitMinutes;
+
         // Notification-joining support (2026-09-11 speech-batching fix). ArmGeneration identifies
         // ONE continuous armed effort on a target -- bumped only by Start() (a genuinely new
         // watch), never by ReturnToWaiting()/ResumeAfterHandoff() (both are documented as
@@ -304,6 +319,7 @@ namespace WSJTX_Controller
 
             ArmGeneration++;
             TargetCall = call;
+            ArmedAtUtc = DateTime.UtcNow;
             ApparentPeer = null;
             TargetEvenParity = null;
             SilenceCount = 0;
@@ -511,7 +527,10 @@ namespace WSJTX_Controller
         {
             if (TargetCall == null || d == null || string.IsNullOrEmpty(d.Message)) return;
 
-            string de = d.DeCall();
+            // Stage 12 audit (2026-09-14): operational -- "is this decode FROM the target"
+            // gates the whole readiness/evidence pipeline below. Sourced from EffectiveSemantic
+            // (was d.DeCall()); myCall is already a parameter here.
+            string de = d.EffectiveSemantic(myCall).From;
             if (de == null || !string.Equals(de, TargetCall, StringComparison.OrdinalIgnoreCase)) return;
 
             DateTime decodeUtc = DecodeUtcOrNow(d);
@@ -545,16 +564,17 @@ namespace WSJTX_Controller
         {
             if (TargetCall == null || d == null || string.IsNullOrEmpty(d.Message)) return;
 
-            string de = d.DeCall();
-            if (de == null) return;
-
-            // Nexus modernization Stage 7a: the message-type + recipient facts this method
-            // classifies on come from EffectiveSemantic (Nexus's own parse when the cutover is
-            // on). Stage 5 proved To / IsCq / IsReport / IsRReport / IsRrr / IsRr73 / Is73
-            // byte-identical to the WsjtxMessage equivalents across the corpus. The observation
+            // Nexus modernization Stage 7a/12: the message-type + recipient + SENDER facts this
+            // method classifies on all come from EffectiveSemantic (Nexus's own parse when the
+            // cutover is on). Stage 5 proved To / IsCq / IsReport / IsRReport / IsRrr / IsRr73 /
+            // Is73 byte-identical to the WsjtxMessage equivalents across the corpus; Stage 12
+            // (2026-09-14 audit) migrates `de` (was d.DeCall()) the same way -- it gates the
+            // whole method exactly like SeedSelectedDecode's own `de` above. The observation
             // Value strings (Payload) and IsFoxHound stay on WsjtxMessage / the DTO -- narration
             // formatting is migrated separately (Stage 7b), and F/H is a heuristic.
             var sem = d.EffectiveSemantic(myCall);
+            string de = sem.From;
+            if (de == null) return;
 
             if (!string.Equals(de, TargetCall, StringComparison.OrdinalIgnoreCase))
             {

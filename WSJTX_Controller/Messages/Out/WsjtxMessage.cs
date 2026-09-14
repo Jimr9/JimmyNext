@@ -114,6 +114,18 @@ namespace WsjtxUdpLib.Messages.Out
         //detect bad (garbage) decode
         public static bool IsInvalidCall(string call)
         {
+            // Reserved FT8/FT4 protocol control words -- never a real callsign (2026-09-13
+            // finding: a decode that arrives with a missing/garbled middle field, e.g. "KP4PW
+            // RR73" instead of "<to> <de> RR73", left the trailing control word landing in the
+            // callsign position and being read as the sender's call -- "AddSelectedCall,
+            // deCall:'RR73' ... Category:NEW_COUNTRY_ON_BAND IsDx:True" put a fake "RR73"
+            // station in the calling queue, 6 times in one session's log). RRR (all letters)
+            // and 73 (all digits) were already caught by the checks below; RR73 was not -- two
+            // letters then a 2-digit run is indistinguishable from a real callsign's shape by
+            // those heuristics alone. Exact match only (not a substring/prefix check), so a
+            // real compound/portable callsign is never affected -- and a call containing "/"
+            // is handled by its own rule immediately below regardless.
+            if (call == "RRR" || call == "RR73" || call == "73") return true;
             if (call.Contains("/")) return false;
             if (call.Length > maxBaseCallsignLength) return true;
             if (IsAlphaOnly(call) || IsNumericOnly(call)) return true;

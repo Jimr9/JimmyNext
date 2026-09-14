@@ -61,7 +61,10 @@ namespace WSJTX_Controller
                     if (_wc.Ranker.SortDependsOnLastHeard()) _wc.lastHeardResortPending = true;
                 }
 
-                if (WsjtxMessage.ToCall(msg.Message) == _wc.myCall && WsjtxMessage.ToCall(dmsg.Message) == _wc.myCall && WsjtxMessage.Progress(msg.Message) > WsjtxMessage.Progress(dmsg.Message))
+                // Stage 12 audit (2026-09-14): operational -- decides whether to re-rank this
+                // queue entry, so identity comes from EffectiveSemantic (was WsjtxMessage.ToCall(..)
+                // == myCall, the same fact AddressedToMe already carries).
+                if (msg.EffectiveSemantic(_wc.myCall).AddressedToMe && dmsg.EffectiveSemantic(_wc.myCall).AddressedToMe && WsjtxMessage.Progress(msg.Message) > WsjtxMessage.Progress(dmsg.Message))
                 {
                     _wc.DebugOutput($"{WsjtxClient.spacer}update stage/sequence '{msg.Message}' (was '{dmsg.Message}')");
                     msg.LastHeardUtc = dmsg.LastHeardUtc;   // carry authoritative last-heard across the re-rank

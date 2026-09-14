@@ -108,7 +108,13 @@ namespace WSJTX_Controller
         public static TargetActivityFact? ClassifyPeerActivity(EnqueueDecodeMessage d, string target, string myCall)
         {
             if (d?.Message == null || string.IsNullOrEmpty(target)) return null;
-            string toCall = WsjtxMessage.ToCall(d.Message);
+            // Stage 12 audit (2026-09-14): operational -- "peer" here is the identity that
+            // drives the TargetActivityFact classification. Sourced from EffectiveSemantic
+            // (was WsjtxMessage.ToCall(d.Message)); SemanticDecode.To is null for a CQ, so the
+            // literal "CQ" is materialized back the same way ProcessDecodeMsg/AddSelectedCall
+            // do, preserving this method's existing null/"CQ" handling below unchanged.
+            var sem = d.EffectiveSemantic(myCall);
+            string toCall = sem.IsCq ? "CQ" : sem.To;
             if (toCall == null) return null;                          // CQ / unparseable -- not this fact
 
             string peer = WsjtxMessage.RemoveAngleBrackets(toCall);
@@ -116,7 +122,6 @@ namespace WSJTX_Controller
             if (!string.IsNullOrEmpty(myCall) && string.Equals(peer, myCall, StringComparison.OrdinalIgnoreCase))
                 return null;                                          // addressed to us -- a different fact
 
-            var sem = d.EffectiveSemantic(myCall);
             string payload = WsjtxMessage.Payload(d.Message);
 
             // 2026-09-11 divergence fix (found while verifying cross-route identity): TargetMonitor.

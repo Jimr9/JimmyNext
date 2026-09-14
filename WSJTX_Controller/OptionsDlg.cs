@@ -162,6 +162,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox spaceCallsignsAndGridsCheckBox;
         private System.Windows.Forms.CheckBox _smartQsoStartCheckBox;
         private System.Windows.Forms.NumericUpDown _smartStartSilencePeriodsNumeric;
+        private System.Windows.Forms.NumericUpDown _smartStartMaxStandbyRoundsNumeric;
+        private System.Windows.Forms.NumericUpDown _smartStartTimeLimitMinutesNumeric;
         private System.Windows.Forms.Button _rxTxFreqControlsButton;
 
         // Appearance tab
@@ -432,12 +434,18 @@ namespace WSJTX_Controller
         {
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
 
+            // AutoScroll (2026-09-13): the group below grew by two rows for the new adjustable
+            // busy-round-cap / time-limit settings -- guarantees nothing below it is ever clipped
+            // regardless of the exact available height, matching notificationsPanel's own
+            // established pattern rather than hand-tuning pixel budgets.
+            transmitPanel.AutoScroll = true;
+
             var smartStartGroup = new System.Windows.Forms.GroupBox
             {
                 Text           = "Smart QSO Start",
                 AccessibleName = "Smart QSO Start",
                 Location       = new System.Drawing.Point(5, 178),
-                Size           = new System.Drawing.Size(650, 80),
+                Size           = new System.Drawing.Size(650, 140),
                 Font           = font,
                 TabStop        = false,
             };
@@ -481,17 +489,72 @@ namespace WSJTX_Controller
             };
             smartStartGroup.Controls.Add(_smartStartSilencePeriodsNumeric);
 
+            // Operator request (2026-09-13): the busy-churn give-up cap used to be a fixed
+            // constant (4) -- now adjustable. See WsjtxClient.StationWatch.cs's own comment on
+            // ctrl.smartStartMaxStandbyRounds for exactly what counts as one "round".
+            var smartStartMaxStandbyRoundsLabel = new System.Windows.Forms.Label
+            {
+                Text     = "Give up after this many busy dead-ends in a row:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 76),
+                Font     = font,
+                TabStop  = false,
+            };
+            smartStartGroup.Controls.Add(smartStartMaxStandbyRoundsLabel);
+
+            _smartStartMaxStandbyRoundsNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Smart Start busy dead-end limit",
+                Location       = new System.Drawing.Point(320, 73),
+                Size           = new System.Drawing.Size(50, 20),
+                TabIndex       = 2,
+                Minimum        = 1,
+                Maximum        = 20,
+                Value          = Math.Max(1, Math.Min(20, ctrl.smartStartMaxStandbyRounds)),
+                Font           = font,
+            };
+            smartStartGroup.Controls.Add(_smartStartMaxStandbyRoundsNumeric);
+
+            // Operator request (2026-09-13): an absolute wall-clock backstop on the whole Smart
+            // Start effort, independent of the Repeat Limit and the busy-dead-end cap above --
+            // "so they know an hour later their radio will not start trying to call the station."
+            // 0 = no limit (default, unchanged behavior).
+            var smartStartTimeLimitLabel = new System.Windows.Forms.Label
+            {
+                Text     = "Overall time limit in minutes (0 = no limit):",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 104),
+                Font     = font,
+                TabStop  = false,
+            };
+            smartStartGroup.Controls.Add(smartStartTimeLimitLabel);
+
+            _smartStartTimeLimitMinutesNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Smart Start time limit in minutes",
+                Location       = new System.Drawing.Point(320, 101),
+                Size           = new System.Drawing.Size(50, 20),
+                TabIndex       = 3,
+                Minimum        = 0,
+                Maximum        = 999,
+                Value          = Math.Max(0, Math.Min(999, ctrl.smartStartTimeLimitMinutes)),
+                Font           = font,
+            };
+            smartStartGroup.Controls.Add(_smartStartTimeLimitMinutesNumeric);
+
             // Item 3 (2026-09-10): launcher for the accessible RX/TX Audio Frequency Controls
             // window. Lives here (not Options > Radio) because this tab already owns the
             // transmit-frequency mode and the frequency step in Hz -- the same context those
             // controls operate on. Modeless / single-instance (Controller owns the instance).
+            // Location moved down (2026-09-13) to make room for the Smart QSO Start group's two
+            // new rows above.
             _rxTxFreqControlsButton = new System.Windows.Forms.Button
             {
                 Text           = "RX/TX Audio Frequency Controls...",
                 AccessibleName = "RX/TX Audio Frequency Controls",
                 AutoSize       = true,
-                Location       = new System.Drawing.Point(10, 264),
-                TabIndex       = 2,
+                Location       = new System.Drawing.Point(10, 324),
+                TabIndex       = 4,
                 Font           = font,
             };
             _rxTxFreqControlsButton.Click += (s, e) => ctrl.OpenRxTxFreqControlsDialog();
@@ -503,6 +566,10 @@ namespace WSJTX_Controller
             ctrl.smartQsoStartEnabled = _smartQsoStartCheckBox?.Checked ?? false;
             int silencePeriods = (int)(_smartStartSilencePeriodsNumeric?.Value ?? 2);
             ctrl.smartStartSilencePeriods = Math.Max(1, Math.Min(10, silencePeriods));
+            int maxStandbyRounds = (int)(_smartStartMaxStandbyRoundsNumeric?.Value ?? 4);
+            ctrl.smartStartMaxStandbyRounds = Math.Max(1, Math.Min(20, maxStandbyRounds));
+            int timeLimitMinutes = (int)(_smartStartTimeLimitMinutesNumeric?.Value ?? 0);
+            ctrl.smartStartTimeLimitMinutes = Math.Max(0, Math.Min(999, timeLimitMinutes));
         }
 
         private void ApplyGeneralSettings()

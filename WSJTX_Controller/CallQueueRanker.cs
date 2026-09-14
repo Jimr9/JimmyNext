@@ -22,6 +22,17 @@ namespace WSJTX_Controller
     // Messages/Out/DecodeMessage.cs already reference them as WsjtxClient.CallCategory /
     // WsjtxClient.RankMethods -- moving the enums would force a large, purely mechanical rename
     // with no decoupling benefit. Only the algorithms/weight tables move.
+    //
+    // Phase B (2026-09-14): this class's own identity reads (SetRank's debug trace,
+    // CompareRank/Compare's LoTW tiebreak) read `d.Semantic?.From` -- the canonical identity
+    // DirectApplyDecodes now stores AT INGRESS on every decode (Nexus's own parse when an
+    // envelope exists, the same Phase-A-hardened fallback otherwise) -- rather than calling
+    // EffectiveSemantic(myCall) or the raw DeCall() DTO method. This is what let this class
+    // drop its "no myCall" exception without actually taking a myCall parameter: the identity
+    // now travels WITH the message, so there is nothing left to re-derive here. The `?? d.
+    // DeCall()` fallback stays only for an EnqueueDecodeMessage built by a test helper that
+    // bypasses DirectApplyDecodes entirely (Phase E migrates those); it is never exercised for
+    // anything that went through real ingress, live or test.
     public class CallQueueRanker
     {
         public const int NonDefaultTierBase = 100_000_000;
@@ -212,7 +223,7 @@ namespace WSJTX_Controller
                 int tier;
                 if (!categoryWeight.TryGetValue(tierKey, out tier)) tier = 0;
                 d.Rank = NonDefaultTierBase + (CategoryTierRange * tier);
-                debugLog?.Invoke($"SetRank: '{d.DeCall()}' cat:{d.Category} tierKey:{tierKey} tier:{tier} rank:{d.Rank}");
+                debugLog?.Invoke($"SetRank: '{d.Semantic?.From ?? d.DeCall()}' cat:{d.Category} tierKey:{tierKey} tier:{tier} rank:{d.Rank}");
                 return;
             }
 
@@ -221,12 +232,12 @@ namespace WSJTX_Controller
                 // CalcAzRank uses rankMethod field for heading; rankMethod is kept in sync with rankBeamMethod
                 // Stage A6: Azimuth now comes from d.EffectiveClassification() instead of directly off the wire.
                 d.Rank = CalcAzRank(d.EffectiveClassification().Azimuth);
-                debugLog?.Invoke($"SetRank: '{d.DeCall()}' cat:DEFAULT beam rank:{d.Rank}");
+                debugLog?.Invoke($"SetRank: '{d.Semantic?.From ?? d.DeCall()}' cat:DEFAULT beam rank:{d.Rank}");
                 return;
             }
 
             d.Rank = RegularSortScore(rankOrderList.Count > 0 ? rankOrderList[0] : WsjtxClient.RankMethods.MOST_RECENT, d);
-            debugLog?.Invoke($"SetRank: '{d.DeCall()}' cat:DEFAULT sort rank:{d.Rank}");
+            debugLog?.Invoke($"SetRank: '{d.Semantic?.From ?? d.DeCall()}' cat:DEFAULT sort rank:{d.Rank}");
         }
 
         public int CalcAzRank(int az)
@@ -278,8 +289,8 @@ namespace WSJTX_Controller
             // Only fires for DEFAULT-category calls (non-DEFAULT ranks differ by >= CategoryTierRange).
             if (lotwBoostEnabled && isLoTWUser != null && existing.Rank < NonDefaultTierBase)
             {
-                bool exLoTW = isLoTWUser(existing.DeCall());
-                bool inLoTW = isLoTWUser(incoming.DeCall());
+                bool exLoTW = isLoTWUser(existing.Semantic?.From ?? existing.DeCall());
+                bool inLoTW = isLoTWUser(incoming.Semantic?.From ?? incoming.DeCall());
                 if (exLoTW != inLoTW) return exLoTW ? 1 : -1;
             }
             // Final tiebreaker: CALL_ORDER (oldest first = lower SequenceNumber first).
@@ -309,8 +320,8 @@ namespace WSJTX_Controller
             }
             if (lotwBoostEnabled && isLoTWUser != null && q.Rank < NonDefaultTierBase)
             {
-                bool qLoTW = isLoTWUser(q.DeCall());
-                bool pLoTW = isLoTWUser(p.DeCall());
+                bool qLoTW = isLoTWUser(q.Semantic?.From ?? q.DeCall());
+                bool pLoTW = isLoTWUser(p.Semantic?.From ?? p.DeCall());
                 if (qLoTW != pLoTW) return qLoTW ? 1 : -1;
             }
             return p.SequenceNumber.CompareTo(q.SequenceNumber);

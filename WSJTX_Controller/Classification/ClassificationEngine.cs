@@ -57,7 +57,16 @@ namespace WSJTX_Controller
         // callers that only need the Stage A1 fields don't need to change -- IsDx/
         // Azimuth/Distance simply stay at their conservative defaults (false/-1/-1)
         // when omitted.
-        public ClassifiedCall Classify(string call, string currentBand, string decodedMessage = null, string myGrid = null, string myContinent = null)
+        //
+        // Phase G-prep (2026-09-14): `canonicalGrid`, when given, is the caller's own
+        // already-canonical Nexus-derived grid (SemanticDecode.Grid) and takes precedence over
+        // re-parsing `decodedMessage` -- this DOES feed real production decisions (Distance/
+        // Azimuth drive CallQueueRanker's DIST_DECR/DIST_INCR sort and beam ranking, not just
+        // display), confirmed by tracing every consumer of ClassifiedCall.Distance/Azimuth.
+        // The one production caller (ProcessDecodeMsg) now passes it; `decodedMessage` stays
+        // the fallback so the 17 existing JimmyTests call sites -- which exercise this via raw
+        // text and are tracked for their own Phase E migration -- need no change here.
+        public ClassifiedCall Classify(string call, string currentBand, string decodedMessage = null, string myGrid = null, string myContinent = null, string canonicalGrid = null)
         {
             var result = new ClassifiedCall();
             if (string.IsNullOrEmpty(call)) return result;
@@ -140,7 +149,12 @@ namespace WSJTX_Controller
             // when the message itself doesn't carry one (73/RR73/report messages
             // never do). Same fallback order already established for US-state
             // resolution elsewhere (Awards/AwardTagger.cs, WsjtxClient.Display.cs).
-            string theirGrid = !string.IsNullOrEmpty(decodedMessage) ? WsjtxMessage.Grid(decodedMessage) : null;
+            // Phase G-prep (2026-09-14): canonicalGrid (the caller's own Nexus-derived
+            // SemanticDecode.Grid) wins when given -- production always provides it now. Only
+            // a caller that omits it (today, every JimmyTests call site) still falls back to
+            // parsing decodedMessage's raw text here.
+            string theirGrid = !string.IsNullOrEmpty(canonicalGrid) ? canonicalGrid
+                : !string.IsNullOrEmpty(decodedMessage) ? WsjtxMessage.Grid(decodedMessage) : null;
             if (string.IsNullOrEmpty(theirGrid)) theirGrid = rec?.Grid;
             if (!string.IsNullOrEmpty(myGrid) && !string.IsNullOrEmpty(theirGrid))
             {

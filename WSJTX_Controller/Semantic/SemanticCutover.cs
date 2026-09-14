@@ -1,5 +1,24 @@
 namespace WSJTX_Controller
 {
+    // ══════════════════════════════════════════════════════════════════════════════════════
+    // TRANSITIONAL -- Phase F (2026-09-14). This flag exists ONLY to cover the field-
+    // validation window for the Nexus semantic-identity migration (Stages 5-14, 2026-09-08
+    // through 2026-09-14). It is not a permanent feature or a durable operator setting.
+    //
+    // Planned removal: Phase G deletes this class, SemanticDecode.FromWsjtxMessage, and every
+    // operational (non-display/debug) WsjtxMessage.DeCall/ToCall/IsCQ/IsCallTo/IsInvalidType/
+    // Is73/IsRR73/IsRogers/IsReport dependency, once (a) a field session run with the flag at
+    // its current default (true) shows no regression versus this session's own validation, and
+    // (b) Phase E's remaining test-helper migration (see JimmyTests.cs's own
+    // SyntheticSemanticEnvelope -- most of the ~129 recentDecodes-constructing tests still rely
+    // on the no-envelope fallback this flag's rollback path shares) is far enough along that
+    // removing the fallback doesn't strand a large fraction of the suite. Until then, DO NOT
+    // treat this flag's existence as license to add new call sites that assume it will always
+    // be here -- every new operational identity/kind decision should read EffectiveSemantic
+    // (or the cached .Semantic/._curTxMsgSemantic/._curCmdSemantic fields it feeds), never
+    // WsjtxMessage directly.
+    // ══════════════════════════════════════════════════════════════════════════════════════
+    //
     // Nexus modernization Stage 5+ (2026-09-08): the emergency rollback valve for the
     // FT8/FT4 semantic-fact migration, mirroring Classification/ClassificationCutover.
     //
@@ -20,7 +39,8 @@ namespace WSJTX_Controller
         // migrated consumer back onto WsjtxMessage in one move (full rollback) -- the
         // WsjtxMessage path stays computed alongside, so nothing is lost. Only the call sites
         // a given Stage has actually converted read through EffectiveSemantic; the rest still
-        // call WsjtxMessage directly until their Stage migrates them.
+        // call WsjtxMessage directly until their Stage migrates them. TRANSITIONAL -- see the
+        // class-level banner above; this is not meant to be a permanent operator escape hatch.
         public static bool UseNexusSemantics = true;
     }
 }
