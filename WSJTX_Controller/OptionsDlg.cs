@@ -164,6 +164,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown _smartStartSilencePeriodsNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartMaxStandbyRoundsNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartTimeLimitMinutesNumeric;
+        private System.Windows.Forms.NumericUpDown _otherStationRepliesBeforeYieldingNumeric;
         private System.Windows.Forms.Button _rxTxFreqControlsButton;
 
         // Appearance tab
@@ -445,7 +446,7 @@ namespace WSJTX_Controller
                 Text           = "Smart QSO Start",
                 AccessibleName = "Smart QSO Start",
                 Location       = new System.Drawing.Point(5, 178),
-                Size           = new System.Drawing.Size(650, 140),
+                Size           = new System.Drawing.Size(650, 168),
                 Font           = font,
                 TabStop        = false,
             };
@@ -542,19 +543,47 @@ namespace WSJTX_Controller
             };
             smartStartGroup.Controls.Add(_smartStartTimeLimitMinutesNumeric);
 
+            // VP5/K5UR live incident (2026-09-14): how many DISTINCT other-station transmit
+            // periods in a row -- not decodes -- the active-partner-working-another guard
+            // (WsjtxClient.cs) requires before it yields the contact, instead of reacting to the
+            // very first one. Applies to manual/Enter-started QSOs too, not just Smart Start (see
+            // WsjtxClient's own comment) -- it lives in this group for lack of a better home.
+            var otherStationRepliesLabel = new System.Windows.Forms.Label
+            {
+                Text     = "Other-station replies before yielding:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 132),
+                Font     = font,
+                TabStop  = false,
+            };
+            smartStartGroup.Controls.Add(otherStationRepliesLabel);
+
+            _otherStationRepliesBeforeYieldingNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Other-station replies before yielding",
+                Location       = new System.Drawing.Point(320, 129),
+                Size           = new System.Drawing.Size(50, 20),
+                TabIndex       = 4,
+                Minimum        = 1,
+                Maximum        = 6,
+                Value          = Math.Max(1, Math.Min(6, ctrl.otherStationRepliesBeforeYielding)),
+                Font           = font,
+            };
+            smartStartGroup.Controls.Add(_otherStationRepliesBeforeYieldingNumeric);
+
             // Item 3 (2026-09-10): launcher for the accessible RX/TX Audio Frequency Controls
             // window. Lives here (not Options > Radio) because this tab already owns the
             // transmit-frequency mode and the frequency step in Hz -- the same context those
             // controls operate on. Modeless / single-instance (Controller owns the instance).
-            // Location moved down (2026-09-13) to make room for the Smart QSO Start group's two
-            // new rows above.
+            // Location moved down (2026-09-14) to make room for the Smart QSO Start group's new
+            // "Other-station replies before yielding" row above.
             _rxTxFreqControlsButton = new System.Windows.Forms.Button
             {
                 Text           = "RX/TX Audio Frequency Controls...",
                 AccessibleName = "RX/TX Audio Frequency Controls",
                 AutoSize       = true,
-                Location       = new System.Drawing.Point(10, 324),
-                TabIndex       = 4,
+                Location       = new System.Drawing.Point(10, 352),
+                TabIndex       = 5,
                 Font           = font,
             };
             _rxTxFreqControlsButton.Click += (s, e) => ctrl.OpenRxTxFreqControlsDialog();
@@ -570,6 +599,8 @@ namespace WSJTX_Controller
             ctrl.smartStartMaxStandbyRounds = Math.Max(1, Math.Min(20, maxStandbyRounds));
             int timeLimitMinutes = (int)(_smartStartTimeLimitMinutesNumeric?.Value ?? 0);
             ctrl.smartStartTimeLimitMinutes = Math.Max(0, Math.Min(999, timeLimitMinutes));
+            int repliesBeforeYielding = (int)(_otherStationRepliesBeforeYieldingNumeric?.Value ?? 2);
+            ctrl.otherStationRepliesBeforeYielding = Math.Max(1, Math.Min(6, repliesBeforeYielding));
         }
 
         private void ApplyGeneralSettings()

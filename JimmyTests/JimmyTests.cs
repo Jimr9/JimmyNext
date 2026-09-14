@@ -355,6 +355,7 @@ static class JimmyTests
         RuleEngineFixedBandRestrictionTests();
         AwardMatcherMatchTests();
         AwardMatcherAlreadyWorkedGateTests();
+        WasUsaEligibilityGateTests();
         RuleEngineResolveBandsForEvaluationTests();
         RuleEngineBandChoicesForTests();
         RuleEngineBandOverrideIntersectEndToEndTests();
@@ -541,6 +542,7 @@ static class JimmyTests
         SmartStartOperatorPolicy20260908Tests();
         SmartStartYieldsToOtherQsoTests();
         ActivePartnerYieldAndStaleSelectionTests();
+        Vp5K5urInterleavedPileupReplayTests();
         SmartStartResumesAfterHandoffYieldTests();
         TargetMonitorBusyExpirationAfterYieldTests();
         TargetMonitorHeardPeriodNotCountedAcrossYieldTests();
@@ -18473,6 +18475,115 @@ static class JimmyTests
               AwardMatcher.ShouldRejectAlreadyWorked(isNewCallOnBand: false, isPota: true, isNewDxccCategory: false, isStillNeededByActiveAward: true), false);
     }
 
+    // ── AwardTagger.ResolveAwardState: WAS (US_50_STATES) live matching must require
+    // authoritative US DXCC eligibility before trusting either QRZ's or grid.dat's state --
+    // CONFIRMED live 2026-09-14: VE1JS (Canada, grid FN64) was wrongly tagged "Worked All
+    // States - 15m Unconf". GridToUsState is purely geometric: FN64 straddles the US/Canada
+    // border and grid.dat resolves it to Maine regardless of which side of the border the
+    // station is actually on, and the old code ran QRZ/grid state resolution unconditionally
+    // with nothing checking the station's real DXCC entity first. Exercises the REAL pipeline
+    // (LookupManager -> ClassificationEngine -> AwardTagger), not a hand-built ClassifiedCall,
+    // so the test fails against the pre-fix code the same way the live bug did. Deliberately
+    // does NOT use IsDx/Continent as the gate -- Canada and the US share a continent (North
+    // America), so that would let every VE station through too; VE1JS and K1ME share the
+    // IDENTICAL grid (FN64) so the only thing that can be deciding the outcome is the
+    // DXCC-entity eligibility check itself. ──
+    static void WasUsaEligibilityGateTests()
+    {
+        Console.WriteLine("\n── WAS (US_50_STATES) live matching requires authoritative US DXCC eligibility, not just grid/QRZ state (VE1JS/FN64 vs K1ME/FN64) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_WasEligibility_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        var def = new RuleDefinition
+        {
+            Id = "TEST_WAS_ELIGIBILITY", Name = "Worked All States (test)",
+            FormatVersion = 1, Enabled = true,
+            GroupBy = RuleGroupBy.State, Universe = "US_50_STATES",
+            Confirmation = RuleConfirmation.None, Target = RuleTargetType.All,
+        };
+        bool defRegistered = false;
+        bool mapInjected = false;
+        LookupManager lookupManager = null;
+        try
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+
+            // Deterministic stand-in for a real grid.dat entry -- avoids depending on WSJT-X's
+            // grid.dat actually being installed on whatever machine runs this suite.
+            if (!UsGridStateMap.Map.ContainsKey("FN64")) { UsGridStateMap.Map["FN64"] = "ME"; mapInjected = true; }
+
+            using (var db = new LogbookDb(tmpDb))
+            {
+                RuleLibrary.Definitions.Add(def);
+                defRegistered = true;
+
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                ctrl.wsjtxClient = wc;
+                ctrl.activeAwardRuleIds.Add(def.Id);
+                ctrl.RefreshStillNeedCache();
+                Check("Setup: the test WAS award IS live-tagging (empty log -> every state, incl. ME, still needed)",
+                      wc.activeAwardTags.TryGetValue(def.Id, out var tag) && tag.Set.Contains("ME"), true);
+
+                lookupManager = new LookupManager();
+                lookupManager.RegisterProviderFirst(new TestFixtureLookupProvider());
+                lookupManager.Initialize(
+                    useLookupData: true,
+                    qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                    lotwEnabled: false, lotwDays: 1,
+                    clubLogAppKey: null, clubLogDays: 1,
+                    fccUlsEnabled: false);
+                wc.lookupManager = lookupManager;
+
+                var engine = new ClassificationEngine(db, lookupManager);
+                var tagger = new AwardTagger(wc);
+
+                var veDecode = new EnqueueDecodeMessage { Message = "CQ VE1JS FN64" };
+                veDecode.Classified = engine.Classify("VE1JS", "20m", veDecode.Message, myGrid: "EN34", myContinent: "NA");
+                CheckStr("Setup: VE1JS classifies as Canada, not USA (the eligibility check's input)",
+                    veDecode.Classified.Country, "Canada");
+
+                var usDecode = new EnqueueDecodeMessage { Message = "CQ K1ME FN64" };
+                usDecode.Classified = engine.Classify("K1ME", "20m", usDecode.Message, myGrid: "EN34", myContinent: "NA");
+                CheckStr("Setup: K1ME classifies as USA, on the IDENTICAL grid FN64",
+                    usDecode.Classified.Country, "USA");
+
+                CheckStr("THE FIX: Canadian VE1JS (grid FN64) is NOT matched as WAS Needed",
+                      tagger.MatchedAwardRuleId(veDecode), null);
+                CheckStr("...and NOT matched as WAS Unconfirmed either",
+                      tagger.MatchedUnconfirmedAwardRuleId(veDecode), null);
+
+                CheckStr("Legitimate US station K1ME, SAME grid FN64, IS matched as WAS Needed",
+                      tagger.MatchedAwardRuleId(usDecode), def.Id);
+
+                // Move ME from Needed to Unconfirmed-only and re-check the other half of the gate.
+                tag.Set.Clear();
+                tag.UnconfirmedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ME" };
+                CheckStr("Canadian VE1JS still NOT matched once ME is Unconfirmed-only",
+                      tagger.MatchedUnconfirmedAwardRuleId(veDecode), null);
+                CheckStr("Legitimate US station K1ME IS matched as WAS Unconfirmed once ME moves there",
+                      tagger.MatchedUnconfirmedAwardRuleId(usDecode), def.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  WasUsaEligibilityGateTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            lookupManager?.Dispose();
+            if (defRegistered) RuleLibrary.Definitions.Remove(def);
+            if (mapInjected) UsGridStateMap.Map.Remove("FN64");
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
     // ── RuleEngine.ResolveBandsForEvaluation: a band override must never let an award
     // evaluate "as" a band outside its own Bands= restriction ──
     static void RuleEngineResolveBandsForEvaluationTests()
@@ -20451,9 +20562,12 @@ static class JimmyTests
     //      captured by Smart Start. Both unchanged.
     //  (2) ANY active contact (Smart Start off, or a Smart Start QSO after hand-off): when a
     //      FRESH live decode proves the active partner is sending a report / R-report / RRR to
-    //      a real third station, Jimmy yields the contact (HALT_TX + disable) before another
-    //      over. A partner -> peer RR73 / 73 (a close, not an exchange) does NOT trigger it,
-    //      and a report the partner sends TO US never triggers it.
+    //      a real third station, Jimmy yields the contact (HALT_TX + disable) once it has seen
+    //      ctrl.otherStationRepliesBeforeYielding such overs IN A ROW with nothing addressed to
+    //      us in between (revised 2026-09-14 for the VP5/K5UR incident -- see cases C/C1/C2
+    //      below; default 2, was an immediate 1-strike yield). A partner -> peer RR73 / 73 (a
+    //      close, not an exchange) does NOT trigger it, and a report the partner sends TO US
+    //      never triggers it (and resets any accumulated strikes -- case C3).
     static void ActivePartnerYieldAndStaleSelectionTests()
     {
         Console.WriteLine("\n── KA1BMF audit: stale \"to us\" selection -> Smart Start; active partner working another -> yield ──");
@@ -20469,7 +20583,7 @@ static class JimmyTests
         Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
         try
         {
-            const string myCall = "KB0UZT", myGrid = "FN42", target = "KA1BMF", peer = "N1UL";
+            const string myCall = "KB0UZT", myGrid = "FN42", target = "KA1BMF", peer = "N1UL", peer2 = "K9ABC";
 
             WsjtxClient MakeWc(out Controller ctrlOut)
             {
@@ -20544,20 +20658,31 @@ static class JimmyTests
                 Check("B: ...Smart Start was NOT armed", wc.TestSmartStartTarget == null, true);
             }
 
-            // ── C. Smart Start OFF, ordinary active QSO: partner -> peer report -> YIELD ──
+            // ── C. Smart Start OFF, ordinary active QSO: ONE partner -> peer report -> NOT yet
+            //      yielded (VP5/K5UR fix -- a single interleaved over is inconclusive) ──
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
                 ctrl.smartQsoStartEnabled = false;
+                ctrl.otherStationRepliesBeforeYielding = 2;   // explicit: the shipped default
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(200));
                 wc.callInProg = target;                                   // an ordinary Enter-started QSO
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(201, target, $"{peer} {target} -10"));
+                System.Threading.Thread.Sleep(40);
+                Check("C: ONE other-station report -> still no HALT_TX (evidence-based policy)", Saw("HALT_TX"), false);
+                Check("C: ...the contact is still active", wc.callInProg == target, true);
+                Check("C: ...exactly one strike recorded", wc.TestOtherPartyOverStrikes == 1, true);
+
+                // ── C1. A SECOND other-party report, still nothing addressed to us in between --
+                //        NOW yields (a DIFFERENT peer this time, on a genuinely new period -- the
+                //        original KA1BMF protection is preserved, just requires stronger evidence) ──
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(202, target, $"{peer2} {target} -12"));
                 PumpUntil(() => Saw("HALT_TX"), 2000);
-                Check("C: partner working a third station (report) -> HALT_TX sent", Saw("HALT_TX"), true);
-                Check("C: ...the contact is ended (callInProg cleared)", wc.callInProg == null, true);
+                Check("C1: a SECOND other-station report -> NOW yields (HALT_TX)", Saw("HALT_TX"), true);
+                Check("C1: ...the contact is ended (callInProg cleared)", wc.callInProg == null, true);
             }
 
-            // ── C2. Same, but partner -> peer RR73 (a QSO close) -> NO yield ──
+            // ── C2. Same, but partner -> peer RR73 (a QSO close) -> NO yield, no strike at all ──
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
@@ -20568,6 +20693,7 @@ static class JimmyTests
                 System.Threading.Thread.Sleep(40);
                 Check("C2: partner -> peer RR73 (close, not an exchange) -> NO HALT_TX", Saw("HALT_TX"), false);
                 Check("C2: ...the contact is untouched", wc.callInProg == target, true);
+                Check("C2: ...no strike recorded either (RR73/73 is never busy evidence here)", wc.TestOtherPartyOverStrikes == 0, true);
             }
 
             // ── C3. Partner's report is addressed TO US -> NO yield ──
@@ -20583,11 +20709,60 @@ static class JimmyTests
                 Check("C3: ...the contact continues", wc.callInProg == target, true);
             }
 
+            // ── C4. Reset-on-reply: one strike, THEN the partner addresses us again (proving it
+            //       hasn't abandoned us) -> the count resets to 0 -- a LATER single other-party
+            //       report still does NOT immediately yield, proving genuine reset rather than
+            //       coincidentally already being below threshold ──
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = false;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(500));
+                wc.callInProg = target;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(501, target, $"{peer} {target} -10"));
+                Check("C4: one strike recorded", wc.TestOtherPartyOverStrikes == 1, true);
+
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(502, target, $"{myCall} {target} R-10"));
+                Check("C4: a reply addressed to us resets the strike count to 0", wc.TestOtherPartyOverStrikes == 0, true);
+                Check("C4: ...and the contact is still active", wc.callInProg == target, true);
+
+                lock (seenLock) seen.Clear();
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(503, target, $"{peer2} {target} -09"));
+                System.Threading.Thread.Sleep(40);
+                Check("C4: one more other-station report after the reset -> still not yielded", Saw("HALT_TX"), false);
+                Check("C4: ...only one strike again, not two carried over", wc.TestOtherPartyOverStrikes == 1, true);
+            }
+
+            // ── C5. Duplicate-same-period: TWO textually different other-party decodes reported
+            //       within the SAME transmit period (radio.Slot unchanged) count as ONE strike --
+            //       distinct PERIODS, not decodes, are what's being counted ──
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = false;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(600));
+                wc.callInProg = target;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 10.136, ""transmitting"": false, ""slot"": 601 },
+                    ""recentDecodes"": [
+                        { ""from"": """ + target + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + peer + " " + target + @" -10"" },
+                        { ""from"": """ + target + @""", ""snr"": -7, ""dtSec"": 0.1, ""freqHz"": 1600.0, ""message"": """ + peer2 + " " + target + @" -05"" }
+                    ] }"));
+                System.Threading.Thread.Sleep(40);
+                Check("C5: two DIFFERENT other-party decodes in the SAME period -> still one strike",
+                      wc.TestOtherPartyOverStrikes == 1, true);
+                Check("C5: ...not yielded (below the default threshold of 2)", Saw("HALT_TX"), false);
+            }
+
             // ── D. Smart Start-STARTED QSO after hand-off: same shared protection ──
+            // (this case is about hand-off/resume scoping, not the evidence threshold itself --
+            // pinned to 1 so a single decode still exercises it exactly as before)
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
                 ctrl.smartQsoStartEnabled = true;
+                ctrl.otherStationRepliesBeforeYielding = 1;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(500));
                 Check("D: Smart Start armed on a fresh CQ", wc.TestTryCaptureSmartStart(target, FreshCq()), true);
                 wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FN31"), true);   // one live CQ (parity/evidence)
@@ -20606,6 +20781,86 @@ static class JimmyTests
                 // SmartStartResumesAfterHandoffYieldTests).
                 Check("D: ...Smart Start resumes watching the SAME target", wc.TestSmartStartTarget == target, true);
             }
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevDb == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // VP5/K5UR interleaved-pileup replay regression (2026-09-14 live incident, log_9-14-2026.txt),
+    // reproduced exactly:
+    //   21:07:42  VP5/K5UR -> KB0UZT: "KB0UZT VP5/K5UR +10"  (Jimmy engages -- an ordinary
+    //             Enter-started QSO, sends "R+02")
+    //   21:08:12  VP5/K5UR -> LU2NI:  "LU2NI VP5/K5UR R-01"  (VP5 interleaving another pileup
+    //             QSO, NOT addressed to us -- Jimmy used to terminate our active QSO right here
+    //             and resume Smart Start; THE FIX: one such over is inconclusive on its own)
+    // then VP5/K5UR returns and closes with KB0UZT normally, exactly as it should have without
+    // the false abandonment.
+    static void Vp5K5urInterleavedPileupReplayTests()
+    {
+        Console.WriteLine("\n── VP5/K5UR interleaved-pileup replay regression (2026-09-14 live incident) ──");
+
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+        List<string> Seen() { lock (seenLock) return new List<string>(seen); }
+        bool Saw(string p) => Seen().Exists(c => c.StartsWith(p));
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Vp5Interleave_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevDb = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            const string myCall = "KB0UZT", myGrid = "FN42", dx = "VP5/K5UR", otherHound = "LU2NI";
+
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.smartQsoStartEnabled = false;   // ordinary Enter-started QSO, exactly as in the log
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            wc.StatusView = new FakeStatusView();
+
+            DirectSnapshot Snap(ulong slot, string decodeFrom = null, string decodeMsg = null) =>
+                ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 21.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + (decodeFrom == null ? "" :
+                        @"{ ""from"": """ + decodeFrom + @""", ""snr"": -10, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }") + @"] }");
+
+            // 21:07:42 -- VP5/K5UR sends KB0UZT a +10 report; Jimmy engages.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1000, dx, $"{myCall} {dx} +10"));
+            wc.callInProg = dx;
+            Check("VP5/K5UR engaged: our active QSO", wc.callInProg == dx, true);
+
+            // 21:08:12 -- VP5/K5UR sends LU2NI an R-report (interleaving another pileup QSO), not
+            // us. THE FIX: a single other-station over is no longer conclusive proof of abandonment.
+            lock (seenLock) seen.Clear();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1002, dx, $"{otherHound} {dx} R-01"));
+            System.Threading.Thread.Sleep(40);
+            Check("THE FIX: interleaved pileup traffic to LU2NI does NOT abandon our active QSO", Saw("HALT_TX"), false);
+            Check("...our QSO with VP5/K5UR is still active", wc.callInProg == dx, true);
+            Check("...exactly one strike recorded (not yet at the default threshold of 2)", wc.TestOtherPartyOverStrikes == 1, true);
+
+            // VP5/K5UR returns and rogers our earlier report -- proof it never abandoned us; the
+            // strike count resets and the QSO continues normally, exactly as it should have.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(1004, dx, $"{myCall} {dx} R-01"));
+            Check("VP5/K5UR returns to KB0UZT -- the strike count resets", wc.TestOtherPartyOverStrikes == 0, true);
+            Check("...our QSO was never abandoned", !Saw("HALT_TX") && wc.callInProg == dx, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  Vp5K5urInterleavedPileupReplayTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
         }
         finally
         {
@@ -20651,6 +20906,10 @@ static class JimmyTests
                 ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
                 ctrl.smartQsoStartEnabled = true;
                 ctrl.smartStartSilencePeriods = 2;
+                // This whole test is about hand-off/resume/Repeat-Limit-carryover plumbing, not
+                // the VP5/K5UR evidence threshold itself -- pinned to 1 so every case's single
+                // partner -> peer decode still yields immediately, exactly as before that fix.
+                ctrl.otherStationRepliesBeforeYielding = 1;
                 ctrlOut = ctrl;
                 var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
                 wc.TestSetDirectConnected(true);

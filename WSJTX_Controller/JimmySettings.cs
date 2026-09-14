@@ -53,6 +53,18 @@ namespace WSJTX_Controller
         // a fresh Start() (arming on a target) resets it. See TargetMonitor.ArmedAtUtc.
         public int SmartStartTimeLimitMinutes { get; set; } = 0;
 
+        // VP5/K5UR live incident (2026-09-14): the KA1BMF active-partner-working-another guard
+        // (WsjtxClient.cs) used to yield the contact the very first time it saw the partner send
+        // a substantive over to someone else -- too eager for a big pileup-running DX station
+        // genuinely juggling several simultaneous QSOs by hand. 1-6, default 2 (tolerate one
+        // interleaved reply before concluding abandonment); 1 restores the original immediate-
+        // yield behavior. Counts distinct other-station transmit periods, not decodes -- see
+        // WsjtxClient's own _otherPartyOverStrikes comment. Applies to manual/Enter-started QSOs
+        // and Smart-Start-originated ones alike (one shared guard) -- it lives in this settings
+        // group for lack of a better home, not because it is Smart-Start-only. The existing
+        // Repeat Limit and Smart Start time limit remain authoritative regardless of this value.
+        public int OtherStationRepliesBeforeYielding { get; set; } = 2;
+
         // Appearance (list font size + colors) -- defaults match the app's original
         // hardcoded look exactly, so nothing changes for anyone who never opens the
         // new Appearance tab. Colors are stored as ARGB ints (unambiguous, no named-
@@ -120,6 +132,8 @@ namespace WSJTX_Controller
                 SmartStartMaxStandbyRounds = maxStandbyRounds;
             if (int.TryParse(ini.Read("smartStartTimeLimitMinutes"), out int timeLimitMinutes) && timeLimitMinutes >= 0 && timeLimitMinutes <= 999)
                 SmartStartTimeLimitMinutes = timeLimitMinutes;
+            if (int.TryParse(ini.Read("otherStationRepliesBeforeYielding"), out int repliesBeforeYielding) && repliesBeforeYielding >= 1 && repliesBeforeYielding <= 6)
+                OtherStationRepliesBeforeYielding = repliesBeforeYielding;
 
             if (int.TryParse(ini.Read("listFontSize"), out int fontSize) && fontSize >= 8 && fontSize <= 18)
                 ListFontSize = fontSize;
@@ -145,6 +159,7 @@ namespace WSJTX_Controller
             ini.Write("smartStartSilencePeriods", SmartStartSilencePeriods.ToString());
             ini.Write("smartStartMaxStandbyRounds", SmartStartMaxStandbyRounds.ToString());
             ini.Write("smartStartTimeLimitMinutes", SmartStartTimeLimitMinutes.ToString());
+            ini.Write("otherStationRepliesBeforeYielding", OtherStationRepliesBeforeYielding.ToString());
 
             ini.Write("listFontSize", ListFontSize.ToString());
             ini.Write("listBackColor", ListBackColor.ToArgb().ToString());

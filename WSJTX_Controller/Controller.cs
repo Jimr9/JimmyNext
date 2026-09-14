@@ -97,6 +97,7 @@ namespace WSJTX_Controller
         public int smartStartSilencePeriods { get => Settings.SmartStartSilencePeriods; set => Settings.SmartStartSilencePeriods = value; }
         public int smartStartMaxStandbyRounds { get => Settings.SmartStartMaxStandbyRounds; set => Settings.SmartStartMaxStandbyRounds = value; }
         public int smartStartTimeLimitMinutes { get => Settings.SmartStartTimeLimitMinutes; set => Settings.SmartStartTimeLimitMinutes = value; }
+        public int otherStationRepliesBeforeYielding { get => Settings.OtherStationRepliesBeforeYielding; set => Settings.OtherStationRepliesBeforeYielding = value; }
         public bool rawShowCq = true;
         public bool rawShowDirected = true;
         public bool rawShowReports = true;

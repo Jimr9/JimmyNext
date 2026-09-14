@@ -72,6 +72,13 @@ namespace WSJTX_Controller
             // must normalize this to "USA" via EnqueueDecodeMessage.WsjtxCountry(), same as
             // the wire-supplied Country setter always did.
             ["K3ZK"]    = new Fixture { Country = "United States", Continent = "NA", Dxcc = 291, Grid = "FN21" },
+            // Not a JimmyReplay.py fixture -- added for the WAS eligibility-gate regression
+            // (AwardTagger.ResolveAwardState), CONFIRMED live 2026-09-14: VE1JS is genuinely
+            // Canadian but its grid FN64 straddles the US/Canada border and grid.dat resolves it
+            // to a US state (Maine) regardless. VE1JS and K1ME share the identical grid so a test
+            // can prove the DXCC-entity gate, not the grid, is what decides eligibility.
+            ["VE1JS"]   = new Fixture { Country = "Canada", Continent = "NA", Dxcc = 1,   Grid = "FN64" },
+            ["K1ME"]    = new Fixture { Country = "USA",    Continent = "NA", Dxcc = 291, Grid = "FN64" },
         };
 
         public void Contribute(LookupRecord record, string call)

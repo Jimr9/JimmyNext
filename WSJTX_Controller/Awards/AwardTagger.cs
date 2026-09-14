@@ -138,10 +138,22 @@ namespace WSJTX_Controller
         // State/Continent are resolved here (cheap); CqZone/Dxcc are handed over as lazy
         // delegates so a LookupManager.Build() call only happens if some active award's
         // GroupBy actually needs it.
-        public string MatchedAwardRuleId(EnqueueDecodeMessage d)
+        // US_50_STATES eligibility gate for live GroupBy=State matching (MatchedAwardRuleId /
+        // MatchedUnconfirmedAwardRuleId below). CONFIRMED live 2026-09-14: VE1JS (Canada, grid
+        // FN64) was tagged "Worked All States - 15m Unconf" because GridToUsState is purely
+        // geometric -- several Maidenhead squares straddling the border (FN64 included) resolve
+        // to a US state regardless of which side of it the station actually is, and the old code
+        // ran QRZ/grid state resolution unconditionally, with nothing checking the station's
+        // actual DXCC entity first. Same "USA" gate already used everywhere else a US state gets
+        // shown/matched (WsjtxClient.Display.cs's raw-decode row, WsjtxClient.cs:~3953's ShowStatus
+        // country line) -- classification.Country is Jimmy's own ClassificationEngine result,
+        // already normalized (EnqueueDecodeMessage.WsjtxCountry) to the literal "USA" regardless of
+        // which provider (QRZ/Club Log) resolved it. Deliberately NOT IsDx/Continent: Canada and
+        // the US share a continent (North America), so a continent-based gate would let every VE
+        // station through too -- this needs actual DXCC-entity eligibility (291), not proximity.
+        private string ResolveAwardState(EnqueueDecodeMessage d, string call)
         {
-            string call = d.EffectiveSemantic(_wc.myCall).From;   // Stage 11 (was d.DeCall())
-            if (string.IsNullOrEmpty(call)) return null;
+            if (d.EffectiveClassification().Country != "USA") return null;
 
             string qrzState = null;
             if (_wc.lookupManager != null && _wc.lookupManager.Enabled)
@@ -151,7 +163,15 @@ namespace WSJTX_Controller
             }
             // Phase D (2026-09-14): canonical Semantic (was WsjtxMessage.Grid(d.Message)).
             string grid = d.EffectiveSemantic(_wc.myCall).Grid;
-            string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
+            return WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
+        }
+
+        public string MatchedAwardRuleId(EnqueueDecodeMessage d)
+        {
+            string call = d.EffectiveSemantic(_wc.myCall).From;   // Stage 11 (was d.DeCall())
+            if (string.IsNullOrEmpty(call)) return null;
+
+            string state = ResolveAwardState(d, call);
 
             // Stage A6: Continent now comes from d.EffectiveClassification() (Jimmy's own
             // ClassificationEngine, resolved via LookupManager -- same source CqZone/Dxcc
@@ -169,15 +189,7 @@ namespace WSJTX_Controller
             string call = d.EffectiveSemantic(_wc.myCall).From;   // Stage 11 (was d.DeCall())
             if (string.IsNullOrEmpty(call)) return null;
 
-            string qrzState = null;
-            if (_wc.lookupManager != null && _wc.lookupManager.Enabled)
-            {
-                var stateRec = _wc.lookupManager.Build(call);
-                qrzState = stateRec.State;
-            }
-            // Phase D (2026-09-14): canonical Semantic (was WsjtxMessage.Grid(d.Message)).
-            string grid = d.EffectiveSemantic(_wc.myCall).Grid;
-            string state = WsjtxClient.ResolveUsState(qrzState, string.IsNullOrEmpty(grid) ? null : WsjtxClient.GridToUsState(grid));
+            string state = ResolveAwardState(d, call);
 
             return AwardMatcher.MatchUnconfirmed(
                 _wc.activeAwardTags, call, state, d.EffectiveClassification().Continent,

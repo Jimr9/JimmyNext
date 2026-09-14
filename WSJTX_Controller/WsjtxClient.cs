@@ -367,6 +367,26 @@ namespace WSJTX_Controller
         // Test-only: precise observation of the ordinary path's own per-decode speech decision,
         // without relying on fragile string matching against the composed status line.
         internal bool TestOtherPartyActivitySpeakable => otherPartyActivitySpeakable;
+
+        // KA1BMF guard evidence counter (VP5/K5UR live incident, 2026-09-14): a big pileup-
+        // running DX station can genuinely be juggling several simultaneous QSOs by hand
+        // (CONFIRMED live: VP5/K5UR sent KB0UZT a report, then 30s later sent LU2NI an R-report,
+        // then returned to close with KB0UZT) -- a single substantive other-party over is NOT,
+        // by itself, proof the active partner has abandoned us. Counts DISTINCT other-station
+        // transmit PERIODS (radio.Slot, via _directLastSlotSeen), not duplicate decodes -- a
+        // period with more than one qualifying decode (should not happen post-
+        // _directSeenDecodeSignatures dedup, but this is defense-in-depth) still counts as only
+        // one strike. Reset to 0 the moment the partner addresses us again (same branch that
+        // clears otherPartyForCallInProg, below) or callInProg changes (SetCallInProg). Compared
+        // against ctrl.otherStationRepliesBeforeYielding (Options > Transmit > Smart QSO Start,
+        // default 2) in the guard itself, below. Applies to BOTH manual/Enter-started QSOs and
+        // Smart-Start-originated ones -- this is one shared guard, not a Smart-Start-only check
+        // (see YieldActiveContactToOtherQso's own comment); it lives in that Options group only
+        // because Smart Start is where a pileup interleave is most consequential, not because
+        // the guard itself is scoped to it.
+        private int _otherPartyOverStrikes = 0;
+        private ulong? _otherPartyOverStrikeLastSlot = null;
+        internal int TestOtherPartyOverStrikes => _otherPartyOverStrikes;
         internal TargetActivityTracker TestGetActivityTracker(string target) => GetActivityTracker(target);
 
         // One shared TargetActivityTracker per target callsign currently being narrated by any of
@@ -1910,6 +1930,10 @@ namespace WSJTX_Controller
                     otherPartyStage = null;
                     otherPartyForCallInProgUtc = default;
                     otherPartyActivitySpeakable = false;
+                    // Any message from the target back to us resets the KA1BMF evidence count --
+                    // it just proved it hasn't abandoned us, whatever it was doing in between.
+                    _otherPartyOverStrikes = 0;
+                    _otherPartyOverStrikeLastSlot = null;
                 }
                 else if (toCall != null)
                 {
@@ -1950,20 +1974,29 @@ namespace WSJTX_Controller
                             ShouldAnnounceTargetActivity(fact.Value.Target, fact.Value.Peer, fact.Value.Kind, fact.Value.Value);
                     }
 
-                    // KA1BMF live-radio audit (2026-09-08): our active partner just sent a
-                    // SUBSTANTIVE exchange message -- a signal report, R-report, or RRR -- to a
-                    // real third station, not to us. A live decode row is always the current
-                    // receive period, so this is fresh proof the partner is working someone
-                    // else; Jimmy must not send another report over to it. Yield exactly the way
-                    // an operator Escape would (YieldActiveContactToOtherQso). One shared guard
-                    // for every active-contact origin -- an ordinary Enter/queue-started QSO and
-                    // a Smart Start QSO after hand-off alike. The Smart Start *calling* phase
-                    // keeps its own richer yield (ServiceSmartStartAwaitingEngagement ->
-                    // YieldSmartStartToOtherQso, which carries the cumulative Repeat Limit /
-                    // standby-round accounting and its own "standing by" narration), so it is
-                    // deliberately left to that path. A partner -> peer RR73 / 73 is a QSO
-                    // *close*, not an active exchange, and is never treated as busy evidence
-                    // here (Smart Start / Work Now still read it as an opening).
+                    // KA1BMF live-radio audit (2026-09-08), revised for the VP5/K5UR incident
+                    // (2026-09-14): our active partner just sent a SUBSTANTIVE exchange message
+                    // -- a signal report, R-report, or RRR -- to a real third station, not to us.
+                    // That alone is no longer treated as conclusive: a busy pileup-running DX
+                    // station can genuinely be juggling several simultaneous QSOs by hand (VP5/
+                    // K5UR sent KB0UZT a report, then 30s later sent LU2NI an R-report, then
+                    // returned to close with KB0UZT), so one such over is inconclusive evidence,
+                    // not proof. Jimmy now requires ctrl.otherStationRepliesBeforeYielding (see
+                    // _otherPartyOverStrikes's own comment) distinct other-station transmit
+                    // periods in a row -- with nothing addressed to us in between -- before it
+                    // stops sending another over and yields the contact exactly the way an
+                    // operator Escape would (YieldActiveContactToOtherQso). One shared guard for
+                    // every active-contact origin -- an ordinary Enter/queue-started QSO and a
+                    // Smart Start QSO after hand-off alike (confirmed: this is NOT limited to
+                    // Smart Start). The Smart Start *calling* phase keeps its own richer yield
+                    // (ServiceSmartStartAwaitingEngagement -> YieldSmartStartToOtherQso, which
+                    // carries the cumulative Repeat Limit / standby-round accounting and its own
+                    // "standing by" narration), so it is deliberately left to that path. A
+                    // partner -> peer RR73 / 73 is a QSO *close*, not an active exchange, and is
+                    // never treated as busy evidence here (Smart Start / Work Now still read it
+                    // as an opening). The existing Repeat Limit and Smart Start time limit remain
+                    // the authoritative backstops regardless of this setting -- this only governs
+                    // how eagerly Jimmy proactively yields, never whether it eventually gives up.
                     if (_directConnected && !isSpecOp && otherPartyForCallInProg != null)
                     {
                         var partnerSem = dmsg.EffectiveSemantic(myCall);
@@ -1974,7 +2007,25 @@ namespace WSJTX_Controller
                             && !partnerSem.AddressedToMe
                             && !smartStartCallingThisTarget)
                         {
-                            YieldActiveContactToOtherQso(callInProg, otherPartyForCallInProg);
+                            // Distinct transmit PERIODS, not duplicate decodes -- only advance
+                            // once per new slot, so re-processing within the same period (should
+                            // never happen post-dedup, but defense-in-depth) can't inflate it.
+                            if (_otherPartyOverStrikeLastSlot != _directLastSlotSeen)
+                            {
+                                _otherPartyOverStrikes++;
+                                _otherPartyOverStrikeLastSlot = _directLastSlotSeen;
+                            }
+
+                            int threshold = Math.Max(1, Math.Min(6, ctrl.otherStationRepliesBeforeYielding));
+                            if (_otherPartyOverStrikes >= threshold)
+                            {
+                                YieldActiveContactToOtherQso(callInProg, otherPartyForCallInProg);
+                            }
+                            else
+                            {
+                                DebugOutput($"{Time()} active partner '{callInProg}' working '{otherPartyForCallInProg}' -- " +
+                                    $"{_otherPartyOverStrikes}/{threshold} other-station over(s), not yielding yet");
+                            }
                         }
                     }
                 }
@@ -3563,6 +3614,8 @@ namespace WSJTX_Controller
             otherPartyStage = null;
             otherPartyForCallInProgUtc = default;
             otherPartyActivitySpeakable = false;
+            _otherPartyOverStrikes = 0;
+            _otherPartyOverStrikeLastSlot = null;
             // Item 1: the coordinator's AfterQso timing hook -- callInProg is the active-QSO
             // signal. Idempotent: the coordinator only acts on a genuine active -> inactive edge.
             Notify?.OnQsoActiveChanged(call != null);
