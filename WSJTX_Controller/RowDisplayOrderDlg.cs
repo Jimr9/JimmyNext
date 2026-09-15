@@ -63,6 +63,17 @@ namespace WSJTX_Controller
             { "callsign", "age", "band", "frequency", "mode", "evenOdd", "snr", "senderGrid", "country",
               "spottercall", "spottercountry", "spottergrid" };
 
+        // The DEFAULT ORDER (which fields are checked, and in what order) for a fresh install, a
+        // missing INI key, and the "Restore Default" button -- see CallWaitingDefaultOrder's own
+        // comment. Fix, 2026-09-14: Spot Watch used to have no curated subset at all, so both
+        // paths fell back to the full field universe above (all 12 fields, every one checked) --
+        // "Restore Default" restored everything instead of a sane starting point. This subset
+        // keeps the essential identifying/propagation fields; the spotter-detail fields
+        // (spottercall/spottercountry/spottergrid) and evenOdd/senderGrid stay in the field
+        // universe, available to add, just unchecked by default.
+        public static readonly string[] SpotWatchDefaultOrder =
+            { "callsign", "age", "band", "frequency", "mode", "snr", "country" };
+
         public static readonly Dictionary<string, string> SpotWatchFieldLabels = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             { "callsign", "Call Sign" }, { "age", "Last Spotted" }, { "band", "Band" }, { "frequency", "Frequency" },
@@ -219,7 +230,10 @@ namespace WSJTX_Controller
 
         private void SpotWatchRestoreDefaultButton_Click(object sender, EventArgs e)
         {
-            PopulateList(spotWatchListBox, SpotWatchDefaultFields, SpotWatchFieldLabels, new List<string>(SpotWatchDefaultFields),
+            // Fix, 2026-09-14: restore to the curated DEFAULT ORDER (subset), not the full field
+            // universe -- see SpotWatchDefaultOrder's own comment. Matches CallWaiting/RawDecode's
+            // own Restore Default handlers above.
+            PopulateList(spotWatchListBox, SpotWatchDefaultFields, SpotWatchFieldLabels, new List<string>(SpotWatchDefaultOrder),
                 spotWatchMoveUpButton, spotWatchMoveDownButton);
         }
 

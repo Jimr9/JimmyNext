@@ -447,6 +447,12 @@ namespace WSJTX_Controller
         // later (e.g. a momentary CAT hiccup).
         private bool _directStartupBandResolved;
 
+        // Fix, 2026-09-14: has the last-confirmed TX tone level been restored at least once this
+        // connection? Gates the unconditional startup restore below -- must fire at most once per
+        // connect, same "one-shot" shape as _directStartupBandResolved. Reset per connection in
+        // ConnectDirectEngine.
+        private bool _startupTxLevelRestored;
+
         // 2.0.58: the prior-session dial/band/tier to restore on startup, snapshotted on the
         // FIRST authenticated poll of this connection -- BEFORE DirectApplyStatus's own "persist
         // confirmed snapshot" block overwrites ctrl.Radio.LastDialFrequencyHz/LastBandIdx/
@@ -733,6 +739,7 @@ namespace WSJTX_Controller
             _directLastSlotSeen = 0;
             _directFirstStatusShown = false;
             _directStartupBandResolved = false;
+            _startupTxLevelRestored = false;
             _startupRestoreCaptured = false;
             _startupRestoreDialHz = 0;
             _startupRestoreBandIdx = -1;
@@ -1425,6 +1432,29 @@ namespace WSJTX_Controller
             // sending a second SetFrequency -- see RigctldClient's own new [RIG-CMD] logging for
             // that), but it is a real correctness bug on its own and worth fixing regardless.
             _pendingBandIdx = null;
+
+            // Fix, 2026-09-14: restore the last CONFIRMED TX tone level once at startup,
+            // unconditionally -- same "always force it, no setting" policy the dial/tier restore
+            // below already uses. The engine's own fresh-process default is 0.8 (tempo-audio's own
+            // Settings::default, upstream, not configurable from here) -- without this, an
+            // operator who never turned on "Remember Tx Level Per Band" got silently reset to 80%
+            // on every restart. Independent of CAT health (tx_level is a pure engine-side gain,
+            // never a rig/CAT command) -- only waits for an idle moment, same as the retune below,
+            // so this never nudges TX drive mid-transmission. LastTxLevel < 0 means never
+            // confirmed yet (fresh install/profile) -- leaves the engine's own default alone
+            // rather than guessing. Positioned before the per-band restore just below: that one
+            // only fires on a genuine CONFIRMED band CHANGE (newBand requires lastDialFrequency to
+            // already be non-null and differ from the new reading -- ConnectDirectEngine resets it
+            // to null on every connect, so newBand can never be true on a connection's very first
+            // poll). Ordering them this way means if a band change ever DOES land on the same poll
+            // as this one-shot restore, the opt-in per-band value still wins by being the later
+            // write, never overwritten by this general fallback.
+            if (!_startupTxLevelRestored && !radio.Transmitting && !radio.Tuning)
+            {
+                _startupTxLevelRestored = true;
+                if (ctrl.Radio.LastTxLevel >= 0.0)
+                    DirectSetEngineTxLevel(ctrl.Radio.LastTxLevel);
+            }
 
             // Options > Radio "Remember F11/F12 audio level per band" -- only on a genuine
             // confirmed band change (newBand, set just above), not every poll tick. See
@@ -3032,15 +3062,20 @@ namespace WSJTX_Controller
                     // this instant (its refresh is gated on !_txLevelChangeInFlight) can't briefly
                     // overwrite the just-confirmed value with a pre-change snapshot.
                     _engineTxLevel = next;
+                    // Fix, 2026-09-14: unconditional last-used level, independent of the opt-in
+                    // per-band memory below -- see RadioSettings.LastTxLevel's own comment for why
+                    // (the engine's own fresh-process default is 80%, and per-band memory alone
+                    // does nothing when it's off or the current band has no saved entry yet).
+                    ctrl.Radio.LastTxLevel = next;
                     if (ShouldRememberTxLevelForBand(ctrl.Radio.RememberTxLevelPerBand, bandIdx, out int bandKey))
-                    {
                         ctrl.Radio.TxLevelByBand[bandKey] = next;
-                        // Item 2 (2026-09-10): also commit this confirmed level to the active
-                        // profile on disk, debounced (~750 ms) so a burst of F11/F12 presses is
-                        // one write -- it no longer waits for the next clean shutdown, so a
-                        // forced close or an upgrade in between keeps the adjustment.
-                        ctrl.NoteTxLevelPerBandConfirmed();
-                    }
+                    // Item 2 (2026-09-10): also commit this confirmed level to the active profile
+                    // on disk, debounced (~750 ms) so a burst of F11/F12 presses is one write -- it
+                    // no longer waits for the next clean shutdown, so a forced close or an upgrade
+                    // in between keeps the adjustment. Now unconditional (2026-09-14) so
+                    // LastTxLevel above gets the same forced-exit resilience even when per-band
+                    // memory is off.
+                    ctrl.NoteTxLevelPerBandConfirmed();
                 }
                 _txLevelChangeInFlight = false;
                 onDone?.Invoke(ok, next);

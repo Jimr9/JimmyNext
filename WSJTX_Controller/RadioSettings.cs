@@ -132,6 +132,20 @@ namespace WSJTX_Controller
         // engine on its own FT8 default rather than guessing.
         public string LastTier { get; set; } = "";
 
+        // Fix, 2026-09-14: the FT8/FT4 transmit tone level (Engine::tx_level, F11/F12 and the
+        // Options > Radio spinner) had NO general "remember my last level" of its own -- only the
+        // opt-in, per-band TxLevelByBand map below, which does nothing at all when
+        // RememberTxLevelPerBand is off (its default) or the current band has no saved entry yet.
+        // The engine's own fresh-process default is 0.8 (tempo-audio's Settings::default,
+        // upstream, not configurable from here), so any operator who never turned on per-band
+        // memory got silently reset to 80% on every restart. -1 = never confirmed yet (first
+        // run) -- same "no fallback data" contract as LastDialFrequencyHz's 0 / LastTier's "".
+        // Restored UNCONDITIONALLY once at startup, same "always force it, no setting" policy
+        // LastDialFrequencyHz/LastTier already use (see DirectApplyStatus's own startup-restore
+        // block) -- the opt-in per-band restore still runs afterward and wins on a real band
+        // match, exactly as before.
+        public double LastTxLevel { get; set; } = -1;
+
         // Requested 2026-08-11: F11/F12 (AudioLevel(), WsjtxClient.BandAudio.cs) always applied
         // one carried-over level across every band. Opt-in (default off, matches current
         // behavior exactly when unchecked) -- when on, WsjtxClient.Direct.cs's own band-change
@@ -187,6 +201,9 @@ namespace WSJTX_Controller
                 LastDialFrequencyHz = lastDial;
             if (ini.Read("radioLastTier") is string lastTier && (lastTier == "FT8" || lastTier == "FT4"))
                 LastTier = lastTier;
+            if (double.TryParse(ini.Read("radioLastTxLevel"), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double lastTxLevel) && lastTxLevel >= 0.0 && lastTxLevel <= 1.0)
+                LastTxLevel = lastTxLevel;
             RememberTxLevelPerBand = ini.Read("radioRememberTxLevelPerBand") == "True";
             ExplainMeterReadings = ini.Read("radioExplainMeterReadings") == "True";
             TxLevelByBand.Clear();
@@ -227,9 +244,21 @@ namespace WSJTX_Controller
             if (LastDialFrequencyHz > 0)
                 ini.Write("radioLastDialFrequencyHz", LastDialFrequencyHz.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (!string.IsNullOrEmpty(LastTier)) ini.Write("radioLastTier", LastTier);
+            SaveLastTxLevelToIni(ini);
             ini.Write("radioRememberTxLevelPerBand", RememberTxLevelPerBand.ToString());
             ini.Write("radioExplainMeterReadings", ExplainMeterReadings.ToString());
             SaveTxLevelByBandToIni(ini);
+        }
+
+        // Just the unconditional last-confirmed TX level, as its own INI key -- same split-out
+        // reasoning as SaveTxLevelByBandToIni below: DirectSetEngineTxLevel's confirmation
+        // callback (WsjtxClient.Direct.cs) can commit this the instant a SET_TX_LEVEL is
+        // confirmed, without rewriting every other radio setting on each F11/F12 press or Options
+        // spinner nudge.
+        internal void SaveLastTxLevelToIni(IniFile ini)
+        {
+            if (LastTxLevel >= 0.0)
+                ini.Write("radioLastTxLevel", LastTxLevel.ToString(System.Globalization.CultureInfo.InvariantCulture));
         }
 
         // Just the per-band F11/F12 level map, as its own INI key. Split out (2026-09-10) so the

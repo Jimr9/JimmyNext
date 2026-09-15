@@ -159,11 +159,21 @@ namespace WSJTX_Controller
         // itself per a third-party audit -- its own accessible name already says what it does).
         public bool announceImportantAlertsWhenFocusElsewhere = false;
 
-        // Sound settings: enabled flags and file paths for each sound event
-        // CallAdded/CallingMe/Logged enabled state is controlled by existing checkboxes
+        // Sound settings: enabled flags and file paths for each sound event.
+        // Fix, 2026-09-14: CallAdded/CallingMe/Logged used to have their enabled state carried by
+        // three real (now Visible=false, vestigial) main-form CheckBox controls left over from
+        // before Options had a Sounds tab at all -- checking one of those boxes WAS the "play a
+        // confirmation chime" action, via its own CheckedChanged handler. Reusing them as inert
+        // enabled-flag storage meant assigning .Checked from the Sounds tab's Save path (OK
+        // button) could still trigger that old handler and play the sound as a pure side effect,
+        // unrelated to the Sounds tab's own Test button. These three plain bools now match the
+        // other ten events' own shape exactly -- no reused UI control, no side effect possible.
         public bool   soundsEnabled         = true;
+        public bool   soundEnabled_CallAdded = true;
         public string soundFile_CallAdded   = "blip.wav";
+        public bool   soundEnabled_CallingMe = true;
         public string soundFile_CallingMe   = "trumpet.wav";
+        public bool   soundEnabled_Logged    = true;
         public string soundFile_Logged      = "echo.wav";
         public bool   soundEnabled_TxEnabled     = true;
         public string soundFile_TxEnabled        = "beepbeep.wav";
@@ -562,8 +572,12 @@ namespace WSJTX_Controller
                         RowDisplayOrderDlg.CallWaitingDefaultFields);
                     parsedRawDecodeRowOrder = ParseRowOrder(iniFile.Read("rawDecodeRowOrder"),
                         RowDisplayOrderDlg.RawDecodeDefaultFields);
+                    // Fix, 2026-09-14: missing-key fallback now matches the curated
+                    // SpotWatchDefaultOrder (same fallback the Restore Default button uses), not
+                    // the full field universe -- see RowDisplayOrderDlg.SpotWatchDefaultOrder's
+                    // own comment. The whitelist passed to ParseRowOrder stays the full universe.
                     spotWatchRowOrderFields = ParseRowOrder(iniFile.Read("spotWatchRowOrder"),
-                        RowDisplayOrderDlg.SpotWatchDefaultFields) ?? new List<string>(RowDisplayOrderDlg.SpotWatchDefaultFields);
+                        RowDisplayOrderDlg.SpotWatchDefaultFields) ?? new List<string>(RowDisplayOrderDlg.SpotWatchDefaultOrder);
                     if (iniFile.KeyExists("spotWatchSortKey"))
                         spotWatchSortKey = iniFile.Read("spotWatchSortKey");
                 }
@@ -625,8 +639,8 @@ namespace WSJTX_Controller
                     timeoutNumUpDown.Value = Math.Max(minSkipCount, Math.Min(maxSkipCount, Properties.Settings.Default.timeout));
                     directedTextBox.Text = Properties.Settings.Default.directeds;
                     callDirCqCheckBox.Checked = Properties.Settings.Default.useDirected;
-                    mycallCheckBox.Checked = Properties.Settings.Default.playMyCall;
-                    loggedCheckBox.Checked = Properties.Settings.Default.playLogged;
+                    soundEnabled_CallingMe = Properties.Settings.Default.playMyCall;
+                    soundEnabled_Logged = Properties.Settings.Default.playLogged;
                     alertTextBox.Text = Properties.Settings.Default.alertDirecteds;
                     replyDirCqCheckBox.Checked = Properties.Settings.Default.useAlertDirected;
                     logEarlyCheckBox.Checked = Properties.Settings.Default.logEarly;
@@ -634,7 +648,7 @@ namespace WSJTX_Controller
                     useRR73 = Properties.Settings.Default.useRR73;
                     skipGridCheckBox.Checked = Properties.Settings.Default.skipGrid;
                     diagLog = Properties.Settings.Default.diagLog;
-                    callAddedCheckBox.Checked = Properties.Settings.Default.playCallAdded;
+                    soundEnabled_CallAdded = Properties.Settings.Default.playCallAdded;
                     replyLocalCheckBox.Checked = Properties.Settings.Default.enableReplyLocal;
                     replyDxCheckBox.Checked = Properties.Settings.Default.enableReplyDx;
                     freqCheckBox.Checked = Properties.Settings.Default.bestOffset;
@@ -724,9 +738,9 @@ namespace WSJTX_Controller
                 directedTextBox.Text = iniFile.Read("directeds");
                 callDirCqCheckBox.Checked = iniFile.Read("useDirected") == "True";
                 if (iniFile.KeyExists("directedCqLockedEntry")) directedCqLockedEntry = iniFile.Read("directedCqLockedEntry");
-                mycallCheckBox.Checked = iniFile.Read("playMyCall") != "False";
-                loggedCheckBox.Checked = iniFile.Read("playLogged") != "False";
-                callAddedCheckBox.Checked = iniFile.Read("playCallAdded") != "False";
+                soundEnabled_CallingMe = iniFile.Read("playMyCall") != "False";
+                soundEnabled_Logged = iniFile.Read("playLogged") != "False";
+                soundEnabled_CallAdded = iniFile.Read("playCallAdded") != "False";
                 alertTextBox.Text = iniFile.Read("alertDirecteds");
                 replyDirCqCheckBox.Checked = iniFile.Read("useAlertDirected") == "True";
                 logEarlyCheckBox.Checked = iniFile.Read("logEarly") == "True";
@@ -1526,9 +1540,9 @@ namespace WSJTX_Controller
                 iniFile.Write("directedCqLockedEntry", directedCqLockedEntry ?? "");
                 if (directedTextBox.Text == separateBySpaces) directedTextBox.Clear();
                 iniFile.Write("directeds", directedTextBox.Text.Trim());
-                iniFile.Write("playMyCall", mycallCheckBox.Checked.ToString());
-                iniFile.Write("playLogged", loggedCheckBox.Checked.ToString());
-                iniFile.Write("playCallAdded", callAddedCheckBox.Checked.ToString());
+                iniFile.Write("playMyCall", soundEnabled_CallingMe.ToString());
+                iniFile.Write("playLogged", soundEnabled_Logged.ToString());
+                iniFile.Write("playCallAdded", soundEnabled_CallAdded.ToString());
                 iniFile.Write("useAlertDirected", replyDirCqCheckBox.Checked.ToString());
                 if (alertTextBox.Text == separateBySpaces) alertTextBox.Clear();
                 iniFile.Write("alertDirecteds", alertTextBox.Text.Trim());
@@ -2169,6 +2183,12 @@ namespace WSJTX_Controller
             string norm = WsjtxClient.NormalizeContinent(code);
             if (wsjtxClient != null) wsjtxClient.myContinent = norm;
             if (iniFile != null) iniFile.Write("myContinent", norm ?? "");
+            // Fix, 2026-09-14: keep the on-screen (and screen-reader-announced) checkbox label in
+            // sync the instant the operator changes continent in Options -- previously only
+            // Form_Load ever set this text (see its own "replyLocalCheckBox.Text = myContinent"
+            // line), so changing continent here left the OLD code showing/announced until the
+            // next restart. "loc" matches the control's own designer default (unset continent).
+            replyLocalCheckBox.Text = norm ?? "loc";
         }
 
         // Item 1/2 (2026-09-03): persist the global routine-status speech-timing choice the
@@ -2193,9 +2213,12 @@ namespace WSJTX_Controller
         }
 
         // Item 2 (2026-09-10): called on the UI thread from DirectSetEngineTxLevel's confirmed
-        // callback, after Radio.TxLevelByBand has already been updated in memory. Debounces the
-        // disk write -- each confirmed adjustment restarts the timer, so a run of rapid F11/F12
-        // presses settles to a single profile write of the final confirmed value.
+        // callback, after Radio.LastTxLevel (and, when per-band memory is on, Radio.TxLevelByBand)
+        // has already been updated in memory. Debounces the disk write -- each confirmed
+        // adjustment restarts the timer, so a run of rapid F11/F12 presses settles to a single
+        // profile write of the final confirmed value. Despite the name, this now also covers the
+        // unconditional LastTxLevel (2026-09-14) -- kept as one debounce/flush path rather than a
+        // second timer for a value that's confirmed at the exact same moment.
         internal void NoteTxLevelPerBandConfirmed()
         {
             if (iniFile == null || _txLevelPersistTimer == null) return;
@@ -2215,15 +2238,17 @@ namespace WSJTX_Controller
         // Form_Load. Not used in production -- Form_Load resolves iniFile to the active profile.
         internal void SetIniFileForTest(IniFile ini) => iniFile = ini;
 
-        // Writes ONLY the per-band F11/F12 level map, to the ACTIVE profile's ini -- iniFile is
-        // already resolved to that profile at startup (ResolveActiveIniPath), so this never
-        // writes into the default profile while a named profile is active. The map holds only
-        // engine-CONFIRMED values, so there is nothing unconfirmed to persist here.
+        // Writes the per-band F11/F12 level map AND the unconditional LastTxLevel, to the ACTIVE
+        // profile's ini -- iniFile is already resolved to that profile at startup
+        // (ResolveActiveIniPath), so this never writes into the default profile while a named
+        // profile is active. Both hold only engine-CONFIRMED values, so there is nothing
+        // unconfirmed to persist here.
         internal void PersistTxLevelPerBandNow()
         {
             try
             {
                 if (iniFile == null) return;
+                Radio.SaveLastTxLevelToIni(iniFile);
                 Radio.SaveTxLevelByBandToIni(iniFile);
             }
             catch { }
@@ -2253,6 +2278,146 @@ namespace WSJTX_Controller
             Frequencies.SaveToIni(iniFile);
             Notifications.SaveToIni(iniFile);
             NativeEngine.SaveToIni(iniFile);
+
+            // Fix, 2026-09-14: this method's own header comment already claimed to extend
+            // "commit to disk now" to "every other Options-governed settings object," but it only
+            // ever covered the six SaveToIni calls above -- everything a Save*Tab() method in
+            // OptionsDlg sets directly on Controller fields (Lookup/Logging, the Advanced/Raw
+            // Decode display flags, Wanted Calls' "anywhere" toggle, Spot Watch's sort key, every
+            // Sound tab setting, and General's queue-size/always-on-top) was applied live but only
+            // ever reached DISK on a clean Controller_FormClosing or a Profile save -- a crash,
+            // power loss, or forced kill in between silently reverted it. Mirrors the exact
+            // iniFile.Write calls SaveAllSettingsToIniFile already makes for these same fields --
+            // duplicated rather than extracted into a shared helper, so this fix touches nothing
+            // in that existing, already-working clean-shutdown path.
+            SaveAdvancedDisplaySettings();
+            SaveWantedCallsAndSpotWatchOptionsSettings();
+            SaveGeneralQueueSettings();
+            SaveSoundSettings();
+            SaveLookupSettings();
+        }
+
+        private void SaveAdvancedDisplaySettings()
+        {
+            iniFile.Write("rawShowCq", rawShowCq.ToString());
+            iniFile.Write("rawShowDirected", rawShowDirected.ToString());
+            iniFile.Write("rawShowReports", rawShowReports.ToString());
+            iniFile.Write("rawShowRR73", rawShowRR73.ToString());
+            iniFile.Write("rawShow73", rawShow73.ToString());
+            iniFile.Write("rawShowPota", rawShowPota.ToString());
+            iniFile.Write("rawShowSota", rawShowSota.ToString());
+            iniFile.Write("rawShowDx", rawShowDx.ToString());
+            iniFile.Write("rawShowSnr", rawShowSnr.ToString());
+            iniFile.Write("rawShowGrid", rawShowGrid.ToString());
+            iniFile.Write("rawShowCountry", rawShowCountry.ToString());
+            iniFile.Write("rawShowDistAz", rawShowDistAz.ToString());
+            iniFile.Write("rawOnlyCallsigns", rawOnlyCallsigns.ToString());
+            iniFile.Write("rawOnlyUnworked", rawOnlyUnworked.ToString());
+            iniFile.Write("rawOnlyRanked", rawOnlyRanked.ToString());
+            iniFile.Write("rawPriorityTags", rawPriorityTags.ToString());
+            iniFile.Write("rawNewestFirst", rawNewestFirst.ToString());
+            iniFile.Write("rawMaxRows", rawMaxRows.ToString());
+            iniFile.Write("keepTransmitListDuringTx", keepTransmitListDuringTx.ToString());
+            iniFile.Write("keepListPositionDuringRefresh", keepListPositionDuringRefresh.ToString());
+        }
+
+        private void SaveWantedCallsAndSpotWatchOptionsSettings()
+        {
+            iniFile.Write("wantedCallAnywhereEnabled", wantedCallAnywhereEnabled.ToString());
+            iniFile.Write("spotWatchSortKey", spotWatchSortKey);
+        }
+
+        private void SaveGeneralQueueSettings()
+        {
+            iniFile.Write("maxQueuedCalls", maxQueuedCallsBase.ToString());
+            iniFile.Write("maxCallQueueAgePeriods", maxCallQueueAgePeriods.ToString());
+            iniFile.Write("alwaysOnTop", alwaysOnTop.ToString());
+        }
+
+        private void SaveSoundSettings()
+        {
+            // playMyCall/playLogged/playCallAdded are the pre-existing ini key names for these
+            // three events' enabled flags (predating the Sounds tab's soundEnabled_* naming
+            // scheme) -- kept as-is for backward compatibility with every existing install's ini.
+            iniFile.Write("playCallAdded",              soundEnabled_CallAdded.ToString());
+            iniFile.Write("playMyCall",                 soundEnabled_CallingMe.ToString());
+            iniFile.Write("playLogged",                 soundEnabled_Logged.ToString());
+            iniFile.Write("soundFile_CallAdded",        soundFile_CallAdded   ?? "");
+            iniFile.Write("soundFile_CallingMe",        soundFile_CallingMe   ?? "");
+            iniFile.Write("soundFile_Logged",           soundFile_Logged      ?? "");
+            iniFile.Write("soundEnabled_TxEnabled",     soundEnabled_TxEnabled.ToString());
+            iniFile.Write("soundFile_TxEnabled",        soundFile_TxEnabled   ?? "");
+            iniFile.Write("soundEnabled_Disconnected",  soundEnabled_Disconnected.ToString());
+            iniFile.Write("soundFile_Disconnected",     soundFile_Disconnected ?? "");
+            iniFile.Write("soundEnabled_NewDxcc",       soundEnabled_NewDxcc.ToString());
+            iniFile.Write("soundFile_NewDxcc",          soundFile_NewDxcc      ?? "");
+            iniFile.Write("soundEnabled_NewDxccOnBand", soundEnabled_NewDxccOnBand.ToString());
+            iniFile.Write("soundFile_NewDxccOnBand",    soundFile_NewDxccOnBand ?? "");
+            iniFile.Write("soundEnabled_AlwaysWanted",  soundEnabled_AlwaysWanted.ToString());
+            iniFile.Write("soundFile_AlwaysWanted",     soundFile_AlwaysWanted  ?? "");
+            iniFile.Write("soundEnabled_DirectedCq",    soundEnabled_DirectedCq.ToString());
+            iniFile.Write("soundFile_DirectedCq",       soundFile_DirectedCq    ?? "");
+            iniFile.Write("soundEnabled_Pota",          soundEnabled_Pota.ToString());
+            iniFile.Write("soundFile_Pota",             soundFile_Pota          ?? "");
+            iniFile.Write("soundEnabled_Sota",           soundEnabled_Sota.ToString());
+            iniFile.Write("soundFile_Sota",              soundFile_Sota              ?? "");
+            iniFile.Write("soundEnabled_WantedAnywhere", soundEnabled_WantedAnywhere.ToString());
+            iniFile.Write("soundFile_WantedAnywhere",    soundFile_WantedAnywhere    ?? "");
+            iniFile.Write("soundEnabled_OppositePeriod", soundEnabled_OppositePeriod.ToString());
+            iniFile.Write("soundFile_OppositePeriod",    soundFile_OppositePeriod    ?? "");
+            iniFile.Write("soundEnabled_AwardNeeded",    soundEnabled_AwardNeeded.ToString());
+            iniFile.Write("soundFile_AwardNeeded",       soundFile_AwardNeeded       ?? "");
+            iniFile.Write("soundsEnabled",               soundsEnabled.ToString());
+        }
+
+        private void SaveLookupSettings()
+        {
+            iniFile.Write("useLookupData",           useLookupData.ToString());
+            iniFile.Write("qrzEnabled",              qrzEnabled.ToString());
+            iniFile.Write("qrzUsername",             qrzUsername              ?? "");
+            iniFile.Write("qrzPassword",             CredentialProtector.Protect(qrzPassword));
+            iniFile.Write("qrzCacheDays",            qrzCacheDays.ToString());
+            iniFile.Write("qrzLookupPolicy",         ((int)qrzLookupPolicy).ToString());
+            iniFile.Write("qrzMinIntervalSeconds",   qrzMinIntervalSeconds.ToString());
+            iniFile.Write("lotwEnabled",             lotwEnabled.ToString());
+            iniFile.Write("lotwBoostEnabled",        lotwBoostEnabled.ToString());
+            iniFile.Write("lotwRefreshDays",         lotwRefreshDays.ToString());
+            iniFile.Write("clubLogRefreshDays",      clubLogRefreshDays.ToString());
+            iniFile.Write("fccUlsEnabled",           fccUlsEnabled.ToString());
+            iniFile.Write("fccUlsRefreshDays",       fccUlsRefreshDays.ToString());
+            iniFile.Write("qrzLogbookApiKey",        CredentialProtector.Protect(qrzLogbookApiKey));
+            iniFile.Write("lotwLogbookUser",         lotwLogbookUser          ?? "");
+            iniFile.Write("lotwLogbookPass",         CredentialProtector.Protect(lotwLogbookPass));
+            iniFile.Write("qrzUploadEnabled",        qrzUploadEnabled.ToString());
+            iniFile.Write("qrzUploadRealtime",       qrzUploadRealtime.ToString());
+            iniFile.Write("lotwUploadEnabled",        lotwUploadEnabled.ToString());
+            iniFile.Write("clubLogUploadEnabled",    clubLogUploadEnabled.ToString());
+            iniFile.Write("clubLogUploadRealtime",   clubLogUploadRealtime.ToString());
+            iniFile.Write("clubLogUploadEmail",      clubLogUploadEmail       ?? "");
+            iniFile.Write("clubLogUploadPassword",   CredentialProtector.Protect(clubLogUploadPassword));
+            iniFile.Write("clubLogUploadCallsign",   clubLogUploadCallsign    ?? "");
+            iniFile.Write("hrdLogUploadEnabled",     hrdLogUploadEnabled.ToString());
+            iniFile.Write("hrdLogUploadRealtime",    hrdLogUploadRealtime.ToString());
+            iniFile.Write("hrdLogUploadCode",        CredentialProtector.Protect(hrdLogUploadCode));
+            iniFile.Write("hrdLogUploadCallsign",    hrdLogUploadCallsign     ?? "");
+            iniFile.Write("eqslUploadEnabled",       eqslUploadEnabled.ToString());
+            iniFile.Write("eqslUploadRealtime",      eqslUploadRealtime.ToString());
+            iniFile.Write("eqslUsername",            eqslUsername             ?? "");
+            iniFile.Write("eqslPassword",            CredentialProtector.Protect(eqslPassword));
+            iniFile.Write("hamQthEnabled",           hamQthEnabled.ToString());
+            iniFile.Write("hamQthUsername",          hamQthUsername           ?? "");
+            iniFile.Write("hamQthPassword",          CredentialProtector.Protect(hamQthPassword));
+            iniFile.Write("hamQthCacheDays",         hamQthCacheDays.ToString());
+            iniFile.Write("callsignLookupProvider",  callsignLookupProvider.ToString());
+            iniFile.Write("dxClusterAddress",        dxClusterAddress        ?? "");
+            iniFile.Write("tqslStationLocation",     tqslStationLocation      ?? "");
+            iniFile.Write("qrzLogbookAutoSyncEnabled",     qrzLogbookAutoSyncEnabled.ToString());
+            iniFile.Write("qrzLogbookRefreshDays",         qrzLogbookRefreshDays.ToString());
+            iniFile.Write("lotwLogbookAutoSyncEnabled",    lotwLogbookAutoSyncEnabled.ToString());
+            iniFile.Write("lotwLogbookRefreshDays",        lotwLogbookRefreshDays.ToString());
+            iniFile.Write("clubLogLogbookAutoSyncEnabled", clubLogLogbookAutoSyncEnabled.ToString());
+            iniFile.Write("clubLogLogbookRefreshDays",     clubLogLogbookRefreshDays.ToString());
+            iniFile.Write("activeAwardRuleIds",  FormatActiveAwardRuleIds(activeAwardRuleIds));
         }
 
         // Accessibility cleanup, 2026-08-19 (third-party audit): these used to always append the
@@ -3141,7 +3306,7 @@ namespace WSJTX_Controller
                     currentBand: () => wsjtxClient?.CurrentBandStr,
                     currentMode: () => wsjtxClient?.CurrentMode,
                     lookupCallsign: call => lookupManager?.Build(call),
-                    onQsoLogged: () => wsjtxClient?.Sounds?.PlaySoundEvent(loggedCheckBox.Checked, soundFile_Logged));
+                    onQsoLogged: () => wsjtxClient?.Sounds?.PlaySoundEvent(soundEnabled_Logged, soundFile_Logged));
                 // Deliberately no Owner assignment -- an owned window is always kept in front
                 // of its owner at the Win32 level, which made it impossible to Alt+Tab back to
                 // Jimmy's main window while the Logbook was open (found 2026-07-11: previously

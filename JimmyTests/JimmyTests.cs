@@ -511,6 +511,8 @@ static class JimmyTests
         DelayedReplyAfterOperatorAbortDoesNotResurrectStaleQsoTests();
         FailedQsoWriteDoesNotFalselyAnnounceSuccessTests();
         DirectInitialConnectAlwaysRestoresLastExactDialTests();
+        DirectStartupAlwaysRestoresLastTxLevelTests();
+        DirectStartupPerBandTxLevelOverridesGeneralRestoreTests();
         DirectStartupRetuneWaitsForHealthyCatTests();
         DirectInitialConnectResyncsTierAndPeriodTests();
         RepeatLimitStopsBeforeTheDisallowedAttemptKeysTests();
@@ -5650,6 +5652,146 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DirectInitialConnectAlwaysRestoresLastExactDialTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            engineListener.Stop();
+        }
+    }
+
+    // ── Fix, 2026-09-14: startup ALWAYS restores the last CONFIRMED TX tone level ──
+    // The engine's own fresh-process default is 0.8 (tempo-audio's own Settings::default,
+    // upstream) -- before this fix, an operator who never turned on "Remember Tx Level Per Band"
+    // (default off) got silently reset to 80% on every restart, with nothing telling them why.
+    // This proves the unconditional restore fires on a normal idle startup.
+    static void DirectStartupAlwaysRestoresLastTxLevelTests()
+    {
+        Console.WriteLine("\n── DirectInitialConnect: always restore last confirmed TX level -- THE FIX ──");
+        var lastCommand = new string[1];
+        var engineListener = new StubEngineHost(line =>
+        {
+            if (line != null && line.StartsWith("SET_TX_LEVEL")) lastCommand[0] = line;
+            return "OK";
+        });
+        if (engineListener == null)
+        {
+            Skip("DirectStartupAlwaysRestoresLastTxLevelTests", "engine control port already in use on this machine");
+            return;
+        }
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            // Prior session: confirmed at 65% -- persisted, exactly as DirectSetEngineTxLevel's
+            // own confirmation callback would have left it. RememberTxLevelPerBand stays at its
+            // default (off), and no per-band entry exists -- this is the operator this fix targets.
+            ctrl.Radio.LastTxLevel = 0.65;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            var snap = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 21.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 }
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap);
+            PumpUntil(() => lastCommand[0] != null, timeoutMs: 8000);
+            CheckStr("Startup sent SET_TX_LEVEL restoring the last confirmed 0.65 -- THE FIX",
+                lastCommand[0], "SET_TX_LEVEL 0.65");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectStartupAlwaysRestoresLastTxLevelTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            engineListener.Stop();
+        }
+    }
+
+    // ── Fix, 2026-09-14: opt-in per-band TX level still wins over the general restore ──
+    // RestoreTxLevelForBand only fires on a genuine CONFIRMED band CHANGE (newBand -- gated on
+    // lastDialFrequency already being non-null and differing from the new one), never on a
+    // connection's very first poll (lastDialFrequency starts null every connection --
+    // ConnectDirectEngine's own reset). So the general LastTxLevel restore (this connection's
+    // first poll) and the per-band restore (a LATER poll, once a real band change is confirmed)
+    // never race within one poll -- they simply happen in that order, and the per-band one must
+    // still be the value actually left in effect once both have run.
+    static void DirectStartupPerBandTxLevelOverridesGeneralRestoreTests()
+    {
+        Console.WriteLine("\n── DirectInitialConnect: per-band TX level restore still wins over the general restore ──");
+        var commands = new List<string>();
+        var engineListener = new StubEngineHost(line =>
+        {
+            if (line != null && line.StartsWith("SET_TX_LEVEL")) lock (commands) commands.Add(line);
+            return "OK";
+        });
+        if (engineListener == null)
+        {
+            Skip("DirectStartupPerBandTxLevelOverridesGeneralRestoreTests", "engine control port already in use on this machine");
+            return;
+        }
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            // General (stale) last-used level, PLUS a per-band memory entry for 15m/index 7 (same
+            // 21.074 MHz mapping DirectInitialConnectAlwaysRestoresLastExactDialTests already
+            // established). The per-band value must be what's actually left in effect once the
+            // operator's rig moves from 20m (the connection's first snapshot) to 15m.
+            ctrl.Radio.LastTxLevel = 0.5;
+            ctrl.Radio.RememberTxLevelPerBand = true;
+            ctrl.Radio.TxLevelByBand[7] = 0.8;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // First snapshot: 20m (index 5) -- the connection's first poll. The general restore
+            // (0.5) fires here; no per-band entry exists for band 5, so nothing else does.
+            var snap1 = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 }
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap1);
+            PumpUntil(() => { lock (commands) return commands.Count >= 1; }, timeoutMs: 8000);
+
+            // Second snapshot: a genuine confirmed band change to 15m (index 7) -- THIS is what
+            // actually triggers RestoreTxLevelForBand, restoring the per-band 0.8.
+            var snap2 = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 21.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3001 }
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap2);
+            PumpUntil(() => { lock (commands) return commands.Count >= 2; }, timeoutMs: 8000);
+
+            List<string> seen;
+            lock (commands) seen = new List<string>(commands);
+            Check("Both the general and the per-band SET_TX_LEVEL were sent",
+                seen.Count == 2, true);
+            if (seen.Count == 2)
+            {
+                CheckStr("...the general restore (0.5) is sent FIRST, on the connection's first poll", seen[0], "SET_TX_LEVEL 0.5");
+                CheckStr("...the per-band restore (0.8) is sent SECOND, on the confirmed band change, so it wins", seen[1], "SET_TX_LEVEL 0.8");
+            }
+            // The general LastTxLevel bookkeeping itself must end up tracking the value actually
+            // left in effect (0.8), not the stale general value it started from -- otherwise the
+            // NEXT restart's general restore would reapply the wrong number until the operator
+            // changed bands again.
+            PumpUntil(() => Math.Abs(ctrl.Radio.LastTxLevel - 0.8) < 1e-9, timeoutMs: 2000);
+            Check("ctrl.Radio.LastTxLevel converges to the winning per-band value (0.8)",
+                Math.Abs(ctrl.Radio.LastTxLevel - 0.8) < 1e-9, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectStartupPerBandTxLevelOverridesGeneralRestoreTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
         finally
@@ -18765,12 +18907,19 @@ static class JimmyTests
             Check($"raw-decode default field '{f}' is in the field universe",
                 RowDisplayOrderDlg.RawDecodeDefaultFields.Contains(f, StringComparer.OrdinalIgnoreCase), true);
 
-        // SpotWatch already uses one array for both fallback and reset -- assert it still matches
-        // the approved spec so a future edit can't split them apart.
+        // Fix, 2026-09-14: SpotWatch now has its own curated SpotWatchDefaultOrder (fallback +
+        // Restore Default), separate from the full-universe SpotWatchDefaultFields -- matching
+        // CallWaiting/RawDecode's own shape. Assert both against the approved spec.
         var approvedSpotWatch = new[] { "callsign", "age", "band", "frequency", "mode", "evenOdd", "snr",
             "senderGrid", "country", "spottercall", "spottercountry", "spottergrid" };
         Check("RowDisplayOrderDlg.SpotWatchDefaultFields == approved value",
             RowDisplayOrderDlg.SpotWatchDefaultFields.SequenceEqual(approvedSpotWatch), true);
+        var approvedSpotWatchOrder = new[] { "callsign", "age", "band", "frequency", "mode", "snr", "country" };
+        Check("RowDisplayOrderDlg.SpotWatchDefaultOrder == approved value",
+            RowDisplayOrderDlg.SpotWatchDefaultOrder.SequenceEqual(approvedSpotWatchOrder), true);
+        foreach (var f in RowDisplayOrderDlg.SpotWatchDefaultOrder)
+            Check($"spot-watch default field '{f}' is in the field universe",
+                RowDisplayOrderDlg.SpotWatchDefaultFields.Contains(f, StringComparer.OrdinalIgnoreCase), true);
 
         // If the master defaults file is present on this machine, cross-check the row-order keys
         // against it too. Skipped (not failed) elsewhere -- it lives outside the repo.
@@ -18783,14 +18932,25 @@ static class JimmyTests
                 Val("callWaitingRowOrder"), string.Join(",", RowDisplayOrderDlg.CallWaitingDefaultOrder));
             CheckStr("master file rawDecodeRowOrder matches the approved default order",
                 Val("rawDecodeRowOrder"), string.Join(",", RowDisplayOrderDlg.RawDecodeDefaultOrder));
-            CheckStr("master file spotWatchRowOrder matches the approved default order",
+            // 2026-09-14 operator decision: the shipped master file deliberately keeps
+            // spotWatchRowOrder at the FULL field list (today's existing behavior for anyone
+            // already using it), independent of the new curated SpotWatchDefaultOrder above --
+            // that curated set only governs a fresh install with no key at all, and the Restore
+            // Default button. So this asserts against SpotWatchDefaultFields, not
+            // SpotWatchDefaultOrder -- not a drift bug if the two differ.
+            CheckStr("master file spotWatchRowOrder is the full field list (deliberate)",
                 Val("spotWatchRowOrder"), string.Join(",", RowDisplayOrderDlg.SpotWatchDefaultFields));
             CheckStr("master file notificationHistoryIncludeRoutineStatus default is True",
                 Val("notificationHistoryIncludeRoutineStatus"), "True");
             CheckStr("master file RadioCatRecovered template is the reworded 'restored' text",
                 Val("notifyTemplate_RadioCatRecovered"), "Radio CAT link restored.");
+            // Fix, 2026-09-14: this assertion was stale -- RadioCatLost's own NotificationPolicy
+            // comment names CAT loss by name as a canonical Critical-priority event (bypasses
+            // timing/QSO gating, always forces the off-focus screen-reader announcement), and its
+            // sibling ConnectionLost is also Critical. The master file's "Critical" was correct;
+            // this test's old "Important" expectation was the actual drift.
             CheckStr("master file has the RadioCatLost notification priority",
-                Val("notifyPriority_RadioCatLost"), "Important");
+                Val("notifyPriority_RadioCatLost"), "Critical");
         }
         else
         {
@@ -19331,6 +19491,65 @@ static class JimmyTests
                 WsjtxClient.ShouldRememberTxLevelForBand(false, 5, out _), false);
             Check("ShouldRememberTxLevelForBand: on + known band -> remembered under that band key",
                 WsjtxClient.ShouldRememberTxLevelForBand(true, 7, out int key7) && key7 == 7, true);
+
+            // 8. Fix, 2026-09-14: LastTxLevel (the general, unconditional "remember my last TX
+            //    level" fallback) round-trips through SaveLastTxLevelToIni/LoadFromIni the same
+            //    way the per-band map does above, and a partial write leaves other keys untouched.
+            var r2 = new RadioSettings { LastTxLevel = 0.72 };
+            var ltlFull = new IniFile(tmpIni + ".ltlfull");
+            r2.SaveToIni(ltlFull);
+            var ltlPartial = new IniFile(tmpIni + ".ltlpartial");
+            r2.SaveLastTxLevelToIni(ltlPartial);
+            CheckStr("SaveLastTxLevelToIni writes the same string as the full SaveToIni",
+                ltlPartial.Read("radioLastTxLevel"), ltlFull.Read("radioLastTxLevel"));
+            var r2b = new RadioSettings();
+            r2b.LoadFromIni(ltlPartial);
+            Check("LastTxLevel round-trips: 0.72", Math.Abs(r2b.LastTxLevel - 0.72) < 1e-9, true);
+
+            // 9. A fresh RadioSettings defaults to -1 ("never confirmed"), an out-of-range or
+            //    garbage ini value is rejected (keeps -1), and -1 is never written to disk (a
+            //    fresh install/profile has nothing to restore, so it must leave the engine's own
+            //    default alone rather than writing a bogus "restore -1" instruction).
+            Check("RadioSettings.LastTxLevel defaults to -1 (never confirmed)",
+                new RadioSettings().LastTxLevel == -1, true);
+            var garbageIni = new IniFile(tmpIni + ".garbage");
+            garbageIni.Write("radioLastTxLevel", "not-a-number");
+            var afterGarbage = new RadioSettings();
+            afterGarbage.LoadFromIni(garbageIni);
+            Check("Garbage radioLastTxLevel is rejected, stays at -1", afterGarbage.LastTxLevel == -1, true);
+            var outOfRangeIni = new IniFile(tmpIni + ".outofrange");
+            outOfRangeIni.Write("radioLastTxLevel", "1.5");
+            var afterOutOfRange = new RadioSettings();
+            afterOutOfRange.LoadFromIni(outOfRangeIni);
+            Check("Out-of-range (>1.0) radioLastTxLevel is rejected, stays at -1", afterOutOfRange.LastTxLevel == -1, true);
+            var neverConfirmedIni = new IniFile(tmpIni + ".neverconfirmed");
+            new RadioSettings().SaveToIni(neverConfirmedIni);
+            Check("A never-confirmed LastTxLevel (-1) is never written to disk",
+                !neverConfirmedIni.KeyExists("radioLastTxLevel"), true);
+
+            // 10. Controller.PersistTxLevelPerBandNow (the debounced flush target, item 2) now
+            //     also commits LastTxLevel, not just the per-band map -- both are confirmed at the
+            //     same DirectSetEngineTxLevel callback moment, so both must reach disk together.
+            var ctrl2 = new Controller();
+            var seamIni2 = new IniFile(tmpIni + ".seam2");
+            ctrl2.SetIniFileForTest(seamIni2);
+            ctrl2.Radio.LastTxLevel = 0.55;
+            ctrl2.PersistTxLevelPerBandNow();
+            var reloaded2 = new RadioSettings();
+            reloaded2.LoadFromIni(new IniFile(tmpIni + ".seam2"));
+            Check("PersistTxLevelPerBandNow also committed LastTxLevel == 0.55",
+                Math.Abs(reloaded2.LastTxLevel - 0.55) < 1e-9, true);
+
+            // 11. The same debounce/flush path used for the per-band map (test 4 above) settles
+            //     LastTxLevel to only its final confirmed value too.
+            ctrl2.Radio.LastTxLevel = 0.60; ctrl2.NoteTxLevelPerBandConfirmed();
+            ctrl2.Radio.LastTxLevel = 0.62; ctrl2.NoteTxLevelPerBandConfirmed();
+            ctrl2.Radio.LastTxLevel = 0.64; ctrl2.NoteTxLevelPerBandConfirmed();
+            ctrl2.FlushPendingTxLevelPersist();
+            var afterFlush2 = new RadioSettings();
+            afterFlush2.LoadFromIni(new IniFile(tmpIni + ".seam2"));
+            Check("rapid confirmed LastTxLevel adjustments then flush persist ONLY the final value (0.64)",
+                Math.Abs(afterFlush2.LastTxLevel - 0.64) < 1e-9, true);
         }
         catch (Exception ex)
         {

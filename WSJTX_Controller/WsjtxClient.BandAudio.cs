@@ -734,7 +734,15 @@ namespace WSJTX_Controller
                 // F11/F12 and the Options spinner stepping from the engine's startup default
                 // instead of the level just restored for this band.
                 if (resp != null && resp.Length > 0 && !resp.StartsWith("ERR"))
+                {
                     _engineTxLevel = savedLevel;
+                    // Fix, 2026-09-14: keep the general LastTxLevel in step with whatever's
+                    // actually active, regardless of which mechanism confirmed it -- so the next
+                    // startup's unconditional restore (before this per-band one re-applies)
+                    // reflects the band this operator most recently used, not a stale value from
+                    // whenever LastTxLevel was last set some other way.
+                    ctrl.Radio.LastTxLevel = savedLevel;
+                }
             });
             DebugOutput($"{Time()} restored tx level {savedLevel:0.00} for band index {bandIdx}");
         }

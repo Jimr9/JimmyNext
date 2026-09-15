@@ -66,7 +66,10 @@ namespace WSJTX_Controller
         private List<System.Windows.Forms.Control> _advUiDependentControls;
 
         // Sounds tab state
-        private List<SoundRow> _soundRows;
+        private System.Windows.Forms.CheckedListBox _soundsListBox;
+        private System.Windows.Forms.TextBox        _soundFilePathTb;
+        private System.Windows.Forms.Button          _soundAssignBtn;
+        private System.Windows.Forms.Button          _soundTestBtn;
         private System.Windows.Forms.CheckBox _soundsEnabledCb;
 
         // Lookup / Data tab state
@@ -125,11 +128,18 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox         _hamQthStatusLbl;
         private System.Windows.Forms.ComboBox        _callsignLookupProviderCb;
 
-        private sealed class SoundRow
+        // Fix, 2026-09-14: redesigned Sounds tab -- one CheckedListBox row per event (matching
+        // the Stations Available row editor's own list style, RowDisplayOrderDlg's
+        // callWaitingListBox) instead of 13 always-visible checkbox+textbox+Browse+Test
+        // quintuples. FilePath is mutable (Assign updates it in place) -- the list only ever
+        // displays Label via ToString(), so mutating this does not need to touch the
+        // CheckedListBox's own Items collection.
+        private sealed class SoundListItem
         {
             public string Key;
-            public System.Windows.Forms.CheckBox EnabledCb;
-            public System.Windows.Forms.TextBox  FileTb;
+            public string Label;
+            public string FilePath;
+            public override string ToString() => Label;
         }
 
         // Hotkeys tab state
@@ -4399,7 +4409,6 @@ namespace WSJTX_Controller
         private void BuildSoundsTab()
         {
             soundsPanel.Controls.Clear();
-            _soundRows = new List<SoundRow>();
 
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
 
@@ -4428,132 +4437,133 @@ namespace WSJTX_Controller
                 ForeColor      = System.Drawing.SystemColors.ControlText,
                 Location       = new System.Drawing.Point(8, 28),
                 Size           = new System.Drawing.Size(648, 32),
-                Text           = "Enable or disable each sound event and choose a WAV file. Leave the path empty to disable a sound.",
+                Text           = "Check an event to enable its sound. Select an event, then Assign a WAV file or Test the one it already has.",
                 TabStop        = false,
                 Font           = font,
             };
             soundsPanel.Controls.Add(instrBox);
 
-            // Column headers
-            var hdrEnabled = new System.Windows.Forms.Label { Text = "On",      AutoSize = true, Location = new System.Drawing.Point(8,   66), Font = font, TabStop = false };
-            var hdrEvent   = new System.Windows.Forms.Label { Text = "Event",   AutoSize = true, Location = new System.Drawing.Point(32,  66), Font = font, TabStop = false };
-            var hdrFile    = new System.Windows.Forms.Label { Text = "WAV file path (empty = no sound)", AutoSize = true, Location = new System.Drawing.Point(190, 66), Font = font, TabStop = false };
-            soundsPanel.Controls.Add(hdrEnabled);
-            soundsPanel.Controls.Add(hdrEvent);
-            soundsPanel.Controls.Add(hdrFile);
-
             var eventDefs = new[]
             {
-                new { Key = "CallAdded",      Label = "Call added",          Enabled = ctrl.callAddedCheckBox.Checked, File = ctrl.soundFile_CallAdded,   EnabledEditable = true  },
-                new { Key = "CallingMe",      Label = "Calling me",          Enabled = ctrl.mycallCheckBox.Checked,    File = ctrl.soundFile_CallingMe,   EnabledEditable = true  },
-                new { Key = "Logged",         Label = "Logged",              Enabled = ctrl.loggedCheckBox.Checked,    File = ctrl.soundFile_Logged,      EnabledEditable = true  },
-                new { Key = "TxEnabled",      Label = "TX enabled",          Enabled = ctrl.soundEnabled_TxEnabled,    File = ctrl.soundFile_TxEnabled,   EnabledEditable = true  },
-                new { Key = "Disconnected",   Label = "Engine disconnected", Enabled = ctrl.soundEnabled_Disconnected, File = ctrl.soundFile_Disconnected,EnabledEditable = true  },
-                new { Key = "NewDxcc",        Label = "New DXCC",            Enabled = ctrl.soundEnabled_NewDxcc,      File = ctrl.soundFile_NewDxcc,     EnabledEditable = true  },
-                new { Key = "NewDxccOnBand",  Label = "New DXCC on band",    Enabled = ctrl.soundEnabled_NewDxccOnBand,File = ctrl.soundFile_NewDxccOnBand,EnabledEditable = true },
-                new { Key = "AlwaysWanted",   Label = "Always Wanted",       Enabled = ctrl.soundEnabled_AlwaysWanted, File = ctrl.soundFile_AlwaysWanted, EnabledEditable = true },
-                new { Key = "DirectedCq",     Label = "Directed CQ",         Enabled = ctrl.soundEnabled_DirectedCq,   File = ctrl.soundFile_DirectedCq,   EnabledEditable = true },
-                new { Key = "Pota",           Label = "POTA",                Enabled = ctrl.soundEnabled_Pota,         File = ctrl.soundFile_Pota,         EnabledEditable = true },
-                new { Key = "Sota",           Label = "SOTA",                            Enabled = ctrl.soundEnabled_Sota,           File = ctrl.soundFile_Sota,           EnabledEditable = true },
-                new { Key = "WantedAnywhere", Label = "Wanted call heard anywhere",       Enabled = ctrl.soundEnabled_WantedAnywhere, File = ctrl.soundFile_WantedAnywhere, EnabledEditable = true },
-                new { Key = "OppositePeriod", Label = "Interesting call opposite period", Enabled = ctrl.soundEnabled_OppositePeriod, File = ctrl.soundFile_OppositePeriod, EnabledEditable = true },
-                new { Key = "AwardNeeded",    Label = "Award needed (Still Need tab)",    Enabled = ctrl.soundEnabled_AwardNeeded,    File = ctrl.soundFile_AwardNeeded,    EnabledEditable = true },
+                new { Key = "CallAdded",      Label = "Call added",                       Enabled = ctrl.soundEnabled_CallAdded,      File = ctrl.soundFile_CallAdded      },
+                new { Key = "CallingMe",      Label = "Calling me",                       Enabled = ctrl.soundEnabled_CallingMe,      File = ctrl.soundFile_CallingMe      },
+                new { Key = "Logged",         Label = "Logged",                           Enabled = ctrl.soundEnabled_Logged,         File = ctrl.soundFile_Logged         },
+                new { Key = "TxEnabled",      Label = "TX enabled",                       Enabled = ctrl.soundEnabled_TxEnabled,      File = ctrl.soundFile_TxEnabled       },
+                new { Key = "Disconnected",   Label = "Engine disconnected",              Enabled = ctrl.soundEnabled_Disconnected,   File = ctrl.soundFile_Disconnected    },
+                new { Key = "NewDxcc",        Label = "New DXCC",                         Enabled = ctrl.soundEnabled_NewDxcc,        File = ctrl.soundFile_NewDxcc         },
+                new { Key = "NewDxccOnBand",  Label = "New DXCC on band",                 Enabled = ctrl.soundEnabled_NewDxccOnBand,  File = ctrl.soundFile_NewDxccOnBand   },
+                new { Key = "AlwaysWanted",   Label = "Always Wanted",                    Enabled = ctrl.soundEnabled_AlwaysWanted,   File = ctrl.soundFile_AlwaysWanted    },
+                new { Key = "DirectedCq",     Label = "Directed CQ",                      Enabled = ctrl.soundEnabled_DirectedCq,     File = ctrl.soundFile_DirectedCq      },
+                new { Key = "Pota",           Label = "POTA",                             Enabled = ctrl.soundEnabled_Pota,           File = ctrl.soundFile_Pota            },
+                new { Key = "Sota",           Label = "SOTA",                             Enabled = ctrl.soundEnabled_Sota,           File = ctrl.soundFile_Sota            },
+                new { Key = "WantedAnywhere", Label = "Wanted call heard anywhere",       Enabled = ctrl.soundEnabled_WantedAnywhere, File = ctrl.soundFile_WantedAnywhere  },
+                new { Key = "OppositePeriod", Label = "Interesting call opposite period", Enabled = ctrl.soundEnabled_OppositePeriod, File = ctrl.soundFile_OppositePeriod  },
+                new { Key = "AwardNeeded",    Label = "Award needed (Still Need tab)",    Enabled = ctrl.soundEnabled_AwardNeeded,    File = ctrl.soundFile_AwardNeeded     },
             };
 
-            int y = 84;
-
-            foreach (var ev in eventDefs)
+            _soundsListBox = new System.Windows.Forms.CheckedListBox
             {
-                var row = new SoundRow { Key = ev.Key };
+                Location        = new System.Drawing.Point(8, 66),
+                Size            = new System.Drawing.Size(300, 280),
+                TabIndex        = tabIdx++,
+                CheckOnClick    = true,
+                IntegralHeight  = false,
+                AccessibleName  = "Sound events",
+                Font            = font,
+            };
+            foreach (var ev in eventDefs)
+                _soundsListBox.Items.Add(new SoundListItem { Key = ev.Key, Label = ev.Label, FilePath = ev.File ?? "" }, ev.Enabled);
+            soundsPanel.Controls.Add(_soundsListBox);
 
-                var enabledCb = new System.Windows.Forms.CheckBox
-                {
-                    Checked         = ev.Enabled,
-                    Location        = new System.Drawing.Point(8, y),
-                    Size            = new System.Drawing.Size(20, 17),
-                    TabIndex        = tabIdx++,
-                    TabStop         = ev.EnabledEditable,
-                    Enabled         = ev.EnabledEditable,
-                    AccessibleName  = ev.Label + " sound enabled",
-                    Font            = font,
-                };
-                soundsPanel.Controls.Add(enabledCb);
-                row.EnabledCb = enabledCb;
+            var fileLabel = new System.Windows.Forms.Label
+            {
+                Text     = "WAV file:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(320, 66),
+                Font     = font,
+                TabStop  = false,
+            };
+            soundsPanel.Controls.Add(fileLabel);
 
-                var evLabel = new System.Windows.Forms.Label
-                {
-                    Text     = ev.Label,
-                    Location = new System.Drawing.Point(32, y + 1),
-                    Size     = new System.Drawing.Size(155, 17),
-                    Font     = font,
-                    TabStop  = false,
-                };
-                soundsPanel.Controls.Add(evLabel);
+            _soundFilePathTb = new System.Windows.Forms.TextBox
+            {
+                ReadOnly       = true,
+                Location       = new System.Drawing.Point(320, 84),
+                Size           = new System.Drawing.Size(328, 20),
+                // Accessibility: tab-reachable (not TabStop=false) so JAWS/NVDA can actually read
+                // the selected event's current file -- a read-only edit control is a standard,
+                // fully accessible way to expose this, and it's otherwise undiscoverable by a
+                // screen-reader user (Assign's OpenFileDialog doesn't pre-fill the current path,
+                // and CheckedListBox selection only announces the event label, not its file).
+                TabIndex       = tabIdx++,
+                AccessibleName = "Selected sound event's WAV file, empty means no sound",
+                Font           = font,
+            };
+            soundsPanel.Controls.Add(_soundFilePathTb);
 
-                var fileTb = new System.Windows.Forms.TextBox
-                {
-                    Text            = ev.File ?? "",
-                    Location        = new System.Drawing.Point(190, y - 1),
-                    Size            = new System.Drawing.Size(295, 20),
-                    TabIndex        = tabIdx++,
-                    AccessibleName  = ev.Label + " sound file path",
-                    Font            = font,
-                };
-                soundsPanel.Controls.Add(fileTb);
-                row.FileTb = fileTb;
+            _soundAssignBtn = new System.Windows.Forms.Button
+            {
+                Text           = "Assign...",
+                Location       = new System.Drawing.Point(320, 110),
+                Size           = new System.Drawing.Size(90, 24),
+                TabIndex       = tabIdx++,
+                AccessibleName = "Assign a WAV file to the selected sound event",
+                Font           = font,
+            };
+            _soundAssignBtn.Click += SoundAssignBtn_Click;
+            soundsPanel.Controls.Add(_soundAssignBtn);
 
-                string capturedLabel = ev.Label;
-                System.Windows.Forms.TextBox capturedTb = fileTb;
+            _soundTestBtn = new System.Windows.Forms.Button
+            {
+                Text           = "Test",
+                Location       = new System.Drawing.Point(418, 110),
+                Size           = new System.Drawing.Size(90, 24),
+                TabIndex       = tabIdx++,
+                AccessibleName = "Test the selected sound event's WAV file",
+                Font           = font,
+            };
+            _soundTestBtn.Click += (s, e) => TestSoundFile(SelectedSoundItem()?.FilePath);
+            soundsPanel.Controls.Add(_soundTestBtn);
 
-                var browseBtn = new System.Windows.Forms.Button
-                {
-                    Text            = "Browse",
-                    Location        = new System.Drawing.Point(490, y - 1),
-                    Size            = new System.Drawing.Size(60, 22),
-                    TabIndex        = tabIdx++,
-                    AccessibleName  = "Browse " + ev.Label + " sound file",
-                    Font            = font,
-                };
-                browseBtn.Click += (s, e) => BrowseSoundFile(capturedLabel, capturedTb);
-                soundsPanel.Controls.Add(browseBtn);
-
-                var testBtn = new System.Windows.Forms.Button
-                {
-                    Text            = "Test",
-                    Location        = new System.Drawing.Point(555, y - 1),
-                    Size            = new System.Drawing.Size(48, 22),
-                    TabIndex        = tabIdx++,
-                    AccessibleName  = "Test " + ev.Label + " sound",
-                    Font            = font,
-                };
-                testBtn.Click += (s, e) => TestSoundFile(capturedTb.Text);
-                soundsPanel.Controls.Add(testBtn);
-
-                _soundRows.Add(row);
-                y += 26;
-            }
+            _soundsListBox.SelectedIndexChanged += (s, e) => RefreshSelectedSoundFileDisplay();
+            if (_soundsListBox.Items.Count > 0) _soundsListBox.SelectedIndex = 0;
+            RefreshSelectedSoundFileDisplay();
         }
 
-        private void BrowseSoundFile(string eventLabel, System.Windows.Forms.TextBox fileTb)
+        private SoundListItem SelectedSoundItem() =>
+            _soundsListBox?.SelectedItem as SoundListItem;
+
+        private void RefreshSelectedSoundFileDisplay()
         {
+            var item = SelectedSoundItem();
+            _soundFilePathTb.Text = item?.FilePath ?? "";
+            _soundTestBtn.Enabled = !string.IsNullOrEmpty(item?.FilePath);
+        }
+
+        private void SoundAssignBtn_Click(object sender, EventArgs e)
+        {
+            var item = SelectedSoundItem();
+            if (item == null) return;
             using (var dlg = new System.Windows.Forms.OpenFileDialog())
             {
-                dlg.Title = "Select sound file for: " + eventLabel;
+                dlg.Title = "Select sound file for: " + item.Label;
                 dlg.Filter = "WAV files (*.wav)|*.wav|All files (*.*)|*.*";
                 dlg.FilterIndex = 1;
                 dlg.CheckFileExists = true;
-                string current = fileTb.Text ?? "";
-                if (!string.IsNullOrEmpty(current))
+                if (!string.IsNullOrEmpty(item.FilePath))
                 {
                     try
                     {
-                        if (System.IO.File.Exists(current))
-                            dlg.InitialDirectory = System.IO.Path.GetDirectoryName(current);
+                        if (System.IO.File.Exists(item.FilePath))
+                            dlg.InitialDirectory = System.IO.Path.GetDirectoryName(item.FilePath);
                     }
                     catch { }
                 }
-                if (dlg.ShowDialog() == System.Windows.Forms.DialogResult.OK)
-                    fileTb.Text = dlg.FileName;
+                if (dlg.ShowDialog(this) == System.Windows.Forms.DialogResult.OK)
+                {
+                    item.FilePath = dlg.FileName;
+                    RefreshSelectedSoundFileDisplay();
+                }
             }
         }
 
@@ -4565,24 +4575,28 @@ namespace WSJTX_Controller
 
         private void SaveSoundsTab()
         {
-            if (_soundRows == null) return;
+            if (_soundsListBox == null) return;
             if (_soundsEnabledCb != null) ctrl.soundsEnabled = _soundsEnabledCb.Checked;
-            foreach (var row in _soundRows)
+            // Fix, 2026-09-14: reads the CheckedListBox's own items/checked-state directly --
+            // no live UI control is ever assigned here, so saving can never trigger a play-sound
+            // side effect the way the old CallAdded/CallingMe/Logged checkboxes used to.
+            for (int i = 0; i < _soundsListBox.Items.Count; i++)
             {
-                bool enabled = row.EnabledCb?.Checked ?? false;
-                string file  = row.FileTb?.Text ?? "";
-                switch (row.Key)
+                if (!(_soundsListBox.Items[i] is SoundListItem item)) continue;
+                bool enabled = _soundsListBox.GetItemChecked(i);
+                string file = item.FilePath ?? "";
+                switch (item.Key)
                 {
                     case "CallAdded":
-                        ctrl.callAddedCheckBox.Checked = enabled;
+                        ctrl.soundEnabled_CallAdded = enabled;
                         ctrl.soundFile_CallAdded = file;
                         break;
                     case "CallingMe":
-                        ctrl.mycallCheckBox.Checked = enabled;
+                        ctrl.soundEnabled_CallingMe = enabled;
                         ctrl.soundFile_CallingMe = file;
                         break;
                     case "Logged":
-                        ctrl.loggedCheckBox.Checked = enabled;
+                        ctrl.soundEnabled_Logged = enabled;
                         ctrl.soundFile_Logged = file;
                         break;
                     case "TxEnabled":

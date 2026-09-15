@@ -2236,7 +2236,7 @@ namespace WSJTX_Controller
                                 DebugOutput($"{spacer}late decode(1), restartQueue:{restartQueue}");
                                 StartProcessDecodeTimer2();
                             }
-                            if (!_lastAddCallCategoryPlayed) Sounds.PlaySoundEvent(ctrl.callAddedCheckBox.Checked, ctrl.soundFile_CallAdded);
+                            if (!_lastAddCallCategoryPlayed) Sounds.PlaySoundEvent(ctrl.soundEnabled_CallAdded, ctrl.soundFile_CallAdded);
                         }
                     }
                     else
@@ -2278,7 +2278,7 @@ namespace WSJTX_Controller
                                             DebugOutput($"{spacer}late decode(2), restartQueue:{restartQueue}");
                                             StartProcessDecodeTimer2();
                                         }
-                                        if (!_lastAddCallCategoryPlayed) Sounds.PlaySoundEvent(ctrl.callAddedCheckBox.Checked, ctrl.soundFile_CallAdded);
+                                        if (!_lastAddCallCategoryPlayed) Sounds.PlaySoundEvent(ctrl.soundEnabled_CallAdded, ctrl.soundFile_CallAdded);
                                     }
 
                                 }
@@ -2318,7 +2318,7 @@ namespace WSJTX_Controller
                                         DebugOutput($"{spacer}late decode(3), restartQueue:{restartQueue}");
                                         StartProcessDecodeTimer2();
                                     }
-                                    if (!_lastAddCallCategoryPlayed && deCall != callInProg) Sounds.PlaySoundEvent(ctrl.callAddedCheckBox.Checked, ctrl.soundFile_CallAdded);
+                                    if (!_lastAddCallCategoryPlayed && deCall != callInProg) Sounds.PlaySoundEvent(ctrl.soundEnabled_CallAdded, ctrl.soundFile_CallAdded);
                                 }
                             }
                         }
@@ -2364,7 +2364,7 @@ namespace WSJTX_Controller
                                     {
                                         DebugOutput($"{spacer}'{deCall}' not already in queue");
                                         _callQueueStore.AddCall(deCall, dmsg);
-                                        if (!_lastAddCallCategoryPlayed) Sounds.PlaySoundEvent(ctrl.callAddedCheckBox.Checked, ctrl.soundFile_CallAdded);
+                                        if (!_lastAddCallCategoryPlayed) Sounds.PlaySoundEvent(ctrl.soundEnabled_CallAdded, ctrl.soundFile_CallAdded);
                                     }
                                     else
                                     {
@@ -3012,7 +3012,7 @@ namespace WSJTX_Controller
             else
             {
                 if (_liveLogWriteFailedCall == call) _liveLogWriteFailedCall = null;   // this call's write landed (or was already committed)
-                Sounds.PlaySoundEvent(ctrl.loggedCheckBox.Checked, ctrl.soundFile_Logged);
+                Sounds.PlaySoundEvent(ctrl.soundEnabled_Logged, ctrl.soundFile_Logged);
             }
             // Removed 2026-08-10: this used to also Notify.Publish(QsoCompletedEvent(...))
             // here ("Logged QSO with {call}"), as a standalone announcement independent of
@@ -3428,7 +3428,7 @@ namespace WSJTX_Controller
 
                     UpdateDebug();
                     string n = cqPaused ? " next" : "";
-                    if (!confirm) StatusView.ShowMessage($"Replying{n} to {call}", ctrl.callAddedCheckBox.Checked);
+                    if (!confirm) StatusView.ShowMessage($"Replying{n} to {call}", ctrl.soundEnabled_CallAdded);
                     return;
                 }
                 return;

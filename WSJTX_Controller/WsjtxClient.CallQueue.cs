@@ -385,7 +385,7 @@ namespace WSJTX_Controller
                             }
 
                             if (addedCall && toCall != myCall && !_lastAddCallCategoryPlayed)
-                                Sounds.PlaySoundEvent(ctrl.callAddedCheckBox.Checked, ctrl.soundFile_CallAdded);
+                                Sounds.PlaySoundEvent(ctrl.soundEnabled_CallAdded, ctrl.soundFile_CallAdded);
                         }
                         else
                         {
@@ -429,11 +429,11 @@ namespace WSJTX_Controller
             {
                 ctrl.ExceptTextBoxAdd(call);       //callqueue updated by BlockedTextChanged()
                 DebugOutput($"{spacer}added  {call} to blocked call list");
-                StatusView.ShowMessage($"{call} is now blocked", ctrl.callAddedCheckBox.Checked);
+                StatusView.ShowMessage($"{call} is now blocked", ctrl.soundEnabled_CallAdded);
             }
             else
             {
-                StatusView.ShowMessage($"{call} already blocked", ctrl.callAddedCheckBox.Checked);
+                StatusView.ShowMessage($"{call} already blocked", ctrl.soundEnabled_CallAdded);
             }
         }
 

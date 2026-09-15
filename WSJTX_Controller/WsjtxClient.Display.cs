@@ -20,7 +20,7 @@ namespace WSJTX_Controller
             switch (msg.Category)
             {
                 case CallCategory.TO_MYCALL:
-                    return Sounds.PlaySoundEvent(ctrl.mycallCheckBox.Checked, ctrl.soundFile_CallingMe, call, "CALLING_ME");
+                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_CallingMe, ctrl.soundFile_CallingMe, call, "CALLING_ME");
                 case CallCategory.NEW_COUNTRY:
                     return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewDxcc, ctrl.soundFile_NewDxcc, call, "NEW_COUNTRY");
                 case CallCategory.NEW_COUNTRY_ON_BAND:
