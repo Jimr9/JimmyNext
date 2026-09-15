@@ -584,24 +584,28 @@ namespace WSJTX_Controller
 
         private void SortCalls()
         {
-            var list = new List<EnqueueDecodeMessage>();
-            foreach (EnqueueDecodeMessage d in callDict.Values)
+            var list = new List<KeyValuePair<string, EnqueueDecodeMessage>>();
+            foreach (var kvp in callDict)
             {
-                SetRank(d);
-                list.Add(d);
+                SetRank(kvp.Value);
+                list.Add(kvp);
             }
 
             Func<string, bool> isLoTWUser = lookupManager != null ? (Func<string, bool>)lookupManager.IsLoTWUser : null;
-            list.Sort((p, q) => Ranker.Compare(p, q, isLoTWUser, lotwBoostEnabled));
+            list.Sort((p, q) => Ranker.Compare(p.Value, q.Value, isLoTWUser, lotwBoostEnabled));
 
             callQueue.Clear();
-            foreach (EnqueueDecodeMessage d in list)
+            foreach (var kvp in list)
             {
-                // Stage 12 audit (2026-09-14): operational -- this must reproduce the EXACT
-                // string callDict is keyed by (the semantic-derived identity the admission gate
-                // resolved when d was added), or callQueue silently diverges from callDict.
-                // Sourced from EffectiveSemantic (was d.DeCall()) for that reason.
-                callQueue.Enqueue(d.EffectiveSemantic(myCall).From);
+                // Fix, 2026-09-14 (live crash: ArgumentNullException, Parameter 'key', inside the
+                // next ShowQueue()'s callDict.TryGetValue): the prior "Stage 12" version enqueued
+                // d.EffectiveSemantic(myCall).From, recomputed fresh here in the HOPE it reproduced
+                // the exact string callDict is keyed by -- its own comment already flagged that
+                // risk. It doesn't always: EffectiveSemantic can resolve differently (or null) here
+                // than whatever the admission gate originally keyed callDict by, silently pushing a
+                // bad/null entry into callQueue that crashes the very next ShowQueue() call.
+                // kvp.Key IS that exact string, by construction -- nothing to recompute or diverge.
+                callQueue.Enqueue(kvp.Key);
             }
 
             ShowQueue();

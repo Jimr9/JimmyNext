@@ -494,6 +494,7 @@ static class JimmyTests
         HaltConfirmsStoppedStateViaFollowUpSnapshotTests();
         HaltDoesNotConfirmWhenStillTransmittingTests();
         RejectedReplyPreservesQueuedStationTests();
+        SortCallsNeverDivergesQueueFromDictKeysTests();
         RxTxFrequencyModeReplyTests();
         EmergencyHaltTxConfirmationTests();
         EscapeAltHAnnouncementGateTests();
@@ -15434,6 +15435,58 @@ static class JimmyTests
         finally
         {
             engineListener.Stop();
+        }
+    }
+
+    // ── Fix, 2026-09-14 (live crash): SortCalls never diverges callQueue from callDict's keys ──
+    // Live crash: ArgumentNullException "Value cannot be null. (Parameter 'key')" inside the
+    // very next ShowQueue()'s callDict.TryGetValue(call, ...), reached via
+    // OptionsDlgClosed -> SortCallsPublic -> SortCalls. SortCalls used to rebuild callQueue by
+    // re-enqueuing d.EffectiveSemantic(myCall).From for each decode -- recomputed fresh, on the
+    // assumption it always reproduces the exact string callDict is keyed by. It doesn't always;
+    // this seeds callDict under a key that deliberately does NOT match what that recomputation
+    // would return for the stored message, simulating the drift the live crash hit, and proves
+    // the fixed SortCalls enqueues the dictionary's own key regardless.
+    static void SortCallsNeverDivergesQueueFromDictKeysTests()
+    {
+        Console.WriteLine("\n── Fix (live crash): SortCalls never diverges callQueue from callDict's own keys ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+
+            const string realKey = "AA1AAA";
+            var dmsg = new EnqueueDecodeMessage
+            {
+                Message = "CQ ZZ9ZZZ OJ22",   // a DIFFERENT callsign than the dict key below
+                Snr = -10,
+                AutoGen = true,
+                RxDate = DateTime.UtcNow.Date,
+                SinceMidnight = DateTime.UtcNow.TimeOfDay,
+            };
+            wc.callDict[realKey] = dmsg;
+            // callQueue deliberately left empty -- SortCallsPublic rebuilds it from callDict.
+
+            wc.SortCallsPublic();
+
+            Check("callQueue contains the dictionary's own key after sorting -- THE FIX",
+                wc.callQueue.Contains(realKey), true);
+            Check("callQueue does NOT contain a recomputed identity that diverged from the key",
+                wc.callQueue.Contains("ZZ9ZZZ"), false);
+            Check("callQueue holds no null entries", wc.callQueue.Any(c => c == null), false);
+            Check("callQueue and callDict stay in sync (same count)",
+                wc.callQueue.Count == wc.callDict.Count, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SortCallsNeverDivergesQueueFromDictKeysTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
         }
     }
 
