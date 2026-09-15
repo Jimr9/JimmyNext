@@ -222,11 +222,6 @@ namespace WsjtxUdpLib.Messages.Out
             return WsjtxMessage.ToCall(Message);
         }
 
-        public string Payload()
-        {
-            return WsjtxMessage.Payload(Message);
-        }
-
         public override string ToString()
         {
             var sb = new StringBuilder();

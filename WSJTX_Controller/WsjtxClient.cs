@@ -2581,11 +2581,10 @@ namespace WSJTX_Controller
 
         private bool IsEvenPeriod(int secPastHour)          //or seconds since midnight
         {
-            if (mode == "FT4")          //irregular
-            {
-                int sec = secPastHour % 60;     //seconds past the minute
-                return (sec >= 0 && sec < 7) || (sec >= 15 && sec < 22) || (sec >= 30 && sec < 37) || (sec >= 45 && sec < 52);
-            }
+            // Fix, 2026-09-14 (Stage 7c timing audit): the FT4 window table now lives in the one
+            // shared WsjtxClient.IsFt4EvenWindow, no longer duplicated here and in
+            // DxSpotWatcher.IsEvenPeriod independently.
+            if (mode == "FT4") return IsFt4EvenWindow(secPastHour);
 
             return (secPastHour / (trPeriod / 1000)) % 2 == 0;
         }
@@ -4030,7 +4029,10 @@ namespace WSJTX_Controller
         private void StartProcessDecodeTimer2()
         {
             if (processDecodeTimer2.Enabled || (mode != "FT8" && mode != "FT4")) return;
-            processDecodeTimer2.Interval = (mode == "FT8" ? 1500 : 750);
+            // Fix, 2026-09-14 (Stage 7c timing audit): derived from the canonical
+            // DefaultTrPeriodMs(mode) chokepoint (period/10) instead of an independent literal
+            // table -- identical values for both modes already gated above (1500/750ms).
+            processDecodeTimer2.Interval = DefaultTrPeriodMs(mode) / 10;
             processDecodeTimer2.Start();
             DebugOutput($"{Time()} processDecodeTimer2 start");
         }

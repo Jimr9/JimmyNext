@@ -398,6 +398,7 @@ static class JimmyTests
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
         StillUnconfirmedReachesQueueTests();
+        NarrationTextStructuredPayloadTests();
         DirectDtoStage3SnapshotFieldsTests();
         DirectDtoStage4DecodeSemanticsTests();
         SemanticShadowCorpusTests();
@@ -516,6 +517,8 @@ static class JimmyTests
         DirectStartupPerBandTxLevelOverridesGeneralRestoreTests();
         DirectStartupRetuneWaitsForHealthyCatTests();
         DirectInitialConnectResyncsTierAndPeriodTests();
+        DirectStatusPrefersEnginesOwnReportedPeriodTests();
+        TierConfirmationTests();
         RepeatLimitStopsBeforeTheDisallowedAttemptKeysTests();
         ToggleTxFirstActuallyTogglesTests();
         OptimizeReducesOnlyUntilReportExchangedTests();
@@ -3220,6 +3223,82 @@ static class JimmyTests
                @"""callForm"": " + J(sem.CallForm) + @", ""qsoRelation"": ""none"" }";
     }
 
+    // ── Stage 7b (2026-09-14): NarrationText.StructuredPayload reproduces WsjtxMessage.Payload's
+    //    exact output for every structured kind, from SemanticDecode instead of re-splitting raw
+    //    text -- the whole point of the migration is that the SPOKEN/DISPLAYED text must not
+    //    change even though the source of truth did. Cross-checks against the legacy parser's own
+    //    output for equivalent raw messages, not just hand-picked expected strings, so this fails
+    //    if the two ever actually diverge in shape. ──
+    static void NarrationTextStructuredPayloadTests()
+    {
+        Console.WriteLine("\n── Stage 7b: NarrationText.StructuredPayload matches WsjtxMessage.Payload exactly ──");
+        try
+        {
+            const string myCall = "KB0UZT";
+
+            void CheckMatchesLegacy(string label, string rawMessage)
+            {
+                var sem = SemanticDecode.FromWsjtxMessage(rawMessage, myCall);
+                string legacy = WsjtxMessage.Payload(rawMessage);
+                string structured = NarrationText.StructuredPayload(sem);
+                CheckStr($"{label}: structured matches legacy Payload() for '{rawMessage}'", structured, legacy);
+            }
+
+            CheckMatchesLegacy("negative report", "K1ABC KB0UZT -15");
+            CheckMatchesLegacy("positive report", "K1ABC KB0UZT +03");
+            CheckMatchesLegacy("zero report", "K1ABC KB0UZT +00");
+            CheckMatchesLegacy("negative roger report", "K1ABC KB0UZT R-15");
+            CheckMatchesLegacy("positive roger report", "K1ABC KB0UZT R+03");
+            CheckMatchesLegacy("RRR", "K1ABC KB0UZT RRR");
+            CheckMatchesLegacy("RR73", "K1ABC KB0UZT RR73");
+            CheckMatchesLegacy("73", "K1ABC KB0UZT 73");
+            CheckMatchesLegacy("plain CQ", "CQ K1ABC FN42");
+            CheckMatchesLegacy("directed CQ", "CQ POTA K1ABC FN42");
+            CheckMatchesLegacy("grid reply", "K1ABC KB0UZT FN42");
+
+            // Kinds StructuredPayload cannot express (no single structured string) return null --
+            // the caller is the one that falls back to NarrationText.ResidualDisplayText, matching
+            // production's own "?? ResidualDisplayText(...)" pattern at every real call site.
+            var replyNoGrid = new SemanticDecode { Kind = "reply", Grid = null };
+            Check("reply with no grid -> null (caller must fall back)",
+                NarrationText.StructuredPayload(replyNoGrid) == null, true);
+            var fieldDay = new SemanticDecode { Kind = "fieldDay" };
+            Check("fieldDay -> null (no structured shape; residual free text only)",
+                NarrationText.StructuredPayload(fieldDay) == null, true);
+            var other = new SemanticDecode { Kind = "other" };
+            Check("other -> null (no structured shape; residual free text only)",
+                NarrationText.StructuredPayload(other) == null, true);
+            Check("null SemanticDecode -> null, never throws",
+                NarrationText.StructuredPayload(null) == null, true);
+
+            // The residual fallback itself is exactly the legacy extraction, for the one case it's
+            // still allowed to be used -- presentation-only, per its own boundary comment.
+            CheckStr("ResidualDisplayText is exactly WsjtxMessage.Payload for a field-day fragment",
+                NarrationText.ResidualDisplayText("K1ABC KB0UZT 2A MO"), WsjtxMessage.Payload("K1ABC KB0UZT 2A MO"));
+
+            // Report formatting: always signed, always 2-digit, independent of the raw text path --
+            // exercises FormatReportValue directly via crafted SemanticDecode instances (values a
+            // real decode's ReportDb could carry: exactly zero, single-digit magnitude).
+            var reportZero = new SemanticDecode { Kind = "report", ReportDb = 0 };
+            CheckStr("report of exactly 0 -> \"+00\", never bare \"00\" or \"-00\"",
+                NarrationText.StructuredPayload(reportZero), "+00");
+            var reportSingleDigit = new SemanticDecode { Kind = "report", ReportDb = -5 };
+            CheckStr("single-digit magnitude is zero-padded: -5 -> \"-05\"",
+                NarrationText.StructuredPayload(reportSingleDigit), "-05");
+            var rReportSingleDigit = new SemanticDecode { Kind = "rReport", ReportDb = 3 };
+            CheckStr("R-prefixed, zero-padded: +3 -> \"R+03\"",
+                NarrationText.StructuredPayload(rReportSingleDigit), "R+03");
+            var reportNullValue = new SemanticDecode { Kind = "report", ReportDb = null };
+            Check("report kind with no ReportDb value -> null, never throws or fabricates a number",
+                NarrationText.StructuredPayload(reportNullValue) == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NarrationTextStructuredPayloadTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
     // ── Nexus modernization Stage 3: the Direct DTO now RETAINS the per-decode and per-QSO
     //    semantic facts Nexus already puts on every snapshot (DecodeRow.is_cq/directed_to_me/
     //    signoff/grid/ap/low_conf/tier/rv; QsoStatus.dxcall/dxgrid/rx_report/running/cq_running/
@@ -5801,6 +5880,230 @@ static class JimmyTests
         }
     }
 
+    // ── Stage 7c (2026-09-14, timing audit): Direct mode now prefers the engine's OWN reported
+    //    period (DirectLinkState.PeriodSecs) over the FT8/FT4 mode-guess fallback, for real ──
+    // Before this, DirectApplyStatus always synthesized StatusMessage.TRPeriod = null, so
+    // UpdateTrPeriod's own "prefer the reported value" branch was permanently unreachable in
+    // Direct mode -- trPeriod always came from the FT8/FT4-mode-based DefaultTrPeriodMs fallback,
+    // never from the engine's own already-computed, tier-generic period. This proves the engine's
+    // reported value is now actually used (a value that would NOT arise from the mode-based
+    // fallback table proves it, rather than merely being consistent with it), and that an older
+    // EngineHost / a snapshot with no "link" object at all still falls back exactly as before.
+    static void DirectStatusPrefersEnginesOwnReportedPeriodTests()
+    {
+        Console.WriteLine("\n── Stage 7c: Direct mode prefers the engine's own reported period -- THE FIX ──");
+        try
+        {
+            Controller NewCtrl()
+            {
+                var c = new Controller();
+                c.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                c.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                c.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                c.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                return c;
+            }
+
+            var wc = new WsjtxClient(NewCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+            // 1. FT8, engine-reported periodSecs matches the known-correct value -- trPeriod comes
+            //    out exactly right, same as the mode-based fallback would have given (can't yet
+            //    prove it came from the engine specifically; test 3 below proves that).
+            var snapFt8 = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 1 },
+                ""link"": { ""tier"": ""FT8"", ""periodSecs"": 15.0 },
+                ""recentDecodes"": []
+            }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snapFt8);
+            Check("FT8 with engine-reported periodSecs=15.0 -> trPeriod == 15000ms",
+                wc.trPeriod == 15000, true);
+
+            // 2. FT4 -- 7.5 seconds is NOT a whole number; confirms the seconds->ms conversion
+            //    rounds/lands exactly on 7500, not 7000 or 8000 from an integer-truncation bug.
+            var wc2 = new WsjtxClient(NewCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var snapFt4 = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.080, ""transmitting"": false, ""tuning"": false, ""slot"": 1 },
+                ""link"": { ""tier"": ""FT4"", ""periodSecs"": 7.5 },
+                ""recentDecodes"": []
+            }");
+            wc2.TestApplyDirectSnapshot("KB0UZT", "FN42", snapFt4);
+            Check("FT4 with engine-reported periodSecs=7.5 -> trPeriod == exactly 7500ms, not 7000 or 8000",
+                wc2.trPeriod == 7500, true);
+
+            // 3. THE decisive proof: an engine-reported period that the FT8/FT4 mode-based
+            //    fallback table could never produce on its own (10.0s) -- if trPeriod comes out as
+            //    10000ms, it can only have come from the engine's own reported value, not from
+            //    DefaultTrPeriodMs(mode).
+            var wc3 = new WsjtxClient(NewCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var snapOther = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 1 },
+                ""link"": { ""tier"": ""FT8"", ""periodSecs"": 10.0 },
+                ""recentDecodes"": []
+            }");
+            wc3.TestApplyDirectSnapshot("KB0UZT", "FN42", snapOther);
+            Check("THE FIX: a period the mode-based fallback could never produce (10.0s) still lands exactly -- proves it came from the engine, not the FT8/FT4 guess table",
+                wc3.trPeriod == 10000, true);
+
+            // 4. Safe startup fallback preserved: a snapshot with NO "link" object at all (an
+            //    older EngineHost, or the very first poll before the engine has reported anything)
+            //    must fall back to the FT8/FT4 mode-based default exactly as before this change --
+            //    never null, never a crash.
+            var wc4 = new WsjtxClient(NewCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var snapNoLink = ParseDirectSnapshot(@"{
+                ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 1 },
+                ""recentDecodes"": []
+            }");
+            wc4.TestApplyDirectSnapshot("KB0UZT", "FN42", snapNoLink);
+            Check("No \"link\" object at all (older EngineHost) -> safe FT8/FT4 mode-based fallback, trPeriod == 15000ms",
+                wc4.trPeriod == 15000, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  DirectStatusPrefersEnginesOwnReportedPeriodTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Tier-confirmation redesign, 2026-09-15: the bounded-window/poll-based confirmation that
+    //    used to live here (ArmTierConfirmation/CheckPendingTierConfirmation) is retired -- traced
+    //    directly against the pinned Nexus source, Engine::set_tier is synchronous and infallible,
+    //    and EngineHost's own SET_TIER handler holds the engine lock across the whole call before
+    //    ever replying, so no "accepted but not yet applied" gap exists to wait out. SET_TIER's
+    //    response now carries the resulting tier/period directly ("OK <TIER> <PERIOD_SECS>"), read
+    //    from that same lock -- SetOperatingMode validates it immediately against what was
+    //    requested, no waiting/polling required. Drives this through the REAL dispatcher/
+    //    StubEngineHost round trip (SetOperatingMode -> DirectSetTier -> network), the same
+    //    pattern DirectInitialConnectResyncsTierAndPeriodTests uses above, since the thing under
+    //    test IS that immediate validation, not an isolable decision function anymore.
+    static void TierConfirmationTests()
+    {
+        Console.WriteLine("\n── Tier confirmation: SET_TIER's own response is required and validated immediately ──");
+        try
+        {
+            Controller NewCtrl()
+            {
+                var c = new Controller();
+                var _ = c.Handle; // force handle creation -- DirectSetTier's completion runs via ctrl.BeginInvoke
+                c.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                c.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                c.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                c.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                return c;
+            }
+
+            // 1. Successful match: EngineHost's response names the SAME tier that was requested.
+            //    Mode and trPeriod are committed immediately from that one response.
+            {
+                var engineListener = new StubEngineHost(_ => "OK FT4 7.5");
+                if (engineListener == null)
+                {
+                    Skip("TierConfirmationTests (1)", "engine control port already in use on this machine");
+                }
+                else
+                {
+                    try
+                    {
+                        var wc = new WsjtxClient(NewCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                        wc.TestSetMode("FT8");
+                        wc.TestSetDirectConnected(true);
+
+                        bool handled = wc.SetOperatingMode("FT4");
+                        Check("1. SetOperatingMode reports handled", handled, true);
+                        PumpUntil(() => wc.CurrentMode == "FT4", timeoutMs: 8000);
+                        Check("1. Successful match: mode is committed to the requested tier",
+                            wc.CurrentMode == "FT4", true);
+                        Check("1. ...trPeriod is set directly from the response (7500ms), no waiting for a later poll",
+                            wc.trPeriod == 7500, true);
+                        Check("1. ...TX was never touched (no mismatch, nothing to halt)", wc.TestTxEnabled, false);
+                    }
+                    finally
+                    {
+                        engineListener.Stop();
+                    }
+                }
+            }
+
+            // 2. THE FIX: EngineHost's response names a DIFFERENT tier than requested -- a genuine,
+            //    immediate disagreement. Must halt+disable TX, keep `mode` at the operator's own
+            //    requested/intended tier (never silently adopt the engine's disagreeing value),
+            //    and report clearly -- with no delay/polling window before acting.
+            {
+                var engineListener = new StubEngineHost(_ => "OK FT8 15");
+                if (engineListener == null)
+                {
+                    Skip("TierConfirmationTests (2)", "engine control port already in use on this machine");
+                }
+                else
+                {
+                    try
+                    {
+                        var wc = new WsjtxClient(NewCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                        wc.TestSetMode("FT8"); // the operator's starting tier
+                        wc.TestSetDirectConnected(true);
+                        var fakeDelivery = new FakeNotificationDelivery();
+                        wc.Notify = NewTestNotificationCenter(new NotificationSettings(), fakeDelivery);
+
+                        bool handled = wc.SetOperatingMode("FT4");
+                        Check("2. SetOperatingMode reports handled", handled, true);
+                        PumpUntil(() => fakeDelivery.AnnounceCount > 0, timeoutMs: 8000);
+                        Check("2. THE FIX: TX is halted and disabled", wc.TestTxEnabled, false);
+                        Check("2. THE FIX: the mismatch is reported (a notification was actually delivered)",
+                            fakeDelivery.AnnounceCount > 0, true);
+                        Check("2. THE FIX: mode is NOT silently changed to the engine's disagreeing tier -- stays at the operator's own prior tier",
+                            wc.CurrentMode == "FT8", true);
+                    }
+                    finally
+                    {
+                        engineListener.Stop();
+                    }
+                }
+            }
+
+            // 3. Malformed/non-conforming response (e.g. an old EngineHost's bare "OK", or a real
+            //    ERR): DirectSetTier itself reports ok=false -- no backward-compatibility fallback
+            //    to trusting a bare acknowledgement. Handled by the existing !ok failure path;
+            //    mode must not change.
+            {
+                var engineListener = new StubEngineHost(_ => "OK");
+                if (engineListener == null)
+                {
+                    Skip("TierConfirmationTests (3)", "engine control port already in use on this machine");
+                }
+                else
+                {
+                    try
+                    {
+                        var wc = new WsjtxClient(NewCtrl(), 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                        wc.TestSetMode("FT8");
+                        wc.TestSetDirectConnected(true);
+                        var fakeDelivery = new FakeNotificationDelivery();
+                        wc.Notify = NewTestNotificationCenter(new NotificationSettings(), fakeDelivery);
+
+                        bool handled = wc.SetOperatingMode("FT4");
+                        Check("3. SetOperatingMode reports handled", handled, true);
+                        PumpUntil(() => fakeDelivery.AnnounceCount > 0, timeoutMs: 8000);
+                        Check("3. No backward-compat fallback: a bare 'OK' is treated as a failure, mode unchanged",
+                            wc.CurrentMode == "FT8", true);
+                        Check("3. ...the failure is reported", fakeDelivery.AnnounceCount > 0, true);
+                    }
+                    finally
+                    {
+                        engineListener.Stop();
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  TierConfirmationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
     // ── 2.0.58: the one-shot startup exact-dial restore must WAIT for a healthy CAT link ──
     // 2.0.57 hardware miss: Jimmy was on 14.074, closed; rig moved to 14.200; Jimmy restarted;
     // UI showed 20m FT8 but the rig stayed on 14.200. The exact-dial restore block runs only
@@ -5901,7 +6204,15 @@ static class JimmyTests
     static void DirectInitialConnectResyncsTierAndPeriodTests()
     {
         Console.WriteLine("\n── Startup/restart mode-sync fix: tier restore also re-derives trPeriod and announces the corrected mode -- THE FIX ──");
-        var engineListener = new StubEngineHost(line => "OK");
+        // Tier-confirmation redesign, 2026-09-15: SET_TIER's response now carries the resulting
+        // tier/period ("OK <TIER> <PERIOD_SECS>", no bare-"OK" fallback) -- this stub must answer
+        // SET_TIER in that shape or DirectSetTier's onComplete reports ok=false and the tier
+        // restore this test exists to prove never lands at all.
+        var engineListener = new StubEngineHost(line =>
+        {
+            if (line != null && line.StartsWith("SET_TIER ")) return "OK " + line.Substring("SET_TIER ".Length) + " " + (line.EndsWith("FT4") ? "7.5" : "15");
+            return "OK";
+        });
         if (engineListener == null)
         {
             Skip("DirectInitialConnectResyncsTierAndPeriodTests", "engine control port already in use on this machine");
@@ -5968,8 +6279,13 @@ static class JimmyTests
             }
             CheckStr("THE FIX: mode is corrected to the restored tier 'FT4', not left on the engine's stale FT8 default",
                 wc.CurrentMode, "FT4");
-            Check("THE FIX: trPeriod is reset (null) so it gets re-derived from the NOW-correct mode, instead of staying stuck at FT8's 15000ms for the rest of the session",
-                wc.trPeriod == null, true);
+            // Tier-confirmation redesign, 2026-09-15: trPeriod is no longer nulled out and left for
+            // a later poll's fallback to re-derive -- the resulting period is already known,
+            // authoritative, from this SAME SET_TIER response, so it lands immediately (7500ms,
+            // FT4's real period), instead of staying stuck at FT8's 15000ms for the rest of the
+            // session.
+            Check("THE FIX: trPeriod re-derives immediately to FT4's real 7500ms period from the SET_TIER response itself, instead of staying stuck at FT8's 15000ms",
+                wc.trPeriod == 7500, true);
             // THE FIX (the operator-facing half): the restore announces itself right away
             // instead of waiting for some later, unrelated render -- proven here BEFORE snap2
             // below drives any further render, so this can only be the tier-restore callback's
@@ -5980,8 +6296,8 @@ static class JimmyTests
                 fakeStatusView.LastStatusText != null && fakeStatusView.LastStatusText.IndexOf("FT4", StringComparison.Ordinal) >= 0, true);
 
             // Drive one more real status render (the same path UpdateTrPeriod/ShowStatus both run
-            // through) to prove trPeriod actually RE-DERIVES to FT4's real period, not just that
-            // it was reset to null and then never revisited.
+            // through) to prove trPeriod, already correct from the SET_TIER response itself,
+            // stays at FT4's real period rather than drifting back to FT8's on a later poll.
             var snap2 = ParseDirectSnapshot(@"{
                 ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                 ""radio"": { ""dialMhz"": 10.140, ""transmitting"": false, ""tuning"": false, ""slot"": 3001 },
@@ -7619,6 +7935,57 @@ static class JimmyTests
         Check("FT4 defaults to 7500ms", WsjtxClient.DefaultTrPeriodMs("FT4") == 7500, true);
         Check("Unknown/null mode falls back to the FT8 default (most common case)",
               WsjtxClient.DefaultTrPeriodMs(null) == 15000, true);
+
+        // ── Stage 7c (2026-09-14): the newly-unified canonical chokepoint ────────────────────
+        Console.WriteLine("\n── Stage 7c: WsjtxClient.PeriodSecondsForMode (the canonical chokepoint) ──");
+        Check("FT8 -> 15.0 seconds", WsjtxClient.PeriodSecondsForMode("FT8") == 15.0, true);
+        Check("FT4 -> 7.5 seconds", WsjtxClient.PeriodSecondsForMode("FT4") == 7.5, true);
+        Check("Unknown/null mode falls back to 15.0 (matches DefaultTrPeriodMs' own fallback)",
+              WsjtxClient.PeriodSecondsForMode(null) == 15.0, true);
+        // Reconciled divergence: DefaultTrPeriodMs used to compare mode case-SENSITIVELY;
+        // TargetMonitor's own copy compared case-INsensitively. The unified chokepoint took the
+        // more defensive (case-insensitive) behavior -- confirm that explicitly, since it's the
+        // one deliberate, if practically unobservable (mode is only ever "FT8"/"FT4" verbatim
+        // today), behavior choice this consolidation made.
+        Check("Case-insensitive: 'ft4' -> 7.5 seconds too", WsjtxClient.PeriodSecondsForMode("ft4") == 7.5, true);
+        Check("DefaultTrPeriodMs and PeriodSecondsForMode agree for FT8 (ms == seconds*1000)",
+              WsjtxClient.DefaultTrPeriodMs("FT8") == (int)(WsjtxClient.PeriodSecondsForMode("FT8") * 1000.0), true);
+        Check("DefaultTrPeriodMs and PeriodSecondsForMode agree for FT4 (ms == seconds*1000)",
+              WsjtxClient.DefaultTrPeriodMs("FT4") == (int)(WsjtxClient.PeriodSecondsForMode("FT4") * 1000.0), true);
+
+        // ── Stage 7c: the FT4 even/odd window table, now shared (was duplicated in WsjtxClient's
+        //    own instance IsEvenPeriod and DxSpotWatcher.IsEvenPeriod independently) ───────────
+        Console.WriteLine("\n── Stage 7c: WsjtxClient.IsFt4EvenWindow (shared FT4 parity table) ──");
+        // The four documented FT4 windows, one representative second inside and outside each,
+        // locking in the EXACT boundaries both prior independent copies used.
+        Check("sec 0 (start of window 1) -> even", WsjtxClient.IsFt4EvenWindow(0), true);
+        Check("sec 6 (end of window 1) -> even", WsjtxClient.IsFt4EvenWindow(6), true);
+        Check("sec 7 (just past window 1) -> odd", WsjtxClient.IsFt4EvenWindow(7), false);
+        Check("sec 14 (just before window 2) -> odd", WsjtxClient.IsFt4EvenWindow(14), false);
+        Check("sec 15 (start of window 2) -> even", WsjtxClient.IsFt4EvenWindow(15), true);
+        Check("sec 21 (end of window 2) -> even", WsjtxClient.IsFt4EvenWindow(21), true);
+        Check("sec 22 (just past window 2) -> odd", WsjtxClient.IsFt4EvenWindow(22), false);
+        Check("sec 30 (start of window 3) -> even", WsjtxClient.IsFt4EvenWindow(30), true);
+        Check("sec 36 (end of window 3) -> even", WsjtxClient.IsFt4EvenWindow(36), true);
+        Check("sec 37 (just past window 3) -> odd", WsjtxClient.IsFt4EvenWindow(37), false);
+        Check("sec 45 (start of window 4) -> even", WsjtxClient.IsFt4EvenWindow(45), true);
+        Check("sec 51 (end of window 4) -> even", WsjtxClient.IsFt4EvenWindow(51), true);
+        Check("sec 52 (just past window 4) -> odd", WsjtxClient.IsFt4EvenWindow(52), false);
+        Check("sec 59 (just before minute rollover) -> odd", WsjtxClient.IsFt4EvenWindow(59), false);
+        Check("sec 60 (exactly one minute -> reduces to 0) -> even", WsjtxClient.IsFt4EvenWindow(60), true);
+        Check("sec 75 (past-the-hour value, reduces to 15) -> even", WsjtxClient.IsFt4EvenWindow(75), true);
+
+        // Both real callers must still agree with the shared table for representative timestamps.
+        var ft4EvenUtc = new DateTime(2026, 1, 1, 0, 0, 3, DateTimeKind.Utc);   // :03 -> window 1, even
+        var ft4OddUtc = new DateTime(2026, 1, 1, 0, 0, 10, DateTimeKind.Utc);  // :10 -> between windows, odd
+        Check("DxSpotWatcher.IsEvenPeriod(FT4, :03) agrees with the shared table -- even",
+              DxSpotWatcher.IsEvenPeriod(ft4EvenUtc, "FT4"), true);
+        Check("DxSpotWatcher.IsEvenPeriod(FT4, :10) agrees with the shared table -- odd",
+              DxSpotWatcher.IsEvenPeriod(ft4OddUtc, "FT4"), false);
+        // Non-FT4 fallback (best-effort /15 division) is untouched by this consolidation.
+        var otherModeUtc = new DateTime(2026, 1, 1, 0, 0, 3, DateTimeKind.Utc);
+        Check("DxSpotWatcher.IsEvenPeriod(non-FT4, :03) still uses the /15 best-effort fallback -- even",
+              DxSpotWatcher.IsEvenPeriod(otherModeUtc, "WSPR"), true);
     }
 
     // ── QrzLogbookClient.IsDuplicateReason ──────────────────────────────────────

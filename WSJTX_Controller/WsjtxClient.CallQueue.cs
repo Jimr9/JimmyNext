@@ -458,8 +458,11 @@ namespace WSJTX_Controller
             if (d == null) return 0;
             DateTime lastHeard = d.LastHeardUtc;
             if (lastHeard <= new DateTime(2000, 1, 1)) return 0;
-            int periodMs = trPeriod ?? 15000;
-            if (periodMs <= 0) periodMs = 15000;
+            // Fix, 2026-09-14 (Stage 7c timing audit): fallback now reads the canonical
+            // DefaultTrPeriodMs(mode) chokepoint instead of an independently duplicated 15000
+            // literal -- identical value for FT8, correct (7500) for FT4 instead of always 15000.
+            int periodMs = trPeriod ?? DefaultTrPeriodMs(mode);
+            if (periodMs <= 0) periodMs = DefaultTrPeriodMs(mode);
             double periods = (nowUtc - lastHeard).TotalMilliseconds / periodMs;
             return periods <= 0 ? 0 : (int)periods;
         }

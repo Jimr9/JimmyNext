@@ -760,11 +760,12 @@ namespace WSJTX_Controller
         // (WSJT-X's classic double-click-to-work behavior); this is the unrelated "pick a quiet gap
         // in the passband for my own transmission" analysis, same as it always was.
         //
-        // CalcTimerAdj (below) is NOT restored -- its only caller was StartProcessDecodeTimer's own
+        // CalcTimerAdj (deleted 2026-09-14, confirmed dead -- Stage 7c timing audit) was NOT
+        // restored when this file was: its only caller was StartProcessDecodeTimer's own
         // dispatcher-cycle-timing (deciding exactly when to fire a decode-completion timer relative
         // to trPeriod), a concept with no analog in Direct mode's independent snapshot-polling
-        // interval. Left in place, unreferenced, same reasoning as before: a real fix would need
-        // Direct's own polling cadence redesigned around it, out of scope here.
+        // interval. A real fix would need Direct's own polling cadence redesigned around it, out
+        // of scope here.
         private bool CalcBestOffset(List<int> offsetList, Periods decodePeriod, bool clearList)
         {
             DebugOutput($"{Time()} CalcBestOffset, decodePeriod:{decodePeriod} clearList:{clearList} offsetList.Count:{offsetList.Count()} skipFirstDecodeSeries:{skipFirstDecodeSeries}");
@@ -885,11 +886,6 @@ namespace WSJTX_Controller
             {
                 return (UInt32)oddOffset;
             }
-        }
-
-        private int CalcTimerAdj()
-        {
-            return (mode == "FT8" ? 150 /*300*/ : (mode == "FT4" ? 150 /*300*/ : (mode == "FST4" ? 750 : 300)));      //msec
         }
 
         private void UpdateBandComboBox()

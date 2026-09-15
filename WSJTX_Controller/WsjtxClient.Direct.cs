@@ -453,6 +453,17 @@ namespace WSJTX_Controller
         // ConnectDirectEngine.
         private bool _startupTxLevelRestored;
 
+        // Tier-confirmation redesign, 2026-09-15: the bounded-window/poll-based confirmation that
+        // used to live here (ArmTierConfirmation/CheckPendingTierConfirmation/
+        // _pendingTierConfirmation*/TierConfirmationWindowMs) has been retired. It existed to
+        // guard against SET_TIER's "OK" meaning only "accepted", not "applied" -- traced directly
+        // against the pinned Nexus source (tempo-app/src/engine.rs: Engine::set_tier is
+        // synchronous and infallible; EngineHost/src/main.rs holds the engine lock across the
+        // entire call before ever writing a response), that gap does not exist. DirectSetTier's
+        // response now carries the resulting tier/period directly, read by EngineHost from the
+        // same lock, so SetOperatingMode and DirectInitialConnect's own startup restore validate
+        // it immediately instead of polling for something already known at ack time.
+
         // 2.0.58: the prior-session dial/band/tier to restore on startup, snapshotted on the
         // FIRST authenticated poll of this connection -- BEFORE DirectApplyStatus's own "persist
         // confirmed snapshot" block overwrites ctrl.Radio.LastDialFrequencyHz/LastBandIdx/
@@ -1335,17 +1346,27 @@ namespace WSJTX_Controller
             // FreqToBandStr kept returning null even after fixing dialFrequency below --
             // CurrentBandStr was still "unknown band" the whole time.
             //
-            // No longer hardcoded to "FT8" here (2026-08-09): the engine has no server-side
-            // read-back of which tier is actually selected (AppSnapshot exposes no top-level
-            // current-tier field -- LinkState.tier is the unrelated Tempo chat-link tier), so
-            // this.mode is tracked optimistically, the same way rit_hz/xit_hz/active_vfo etc.
-            // are on the Rust side: set once to "FT8" the first time this runs (matching the
-            // engine's own startup default; ConnectDirectEngine also sets it eagerly for the
-            // normal live-poll path, but TestApplyDirectSnapshot deliberately bypasses that, so
-            // this lazy fallback covers both) and only ever changed after that by
-            // SetOperatingMode/DirectSetTier when the operator actually commands a switch.
-            // Stomping it back to "FT8" every single poll tick here would silently undo that the
-            // instant Alt+M picked FT4.
+            // No longer hardcoded to "FT8" here (2026-08-09): this.mode is tracked
+            // optimistically, the same way rit_hz/xit_hz/active_vfo etc. are on the Rust side:
+            // set once to "FT8" the first time this runs (matching the engine's own startup
+            // default; ConnectDirectEngine also sets it eagerly for the normal live-poll path,
+            // but TestApplyDirectSnapshot deliberately bypasses that, so this lazy fallback
+            // covers both) and only ever changed after that by SetOperatingMode/DirectSetTier
+            // when the operator actually commands a switch. Stomping it back to "FT8" every
+            // single poll tick here would silently undo that the instant Alt+M picked FT4.
+            //
+            // Correction, 2026-09-14 (Stage 7c timing audit): the ORIGINAL version of this
+            // comment claimed "AppSnapshot exposes no top-level current-tier field -- LinkState.
+            // tier is the unrelated Tempo chat-link tier." That was mistaken (or true of an
+            // older vendored snapshot; not true of the source this build links against today) --
+            // traced directly to tempo-app/src/lib.rs: AppState::set_tier writes self.link.tier
+            // = tier, and AppState::tier() reads it back, so LinkState.tier (this.mode's own
+            // engine-side counterpart) genuinely IS the live active tier, kept in sync with
+            // Engine::set_tier. DirectLinkState.Tier (below) now parses it. Reconciling
+            // this.mode against it (detecting a tier command that silently failed, for instance)
+            // is a real, cheap future improvement this correction enables -- deliberately NOT
+            // done in this pass, which only consumes DirectLinkState.PeriodSecs; this.mode's own
+            // tracking is unchanged.
             if (string.IsNullOrEmpty(this.mode)) this.mode = "FT8";
             var smsg = new StatusMessage
             {
@@ -1354,7 +1375,18 @@ namespace WSJTX_Controller
                 TransmitMode = this.mode,
                 Transmitting = radio.Transmitting,
                 Decoding = false, // no direct equivalent in AppSnapshot; UpdateTrPeriod/ShowStatus don't depend on this being exact
-                TRPeriod = null,  // null -> UpdateTrPeriod's own mode-based fallback resolves this from smsg.Mode (FT8 15000ms / FT4 7500ms)
+                // Fix, 2026-09-14 (Stage 7c timing audit): now sourced from the engine's own
+                // already-computed, tier-generic period (DirectLinkState.PeriodSecs, seconds ->
+                // whole ms; UpdateTrPeriod's own "< 1000 means seconds, multiply by 1000" units
+                // heuristic never fires for a real period expressed in ms, so this always lands
+                // in the "already ms" branch) -- makes UpdateTrPeriod's own pre-existing "prefer
+                // the reported value" branch engine-authoritative instead of permanently
+                // unreachable. PeriodSecs <= 0 (older EngineHost, or no snapshot parsed yet)
+                // passes null, same as before this change -- UpdateTrPeriod's own FT8/FT4
+                // mode-based fallback (DefaultTrPeriodMs) resolves it exactly as it always did.
+                TRPeriod = (snap.Link != null && snap.Link.PeriodSecs > 0)
+                    ? (uint?)Math.Round(snap.Link.PeriodSecs * 1000.0)
+                    : null,
                 TxFirst = (radio.Slot % 2) == 0, // approximation -- see this method's own doc comment
                 DxCall = "",
                 DeGrid = "",
@@ -1621,9 +1653,26 @@ namespace WSJTX_Controller
                     // this file) instead of this call site opening its own independent Task.Run --
                     // the dispatcher already marshals onComplete onto the UI thread, same as
                     // ctrl.BeginInvoke did here before.
-                    DirectSetTier(targetTier, ok =>
+                    DirectSetTier(targetTier, (ok, resultingTier, periodSecs) =>
                     {
                         if (epoch != _directConnectionEpoch) return; // superseded by a reconnect
+
+                        // Tier-confirmation redesign, 2026-09-15: same immediate
+                        // requested-vs-resulting validation SetOperatingMode's own Alt+M switch
+                        // uses -- see DirectSetTier's own comment for why the response is already
+                        // authoritative, no waiting/polling required. A startup restore is just as
+                        // capable of a genuine engine-side disagreement as a live switch, and the
+                        // same safety response applies: never adopt the engine's unexpected tier,
+                        // halt+disable TX, report clearly.
+                        if (ok && !string.Equals(resultingTier, targetTier, StringComparison.OrdinalIgnoreCase))
+                        {
+                            HaltAndDisableTx();
+                            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error,
+                                $"Tier mismatch: requested {targetTier}, engine reports {resultingTier}",
+                                "Transmit disabled -- the engine did not apply the requested tier. Verify the tier and re-enable transmit manually."));
+                            ApplyStartupBandFallback();
+                            return;
+                        }
 
                         if (ok)
                         {
@@ -1656,26 +1705,28 @@ namespace WSJTX_Controller
                             UpdateRR73();
                             // Independent audit finding, 2026-08-24 (the REAL root cause behind
                             // the visible symptom above -- confirmed by direct log/timing math,
-                            // not just the display gap): trPeriod (WsjtxClient.cs) is computed
-                            // exactly ONCE per connection and then left alone, guarded on
+                            // not just the display gap): trPeriod (WsjtxClient.cs) used to be
+                            // computed exactly ONCE per connection and then left alone, guarded on
                             // "trPeriod == null" (UpdateTrPeriod, WsjtxClient.Protocol.cs) --
                             // DirectApplyStatus's own FIRST poll this session already computed it
                             // from the SAME stale optimistic "FT8" default (same lazy-fallback
-                            // race as `mode` above, see that comment), and with trPeriod no
-                            // longer null, nothing ever re-derives it again for the rest of the
-                            // session. trPeriod is NOT cosmetic -- it directly drives even/odd
-                            // period-parity math (WsjtxClient.cs's own IsEvenPeriod, "(secPastHour
-                            // / (trPeriod / 1000)) % 2 == 0") and call-queue age expiry
-                            // (CallQueueStore.cs), so a stale 15000ms (FT8) value under a real
-                            // FT4 session would silently mis-time period-boundary/parity decisions
-                            // and queue expiry for the ENTIRE REST OF THE SESSION -- a genuine
-                            // functional bug, not just a wrong label. Reset to null here so
-                            // UpdateTrPeriod's own guard fires again and re-derives it correctly
-                            // from the NOW-corrected mode -- the exact same reset
-                            // SetOperatingMode's own live-switch callback already does (see its
-                            // own comment, WsjtxClient.Protocol.cs) for an operator-driven switch;
-                            // this is that same fix's missing startup-restore counterpart.
-                            trPeriod = null;
+                            // race as `mode` above, see that comment), and with trPeriod no longer
+                            // null, nothing re-derived it again for the rest of the session.
+                            // trPeriod is NOT cosmetic -- it directly drives even/odd period-parity
+                            // math (WsjtxClient.cs's own IsEvenPeriod) and call-queue age expiry
+                            // (CallQueueStore.cs), so a stale 15000ms (FT8) value under a real FT4
+                            // session would silently mis-time period-boundary/parity decisions for
+                            // the ENTIRE REST OF THE SESSION -- a genuine functional bug, not just
+                            // a wrong label.
+                            //
+                            // Tier-confirmation redesign, 2026-09-15: the fix used to be resetting
+                            // trPeriod to null here so UpdateTrPeriod's own fallback re-derived it
+                            // on the NEXT poll. That is no longer necessary -- the resulting period
+                            // is already known, authoritative, from this SAME DirectSetTier
+                            // response (set_tier is synchronous; confirmed directly against the
+                            // pinned Nexus source), so it is set directly, immediately, rather than
+                            // nulled out and left for a later poll to re-derive.
+                            trPeriod = periodSecs.HasValue ? (int?)Math.Round(periodSecs.Value * 1000.0) : null;
                             DebugOutput($"{Time()} [DIRECT] DirectInitialConnect: restored tier '{this.mode}'");
                             // Retest finding, 2026-08-24: newMode=true alone only primes the
                             // NEXT unrelated ShowStatus() render to include the corrected mode --
@@ -3100,10 +3151,37 @@ namespace WSJTX_Controller
         // Task.Run -- SetOperatingMode (WsjtxClient.Protocol.cs) and the startup tier restore
         // below pass onComplete instead of wrapping this call in their own Task.Run+BeginInvoke;
         // the dispatcher already marshals onComplete onto the UI thread.
-        public void DirectSetTier(string newTier, Action<bool> onComplete)
+        // Tier-confirmation redesign, 2026-09-15: EngineHost's SET_TIER response now carries the
+        // resulting tier and period directly -- "OK <TIER> <PERIOD_SECS>", e.g. "OK FT4 7.5" --
+        // read by EngineHost from the SAME engine lock Engine::set_tier itself runs under, so it
+        // is already authoritative by construction (set_tier is synchronous and infallible;
+        // confirmed directly against the pinned tempo-app/src/engine.rs -- by the time it
+        // returns, the resulting tier/period are already real). Mirrors Nexus's own Tauri
+        // `set_tier` command, which returns the fresh snapshot the same way instead of a bare
+        // acknowledgement. Deliberately NO bare-"OK" compatibility fallback: an EngineHost that
+        // doesn't speak this response shape is a build/version mismatch between Jimmy and its own
+        // bundled engine host, not a case to silently paper over by trusting an unconfirmed
+        // acknowledgement -- callers REQUIRE and VALIDATE this response, they do not merely trust
+        // it. onComplete(ok, resultingTier, periodSecs): ok=false and both other args null for
+        // anything that isn't exactly this shape (a real ERR, a malformed line, no response at
+        // all, or the connection dropping).
+        public void DirectSetTier(string newTier, Action<bool, string, double?> onComplete)
         {
-            EnqueueDirectCommand("SET_TIER " + newTier,
-                resp => onComplete(resp != null && resp.StartsWith("OK")));
+            EnqueueDirectCommand("SET_TIER " + newTier, resp =>
+            {
+                if (resp != null)
+                {
+                    string[] parts = resp.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length == 3 && parts[0] == "OK" &&
+                        double.TryParse(parts[2], System.Globalization.NumberStyles.Float,
+                            System.Globalization.CultureInfo.InvariantCulture, out double periodSecs))
+                    {
+                        onComplete(true, parts[1], periodSecs);
+                        return;
+                    }
+                }
+                onComplete(false, null, null);
+            });
         }
 
         // Band Up/Down and Options>Frequencies hotkeys' retune path, native/Direct-engine mode.
@@ -3740,6 +3818,35 @@ namespace WSJTX_Controller
         // path reads a typed kind instead of re-parsing curTxMsg with WsjtxMessage. Same
         // Msg::parse; no Nexus patch. Null when listening / no active QSO / older EngineHost.
         public DirectDecodeSemantics QsoTxSemantics { get; set; }
+
+        // Nexus modernization Stage 7c (additive, 2026-09-14, timing audit): mirrors
+        // tempo_app::dto::AppSnapshot.link (LinkState) -- the engine's own already-computed,
+        // tier-generic T/R period length and active tier name. See DirectLinkState's own comment
+        // for exactly how/whether this is consumed. Null in an older EngineHost's snapshot.
+        public DirectLinkState Link { get; set; }
+    }
+
+    // Nexus modernization Stage 7c (additive, 2026-09-14): tempo_app::dto::LinkState's tier/
+    // period_secs, both already generic across every tier Nexus supports (Engine::
+    // active_slot_secs() -> ModeKind::slot_secs(), never a hardcoded 15.0/7.5 on the engine side --
+    // see EngineHost timing-capability audit). PeriodSecs is the SAME value RadioStatus's own
+    // tr_period_secs carries (both fields are populated from the identical engine call); either
+    // would do, this one is used because it sits with Tier under one wire object.
+    //
+    // Consumption in THIS phase is intentionally narrow: PeriodSecs feeds DirectApplyStatus's
+    // synthetic StatusMessage.TRPeriod, making UpdateTrPeriod's own pre-existing "prefer the
+    // reported value over the FT8/FT4 mode-guess fallback" branch engine-authoritative for real,
+    // for FT8 and FT4 alike, instead of that branch being permanently unreachable the way it was
+    // when Direct mode always synthesized TRPeriod = null. Tier is parsed here but NOT yet acted
+    // on anywhere -- Jimmy's own `mode` field tracking, the Alt+M toggle, and the SET_TIER wire
+    // command are all unchanged in this phase; enabling anything beyond FT8/FT4 is explicitly out
+    // of scope. PeriodSecs <= 0 (or a null Link) must be treated as "not yet known" and fall back
+    // to DefaultTrPeriodMs(mode), the same FT8/FT4-only safe default UpdateTrPeriod already used
+    // before this change existed.
+    internal class DirectLinkState
+    {
+        public string Tier { get; set; }
+        public double PeriodSecs { get; set; }
     }
 
     // Nexus modernization Stage 4: the C# shape of EngineHost's per-decode semantic envelope

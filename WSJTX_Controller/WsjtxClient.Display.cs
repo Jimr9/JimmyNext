@@ -1425,7 +1425,14 @@ namespace WSJTX_Controller
                                 // the ALREADY-known curTxMsg gets described in the status text.
                                 if (curTxMsg != null && (transmitting || loggedCall != null))
                                 {
-                                    if (curTxPayload == null) curTxPayload = WsjtxMessage.Payload(curTxMsg);
+                                    // Stage 7b: structured Nexus-semantic formatting off the
+                                    // cached _curTxMsgSemantic (set alongside curTxMsg itself --
+                                    // see its own Phase C comment above) instead of re-splitting
+                                    // curTxMsg's raw text; falls back to residual free-text
+                                    // extraction only if that cache is somehow unset.
+                                    if (curTxPayload == null)
+                                        curTxPayload = NarrationText.StructuredPayload(_curTxMsgSemantic)
+                                            ?? NarrationText.ResidualDisplayText(curTxMsg);
                                     string p = SpacifyPayload(curTxPayload);
                                     // "Transmit message" clause -- clean phrase ("sending 73");
                                     // ShowStatus adds the ", " separator. Disabled -> absent.
@@ -1456,20 +1463,26 @@ namespace WSJTX_Controller
                                         EnqueueDecodeMessage rmsg = msgList[msgList.Count - 1];
                                         // Stage 12 audit (2026-09-14): operational -- gates whether
                                         // the "received X" status clause below is populated at all.
-                                        if (!rmsg.EffectiveSemantic(myCall).IsCq)
+                                        var rmsgSem = rmsg.EffectiveSemantic(myCall);
+                                        if (!rmsgSem.IsCq)
                                         {
                                             var sec = (sinceMidnight - rmsg.SinceMidnight).TotalSeconds;
                                             //DebugOutput($"{spacer}rmsg:'{rmsg.Message}' rmsg.SinceMidnight:{rmsg.SinceMidnight} TotalSeconds:{sec}");
                                             if (sec < 3.5 * (trPeriod / 1000))  //Rx period that just ended
                                             {
-                                                curRxPayload = SpacifyPayload(WsjtxMessage.Payload(rmsg.Message));
+                                                // Stage 7b: structured Nexus-semantic formatting
+                                                // first, residual free text only for fieldDay/other.
+                                                curRxPayload = SpacifyPayload(NarrationText.StructuredPayload(rmsgSem)
+                                                    ?? NarrationText.ResidualDisplayText(rmsg.Message));
                                                 //DebugOutput($"{spacer}found current:{curRxPayload}");
                                                 if (!rmsg.Is73orRR73() && msgList.Count >= 2)
                                                 {   //Rx period previous to the one that just ended
                                                     rmsg = msgList[msgList.Count - 2];
-                                                    if (!rmsg.EffectiveSemantic(myCall).IsCq)
+                                                    rmsgSem = rmsg.EffectiveSemantic(myCall);
+                                                    if (!rmsgSem.IsCq)
                                                     {
-                                                        prevRxPayload = SpacifyPayload(WsjtxMessage.Payload(rmsg.Message));
+                                                        prevRxPayload = SpacifyPayload(NarrationText.StructuredPayload(rmsgSem)
+                                                            ?? NarrationText.ResidualDisplayText(rmsg.Message));
                                                         //DebugOutput($"{spacer}found prev:{prevRxPayload}");
                                                     }
                                                 }
@@ -1477,7 +1490,8 @@ namespace WSJTX_Controller
                                             else
                                             {
                                                 //Rx period previous to the one that just ended
-                                                prevRxPayload = SpacifyPayload(WsjtxMessage.Payload(rmsg.Message));
+                                                prevRxPayload = SpacifyPayload(NarrationText.StructuredPayload(rmsgSem)
+                                                    ?? NarrationText.ResidualDisplayText(rmsg.Message));
                                                 //DebugOutput($"{spacer}no current, found prev:{prevRxPayload}");
                                             }
                                             if (prevRxPayload != null && prevRxPayload == curRxPayload) prevRxPayload = null;  //no need to repeat the same results
@@ -1592,7 +1606,10 @@ namespace WSJTX_Controller
                                 // the whole 20-call effort). A fresh decode from the target
                                 // re-stamps otherPartyForCallInProgUtc; a target CQ / turn-to-us
                                 // clears it outright (ProcessDecodeMsg).
-                                double otherFreshMs = 1.5 * (trPeriod ?? 15000);
+                                // Fix, 2026-09-14 (Stage 7c timing audit): fallback now reads the
+                                // canonical DefaultTrPeriodMs(mode) chokepoint, matching FT4
+                                // instead of always assuming FT8's period.
+                                double otherFreshMs = 1.5 * (trPeriod ?? DefaultTrPeriodMs(mode));
                                 bool otherPartyFresh = otherPartyForCallInProgUtc != default
                                     && (DateTime.UtcNow - otherPartyForCallInProgUtc).TotalMilliseconds <= otherFreshMs;
                                 if (curCall != null && otherPartyFresh && (otherPartyForCallInProg != null || otherPartyStage != null))

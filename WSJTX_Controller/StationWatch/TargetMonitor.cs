@@ -273,10 +273,11 @@ namespace WSJTX_Controller
             Purpose = purpose;
         }
 
-        // Fixed WSJT-X T/R period length for a mode token (FT8 15 s / FT4 7.5 s). Unknown or
-        // any other value conservatively uses the longer FT8 period.
-        private static double PeriodSecondsForMode(string mode) =>
-            string.Equals(mode, "FT4", StringComparison.OrdinalIgnoreCase) ? 7.5 : 15.0;
+        // Fix, 2026-09-14 (Stage 7c timing audit): delegates to the one canonical chokepoint
+        // (WsjtxClient.PeriodSecondsForMode) instead of keeping an independent copy of the same
+        // FT8=15s/FT4=7.5s table -- this method's own name/signature/call sites throughout this
+        // file are unchanged.
+        private static double PeriodSecondsForMode(string mode) => WsjtxClient.PeriodSecondsForMode(mode);
 
         // Which alternating slot a UTC instant falls in, using the same seconds-since-midnight /
         // period alignment the engine's own monotonic slot counter uses (FT8 boundaries at
@@ -570,8 +571,9 @@ namespace WSJTX_Controller
             // Is73 byte-identical to the WsjtxMessage equivalents across the corpus; Stage 12
             // (2026-09-14 audit) migrates `de` (was d.DeCall()) the same way -- it gates the
             // whole method exactly like SeedSelectedDecode's own `de` above. The observation
-            // Value strings (Payload) and IsFoxHound stay on WsjtxMessage / the DTO -- narration
-            // formatting is migrated separately (Stage 7b), and F/H is a heuristic.
+            // Value strings now come from NarrationText.StructuredPayload (Stage 7b, structured
+            // Nexus-semantic formatting, falling back to residual free text only for
+            // fieldDay/other) -- IsFoxHound stays on the DTO, a heuristic unrelated to this.
             var sem = d.EffectiveSemantic(myCall);
             string de = sem.From;
             if (de == null) return;
@@ -617,7 +619,8 @@ namespace WSJTX_Controller
                     // the unseen half of the target's own exchange. Value carries the peer's own
                     // payload (report/RRR/RR73/73/grid) so the glue can word it naturally, e.g.
                     // "W1ABC R minus 5." from a decoded "W1ABC K4YT R-05".
-                    Raise(TargetObservationKind.OtherPartyObserved, TargetCall, de, WsjtxMessage.Payload(d.Message), d.Message);
+                    Raise(TargetObservationKind.OtherPartyObserved, TargetCall, de,
+                        NarrationText.StructuredPayload(sem) ?? NarrationText.ResidualDisplayText(d.Message), d.Message);
                 }
                 return;
             }
@@ -672,7 +675,11 @@ namespace WSJTX_Controller
             if (!addressingUs && !string.Equals(to, ApparentPeer, StringComparison.OrdinalIgnoreCase))
                 ApparentPeer = to;
             string peer = addressingUs ? myCall : to;
-            string payload = WsjtxMessage.Payload(d.Message);   // "-15" / "R-15" / "RRR" / "RR73" / "73" -- narration only
+            // Stage 7b: structured Nexus-semantic formatting first ("-15"/"R-15"/"RRR"/"RR73"/
+            // "73"/grid), falling back to residual free-text extraction only for a
+            // fieldDay/other decode with no structured shape -- see NarrationText's own boundary
+            // comment. Narration only; never read for admission/queue/QSO decisions.
+            string payload = NarrationText.StructuredPayload(sem) ?? NarrationText.ResidualDisplayText(d.Message);
 
             if (live && addressingUs)
                 EngagedUs = true;                      // the target answered our callsign
@@ -764,7 +771,7 @@ namespace WSJTX_Controller
         // state -- classification only, so Station Watch style callers still report "watching X".
         private void RaiseSeedClassification(EnqueueDecodeMessage d, string myCall)
         {
-            var sem = d.EffectiveSemantic(myCall);   // Stage 7a (Payload strings stay as-is)
+            var sem = d.EffectiveSemantic(myCall);   // Stage 7b: report/RReport strings now come from NarrationText.StructuredPayload
             if (sem.IsCq) { Raise(TargetObservationKind.TargetCq, TargetCall, null, null, d.Message); return; }
             string to = sem.To;
             if (string.IsNullOrEmpty(to)) { Raise(TargetObservationKind.TargetAmbiguous, TargetCall, null, null, d.Message); return; }
@@ -773,8 +780,8 @@ namespace WSJTX_Controller
             if (sem.IsRr73) Raise(TargetObservationKind.TargetRr73, TargetCall, peer, null, d.Message);
             else if (sem.Is73) Raise(TargetObservationKind.Target73, TargetCall, peer, null, d.Message);
             else if (sem.IsRrr) Raise(TargetObservationKind.TargetRrr, TargetCall, peer, null, d.Message);
-            else if (sem.IsRReport) Raise(TargetObservationKind.TargetRReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
-            else if (sem.IsReport) Raise(TargetObservationKind.TargetReport, TargetCall, peer, WsjtxMessage.Payload(d.Message), d.Message);
+            else if (sem.IsRReport) Raise(TargetObservationKind.TargetRReport, TargetCall, peer, NarrationText.StructuredPayload(sem), d.Message);
+            else if (sem.IsReport) Raise(TargetObservationKind.TargetReport, TargetCall, peer, NarrationText.StructuredPayload(sem), d.Message);
             else if (addressingUs) Raise(TargetObservationKind.TargetAddressingUs, TargetCall, peer, null, d.Message);
             else Raise(TargetObservationKind.TargetAddressingOther, TargetCall, peer, null, d.Message);
         }

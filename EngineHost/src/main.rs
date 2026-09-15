@@ -704,7 +704,8 @@ fn parse_args() -> Args {
 ///                                          (tempo-app/src/engine.rs's own doc comment: "takes
 ///                                          effect live"); this just exposes it, matching every
 ///                                          other command above -- no Nexus source touched.
-///   SET_TIER FT8|FT4                    -- calls Engine::set_tier(Tier). Responds "OK" or
+///   SET_TIER FT8|FT4                    -- calls Engine::set_tier(Tier). Responds
+///                                          "OK <TIER> <PERIOD_SECS>" (e.g. "OK FT4 7.5") or
 ///                                          "ERR <message>". Jimmy's own Alt+M (Toggle Mode)
 ///                                          hotkey -- under classic WSJT-X/UDP mode this always
 ///                                          just halted Tx and left the operator to switch modes
@@ -713,6 +714,18 @@ fn parse_args() -> Args {
 ///                                          has no separate UI to fall back to, so it needs this
 ///                                          instead. set_tier already existed in Engine; this just
 ///                                          exposes it.
+///                                          Response shape fixed 2026-09-15 (tier-confirmation
+///                                          redesign): set_tier() is synchronous and infallible --
+///                                          by the time it returns, engine.tier()/
+///                                          active_slot_secs() are already the authoritative
+///                                          resulting values, still under the SAME lock this
+///                                          handler already holds. Nexus's own Tauri `set_tier`
+///                                          command (src-tauri/src/lib.rs) does exactly this --
+///                                          `eng.set_tier(tier); Ok(eng.snapshot())` -- returning
+///                                          the fresh state instead of a bare acknowledgement.
+///                                          This mirrors that, so Jimmy can trust the response
+///                                          immediately instead of polling SNAPSHOT afterward to
+///                                          find out what it was already told.
 ///   SET_DECODE_DEPTH 1|2|3               -- calls Engine::set_decode_depth(u8) (WSJT-X's
 ///                                          "Fast/Normal/Deep"). Responds "OK" or "ERR <message>".
 ///                                          Live, mid-session -- unlike the rest of Jimmy's Decode
@@ -761,6 +774,25 @@ fn parse_args() -> Args {
 ///                                          worked decode's audio Hz. set_rx_offset already exists
 ///                                          in Engine (clamped 200-4000 Hz, read by the next
 ///                                          poll); no Nexus source touched.
+/// Formats SET_TIER's wire response from the ALREADY-RESULTING tier/period (read by the caller,
+/// under the same engine lock, immediately after `Engine::set_tier` returns) -- pulled out as a
+/// small pure function for direct test coverage, same reasoning as `reply_wire_response` below.
+/// "OK <TIER> <PERIOD_SECS>", e.g. "OK FT4 7.5". `tier` is serialized through `Tier`'s own
+/// `Serialize` impl (the SAME wire name `AppSnapshot.link.tier` already uses, e.g. "FT8"/"FT4")
+/// rather than a hand-maintained duplicate mapping, so this can never drift from what a SNAPSHOT
+/// response calls the same tier. Tier-confirmation redesign, 2026-09-15: no bare "OK" anymore --
+/// see this command's own doc comment above for why the caller can trust this immediately instead
+/// of polling SNAPSHOT afterward.
+fn set_tier_wire_response(tier: tempo_app::dto::Tier, period_secs: f64) -> String {
+    let tier_name = match serde_json::to_value(tier) {
+        Ok(serde_json::Value::String(s)) => s,
+        // Tier's Serialize impl always produces a bare string for every variant -- this arm is
+        // unreachable in practice, but a malformed response is far better than a panic here.
+        _ => format!("{tier:?}"),
+    };
+    format!("OK {tier_name} {period_secs}")
+}
+
 /// Formats the REPLY command's wire response from `Engine::call_station_ctx`'s own `Result` --
 /// pulled out as a small pure function so this has direct test coverage without needing a live
 /// Engine/TCP round trip. `Ok(())` -> "OK"; `Err(e)` -> "ERR {e}", matching every other fallible
@@ -1092,17 +1124,34 @@ fn handle_control_connection(
             // operator changes it in WSJT-X's own UI" (WSJT-X's UDP API has no outbound
             // mode-change command at all -- Jimmy only ever OBSERVED whichever mode WSJT-X's own
             // Status messages reported). Direct-engine mode has no separate WSJT-X UI to fall
-            // back to, so it needs a real command instead. Engine::set_tier already exists and
-            // already safely halts any in-flight over across a tier switch (see its own doc
-            // comment) -- this just exposes it, matching every other command above.
+            // back to, so it needs a real command instead. Engine::set_tier already exists; this
+            // just exposes it, matching every other command above.
+            // Correction, 2026-09-15: the ORIGINAL version of this comment claimed set_tier
+            // "already safely halts any in-flight over across a tier switch" for every tier --
+            // traced directly against tempo-app/src/engine.rs and that is only true for the
+            // long-over tier family (WSPR/FST4/FST4W/Q65/...). For FT8/FT4 specifically (and
+            // FT2/FT1/DX1/TempoFast/TempoDeep), set_tier deliberately does NOT halt an in-flight
+            // over -- it is left to finish naturally on its own pre-computed timer, explicitly
+            // documented in that source as "shipped gold-standard behaviour and not mine to
+            // alter." Jimmy's own SetOperatingMode (WsjtxClient.Protocol.cs) halts Tx itself
+            // before calling this command, independent of and more conservative than this
+            // engine's own FT8/FT4 default -- a deliberate, separate Jimmy-side choice, not
+            // something this command relies on or should be described as providing.
             match v.trim() {
-                "FT8" => {
-                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_tier(tempo_app::dto::Tier::Ft8);
-                    let _ = writeln!(stream, "OK");
-                }
-                "FT4" => {
-                    engine.lock().unwrap_or_else(|e| e.into_inner()).set_tier(tempo_app::dto::Tier::Ft4);
-                    let _ = writeln!(stream, "OK");
+                "FT8" | "FT4" => {
+                    let requested = if v.trim() == "FT8" { tempo_app::dto::Tier::Ft8 } else { tempo_app::dto::Tier::Ft4 };
+                    // Tier-confirmation redesign, 2026-09-15: one lock acquisition covers both
+                    // the mutation and reading the resulting state back -- set_tier() is
+                    // synchronous and infallible (confirmed directly from tempo-app/src/
+                    // engine.rs), so by the time it returns, tier()/active_slot_secs() are
+                    // already authoritative. Mirrors Nexus's own Tauri `set_tier` command
+                    // (src-tauri/src/lib.rs: `eng.set_tier(tier); Ok(eng.snapshot())`).
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    eng.set_tier(requested);
+                    let resulting_tier = eng.tier();
+                    let period_secs = eng.active_slot_secs();
+                    drop(eng);
+                    let _ = writeln!(stream, "{}", set_tier_wire_response(resulting_tier, period_secs));
                 }
                 other => {
                     let _ = writeln!(stream, "ERR bad SET_TIER value: {other}");
@@ -1699,6 +1748,26 @@ mod tests {
     fn reply_wire_response_err_reports_err_with_the_real_message() {
         let msg = "No recent decode from W1AW -- wait for their next transmission, then click again.";
         assert_eq!(reply_wire_response(Err(msg.to_string())), format!("ERR {msg}"));
+    }
+
+    // Tier-confirmation redesign, 2026-09-15: SET_TIER's response now carries the resulting tier
+    // and period instead of a bare "OK" -- these lock in the exact wire shape Jimmy's own
+    // DirectSetTier parses, and that the tier name matches AppSnapshot.link.tier's own wire
+    // convention (Tier's Serialize impl), not a hand-maintained duplicate.
+    #[test]
+    fn set_tier_wire_response_ft8() {
+        assert_eq!(
+            set_tier_wire_response(tempo_app::dto::Tier::Ft8, 15.0),
+            "OK FT8 15"
+        );
+    }
+
+    #[test]
+    fn set_tier_wire_response_ft4() {
+        assert_eq!(
+            set_tier_wire_response(tempo_app::dto::Tier::Ft4, 7.5),
+            "OK FT4 7.5"
+        );
     }
 
     // Release-audit finding (Codex Audit 02, 2026-08-21) -- release blocker: plain CQ

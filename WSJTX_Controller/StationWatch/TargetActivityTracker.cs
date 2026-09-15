@@ -122,7 +122,12 @@ namespace WSJTX_Controller
             if (!string.IsNullOrEmpty(myCall) && string.Equals(peer, myCall, StringComparison.OrdinalIgnoreCase))
                 return null;                                          // addressed to us -- a different fact
 
-            string payload = WsjtxMessage.Payload(d.Message);
+            // Stage 7b: same structured-first, residual-fallback formatting as TargetMonitor.
+            // IngestTargetDecode's own `payload` local -- MUST stay the exact same expression, not
+            // just the same output shape, so this classifier and that method keep producing
+            // byte-identical strings for the same decode (see the 2026-09-11 divergence-fix note
+            // below for why that parity matters).
+            string payload = NarrationText.StructuredPayload(sem) ?? NarrationText.ResidualDisplayText(d.Message);
 
             // 2026-09-11 divergence fix (found while verifying cross-route identity): TargetMonitor.
             // IngestTargetDecode's Raise() calls pass the raw payload for EVERY one of these kinds

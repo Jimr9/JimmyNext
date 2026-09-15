@@ -256,11 +256,13 @@ namespace WSJTX_Controller
         // to the same 15-second division as a best-effort label, not a precise one.
         public static bool IsEvenPeriod(DateTime utcTime, string mode)
         {
-            int secPastMinute = (int)(utcTime.TimeOfDay.TotalSeconds % 60);
+            // Fix, 2026-09-14 (Stage 7c timing audit): the FT4 window table now lives in the one
+            // shared WsjtxClient.IsFt4EvenWindow, no longer duplicated here and in
+            // WsjtxClient's own instance IsEvenPeriod independently.
             if (string.Equals(mode, "FT4", StringComparison.OrdinalIgnoreCase))
             {
-                return (secPastMinute >= 0 && secPastMinute < 7) || (secPastMinute >= 15 && secPastMinute < 22) ||
-                       (secPastMinute >= 30 && secPastMinute < 37) || (secPastMinute >= 45 && secPastMinute < 52);
+                int secPastMinute = (int)(utcTime.TimeOfDay.TotalSeconds % 60);
+                return WsjtxClient.IsFt4EvenWindow(secPastMinute);
             }
             int secPastHour = (int)(utcTime.TimeOfDay.TotalSeconds % 3600);
             return (secPastHour / 15) % 2 == 0;

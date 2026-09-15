@@ -99,7 +99,7 @@ namespace WSJTX_Controller
                 // ordered dispatcher (WsjtxClient.Direct.cs's own class comment) instead of this
                 // method opening its own independent Task.Run -- the dispatcher already marshals
                 // onComplete onto the UI thread, same as ctrl.BeginInvoke did here before.
-                DirectSetTier(tier, ok =>
+                DirectSetTier(tier, (ok, resultingTier, periodSecs) =>
                 {
                     _tierChangeRequestInFlight = false;
                     if (!ok)
@@ -111,13 +111,30 @@ namespace WSJTX_Controller
                         Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, $"Mode change to {tier} failed", "engine did not confirm"));
                         return;
                     }
+                    // Tier-confirmation redesign, 2026-09-15: DirectSetTier's "ok" already means
+                    // EngineHost returned a well-formed "OK <TIER> <PERIOD_SECS>" response -- see
+                    // that method's own comment for why this is authoritative immediately, no
+                    // waiting/polling required (set_tier is synchronous and infallible; confirmed
+                    // directly against the pinned Nexus source). The remaining, immediate check is
+                    // that the RESULTING tier is the one actually requested -- infallible set_tier
+                    // means this should never disagree in practice, but "requires and validates"
+                    // means checking it anyway rather than assuming. On a genuine disagreement:
+                    // do NOT adopt the engine's unexpected tier, halt+disable TX (mismatched
+                    // mode/timing must not keep transmitting), and report clearly.
+                    if (!string.Equals(resultingTier, tier, StringComparison.OrdinalIgnoreCase))
+                    {
+                        HaltAndDisableTx();
+                        Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error,
+                            $"Tier mismatch: requested {tier}, engine reports {resultingTier}",
+                            "Transmit disabled -- the engine did not apply the requested tier. Verify the tier and re-enable transmit manually."));
+                        return;
+                    }
                     mode = tier;
                     newMode = true;
-                    // A tier switch changes the T/R period (FT8 15s / FT4 7.5s) -- everything
-                    // queued under the old period's timing is stale, same treatment
-                    // DirectApplyStatus's own band-change handling already gives a confirmed
-                    // band change.
-                    trPeriod = null;
+                    // The resulting period is already known, authoritative, from this SAME
+                    // response -- set it directly instead of nulling it out and waiting for the
+                    // next SNAPSHOT poll's UpdateTrPeriod fallback to re-derive it.
+                    trPeriod = periodSecs.HasValue ? (int?)Math.Round(periodSecs.Value * 1000.0) : null;
                     // Found in the Direct-engine-path review, 2026-08-12: DT samples measured
                     // under one mode's decode correlator aren't directly comparable to the
                     // other mode's -- averaging an FT8 sample together with a fresh FT4 one
@@ -298,6 +315,33 @@ namespace WSJTX_Controller
             }
         }
 
+        // Fix, 2026-09-14 (Stage 7c timing audit): the ONE canonical T/R-period-length
+        // chokepoint -- previously duplicated independently here (as DefaultTrPeriodMs, ms,
+        // case-sensitive "FT4" compare) and in TargetMonitor.PeriodSecondsForMode (seconds,
+        // case-INsensitive compare); TargetMonitor now delegates to this method instead of
+        // keeping its own copy. Case-insensitive (TargetMonitor's own prior behavior, the more
+        // defensive of the two) -- harmless in practice since `mode` is only ever assigned the
+        // exact literals "FT8"/"FT4" throughout the codebase today, but a real, deliberate
+        // reconciliation of a genuine (if unobservable) divergence between the two prior
+        // implementations, not an oversight. FT8 15s / FT4 7.5s; unknown/null/any other value
+        // conservatively uses the longer FT8 period, matching both prior implementations' own
+        // fallback choice.
+        public static double PeriodSecondsForMode(string mode) =>
+            string.Equals(mode, "FT4", StringComparison.OrdinalIgnoreCase) ? 7.5 : 15.0;
+
+        // Fix, 2026-09-14 (Stage 7c timing audit): FT4's period (7.5s) does not divide evenly
+        // into a 60-second minute the way FT8's 15s does, so parity needs four explicit windows
+        // instead of one division -- this exact table used to be duplicated verbatim in this
+        // class's own instance IsEvenPeriod AND in DxSpotWatcher.IsEvenPeriod; both now call this
+        // one shared implementation. Takes any raw seconds count (past the hour, past the minute,
+        // whatever the caller has) and reduces mod 60 itself, matching the original callers' own
+        // "% 60" step exactly -- byte-identical output to both prior independent copies.
+        public static bool IsFt4EvenWindow(int secondsCount)
+        {
+            int sec = secondsCount % 60;
+            return (sec >= 0 && sec < 7) || (sec >= 15 && sec < 22) || (sec >= 30 && sec < 37) || (sec >= 45 && sec < 52);
+        }
+
         // FT8's and FT4's T/R periods are fixed protocol constants, not something
         // that varies station to station -- pulled out as its own pure function so
         // it's directly unit-testable (UpdateTrPeriod itself needs a live
@@ -305,7 +349,7 @@ namespace WSJTX_Controller
         // references Jimmy.exe as a compiled binary with no InternalsVisibleTo, so
         // only public members are reachable from there (see CallQueueRanker.cs's/
         // RowFormatter.cs's own comments on this same constraint).
-        public static int DefaultTrPeriodMs(string mode) => mode == "FT4" ? 7500 : 15000;
+        public static int DefaultTrPeriodMs(string mode) => (int)(PeriodSecondsForMode(mode) * 1000.0);
 
         private void ResetNego()
         {
