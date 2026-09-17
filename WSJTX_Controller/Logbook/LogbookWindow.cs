@@ -601,8 +601,26 @@ namespace WSJTX_Controller
                 Location       = new Point(56, 7),
                 Size           = new Size(300, 100),
                 TabIndex       = 1,
-                CheckOnClick   = true,
+                CheckOnClick   = false,
                 AccessibleName = "Still Needed awards",
+            };
+            // CheckOnClick=false + manual toggle on MouseUp, not the built-in CheckOnClick=true --
+            // found live, 2026-09-15: WinForms' own CheckOnClick only toggles the box when the
+            // click does NOT also change the selection. Clicking a row that isn't already selected
+            // (the common case -- arrow-keying/clicking through the list to find an award, then
+            // clicking its box) selects it but silently eats the check-toggle, so the very
+            // interaction this control exists for could look like it worked (row highights) while
+            // never actually calling _onActiveAwardRuleIdsChanged or reaching activeAwardRuleIds/
+            // the ini at all. Toggling explicitly here fires on every left-click regardless of
+            // whether that same click also changed the selection. Keyboard (Space) already toggles
+            // correctly without CheckOnClick -- untouched by this change, so JAWS/NVDA users were
+            // never affected.
+            _neededAwardsClb.MouseUp += (s, e) =>
+            {
+                if (e.Button != MouseButtons.Left) return;
+                int index = _neededAwardsClb.IndexFromPoint(e.Location);
+                if (index < 0 || index >= _neededAwardsClb.Items.Count) return;
+                _neededAwardsClb.SetItemChecked(index, !_neededAwardsClb.GetItemChecked(index));
             };
             // Items are populated from RuleLibrary.Definitions in PopulateNeededAwardsList() --
             // dropping a new .ini file into RuleDefinitions adds it here with no code change.
@@ -1627,6 +1645,22 @@ namespace WSJTX_Controller
         {
             var defs = RuleLibrary.Definitions.Where(d => d.Enabled)
                 .OrderBy(d => d.Category ?? "").ThenBy(d => d.Name).ToList();
+
+            // Skip the rebuild when the enabled-rule set hasn't actually changed. PopulateNeeded()
+            // calls this on every plain selection/band change and tab switch, not just when a
+            // Rule Definition was added/removed -- and _neededAwardsClb's own SelectedIndexChanged
+            // fires as part of the SAME click that checks/unchecks a not-yet-selected row's box
+            // (selection changes before the click's check-toggle completes). Clearing and
+            // re-adding Items mid-click could silently swallow that pending checkbox toggle
+            // (found 2026-09-15: checking Route 66 On The Air, closing the Logbook window, and
+            // reopening it showed the box unchecked again -- activeAwardRuleIds in the profile
+            // ini never gained ROUTE66OTA). Comparing by Id leaves the list and its live checked
+            // states alone unless something genuinely added, removed, or reordered an award.
+            if (_neededDefs.Count == defs.Count && _neededDefs.Select(d => d.Id).SequenceEqual(defs.Select(d => d.Id)))
+            {
+                _neededDefs = defs;
+                return;
+            }
 
             string prevId = (_neededAwardsClb.SelectedIndex >= 0 && _neededAwardsClb.SelectedIndex < _neededDefs.Count)
                 ? _neededDefs[_neededAwardsClb.SelectedIndex].Id : _activeAwardRuleIds.FirstOrDefault();
