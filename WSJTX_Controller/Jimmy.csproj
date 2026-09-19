@@ -4,6 +4,13 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Explicitly pins the DPI mode this app is built/tested against (PerMonitorV2 is
+         already the .NET SDK's own implicit default when unset, so this is not expected to
+         change today's rendering) instead of leaving it to an unstated SDK default that
+         could shift under a future SDK/runtime update. See visual audit.txt Finding 5:
+         the raw-pixel-coordinate layouts throughout this app still need testing at 125/150/
+         200% scaling; this flag alone does not make that layout DPI-correct. -->
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <RootNamespace>WSJTX_Controller</RootNamespace>
     <AssemblyName>Jimmy</AssemblyName>
     <ApplicationIcon>netfol.ico</ApplicationIcon>

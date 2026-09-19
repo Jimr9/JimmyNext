@@ -71,10 +71,17 @@ namespace WSJTX_Controller
 
             _sourcesValue = AddRow("Sources:", ref y, lx, vx, fw, rh, ref tabIndex);
 
+            // Was single-line (Height=18) -- measured against a realistic real message
+            // ("QRZ: Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real QRZ traffic
+            // allowed.", the exact status shown while running under Jimmy's own test-mode
+            // safety guard) at ~449px, already wider than this 444px-wide box; provider
+            // errors can be considerably longer. Multiline/WordWrap wraps instead of clipping.
             _statusValue = new TextBox
             {
                 Location       = new Point(lx, y + 6),
-                Size           = new Size(fw + vx - lx, 18),
+                Size           = new Size(fw + vx - lx, 36),
+                Multiline      = true,
+                WordWrap       = true,
                 ReadOnly       = true,
                 BorderStyle    = BorderStyle.None,
                 BackColor      = SystemColors.Control,
@@ -84,7 +91,7 @@ namespace WSJTX_Controller
             };
             Controls.Add(_statusValue);
 
-            y += 32;
+            y += 50; // 32 + 18 extra for _statusValue's taller box, above
 
             _closeButton = new Button
             {

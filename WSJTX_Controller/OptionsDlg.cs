@@ -237,6 +237,16 @@ namespace WSJTX_Controller
                 potaButton, hunterButton,
                 allButton, recentButton
             };
+
+            // label9's Width must be set explicitly from basicPanel's real client width,
+            // refreshed on every resize -- not via Anchor=Right, which an independent runtime
+            // check found let it balloon to ~1450px inside an ~830px-wide panel because
+            // basicPanel has AutoScroll=true (see label9's own comment in
+            // OptionsDlg.Designer.cs). Wrapping happened to still look right at that width by
+            // coincidence, not because the box was actually sized correctly.
+            void SizeLabel9() => label9.Width = Math.Max(50, basicPanel.ClientSize.Width - label9.Left - 10);
+            SizeLabel9();
+            basicPanel.Resize += (s, e) => SizeLabel9();
         }
 
         public void UpdateView()
@@ -247,9 +257,25 @@ namespace WSJTX_Controller
         private void OptionsDlg_Load(object sender, EventArgs e)
         {
             Screen screen = Screen.FromControl(ctrl);
+            var workingArea = screen.WorkingArea;
+
+            // MinimumSize is the smaller of the dialog's designed size (today's actual Size,
+            // which already includes OS chrome) and what the current screen's usable work
+            // area can actually show -- so a normal monitor keeps the tested-good 830x418-ish
+            // floor, while a screen too small for that can't leave the dialog stuck bigger
+            // than the display itself.
+            MinimumSize = new Size(
+                Math.Min(Width,  workingArea.Width),
+                Math.Min(Height, workingArea.Height));
+
+            // Fit the dialog within the usable work area (not the full monitor Bounds, which
+            // would let it land under the taskbar) before centering.
+            Size = new Size(
+                Math.Min(Width,  workingArea.Width),
+                Math.Min(Height, workingArea.Height));
             Location = new Point(
-                screen.Bounds.X + (screen.Bounds.Width - Width) / 2,
-                screen.Bounds.Y + (screen.Bounds.Height - Height) / 2);
+                workingArea.X + Math.Max(0, (workingArea.Width  - Width)  / 2),
+                workingArea.Y + Math.Max(0, (workingArea.Height - Height) / 2));
 
             udpOnTopCheckBox.Checked = ctrl.alwaysOnTop;
             udpDiagLogCheckBox.Checked = wsjtxClient.diagLog;
@@ -276,18 +302,43 @@ namespace WSJTX_Controller
             // already visible before subtitleLabel.Focus() below. profilesPanel is appended
             // last, matching "Profiles" being appended last in the Designer's own item list --
             // every other category keeps its existing index unchanged.
-            WireCategoryList(_categoryListBox, _categoryDetailHost, new List<Control> {
+            var categoryPanels = new List<Control> {
                 basicPanel, generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
                 advUiPanel, wantedCallsPanel, spotWatchPanel, soundsPanel, radioPanel,
                 decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
                 appearancePanel, profilesPanel
-            });
+            };
+            WireCategoryList(_categoryListBox, _categoryDetailHost, categoryPanels);
+
+            // Accessibility fix, 2026-09-17: every NumericUpDown here is a composite control --
+            // internally it hosts its own child TextBox (the editable number) plus spin buttons.
+            // JAWS was announcing both the NumericUpDown itself ("...edit spin box") AND that
+            // internal child ("...Edit") as two separate stops with the same borrowed name (e.g.
+            // "SWR halt threshold edit spin box" / "SWR halt threshold Edit" / "2.5"). The child
+            // is never an independent Tab stop -- this walks every category panel once, up
+            // front, to mark each NumericUpDown's internal TextBox as accessibility-invisible
+            // (AccessibleRole.None) so only the composite control itself is announced. Applies
+            // to every numeric control in the dialog, not just the ones named in the original
+            // report, and needs no changes at each individual NumericUpDown's own construction.
+            foreach (var panel in categoryPanels)
+                SuppressNumericUpDownChildAccessibility(panel);
 
             UpdateAllButtons();
             dxccButtonEnabled = false;  // Phase 3: New DXCC exclusive mode removed
             UpdateAllButtons();
 
-            subtitleLabel.Focus();
+            // Accessibility fix, 2026-09-19: initial focus must be on the Categories list
+            // itself (JAWS announces "Options categories, Basic, 1 of 18" the instant Alt+O
+            // opens this dialog), not on Basic's own content. Load fires before the window is
+            // actually shown/activated, so a .Focus() call made here (the previous
+            // subtitleLabel.Focus()) is unreliable -- live JAWS testing showed focus landing on
+            // _categoryListBox anyway, but only because that call silently failed and
+            // WinForms' own post-activation default (lowest TabIndex control) picked
+            // _categoryListBox regardless, coincidentally producing the right result for the
+            // wrong reason. Doing it explicitly in Shown (which fires once the window is
+            // genuinely visible and activated) makes the actual intent reliable instead of
+            // accidental.
+            this.Shown += (s, e) => _categoryListBox.Focus();
         }
 
         // Generalizes WireServiceList (below, still used as-is inside Logbook Sync/Lookup Data)
@@ -310,6 +361,29 @@ namespace WSJTX_Controller
             listBox.SelectedIndexChanged += (s, e) => UpdateVisibility();
             if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;
             UpdateVisibility();
+        }
+
+        // Recursively finds every NumericUpDown under root and marks its internal editable
+        // TextBox part as accessibility-invisible. NumericUpDown is a composite Win32 control
+        // (an UpDownEdit TextBox plus spin buttons as real child controls); WinForms exposes
+        // that internal TextBox as its own separate, independently-named accessible object,
+        // which is what let JAWS announce the control twice under one borrowed name. The
+        // NumericUpDown's own composite accessible object (name/value/spin-button semantics)
+        // is untouched -- only its non-Tab-stop internal child is hidden from the tree.
+        private static void SuppressNumericUpDownChildAccessibility(Control root)
+        {
+            foreach (Control child in root.Controls)
+            {
+                if (child is NumericUpDown nud)
+                {
+                    foreach (Control nudChild in nud.Controls)
+                    {
+                        if (nudChild is TextBox)
+                            nudChild.AccessibleRole = AccessibleRole.None;
+                    }
+                }
+                SuppressNumericUpDownChildAccessibility(child);
+            }
         }
 
         // ===== GENERAL TAB =====
@@ -5404,31 +5478,32 @@ namespace WSJTX_Controller
         private void BuildLogbookSyncTab()
         {
             logbookSyncPanel.Controls.Clear();
+            // This category panel has AutoScroll=true from the Designer (like every other
+            // Options category), but AddServiceSelectorColumn's detailHost is a Dock=Fill
+            // child of it -- verified live that an AutoScroll panel's own Dock=Fill child
+            // renders in the wrong place (it ignored the Dock=Left service selector here,
+            // overlapping it by ~157px, confirmed via UI Automation bounding rectangles, not
+            // a paint/timing artifact). detailHost provides its own AutoScroll for the
+            // (possibly taller-than-the-window) selected provider box, so this outer scroll
+            // is redundant as well as the thing actually causing the overlap.
+            logbookSyncPanel.AutoScroll = false;
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
-            int pw = 630;   // detail panel usable width -- matches the original single-column
-                             // width exactly, so no description label needed re-wrapping.
+            const int cw = ServiceDetailContentWidth;
 
             string uploadLotwKeyText = ctrl.hotkeyConfig != null
                 ? HotkeyConfig.FormatKeys(ctrl.hotkeyConfig[HotkeyAction.UploadLotw])
                 : "";
             if (string.IsNullOrEmpty(uploadLotwKeyText)) uploadLotwKeyText = "(unassigned hotkey)";
 
-            var serviceList = new System.Windows.Forms.ListBox
-            {
-                Location       = new System.Drawing.Point(5, 5),
-                Size           = new System.Drawing.Size(160, 340),
-                Font           = font,
-                TabIndex       = 0,
-                AccessibleName = "Logbook services",
-            };
-            logbookSyncPanel.Controls.Add(serviceList);
+            var detailHost = AddServiceSelectorColumn(logbookSyncPanel, font, "Logbook services", out var serviceList);
 
             var panels = new List<System.Windows.Forms.GroupBox>();
             int tabIdx;
+            int y;
 
             // ── QRZ Logbook Download / Upload ────────────────────────────────────
             tabIdx = 1;
-            var qrzLogbookBox = MakeGroupBox("QRZ Logbook Download / Upload", 175, 5, pw, 182, font);
+            var qrzLogbookBox = MakeServiceGroupBox("QRZ Logbook Download / Upload", font);
             panels.Add(qrzLogbookBox);
             serviceList.Items.Add("QRZ");
 
@@ -5445,39 +5520,34 @@ namespace WSJTX_Controller
             };
             qrzLogbookBox.Controls.Add(_qrzLogbookApiKeyTb);
 
-            qrzLogbookBox.Controls.Add(MakeLabel(
-                "Downloads QSOs you've already logged to your QRZ online logbook (Logbook > Sync tab). From",
-                10, 48, font));
-            qrzLogbookBox.Controls.Add(MakeLabel(
-                "qrz.com → Logbook → Settings → API Access. Requires a paid QRZ XML Data subscription -- this",
-                10, 64, font));
-            qrzLogbookBox.Controls.Add(MakeLabel(
-                "key only reaches your own logbook, but also unlocks full Callsign Lookup data (Lookup Data tab).",
-                10, 80, font));
+            var qrzDescLbl = MakeWrapLabel(
+                "Downloads QSOs you've already logged to your QRZ online logbook (Logbook > Sync tab). " +
+                "From qrz.com → Logbook → Settings → API Access. Requires a paid QRZ XML Data subscription " +
+                "-- this key only reaches your own logbook, but also unlocks full Callsign Lookup data " +
+                "(Lookup Data tab).",
+                10, 48, cw, font);
+            qrzLogbookBox.Controls.Add(qrzDescLbl);
+            y = qrzDescLbl.Bottom + 8;
 
             _qrzUploadEnabledCb = new System.Windows.Forms.CheckBox
             {
                 Text           = "Enable QRZ Logbook upload (uses the same API key above)",
                 Checked        = ctrl.qrzUploadEnabled,
-                Location       = new System.Drawing.Point(10, 104),
+                Location       = new System.Drawing.Point(10, y),
                 AutoSize       = true,
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "Enable QRZ Logbook upload",
             };
             qrzLogbookBox.Controls.Add(_qrzUploadEnabledCb);
+            y += 22;
 
-            _qrzUploadRealtimeCb = new System.Windows.Forms.CheckBox
-            {
-                Text           = $"Upload automatically as each QSO completes (otherwise, use {uploadLotwKeyText})",
-                Checked        = ctrl.qrzUploadRealtime,
-                Location       = new System.Drawing.Point(28, 126),
-                AutoSize       = true,
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "Upload to QRZ automatically in real time",
-            };
+            _qrzUploadRealtimeCb = MakeWrapCheckBox(
+                $"Upload automatically as each QSO completes (otherwise, use {uploadLotwKeyText})",
+                ctrl.qrzUploadRealtime, 28, y, cw - 28, tabIdx++,
+                "Upload to QRZ automatically in real time", font);
             qrzLogbookBox.Controls.Add(_qrzUploadRealtimeCb);
+            y = _qrzUploadRealtimeCb.Bottom + 6;
 
             // Automatic download: opt-in (default off), reuses the exact same fetch/import
             // path the Logbook window's manual "Download from QRZ" button already uses --
@@ -5487,7 +5557,7 @@ namespace WSJTX_Controller
             {
                 Text           = "Automatically download and sync every",
                 Checked        = ctrl.qrzLogbookAutoSyncEnabled,
-                Location       = new System.Drawing.Point(10, 150),
+                Location       = new System.Drawing.Point(10, y),
                 AutoSize       = true,
                 TabIndex       = tabIdx++,
                 Font           = font,
@@ -5500,18 +5570,18 @@ namespace WSJTX_Controller
                 Minimum        = 1,
                 Maximum        = 365,
                 Value          = Math.Max(1, Math.Min(365, ctrl.qrzLogbookRefreshDays)),
-                Location       = new System.Drawing.Point(216, 148),
+                Location       = new System.Drawing.Point(216, y - 2),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "QRZ Logbook automatic sync interval in days",
             };
             qrzLogbookBox.Controls.Add(_qrzLogbookRefreshDaysNum);
-            qrzLogbookBox.Controls.Add(MakeLabel("days", 270, 150, font));
+            qrzLogbookBox.Controls.Add(MakeLabel("days", 270, y, font));
 
             // ── LoTW Logbook Download ────────────────────────────────────────────
             tabIdx = 1;
-            var lotwLogbookBox = MakeGroupBox("LoTW Logbook Download", 175, 5, pw, 210, font);
+            var lotwLogbookBox = MakeServiceGroupBox("LoTW Logbook Download", font);
             panels.Add(lotwLogbookBox);
             serviceList.Items.Add("LoTW");
 
@@ -5540,12 +5610,13 @@ namespace WSJTX_Controller
             };
             lotwLogbookBox.Controls.Add(_lotwLogbookPassTb);
 
-            lotwLogbookBox.Controls.Add(MakeLabel(
-                "Downloads your confirmed QSOs from LoTW (Logbook > Sync tab). Separate feature from LoTW User",
-                10, 71, font));
-            lotwLogbookBox.Controls.Add(MakeLabel(
-                "Activity (Lookup Data tab) -- this is your standard LoTW.org login; no TQSL certificate here.",
-                10, 87, font));
+            var lotwDescLbl = MakeWrapLabel(
+                "Downloads your confirmed QSOs from LoTW (Logbook > Sync tab). Separate feature from LoTW " +
+                "User Activity (Lookup Data tab) -- this is your standard LoTW.org login; no TQSL " +
+                "certificate here.",
+                10, 71, cw, font);
+            lotwLogbookBox.Controls.Add(lotwDescLbl);
+            y = lotwDescLbl.Bottom + 8;
 
             // Automatic download: opt-in (default off), same shape as QRZ's above -- see
             // LogbookAutoSync.cs. Minimum=1 day hard floor.
@@ -5553,7 +5624,7 @@ namespace WSJTX_Controller
             {
                 Text           = "Automatically download and sync every",
                 Checked        = ctrl.lotwLogbookAutoSyncEnabled,
-                Location       = new System.Drawing.Point(10, 111),
+                Location       = new System.Drawing.Point(10, y),
                 AutoSize       = true,
                 TabIndex       = tabIdx++,
                 Font           = font,
@@ -5566,14 +5637,15 @@ namespace WSJTX_Controller
                 Minimum        = 1,
                 Maximum        = 365,
                 Value          = Math.Max(1, Math.Min(365, ctrl.lotwLogbookRefreshDays)),
-                Location       = new System.Drawing.Point(216, 109),
+                Location       = new System.Drawing.Point(216, y - 2),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "LoTW Logbook automatic sync interval in days",
             };
             lotwLogbookBox.Controls.Add(_lotwLogbookRefreshDaysNum);
-            lotwLogbookBox.Controls.Add(MakeLabel("days", 270, 111, font));
+            lotwLogbookBox.Controls.Add(MakeLabel("days", 270, y, font));
+            y += 26;
 
             // ── LoTW upload (self-sufficiency plan, Phase 3) ────────────────
             // Independent of the download settings above -- this only affects what Alt+U's
@@ -5583,31 +5655,35 @@ namespace WSJTX_Controller
             // configured inside TQSL.
             lotwLogbookBox.Controls.Add(new System.Windows.Forms.Label
             {
-                Text = "――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――――",
-                Location = new System.Drawing.Point(10, 137), AutoSize = true, Font = font, TabStop = false,
+                Text = "――――――――――――――――――――――――――――――――――――――――――――――――――――――――――",
+                Location = new System.Drawing.Point(10, y), AutoSize = true, Font = font, TabStop = false,
             });
+            y += 11;
 
-            lotwLogbookBox.Controls.Add(MakeLabel("TQSL Station Location:", 10, 148, font));
+            lotwLogbookBox.Controls.Add(MakeLabel("TQSL Station Location:", 10, y + 3, font));
             _tqslStationLocationTb = new System.Windows.Forms.TextBox
             {
                 Text           = ctrl.tqslStationLocation ?? "",
-                Location       = new System.Drawing.Point(160, 145),
+                Location       = new System.Drawing.Point(160, y),
                 Size           = new System.Drawing.Size(150, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "TQSL Station Location name",
             };
             lotwLogbookBox.Controls.Add(_tqslStationLocationTb);
-            lotwLogbookBox.Controls.Add(MakeLabel(
-                "A passphrase-protected certificate isn't supported here -- use a certificate TQSL doesn't need to unlock.",
-                10, 168, font));
+            y += 23;
+
+            lotwLogbookBox.Controls.Add(MakeWrapLabel(
+                "A passphrase-protected certificate isn't supported here -- use a certificate TQSL doesn't " +
+                "need to unlock.",
+                10, y, cw, font));
 
             // ── Club Log Logbook Upload ──────────────────────────────────────────
             // A per-user credential (Application Password), entirely separate from
             // the app-wide Club Log key used for country data (Lookup Data tab) -- see
             // ClubLogUploadClient.cs for why these cannot be the same credential.
             tabIdx = 1;
-            var clUploadBox = MakeGroupBox("Club Log Logbook Upload", 175, 5, pw, 222, font);
+            var clUploadBox = MakeServiceGroupBox("Club Log Logbook Upload", font);
             panels.Add(clUploadBox);
             serviceList.Items.Add("Club Log");
 
@@ -5623,35 +5699,31 @@ namespace WSJTX_Controller
             };
             clUploadBox.Controls.Add(_clubLogUploadEnabledCb);
 
-            _clubLogUploadRealtimeCb = new System.Windows.Forms.CheckBox
-            {
-                Text           = $"Upload automatically as each QSO completes (otherwise, use {uploadLotwKeyText})",
-                Checked        = ctrl.clubLogUploadRealtime,
-                Location       = new System.Drawing.Point(28, 42),
-                AutoSize       = true,
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "Upload to Club Log automatically in real time",
-            };
+            _clubLogUploadRealtimeCb = MakeWrapCheckBox(
+                $"Upload automatically as each QSO completes (otherwise, use {uploadLotwKeyText})",
+                ctrl.clubLogUploadRealtime, 28, 42, cw - 28, tabIdx++,
+                "Upload to Club Log automatically in real time", font);
             clUploadBox.Controls.Add(_clubLogUploadRealtimeCb);
+            y = _clubLogUploadRealtimeCb.Bottom + 6;
 
-            clUploadBox.Controls.Add(MakeLabel("Email:", 10, 68, font));
+            clUploadBox.Controls.Add(MakeLabel("Email:", 10, y + 3, font));
             _clubLogUploadEmailTb = new System.Windows.Forms.TextBox
             {
                 Text           = ctrl.clubLogUploadEmail ?? "",
-                Location       = new System.Drawing.Point(90, 65),
+                Location       = new System.Drawing.Point(90, y),
                 Size           = new System.Drawing.Size(220, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "Club Log account email for upload",
             };
             clUploadBox.Controls.Add(_clubLogUploadEmailTb);
+            y += 24;
 
-            clUploadBox.Controls.Add(MakeLabel("App Password:", 10, 92, font));
+            clUploadBox.Controls.Add(MakeLabel("App Password:", 10, y + 3, font));
             _clubLogUploadPasswordTb = new System.Windows.Forms.TextBox
             {
                 Text           = ctrl.clubLogUploadPassword ?? "",
-                Location       = new System.Drawing.Point(90, 89),
+                Location       = new System.Drawing.Point(90, y),
                 Size           = new System.Drawing.Size(220, 20),
                 PasswordChar   = '●',
                 TabIndex       = tabIdx++,
@@ -5659,18 +5731,20 @@ namespace WSJTX_Controller
                 AccessibleName = "Club Log Application Password for upload",
             };
             clUploadBox.Controls.Add(_clubLogUploadPasswordTb);
+            y += 24;
 
-            clUploadBox.Controls.Add(MakeLabel("Callsign:", 10, 116, font));
+            clUploadBox.Controls.Add(MakeLabel("Callsign:", 10, y + 3, font));
             _clubLogUploadCallsignTb = new System.Windows.Forms.TextBox
             {
                 Text           = ctrl.clubLogUploadCallsign ?? "",
-                Location       = new System.Drawing.Point(90, 113),
+                Location       = new System.Drawing.Point(90, y),
                 Size           = new System.Drawing.Size(120, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "Callsign for Club Log upload",
             };
             clUploadBox.Controls.Add(_clubLogUploadCallsignTb);
+            y += 26;
 
             // Automatic download: opt-in (default off), same shape as QRZ/LoTW above --
             // see LogbookAutoSync.cs. Minimum=1 day hard floor -- worth being especially
@@ -5680,7 +5754,7 @@ namespace WSJTX_Controller
             {
                 Text           = "Automatically download and sync every",
                 Checked        = ctrl.clubLogLogbookAutoSyncEnabled,
-                Location       = new System.Drawing.Point(10, 142),
+                Location       = new System.Drawing.Point(10, y),
                 AutoSize       = true,
                 TabIndex       = tabIdx++,
                 Font           = font,
@@ -5693,24 +5767,22 @@ namespace WSJTX_Controller
                 Minimum        = 1,
                 Maximum        = 365,
                 Value          = Math.Max(1, Math.Min(365, ctrl.clubLogLogbookRefreshDays)),
-                Location       = new System.Drawing.Point(216, 140),
+                Location       = new System.Drawing.Point(216, y - 2),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "Club Log Logbook automatic sync interval in days",
             };
             clUploadBox.Controls.Add(_clubLogLogbookRefreshDaysNum);
-            clUploadBox.Controls.Add(MakeLabel("days", 270, 142, font));
+            clUploadBox.Controls.Add(MakeLabel("days", 270, y, font));
+            y += 26;
 
-            clUploadBox.Controls.Add(MakeLabel(
-                "Uploads QSOs to your Club Log online logbook (Logbook > Sync tab, or automatically as you log",
-                10, 168, font));
-            clUploadBox.Controls.Add(MakeLabel(
-                "each contact). Requires a Club Log Application Password (clublog.org → Settings → App",
-                10, 184, font));
-            clUploadBox.Controls.Add(MakeLabel(
-                "Passwords) -- NOT your normal Club Log website login. Separate from the country-data key (Lookup Data tab).",
-                10, 200, font));
+            clUploadBox.Controls.Add(MakeWrapLabel(
+                "Uploads QSOs to your Club Log online logbook (Logbook > Sync tab, or automatically as you " +
+                "log each contact). Requires a Club Log Application Password (clublog.org → Settings → App " +
+                "Passwords) -- NOT your normal Club Log website login. Separate from the country-data key " +
+                "(Lookup Data tab).",
+                10, y, cw, font));
 
             // ── HRDLog.net Upload (self-sufficiency plan, Phase 2) ───────────────
             // HRDLog.net is the online logging/awards site at hrdlog.net -- NOT the Ham Radio
@@ -5718,7 +5790,7 @@ namespace WSJTX_Controller
             // never earns DXCC/WAS credit, unlike LoTW). No auto-download here: HRDLog exposes
             // no bulk-fetch API, unlike QRZ/LoTW/Club Log above.
             tabIdx = 1;
-            var hrdLogBox = MakeGroupBox("HRDLog.net Upload", 175, 5, pw, 160, font);
+            var hrdLogBox = MakeServiceGroupBox("HRDLog.net Upload", font);
             panels.Add(hrdLogBox);
             serviceList.Items.Add("HRDLog");
 
@@ -5734,35 +5806,31 @@ namespace WSJTX_Controller
             };
             hrdLogBox.Controls.Add(_hrdLogUploadEnabledCb);
 
-            _hrdLogUploadRealtimeCb = new System.Windows.Forms.CheckBox
-            {
-                Text           = $"Upload automatically as each QSO completes (otherwise, use {uploadLotwKeyText})",
-                Checked        = ctrl.hrdLogUploadRealtime,
-                Location       = new System.Drawing.Point(28, 42),
-                AutoSize       = true,
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "Upload to HRDLog.net automatically in real time",
-            };
+            _hrdLogUploadRealtimeCb = MakeWrapCheckBox(
+                $"Upload automatically as each QSO completes (otherwise, use {uploadLotwKeyText})",
+                ctrl.hrdLogUploadRealtime, 28, 42, cw - 28, tabIdx++,
+                "Upload to HRDLog.net automatically in real time", font);
             hrdLogBox.Controls.Add(_hrdLogUploadRealtimeCb);
+            y = _hrdLogUploadRealtimeCb.Bottom + 6;
 
-            hrdLogBox.Controls.Add(MakeLabel("Callsign:", 10, 68, font));
+            hrdLogBox.Controls.Add(MakeLabel("Callsign:", 10, y + 3, font));
             _hrdLogUploadCallsignTb = new System.Windows.Forms.TextBox
             {
                 Text           = ctrl.hrdLogUploadCallsign ?? "",
-                Location       = new System.Drawing.Point(90, 65),
+                Location       = new System.Drawing.Point(90, y),
                 Size           = new System.Drawing.Size(120, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "Callsign for HRDLog.net upload",
             };
             hrdLogBox.Controls.Add(_hrdLogUploadCallsignTb);
+            y += 24;
 
-            hrdLogBox.Controls.Add(MakeLabel("Upload code:", 10, 92, font));
+            hrdLogBox.Controls.Add(MakeLabel("Upload code:", 10, y + 3, font));
             _hrdLogUploadCodeTb = new System.Windows.Forms.TextBox
             {
                 Text           = ctrl.hrdLogUploadCode ?? "",
-                Location       = new System.Drawing.Point(90, 89),
+                Location       = new System.Drawing.Point(90, y),
                 Size           = new System.Drawing.Size(220, 20),
                 PasswordChar   = '●',
                 TabIndex       = tabIdx++,
@@ -5770,16 +5838,13 @@ namespace WSJTX_Controller
                 AccessibleName = "HRDLog.net upload code",
             };
             hrdLogBox.Controls.Add(_hrdLogUploadCodeTb);
+            y += 27;
 
-            hrdLogBox.Controls.Add(MakeLabel(
-                "Uploads QSOs to your HRDLog.net account (Options -> your account -> Upload Code). This is",
-                10, 116, font));
-            hrdLogBox.Controls.Add(MakeLabel(
-                "the online HRDLog.net live-logging/awards site, not Ham Radio Deluxe software, and does",
-                10, 132, font));
-            hrdLogBox.Controls.Add(MakeLabel(
+            hrdLogBox.Controls.Add(MakeWrapLabel(
+                "Uploads QSOs to your HRDLog.net account (Options -> your account -> Upload Code). This is " +
+                "the online HRDLog.net live-logging/awards site, not Ham Radio Deluxe software, and does " +
                 "not earn ARRL award credit -- LoTW above still handles DXCC/WAS confirmation.",
-                10, 148, font));
+                10, y, cw, font));
 
             // ── eQSL.cc Upload ────────────────────────────────────────────────────
             // Uploaded via EngineHost/Nexus's own eQSL transport (propagation::live::eqsl) --
@@ -5789,7 +5854,7 @@ namespace WSJTX_Controller
             // download here yet -- see ARCHITECTURE.md for the deferred download/reconciliation
             // contract.
             tabIdx = 1;
-            var eqslBox = MakeGroupBox("eQSL.cc Upload", 175, 5, pw, 145, font);
+            var eqslBox = MakeServiceGroupBox("eQSL.cc Upload", font);
             panels.Add(eqslBox);
             serviceList.Items.Add("eQSL");
 
@@ -5842,21 +5907,26 @@ namespace WSJTX_Controller
             };
             eqslBox.Controls.Add(_eqslPasswordTb);
 
-            eqslBox.Controls.Add(MakeLabel(
+            eqslBox.Controls.Add(MakeWrapLabel(
                 "Uploads QSOs to your eQSL.cc account using your normal eQSL.cc login and password.",
-                10, 116, font));
+                10, 116, cw, font));
 
-            WireServiceList(serviceList, logbookSyncPanel, panels);
+            WireServiceList(serviceList, detailHost, panels);
         }
 
         private void BuildLookupDataTab()
         {
             lookupPanel.Controls.Clear();
+            // See BuildLogbookSyncTab's identical line for why -- same AutoScroll-panel/
+            // Dock=Fill-child conflict, same fix.
+            lookupPanel.AutoScroll = false;
             var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
-            int pw = 630;
+            const int cw = ServiceDetailContentWidth;
 
-            // ── General ──────────────────────────────────────────────────────────
-            var genBox = MakeGroupBox("General", 5, 5, pw, 74, font);
+            // ── General ── stays full width (Dock=Top), spanning above the selector/detail
+            // row below -- it isn't one of the per-provider boxes affected by the width bug.
+            var genBox = MakeGroupBox("General", 5, 5, 630, 74, font);
+            genBox.Dock = System.Windows.Forms.DockStyle.Top;
             lookupPanel.Controls.Add(genBox);
 
             _useLookupDataCb = new System.Windows.Forms.CheckBox
@@ -5885,22 +5955,15 @@ namespace WSJTX_Controller
             _callsignLookupProviderCb.SelectedIndex = (int)ctrl.callsignLookupProvider;
             genBox.Controls.Add(_callsignLookupProviderCb);
 
-            var serviceList = new System.Windows.Forms.ListBox
-            {
-                Location       = new System.Drawing.Point(5, 84),
-                Size           = new System.Drawing.Size(160, 279),
-                Font           = font,
-                TabIndex       = 2,
-                AccessibleName = "Lookup data services",
-            };
-            lookupPanel.Controls.Add(serviceList);
+            var detailHost = AddServiceSelectorColumn(lookupPanel, font, "Lookup data services", out var serviceList, topOffset: genBox.Height);
 
             var panels = new List<System.Windows.Forms.GroupBox>();
             int tabIdx;
+            int y;
 
             // ── QRZ Callsign Lookup ──────────────────────────────────────────────
             tabIdx = 2;
-            var qrzBox = MakeGroupBox("QRZ Callsign Lookup", 175, 84, pw, 230, font);
+            var qrzBox = MakeServiceGroupBox("QRZ Callsign Lookup", font);
             panels.Add(qrzBox);
             serviceList.Items.Add("QRZ Callsign Lookup");
 
@@ -5955,12 +6018,17 @@ namespace WSJTX_Controller
             };
             qrzBox.Controls.Add(_qrzCacheDaysNum);
 
+            // Label above the combo, not beside it -- the longest item ("Supplement offline —
+            // queue entries offline data cannot identify", measured ~313px) never fit in the
+            // old side-by-side layout's cw-136 (~274px) remaining width. Full cw width here
+            // comfortably fits it (and the dropdown list, which defaults to the control's own
+            // Width) with room to spare.
             qrzBox.Controls.Add(MakeLabel("Automatic lookup:", 10, 118, font));
             _qrzPolicyCb = new System.Windows.Forms.ComboBox
             {
                 DropDownStyle  = System.Windows.Forms.ComboBoxStyle.DropDownList,
-                Location       = new System.Drawing.Point(126, 115),
-                Size           = new System.Drawing.Size(320, 21),
+                Location       = new System.Drawing.Point(10, 136),
+                Size           = new System.Drawing.Size(cw, 21),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "QRZ automatic lookup policy",
@@ -5973,26 +6041,33 @@ namespace WSJTX_Controller
             });
             _qrzPolicyCb.SelectedIndex = (int)ctrl.qrzLookupPolicy;
             qrzBox.Controls.Add(_qrzPolicyCb);
+            y = _qrzPolicyCb.Bottom + 8;
 
-            qrzBox.Controls.Add(MakeLabel("Min interval (sec):", 10, 142, font));
+            qrzBox.Controls.Add(MakeLabel("Min interval (sec):", 10, y + 3, font));
             _qrzIntervalNum = new System.Windows.Forms.NumericUpDown
             {
                 Minimum        = 5,
                 Maximum        = 300,
                 Value          = Math.Max(5, Math.Min(300, ctrl.qrzMinIntervalSeconds)),
-                Location       = new System.Drawing.Point(138, 139),
+                Location       = new System.Drawing.Point(138, y),
                 Size           = new System.Drawing.Size(60, 20),
                 TabIndex       = tabIdx++,
                 Font           = font,
                 AccessibleName = "Minimum seconds between automatic QRZ requests",
             };
             qrzBox.Controls.Add(_qrzIntervalNum);
-            qrzBox.Controls.Add(MakeLabel("(default 10 s — recommended for QRZ server courtesy)", 205, 142, font));
+            y = _qrzIntervalNum.Bottom + 4;
+            // Was beside the interval box on the same row (x=205) -- too long to fit there
+            // once the box is no longer ~630px wide, so it gets its own wrapped line below.
+            var qrzIntervalNoteLbl = MakeWrapLabel(
+                "(default 10 s — recommended for QRZ server courtesy)", 10, y, cw, font);
+            qrzBox.Controls.Add(qrzIntervalNoteLbl);
+            y = qrzIntervalNoteLbl.Bottom + 6;
 
             _qrzTestBtn = new System.Windows.Forms.Button
             {
                 Text           = "Test Login",
-                Location       = new System.Drawing.Point(10, 167),
+                Location       = new System.Drawing.Point(10, y),
                 Size           = new System.Drawing.Size(90, 24),
                 TabIndex       = tabIdx++,
                 Font           = font,
@@ -6001,30 +6076,16 @@ namespace WSJTX_Controller
             _qrzTestBtn.Click += QrzTestBtn_Click;
             qrzBox.Controls.Add(_qrzTestBtn);
 
-            _qrzStatusLbl = new System.Windows.Forms.TextBox
-            {
-                Text           = QrzStatusText(),
-                Location       = new System.Drawing.Point(110, 171),
-                Size           = new System.Drawing.Size(500, 18),
-                Font           = font,
-                ReadOnly       = true,
-                BorderStyle    = System.Windows.Forms.BorderStyle.None,
-                BackColor      = System.Drawing.SystemColors.Control,
-                TabStop        = true,
-                TabIndex       = tabIdx++,
-                AccessibleName = "QRZ login status",
-            };
+            _qrzStatusLbl = MakeStatusBox(QrzStatusText(), 110, y + 2, tabIdx++, "QRZ login status", font);
             qrzBox.Controls.Add(_qrzStatusLbl);
+            y += 32;
 
-            qrzBox.Controls.Add(MakeLabel(
-                "Real-time station lookup by callsign (name, address, grid). Uses your normal QRZ.com login --",
-                10, 194, font));
-            qrzBox.Controls.Add(MakeLabel(
-                "any QRZ account works, but without a paid XML Data subscription QRZ returns fewer data fields.",
-                10, 210, font));
-            qrzBox.Controls.Add(MakeLabel(
-                "The same subscription key (Logbook Sync's QRZ panel) unlocks full lookup data and log sync.",
-                10, 226, font));
+            qrzBox.Controls.Add(MakeWrapLabel(
+                "Real-time station lookup by callsign (name, address, grid). Uses your normal QRZ.com " +
+                "login -- any QRZ account works, but without a paid XML Data subscription QRZ returns " +
+                "fewer data fields. The same subscription key (Logbook Sync's QRZ panel) unlocks full " +
+                "lookup data and log sync.",
+                10, y, cw, font));
 
             // ── LoTW User Activity ───────────────────────────────────────────────
             string uploadLotwKeyText = ctrl.hotkeyConfig != null
@@ -6033,7 +6094,7 @@ namespace WSJTX_Controller
             if (string.IsNullOrEmpty(uploadLotwKeyText)) uploadLotwKeyText = "(unassigned hotkey)";
 
             tabIdx = 2;
-            var lotwBox = MakeGroupBox("LoTW User Activity  (public download — no account required)", 175, 84, pw, 160, font);
+            var lotwBox = MakeServiceGroupBox("LoTW User Activity  (public download — no account required)", font);
             panels.Add(lotwBox);
             serviceList.Items.Add("LoTW User Activity");
 
@@ -6087,20 +6148,9 @@ namespace WSJTX_Controller
             _lotwUpdateBtn.Click += LoTWUpdateBtn_Click;
             lotwBox.Controls.Add(_lotwUpdateBtn);
 
-            _lotwStatusLbl = new System.Windows.Forms.TextBox
-            {
-                Text      = LoTWStatusText(),
-                Location  = new System.Drawing.Point(110, 91),
-                Size      = new System.Drawing.Size(500, 18),
-                Font      = font,
-                ReadOnly    = true,
-                BorderStyle = System.Windows.Forms.BorderStyle.None,
-                BackColor   = System.Drawing.SystemColors.Control,
-                TabStop   = true,
-                TabIndex  = tabIdx++,
-                AccessibleName = "LoTW download status",
-            };
+            _lotwStatusLbl = MakeStatusBox(LoTWStatusText(), 110, 89, tabIdx++, "LoTW download status", font);
             lotwBox.Controls.Add(_lotwStatusLbl);
+            y = _lotwStatusLbl.Bottom + 8;
 
             // LoTW upload itself stays a manual action (Jimmy invokes TQSL itself --
             // RunTqslUpload/TqslUploadClient.cs -- its own signing/upload is batch-oriented,
@@ -6108,16 +6158,10 @@ namespace WSJTX_Controller
             // to offer here) -- this checkbox only gates whether the upload hotkey below tells
             // TQSL to do it at all, for operators who don't use LoTW and would otherwise see a
             // TQSL error.
-            _lotwUploadEnabledCb = new System.Windows.Forms.CheckBox
-            {
-                Text           = $"Upload to LoTW (via TQSL) when pressing {uploadLotwKeyText} (uncheck if you don't use LoTW)",
-                Checked        = ctrl.lotwUploadEnabled,
-                Location       = new System.Drawing.Point(10, 116),
-                AutoSize       = true,
-                TabIndex       = tabIdx++,
-                Font           = font,
-                AccessibleName = "Upload to LoTW when pressing the upload hotkey",
-            };
+            _lotwUploadEnabledCb = MakeWrapCheckBox(
+                $"Upload to LoTW (via TQSL) when pressing {uploadLotwKeyText} (uncheck if you don't use LoTW)",
+                ctrl.lotwUploadEnabled, 10, y, cw, tabIdx++,
+                "Upload to LoTW when pressing the upload hotkey", font);
             lotwBox.Controls.Add(_lotwUploadEnabledCb);
 
             // ── Club Log Country Data + Big CTY aliases ──────────────────────────
@@ -6131,7 +6175,10 @@ namespace WSJTX_Controller
             // doesn't carry -- see ClubLogProvider.cs), which is what actually
             // resolves a decoded callsign to the right entity.
             tabIdx = 2;
-            var clBox = MakeGroupBox("Country & Prefix Data (automatic — no account needed)", 175, 84, pw, 76, font);
+            // "&&" (not "&") -- GroupBox.Text treats a single "&" as a mnemonic-underline
+            // escape (silently swallowing it, e.g. "Country Prefix Data") rather than a
+            // literal ampersand.
+            var clBox = MakeServiceGroupBox("Country && Prefix Data (automatic — no account needed)", font);
             panels.Add(clBox);
             serviceList.Items.Add("Country & Prefix Data");
 
@@ -6161,19 +6208,7 @@ namespace WSJTX_Controller
             _clubLogUpdateBtn.Click += ClubLogUpdateBtn_Click;
             clBox.Controls.Add(_clubLogUpdateBtn);
 
-            _clubLogStatusLbl = new System.Windows.Forms.TextBox
-            {
-                Text      = ClubLogStatusText(),
-                Location  = new System.Drawing.Point(110, 47),
-                Size      = new System.Drawing.Size(500, 18),
-                Font      = font,
-                ReadOnly    = true,
-                BorderStyle = System.Windows.Forms.BorderStyle.None,
-                BackColor   = System.Drawing.SystemColors.Control,
-                TabStop   = true,
-                TabIndex  = tabIdx++,
-                AccessibleName = "Club Log download status",
-            };
+            _clubLogStatusLbl = MakeStatusBox(ClubLogStatusText(), 110, 47, tabIdx++, "Club Log download status", font);
             clBox.Controls.Add(_clubLogStatusLbl);
 
             // ── FCC ULS US State Lookup ──────────────────────────────────────────
@@ -6182,7 +6217,7 @@ namespace WSJTX_Controller
             // priority over QRZ's (see LookupManager's provider order) since it's
             // the FCC's own authoritative registration data.
             tabIdx = 2;
-            var fccBox = MakeGroupBox("FCC ULS US State Lookup (optional -- ~170MB download, no account needed)", 175, 84, pw, 130, font);
+            var fccBox = MakeServiceGroupBox("FCC ULS US State Lookup (optional -- ~170MB download, no account needed)", font);
             panels.Add(fccBox);
             serviceList.Items.Add("FCC ULS");
 
@@ -6224,27 +6259,15 @@ namespace WSJTX_Controller
             _fccUlsUpdateBtn.Click += FccUlsUpdateBtn_Click;
             fccBox.Controls.Add(_fccUlsUpdateBtn);
 
-            _fccUlsStatusLbl = new System.Windows.Forms.TextBox
-            {
-                Text        = FccUlsStatusText(),
-                Location    = new System.Drawing.Point(110, 74),
-                Size        = new System.Drawing.Size(500, 18),
-                Font        = font,
-                ReadOnly    = true,
-                BorderStyle = System.Windows.Forms.BorderStyle.None,
-                BackColor   = System.Drawing.SystemColors.Control,
-                TabStop     = true,
-                TabIndex    = tabIdx++,
-                AccessibleName = "FCC ULS download status",
-            };
+            _fccUlsStatusLbl = MakeStatusBox(FccUlsStatusText(), 110, 74, tabIdx++, "FCC ULS download status", font);
             fccBox.Controls.Add(_fccUlsStatusLbl);
+            y = _fccUlsStatusLbl.Bottom + 8;
 
-            fccBox.Controls.Add(MakeLabel(
-                "The FCC's own free public amateur-license database -- gives the actual registered US state",
-                10, 100, font));
-            fccBox.Controls.Add(MakeLabel(
-                "for a callsign, offline and without needing QRZ. Weekly full refresh only (no daily deltas).",
-                10, 116, font));
+            fccBox.Controls.Add(MakeWrapLabel(
+                "The FCC's own free public amateur-license database -- gives the actual registered US " +
+                "state for a callsign, offline and without needing QRZ. Weekly full refresh only (no " +
+                "daily deltas).",
+                10, y, cw, font));
 
             // ── HamQTH Callsign Lookup ───────────────────────────────────────────
             // Reached via EngineHost/Nexus's own HamQTH transport (propagation::live::hamqth) --
@@ -6257,7 +6280,7 @@ namespace WSJTX_Controller
             // supplement Build()'s merge and lets it BE selected as primary; it does not by
             // itself make live lookups run.
             tabIdx = 2;
-            var hamQthBox = MakeGroupBox("HamQTH Callsign Lookup", 175, 84, pw, 230, font);
+            var hamQthBox = MakeServiceGroupBox("HamQTH Callsign Lookup", font);
             panels.Add(hamQthBox);
             serviceList.Items.Add("HamQTH");
 
@@ -6324,32 +6347,17 @@ namespace WSJTX_Controller
             _hamQthTestBtn.Click += HamQthTestBtn_Click;
             hamQthBox.Controls.Add(_hamQthTestBtn);
 
-            _hamQthStatusLbl = new System.Windows.Forms.TextBox
-            {
-                Text           = HamQthStatusText(),
-                Location       = new System.Drawing.Point(110, 123),
-                Size           = new System.Drawing.Size(500, 18),
-                Font           = font,
-                ReadOnly       = true,
-                BorderStyle    = System.Windows.Forms.BorderStyle.None,
-                BackColor      = System.Drawing.SystemColors.Control,
-                TabStop        = true,
-                TabIndex       = tabIdx++,
-                AccessibleName = "HamQTH login status",
-            };
+            _hamQthStatusLbl = MakeStatusBox(HamQthStatusText(), 110, 121, tabIdx++, "HamQTH login status", font);
             hamQthBox.Controls.Add(_hamQthStatusLbl);
+            y = _hamQthStatusLbl.Bottom + 8;
 
-            hamQthBox.Controls.Add(MakeLabel(
-                "Uses your normal HamQTH.com login -- a free account is sufficient (unlike QRZ, whose",
-                10, 148, font));
-            hamQthBox.Controls.Add(MakeLabel(
-                "fuller data needs a paid XML subscription). Select HamQTH above to make it the primary",
-                10, 164, font));
-            hamQthBox.Controls.Add(MakeLabel(
+            hamQthBox.Controls.Add(MakeWrapLabel(
+                "Uses your normal HamQTH.com login -- a free account is sufficient (unlike QRZ, whose " +
+                "fuller data needs a paid XML subscription). Select HamQTH above to make it the primary " +
                 "automatic provider, or leave QRZ selected and enable HamQTH here just to supplement it.",
-                10, 180, font));
+                10, y, cw, font));
 
-            WireServiceList(serviceList, lookupPanel, panels);
+            WireServiceList(serviceList, detailHost, panels);
         }
 
         private string HamQthStatusText() =>
@@ -6397,14 +6405,38 @@ namespace WSJTX_Controller
         private static void WireServiceList(System.Windows.Forms.ListBox listBox, System.Windows.Forms.Control host, List<System.Windows.Forms.GroupBox> panels)
         {
             System.Windows.Forms.GroupBox current = null;
+
+            // Explicit Location/Size instead of Dock=Fill (see MakeServiceGroupBox's own
+            // comment for why) -- width always matches the host so a box never needs
+            // horizontal scrolling; height comes from the box's own content so the
+            // AutoScroll host can offer vertical scrolling when a box doesn't fit.
+            void ResizeCurrent()
+            {
+                if (current == null) return;
+                int contentBottom = 0;
+                foreach (System.Windows.Forms.Control c in current.Controls)
+                    contentBottom = Math.Max(contentBottom, c.Bottom);
+                current.Location = new System.Drawing.Point(host.Padding.Left, host.Padding.Top);
+                current.Width = Math.Max(0, host.ClientSize.Width - host.Padding.Horizontal);
+                current.Height = contentBottom + 10;
+                current.Anchor = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right;
+            }
+
             void UpdateVisibility()
             {
                 if (current != null) host.Controls.Remove(current);
                 int idx = listBox.SelectedIndex;
                 current = (idx >= 0 && idx < panels.Count) ? panels[idx] : null;
-                if (current != null) host.Controls.Add(current);
+                if (current != null)
+                {
+                    ResizeCurrent();
+                    host.Controls.Add(current);
+                }
             }
             listBox.SelectedIndexChanged += (s, e) => UpdateVisibility();
+            // Anchor keeps width in sync on most resizes, but a MinimumSize-clamped resize
+            // (or one that happens while a box is already shown) needs an explicit refresh.
+            host.Resize += (s, e) => ResizeCurrent();
             if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;
             UpdateVisibility();
         }
@@ -6430,6 +6462,171 @@ namespace WSJTX_Controller
                 AutoSize = true,
                 TabStop  = false,
                 Font     = font,
+            };
+        }
+
+        // ── Shared "service selector + detail box" layout ───────────────────────────
+        // Used by both the Logbook Sync and Lookup Data tabs, each of which lists several
+        // providers (QRZ, LoTW, Club Log, ...) in a ListBox on the left and shows the
+        // selected one's settings in a GroupBox on the right (WireServiceList swaps which
+        // GroupBox is parented into the detail host as the selection changes).
+        //
+        // Previously each provider's GroupBox was built at a fixed Location(175, y) and
+        // Size(630, h) -- 630 being the *whole* category detail host's usable width, reused
+        // unchanged even though the box itself started 175px in. That put every one of the
+        // 10 provider boxes' right edge at x=805, about 171px past the ~634px-wide visible
+        // area, and WireServiceList never repositions the box it shows -- so most of each
+        // box's own controls (status text, Test/Update buttons, credential fields) needed
+        // horizontal scrolling to reach even though the box's title looked fine at a glance.
+        //
+        // Fix: the selector list is Dock=Left at a fixed width, and the detail host is
+        // Dock=Fill for whatever remains -- so the active GroupBox (also Dock=Fill inside
+        // the host) always matches the real available width, including as the now-resizable
+        // Options dialog is resized. ServiceDetailContentWidth is the width every provider's
+        // internal controls are laid out against, chosen to fit inside that space even at
+        // the dialog's MinimumSize; extra room on a larger window is just unused margin.
+        private const int ServiceDetailContentWidth = 410;
+
+        private static System.Windows.Forms.Panel AddServiceSelectorColumn(
+            System.Windows.Forms.Panel page, System.Drawing.Font font,
+            string listAccessibleName, out System.Windows.Forms.ListBox serviceList, int topOffset = 0)
+        {
+            // detailHost is deliberately NOT Dock=Fill -- verified live, repeatedly, that
+            // giving it Dock=Fill here made it ignore whichever sibling was docked to an
+            // edge (Top and/or Left) and claim `page`'s *entire* client area from (0,0),
+            // overlapping that sibling instead of starting after it. This reproduced
+            // identically across every other variable tried (add order, AutoScroll on/off,
+            // an extra wrapper panel, the child GroupBox's own Dock vs Anchor) -- Dock=Fill
+            // on this specific control, relative to `page`, was the one constant. Anchor with
+            // geometry computed from serviceList/topOffset's real values, refreshed on
+            // `page`'s own Resize, avoids Dock for this relationship entirely.
+            const int selectorWidth = 165;
+            var list = new System.Windows.Forms.ListBox
+            {
+                Dock           = System.Windows.Forms.DockStyle.Left,
+                Width          = selectorWidth,
+                Font           = font,
+                TabIndex       = 0,
+                AccessibleName = listAccessibleName,
+            };
+            serviceList = list;
+            var detailHost = new System.Windows.Forms.Panel
+            {
+                AutoScroll = true,
+                Padding    = new System.Windows.Forms.Padding(8, 5, 5, 5),
+            };
+            void PositionDetailHost()
+            {
+                detailHost.Location = new System.Drawing.Point(selectorWidth, topOffset);
+                detailHost.Size = new System.Drawing.Size(
+                    Math.Max(0, page.ClientSize.Width - selectorWidth),
+                    Math.Max(0, page.ClientSize.Height - topOffset));
+            }
+            PositionDetailHost();
+            detailHost.Anchor = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left
+                | System.Windows.Forms.AnchorStyles.Right | System.Windows.Forms.AnchorStyles.Bottom;
+            page.Resize += (s, e) => PositionDetailHost();
+            page.Controls.Add(serviceList);
+            page.Controls.Add(detailHost);
+            return detailHost;
+        }
+
+        // A provider detail box shown inside the AutoScroll detail host above. Deliberately
+        // NOT Dock=Fill -- verified live that an AutoScroll panel's own Dock=Fill child
+        // renders in the wrong place (confirmed via UI Automation bounding rectangles, not a
+        // paint/timing artifact; reproduced two different ways: overlapping a Dock=Top
+        // sibling of the AutoScroll panel by ~70px, and, once that sibling was structurally
+        // separated out, still overlapping the Dock=Left selector by ~157px). WireServiceList
+        // instead sizes/positions each box explicitly with Anchor=Top|Left|Right: width
+        // tracks the host so nothing ever needs horizontal scrolling, height is measured from
+        // the box's own content so the AutoScroll host correctly offers vertical scrolling
+        // when a box is taller than the visible area -- Dock=Fill would have clamped the box
+        // to the viewport height and silently clipped any overflow instead.
+        private static System.Windows.Forms.GroupBox MakeServiceGroupBox(string text, System.Drawing.Font font)
+        {
+            return new System.Windows.Forms.GroupBox
+            {
+                Text    = text,
+                TabStop = false,
+                Font    = font,
+            };
+        }
+
+        // Measures how tall `text` needs to be to wrap within `width` at `font`, instead of
+        // hand-guessing a line count per string -- accurate for these labels/checkboxes
+        // because their text is fixed at construction time (never reassigned later).
+        private static int MeasureWrappedHeight(string text, int width, System.Drawing.Font font, int extraPadding = 6)
+        {
+            using (var g = System.Drawing.Graphics.FromHwnd(IntPtr.Zero))
+            {
+                var size = g.MeasureString(text, font, Math.Max(1, width));
+                return (int)Math.Ceiling(size.Height) + extraPadding;
+            }
+        }
+
+        // A label that wraps instead of clipping -- for the longer explanatory sentences in
+        // each provider's box, which the old fixed-630px-wide layout could leave as a single
+        // un-wrapped line but the new narrower width cannot. Text is never shortened, only
+        // reflowed onto more lines.
+        private static System.Windows.Forms.Label MakeWrapLabel(string text, int x, int y, int width, System.Drawing.Font font)
+        {
+            return new System.Windows.Forms.Label
+            {
+                Text     = text,
+                Location = new System.Drawing.Point(x, y),
+                Size     = new System.Drawing.Size(width, MeasureWrappedHeight(text, width, font)),
+                AutoSize = false,
+                Font     = font,
+                TabStop  = false,
+            };
+        }
+
+        // A checkbox whose text is long enough to need wrapping (e.g. it embeds a
+        // user-configured hotkey string of unpredictable length) -- AutoSize=false with a
+        // measured height wraps instead of the box silently growing wider than its
+        // container the way an AutoSize CheckBox would.
+        private static System.Windows.Forms.CheckBox MakeWrapCheckBox(
+            string text, bool @checked, int x, int y, int width,
+            int tabIndex, string accessibleName, System.Drawing.Font font)
+        {
+            // The checkbox glyph + padding eats into the available text width.
+            int height = MeasureWrappedHeight(text, Math.Max(1, width - 20), font, extraPadding: 8);
+            return new System.Windows.Forms.CheckBox
+            {
+                Text           = text,
+                Checked        = @checked,
+                Location       = new System.Drawing.Point(x, y),
+                Size           = new System.Drawing.Size(width, height),
+                AutoSize       = false,
+                TabIndex       = tabIndex,
+                Font           = font,
+                AccessibleName = accessibleName,
+            };
+        }
+
+        // The read-only status TextBox every provider box shows beside its Test/Update
+        // button -- wraps to a couple of lines instead of clipping the runtime status/error
+        // text (unpredictable length, reassigned repeatedly) the old fixed 500x18 single-line
+        // box could not show in full. Height is a fixed generous allowance (not measured,
+        // since the text changes after construction) matching the same approach used for
+        // OptionsDlg's Basic-tab label9.
+        private static System.Windows.Forms.TextBox MakeStatusBox(
+            string text, int x, int y, int tabIndex, string accessibleName, System.Drawing.Font font)
+        {
+            return new System.Windows.Forms.TextBox
+            {
+                Text           = text,
+                Location       = new System.Drawing.Point(x, y),
+                Size           = new System.Drawing.Size(ServiceDetailContentWidth - x, 36),
+                Multiline      = true,
+                WordWrap       = true,
+                Font           = font,
+                ReadOnly       = true,
+                BorderStyle    = System.Windows.Forms.BorderStyle.None,
+                BackColor      = System.Drawing.SystemColors.Control,
+                TabStop        = true,
+                TabIndex       = tabIndex,
+                AccessibleName = accessibleName,
             };
         }
 

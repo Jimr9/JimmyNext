@@ -82,6 +82,8 @@ namespace WSJTX_Controller
         private ComboBox _awardsViewCb;
         private TextBox  _awardsProgressLbl;
         private ListView _awardsLv;
+        private Button   _awardsManageBtn;
+        private Button   _awardsRefreshBtn;
         private List<RuleDefinition> _awardsDefs = new List<RuleDefinition>();
         private bool     _suppressAwardsEvent;
 
@@ -90,6 +92,7 @@ namespace WSJTX_Controller
         private ComboBox _neededBandCb;
         private ListView _neededLv;
         private TextBox  _neededCountLbl;
+        private Button   _neededRefreshBtn;
         private List<RuleDefinition> _neededDefs = new List<RuleDefinition>();
         private bool     _suppressNeededEvent;
 
@@ -221,7 +224,18 @@ namespace WSJTX_Controller
             var hfont = new Font("Microsoft Sans Serif", 9F, FontStyle.Bold);
 
             // Status bar at the bottom — read-only TextBox so JAWS can focus and read it on demand.
-            var statusPanel = new Panel { Dock = DockStyle.Bottom, Height = 22, BackColor = SystemColors.Control };
+            // AccessibleName=""/AccessibleRole=None -- see MakePage()'s comment: this is the
+            // container whose own missing name used to resolve (via WinForms/JAWS's structural
+            // "infer a name for this container" fallback) to the Sync tab's unrelated "Import
+            // History (most recent first)" label, on every tab, not just Sync.
+            var statusPanel = new Panel
+            {
+                Dock           = DockStyle.Bottom,
+                Height         = 22,
+                BackColor      = SystemColors.Control,
+                AccessibleName = "",
+                AccessibleRole = AccessibleRole.None,
+            };
 
             // Close button — a single shared control (not per-tab) so it lands last in tab
             // order on every tab, satisfying "Close appears consistently on all tabs" without
@@ -249,6 +263,7 @@ namespace WSJTX_Controller
                 TabStop        = true,
                 TabIndex       = 0,
                 AccessibleName = "Status",
+                AccessibleDescription = "",
             };
             statusPanel.Controls.Add(_statusTb);
 
@@ -297,24 +312,31 @@ namespace WSJTX_Controller
         private void BuildMyLogPage(Font font, Font hfont)
         {
             _myLogPanel = MakePage();
+            // Header controls are built into their own Dock=Top panel, sized to exactly the
+            // content height (y), instead of being anchored directly against _myLogPanel while
+            // it's still at its tiny unparented default size (see the Dock=Fill fix on
+            // _dashRecentLv below for why that combination clips the list).
+            // AccessibleName=""/AccessibleRole=None -- pure layout container, see MakePage()'s
+            // comment; keeps it out of the accessibility tree as a distinct named region.
+            var header = new Panel { Dock = DockStyle.Top, AccessibleName = "", AccessibleRole = AccessibleRole.None };
             int y = 8;
 
             // Individual focusable read-only TextBoxes — JAWS can Tab to each and read the value.
-            AddStatField(_myLogPanel, "Total QSOs",         font, ref y, out _statTotalTb, "Total QSOs");
-            AddStatField(_myLogPanel, "LoTW confirmed",     font, ref y, out _statLotwTb,  "LoTW confirmed QSOs");
-            AddStatField(_myLogPanel, "QRZ confirmed",      font, ref y, out _statQrzTb,   "QRZ confirmed QSOs");
-            AddStatField(_myLogPanel, "Combined confirmed", font, ref y, out _statConfTb,  "Combined confirmed QSOs");
+            AddStatField(header, "Total QSOs",         font, ref y, out _statTotalTb, "Total QSOs");
+            AddStatField(header, "LoTW confirmed",     font, ref y, out _statLotwTb,  "LoTW confirmed QSOs");
+            AddStatField(header, "QRZ confirmed",      font, ref y, out _statQrzTb,   "QRZ confirmed QSOs");
+            AddStatField(header, "Combined confirmed", font, ref y, out _statConfTb,  "Combined confirmed QSOs");
             y += 4;
-            AddStatField(_myLogPanel, "WAS",  font, ref y, out _statWasTb,  "WAS worked and confirmed");
-            AddStatField(_myLogPanel, "DXCC", font, ref y, out _statDxccTb, "DXCC entities worked and confirmed");
-            AddStatField(_myLogPanel, "WAZ",  font, ref y, out _statWazTb,  "WAZ zones worked and confirmed");
+            AddStatField(header, "WAS",  font, ref y, out _statWasTb,  "WAS worked and confirmed");
+            AddStatField(header, "DXCC", font, ref y, out _statDxccTb, "DXCC entities worked and confirmed");
+            AddStatField(header, "WAZ",  font, ref y, out _statWazTb,  "WAZ zones worked and confirmed");
             y += 8;
 
-            AddSectionLabel(_myLogPanel, "Upload Status", hfont, ref y);
-            AddStatField(_myLogPanel, "QRZ",      font, ref y, out _statUploadQrzTb,      "QRZ upload status");
-            AddStatField(_myLogPanel, "Club Log", font, ref y, out _statUploadClubLogTb,  "Club Log upload status");
-            AddStatField(_myLogPanel, "LoTW",     font, ref y, out _statUploadLotwTb,     "LoTW upload status");
-            AddStatField(_myLogPanel, "HRDLog.net", font, ref y, out _statUploadHrdLogTb, "HRDLog.net upload status");
+            AddSectionLabel(header, "Upload Status", hfont, ref y);
+            AddStatField(header, "QRZ",      font, ref y, out _statUploadQrzTb,      "QRZ upload status");
+            AddStatField(header, "Club Log", font, ref y, out _statUploadClubLogTb,  "Club Log upload status");
+            AddStatField(header, "LoTW",     font, ref y, out _statUploadLotwTb,     "LoTW upload status");
+            AddStatField(header, "HRDLog.net", font, ref y, out _statUploadHrdLogTb, "HRDLog.net upload status");
             y += 8;
 
             var recentLbl = new Label
@@ -324,13 +346,12 @@ namespace WSJTX_Controller
                 Location = new Point(8, y),
                 AutoSize = true,
             };
-            _myLogPanel.Controls.Add(recentLbl);
+            header.Controls.Add(recentLbl);
             y += 22;
+            header.Height = y;
 
             _dashRecentLv = MakeListView(font);
-            _dashRecentLv.Location = new Point(8, y);
-            _dashRecentLv.Size     = new Size(700, 200);
-            _dashRecentLv.Anchor   = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            _dashRecentLv.Dock = DockStyle.Fill;
             _dashRecentLv.Columns.Add("Date",      80);
             _dashRecentLv.Columns.Add("UTC",       60);
             _dashRecentLv.Columns.Add("Callsign",  90);
@@ -345,12 +366,15 @@ namespace WSJTX_Controller
             // after every stat field (found 2026-07-09, confirmed by tracing real Tab-key
             // focus order). 30 is safely past the last auto-numbered control on this page.
             _dashRecentLv.TabIndex = 30;
+            // Fill added before Top so Dock=Top can carve the header's space out of it.
             _myLogPanel.Controls.Add(_dashRecentLv);
+            _myLogPanel.Controls.Add(header);
         }
 
         private void BuildSyncPage(Font font, Font hfont)
         {
             _syncPanel = MakePage();
+            var header = new Panel { Dock = DockStyle.Top, AccessibleName = "", AccessibleRole = AccessibleRole.None };
             int y = 8;
 
             _syncImportBtn = new Button
@@ -402,7 +426,7 @@ namespace WSJTX_Controller
             };
             _syncClubLogBtn.Click += ClubLogRefreshBtn_Click;
 
-            _syncPanel.Controls.AddRange(new Control[] { _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncClubLogBtn });
+            header.Controls.AddRange(new Control[] { _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncClubLogBtn });
             y += 34;
 
             // Own row: the first row (Import/QRZ/LoTW/Club Log) is already close to this
@@ -420,7 +444,7 @@ namespace WSJTX_Controller
                 Enabled        = !string.IsNullOrWhiteSpace(_eqslUsername()) && !string.IsNullOrWhiteSpace(_eqslPassword()),
             };
             _syncEqslBtn.Click += EqslRefreshBtn_Click;
-            _syncPanel.Controls.Add(_syncEqslBtn);
+            header.Controls.Add(_syncEqslBtn);
             y += 34;
 
             _syncExportBtn = new Button
@@ -433,23 +457,23 @@ namespace WSJTX_Controller
                 TabIndex       = 6,
             };
             _syncExportBtn.Click += (s, e) => ExportAdif(null);
-            _syncPanel.Controls.Add(_syncExportBtn);
+            header.Controls.Add(_syncExportBtn);
             y += 34;
 
-            AddSectionLabel(_syncPanel, "QRZ Logbook", hfont, ref y);
-            _srcQrzStatusLbl = AddInfoLabel(_syncPanel, "Status: not configured", font, ref y);
+            AddSectionLabel(header, "QRZ Logbook", hfont, ref y);
+            _srcQrzStatusLbl = AddInfoLabel(header, "Status: not configured", font, ref y);
             y += 4;
 
-            AddSectionLabel(_syncPanel, "LoTW", hfont, ref y);
-            _srcLotwStatusLbl = AddInfoLabel(_syncPanel, "Status: not configured", font, ref y);
+            AddSectionLabel(header, "LoTW", hfont, ref y);
+            _srcLotwStatusLbl = AddInfoLabel(header, "Status: not configured", font, ref y);
             y += 4;
 
-            AddSectionLabel(_syncPanel, "eQSL", hfont, ref y);
-            _srcEqslStatusLbl = AddInfoLabel(_syncPanel, "Status: not configured", font, ref y);
+            AddSectionLabel(header, "eQSL", hfont, ref y);
+            _srcEqslStatusLbl = AddInfoLabel(header, "Status: not configured", font, ref y);
             y += 4;
 
-            AddSectionLabel(_syncPanel, "Club Log", hfont, ref y);
-            _srcClubLogStatusLbl = AddInfoLabel(_syncPanel, "Status: not configured", font, ref y);
+            AddSectionLabel(header, "Club Log", hfont, ref y);
+            _srcClubLogStatusLbl = AddInfoLabel(header, "Status: not configured", font, ref y);
             y += 12;
 
             var histLbl = new Label
@@ -459,13 +483,12 @@ namespace WSJTX_Controller
                 Location = new Point(8, y),
                 AutoSize = true,
             };
-            _syncPanel.Controls.Add(histLbl);
+            header.Controls.Add(histLbl);
             y += 22;
+            header.Height = y;
 
             _srcHistoryLv = MakeListView(font);
-            _srcHistoryLv.Location = new Point(8, y);
-            _srcHistoryLv.Size     = new Size(700, 200);
-            _srcHistoryLv.Anchor   = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+            _srcHistoryLv.Dock = DockStyle.Fill;
             _srcHistoryLv.Columns.Add("Date/Time",       135);
             _srcHistoryLv.Columns.Add("Source",           65);
             _srcHistoryLv.Columns.Add("New",              50);
@@ -475,11 +498,21 @@ namespace WSJTX_Controller
             _srcHistoryLv.Columns.Add("Errors",          170);
             _srcHistoryLv.AccessibleName = "Import history";
             _syncPanel.Controls.Add(_srcHistoryLv);
+            _syncPanel.Controls.Add(header);
         }
 
         private void BuildAwardsPage(Font font, Font hfont)
         {
             _awardsPanel = MakePage();
+
+            // Two stacked Dock=Top panels, not one: manageBtn/refreshBtn sit visually above
+            // the list (old Y=34 vs list's old Y=66) but were already deliberately given a
+            // TabIndex (4,5) placing them AFTER the list (TabIndex=3) in tab order. A single
+            // merged header panel would force them back before the list, changing existing
+            // keyboard-nav behavior -- splitting into topRow (TabIndex 0, before the list) and
+            // buttonRow (TabIndex 6, after the list) reproduces the original order exactly.
+            // AccessibleName=""/AccessibleRole=None -- pure layout container, see MakePage().
+            var topRow = new Panel { Dock = DockStyle.Top, Height = 34, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             var viewLbl = new Label
             {
@@ -488,7 +521,7 @@ namespace WSJTX_Controller
                 Location = new Point(8, 10),
                 AutoSize = true,
             };
-            _awardsPanel.Controls.Add(viewLbl);
+            topRow.Controls.Add(viewLbl);
 
             _awardsViewCb = new ComboBox
             {
@@ -502,7 +535,7 @@ namespace WSJTX_Controller
             // Items are populated from RuleLibrary.Definitions in PopulateAwardsCombo() —
             // dropping a new .ini file into RuleDefinitions adds it here with no code change.
             _awardsViewCb.SelectedIndexChanged += (s, e) => { if (!_suppressAwardsEvent) PopulateAwards(); };
-            _awardsPanel.Controls.Add(_awardsViewCb);
+            topRow.Controls.Add(_awardsViewCb);
 
             // Read-only TextBox, not a Label -- a plain Label is never reachable by Tab,
             // so JAWS/NVDA users tabbing through this page would never hear the progress
@@ -523,39 +556,44 @@ namespace WSJTX_Controller
                 TabIndex       = 2,
                 AccessibleName = "Award progress summary",
             };
-            _awardsPanel.Controls.Add(_awardsProgressLbl);
+            topRow.Controls.Add(_awardsProgressLbl);
 
-            _awardsLv = MakeListView(font);
-            _awardsLv.Location = new Point(8, 66);
-            _awardsLv.Anchor   = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            _awardsLv.Size     = new Size(700, 350);
-            _awardsLv.TabIndex = 3;
-            _awardsLv.AccessibleName = "Award details";
-            _awardsPanel.Controls.Add(_awardsLv);
+            // AccessibleName=""/AccessibleRole=None -- pure layout container, see MakePage().
+            var buttonRow = new Panel { Dock = DockStyle.Top, Height = 32, TabIndex = 6, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
-            var manageBtn = new Button
+            _awardsManageBtn = new Button
             {
                 Text           = "Manage Rule Definitions...",
                 Font           = font,
-                Location       = new Point(8, 34),
+                Location       = new Point(8, 2),
                 Size           = new Size(180, 24),
                 TabIndex       = 4,
                 AccessibleName = "Manage Rule Definitions",
             };
-            manageBtn.Click += (s, e) => OpenRuleDefinitionManager();
-            _awardsPanel.Controls.Add(manageBtn);
+            _awardsManageBtn.Click += (s, e) => OpenRuleDefinitionManager();
+            buttonRow.Controls.Add(_awardsManageBtn);
 
-            var refreshBtn = new Button
+            _awardsRefreshBtn = new Button
             {
                 Text           = "Refresh",
                 Font           = font,
-                Location       = new Point(196, 34),
+                Location       = new Point(196, 2),
                 Size           = new Size(90, 24),
                 TabIndex       = 5,
                 AccessibleName = "Refresh award progress",
             };
-            refreshBtn.Click += (s, e) => PopulateAwards();
-            _awardsPanel.Controls.Add(refreshBtn);
+            _awardsRefreshBtn.Click += (s, e) => PopulateAwards();
+            buttonRow.Controls.Add(_awardsRefreshBtn);
+
+            _awardsLv = MakeListView(font);
+            _awardsLv.Dock = DockStyle.Fill;
+            _awardsLv.TabIndex = 3;
+            _awardsLv.AccessibleName = "Award details";
+
+            // topRow added before buttonRow so it stacks above it (Y0-34 then Y34-66).
+            _awardsPanel.Controls.Add(_awardsLv);
+            _awardsPanel.Controls.Add(topRow);
+            _awardsPanel.Controls.Add(buttonRow);
         }
 
         // Opens the Rule Definition Manager and, if anything changed, refreshes
@@ -579,6 +617,8 @@ namespace WSJTX_Controller
         private void BuildStillNeedPage(Font font, Font hfont)
         {
             _stillNeedPanel = MakePage();
+            // Height grown from 115 -- see _neededCountLbl's own comment below for why.
+            var header = new Panel { Dock = DockStyle.Top, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             var typeLbl = new Label
             {
@@ -587,7 +627,7 @@ namespace WSJTX_Controller
                 Location = new Point(8, 10),
                 AutoSize = true,
             };
-            _stillNeedPanel.Controls.Add(typeLbl);
+            header.Controls.Add(typeLbl);
 
             // One list serves two purposes: moving through it (arrow keys) picks which
             // award's checklist is shown below, and checking/unchecking an item (Space)
@@ -638,7 +678,7 @@ namespace WSJTX_Controller
                 }
                 _onActiveAwardRuleIdsChanged?.Invoke(def.Id, e.NewValue == CheckState.Checked);
             };
-            _stillNeedPanel.Controls.Add(_neededAwardsClb);
+            header.Controls.Add(_neededAwardsClb);
 
             var bandLbl = new Label
             {
@@ -647,7 +687,7 @@ namespace WSJTX_Controller
                 Location = new Point(366, 10),
                 AutoSize = true,
             };
-            _stillNeedPanel.Controls.Add(bandLbl);
+            header.Controls.Add(bandLbl);
 
             _neededBandCb = new ComboBox
             {
@@ -661,16 +701,39 @@ namespace WSJTX_Controller
             _neededBandCb.Items.AddRange(AllBands);
             _neededBandCb.SelectedIndex = 0;
             _neededBandCb.SelectedIndexChanged += (s, e) => { if (!_suppressNeededEvent) PopulateNeeded(); };
-            _stillNeedPanel.Controls.Add(_neededBandCb);
+            header.Controls.Add(_neededBandCb);
 
-            // Read-only TextBox, not a Label -- see the same fix on the Awards tab's
+            _neededRefreshBtn = new Button
+            {
+                Text           = "Refresh",
+                Font           = font,
+                Location       = new Point(502, 6),
+                Size           = new Size(100, 23),
+                TabIndex       = 4,
+                AccessibleName = "Refresh needed list",
+            };
+            _neededRefreshBtn.Click += (s, e) => PopulateNeeded();
+            header.Controls.Add(_neededRefreshBtn);
+
+            // Was Location(500,8) Size(200,20), single-line -- neededRefreshBtn starts at
+            // x=600, so this box's own declared width (ending at x=700) already overlapped it
+            // by 100px before any text-length problem, and its status text (e.g. "This rule
+            // does not have a fixed still-needed checklist. (Live decode tagging is
+            // unavailable for this award.)") is far longer than 200px besides. Moved to its
+            // own full-width row below the awards checklist/band/refresh row (header's Height
+            // grew to fit it), Multiline/WordWrap so the complete message is always readable,
+            // Anchor=Right so it keeps using the page's full width if the window is widened.
+            // Still a read-only TextBox, not a Label -- see the same fix on the Awards tab's
             // _awardsProgressLbl for why a plain Label is unreachable by Tab/screen reader.
             _neededCountLbl = new TextBox
             {
                 Text           = "",
                 Font           = font,
-                Location       = new Point(500, 8),
-                Size           = new Size(200, 20),
+                Location       = new Point(8, 111),
+                Size           = new Size(680, 34),
+                Anchor         = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                Multiline      = true,
+                WordWrap       = true,
                 ReadOnly       = true,
                 BorderStyle    = BorderStyle.None,
                 BackColor      = SystemColors.Control,
@@ -678,32 +741,20 @@ namespace WSJTX_Controller
                 TabIndex       = 3,
                 AccessibleName = "Needed entries",
             };
-            _stillNeedPanel.Controls.Add(_neededCountLbl);
-
-            var neededRefreshBtn = new Button
-            {
-                Text           = "Refresh",
-                Font           = font,
-                Location       = new Point(600, 6),
-                Size           = new Size(100, 23),
-                TabIndex       = 4,
-                AccessibleName = "Refresh needed list",
-            };
-            neededRefreshBtn.Click += (s, e) => PopulateNeeded();
-            _stillNeedPanel.Controls.Add(neededRefreshBtn);
+            header.Controls.Add(_neededCountLbl);
 
             _neededLv = MakeListView(font);
-            _neededLv.Location = new Point(8, 115);
-            _neededLv.Anchor   = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            _neededLv.Size     = new Size(700, 301);
+            _neededLv.Dock = DockStyle.Fill;
             _neededLv.TabIndex = 5;
             _neededLv.AccessibleName = "Needed items";
             _stillNeedPanel.Controls.Add(_neededLv);
+            _stillNeedPanel.Controls.Add(header);
         }
 
         private void BuildLookupPage(Font font, Font hfont)
         {
             _lookupPanel = MakePage();
+            var header = new Panel { Dock = DockStyle.Top, Height = 36, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             var searchLbl = new Label
             {
@@ -712,7 +763,7 @@ namespace WSJTX_Controller
                 Location = new Point(8, 11),
                 AutoSize = true,
             };
-            _lookupPanel.Controls.Add(searchLbl);
+            header.Controls.Add(searchLbl);
 
             _searchTb = new TextBox
             {
@@ -723,7 +774,7 @@ namespace WSJTX_Controller
                 AccessibleName = "Callsign search",
             };
             _searchTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoSearch(); } };
-            _lookupPanel.Controls.Add(_searchTb);
+            header.Controls.Add(_searchTb);
 
             _searchBtn = new Button
             {
@@ -735,7 +786,7 @@ namespace WSJTX_Controller
                 TabIndex       = 2,
             };
             _searchBtn.Click += (s, e) => DoSearch();
-            _lookupPanel.Controls.Add(_searchBtn);
+            header.Controls.Add(_searchBtn);
 
             _searchCountLbl = new Label
             {
@@ -745,12 +796,25 @@ namespace WSJTX_Controller
                 AutoSize = true,
                 AccessibleName = "Search result count",
             };
-            _lookupPanel.Controls.Add(_searchCountLbl);
+            header.Controls.Add(_searchCountLbl);
+
+            // Bottom-docked footer, TabIndex above the list, so Clear stays after the list
+            // in tab order exactly as it was when it was merely Bottom-anchored.
+            var footer = new Panel { Dock = DockStyle.Bottom, Height = 31, TabIndex = 5, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            _searchClearBtn = new Button
+            {
+                Text           = "Clear",
+                AccessibleName = "Clear search results",
+                Font           = font,
+                Location       = new Point(8, 4),
+                Size           = new Size(70, 23),
+                TabIndex       = 4,
+            };
+            _searchClearBtn.Click += (s, e) => ClearSearch();
+            footer.Controls.Add(_searchClearBtn);
 
             _searchLv = MakeListView(font);
-            _searchLv.Location = new Point(8, 36);
-            _searchLv.Anchor   = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            _searchLv.Size     = new Size(700, 380);
+            _searchLv.Dock = DockStyle.Fill;
             _searchLv.TabIndex = 3;
             _searchLv.Columns.Add("Date",      80);
             _searchLv.Columns.Add("UTC",       55);
@@ -762,20 +826,10 @@ namespace WSJTX_Controller
             _searchLv.Columns.Add("Confirmed", 80);
             _searchLv.Columns.Add("Source",    60);
             _searchLv.AccessibleName = "Search results";
-            _lookupPanel.Controls.Add(_searchLv);
 
-            _searchClearBtn = new Button
-            {
-                Text           = "Clear",
-                AccessibleName = "Clear search results",
-                Font           = font,
-                Location       = new Point(8, 420),
-                Size           = new Size(70, 23),
-                Anchor         = AnchorStyles.Bottom | AnchorStyles.Left,
-                TabIndex       = 4,
-            };
-            _searchClearBtn.Click += (s, e) => ClearSearch();
-            _lookupPanel.Controls.Add(_searchClearBtn);
+            _lookupPanel.Controls.Add(_searchLv);
+            _lookupPanel.Controls.Add(header);
+            _lookupPanel.Controls.Add(footer);
         }
 
         private void ClearSearch()
@@ -789,9 +843,10 @@ namespace WSJTX_Controller
         private void BuildEditLogPage(Font font, Font hfont)
         {
             _editLogPanel = MakePage();
+            var header = new Panel { Dock = DockStyle.Top, Height = 86, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             var callLbl = new Label { Text = "Callsign:", Font = font, Location = new Point(8, 11), AutoSize = true };
-            _editLogPanel.Controls.Add(callLbl);
+            header.Controls.Add(callLbl);
 
             _editCallTb = new TextBox
             {
@@ -802,10 +857,10 @@ namespace WSJTX_Controller
                 AccessibleName = "Callsign filter",
             };
             _editCallTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
-            _editLogPanel.Controls.Add(_editCallTb);
+            header.Controls.Add(_editCallTb);
 
             var sourceLbl = new Label { Text = "Source:", Font = font, Location = new Point(196, 11), AutoSize = true };
-            _editLogPanel.Controls.Add(sourceLbl);
+            header.Controls.Add(sourceLbl);
 
             _editSourceCb = new ComboBox
             {
@@ -819,10 +874,10 @@ namespace WSJTX_Controller
             _editSourceCb.Items.Add("(Any)");
             _editSourceCb.Items.AddRange(QsoRecord.KnownSources);
             _editSourceCb.SelectedIndex = 0;
-            _editLogPanel.Controls.Add(_editSourceCb);
+            header.Controls.Add(_editSourceCb);
 
             var dateFromLbl = new Label { Text = "Date from:", Font = font, Location = new Point(8, 37), AutoSize = true };
-            _editLogPanel.Controls.Add(dateFromLbl);
+            header.Controls.Add(dateFromLbl);
 
             _editDateFromTb = new TextBox
             {
@@ -833,10 +888,10 @@ namespace WSJTX_Controller
                 AccessibleName = "Date from, format year month day, optional",
             };
             _editDateFromTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
-            _editLogPanel.Controls.Add(_editDateFromTb);
+            header.Controls.Add(_editDateFromTb);
 
             var dateToLbl = new Label { Text = "to:", Font = font, Location = new Point(156, 37), AutoSize = true };
-            _editLogPanel.Controls.Add(dateToLbl);
+            header.Controls.Add(dateToLbl);
 
             _editDateToTb = new TextBox
             {
@@ -847,7 +902,7 @@ namespace WSJTX_Controller
                 AccessibleName = "Date to, format year month day, optional",
             };
             _editDateToTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
-            _editLogPanel.Controls.Add(_editDateToTb);
+            header.Controls.Add(_editDateToTb);
 
             _editSearchBtn = new Button
             {
@@ -859,7 +914,7 @@ namespace WSJTX_Controller
                 TabIndex       = 5,
             };
             _editSearchBtn.Click += (s, e) => DoEditSearch();
-            _editLogPanel.Controls.Add(_editSearchBtn);
+            header.Controls.Add(_editSearchBtn);
 
             _editClearBtn = new Button
             {
@@ -871,7 +926,7 @@ namespace WSJTX_Controller
                 TabIndex       = 6,
             };
             _editClearBtn.Click += (s, e) => ClearEditLog();
-            _editLogPanel.Controls.Add(_editClearBtn);
+            header.Controls.Add(_editClearBtn);
 
             _editCountLbl = new Label
             {
@@ -881,7 +936,7 @@ namespace WSJTX_Controller
                 AutoSize       = true,
                 AccessibleName = "Result count",
             };
-            _editLogPanel.Controls.Add(_editCountLbl);
+            header.Controls.Add(_editCountLbl);
 
             _editRowOrderBtn = new Button
             {
@@ -893,73 +948,75 @@ namespace WSJTX_Controller
                 TabIndex       = 7,
             };
             _editRowOrderBtn.Click += RowOrderBtn_Click;
-            _editLogPanel.Controls.Add(_editRowOrderBtn);
+            header.Controls.Add(_editRowOrderBtn);
 
-            _editLv = MakeListView(font);
-            _editLv.Location    = new Point(8, 86);
-            _editLv.Anchor      = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            _editLv.Size        = new Size(700, 330);
-            _editLv.MultiSelect = true;
-            _editLv.TabIndex    = 8;
-            RebuildEditLogColumns();
-            _editLv.AccessibleName = "Edit Log results";
-            _editLv.SelectedIndexChanged += (s, e) => UpdateEditLogButtons();
-            _editLogPanel.Controls.Add(_editLv);
+            // Bottom-docked footer, TabIndex above the list, so the four action buttons stay
+            // after the list in tab order exactly as they were when merely Bottom-anchored.
+            // AccessibleName=""/AccessibleRole=None -- pure layout container, see MakePage().
+            var footer = new Panel { Dock = DockStyle.Bottom, Height = 31, TabIndex = 13, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             _editAddBtn = new Button
             {
                 Text           = "Add New...",
                 AccessibleName = "Add a new QSO",
                 Font           = font,
-                Location       = new Point(8, 420),
+                Location       = new Point(8, 4),
                 Size           = new Size(90, 23),
-                Anchor         = AnchorStyles.Bottom | AnchorStyles.Left,
                 TabIndex       = 9,
             };
             _editAddBtn.Click += AddQsoBtn_Click;
-            _editLogPanel.Controls.Add(_editAddBtn);
+            footer.Controls.Add(_editAddBtn);
 
             _editEditBtn = new Button
             {
                 Text           = "Edit...",
                 AccessibleName = "Edit selected QSO",
                 Font           = font,
-                Location       = new Point(104, 420),
+                Location       = new Point(104, 4),
                 Size           = new Size(70, 23),
-                Anchor         = AnchorStyles.Bottom | AnchorStyles.Left,
                 TabIndex       = 10,
                 Enabled        = false,
             };
             _editEditBtn.Click += EditQsoBtn_Click;
-            _editLogPanel.Controls.Add(_editEditBtn);
+            footer.Controls.Add(_editEditBtn);
 
             _editDeleteBtn = new Button
             {
                 Text           = "Delete...",
                 AccessibleName = "Delete selected QSOs",
                 Font           = font,
-                Location       = new Point(180, 420),
+                Location       = new Point(180, 4),
                 Size           = new Size(80, 23),
-                Anchor         = AnchorStyles.Bottom | AnchorStyles.Left,
                 TabIndex       = 11,
                 Enabled        = false,
             };
             _editDeleteBtn.Click += DeleteQsosBtn_Click;
-            _editLogPanel.Controls.Add(_editDeleteBtn);
+            footer.Controls.Add(_editDeleteBtn);
 
             _editExportBtn = new Button
             {
                 Text           = "Export Selected...",
                 AccessibleName = "Export selected QSOs to ADIF",
                 Font           = font,
-                Location       = new Point(266, 420),
+                Location       = new Point(266, 4),
                 Size           = new Size(130, 23),
-                Anchor         = AnchorStyles.Bottom | AnchorStyles.Left,
                 TabIndex       = 12,
                 Enabled        = false,
             };
             _editExportBtn.Click += ExportSelectedBtn_Click;
-            _editLogPanel.Controls.Add(_editExportBtn);
+            footer.Controls.Add(_editExportBtn);
+
+            _editLv = MakeListView(font);
+            _editLv.Dock        = DockStyle.Fill;
+            _editLv.MultiSelect = true;
+            _editLv.TabIndex    = 8;
+            RebuildEditLogColumns();
+            _editLv.AccessibleName = "Edit Log results";
+            _editLv.SelectedIndexChanged += (s, e) => UpdateEditLogButtons();
+
+            _editLogPanel.Controls.Add(_editLv);
+            _editLogPanel.Controls.Add(header);
+            _editLogPanel.Controls.Add(footer);
         }
 
         private void ClearEditLog()
@@ -1240,14 +1297,127 @@ namespace WSJTX_Controller
                 case PAGE_MYLOG:     PopulateMyLog();  break;
                 case PAGE_AWARDS:    PopulateAwards(); break;
                 case PAGE_STILLNEED: PopulateNeeded(); break;
-                case PAGE_LOOKUP:
-                    // Do NOT auto-focus the callsign box here — that steals focus from
-                    // normal tab navigation.  GoToLookup() (Ctrl+F) focuses it explicitly.
-                    break;
-                case PAGE_EDITLOG:
-                    // Same reasoning as PAGE_LOOKUP -- no auto-search/auto-focus on switch.
-                    break;
+                case PAGE_LOOKUP:    break;
+                case PAGE_EDITLOG:   break;
                 case PAGE_SYNC:      PopulateSync();   break;
+            }
+        }
+
+        // Root cause (found live, 2026-09-18, via a real Form.SelectNextControl walk -- not
+        // guessed): each page's main ListView is Dock=Fill and MUST be added to its panel
+        // before its header (Dock=Top) for the header's own carve-out to size correctly --
+        // reversing that add order was verified live to make Dock=Fill ignore the header
+        // entirely and overlap it from y=0 (a real, separate layout bug, not merely
+        // untested). Control.SetChildIndex does not help either (confirmed live: it changes
+        // neither the layout nor the traversal below).
+        //
+        // Given that, TWO separate points in WinForms' real, structural Tab traversal turn
+        // out to use the list/header's Z-order (Controls-collection) position rather than
+        // TabIndex, both confirmed live against the actual control tree, not assumed:
+        //   1. Entering the page's panel for the first time from outside it (e.g. Tab pressed
+        //      while sitting on the tab strip) lands on Controls[0] of that panel -- the list,
+        //      since it must be added first for the layout reason above -- regardless of any
+        //      TabIndex value.
+        //   2. Leaving the header's own LAST child, moving forward, ascends back out to the
+        //      header's own next sibling by the header's Z-order position among ITS parent's
+        //      children -- since the list sits BEFORE the header in that collection (add-order,
+        //      same layout reason), forward traversal never finds it there either; it only
+        //      turns up on a full wrap-around, after Close. The same asymmetry breaks
+        //      Shift+Tab backward from Status: descending into the page again lands on the
+        //      header's own last child, not the list.
+        // No amount of TabIndex tuning can fix either of these -- they are keyed off Controls-
+        // collection position, which the Dock=Fill layout requirement fixes in place. The
+        // correct, supported fix for this well-known Dock-vs-tab-order conflict is to
+        // intercept Tab-key transitions at the Form level, where ProcessTabKey is a real,
+        // overridable hook (Panel is not a ContainerControl and cannot override it itself),
+        // and drive the page's own content from one explicit, verified-correct order (see
+        // PageOrder) instead of trusting the structural walk for it -- including BOTH
+        // boundary hops (entering from the tab strip, and leaving to Status). Confirmed live
+        // that leaving the exit hop to fall through to base.ProcessTabKey looked plausible
+        // (Status is a genuine, simply-structured Form-level sibling of the TabControl) but
+        // was NOT reliable in practice: asking WinForms "what comes after this page's last
+        // control" can re-enter the page's own header container instead of ascending past it,
+        // producing a real infinite loop between the header's content and the list rather than
+        // ever reaching Status. Handling both directions explicitly avoids trusting that
+        // ascension at all. Only genuinely simple, unambiguous transitions -- Status -> Close,
+        // Close -> wrap to the tab strip, arrow-key tab switching, disabled/hidden controls
+        // between OTHER Form-level controls -- are left to real, untouched WinForms behavior
+        // via base.ProcessTabKey. Disabled/hidden controls WITHIN a page's own order (e.g. the
+        // Award selector when no Rule Definitions are loaded, or Edit/Delete/Export before any
+        // row is selected) are skipped explicitly here, same as real Tab handling would.
+        protected override bool ProcessTabKey(bool forward)
+        {
+            if (_tabControl == null) return base.ProcessTabKey(forward);
+            Control[] order = PageOrder(_tabControl.SelectedIndex);
+
+            if (forward && ActiveControl == _tabControl && order != null && order.Length > 0)
+            {
+                Control first = FirstSelectable(order, 0, +1);
+                if (first != null) return first.Focus();
+            }
+
+            // Shift+Tab from the shared Status field must re-enter the CURRENTLY selected
+            // page at its own last control, not whatever the structural walk would find.
+            if (!forward && ActiveControl == _statusTb && order != null && order.Length > 0)
+            {
+                Control last = FirstSelectable(order, order.Length - 1, -1);
+                if (last != null) return last.Focus();
+            }
+
+            if (order != null)
+            {
+                int idx = Array.IndexOf(order, ActiveControl);
+                if (idx >= 0)
+                {
+                    int step = forward ? 1 : -1;
+                    Control target = FirstSelectable(order, idx + step, step);
+                    if (target != null) return target.Focus();
+                    if (!forward) return _tabControl.Focus();   // nothing selectable before the first item -> the strip
+                    if (_statusTb != null) return _statusTb.Focus();   // nothing selectable after the last item -> Status
+                }
+            }
+            return base.ProcessTabKey(forward);
+        }
+
+        // Scans `order` from `start`, stepping by `step` (+1 or -1), for the first control that
+        // can actually take focus -- mirrors real Tab-key handling silently skipping disabled/
+        // hidden controls instead of getting stuck on one.
+        private static Control FirstSelectable(Control[] order, int start, int step)
+        {
+            for (int i = start; i >= 0 && i < order.Length; i += step)
+                if (order[i] != null && order[i].CanSelect) return order[i];
+            return null;
+        }
+
+        // The verified-correct (bb1a7a0-matching) content order for each page, driving
+        // ProcessTabKey above. Kept as one explicit array per page rather than inferred from
+        // the Controls tree, since that tree is exactly what can't be trusted here.
+        private Control[] PageOrder(int page)
+        {
+            switch (page)
+            {
+                case PAGE_MYLOG: return new Control[] {
+                    _statTotalTb, _statLotwTb, _statQrzTb, _statConfTb, _statWasTb, _statDxccTb, _statWazTb,
+                    _statUploadQrzTb, _statUploadClubLogTb, _statUploadLotwTb, _statUploadHrdLogTb, _dashRecentLv,
+                };
+                case PAGE_AWARDS: return new Control[] {
+                    _awardsViewCb, _awardsProgressLbl, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
+                };
+                case PAGE_STILLNEED: return new Control[] {
+                    _neededAwardsClb, _neededBandCb, _neededCountLbl, _neededRefreshBtn, _neededLv,
+                };
+                case PAGE_LOOKUP: return new Control[] {
+                    _searchTb, _searchBtn, _searchLv, _searchClearBtn,
+                };
+                case PAGE_EDITLOG: return new Control[] {
+                    _editCallTb, _editSourceCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
+                    _editRowOrderBtn, _editLv, _editAddBtn, _editEditBtn, _editDeleteBtn, _editExportBtn,
+                };
+                case PAGE_SYNC: return new Control[] {
+                    _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncClubLogBtn, _syncEqslBtn, _syncExportBtn,
+                    _srcHistoryLv,
+                };
+                default: return null;
             }
         }
 
@@ -2170,13 +2340,27 @@ namespace WSJTX_Controller
 
         // ── Helpers ───────────────────────────────────────────────────────────────
 
+        // AccessibleRole.None + empty AccessibleName mark this as a pure layout container:
+        // it and every other purely-decorative Panel below (header/footer/topRow/buttonRow)
+        // used to expose no explicit name at all, which let WinForms/JAWS's own "infer a
+        // name for this unnamed container" fallback kick in. That fallback walks the whole
+        // window's control tree structurally (by add order), not by which TabPage is
+        // actually visible -- so it could -- and did, confirmed against a real JAWS speech
+        // transcript 2026-09-17 -- latch onto an unrelated Label from a completely different,
+        // hidden tab (BuildSyncPage's "Import History (most recent first)" heading bled into
+        // the shared Status field's announcement on every tab, not just Sync). Marking these
+        // containers None/empty removes them from the accessibility tree as distinct named
+        // regions entirely, so JAWS/NVDA pass straight through to their real, individually-
+        // named children instead of trying to announce a name for the container itself.
         private static Panel MakePage()
         {
             return new Panel
             {
-                Dock       = DockStyle.Fill,
-                AutoScroll = true,
-                TabIndex   = 5,
+                Dock             = DockStyle.Fill,
+                AutoScroll       = true,
+                TabIndex         = 5,
+                AccessibleName   = "",
+                AccessibleRole   = AccessibleRole.None,
             };
         }
 

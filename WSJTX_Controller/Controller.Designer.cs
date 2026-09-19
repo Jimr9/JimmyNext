@@ -190,7 +190,11 @@
             // verLabel
             //
             this.verLabel.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
-            this.verLabel.Location = new System.Drawing.Point(14, 342);
+            // Moved below otaSpotsButton (bottom 385) -- used to sit at y=342, which
+            // logbookButton (added dynamically at y=333, Controller.cs) grew to cover.
+            // See Controller.AdvancedListStartY(), which derives the advanced-list block's
+            // start position from this label's real Bottom instead of a hardcoded constant.
+            this.verLabel.Location = new System.Drawing.Point(14, 389);
             this.verLabel.Name = "verLabel";
             this.verLabel.Size = new System.Drawing.Size(113, 14);
             this.verLabel.TabIndex = 999;
@@ -331,7 +335,9 @@
             // 
             this.verLabel2.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F, System.Drawing.FontStyle.Underline, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.verLabel2.ForeColor = System.Drawing.Color.DarkBlue;
-            this.verLabel2.Location = new System.Drawing.Point(15, 361);
+            // Moved beside verLabel, below otaSpotsButton -- used to sit at y=361, which
+            // otaSpotsButton (added dynamically at the same y, Controller.cs) grew to cover.
+            this.verLabel2.Location = new System.Drawing.Point(150, 389);
             this.verLabel2.Name = "verLabel2";
             this.verLabel2.Size = new System.Drawing.Size(110, 14);
             this.verLabel2.TabIndex = 34;

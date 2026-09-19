@@ -39,6 +39,30 @@ namespace WSJTX_Controller
             panel1.BackgroundImage = Bitmap.FromHicon(SystemIcons.Question.Handle);
             panel1.BackgroundImageLayout = System.Windows.Forms.ImageLayout.Center;
             textBox.Text = text;
+
+            // The message box used to be locked to a fixed 190x17 regardless of content --
+            // most real confirmation text (this dialog is shared across many call sites with
+            // wildly different message lengths, e.g. Controller.cs's two-line, ~150-character
+            // Call CQ options prompt) was silently clipped to a sliver of its first line.
+            // Measure the actual text and grow the box -- and the button row below it -- to
+            // fit, instead of assuming a fixed height.
+            int origBoxBottom = textBox.Bottom;
+            using (var g = CreateGraphics())
+            {
+                var needed = g.MeasureString(text, textBox.Font, textBox.Width);
+                // Capped so one caller's unusually long message can't blow this popup up into
+                // a full-screen wall of text -- it can still scroll within Multiline if needed.
+                textBox.Height = Math.Min(Math.Max(textBox.Height, (int)Math.Ceiling(needed.Height) + 4), 200);
+            }
+            int delta = textBox.Bottom - origBoxBottom;
+            if (delta > 0)
+            {
+                panel2.Location    = new Point(panel2.Location.X, panel2.Location.Y + delta);
+                yesButton.Location = new Point(yesButton.Location.X, yesButton.Location.Y + delta);
+                nobutton.Location  = new Point(nobutton.Location.X, nobutton.Location.Y + delta);
+                Height += delta;
+            }
+
             textBox.SelectionStart = 0;
             textBox.SelectionLength = 0;
             textBox.Focus();

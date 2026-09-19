@@ -64,15 +64,20 @@ namespace WSJTX_Controller
             //
             // callWaitingInstructionsLabel
             //
-            this.callWaitingInstructionsLabel.AutoSize = true;
+            // Was AutoSize=true on a single line -- overflows the ~344px usable tab width by
+            // ~47px at 100% scaling. Fixed width (matching the list box below) + Height for 2
+            // lines lets Label wrap instead of clipping; text is unchanged. The list box and
+            // everything below shift down by 20px (see the other two tabs and the dialog's
+            // own ClientSize/tabControl height, changed the same way) to make room.
+            this.callWaitingInstructionsLabel.AutoSize = false;
             this.callWaitingInstructionsLabel.Location = new Point(8, 8);
-            this.callWaitingInstructionsLabel.Size = new Size(314, 13);
+            this.callWaitingInstructionsLabel.Size = new Size(336, 40);
             this.callWaitingInstructionsLabel.Text = "Checked fields are shown; use Move Up/Move Down to change display order.";
             //
             // callWaitingListBox
             //
             this.callWaitingListBox.FormattingEnabled = true;
-            this.callWaitingListBox.Location = new Point(8, 28);
+            this.callWaitingListBox.Location = new Point(8, 60);
             this.callWaitingListBox.Size = new Size(336, 190);
             this.callWaitingListBox.TabIndex = 0;
             this.callWaitingListBox.CheckOnClick = true;
@@ -81,7 +86,7 @@ namespace WSJTX_Controller
             //
             // callWaitingMoveUpButton
             //
-            this.callWaitingMoveUpButton.Location = new Point(8, 224);
+            this.callWaitingMoveUpButton.Location = new Point(8, 256);
             this.callWaitingMoveUpButton.Size = new Size(100, 28);
             this.callWaitingMoveUpButton.TabIndex = 1;
             this.callWaitingMoveUpButton.Text = "Move Up";
@@ -91,7 +96,7 @@ namespace WSJTX_Controller
             //
             // callWaitingMoveDownButton
             //
-            this.callWaitingMoveDownButton.Location = new Point(114, 224);
+            this.callWaitingMoveDownButton.Location = new Point(114, 256);
             this.callWaitingMoveDownButton.Size = new Size(100, 28);
             this.callWaitingMoveDownButton.TabIndex = 2;
             this.callWaitingMoveDownButton.Text = "Move Down";
@@ -101,7 +106,7 @@ namespace WSJTX_Controller
             //
             // callWaitingRestoreDefaultButton
             //
-            this.callWaitingRestoreDefaultButton.Location = new Point(220, 224);
+            this.callWaitingRestoreDefaultButton.Location = new Point(220, 256);
             this.callWaitingRestoreDefaultButton.Size = new Size(124, 28);
             this.callWaitingRestoreDefaultButton.TabIndex = 3;
             this.callWaitingRestoreDefaultButton.Text = "Restore Default";
@@ -123,15 +128,15 @@ namespace WSJTX_Controller
             //
             // rawDecodeInstructionsLabel
             //
-            this.rawDecodeInstructionsLabel.AutoSize = true;
+            this.rawDecodeInstructionsLabel.AutoSize = false;
             this.rawDecodeInstructionsLabel.Location = new Point(8, 8);
-            this.rawDecodeInstructionsLabel.Size = new Size(314, 13);
+            this.rawDecodeInstructionsLabel.Size = new Size(336, 40);
             this.rawDecodeInstructionsLabel.Text = "Checked fields are shown; use Move Up/Move Down to change display order.";
             //
             // rawDecodeListBox
             //
             this.rawDecodeListBox.FormattingEnabled = true;
-            this.rawDecodeListBox.Location = new Point(8, 28);
+            this.rawDecodeListBox.Location = new Point(8, 60);
             this.rawDecodeListBox.Size = new Size(336, 190);
             this.rawDecodeListBox.TabIndex = 0;
             this.rawDecodeListBox.CheckOnClick = true;
@@ -140,7 +145,7 @@ namespace WSJTX_Controller
             //
             // rawDecodeMoveUpButton
             //
-            this.rawDecodeMoveUpButton.Location = new Point(8, 224);
+            this.rawDecodeMoveUpButton.Location = new Point(8, 256);
             this.rawDecodeMoveUpButton.Size = new Size(100, 28);
             this.rawDecodeMoveUpButton.TabIndex = 1;
             this.rawDecodeMoveUpButton.Text = "Move Up";
@@ -150,7 +155,7 @@ namespace WSJTX_Controller
             //
             // rawDecodeMoveDownButton
             //
-            this.rawDecodeMoveDownButton.Location = new Point(114, 224);
+            this.rawDecodeMoveDownButton.Location = new Point(114, 256);
             this.rawDecodeMoveDownButton.Size = new Size(100, 28);
             this.rawDecodeMoveDownButton.TabIndex = 2;
             this.rawDecodeMoveDownButton.Text = "Move Down";
@@ -160,7 +165,7 @@ namespace WSJTX_Controller
             //
             // rawDecodeRestoreDefaultButton
             //
-            this.rawDecodeRestoreDefaultButton.Location = new Point(220, 224);
+            this.rawDecodeRestoreDefaultButton.Location = new Point(220, 256);
             this.rawDecodeRestoreDefaultButton.Size = new Size(124, 28);
             this.rawDecodeRestoreDefaultButton.TabIndex = 3;
             this.rawDecodeRestoreDefaultButton.Text = "Restore Default";
@@ -182,15 +187,15 @@ namespace WSJTX_Controller
             //
             // spotWatchInstructionsLabel
             //
-            this.spotWatchInstructionsLabel.AutoSize = true;
+            this.spotWatchInstructionsLabel.AutoSize = false;
             this.spotWatchInstructionsLabel.Location = new Point(8, 8);
-            this.spotWatchInstructionsLabel.Size = new Size(314, 13);
+            this.spotWatchInstructionsLabel.Size = new Size(336, 40);
             this.spotWatchInstructionsLabel.Text = "Checked fields are shown; use Move Up/Move Down to change display order.";
             //
             // spotWatchListBox
             //
             this.spotWatchListBox.FormattingEnabled = true;
-            this.spotWatchListBox.Location = new Point(8, 28);
+            this.spotWatchListBox.Location = new Point(8, 60);
             this.spotWatchListBox.Size = new Size(336, 190);
             this.spotWatchListBox.TabIndex = 0;
             this.spotWatchListBox.CheckOnClick = true;
@@ -199,7 +204,7 @@ namespace WSJTX_Controller
             //
             // spotWatchMoveUpButton
             //
-            this.spotWatchMoveUpButton.Location = new Point(8, 224);
+            this.spotWatchMoveUpButton.Location = new Point(8, 256);
             this.spotWatchMoveUpButton.Size = new Size(100, 28);
             this.spotWatchMoveUpButton.TabIndex = 1;
             this.spotWatchMoveUpButton.Text = "Move Up";
@@ -209,7 +214,7 @@ namespace WSJTX_Controller
             //
             // spotWatchMoveDownButton
             //
-            this.spotWatchMoveDownButton.Location = new Point(114, 224);
+            this.spotWatchMoveDownButton.Location = new Point(114, 256);
             this.spotWatchMoveDownButton.Size = new Size(100, 28);
             this.spotWatchMoveDownButton.TabIndex = 2;
             this.spotWatchMoveDownButton.Text = "Move Down";
@@ -219,7 +224,7 @@ namespace WSJTX_Controller
             //
             // spotWatchRestoreDefaultButton
             //
-            this.spotWatchRestoreDefaultButton.Location = new Point(220, 224);
+            this.spotWatchRestoreDefaultButton.Location = new Point(220, 256);
             this.spotWatchRestoreDefaultButton.Size = new Size(124, 28);
             this.spotWatchRestoreDefaultButton.TabIndex = 3;
             this.spotWatchRestoreDefaultButton.Text = "Restore Default";
@@ -245,13 +250,15 @@ namespace WSJTX_Controller
             this.tabControl.Controls.Add(this.rawDecodeTabPage);
             this.tabControl.Controls.Add(this.spotWatchTabPage);
             this.tabControl.Location = new Point(12, 12);
-            this.tabControl.Size = new Size(360, 290);
+            // Height grown by 20px to match the instruction labels' new 2-line wrapped height
+            // on all three tabs (was 290, just enough for the old single-line label).
+            this.tabControl.Size = new Size(360, 322);
             this.tabControl.TabIndex = 0;
 
             //
             // okButton
             //
-            this.okButton.Location = new Point(196, 310);
+            this.okButton.Location = new Point(196, 342);
             this.okButton.Size = new Size(88, 28);
             this.okButton.TabIndex = 1;
             this.okButton.Text = "OK";
@@ -261,7 +268,7 @@ namespace WSJTX_Controller
             //
             // cancelButton
             //
-            this.cancelButton.Location = new Point(290, 310);
+            this.cancelButton.Location = new Point(290, 342);
             this.cancelButton.Size = new Size(88, 28);
             this.cancelButton.TabIndex = 2;
             this.cancelButton.Text = "Cancel";
@@ -273,7 +280,9 @@ namespace WSJTX_Controller
             //
             this.AcceptButton = this.okButton;
             this.CancelButton = this.cancelButton;
-            this.ClientSize = new Size(384, 350);
+            // Height grown by 20px to fit the taller (now 2-line-wrapping) instruction labels
+            // and the tabControl/button-row shift that goes with them.
+            this.ClientSize = new Size(384, 382);
             this.Controls.Add(this.cancelButton);
             this.Controls.Add(this.okButton);
             this.Controls.Add(this.tabControl);

@@ -19,6 +19,11 @@ namespace WSJTX_Controller
 
             callQueue.Clear();
             callDict.Clear();
+            // See ClearCalls()'s own comment (WsjtxClient.cs) -- an explicit, deliberate clear
+            // should not leave ShowAdvancedQueue's per-side "stay suppressed" latch holding a
+            // Tx side empty for a queue that no longer has anything to do with it.
+            _evenSideHeld = false;
+            _oddSideHeld  = false;
             ShowQueue();
             if (ctrl.advancedCallLayout) ShowAdvancedQueue(null);
             UpdateMaxTxRepeat();

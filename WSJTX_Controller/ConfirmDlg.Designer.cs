@@ -55,11 +55,15 @@
             this.textBox.BorderStyle = System.Windows.Forms.BorderStyle.None;
             this.textBox.Font = new System.Drawing.Font("Microsoft Sans Serif", 9F, System.Drawing.FontStyle.Regular, System.Drawing.GraphicsUnit.Point, ((byte)(0)));
             this.textBox.Location = new System.Drawing.Point(68, 26);
-            this.textBox.MaximumSize = new System.Drawing.Size(190, 17);
-            this.textBox.MinimumSize = new System.Drawing.Size(190, 17);
+            // Was also MinimumSize/MaximumSize-locked to this same 190x17 -- Multiline=true
+            // but capped to one line's worth of height, so most real confirmation text (e.g.
+            // Controller.cs's two-line, ~150-character Call CQ options prompt) was silently
+            // clipped to a sliver of its first line. No fixed Min/Max here anymore --
+            // ConfirmDlg.cs measures the actual message at Load and grows the box (and the
+            // buttons below it) to fit.
             this.textBox.Multiline = true;
             this.textBox.Name = "textBox";
-            this.textBox.Size = new System.Drawing.Size(190, 17);
+            this.textBox.Size = new System.Drawing.Size(196, 17);
             this.textBox.TabIndex = 0;
             // Release-audit finding, 2026-08-20 (release blocker): was TabStop = false with no
             // AccessibleName and the dialog's own caption never set anywhere -- a JAWS/NVDA user
@@ -128,7 +132,10 @@
             this.ForeColor = System.Drawing.SystemColors.ControlText;
             this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedSingle;
             this.MaximizeBox = false;
-            this.MaximumSize = new System.Drawing.Size(280, 110);
+            // Height component 0 = no maximum (WinForms convention) -- width stays capped at
+            // 280, but ConfirmDlg.cs now needs to grow the dialog taller than 110 to fit a
+            // longer measured message.
+            this.MaximumSize = new System.Drawing.Size(280, 0);
             this.MinimizeBox = false;
             this.MinimumSize = new System.Drawing.Size(280, 110);
             this.Name = "ConfirmDlg";

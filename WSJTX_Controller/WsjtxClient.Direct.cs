@@ -1781,6 +1781,31 @@ namespace WSJTX_Controller
             // release AfterTx items and to DROP a still-pending AfterRx routine summary (stale RX
             // chatter must not be spoken once an over has begun) -- see OnPhysicalTxChanged.
             if (transmittingChanged) Notify?.OnTransmittingChanged(transmitting);
+            // Root-caused live, 2026-09-17 (advanced-list TX1/TX2 "not clearing" report): with
+            // "Keep transmit list during transmit" unchecked, ShowAdvancedQueue's own
+            // suppressTx1/suppressTx2 check is correct, but nothing was ever re-evaluating it at
+            // the moment transmitting flips -- that used to be the classic UDP path's
+            // ProcessTxStart()/ProcessTxEnd()'s job (see ShowAdvancedQueue's own "undoing
+            // ProcessTxStart()'s clear" comment), but ProcessTxStart was deleted as dead code on
+            // 2026-08-18 when this app moved to Direct engine mode, and nothing here ever grew an
+            // equivalent hook. Until now, whichever side was actively transmitting only got
+            // suppressed if a fresh decode happened to land on that exact side mid-transmission,
+            // or a resize/layout pass incidentally called RefreshAdvancedLists() -- both
+            // coincidental, which is why the operator saw it clear sometimes and not others.
+            // RefreshAdvancedLists() itself already no-ops when Advanced UI isn't enabled.
+            //
+            // Follow-up fix, 2026-09-18 (W6H repro: stale TX list resurrected at the next receive
+            // period): calling a full rebuild on EITHER edge of `transmitting` used to be unsafe,
+            // because suppressTx1/suppressTx2 only guarded the snapshot while `transmitting` was
+            // still literally true -- the instant it flipped back to false for the following
+            // receive period, this same call re-evaluated them as "not suppressed" and rebuilt
+            // straight from callQueue/callDict's own still-unremoved, merely-stale pre-transmit
+            // entries (nothing here or in ShowAdvancedQueue ever actually removes them from the
+            // queue -- that's TrimCallQueue's own separate, age-based job). The real fix is now in
+            // ShowAdvancedQueue itself (a per-side latch that survives exactly this kind of full
+            // rebuild, cleared only by a genuinely fresh same-side decode) -- this call site no
+            // longer needs to special-case either direction of the edge.
+            if (transmittingChanged) RefreshAdvancedLists();
 
             // Rx/Tx frequency control, 2026-08-27: the old mid-QSO "too many consecutive
             // transmits without being heard -> disable Tx and re-pick the best free frequency"
@@ -3464,6 +3489,13 @@ namespace WSJTX_Controller
             for (int i = 0; i < tx1; i++) _tx1SnapshotRows.Add($"row{i}");
             for (int i = 0; i < tx2; i++) _tx2SnapshotRows.Add($"row{i}");
         }
+
+        // Test-only (2026-09-18, stale-TX-list-at-Tx-end fix): read-only views of the retained
+        // TX1/TX2 (even/odd) advanced-list snapshots ShowAdvancedQueue maintains, so a test can
+        // assert directly on which calls are actually retained on each side without needing a
+        // real QueueView control.
+        internal List<string> TestTx1SnapshotCalls => _tx1SnapshotCalls;
+        internal List<string> TestTx2SnapshotCalls => _tx2SnapshotCalls;
 
         // Test-only: runaway-Tx backstop counter (private). DirectRunawayRr73HaltsEngineTests
         // asserts the first orphaned over is tolerated and the second one trips the halt.

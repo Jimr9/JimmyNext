@@ -105,21 +105,28 @@ namespace WSJTX_Controller
             _rxSetBtn.TabIndex = 16;
 
             // ---- status + window buttons ----------------------------------------------------
+            // Was single-line (Height=20) -- WsjtxClient.SetText() feeds this box 60-80+
+            // character engine-status sentences that overflowed it. Multiline/WordWrap lets
+            // it wrap to 2 lines; the buttons below (and the dialog itself) shift down by the
+            // added height so nothing else gets covered.
             _statusBox = new TextBox
             {
-                Location = new Point(12, 366), Size = new Size(368, 20),
+                Location = new Point(12, 366), Size = new Size(368, 36),
+                Multiline = true, WordWrap = true,
                 ReadOnly = true, TabStop = true, TabIndex = 17,
                 AccessibleName = "Status",
             };
             Controls.Add(_statusBox);
 
-            _helpBtn = MakeButton("Help", 12, 396, 90, 26, OpenHelp);
+            const int statusDelta = 16; // added status-box height (36 - original 20)
+            _helpBtn = MakeButton("Help", 12, 396 + statusDelta, 90, 26, OpenHelp);
             _helpBtn.AccessibleName = "Help, opens the Jimmy website";
             _helpBtn.TabIndex = 18;
-            _closeBtn = MakeButton("Close", 290, 396, 90, 26, Close);
+            _closeBtn = MakeButton("Close", 290, 396 + statusDelta, 90, 26, Close);
             _closeBtn.AccessibleName = "Close";
             _closeBtn.TabIndex = 19;
             CancelButton = _closeBtn;
+            ClientSize = new Size(ClientSize.Width, ClientSize.Height + statusDelta);
 
             // Give the context fields a stable leading tab order (0..6).
             _bandBox.TabIndex = 0; _dialBox.TabIndex = 1; _modeBox.TabIndex = 2;

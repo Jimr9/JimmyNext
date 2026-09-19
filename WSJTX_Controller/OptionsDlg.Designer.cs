@@ -115,6 +115,7 @@ namespace WSJTX_Controller
                 "Lookup Data",
                 "Appearance",
                 "Profiles"});
+            this._categoryListBox.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this._categoryListBox.Location = new System.Drawing.Point(0, 0);
             this._categoryListBox.Name = "_categoryListBox";
             this._categoryListBox.Size = new System.Drawing.Size(190, 380);
@@ -139,10 +140,19 @@ namespace WSJTX_Controller
             // tabControl1.Controls.Add sequence) so nothing about "what's first" changes --
             // basicPanel stays index 0, matching subtitleLabel's unconditional .Focus() at the
             // end of OptionsDlg_Load.
+            this._categoryDetailHost.Anchor = ((System.Windows.Forms.AnchorStyles)((((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom) | System.Windows.Forms.AnchorStyles.Left) | System.Windows.Forms.AnchorStyles.Right)));
             this._categoryDetailHost.Location = new System.Drawing.Point(196, 0);
             this._categoryDetailHost.Name = "_categoryDetailHost";
             this._categoryDetailHost.Size = new System.Drawing.Size(634, 380);
             this._categoryDetailHost.TabIndex = 1;
+            // Pure layout wrapper -- the one category panel actually parented inside it already
+            // carries its own real AccessibleName ("General", "Transmit", etc., set on each
+            // category panel below). Leaving this host unnamed let WinForms/JAWS's own
+            // "infer a name for this unnamed container" fallback attach to it instead;
+            // AccessibleRole.None removes it from the accessibility tree as a distinct region
+            // so JAWS announces only the real category panel's name when a category is entered.
+            this._categoryDetailHost.AccessibleName = "";
+            this._categoryDetailHost.AccessibleRole = System.Windows.Forms.AccessibleRole.None;
             //
             // generalPanel
             //
@@ -253,6 +263,13 @@ namespace WSJTX_Controller
             this.basicPanel.Controls.Add(this.filterGroupBox);
             this.basicPanel.Controls.Add(this.label9);
             this.basicPanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            // Matches every other Options category panel (decodeEnginePanel, decodePanel,
+            // frequenciesPanel, notificationsPanel, etc.) -- Basic was the one category
+            // panel missing this. Needed because stacking the "reply to" choice pairs
+            // vertically (below) makes this tab's content taller than the 380px detail
+            // host; scrolling vertically (never horizontally) is this codebase's existing,
+            // established way of handling that, not a new pattern introduced here.
+            this.basicPanel.AutoScroll = true;
             this.basicPanel.Name = "basicPanel";
             //
             // hotkeysPanel
@@ -391,9 +408,12 @@ namespace WSJTX_Controller
             //
             this.filterGroupBox.AccessibleName = "Reply to new calls filter";
             this.filterGroupBox.Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
-            this.filterGroupBox.Location = new System.Drawing.Point(5, 218);
+            this.filterGroupBox.Location = new System.Drawing.Point(5, 310);
             this.filterGroupBox.Name = "filterGroupBox";
-            this.filterGroupBox.Size = new System.Drawing.Size(655, 70);
+            // Was 655 wide -- already 26px past the 634px-wide detail host on its own,
+            // independent of the choice-row truncation above. Empty (no children, here or
+            // in code-behind), so this is a plain resize.
+            this.filterGroupBox.Size = new System.Drawing.Size(620, 70);
             this.filterGroupBox.TabStop = false;
             this.filterGroupBox.Text = "Reply to new calls";
             //
@@ -495,10 +515,10 @@ namespace WSJTX_Controller
             //
             // dxButton
             //
+            this.dxButton.AutoSize = true;
             this.dxButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
             this.dxButton.Location = new System.Drawing.Point(460, 110);
             this.dxButton.Name = "dxButton";
-            this.dxButton.Size = new System.Drawing.Size(100, 27);
             this.dxButton.TabIndex = 8;
             this.dxButton.Text = "Reply to DX";
             this.dxButton.UseVisualStyleBackColor = true;
@@ -506,10 +526,18 @@ namespace WSJTX_Controller
             //
             // nonDxButton
             //
+            // Was beside dxButton at x=565 in a second column -- the detail host is only
+            // 634px wide and the explanation label already runs to x=450, leaving ~180px,
+            // not enough room for two full-width AutoSize choices side by side (measured:
+            // the old fixed 105px box put nonDxButton's own right edge at x=670, already
+            // 36px past the visible panel before its text -- "Reply to my continent" --
+            // even started clipping against that too-narrow box). Stacked below its pair
+            // partner instead, same x, AutoSize so the full text always fits.
+            this.nonDxButton.AccessibleName = "Reply to my continent";
+            this.nonDxButton.AutoSize = true;
             this.nonDxButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9F);
-            this.nonDxButton.Location = new System.Drawing.Point(565, 110);
+            this.nonDxButton.Location = new System.Drawing.Point(460, 141);
             this.nonDxButton.Name = "nonDxButton";
-            this.nonDxButton.Size = new System.Drawing.Size(105, 27);
             this.nonDxButton.TabIndex = 9;
             this.nonDxButton.Text = "Reply to my continent";
             this.nonDxButton.UseVisualStyleBackColor = true;
@@ -519,7 +547,7 @@ namespace WSJTX_Controller
             //
             this.label4.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label4.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
-            this.label4.Location = new System.Drawing.Point(10, 148);
+            this.label4.Location = new System.Drawing.Point(10, 178);
             this.label4.Name = "label4";
             this.label4.ReadOnly = true;
             this.label4.Size = new System.Drawing.Size(440, 22);
@@ -530,10 +558,10 @@ namespace WSJTX_Controller
             // potaButton
             //
             this.potaButton.AccessibleName = "POTA Activator";
+            this.potaButton.AutoSize = true;
             this.potaButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
-            this.potaButton.Location = new System.Drawing.Point(460, 146);
+            this.potaButton.Location = new System.Drawing.Point(460, 176);
             this.potaButton.Name = "potaButton";
-            this.potaButton.Size = new System.Drawing.Size(100, 27);
             this.potaButton.TabIndex = 11;
             this.potaButton.Text = "Activator";
             this.potaButton.UseVisualStyleBackColor = true;
@@ -541,11 +569,13 @@ namespace WSJTX_Controller
             //
             // hunterButton
             //
+            // Stacked below potaButton -- see nonDxButton's comment above for why this
+            // column can no longer sit beside its pair partner.
             this.hunterButton.AccessibleName = "POTA Hunter";
+            this.hunterButton.AutoSize = true;
             this.hunterButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
-            this.hunterButton.Location = new System.Drawing.Point(565, 146);
+            this.hunterButton.Location = new System.Drawing.Point(460, 207);
             this.hunterButton.Name = "hunterButton";
-            this.hunterButton.Size = new System.Drawing.Size(105, 27);
             this.hunterButton.TabIndex = 12;
             this.hunterButton.Text = "Hunter";
             this.hunterButton.UseVisualStyleBackColor = true;
@@ -555,7 +585,7 @@ namespace WSJTX_Controller
             //
             this.label5.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label5.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
-            this.label5.Location = new System.Drawing.Point(10, 184);
+            this.label5.Location = new System.Drawing.Point(10, 244);
             this.label5.Name = "label5";
             this.label5.ReadOnly = true;
             this.label5.Size = new System.Drawing.Size(440, 22);
@@ -567,10 +597,10 @@ namespace WSJTX_Controller
             //
             this.allButton.AccessibleName = "reply in call order";
             this.allButton.AccessibleRole = System.Windows.Forms.AccessibleRole.RadioButton;
+            this.allButton.AutoSize = true;
             this.allButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
-            this.allButton.Location = new System.Drawing.Point(460, 182);
+            this.allButton.Location = new System.Drawing.Point(460, 242);
             this.allButton.Name = "allButton";
-            this.allButton.Size = new System.Drawing.Size(100, 27);
             this.allButton.TabIndex = 14;
             this.allButton.Text = "Reply in order";
             this.allButton.UseVisualStyleBackColor = true;
@@ -578,12 +608,14 @@ namespace WSJTX_Controller
             //
             // recentButton
             //
+            // Stacked below allButton -- see nonDxButton's comment above for why this
+            // column can no longer sit beside its pair partner.
             this.recentButton.AccessibleName = "Reply to most recent first";
             this.recentButton.AccessibleRole = System.Windows.Forms.AccessibleRole.RadioButton;
+            this.recentButton.AutoSize = true;
             this.recentButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F);
-            this.recentButton.Location = new System.Drawing.Point(565, 182);
+            this.recentButton.Location = new System.Drawing.Point(460, 273);
             this.recentButton.Name = "recentButton";
-            this.recentButton.Size = new System.Drawing.Size(105, 27);
             this.recentButton.TabIndex = 15;
             this.recentButton.Text = "Reply to recent first";
             this.recentButton.UseVisualStyleBackColor = true;
@@ -591,24 +623,47 @@ namespace WSJTX_Controller
             //
             // label9
             //
+            // Widened and wrapping: OptionsDlg.cs replaces this Text at runtime with a longer
+            // sentence (e.g. "...then enable CQ mode using Ctrl, E.") that overflowed the old
+            // fixed 540px single-line box. Multiline/WordWrap lets it wrap instead of clipping
+            // if it doesn't fit on one line -- the text itself is never shortened.
+            //
+            // Deliberately NOT Anchor=Right here -- basicPanel has AutoScroll=true (needed so
+            // the stacked "reply to" choices above still fit at the dialog's MinimumSize), and
+            // an independent runtime check found that Anchor=Right combined with AutoScroll
+            // let this control's real Width balloon to ~1450px inside an ~830px-wide panel
+            // (its wrapping still happened to fit at the panel's own current width, so nothing
+            // looked wrong -- but the wrap was being computed against the wrong, oversized
+            // width, so longer text or a different DPI could silently clip). Same class of bug
+            // as the Logbook Sync/Lookup Data provider boxes elsewhere in this file: an
+            // AutoScroll panel's child cannot safely size itself via Anchor or Dock. OptionsDlg.cs
+            // instead sets label9.Width explicitly from basicPanel's real client width whenever
+            // basicPanel resizes.
             this.label9.AccessibleRole = System.Windows.Forms.AccessibleRole.StaticText;
             this.label9.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Bold);
-            this.label9.Location = new System.Drawing.Point(10, 326);
+            this.label9.Location = new System.Drawing.Point(10, 388);
+            this.label9.Multiline = true;
             this.label9.Name = "label9";
             this.label9.ReadOnly = true;
-            this.label9.Size = new System.Drawing.Size(540, 22);
+            this.label9.Size = new System.Drawing.Size(610, 40);
             this.label9.TabIndex = 16;
             this.label9.Text = "You're now ready to start. Press OK to close this Options dialog.";
+            this.label9.WordWrap = true;
             this.label9.Enter += new System.EventHandler(this.label9_Enter);
             //
             // okButton
             //
             this.okButton.AccessibleName = "OK";
+            this.okButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
             this.okButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Bold);
             this.okButton.Location = new System.Drawing.Point(618, 386);
             this.okButton.Name = "okButton";
             this.okButton.Size = new System.Drawing.Size(100, 27);
-            this.okButton.TabIndex = 1;
+            // Was 1, tying with _categoryDetailHost's own TabIndex (also 1) -- accessibility
+            // tab order review (2026-09-17): Categories list, then the selected page's
+            // controls, then OK, then Cancel should be unambiguous, not dependent on a
+            // same-index tiebreak.
+            this.okButton.TabIndex = 2;
             this.okButton.Text = "OK";
             this.okButton.UseVisualStyleBackColor = true;
             this.okButton.Click += new System.EventHandler(this.okButton_Click);
@@ -616,11 +671,12 @@ namespace WSJTX_Controller
             // cancelButton
             //
             this.cancelButton.AccessibleName = "Cancel";
+            this.cancelButton.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Right)));
             this.cancelButton.Font = new System.Drawing.Font("Microsoft Sans Serif", 9.75F, System.Drawing.FontStyle.Bold);
             this.cancelButton.Location = new System.Drawing.Point(723, 386);
             this.cancelButton.Name = "cancelButton";
             this.cancelButton.Size = new System.Drawing.Size(100, 27);
-            this.cancelButton.TabIndex = 2;
+            this.cancelButton.TabIndex = 3;
             this.cancelButton.Text = "Cancel";
             this.cancelButton.UseVisualStyleBackColor = true;
             // T10A fix, 2026-08-23 (HIGHLY LIKELY bug): DialogResult.Cancel was never assigned
@@ -641,9 +697,17 @@ namespace WSJTX_Controller
             this.Controls.Add(this._categoryDetailHost);
             this.Controls.Add(this.okButton);
             this.Controls.Add(this.cancelButton);
-            this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
+            // Was FixedDialog -- Basic's truncated text and the systemic DPI/small-screen risk
+            // (see visual audit) both call for the dialog to be resizable rather than a fixed
+            // 830x418. _categoryListBox/_categoryDetailHost/okButton/cancelButton now carry
+            // explicit Anchors (above) so they track the new size instead of leaving blank
+            // space; MinimumSize is set at runtime in OptionsDlg_Load from the actual initial
+            // Size (which already accounts for OS chrome), clamped to the current screen's
+            // WorkingArea. MaximizeBox restored so keyboard/screen-reader users have an
+            // obvious way to get more room without hunting for a resize border.
+            this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.Sizable;
             this.KeyPreview = true;
-            this.MaximizeBox = false;
+            this.MaximizeBox = true;
             this.MinimizeBox = false;
             // T10A fix, 2026-08-23: see cancelButton's own comment above -- the form-level
             // CancelButton property was never set at all.

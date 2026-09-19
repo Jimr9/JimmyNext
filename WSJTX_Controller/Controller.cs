@@ -680,7 +680,9 @@ namespace WSJTX_Controller
                 //check all screens, extended screen may not be present
                 var screens = System.Windows.Forms.Screen.AllScreens;
                 bool found = false;
-                Rectangle matchedScreenBounds = Screen.PrimaryScreen.Bounds;
+                // WorkingArea (not Bounds) excludes the taskbar, so clamping against it can't
+                // leave part of the window hidden behind/under it.
+                Rectangle matchedScreenBounds = Screen.PrimaryScreen.WorkingArea;
                 for (int scnIdx = 0; scnIdx < screens.Length; scnIdx++)
                 {
                     var screenBounds = screens[scnIdx].Bounds;
@@ -688,7 +690,7 @@ namespace WSJTX_Controller
                     if (screenBounds.Contains(centerPt))
                     {
                         found = true;       //found screen for window posn
-                        matchedScreenBounds = screenBounds;
+                        matchedScreenBounds = screens[scnIdx].WorkingArea;
                         break;
                     }
                 }
@@ -696,9 +698,8 @@ namespace WSJTX_Controller
                 {
                     x = 0;
                     y = 0;
-                    matchedScreenBounds = Screen.PrimaryScreen.Bounds;
+                    matchedScreenBounds = Screen.PrimaryScreen.WorkingArea;
                 }
-                this.Location = new Point(x, y);
                 int i;
                 int w;
                 int.TryParse(iniFile.Read("windowWd"), out w);
@@ -707,6 +708,11 @@ namespace WSJTX_Controller
                 // from a different/larger monitor can't leave the window unusable.
                 if (w > 0) this.Width  = Math.Max(this.MinimumSize.Width,  Math.Min(w, matchedScreenBounds.Width));
                 if (i > 0) this.Height = Math.Max(this.MinimumSize.Height, Math.Min(i, matchedScreenBounds.Height));
+                // Clamp position last (after Width/Height are final) so the whole restored
+                // rectangle -- not just its center point -- stays inside the usable work area.
+                x = Math.Max(matchedScreenBounds.Left, Math.Min(x, matchedScreenBounds.Right - this.Width));
+                y = Math.Max(matchedScreenBounds.Top, Math.Min(y, matchedScreenBounds.Bottom - this.Height));
+                this.Location = new Point(x, y);
 
                 if (iniFile.Read("windowState") == "Maximized")
                     this.WindowState = FormWindowState.Maximized;
@@ -1235,12 +1241,13 @@ namespace WSJTX_Controller
             wsjtxClient.UpdateModeSelection();
             SyncCqIntentFromMode();     // force-sync after wsjtxClient is assigned
 
-            // Logbook button — added below sortOrderButton at y=305
+            // Logbook button — placed below sortOrderButton, derived from its actual Bottom
+            // rather than a hardcoded Y so it can never drift back on top of a control above it.
             logbookButton = new System.Windows.Forms.Button
             {
                 Text           = "Logbook",
                 AccessibleName = "Logbook",
-                Location       = new System.Drawing.Point(10, 333),
+                Location       = new System.Drawing.Point(10, sortOrderButton.Bottom + 4),
                 Size           = new System.Drawing.Size(492, 24),
                 Anchor         = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right,
                 TabIndex       = 50,
@@ -1250,12 +1257,12 @@ namespace WSJTX_Controller
             logbookButton.BringToFront();
 
             // POTA/SOTA/DX Spots/Band Conditions/Space Weather window button — below
-            // logbookButton at y=361, same footprint.
+            // logbookButton, same footprint, same derived-position approach.
             otaSpotsButton = new System.Windows.Forms.Button
             {
                 Text           = "POTA / SOTA / DX Spots",
                 AccessibleName = "POTA, SOTA, and DX spots",
-                Location       = new System.Drawing.Point(10, 361),
+                Location       = new System.Drawing.Point(10, logbookButton.Bottom + 4),
                 Size           = new System.Drawing.Size(492, 24),
                 Anchor         = System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Left | System.Windows.Forms.AnchorStyles.Right,
                 TabIndex       = 52,
@@ -3057,6 +3064,25 @@ namespace WSJTX_Controller
             BeginInvoke((Action)(() => CoordinatedSpeak("Window size and position reset to default.")));
         }
 
+        // Bottom Y of the last fixed control in the main button/label stack (verLabel/
+        // verLabel2, below logbookButton/otaSpotsButton). Single source of truth for where
+        // the advanced-list block and Simple-mode's minimum height may start -- previously
+        // this was two separately-hardcoded "376" literals (one here, one in
+        // ApplyAdvancedLayout) that happened to agree with each other and with verLabel's
+        // designer position, but nothing enforced that agreement; a future change to the
+        // button stack could silently reintroduce the overlap this replaces.
+        private int ButtonBlockBottom() => Math.Max(verLabel.Bottom, verLabel2.Bottom);
+
+        // First Y the advanced-list block (TX1/TX2/Raw/Spot Watch labels) may use.
+        private int AdvancedListStartY() => ButtonBlockBottom() + 6;
+
+        // Vertical gap between one advanced list's bottom and the next section's heading.
+        // Was two separately-hardcoded "6"s (one here, one in ApplyAdvancedLayout) -- visual
+        // review with TX1/TX2/Raw/Spot Watch all enabled found 6px too subtle to read as
+        // separate sections at a glance. Single shared constant this time so the two call
+        // sites can't drift the way the old startY literals did.
+        private const int AdvancedListGroupGap = 11;
+
         // Natural (unstretched) bottom Y of the advanced lists block for however many of
         // TX1/TX2/Raw are shown, always derived from the fixed base sizes below -- never
         // from the lists' current (possibly window-stretched) positions/sizes. Sharing this
@@ -3064,10 +3090,10 @@ namespace WSJTX_Controller
         // window height stable instead of ratcheting up every time the window grows.
         private int NaturalAdvancedListsBottom(bool showTx1, bool showTx2, bool showRaw, out int baseListH, out int baseRawH)
         {
-            const int startY   = 376;   // first label Y (same as designer baseline)
+            int startY = AdvancedListStartY();
             const int labelH   = 14;    // approx height of bold 8.25pt label
             const int labelGap = 2;     // gap between label bottom and list top
-            const int groupGap = 6;     // gap between list bottom and next label
+            int groupGap = AdvancedListGroupGap;
 
             int count = (showTx1 ? 1 : 0) + (showTx2 ? 1 : 0) + (showRaw ? 1 : 0);
             switch (count)
@@ -3141,7 +3167,11 @@ namespace WSJTX_Controller
                 }
                 else
                 {
-                    naturalHeight = sortOrderButton.Location.Y + sortOrderButton.Height + 45;
+                    // Was based on sortOrderButton alone, which never accounted for
+                    // logbookButton/otaSpotsButton/verLabel/verLabel2 below it -- Simple
+                    // mode's minimum height could be smaller than the button stack it must
+                    // contain. ButtonBlockBottom() is the real bottom of that stack.
+                    naturalHeight = ButtonBlockBottom() + 45;
                 }
                 // Spot Watch now requires Advanced Call Layout to be enabled, so its own height
                 // requirement only applies when both flags are on.
@@ -6025,10 +6055,10 @@ namespace WSJTX_Controller
             // starting just below the last main-control row, with height scaled to count.
             if (anyAdvList || showSpot)
             {
-                const int startY   = 376;   // first label Y (same as designer baseline)
+                int startY = AdvancedListStartY();
                 const int labelH   = 14;    // approx height of bold 8.25pt label
                 const int labelGap = 2;     // gap between label bottom and list top
-                const int groupGap = 6;     // gap between list bottom and next label
+                int groupGap = AdvancedListGroupGap;
                 const int listX    = 10;
 
                 // Lists widen to fill the window, never below today's default 280px.

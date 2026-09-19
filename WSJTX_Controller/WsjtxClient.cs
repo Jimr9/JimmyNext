@@ -186,6 +186,12 @@ namespace WSJTX_Controller
         private List<string> _tx2SnapshotRows  = new List<string>();
         private List<string> _tx2SnapshotCalls = new List<string>();
         private List<CallCategory> _tx2SnapshotCategories = new List<CallCategory>();
+        // Per-side "stay suppressed" latch for ShowAdvancedQueue's Tx-side clearing (see its own
+        // comment) -- true (even/tx1 or odd/tx2) once that side has been cleared for being our
+        // live Tx slot, and stays true across any number of later full-rebuild calls until a
+        // genuinely fresh decode for that same side arrives via AddCall.
+        private bool _evenSideHeld;
+        private bool _oddSideHeld;
         // Maps each normal-list display row index to its true callQueue position.
         // Rebuilt by ShowQueue whenever callInProg is filtered from the visible rows.
         private List<int> _callListBoxQueueIndices = new List<int>();
@@ -2695,6 +2701,12 @@ namespace WSJTX_Controller
             UpdateMaxTxRepeat();
             callDict.Clear();
             decodeNum = 0;
+            // A full clear (band/session reset) is a genuine fresh start -- unlike an ordinary
+            // Tx cycle or QSO start/end, which must leave ShowAdvancedQueue's per-side "stay
+            // suppressed" latch alone, this should not carry a hold left over from whatever the
+            // queue was doing before the reset.
+            _evenSideHeld = false;
+            _oddSideHeld  = false;
             ShowQueue();
             if (ctrl.advancedCallLayout) ShowAdvancedQueue(null);
             DebugOutput($"{Time()} ClearCalls, decodeNum:{decodeNum}");

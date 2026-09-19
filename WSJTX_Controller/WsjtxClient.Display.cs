@@ -137,10 +137,34 @@ namespace WSJTX_Controller
             // during Tx" unchecked, keep that side's snapshot forcibly empty here instead
             // of repopulating it -- otherwise any decode/queue change that happens mid-
             // transmission (very common) silently refills it before the Tx cycle even
-            // ends, undoing ProcessTxStart()'s clear. Resumes populating normally the
-            // moment transmitting goes false (Tx end) for that side.
-            bool suppressTx1 = !ctrl.keepTransmitListDuringTx && transmitting && txFirst;
-            bool suppressTx2 = !ctrl.keepTransmitListDuringTx && transmitting && !txFirst;
+            // ends, undoing ProcessTxStart()'s clear.
+            //
+            // Fix, 2026-09-18 (W6H repro: stale entries resurrected at the next receive
+            // period): suppression used to be keyed purely on the live `transmitting` flag,
+            // so it lifted itself the instant Tx ended -- but callQueue/callDict still hold
+            // that side's pre-transmit decodes (nothing removes them; TrimCallQueue expires
+            // them later, on its own unrelated age schedule), so the very next rebuild of any
+            // kind -- and there are many call sites that pass evenSide: null for exactly this
+            // (a timer tick, a filter/sort change, ClearCalls, DirectApplyStatus's own
+            // transmitting-edge refresh) -- would repopulate the just-cleared side straight
+            // back from those stale entries. _evenSideHeld/_oddSideHeld are a per-side latch:
+            // once a side is suppressed for being our live Tx slot, it STAYS suppressed across
+            // any number of later rebuilds, regardless of `transmitting`'s current value, until
+            // a genuinely fresh decode for that SAME side arrives -- which is exactly what
+            // AddCall's own targeted ShowAdvancedQueue(evenSide: <side>) call represents. Only
+            // updated while "keep transmit list during Tx" is actually unchecked, so toggling
+            // the option ON mid-session can never leave a stale hold from an earlier OFF period
+            // (or vice versa) affecting a side it never applied to.
+            if (!ctrl.keepTransmitListDuringTx)
+            {
+                _evenSideHeld = _evenSideHeld || (transmitting && txFirst);
+                _oddSideHeld  = _oddSideHeld  || (transmitting && !txFirst);
+            }
+            if (evenSide == true)  _evenSideHeld = false;
+            if (evenSide == false) _oddSideHeld  = false;
+
+            bool suppressTx1 = !ctrl.keepTransmitListDuringTx && txFirst  && _evenSideHeld;
+            bool suppressTx2 = !ctrl.keepTransmitListDuringTx && !txFirst && _oddSideHeld;
 
             if (rebuildTx1)
             {

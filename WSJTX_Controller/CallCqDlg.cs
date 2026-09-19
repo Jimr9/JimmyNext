@@ -151,7 +151,13 @@ namespace WSJTX_Controller
             {
                 Text           = $"Find open slot ({slotKeyText})",
                 Location       = new Point(12, 182),
-                Size           = new Size(240, 26),
+                // Was a fixed 240px -- slotKeyText is a user-configured hotkey string of
+                // unpredictable length (or "no hotkey assigned"), which could exceed that
+                // width. AutoSize with a MinimumSize floor always fits the actual text while
+                // keeping today's visual size for the common case.
+                AutoSize       = true,
+                AutoSizeMode   = AutoSizeMode.GrowOnly,
+                MinimumSize    = new Size(240, 26),
                 AccessibleName = "Find open transmit slot",
                 TabIndex       = 6,
             };

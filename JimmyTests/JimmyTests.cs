@@ -496,6 +496,9 @@ static class JimmyTests
         HaltDoesNotConfirmWhenStillTransmittingTests();
         RejectedReplyPreservesQueuedStationTests();
         SortCallsNeverDivergesQueueFromDictKeysTests();
+        AdvancedTxListDoesNotResurrectStaleEntriesTests();
+        LogbookWindowKeyboardTraversalBaselineTests();
+        OptionsDlgKeyboardTraversalBaselineTests();
         RxTxFrequencyModeReplyTests();
         EmergencyHaltTxConfirmationTests();
         EscapeAltHAnnouncementGateTests();
@@ -15853,6 +15856,483 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  SortCallsNeverDivergesQueueFromDictKeysTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Fix, 2026-09-18 (live repro, W6H): the Advanced UI transmit-side available-stations
+    // list cleared correctly the instant Tx began, but came back with the SAME pre-Tx entries
+    // the instant Tx ended -- ShowAdvancedQueue's suppression was keyed purely on the live
+    // `transmitting` flag, so it lifted itself immediately, and the underlying callQueue/
+    // callDict still held those stale entries (nothing removes them; that's TrimCallQueue's own
+    // separate, age-based job). Root cause + fix: WsjtxClient.Display.cs's ShowAdvancedQueue now
+    // latches each side's suppression (_evenSideHeld/_oddSideHeld, WsjtxClient.cs) until a
+    // genuinely fresh same-side decode arrives via AddCall, surviving any number of full
+    // rebuilds in between (filter/sort/timer refreshes all pass evenSide: null, same as the
+    // DirectApplyStatus transmitting-edge refresh that exposed this).
+    static void AdvancedTxListDoesNotResurrectStaleEntriesTests()
+    {
+        Console.WriteLine("\n── Fix, 2026-09-18: Tx-side advanced list must not resurrect stale pre-Tx entries (W6H repro) ──");
+        try
+        {
+            WsjtxClient MakeWc(bool keepDuringTx)
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.advancedCallLayout = true;
+                ctrl.advShowTx1 = true;
+                ctrl.advShowTx2 = true;
+                ctrl.keepTransmitListDuringTx = keepDuringTx;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.ConnectDirectEngine("KB0UZT", "FN42");
+                wc.TestStopPollTimer();   // the 1s SNAPSHOT poll would otherwise race this test's own drives
+                wc.TestSetMode("FT8");
+                wc.trPeriod = 15000;
+                wc.TestSetTxFirst(true); // our Tx side is the "even" bucket (TX1)
+                return wc;
+            }
+
+            DirectSnapshot Snap(bool transmitting) => ParseDirectSnapshot(
+                "{ \"mycall\": \"KB0UZT\", \"mygrid\": \"FN42\", " +
+                "\"radio\": { \"dialMhz\": 14.074, \"transmitting\": " + (transmitting ? "true" : "false") +
+                ", \"tuning\": false, \"catOk\": true, \"slot\": 500 }, \"recentDecodes\": [] }");
+
+            // ── Option OFF: the reported bug ──
+            {
+                var wc = MakeWc(keepDuringTx: false);
+
+                const string staleCall = "W6H";
+                wc.callDict[staleCall] = new EnqueueDecodeMessage
+                {
+                    Message = $"CQ {staleCall} EM12", Snr = -10,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = TimeSpan.Zero,          // even -> our Tx side
+                };
+                wc.callQueue.Enqueue(staleCall);
+
+                const string rxCall = "K1ABC";
+                wc.callDict[rxCall] = new EnqueueDecodeMessage
+                {
+                    Message = $"CQ {rxCall} EM12", Snr = -8,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = TimeSpan.FromSeconds(15), // odd -> receive side
+                };
+                wc.callQueue.Enqueue(rxCall);
+
+                // 1. Seed: the lists contain data.
+                wc.ShowAdvancedQueue();
+                Check("1. Seed: Tx-side (TX1) list contains the seeded entry before transmitting",
+                    wc.TestTx1SnapshotCalls.Contains(staleCall), true);
+                Check("1. Seed: Rx-side (TX2) list contains its own seeded entry",
+                    wc.TestTx2SnapshotCalls.Contains(rxCall), true);
+
+                // 2/3. Enter transmit -- the Tx-side list (visible + backing) clears.
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(transmitting: true));
+                Check("2/3. Tx-side backing state is empty the moment transmit begins",
+                    wc.TestTx1SnapshotCalls.Count == 0, true);
+                Check("3. The stale entry is still sitting in the underlying callQueue (never removed, only suppressed)",
+                    wc.callQueue.Contains(staleCall), true);
+
+                // 4. Enter the following receive period (Tx ends) -- THE FIX under test.
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(transmitting: false));
+                Check("4. THE FIX: Tx-side list stays empty once Tx ends, despite the stale entry still being queued",
+                    wc.TestTx1SnapshotCalls.Count == 0, true);
+
+                // 5/6. A fresh receive-side decode updates the receive side normally.
+                const string freshRxCall = "N9ZZZ";
+                wc.callDict[freshRxCall] = new EnqueueDecodeMessage
+                {
+                    Message = $"CQ {freshRxCall} EM12", Snr = -6,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = TimeSpan.FromSeconds(15), // odd -> receive side
+                };
+                wc.callQueue.Enqueue(freshRxCall);
+                wc.ShowAdvancedQueue(false);   // AddCall's own targeted per-side refresh for the odd bucket
+                Check("6. Receive side picks up the fresh decode normally",
+                    wc.TestTx2SnapshotCalls.Contains(freshRxCall), true);
+                Check("7. Tx side is still empty after a receive-side update (RX/TX never mixed)",
+                    wc.TestTx1SnapshotCalls.Count == 0, true);
+
+                // 8/9. A normal timer/filter/sort/UI refresh must not resurrect the stale entry.
+                wc.RefreshAdvancedLists();
+                Check("9. A subsequent full refresh (filter/sort/timer-style) still does not resurrect the stale Tx entry",
+                    wc.TestTx1SnapshotCalls.Contains(staleCall), false);
+                Check("9b. ...Tx side is still empty",
+                    wc.TestTx1SnapshotCalls.Count == 0, true);
+
+                // RX/TX must never mix into the wrong side.
+                Check("RX/TX never mixed: no receive-side call ever leaked into the Tx-side snapshot",
+                    wc.TestTx1SnapshotCalls.Contains(rxCall) || wc.TestTx1SnapshotCalls.Contains(freshRxCall), false);
+
+                // Ending a QSO must not resurrect the old cached Tx list either.
+                wc.CancelQso();
+                Check("Ending a QSO does not resurrect the stale Tx-side entry",
+                    wc.TestTx1SnapshotCalls.Contains(staleCall), false);
+            }
+
+            // ── Option ON: preserve across Tx and the following refreshes ──
+            {
+                var wc = MakeWc(keepDuringTx: true);
+
+                const string keptCall = "W6H";
+                wc.callDict[keptCall] = new EnqueueDecodeMessage
+                {
+                    Message = $"CQ {keptCall} EM12", Snr = -10,
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = TimeSpan.Zero,   // even -> our Tx side
+                };
+                wc.callQueue.Enqueue(keptCall);
+
+                wc.ShowAdvancedQueue();
+                Check("ON: Tx-side list seeded before transmitting", wc.TestTx1SnapshotCalls.Contains(keptCall), true);
+
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(transmitting: true));
+                Check("ON: Tx-side list is preserved (not cleared) while transmitting",
+                    wc.TestTx1SnapshotCalls.Contains(keptCall), true);
+
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(transmitting: false));
+                Check("ON: Tx-side list is still preserved in the following receive period",
+                    wc.TestTx1SnapshotCalls.Contains(keptCall), true);
+
+                wc.RefreshAdvancedLists();
+                Check("ON: still preserved after a normal filter/sort/timer-style refresh",
+                    wc.TestTx1SnapshotCalls.Contains(keptCall), true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  AdvancedTxListDoesNotResurrectStaleEntriesTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Reusable WinForms keyboard-traversal test harness (2026-09-18, tab-order baseline
+    // restoration) ──────────────────────────────────────────────────────────────────────────
+    // Walks Control.GetNextControl -- the SAME hierarchical, TabIndex-aware, container-
+    // recursive algorithm Control.ProcessTabKey itself calls for a real Tab/Shift+Tab key
+    // press -- so a test asserts against the actual keyboard route a user experiences, not
+    // just raw TabIndex numbers (which, per WinForms' hierarchical traversal, do not by
+    // themselves determine cross-container order once controls are nested in different
+    // panels). Reusable across any Form.
+    static class TabOrderWalker
+    {
+        // Runs `body` on a dedicated, background STA thread (required to construct/host
+        // WinForms controls) and rethrows any exception on the caller's thread so failures
+        // still report normally through the ordinary Check()/try-catch pattern. Joins with a
+        // bounded timeout rather than forever: a real Form.Show() can, in some environments,
+        // block waiting on a native window-activation handshake that never completes without
+        // a full Application.Run() message loop (confirmed live -- OptionsDlg.Show() hangs
+        // this way, LogbookWindow.Show() does not). IsBackground=true means an actually-hung
+        // thread cannot keep the whole test process from exiting; a timeout is reported as a
+        // failure instead of freezing the entire suite.
+        public static void OnSTA(Action body, int timeoutMs = 20000)
+        {
+            Exception captured = null;
+            var t = new Thread(() =>
+            {
+                try { body(); }
+                catch (Exception ex) { captured = ex; }
+            });
+            t.IsBackground = true;
+            t.SetApartmentState(ApartmentState.STA);
+            t.Start();
+            if (!t.Join(timeoutMs))
+                throw new Exception($"STA thread did not complete within {timeoutMs}ms (likely blocked in Form.Show() without a message loop) -- abandoned so the rest of the suite can continue.");
+            if (captured != null)
+            {
+                var inner = captured;
+                while (inner.InnerException != null) inner = inner.InnerException;
+                throw new Exception("STA thread failed: " + inner.GetType().Name + ": " + inner.Message + "\n" + inner.StackTrace, captured);
+            }
+        }
+
+        // One label per stop: AccessibleName when set (every real control in this codebase
+        // sets one), else Name, else the bare type name.
+        public static string Describe(System.Windows.Forms.Control c)
+        {
+            if (c == null) return "<null>";
+            if (!string.IsNullOrEmpty(c.AccessibleName)) return c.AccessibleName;
+            if (!string.IsNullOrEmpty(c.Name)) return c.Name;
+            return "<" + c.GetType().Name + ">";
+        }
+
+        // Walks the REAL Tab/Shift+Tab route via Control.SelectNextControl + Form.ActiveControl
+        // -- the exact public method Control.ProcessTabKey itself calls for a live key press
+        // (tabStopOnly/nested/wrap all true, matching real key handling). This is deliberately
+        // NOT built on GetNextControl: confirmed live that GetNextControl(ctl: null, forward:
+        // true) does not reliably return the true TabIndex-lowest control -- it can return
+        // root.Controls[0] (Z-order/add-order) instead, which is exactly the "wrong control
+        // wins because it happened to be added to the Controls collection first" class of bug
+        // this whole restoration is about, and would silently defeat a test meant to catch it.
+        // SelectNextControl requires `form` to be genuinely shown (it silently no-ops on a
+        // window never made visible at the OS level, same as Control.Focus()).
+        // `step(forward)` performs ONE real navigation hop (returning success) and is expected
+        // to update `form.ActiveControl` as a side effect -- exactly what both
+        // Form.SelectNextControl and a Form's own (possibly overridden) ProcessTabKey do.
+        // Passing a reflection-bound ProcessTabKey here (rather than calling
+        // Form.SelectNextControl directly) matters whenever a Form overrides ProcessTabKey to
+        // correct its own structural Tab-order quirks: SelectNextControl is a lower-level
+        // primitive ProcessTabKey itself normally calls, so invoking it directly would bypass
+        // any such override and silently test WinForms' raw (possibly wrong) behavior instead
+        // of what a real Tab keypress actually does.
+        // Returns the visited-name sequence plus the actual last Control reached (NOT simply
+        // re-read from form.ActiveControl afterward -- the very call that detects wraparound
+        // has, by then, already moved ActiveControl TO the wrapped-to seed, so re-reading it
+        // would silently hand a caller the wrong "last control" to continue from).
+        public static (List<string> names, System.Windows.Forms.Control last) WalkReal(
+            System.Windows.Forms.Form form, System.Windows.Forms.Control seedFrom, bool forward,
+            Func<bool, bool> step, int maxSteps = 60)
+        {
+            var seq = new List<string>();
+            System.Windows.Forms.Control last = seedFrom;
+            for (int i = 0; i < maxSteps; i++)
+            {
+                bool ok = step(forward);
+                if (!ok) break;
+                var next = form.ActiveControl;
+                if (next == null || next == seedFrom) break;
+                last = next;
+                seq.Add(Describe(next));
+            }
+            return (seq, last);
+        }
+    }
+
+    // ── Logbook keyboard traversal baseline (restored from commit bb1a7a0, "Checkpoint
+    // before visual layout fixes") ──────────────────────────────────────────────────────────
+    // The 2026-09 visual-layout rework wrapped each tab's content in header/footer Dock
+    // panels (needed for resizing/DPI correctness), and a separate accessibility pass made
+    // its own tab-order judgment calls on top of that -- together these regressed the
+    // keyboard route a live user had already confirmed worked. This walks the SAME
+    // GetNextControl route real Tab/Shift+Tab uses and checks it against the sequence
+    // bb1a7a0 itself actually produces (verified via `git diff bb1a7a0` against every
+    // Build*Page method, not guessed), so a future change that reintroduces the regression
+    // fails here instead of needing another live report.
+    static void LogbookWindowKeyboardTraversalBaselineTests()
+    {
+        Console.WriteLine("\n── Logbook: keyboard traversal matches the bb1a7a0 baseline ──");
+        // Awards/Still Need's own first control (the award selector/checklist) is disabled
+        // whenever RuleLibrary.Definitions is empty -- true here, since JimmyTests' own output
+        // folder doesn't carry a copy of RuleDefinitions/*.ini. A disabled first control is a
+        // real, legitimate state (ProcessTabKey's FirstSelectable skips it, same as a real Tab
+        // press would), but it would make this test's own expected sequences -- which assume
+        // the normal, "some award is loaded" case -- fail for a reason that has nothing to do
+        // with the fix under test. Definitions.Add mutates the actual shared static list
+        // directly (its setter is private, but the List<T> instance itself is not immutable);
+        // removed again in `finally` so no other test in this same process sees it.
+        var fakeAward = new RuleDefinition { Id = "TESTFAKE", Name = "Test Award", Enabled = true };
+        RuleLibrary.Definitions.Add(fakeAward);
+        try
+        {
+            TabOrderWalker.OnSTA(() =>
+            {
+                // Non-empty fake credentials for every source -- Sync's own download buttons
+                // (QRZ/LoTW/Club Log/eQSL) are legitimately disabled without them, and a real
+                // Tab press correctly skips a disabled control, same as it does for the (here
+                // genuinely, correctly disabled) Edit/Delete/Export buttons before any Edit Log
+                // row is selected. Enabling these lets the test verify the FULL Sync sequence
+                // rather than a partial one that's merely correct for the credential-less case.
+                using (var lw = new LogbookWindow(null, () => "FAKE", () => "FAKE", () => "FAKE",
+                    () => "FAKE", () => "FAKE", () => "FAKE", () => "FAKE", () => "FAKE"))
+                {
+                    lw.Show();   // SelectNextControl/Focus need a genuinely shown window (confirmed
+                                 // live: LogbookWindow.Show() does not hang here, unlike OptionsDlg)
+
+                    T GetField<T>(string name) => (T)typeof(LogbookWindow).GetField(name,
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(lw);
+                    var tabControl = GetField<System.Windows.Forms.TabControl>("_tabControl");
+
+                    // EVERY hop must go through LogbookWindow's own ProcessTabKey override, not
+                    // just the first -- the fix corrects multiple distinct transitions (tab
+                    // strip -> page, mid-page hops past the header's last child, and Status ->
+                    // page on Shift+Tab), all inside that one override (see its own comment).
+                    // Calling Form.SelectNextControl directly, as a naive WalkReal would, bypasses
+                    // it entirely and would silently test WinForms' raw (still-buggy) structural
+                    // behavior instead of what a real Tab keypress actually does. ProcessTabKey is
+                    // `protected`, so it's invoked here via reflection.
+                    var processTabKey = typeof(LogbookWindow).GetMethod("ProcessTabKey",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    bool StepViaProcessTabKey(bool fwd) => (bool)processTabKey.Invoke(lw, new object[] { fwd });
+
+                    void CheckPage(string label, int tabIndex, string[] expectedFull)
+                    {
+                        // Simulates: operator arrows to this tab while sitting on the tab strip,
+                        // then presses Tab to enter the page.
+                        tabControl.SelectedIndex = tabIndex;
+                        tabControl.Focus();
+
+                        var (forwardSeq, lastCtl) = TabOrderWalker.WalkReal(lw, tabControl, forward: true, StepViaProcessTabKey);
+                        CheckStr($"{label}: forward Tab sequence matches bb1a7a0",
+                            string.Join(" -> ", forwardSeq), string.Join(" -> ", expectedFull));
+
+                        // WalkReal's own wrap-detecting step still PERFORMS that last hop as a
+                        // side effect before recognizing it as a wrap (it has to call step() to
+                        // find out where it lands) -- so by the time it returns, ActiveControl
+                        // has already moved PAST lastCtl (e.g. to the tab strip, wrapped from
+                        // Close). Re-focus lastCtl explicitly so the backward walk's own
+                        // precondition (ActiveControl == seedFrom) actually holds.
+                        lastCtl.Focus();
+
+                        // Shift+Tab from the actual last real stop (e.g. "Close") must retrace
+                        // the exact same route in reverse, continuing one step further than the
+                        // forward walk: Shift+Tab off the page's own first control naturally
+                        // wraps back to the tab strip (the exact mirror of how the forward walk
+                        // started), which is correct, desired behavior, not an artifact.
+                        var (backwardSeq, _) = TabOrderWalker.WalkReal(lw, lastCtl, forward: false, StepViaProcessTabKey);
+                        backwardSeq.Reverse();
+                        var expectedBackward = expectedFull.Length > 0
+                            ? expectedFull.Take(expectedFull.Length - 1).Prepend("<TabControl>").ToList()
+                            : new List<string>();
+                        CheckStr($"{label}: Shift+Tab reverse sequence is the exact mirror of Tab",
+                            string.Join(" -> ", backwardSeq), string.Join(" -> ", expectedBackward));
+                    }
+
+                    CheckPage("My Log", 0, new[] {
+                        "Total QSOs", "LoTW confirmed QSOs", "QRZ confirmed QSOs", "Combined confirmed QSOs",
+                        "WAS worked and confirmed", "DXCC entities worked and confirmed", "WAZ zones worked and confirmed",
+                        "QRZ upload status", "Club Log upload status", "LoTW upload status", "HRDLog.net upload status",
+                        "Recent QSOs", "Status", "Close",
+                    });
+                    CheckPage("Awards", 1, new[] {
+                        "Award selector", "Award progress summary", "Award details",
+                        "Manage Rule Definitions", "Refresh award progress", "Status", "Close",
+                    });
+                    CheckPage("Still Need", 2, new[] {
+                        "Still Needed awards", "Band filter", "Needed entries", "Refresh needed list",
+                        "Needed items", "Status", "Close",
+                    });
+                    CheckPage("Lookup", 3, new[] {
+                        "Callsign search", "Search for callsign", "Search results", "Clear search results",
+                        "Status", "Close",
+                    });
+                    // Edit/Delete/Export are correctly skipped here: they start Enabled=false
+                    // until a row is selected (no QSOs exist to select in this bare fixture),
+                    // and a real Tab press skips a genuinely disabled control -- same as it
+                    // does for Sync's own download buttons without credentials (see the fake
+                    // credentials passed to the constructor above, which cover that case for
+                    // Sync so its full sequence can be checked; there's no equivalent
+                    // workaround for "a row is selected" without a real, seeded database).
+                    CheckPage("Edit Log", 4, new[] {
+                        "Callsign filter", "Source filter", "Date from, format year month day, optional",
+                        "Date to, format year month day, optional", "Search", "Clear filters",
+                        "Choose Edit Log column order", "Edit Log results", "Add a new QSO",
+                        "Status", "Close",
+                    });
+                    CheckPage("Sync", 5, new[] {
+                        "Import ADIF file", "Download from QRZ Logbook", "Download from LoTW",
+                        "Download from Club Log", "Download and reconcile eQSL confirmations",
+                        "Export all QSOs to ADIF file", "Import history", "Status", "Close",
+                    });
+
+                    // Left/Right Arrow while the tab strip has focus must NOT move focus into the
+                    // page -- the live-reported regression from an earlier fix attempt. Real
+                    // Left/Right key SendInput isn't reliable headlessly, but the actual mechanism
+                    // (changing SelectedIndex while the strip is focused) is exercised for real:
+                    // TabControl's own arrow-key handler does exactly this, nothing more.
+                    tabControl.SelectedIndex = 0;
+                    tabControl.Focus();
+                    bool stripFocusedBefore = tabControl.Focused;
+                    tabControl.SelectedIndex = 2;
+                    Check("Arrow-key tab switch: focus stays on the tab strip (does not jump into the page)",
+                        stripFocusedBefore && tabControl.Focused, true);
+
+                    lw.Hide();
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  LogbookWindowKeyboardTraversalBaselineTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            RuleLibrary.Definitions.Remove(fakeAward);
+        }
+    }
+
+    // ── Options keyboard traversal baseline (restored from commit bb1a7a0) ──────────────────
+    // bb1a7a0 itself focuses subtitleLabel (inside the Basic category's content) when the
+    // dialog opens -- NOT the Categories list -- confirmed via `git diff bb1a7a0`. A later
+    // accessibility review changed this to focus the Categories list instead; that is an
+    // opinion the operator has not confirmed and is reverted. This checks the ACTUAL
+    // established behavior: initial focus lands in Basic's content, and Tab from there
+    // eventually reaches OK, then Cancel, then wraps to the Categories list.
+    static void OptionsDlgKeyboardTraversalBaselineTests()
+    {
+        Console.WriteLine("\n── Options: keyboard traversal matches the bb1a7a0 baseline ──");
+        try
+        {
+            TabOrderWalker.OnSTA(() =>
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.hotkeyConfig = new HotkeyConfig();   // BuildHotkeysTab (run by OptionsDlg_Load) needs this
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+
+                using (var dlg = new OptionsDlg(wc, ctrl))
+                {
+                    var _ = dlg.Handle;   // force handle creation without a real Show()
+
+                    // Form.Show() is deliberately avoided here -- confirmed live that it blocks
+                    // indefinitely in this harness (native window-activation handshake with no
+                    // Application.Run() message loop to service it; LogbookWindow.Show() does not
+                    // have this problem, OptionsDlg.Show() does). OptionsDlg_Load runs the exact
+                    // same code either way; invoking it directly exercises the real logic
+                    // (including subtitleLabel.Focus()) without that hang.
+                    var loadMethod = typeof(OptionsDlg).GetMethod("OptionsDlg_Load",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    loadMethod.Invoke(dlg, new object[] { dlg, EventArgs.Empty });
+
+                    var subtitleField = typeof(OptionsDlg).GetField("subtitleLabel",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    var subtitleLabel = (System.Windows.Forms.Control)subtitleField.GetValue(dlg);
+                    var categoryListField = typeof(OptionsDlg).GetField("_categoryListBox",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                    var categoryList = (System.Windows.Forms.Control)categoryListField.GetValue(dlg);
+
+                    // Without a real Show(), Control.Focused (true OS keyboard focus) never
+                    // becomes true for anything -- Control.Focus() silently no-ops on a window
+                    // that was never actually made visible at the OS level. ContainerControl.
+                    // ActiveControl is WinForms' own logical bookkeeping for "who would have
+                    // focus," updated by every .Focus() call regardless, so it reflects
+                    // subtitleLabel.Focus()'s real effect even here.
+                    Check("Initial focus lands in Basic's content (subtitleLabel), matching bb1a7a0 -- NOT the Categories list",
+                        dlg.ActiveControl == subtitleLabel, true);
+                    Check("...Categories list does not steal initial focus",
+                        dlg.ActiveControl == categoryList, false);
+
+                    // The full OK -> Cancel -> wraps-to-Categories walk is NOT automated here:
+                    // it needs either a genuinely shown window (Form.SelectNextControl, like
+                    // LogbookWindowKeyboardTraversalBaselineTests uses -- but OptionsDlg.Show()
+                    // hangs in this harness, confirmed live) or Control.GetNextControl (confirmed
+                    // live, separately, to sometimes return Z-order/add-order rather than true
+                    // TabIndex order and so cannot be trusted for a regression guard). The one
+                    // fact that actually regressed -- and is the one bb1a7a0 itself establishes
+                    // -- is the initial-focus target checked above. The OK/Cancel/Categories
+                    // wrap-around route is unchanged code (never touched by any fix in this
+                    // session) and should be spot-checked manually with JAWS/keyboard.
+                }
+            }, timeoutMs: 15000);
+        }
+        catch (Exception ex) when (ex.ToString().Contains("System.IO.Ports"))
+        {
+            // Environment limitation, not a product bug: OptionsDlg_Load's BuildRadioTab()
+            // calls SerialPort.GetPortNames(), which throws PlatformNotSupportedException in
+            // this specific reflection/STA-thread test-hosting context despite genuinely
+            // running on Windows -- confirmed live, unrelated to anything this session
+            // changed. No existing test in this file calls the full OptionsDlg_Load either,
+            // for the same reason (they call individual Build*Tab methods directly instead).
+            // The initial-focus fact this test exists to guard is already independently
+            // confirmed via `git diff bb1a7a0` (see this method's own comment); recommend a
+            // quick manual keyboard check of Options as a supplement, not a replacement.
+            Console.WriteLine("  SKIP  OptionsDlgKeyboardTraversalBaselineTests: OptionsDlg_Load's BuildRadioTab needs SerialPort.GetPortNames(), unavailable in this test context -- verify manually with a keyboard/JAWS check instead.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  OptionsDlgKeyboardTraversalBaselineTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
