@@ -4133,6 +4133,16 @@ namespace WSJTX_Controller
             nativeEngineClient = null;
             if (TestModeGuard.IsTestMode) return;
 
+            // 2026-09-23: reapply the Windows ENDPOINT (device) master input/output levels here,
+            // not gated on My Call/My Grid being configured below -- this is a pure Windows
+            // device operation, independent of whether the engine itself can launch. ApplyEngine
+            // Mode() is the one method already called at every trigger this needs to cover:
+            // Jimmy startup (Form_Load), an Engine Host restart (OnNativeEngineUnexpectedExit
+            // routes back through here), and the operator changing either selected audio device
+            // (OptionsDlg.SaveRadioTab's engineIdentityChanged calls ApplyEngineMode()) -- so one
+            // call site here covers all three without separate wiring at each trigger.
+            ApplyRadioMasterAudioLevels();
+
             // 2026-08-19 fresh-install usability fix (release blocker): a genuine "not
             // configured yet" state, checked and handled BEFORE ever attempting Launch() --
             // not a reactive failure caught after the fact. Previously this method always
@@ -4220,6 +4230,36 @@ namespace WSJTX_Controller
                         wsjtx?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, "Native engine", client.LastError)));
                 }
             });
+        }
+
+        // 2026-09-23: reapplies the Windows ENDPOINT (device) master volume for the currently
+        // selected input/output audio devices -- Options > Decode Engine's "Radio input/output
+        // master level percent" controls. A saved percent (ctrl.NativeEngine.Input/
+        // OutputMasterLevelPercent) is pushed onto the device; with no saved value yet, the
+        // device's OWN current Windows master level is read and adopted as the new saved
+        // baseline instead of forcing a level the operator never set in Jimmy. Called from
+        // ApplyEngineMode() -- see its own call site comment for why that single place covers
+        // every trigger this needs (startup, engine restart, device change).
+        public void ApplyRadioMasterAudioLevels()
+        {
+            ApplyOneRadioMasterAudioLevel(isRender: false);
+            ApplyOneRadioMasterAudioLevel(isRender: true);
+        }
+
+        private void ApplyOneRadioMasterAudioLevel(bool isRender)
+        {
+            string device = isRender ? NativeEngine.AudioOutputDevice : NativeEngine.AudioInputDevice;
+            int? saved = isRender ? NativeEngine.OutputMasterLevelPercent : NativeEngine.InputMasterLevelPercent;
+            if (saved.HasValue)
+            {
+                AudioEndpointMasterVolume.SetVolume(device, isRender, saved.Value / 100f);
+                return;
+            }
+            float? current = AudioEndpointMasterVolume.GetVolume(device, isRender);
+            if (!current.HasValue) return;
+            int pct = Math.Max(0, Math.Min(100, (int)Math.Round(current.Value * 100f)));
+            if (isRender) NativeEngine.OutputMasterLevelPercent = pct;
+            else NativeEngine.InputMasterLevelPercent = pct;
         }
 
         // Confirmed live, 2026-08-08: a real crash still happens occasionally (intermittently --

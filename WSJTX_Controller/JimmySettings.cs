@@ -37,18 +37,22 @@ namespace WSJTX_Controller
         // TargetMonitor.OnReceivePeriodComplete's own comment for exactly what counts).
         public int SmartStartSilencePeriods { get; set; } = 2;
 
-        // Operator request (2026-09-13): the busy-churn give-up cap ("looked ready -> turned out
-        // busy" dead-end rounds with no successful new dispatch resetting the count in between)
-        // used to be a fixed constant (4) -- now adjustable, 1-20, default 4 so nothing changes
-        // for an operator who never visits Options for it. See TargetMonitor.
-        // NoteStandbyRoundAndCheckGiveUp's own comment for exactly what counts as one round.
+        // Operator request (2026-09-13), reworked 2026-09-22 from "busy dead-end" round counting
+        // into a consecutive target-not-heard limit -- same setting/storage key kept for profile
+        // compatibility, new meaning: how many COMPLETED Smart Start calling-over transmissions in
+        // a row may go out to one target with NO live decode from it at all (a decode showing the
+        // target busy with someone else still resets this -- see TargetMonitor.TargetNotHeardStreak
+        // and NoteCallOverCompletedAndCheckNotHeardLimit for exactly what counts) before Smart
+        // Start disarms itself: the target may be gone, or propagation may have changed.
+        // Adjustable, 1-20, default 4 so nothing changes for an operator who never visits Options
+        // for it.
         public int SmartStartMaxStandbyRounds { get; set; } = 4;
 
         // Operator request (2026-09-13): an absolute wall-clock backstop on the WHOLE Smart Start
         // effort, independent of the Repeat Limit (which only counts actual transmitted calls) and
-        // the busy-churn cap above (which only counts dead-end rounds) -- "so they know an hour
-        // later their radio will not start trying to call the station," regardless of how many
-        // calls/busy-declines happened. Minutes; 0 = no limit (today's behavior, and the default).
+        // the consecutive target-not-heard limit above -- "so they know an hour later their radio
+        // will not start trying to call the station," regardless of how many calls/silent rounds
+        // happened. Minutes; 0 = no limit (today's behavior, and the default).
         // Counts from the ORIGINAL arm time and is NOT reset by a busy-yield/resume cycle -- only
         // a fresh Start() (arming on a target) resets it. See TargetMonitor.ArmedAtUtc.
         public int SmartStartTimeLimitMinutes { get; set; } = 0;

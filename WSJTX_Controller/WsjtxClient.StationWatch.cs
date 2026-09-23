@@ -76,16 +76,16 @@ namespace WSJTX_Controller
         // target that is genuinely mid-report to a peer, and rule 7 (yield the moment the target
         // sends someone else a report) is the recovery when the DX does choose another station.
 
-        // After this many dead-end readiness rounds IN A ROW for one armed target, Smart Start
-        // disarms and tells the operator. A "round" is EITHER revalidation declining a dispatch
-        // as busy right before transmitting (no call sent that round) OR a call that WAS
-        // dispatched being yielded because the target turned to answer someone else before
-        // answering us (a real over did go out, but engagement was never reached) -- either way
-        // it's a dead end. TargetMonitor.EnterAwaitingEngagement resets the count to zero the
-        // moment a fresh dispatch actually goes out, so this really guards "N consecutive
-        // non-productive rounds with no clean dispatch resetting the count in between" -- not
-        // literally "N tries total, zero RF". Operator-adjustable (2026-09-13, was a fixed
-        // constant of 4) -- ctrl.smartStartMaxStandbyRounds, Options > Transmit.
+        // Consecutive target-not-heard limit (reworked 2026-09-22 from the old "busy dead-end"
+        // round counter -- same operator-adjustable setting/storage key, ctrl.smartStartMax
+        // StandbyRounds, Options > Transmit, new meaning). After this many COMPLETED calling-over
+        // transmissions IN A ROW to one armed target with NO live decode from the target at all --
+        // not even one showing it busy with another station -- Smart Start disarms and tells the
+        // operator: the target may be gone, or propagation may have changed. Hearing the target at
+        // all, including working someone else, resets the streak to zero (TargetMonitor.
+        // NoteCallOverCompletedAndCheckNotHeardLimit) -- a target that is busy but still audible is
+        // not what this guards against; the Repeat Limit is what bounds a hot pileup that keeps
+        // answering someone else. See TargetMonitor.TargetNotHeardStreak's own comment.
 
         public bool StationWatchActive => _stationWatch.IsActive;
         public string StationWatchTarget => _stationWatch.TargetCall;
@@ -458,25 +458,38 @@ namespace WSJTX_Controller
             HaltAndDisableTx();     // HALT_TX + SET_TX_ENABLED 0
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
+            // Hearing the target working another station is presence, not silence -- it does NOT
+            // count against the consecutive target-not-heard limit (TargetMonitor already reset
+            // that streak the moment this busy decode was ingested). Jimmy just yields and stays
+            // armed, exactly as before.
             Notify?.Publish(new SmartStartYieldedEvent(SC(target), _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
-            if (_smartStart.NoteStandbyRoundAndCheckGiveUp(ctrl.smartStartMaxStandbyRounds))
-                SmartStartStoodDownBusy(target);
         }
 
-        // Smart Start has churned through ctrl.smartStartMaxStandbyRounds dead-end "looked ready
-        // -> turned out busy" rounds in a row for this armed target (see the field's own comment
-        // for exactly what counts as one round -- NOT necessarily zero calls sent). This is a
-        // SEPARATE terminal policy from the Repeat Limit (which only counts actual transmitted
-        // calls) and the time limit below (which is purely wall-clock): it exists because a hot
-        // CQing pileup has no lull to wait for, so a plain Enter + the Repeat Limit is the tool
-        // for that case. Its message is deliberately distinct from the Repeat-Limit "expired"
-        // wording so the operator can tell the two apart.
-        private void SmartStartStoodDownBusy(string target)
+        // Consecutive target-not-heard limit reached (reworked 2026-09-22 from the old "busy
+        // dead-end" stand-down -- see TargetMonitor.NoteCallOverCompletedAndCheckNotHeardLimit for
+        // exactly what counts). ctrl.smartStartMaxStandbyRounds completed calling-over
+        // transmissions to this target went out in a row with NO live decode from the target at
+        // all -- the target may be gone, or propagation may have changed. A SEPARATE terminal
+        // policy from the Repeat Limit (which counts total calls regardless of whether the target
+        // was ever heard) and the time limit below (purely wall-clock): a target that stays
+        // audible but busy with someone else never trips this -- the Repeat Limit is the tool for
+        // a hot pileup. Mirrors SmartStartRepeatLimitReached's own teardown; distinct wording so
+        // the operator can tell the two apart.
+        private void SmartStartNotHeardLimitReached()
         {
-            DebugOutput($"{Time()} [SMART] {target} stayed busy across {ctrl.smartStartMaxStandbyRounds} standby rounds with no call out -- disarming Smart Start");
+            string target = _smartStart.TargetCall;
+            int limit = ctrl.smartStartMaxStandbyRounds;
+            DebugOutput($"{Time()} [SMART] {target} not heard across {limit} consecutive calls -- disarming Smart Start");
             ClearPendingAutoStart();
+            if (string.Equals(callInProg, target, StringComparison.OrdinalIgnoreCase))
+            {
+                RequeueAbortedCall();                       // while callInProg / replyDecode are still valid
+                if (!transmitting) expiredCall = target;    // existing "<call> expired" operator status/announcement
+                CancelQso();                                // clears QSO state + bumps _contactEpoch
+                HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
+            }
             _smartStart.Stop(announce: false);
-            StatusView.ShowMessage($"{SC(target)} stayed busy; Smart Start stopped, no calls made", true);
+            StatusView.ShowMessage($"{SC(target)} not heard after {limit} calls; Smart Start stopped", true);
         }
 
         // Operator request (2026-09-13): an absolute wall-clock backstop, independent of both the
@@ -654,15 +667,12 @@ namespace WSJTX_Controller
                     StatusView.ShowMessage(why, false);
                 else if (check == AutoStartCheck.TargetBusy)
                 {
+                    // A pre-transmit decline -- no calling-over went out this round, so it is not
+                    // evidence one way or the other for the consecutive target-not-heard limit
+                    // (that only counts COMPLETED calling-over transmissions, WsjtxClient.Direct.cs)
+                    // -- and the decode that revealed the target busy already reset that streak via
+                    // IngestTargetDecode, exactly as it would for a decode heard any other way.
                     Notify?.Publish(new SmartStartYieldedEvent(SC(monitor.TargetCall), monitor.ArmGeneration, monitor.AdvanceStateSeq()));
-                    // A "looked ready, revalidated busy" round for the Smart Start monitor --
-                    // after enough of these on one target, stop chasing the pileup (below).
-                    if (ReferenceEquals(monitor, _smartStart)
-                        && _smartStart.NoteStandbyRoundAndCheckGiveUp(ctrl.smartStartMaxStandbyRounds))
-                    {
-                        SmartStartStoodDownBusy(monitor.TargetCall);
-                        return;
-                    }
                 }
                 else
                     Notify?.Publish(new SmartStartWaitingEvent(SC(monitor.TargetCall), why,
@@ -837,8 +847,9 @@ namespace WSJTX_Controller
                 case TargetObservationKind.TargetRr73:
                 case TargetObservationKind.Target73:
                 case TargetObservationKind.OtherPartyObserved:
-                    // The decoded FT8 fact about what the target is doing -- "N4BP to KZ4MW, -15."
-                    // / "N4BP to KZ4MW, RR73." etc. (no translated state like "finishing"). Gated
+                    // The decoded FT8 fact about what the target is doing -- "N4BP working KZ4MW,
+                    // -15." / "N4BP working KZ4MW, RR73." etc. (no translated state like
+                    // "finishing"). Gated
                     // through the shared target-activity tracker so a peer/report/kind change
                     // always re-announces, an unchanged fact repeats at most once per applicable
                     // period (or never, per the operator's setting), and Station Watch / the

@@ -358,10 +358,10 @@ namespace WSJTX_Controller
             },
             // The target is mid-exchange with (or being called by) someone else. Default wording
             // (N4BP live-radio audit, 2026-09-08) is the decoded FT8 fact -- "{Phrase}" renders
-            // "X to Y, minus 8." / "X to Y, RR73." / "X to Y." / "X working another station."
-            // depending on what was decoded. DedupKey folds in the peer, so a move to a NEW
-            // station re-announces immediately; RepeatSeconds still collapses several decodes for
-            // the SAME peer in one exchange down to one line.
+            // "X working Y, minus 8." / "X working Y, RR73." / "X working Y." / "X working
+            // another station." depending on what was decoded. DedupKey folds in the peer, so a
+            // move to a NEW station re-announces immediately; RepeatSeconds still collapses
+            // several decodes for the SAME peer in one exchange down to one line.
             [NotificationEventType.SmartStartTargetBusy] = new NotificationPolicy
             {
                 Enabled = true,

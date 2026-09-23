@@ -43,9 +43,9 @@ namespace WSJTX_Controller
     // discarded from speech (never spoken, onSpoken never invoked, exactly like any other
     // discarded occurrence). A Posture survivor and an Observation survivor for the SAME target
     // are NEVER compared against each other -- both join into the final utterance (e.g. "Waiting
-    // to work EA6Y. EA6Y to KX4I, R minus 14." -- these are complementary facts, not competing
-    // ones). Two different Targets never interact. Station Watch's four observation-shaped types
-    // are outside both groups and always join, never superseded.
+    // to work EA6Y. EA6Y working KX4I, R minus 14." -- these are complementary facts, not
+    // competing ones). Two different Targets never interact. Station Watch's four
+    // observation-shaped types are outside both groups and always join, never superseded.
     //
     // Timing: a joinable item is added to an OPEN batch; a debounce timer (QuietPeriodMs) resets
     // on every new arrival but is capped by a hard ceiling (MaxBatchWindowMs) measured from the
@@ -755,7 +755,7 @@ namespace WSJTX_Controller
         // next fragment with NO separator at all") is correct for its own job -- weaving PARTIAL
         // clauses of one routine sentence together, where only the very last clause ends in "."
         // -- but wrong here: every category merged by THIS method contributes its own already-
-        // complete sentence ("Waiting to work EA6Y." / "EA6Y to KX4I, R minus 14." / "1 new
+        // complete sentence ("Waiting to work EA6Y." / "EA6Y working KX4I, R minus 14." / "1 new
         // DXCC."), and two complete sentences need a space between them, not nothing.
         private string ComposeMerged(List<(NotificationEventType category, string text, int arrival)> parts,
             NotificationEventType? forceFirst)

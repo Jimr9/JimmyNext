@@ -27,7 +27,7 @@ namespace WSJTX_Controller
     // relationship to the target (armed/waiting/calling/yielded/engaged); Observation is what was
     // most recently decoded the TARGET doing (busy with someone else / appears available). The two
     // never compete -- a surviving Posture fact and a surviving Observation fact for the same
-    // target both join into one utterance (e.g. "Waiting to work EA6Y. EA6Y to KX4I, R minus 14.")
+    // target both join into one utterance (e.g. "Waiting to work EA6Y. EA6Y working KX4I, R minus 14.")
     // -- only members of the SAME group ever supersede each other, decided by StateSeq, not by
     // NotificationEventType identity or arrival order (TargetMonitor.ReturnToWaiting() proves the
     // state machine can cycle Yielded -> Waiting within one ArmGeneration, so a fixed "tier" is
@@ -425,9 +425,13 @@ namespace WSJTX_Controller
 
     // The target is mid-exchange with (or being called by) someone else. `Phrase` is a fully
     // worded sentence built at the call site (the default template is just "{Phrase}") that
-    // degrades cleanly: "X is working Y, minus 8." with a known peer + report, "X is working Y."
-    // with just a peer, "X is working another station." when the peer couldn't be parsed. The
-    // `{Target}` / `{Peer}` / `{Report}` fragments stay available for an operator's own template.
+    // degrades cleanly: "X working Y, minus 8." with a known peer + report, "X working Y." with
+    // just a peer, "X working another station." when the peer couldn't be parsed. Operator
+    // feedback, 2026-09-23: the earlier "X to Y" wording for the middle two cases read as
+    // ambiguous/confusable with FT8's own directional "to" (who a decode is addressed to,
+    // unrelated) -- "working" now matches the peerless fallback's own verb, so all three cases
+    // read as one consistent family. The `{Target}` / `{Peer}` / `{Report}` fragments stay
+    // available for an operator's own template.
     // DedupKey folds in the peer so the line re-announces each time the target turns to a NEW
     // station (naturally the right cadence in FT8 and FT4 alike), while several decodes for the
     // SAME peer in one exchange still collapse via RepeatSeconds.
@@ -469,14 +473,17 @@ namespace WSJTX_Controller
             new SmartStartTargetBusyEvent(target ?? "", $"{target} calling CQ.", false)
                 { ArmGeneration = armGeneration, StateSeq = stateSeq };
 
-        // N4BP live-radio audit -- fix 3: the decoded FT8 fact, not a translated state. "N4BP to
-        // KZ4MW, minus 15." / "N4BP to KZ4MW, RR73." / "N4BP to KZ4MW." / "N4BP working another
-        // station." (`report` is already the spoken form -- "minus 15" / "R minus 15" / "RR73").
+        // N4BP live-radio audit -- fix 3: the decoded FT8 fact, not a translated state. "N4BP
+        // working KZ4MW, minus 15." / "N4BP working KZ4MW, RR73." / "N4BP working KZ4MW." /
+        // "N4BP working another station." (`report` is already the spoken form -- "minus 15" /
+        // "R minus 15" / "RR73"). Wording fix, 2026-09-23: was "N4BP to KZ4MW" -- "to" read as
+        // ambiguous against FT8's own directional "to" (who a decode is addressed to). "working"
+        // matches the peerless fallback below, so all three cases share one verb.
         private static string BuildPhrase(string target, string peer, string report)
         {
             if (string.IsNullOrEmpty(peer)) return $"{target} working another station.";
-            if (string.IsNullOrEmpty(report)) return $"{target} to {peer}.";
-            return $"{target} to {peer}, {report}.";
+            if (string.IsNullOrEmpty(report)) return $"{target} working {peer}.";
+            return $"{target} working {peer}, {report}.";
         }
 
         public NotificationEventType EventType => NotificationEventType.SmartStartTargetBusy;

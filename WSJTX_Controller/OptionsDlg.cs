@@ -574,12 +574,14 @@ namespace WSJTX_Controller
             };
             smartStartGroup.Controls.Add(_smartStartSilencePeriodsNumeric);
 
-            // Operator request (2026-09-13): the busy-churn give-up cap used to be a fixed
-            // constant (4) -- now adjustable. See WsjtxClient.StationWatch.cs's own comment on
-            // ctrl.smartStartMaxStandbyRounds for exactly what counts as one "round".
+            // Operator request (2026-09-13), reworked 2026-09-22 from "busy dead-end" round
+            // counting into a consecutive target-not-heard limit -- same underlying setting
+            // (ctrl.smartStartMaxStandbyRounds), only its meaning and this visible wording changed.
+            // See WsjtxClient.StationWatch.cs's own comment on that setting, and TargetMonitor.
+            // NoteCallOverCompletedAndCheckNotHeardLimit, for exactly what counts as "not heard".
             var smartStartMaxStandbyRoundsLabel = new System.Windows.Forms.Label
             {
-                Text     = "Give up after this many busy dead-ends in a row:",
+                Text     = "Give up after this many consecutive calls with no target heard:",
                 AutoSize = true,
                 Location = new System.Drawing.Point(10, 76),
                 Font     = font,
@@ -589,7 +591,7 @@ namespace WSJTX_Controller
 
             _smartStartMaxStandbyRoundsNumeric = new System.Windows.Forms.NumericUpDown
             {
-                AccessibleName = "Smart Start busy dead-end limit",
+                AccessibleName = "Consecutive target-not-heard limit",
                 Location       = new System.Drawing.Point(320, 73),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 2,
@@ -601,8 +603,9 @@ namespace WSJTX_Controller
             smartStartGroup.Controls.Add(_smartStartMaxStandbyRoundsNumeric);
 
             // Operator request (2026-09-13): an absolute wall-clock backstop on the whole Smart
-            // Start effort, independent of the Repeat Limit and the busy-dead-end cap above --
-            // "so they know an hour later their radio will not start trying to call the station."
+            // Start effort, independent of the Repeat Limit and the consecutive target-not-heard
+            // limit above -- "so they know an hour later their radio will not start trying to call
+            // the station."
             // 0 = no limit (default, unchanged behavior).
             var smartStartTimeLimitLabel = new System.Windows.Forms.Label
             {
@@ -1294,8 +1297,16 @@ namespace WSJTX_Controller
             return 18;
         }
 
-        private System.Windows.Forms.NumericUpDown _engineAudioInputLevelUpDown;
-        private System.Windows.Forms.NumericUpDown _engineAudioOutputLevelUpDown;
+        // 2026-09-23 redesign: these used to drive the Engine Host's own per-application Windows
+        // Volume Mixer session volume (ProcessAudioSessionVolume) -- they now drive the Windows
+        // ENDPOINT (device) master volume for the selected input/output device instead
+        // (AudioEndpointMasterVolume), saved in the profile ini as ctrl.NativeEngine.
+        // InputMasterLevelPercent/OutputMasterLevelPercent. The old per-application levels still
+        // exist as hidden, ini-only settings (EngineAudioInputAppLevel/EngineAudioOutputAppLevel)
+        // applied automatically once the engine's own session appears -- see
+        // WsjtxClient.Direct.cs's ApplyEngineAppAudioLevelsOnceAvailable.
+        private System.Windows.Forms.NumericUpDown _radioInputMasterLevelUpDown;
+        private System.Windows.Forms.NumericUpDown _radioOutputMasterLevelUpDown;
         private System.Windows.Forms.TextBox _dxClusterAddressTextBox;
         private System.Windows.Forms.CheckBox _radioPttDataSourceCheckBox;
         private System.Windows.Forms.ComboBox _radioPttSerialPortCombo;
@@ -1932,8 +1943,8 @@ namespace WSJTX_Controller
             y += 32;
 
             // FT8/FT4 transmit tone level -- the engine's own software TX drive level (WSJT-X's
-            // "Pwr" slider equivalent), NOT the Windows per-application Input/Output levels on the
-            // Decode Engine tab. Grouped so the confirmed band, the live level, the F11/F12 step
+            // "Pwr" slider equivalent), NOT the Windows master input/output levels on the Decode
+            // Engine tab. Grouped so the confirmed band, the live level, the F11/F12 step
             // size and the per-band option read as one thing. The band and the live level refresh
             // on a 1s timer (RadioTxLevelRefreshTick) because Options is modeless and F11/F12 can
             // move the level while this is open.
@@ -1950,7 +1961,7 @@ namespace WSJTX_Controller
             var txLevelHelp = new System.Windows.Forms.Label
             {
                 Text = "The engine's FT8/FT4 transmit tone (drive) level -- the software \"Pwr\" control. " +
-                       "Separate from the Windows Input and Output levels on the Decode Engine tab.",
+                       "Separate from the Radio input/output master level on the Decode Engine tab.",
                 Location = new System.Drawing.Point(10, 18),
                 Size = new System.Drawing.Size(372, 40),
                 Font = font,
@@ -2004,7 +2015,7 @@ namespace WSJTX_Controller
                 Font = font,
                 AccessibleName = "Engine transmit tone level percent",
                 AccessibleDescription = "The FT8/FT4 transmit tone drive level inside the engine, in 0.5 percent steps. " +
-                    "Separate from the Windows Input and Output levels on the Decode Engine tab. Sent to the " +
+                    "Separate from the Radio input/output master level on the Decode Engine tab. Sent to the " +
                     "engine live; the shown value only changes once the engine confirms it.",
             };
             _radioTxLevelGroupBox.Controls.Add(_radioEngineTxLevelUpDown);
@@ -2376,7 +2387,7 @@ namespace WSJTX_Controller
 
             var audioInputLevelLabel = new System.Windows.Forms.Label
             {
-                Text = "Input level (%):",
+                Text = "Radio input master level (%):",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -2384,27 +2395,27 @@ namespace WSJTX_Controller
             };
             decodeEnginePanel.Controls.Add(audioInputLevelLabel);
 
-            // Windows' own per-application session volume for the engine's capture stream on
-            // the device above -- separate from mic_gain (F11/F12), which scales the TX waveform
-            // digitally before it ever reaches Windows. This is the SAME control the Windows
-            // Volume Mixer exposes for jimmy-engine-host.exe (confirmed live, 2026-08-09, it
-            // shows there under its own raw filename since it has no embedded Windows version
-            // resource); reading/writing it here just saves hunting for that unfamiliar name.
-            // Live -- applies immediately on change, not gated behind OK, since it's OS session
-            // state, not a Jimmy setting Jimmy itself remembers/reapplies at next startup.
-            _engineAudioInputLevelUpDown = new System.Windows.Forms.NumericUpDown
+            // 2026-09-23 redesign: the Windows ENDPOINT (device) master volume for the input
+            // device above -- the same slider Windows Sound settings shows for that device,
+            // set via AudioEndpointMasterVolume -- not the engine's own per-application Volume
+            // Mixer session level any more (see EngineAudioInputAppLevel's own comment for
+            // that, now hidden). Separate from mic_gain (F11/F12), which scales the TX waveform
+            // digitally before it ever reaches Windows. Live -- applies immediately on change --
+            // and also saved to the profile ini (ctrl.NativeEngine.InputMasterLevelPercent),
+            // reapplied at startup, on an engine restart, and whenever this device changes (see
+            // Controller.ApplyRadioMasterAudioLevels).
+            _radioInputMasterLevelUpDown = new System.Windows.Forms.NumericUpDown
             {
                 Minimum = 0,
                 Maximum = 100,
-                Location = new System.Drawing.Point(left + 110, y),
+                Location = new System.Drawing.Point(left + 190, y),
                 Size = new System.Drawing.Size(55, 21),
                 TabIndex = 5,
                 Font = font,
-                AccessibleName = "Audio input level percent",
-                Enabled = false,
+                AccessibleName = "Radio input master level percent",
             };
-            decodeEnginePanel.Controls.Add(_engineAudioInputLevelUpDown);
-            InitAudioSessionLevelControl(_engineAudioInputLevelUpDown, isRender: false);
+            decodeEnginePanel.Controls.Add(_radioInputMasterLevelUpDown);
+            InitRadioMasterLevelControl(_radioInputMasterLevelUpDown, isRender: false);
             y += 32;
 
             var audioOutputDeviceLabel = new System.Windows.Forms.Label
@@ -2438,7 +2449,7 @@ namespace WSJTX_Controller
 
             var audioOutputLevelLabel = new System.Windows.Forms.Label
             {
-                Text = "Output level (%):",
+                Text = "Radio output master level (%):",
                 AutoSize = true,
                 Location = new System.Drawing.Point(left, y + 3),
                 Font = font,
@@ -2446,23 +2457,23 @@ namespace WSJTX_Controller
             };
             decodeEnginePanel.Controls.Add(audioOutputLevelLabel);
 
-            // Same idea as the input level control above, for the engine's RENDER stream on the
-            // device above -- this is the one that actually feeds the radio, and the slider you'd
-            // find in the Windows Volume Mixer under jimmy-engine-host.exe's own "adjust output
-            // volume." Live -- applies immediately on change.
-            _engineAudioOutputLevelUpDown = new System.Windows.Forms.NumericUpDown
+            // Same idea as the input master level control above, for the output device above --
+            // this is the one that actually feeds the radio. Windows ENDPOINT master volume, not
+            // the engine's own per-application session level. Live -- applies immediately on
+            // change -- and saved/reapplied the same way (ctrl.NativeEngine.
+            // OutputMasterLevelPercent).
+            _radioOutputMasterLevelUpDown = new System.Windows.Forms.NumericUpDown
             {
                 Minimum = 0,
                 Maximum = 100,
-                Location = new System.Drawing.Point(left + 110, y),
+                Location = new System.Drawing.Point(left + 190, y),
                 Size = new System.Drawing.Size(55, 21),
                 TabIndex = 7,
                 Font = font,
-                AccessibleName = "Audio output level percent",
-                Enabled = false,
+                AccessibleName = "Radio output master level percent",
             };
-            decodeEnginePanel.Controls.Add(_engineAudioOutputLevelUpDown);
-            InitAudioSessionLevelControl(_engineAudioOutputLevelUpDown, isRender: true);
+            decodeEnginePanel.Controls.Add(_radioOutputMasterLevelUpDown);
+            InitRadioMasterLevelControl(_radioOutputMasterLevelUpDown, isRender: true);
             y += 32;
 
             var dxClusterLabel = new System.Windows.Forms.Label
@@ -2503,35 +2514,38 @@ namespace WSJTX_Controller
             y += 24;
         }
 
-        // Reads the engine's current OS-level session volume for the given direction (input
+        // Seeds the Windows ENDPOINT (device) master level for the given direction (input
         // device combo's saved device for isRender:false, output device combo's for
-        // isRender:true) and shows it on upDown, enabling it only if a live session was actually
-        // found. Wires ValueChanged to apply changes immediately (ProcessAudioSessionVolume.cs) --
-        // this is real Windows session state, not a Jimmy setting saved to the ini, so there's
-        // nothing to persist and no reason to wait for OK.
-        private void InitAudioSessionLevelControl(System.Windows.Forms.NumericUpDown upDown, bool isRender)
+        // isRender:true): the saved profile value if one exists, else the device's own current
+        // Windows master level (read-only seed here -- Controller.ApplyRadioMasterAudioLevels is
+        // what actually adopts that reading as the new saved baseline, at startup/restart/device
+        // change). Wires ValueChanged to apply live (AudioEndpointMasterVolume) AND remember the
+        // new value in the profile (ctrl.NativeEngine.Input/OutputMasterLevelPercent) -- the
+        // actual ini write happens through this dialog's normal Save, same as every other field
+        // on this tab.
+        private void InitRadioMasterLevelControl(System.Windows.Forms.NumericUpDown upDown, bool isRender)
         {
-            int pid = ctrl.nativeEngineClient?.ProcessId ?? 0;
             string deviceName = isRender ? ctrl.NativeEngine.AudioOutputDevice : ctrl.NativeEngine.AudioInputDevice;
-            float? current = pid > 0 ? ProcessAudioSessionVolume.GetVolume(pid, deviceName, isRender) : null;
-
-            if (current.HasValue)
+            int? saved = isRender ? ctrl.NativeEngine.OutputMasterLevelPercent : ctrl.NativeEngine.InputMasterLevelPercent;
+            int display;
+            if (saved.HasValue)
             {
-                upDown.Value = (decimal)Math.Max(0, Math.Min(100, current.Value * 100));
-                upDown.Enabled = true;
+                display = saved.Value;
             }
             else
             {
-                upDown.Value = 100;
-                upDown.Enabled = false;
+                float? current = AudioEndpointMasterVolume.GetVolume(deviceName, isRender);
+                display = current.HasValue ? (int)Math.Round(current.Value * 100f) : 100;
             }
+            upDown.Value = Math.Max(0, Math.Min(100, display));
 
             upDown.ValueChanged += (s, e) =>
             {
-                int livePid = ctrl.nativeEngineClient?.ProcessId ?? 0;
-                if (livePid <= 0) return;
+                int pct = (int)upDown.Value;
                 string liveDeviceName = isRender ? ctrl.NativeEngine.AudioOutputDevice : ctrl.NativeEngine.AudioInputDevice;
-                ProcessAudioSessionVolume.SetVolume(livePid, liveDeviceName, isRender, (float)(upDown.Value / 100m));
+                AudioEndpointMasterVolume.SetVolume(liveDeviceName, isRender, pct / 100f);
+                if (isRender) ctrl.NativeEngine.OutputMasterLevelPercent = pct;
+                else ctrl.NativeEngine.InputMasterLevelPercent = pct;
             };
         }
 

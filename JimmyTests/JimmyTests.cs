@@ -376,6 +376,7 @@ static class JimmyTests
         RigctldClientBoundedReadTests();
         OptionsDlgSystemDefaultDeviceLabelTests();
         NativeEngineAudioDevicePreservationTests();
+        NativeEngineAudioLevelPreservationTests();
         OptionsDlgExtractRigModelIdTests();
         TqslParseFinalStatusTests();
         TqslClassifyFinalStatusTests();
@@ -561,6 +562,7 @@ static class JimmyTests
         SmartStartAdvancedLayoutTxSideFlipTests();
         SmartStartPileupBackoffTests();
         SmartStartConfigurableLimitsTests();
+        SmartStartTargetNotHeardLimitTests();
         SmartStartManualStopSurfaceTests();
         SpeechCoordinatorStationWatchSuppressionTests();
         StationWatchHotkeyDefaultsTests();
@@ -8238,6 +8240,86 @@ static class JimmyTests
         }
     }
 
+    // 2026-09-23 redesign: Options > Decode Engine's "Radio input/output master level percent"
+    // controls (Windows ENDPOINT master volume) replaced the old per-application Windows Volume
+    // Mixer session controls. Covers the new persisted surface: the two nullable master-level
+    // percents round-trip and preserve an established value across a missing key exactly like
+    // the audio device names above; the two hidden EngineAudioInput/OutputAppLevel settings
+    // default to 100, round-trip when set, and reject an out-of-range ini value. Does not touch
+    // AudioEndpointMasterVolume/ProcessAudioSessionVolume themselves (real Windows Core Audio
+    // calls) -- same "not unit-testable without real hardware" boundary ProcessAudioSessionVolume
+    // already has zero coverage for.
+    static void NativeEngineAudioLevelPreservationTests()
+    {
+        Console.WriteLine("\n── Audio-level redesign: master level + hidden app-level settings persist correctly ──");
+
+        string tmpIni = Path.Combine(Path.GetTempPath(), "JimmyTest_NativeAudioLevel_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            // Defaults: a fresh NativeEngineSettings has no saved master level (never forced a
+            // level the operator never set) and the hidden app levels default to 100.
+            var fresh = new NativeEngineSettings();
+            Check("InputMasterLevelPercent defaults to null (never set)", fresh.InputMasterLevelPercent == null, true);
+            Check("OutputMasterLevelPercent defaults to null (never set)", fresh.OutputMasterLevelPercent == null, true);
+            Check("EngineAudioInputAppLevel defaults to 100", fresh.EngineAudioInputAppLevel == 100, true);
+            Check("EngineAudioOutputAppLevel defaults to 100", fresh.EngineAudioOutputAppLevel == 100, true);
+
+            // Save -> reload round-trips all four once set.
+            var saved = new NativeEngineSettings
+            {
+                InputMasterLevelPercent = 62,
+                OutputMasterLevelPercent = 88,
+                EngineAudioInputAppLevel = 100,
+                EngineAudioOutputAppLevel = 100,
+            };
+            var ini = new IniFile(tmpIni);
+            saved.SaveToIni(ini);
+            var reloaded = new NativeEngineSettings();
+            reloaded.LoadFromIni(ini);
+            Check("InputMasterLevelPercent round-trips through the INI", reloaded.InputMasterLevelPercent == 62, true);
+            Check("OutputMasterLevelPercent round-trips through the INI", reloaded.OutputMasterLevelPercent == 88, true);
+            Check("EngineAudioInputAppLevel round-trips through the INI", reloaded.EngineAudioInputAppLevel == 100, true);
+            Check("EngineAudioOutputAppLevel round-trips through the INI", reloaded.EngineAudioOutputAppLevel == 100, true);
+
+            // A later load from an INI missing the master-level keys must not clear an
+            // established in-memory value -- same preservation contract as the device names.
+            var iniNoLevels = new IniFile(Path.Combine(Path.GetTempPath(), "JimmyTest_NativeAudioLevel_empty_" + Guid.NewGuid().ToString("N") + ".ini"));
+            iniNoLevels.Write("nativeEngineMyCall", "KB0UZT");   // only unrelated keys present
+            var established = new NativeEngineSettings { InputMasterLevelPercent = 40, OutputMasterLevelPercent = 75 };
+            established.LoadFromIni(iniNoLevels);
+            Check("missing master-level keys leave the established input value intact", established.InputMasterLevelPercent == 40, true);
+            Check("missing master-level keys leave the established output value intact", established.OutputMasterLevelPercent == 75, true);
+            Check("missing app-level keys leave the default (100) in place", established.EngineAudioInputAppLevel == 100, true);
+
+            // Out-of-range / garbage ini values are rejected -- the established value survives,
+            // mirroring the bounds-check convention JimmySettings' own numeric settings use.
+            var iniBad = new IniFile(Path.Combine(Path.GetTempPath(), "JimmyTest_NativeAudioLevel_bad_" + Guid.NewGuid().ToString("N") + ".ini"));
+            iniBad.Write("radioInputMasterLevelPercent", "150");     // above 100
+            iniBad.Write("radioOutputMasterLevelPercent", "not-a-number");
+            iniBad.Write("engineAudioInputAppLevel", "-5");          // below 0
+            iniBad.Write("engineAudioOutputAppLevel", "garbage");
+            var rejecting = new NativeEngineSettings { InputMasterLevelPercent = 33, OutputMasterLevelPercent = 44 };
+            rejecting.LoadFromIni(iniBad);
+            Check("out-of-range input master level (150) is rejected -> established value (33) kept",
+                rejecting.InputMasterLevelPercent == 33, true);
+            Check("unparseable output master level is rejected -> established value (44) kept",
+                rejecting.OutputMasterLevelPercent == 44, true);
+            Check("out-of-range app input level (-5) is rejected -> default (100) kept",
+                rejecting.EngineAudioInputAppLevel == 100, true);
+            Check("unparseable app output level is rejected -> default (100) kept",
+                rejecting.EngineAudioOutputAppLevel == 100, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NativeEngineAudioLevelPreservationTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { File.Delete(tmpIni); } catch { }
+        }
+    }
+
     static void OptionsDlgExtractRigModelIdTests()
     {
         Console.WriteLine("\n── OptionsDlg.ExtractRigModelId ──");
@@ -11202,7 +11284,7 @@ static class JimmyTests
             wc.TestFeedTargetMonitorsDecode(Dec($"{peer} {target} -07"), true);
             string peerSp = WsjtxClient.DisplayCallsign(peer, true);
             Check("target working another station still announces that activity",
-                SaidHas($"{targetSp} to {peerSp}, minus 7"), true);
+                SaidHas($"{targetSp} working {peerSp}, minus 7"), true);
             wc.TestCancelStationWatchPendingStart();
 
             // 4) Replies addressed to the operator, and 73 / RR73, are unchanged. A stale "to us"
@@ -11228,7 +11310,7 @@ static class JimmyTests
             ClearSaid();
             wc.TestFeedTargetMonitorsDecode(Dec($"{peer} {t73} RR73"), true);  // target -> peer RR73 (finishing)
             Check("a target -> peer RR73 still narrates the fact (73/RR73 path unchanged)",
-                SaidHas($"{WsjtxClient.DisplayCallsign(t73, true)} to {peerSp}, RR73"), true);
+                SaidHas($"{WsjtxClient.DisplayCallsign(t73, true)} working {peerSp}, RR73"), true);
             wc.TestCancelStationWatchPendingStart();
         }
         catch (Exception ex)
@@ -22464,6 +22546,12 @@ static class JimmyTests
             wc.TestSetMode("FT8");
             ctrl.smartQsoStartEnabled = true;
             ctrl.smartStartSilencePeriods = 2;
+            // This test proves the Repeat Limit in isolation across many silent calling-overs with
+            // no intervening decodes fed -- disable the separate, coexisting consecutive
+            // target-not-heard limit (default cap 4) so it cannot trip first and mask what this
+            // test is actually measuring. See SmartStartTargetNotHeardLimitTests for that limit's
+            // own coverage.
+            ctrl.smartStartMaxStandbyRounds = 0;
             var statusView = new FakeStatusView();
             wc.StatusView = statusView;
 
@@ -22883,15 +22971,17 @@ static class JimmyTests
         }
     }
 
-    // Operator request (2026-09-13): the busy-churn round cap (was a fixed constant of 4) and a
-    // brand-new overall wall-clock time limit (0 = no limit, default) are both now adjustable in
-    // Options > Transmit. Covers: the pure TargetMonitor.ExceedsTimeLimit math (deterministic,
-    // synthetic `nowUtc` -- no sleep); the real WsjtxClient wiring for BOTH new ctrl properties,
-    // proven through the actual code paths (a real busy-decline round with the cap set to 1, and
-    // the same period-complete check FeedTargetMonitorsPeriodComplete performs, via
-    // TestCheckSmartStartTimeLimit's explicit-nowUtc test seam); and JimmySettings persistence
-    // (round-trip + out-of-range/missing-key defaults), mirroring JimmySettingsRoundTripTests'
-    // own style.
+    // Operator request (2026-09-13): the round cap (was a fixed constant of 4; reworked
+    // 2026-09-22 from busy-churn counting into the consecutive target-not-heard limit -- see
+    // SmartStartTargetNotHeardLimitTests for that rework's own coverage) and a brand-new overall
+    // wall-clock time limit (0 = no limit, default) are both adjustable in Options > Transmit.
+    // Covers here: the pure TargetMonitor.ExceedsTimeLimit math (deterministic, synthetic
+    // `nowUtc` -- no sleep); a regression check that a pre-transmit busy decline no longer stands
+    // Smart Start down under the new limit; the real WsjtxClient wiring for the time limit ctrl
+    // property, proven through the actual code path (the same period-complete check
+    // FeedTargetMonitorsPeriodComplete performs, via TestCheckSmartStartTimeLimit's explicit-
+    // nowUtc test seam); and JimmySettings persistence (round-trip + out-of-range/missing-key
+    // defaults), mirroring JimmySettingsRoundTripTests' own style.
     static void SmartStartConfigurableLimitsTests()
     {
         Console.WriteLine("\n── Smart Start: adjustable busy-round cap + overall time limit (2026-09-13) ──");
@@ -22914,15 +23004,9 @@ static class JimmyTests
                     new TargetMonitor(TargetPurpose.SmartStart).ExceedsTimeLimit(DateTime.UtcNow.AddDays(1), 5), false);
             }
 
-            // ── TargetMonitor.NoteStandbyRoundAndCheckGiveUp: the parameter itself was already
-            //    generic before this change -- quick direct confirmation a small custom cap is
-            //    honored (the WsjtxClient-level test below proves the real wiring reads it). ──
-            {
-                var tm = new TargetMonitor(TargetPurpose.SmartStart);
-                tm.Start("W1ABC", "20m", "FT8", "sess1");
-                Check("cap=1: the very first dead-end round gives up immediately",
-                    tm.NoteStandbyRoundAndCheckGiveUp(1), true);
-            }
+            // TargetMonitor.NoteCallOverCompletedAndCheckNotHeardLimit (the reworked replacement
+            // for the old NoteStandbyRoundAndCheckGiveUp) is covered in its own dedicated test,
+            // SmartStartTargetNotHeardLimitTests, below.
 
             (Controller ctrl, WsjtxClient wc, FakeStatusView view, StubEngineHost listener, List<string> seen, string tmpDb, string prevTestDbPath) MakeClient()
             {
@@ -22966,11 +23050,13 @@ static class JimmyTests
             DirectSnapshot Snap(ulong slot) => ParseDirectSnapshot(@"{ ""mycall"":""" + myCall + @""",""mygrid"":""" + myGrid + @""",
                 ""radio"":{ ""dialMhz"":14.074,""transmitting"":false,""slot"":" + slot + @" }, ""recentDecodes"":[] }");
 
-            // ── WsjtxClient wiring, round cap: ctrl.smartStartMaxStandbyRounds=1 -> the FIRST
-            //    "looked ready, revalidated busy" round (a straggler decode landing during the
-            //    3-poll finality window) stands Smart Start down immediately -- with the OLD fixed
-            //    constant of 4 this exact scenario would NOT have stood down yet (proven by
-            //    SmartStartPileupBackoffTests' own "straggler" sub-case leaving Smart Start armed). ──
+            // ── WsjtxClient wiring, round cap (2026-09-22 rework regression check):
+            //    ctrl.smartStartMaxStandbyRounds=1 -> a pre-transmit "looked ready, revalidated
+            //    busy" decline (a straggler decode landing during the 3-poll finality window) must
+            //    NOT stand Smart Start down any more. It is a busy sighting -- the target WAS
+            //    heard -- so under the consecutive target-not-heard limit it is presence, not
+            //    silence, and no calling-over transmission even went out. Full coverage of the new
+            //    limit itself lives in SmartStartTargetNotHeardLimitTests. ──
             {
                 var (ctrl, wc, view, listener, _, tmpDb, prevTestDbPath) = MakeClient();
                 try
@@ -22980,12 +23066,14 @@ static class JimmyTests
                     Check("fresh CQ captured + auto-start armed", wc.TestTryCaptureSmartStart(target, FreshCq()) && wc.TestAutoStartPending, true);
                     wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"CQ {target} FK92", DeltaFrequency = 1500, Snr = -6 }, true);
                     // A straggler "target working a peer" decode during the finality window -> the
-                    // deferred dispatch declines as TargetBusy -> ONE dead-end round.
+                    // deferred dispatch declines as TargetBusy -- a busy sighting, not silence.
                     wc.TestFeedTargetMonitorsDecode(new EnqueueDecodeMessage { Message = $"{peer} {target} -09", DeltaFrequency = 1500, Snr = -6 }, true);
                     for (int i = 0; i < 4; i++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(2000));
-                    Check("cap=1: Smart Start stands itself down after just ONE busy dead-end round",
-                        view.LastShowMessageText != null && view.LastShowMessageText.Contains("stayed busy"), true);
-                    Check("...and is no longer armed", wc.TestSmartStartTarget == null, true);
+                    Check("cap=1: a pre-transmit busy decline does NOT stand Smart Start down any more",
+                        view.LastShowMessageText == null || !view.LastShowMessageText.Contains("not heard"), true);
+                    Check("...still armed for the same target", wc.TestSmartStartTarget == target, true);
+                    Check("...the not-heard streak was never advanced by a busy sighting",
+                        wc.TestSmartStartTargetNotHeardStreak == 0, true);
                 }
                 finally { Cleanup(wc, listener, tmpDb, prevTestDbPath); }
             }
@@ -23064,6 +23152,212 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  SmartStartConfigurableLimitsTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // 2026-09-22 rework: the "busy dead-end" round cap became the consecutive target-not-heard
+    // limit -- same setting (ctrl.smartStartMaxStandbyRounds), new meaning. Proves: (1) completed
+    // calling-over transmissions with no target decode at all advance the streak; (2) any live
+    // target decode resets it to zero; (3) a target working another station resets it too, while
+    // Jimmy still yields and stays armed exactly as before; (4) reaching the configured limit
+    // disarms Smart Start; (5) the existing cumulative Repeat Limit is untouched by any of this.
+    static void SmartStartTargetNotHeardLimitTests()
+    {
+        Console.WriteLine("\n── Smart Start: consecutive target-not-heard limit (2026-09-22 rework) ──");
+        try
+        {
+            // ── TargetMonitor.NoteCallOverCompletedAndCheckNotHeardLimit: pure logic, no engine ──
+            {
+                var tm = new TargetMonitor(TargetPurpose.SmartStart);
+                tm.Start("W1ABC", "20m", "FT8", "sess1");
+
+                // Proof 1: completed calls with no target decode at all advance the streak.
+                Check("call 1, nothing heard: streak=1, cap=3 not reached",
+                    tm.NoteCallOverCompletedAndCheckNotHeardLimit(3), false);
+                Check("...TargetNotHeardStreak == 1", tm.TargetNotHeardStreak == 1, true);
+                Check("call 2, nothing heard: streak=2, cap=3 still not reached",
+                    tm.NoteCallOverCompletedAndCheckNotHeardLimit(3), false);
+                Check("...TargetNotHeardStreak == 2", tm.TargetNotHeardStreak == 2, true);
+
+                // Proof 2: ANY live decode from the target -- even a bare CQ -- resets it to zero.
+                tm.ObserveDecode(D("CQ W1ABC EM96"), true, "KB0UZT");
+                Check("call after hearing the target: streak resets first, so cap=3 not reached",
+                    tm.NoteCallOverCompletedAndCheckNotHeardLimit(3), false);
+                Check("...TargetNotHeardStreak == 0", tm.TargetNotHeardStreak == 0, true);
+
+                // Proof 3 (pure-logic half): a decode showing the target BUSY WITH A PEER is still
+                // presence, not silence -- it resets the streak exactly like any other live decode.
+                tm.NoteCallOverCompletedAndCheckNotHeardLimit(3);   // rebuild the streak to 1
+                Check("streak rebuilt to 1 after another silent call", tm.TargetNotHeardStreak == 1, true);
+                tm.ObserveDecode(D("W6PAN W1ABC -07"), true, "KB0UZT");   // target -> peer report
+                Check("target working a peer IS live evidence -> BusyWithOther set", tm.BusyWithOther, true);
+                Check("call after a busy-with-peer sighting: streak resets to zero",
+                    tm.NoteCallOverCompletedAndCheckNotHeardLimit(3), false);
+                Check("...TargetNotHeardStreak == 0", tm.TargetNotHeardStreak == 0, true);
+
+                // Proof 4: reaching the configured limit trips.
+                Check("call 1 after reset: streak=1", tm.NoteCallOverCompletedAndCheckNotHeardLimit(2), false);
+                Check("call 2 after reset: streak=2 reaches cap=2 -> trips",
+                    tm.NoteCallOverCompletedAndCheckNotHeardLimit(2), true);
+
+                // Non-positive limit (disabled) never trips, mirroring NoteCallingOverTransmitted.
+                var tm2 = new TargetMonitor(TargetPurpose.SmartStart);
+                tm2.Start("W1ABC", "20m", "FT8", "sess1");
+                for (int i = 0; i < 10; i++)
+                    Check($"limit disabled (0): call {i + 1} never trips", tm2.NoteCallOverCompletedAndCheckNotHeardLimit(0), false);
+
+                // A StationWatch-purpose instance never participates (Smart Start only).
+                var sw = new TargetMonitor(TargetPurpose.StationWatch);
+                sw.Start("W1ABC", "20m", "FT8", "sess1");
+                Check("Station Watch purpose: never trips regardless of cap",
+                    sw.NoteCallOverCompletedAndCheckNotHeardLimit(1), false);
+
+                // Start() resets the streak (a genuinely new/renewed effort).
+                var tm3 = new TargetMonitor(TargetPurpose.SmartStart);
+                tm3.Start("W1ABC", "20m", "FT8", "sess1");
+                tm3.NoteCallOverCompletedAndCheckNotHeardLimit(5);
+                tm3.NoteCallOverCompletedAndCheckNotHeardLimit(5);
+                Check("streak built up to 2 before a fresh Start()", tm3.TargetNotHeardStreak == 2, true);
+                tm3.Start("W1ABC", "20m", "FT8", "sess1");
+                Check("a fresh Start() resets the streak to zero", tm3.TargetNotHeardStreak == 0, true);
+            }
+
+            // ── WsjtxClient wiring: the real transmitting-just-ended edge, exactly as production
+            //    code drives it (same CallingOver()/HandOff()/ReCall() pattern as
+            //    SmartStartRepeatLimitSpansYieldsTests). ──
+            var seen = new List<string>();
+            var seenLock = new object();
+            var listener = new StubEngineHost(line => { lock (seenLock) seen.Add(line); return "OK"; });
+            string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartNotHeard_" + Guid.NewGuid().ToString("N") + ".db");
+            string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+            try
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                var _ = ctrl.Handle;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetDirectConnected(true);
+                wc.TestSetMode("FT8");
+                ctrl.smartQsoStartEnabled = true;
+                ctrl.smartStartSilencePeriods = 2;
+                var statusView = new FakeStatusView();
+                wc.StatusView = statusView;
+
+                const string myCall = "KB0UZT", myGrid = "FN42", target = "J39DX", A = "W6PAN";
+                const ulong SLOT = 700;
+                List<string> Seen() { lock (seenLock) return new List<string>(seen); }
+                bool SawCmd(string p) => Seen().Exists(c => c.StartsWith(p));
+
+                void Tx(bool tx) => wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot($@"{{
+                    ""mycall"": ""{myCall}"", ""mygrid"": ""{myGrid}"",
+                    ""radio"": {{ ""dialMhz"": 14.074, ""transmitting"": {(tx ? "true" : "false")}, ""tuning"": false, ""slot"": {SLOT}, ""txEnabled"": true }},
+                    ""recentDecodes"": []
+                }}"));
+                void CallingOver() { Tx(true); Tx(false); }
+
+                EnqueueDecodeMessage Dec(string msg) => new EnqueueDecodeMessage { Message = msg, DeltaFrequency = 1500, Snr = -6 };
+                EnqueueDecodeMessage FreshCq() => new EnqueueDecodeMessage
+                {
+                    Message = $"CQ {target} FK92",
+                    RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                    DeltaFrequency = 1500, Snr = -6,
+                };
+                void HandOff()
+                {
+                    wc.TestTryCaptureSmartStart(target, FreshCq());
+                    wc.TestFeedTargetMonitorsDecode(Dec($"CQ {target} FK92"), true);   // live CQ -> parity/evidence
+                    wc.callInProg = target;
+                    wc.TestSmartStartEnterAwaitingEngagement();                        // stands in for ReplyTo's commit
+                }
+                void ReCall()
+                {
+                    wc.callInProg = target;
+                    wc.TestSmartStartEnterAwaitingEngagement();
+                }
+
+                Tx(false);   // establish band / mode / slot
+
+                // ── Proofs 1 + 4 + 5: silent completed calling-overs reach the configured limit
+                //    and disarm; the Repeat Limit (generous here) is untouched. The CQ that
+                //    CAPTURED the target already counts as "heard", so the streak only starts
+                //    climbing from the SECOND completed calling-over onward. ──
+                ctrl.smartStartMaxStandbyRounds = 3;
+                ctrl.timeoutNumUpDown.Value = 20;   // Repeat Limit generous -- must not be what trips here
+                HandOff();
+                Check("fresh capture: not-heard streak starts at 0", wc.TestSmartStartTargetNotHeardStreak == 0, true);
+
+                CallingOver();   // over 1 -- the capturing CQ itself was live evidence
+                Check("call 1 completes: capture's own CQ counted as heard -> streak stays 0",
+                    wc.TestSmartStartTargetNotHeardStreak == 0 && wc.TestSmartStartTarget == target, true);
+
+                ReCall(); CallingOver();   // over 2 -- nothing heard since over 1
+                Check("call 2, nothing heard since: streak=1", wc.TestSmartStartTargetNotHeardStreak == 1 && wc.TestSmartStartTarget == target, true);
+
+                ReCall(); CallingOver();   // over 3 -- still nothing heard
+                Check("call 3, still nothing heard: streak=2", wc.TestSmartStartTargetNotHeardStreak == 2 && wc.TestSmartStartTarget == target, true);
+
+                ReCall(); CallingOver();   // over 4 -- reaches cap=3
+                Check("call 4 reaches cap=3 -- Smart Start disarmed", wc.TestSmartStartTarget == null, true);
+                Check("...operator told with distinct 'not heard' wording",
+                    statusView.LastShowMessageText != null && statusView.LastShowMessageText.Contains("not heard"), true);
+                Check("...NOT the Repeat-Limit wording -- a separate, unaffected policy (proof 5)",
+                    !statusView.LastShowMessageText.Contains("Repeat limit"), true);
+                // Proof 5: Stop() always zeroes the cumulative Repeat-Limit count on ANY disarm --
+                // the exact same convention the Repeat-Limit-triggered disarm itself relies on
+                // (see "after the limit, Smart Start stays disarmed and counts nothing further" in
+                // SmartStartRepeatLimitSpansYieldsTests) -- proving this new disarm path reused
+                // that existing teardown unchanged, rather than inventing its own.
+                Check("...Repeat Limit's cumulative count is reset by Stop(), same as any other disarm",
+                    wc.TestSmartStartTransmittedCallCount == 0, true);
+
+                // ── Proof 3: hearing the target busy with someone else resets the streak, and
+                //    Jimmy still yields our call and stays armed exactly as before. ──
+                wc.callInProg = null;
+                ctrl.smartStartMaxStandbyRounds = 3;
+                HandOff();
+                CallingOver();             // over 1 -- capture counted as heard -> streak 0
+                ReCall(); CallingOver();   // over 2 -- streak 1
+                ReCall(); CallingOver();   // over 3 -- streak 2
+                Check("streak built up to 2 before any busy sighting", wc.TestSmartStartTargetNotHeardStreak == 2, true);
+                Check("Repeat Limit counted all 3 overs normally so far", wc.TestSmartStartTransmittedCallCount == 3, true);
+
+                // Smart Start is still AwaitingEngagement, repeating the same call every period --
+                // exactly the same state SmartStartRepeatLimitSpansYieldsTests' own busy-yield
+                // sub-test feeds its busy decode from, no extra ReCall()/Tx(true) needed.
+                lock (seenLock) seen.Clear();
+                wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // target -> peer: busy sighting
+                PumpUntil(() => SawCmd("HALT_TX"), 2000);
+                Check("target working another station -> Jimmy still halts and yields, unchanged",
+                    SawCmd("HALT_TX") && wc.callInProg == null, true);
+                Check("...Smart Start stays armed for the same target, unchanged", wc.TestSmartStartTarget == target, true);
+                Check("...streak value itself is untouched until the NEXT completed call-over (still 2)",
+                    wc.TestSmartStartTargetNotHeardStreak == 2, true);
+                Check("...nor has the Repeat Limit's own count moved (still 3)",
+                    wc.TestSmartStartTransmittedCallCount == 3, true);
+
+                ReCall(); CallingOver();   // the NEXT genuine completed over, after resuming
+                Check("first call after the busy sighting resets to 0, NOT advancing to 3 -- proof the busy sighting counted as heard",
+                    wc.TestSmartStartTargetNotHeardStreak == 0 && wc.TestSmartStartTarget == target, true);
+                Check("...Repeat Limit's cumulative count simply adds this one completed over (4)",
+                    wc.TestSmartStartTransmittedCallCount == 4, true);
+            }
+            finally
+            {
+                listener.Stop();
+                WsjtxClient.TestQuiesceAllDirectClients();
+                if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+                else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+                try { File.Delete(tmpDb); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SmartStartTargetNotHeardLimitTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
@@ -23222,12 +23516,12 @@ static class JimmyTests
             var armed = new SmartStartArmedEvent("EA6Y", armGeneration: 1, stateSeq: 1);
             var busy = new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", armGeneration: 1, stateSeq: 1);
             SubmitCorrelated(c, armed, "Waiting to work EA6Y.");
-            SubmitCorrelated(c, busy, "EA6Y to KX4I, R minus 14.");
+            SubmitCorrelated(c, busy, "EA6Y working KX4I, R minus 14.");
             Check("Both Posture and Observation facts are held, not spoken inline", said.Count == 0, true);
             sched.Advance(c.MaxBatchWindowMs);
             Check("Posture + Observation for the same target JOIN into one utterance", said.Count == 1, true);
             CheckStr("Joined utterance matches the worked example, in configured order",
-                said.Count == 1 ? said[0] : "<none>", "Waiting to work EA6Y. EA6Y to KX4I, R minus 14.");
+                said.Count == 1 ? said[0] : "<none>", "Waiting to work EA6Y. EA6Y working KX4I, R minus 14.");
         }
 
         // ── Reordering the join order changes the utterance (Move Up/Down effect) ──
@@ -23237,10 +23531,10 @@ static class JimmyTests
             c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartTargetBusy, NotificationEventType.SmartStartArmed });
 
             SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
-            SubmitCorrelated(c, new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", 1, 1), "EA6Y to KX4I, R minus 14.");
+            SubmitCorrelated(c, new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", 1, 1), "EA6Y working KX4I, R minus 14.");
             sched.Advance(c.MaxBatchWindowMs);
             CheckStr("Moving TargetBusy ahead of Armed in the join order changes the utterance",
-                said.Count == 1 ? said[0] : "<none>", "EA6Y to KX4I, R minus 14. Waiting to work EA6Y.");
+                said.Count == 1 ? said[0] : "<none>", "EA6Y working KX4I, R minus 14. Waiting to work EA6Y.");
         }
 
         // ── Posture supersession: newest StateSeq wins, NOT highest "tier" ──
@@ -23604,7 +23898,7 @@ static class JimmyTests
                 NotificationEventType.SmartStartWaiting,
             });
 
-            SubmitCorrelated(c, new SmartStartTargetBusyEvent("KF0VZS", "K3ATA", "", 1, 1), "KF0VZS to K3ATA.");
+            SubmitCorrelated(c, new SmartStartTargetBusyEvent("KF0VZS", "K3ATA", "", 1, 1), "KF0VZS working K3ATA.");
             SubmitCorrelated(c, new SmartStartYieldedEvent("KF0VZS", 1, 2), "KF0VZS is busy; standing by.");
             SubmitCorrelated(c, new SmartStartWaitingEvent("KF0VZS", "KF0VZS not heard, 1 of 2.", "1 of 2", 1, 3), "KF0VZS not heard, 1 of 2.");
             Check("All three still open, nothing spoken yet", said.Count == 0, true);
@@ -23614,7 +23908,7 @@ static class JimmyTests
             CheckStr("Observation (TargetBusy) always joins; within Posture, the NEWEST StateSeq " +
                 "(Waiting, seq 3) supersedes the older one (Yielded, seq 2) -- exactly the live " +
                 "incident's own correct-per-design outcome, now actually reachable in one utterance",
-                said.Count == 1 ? said[0] : "<none>", "KF0VZS to K3ATA. KF0VZS not heard, 1 of 2.");
+                said.Count == 1 ? said[0] : "<none>", "KF0VZS working K3ATA. KF0VZS not heard, 1 of 2.");
 
             // The OLD, now-superseded failure mode: if each item HAD been allowed to resolve on
             // its own fixed timer before the next arrived (simulating a message-pump yield
@@ -23711,7 +24005,7 @@ static class JimmyTests
             c.UpdateJoinOrder(new[] { NotificationEventType.SmartStartArmed, NotificationEventType.SmartStartTargetBusy });
 
             SubmitCorrelated(c, new SmartStartArmedEvent("EA6Y", 1, 1), "Waiting to work EA6Y.");
-            SubmitCorrelated(c, new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", 1, 1), "EA6Y to KX4I, R minus 14.");
+            SubmitCorrelated(c, new SmartStartTargetBusyEvent("EA6Y", "KX4I", "R minus 14", 1, 1), "EA6Y working KX4I, R minus 14.");
             Check("A diagnostic line was emitted when the batch opened", diag.Any(l => l.Contains("opened") && l.Contains("SmartStartArmed")), true);
             Check("A diagnostic line was emitted for the second item added", diag.Any(l => l.Contains("+item") && l.Contains("SmartStartTargetBusy")), true);
 
@@ -23996,7 +24290,7 @@ static class JimmyTests
             Check("7c: exactly ONE delivery -- the stale repeat never queues behind the real change",
                 delivery.AnnounceCount == 1, true);
             CheckStr("7d: the surviving text is the genuine change, not the superseded stale repeat",
-                delivery.LastText, "N3TBB to W1AW, minus 5.");
+                delivery.LastText, "N3TBB working W1AW, minus 5.");
 
             // 7e-g: the SAME race against SmartStartTargetBusy's ACTUAL shipped SpeakWhen (Now,
             // untouched here) -- the Now-batch path, not _pendingNotifications. Non-autofire
@@ -24026,7 +24320,7 @@ static class JimmyTests
             Check("7f: exactly one utterance results (never a zero-gap pair)", delivery2.AnnounceCount == 1, true);
             CheckStr("7g: the surviving text is the genuine change ONLY -- the stale repeat is " +
                 "superseded (StateSeq-based correlation fold), not composed alongside it",
-                delivery2.LastText, "N3TBB to W1AW, minus 5.");
+                delivery2.LastText, "N3TBB working W1AW, minus 5.");
 
             // 7h: StationWatchActivity carries NO correlation (Station Watch's four observation
             // types deliberately always join, never supersede -- see NotificationCenter.Deliver's
@@ -24156,14 +24450,15 @@ static class JimmyTests
             NotificationDefaults.Policies[NotificationEventType.SmartStartWaiting].Template, "{Phrase}");
 
         // SmartStartTargetBusy: default template is "{Phrase}", and the phrase is the decoded FT8
-        // fact -- "X to Y, <report>." -- degrading cleanly when peer/report aren't known
-        // (N4BP live audit -- fix 3).
+        // fact -- "X working Y, <report>." -- degrading cleanly when peer/report aren't known
+        // (N4BP live audit -- fix 3; wording fix 2026-09-23, was "X to Y" -- see BuildPhrase's
+        // own comment).
         CheckStr("SmartStartTargetBusy default template is the pre-worded {Phrase}",
             NotificationDefaults.Policies[NotificationEventType.SmartStartTargetBusy].Template, "{Phrase}");
         CheckStr("busy phrase: peer + report",
-            new SmartStartTargetBusyEvent("J38DX", "VA2VT", "minus 16").Phrase, "J38DX to VA2VT, minus 16.");
+            new SmartStartTargetBusyEvent("J38DX", "VA2VT", "minus 16").Phrase, "J38DX working VA2VT, minus 16.");
         CheckStr("busy phrase: peer only (no report on this decode)",
-            new SmartStartTargetBusyEvent("J38DX", "VA2VT").Phrase, "J38DX to VA2VT.");
+            new SmartStartTargetBusyEvent("J38DX", "VA2VT").Phrase, "J38DX working VA2VT.");
         CheckStr("busy phrase: peer not parsed -> the degraded wording",
             new SmartStartTargetBusyEvent("J38DX").Phrase, "J38DX working another station.");
         CheckStr("busy DedupKey folds in the peer (re-announce on a new station)",
@@ -24289,7 +24584,7 @@ static class JimmyTests
             wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} -07"), true);   // target now working A
             string spA = WsjtxClient.DisplayCallsign(A, true);
             Check("Smart Start names the station the target is working, with its report",
-                SaidContains($"{targetSp} to {spA}, minus 7"), true);
+                SaidContains($"{targetSp} working {spA}, minus 7"), true);
             // 2026-09-11 target-activity unification: a roger-report (RReport, "R-05") is a
             // DIFFERENT structured fact from the plain report (TargetReport, "-07") just spoken --
             // Kind and Value both changed -- so it always announces, regardless of elapsed wall
@@ -24301,11 +24596,11 @@ static class JimmyTests
             // dedicated TargetActivityTrackerTests below, not here.
             wc.TestFeedTargetMonitorsDecode(Dec($"{A} {target} R-05"), true);
             Check("a changed report (kind AND value) to the SAME peer still announces -- not swallowed",
-                SaidContains($"{targetSp} to {spA}, R minus 5"), true);
+                SaidContains($"{targetSp} working {spA}, R minus 5"), true);
             wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -09"), true);   // target MOVES to a new station
             string spB = WsjtxClient.DisplayCallsign(B, true);
             Check("moving to a NEW station re-announces (peer folded into the dedup key)",
-                SaidContains($"{targetSp} to {spB}, minus 9"), true);
+                SaidContains($"{targetSp} working {spB}, minus 9"), true);
 
             // ══ 3. Both monitors on the same call: no doubled target fact ══
             wc.TestStartStationWatch(target);
@@ -24313,8 +24608,13 @@ static class JimmyTests
             wc.TestFeedTargetMonitorsDecode(Dec($"{B} {target} -12"), true);
             Check("Station Watch still gives the fuller shared observation",
                 SaidContains($"{targetSp} working {spB}"), true);
+            // Station Watch's own fuller observation and Smart Start's (correctly-suppressed)
+            // busy fact now share the exact same "X working Y, minus N" wording (2026-09-23
+            // wording fix), so a mere SaidContains can no longer tell "Station Watch alone said
+            // it" apart from "both said it" -- count occurrences instead: exactly one proves no
+            // duplicate, not a coincidental text collision.
             Check("Smart Start does NOT repeat the target-busy fact while Station Watch covers it",
-                SaidContains($"{targetSp} to {spB}, minus"), false);
+                SaidCount($"{targetSp} working {spB}, minus") == 1, true);
             wc.TestCancelStationWatchPendingStart();
             wc.StopStationWatch();
 
@@ -24380,7 +24680,7 @@ static class JimmyTests
                 wc.TestFeedTargetMonitorsDecode(Dec($"{C} {target} -07"), true);   // target -> peer report -> yield
                 PumpUntil(() => SeenCmds().Exists(c => c.StartsWith("HALT_TX")), 2000);
                 string spC = WsjtxClient.DisplayCallsign(C, true);
-                Check("7: the decoded busy FACT is spoken once", SaidCount($"{targetSp} to {spC}, minus 7") == 1, true);
+                Check("7: the decoded busy FACT is spoken once", SaidCount($"{targetSp} working {spC}, minus 7") == 1, true);
                 Check("7: the yield ACTION is spoken once, as the bare default 'Standing by.'",
                     SaidCount("Standing by.") == 1, true);
                 Check("7: the yield line does NOT restate the busy fact (default template)",

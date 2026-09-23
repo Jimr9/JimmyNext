@@ -99,7 +99,8 @@ namespace WSJTX_Controller
         // Operator request (2026-09-13): an absolute wall-clock backstop on the WHOLE Smart Start
         // effort ("an hour later their radio will not start trying to call the station,
         // regardless"), separate from the Repeat Limit (counts actual transmitted calls) and the
-        // busy-churn standby cap (counts dead-end rounds). Set once by Start() -- the ORIGINAL arm
+        // consecutive target-not-heard cap (counts completed calls with no target decode at all).
+        // Set once by Start() -- the ORIGINAL arm
         // time for this effort -- and deliberately NOT touched by ReturnToWaiting() or
         // ResumeAfterHandoff() (both continue the SAME effort, exactly like ArmGeneration just
         // above), so a busy-yield/resume cycle never resets the clock. Only Stop()+a fresh Start()
@@ -237,14 +238,23 @@ namespace WSJTX_Controller
         // already only calls this once per boundary).
         private ulong? _lastCountedSlot;
 
-        // Smart Start only. How many times, for THIS armed target, a readiness turned out to be a
-        // dead end -- pre-transmit revalidation declined it as busy, or a dispatched call yielded
-        // before the target engaged us. A CQing DX in a pileup produces an endless "appears
-        // available -> busy -> standing by" churn with no useful outcome; after MaxSmartStart
-        // StandbyRounds of it WsjtxClient disarms Smart Start and tells the operator (there is no
-        // lull to wait for -- a plain call + Repeat Limit is the tool for a hot pileup). Reset by
-        // Start() (new target) and by a real EnterAwaitingEngagement (we actually got to call).
-        private int _standbyRounds;
+        // Smart Start only (reworked 2026-09-22, was the "busy dead-end" round counter -- see
+        // NoteCallOverCompletedAndCheckNotHeardLimit's own comment). How many COMPLETED calling-
+        // over transmissions to this armed target, in a row, went out with no live decode from the
+        // target at all -- not even one showing the target busy with someone else. A target that
+        // has gone quiet across ctrl.smartStartMaxStandbyRounds such calls may be gone, or
+        // propagation may have changed, so WsjtxClient disarms Smart Start and tells the operator.
+        // Reset to zero by Start()/Stop()/ResumeAfterHandoff (a genuinely new/renewed effort) and
+        // by NoteCallOverCompletedAndCheckNotHeardLimit itself whenever the target was heard since
+        // the previous check. Deliberately NOT reset by EnterAwaitingEngagement -- a dispatch
+        // starting is not evidence the target was heard.
+        public int TargetNotHeardStreak { get; private set; }
+
+        // True once a live decode FROM THE TARGET, of ANY kind (including one showing it working
+        // another station), has been observed since the last time TargetNotHeardStreak was
+        // evaluated. Set in IngestTargetDecode; consumed (read and cleared) by
+        // NoteCallOverCompletedAndCheckNotHeardLimit.
+        private bool _targetHeardSinceLastCallOver;
 
         private string _band;
         private string _mode;
@@ -336,7 +346,8 @@ namespace WSJTX_Controller
             _rr73AwaitingOneMoreOpportunity = false;
             _targetHeardThisPeriod = false;
             _engagedWhileWaiting = false;
-            _standbyRounds = 0;
+            TargetNotHeardStreak = 0;
+            _targetHeardSinceLastCallOver = false;
             _lastCountedSlot = null;
             _band = band;
             _mode = mode;
@@ -366,7 +377,8 @@ namespace WSJTX_Controller
             _rr73AwaitingOneMoreOpportunity = false;
             _targetHeardThisPeriod = false;
             _engagedWhileWaiting = false;
-            _standbyRounds = 0;
+            TargetNotHeardStreak = 0;
+            _targetHeardSinceLastCallOver = false;
             _lastCountedSlot = null;
             if (announce) Raise(TargetObservationKind.WatchStopped, call);
         }
@@ -417,7 +429,8 @@ namespace WSJTX_Controller
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
             _engagedWhileWaiting = false;
-            _standbyRounds = 0;   // we actually got to call -- the earlier dead-end rounds don't count against us
+            // TargetNotHeardStreak is deliberately NOT reset here -- a dispatch starting is not
+            // evidence the target was heard (see the field's own comment).
         }
 
         // The target started working someone else before answering us and the caller has ceased
@@ -483,7 +496,8 @@ namespace WSJTX_Controller
             _rr73AwaitingOneMoreOpportunity = false;
             _targetHeardThisPeriod = false;
             _engagedWhileWaiting = false;
-            _standbyRounds = 0;
+            TargetNotHeardStreak = 0;
+            _targetHeardSinceLastCallOver = false;
             _lastCountedSlot = null;
             _band = band;
             _mode = mode;
@@ -506,15 +520,25 @@ namespace WSJTX_Controller
             return repeatLimit > 0 && TransmittedCallCount >= repeatLimit;
         }
 
-        // One readiness for this armed target turned out to be a dead end (revalidation declined
-        // it as busy, or a dispatched call yielded before engagement). Returns true once that has
-        // happened `maxRounds` times with no real call in between -- the caller then disarms Smart
-        // Start (a CQing pileup DX has no lull to wait for). Reset by Start() / EnterAwaitingEngagement.
-        public bool NoteStandbyRoundAndCheckGiveUp(int maxRounds)
+        // One ACTUAL completed calling-over transmission to this armed target just ended (same
+        // transmitting-just-ended edge WsjtxClient feeds NoteCallingOverTransmitted from, and fed
+        // exactly once per completed over -- a busy yield still counts, matching that method's own
+        // "calls after a busy yield" accounting). If the target was heard AT ALL since the previous
+        // check -- including a decode showing it busy with another station -- that is presence, not
+        // silence: the streak resets to zero. Only a completed call with NO target decode
+        // whatsoever advances it. Returns true once `notHeardLimit` such calls have gone by in a
+        // row with no target decode at all -- the caller then disarms Smart Start (the target may
+        // be gone, or propagation may have changed). A non-positive notHeardLimit (limit disabled)
+        // never trips.
+        public bool NoteCallOverCompletedAndCheckNotHeardLimit(int notHeardLimit)
         {
             if (Purpose != TargetPurpose.SmartStart) return false;
-            _standbyRounds++;
-            return maxRounds > 0 && _standbyRounds >= maxRounds;
+            if (_targetHeardSinceLastCallOver)
+                TargetNotHeardStreak = 0;
+            else
+                TargetNotHeardStreak++;
+            _targetHeardSinceLastCallOver = false;
+            return notHeardLimit > 0 && TargetNotHeardStreak >= notHeardLimit;
         }
 
         // Smart Start capture (WsjtxClient.TryCaptureSmartStart): the operator selected this
@@ -651,6 +675,9 @@ namespace WSJTX_Controller
             {
                 HasLiveTargetEvidence = true;
                 OpportunitiesSinceLiveEvidence = 0;
+                // Any confident live decode from the target -- CQ, busy with a peer, a report,
+                // anything -- is presence, not silence. See TargetNotHeardStreak's own comment.
+                _targetHeardSinceLastCallOver = true;
             }
 
             if (sem.IsCq)

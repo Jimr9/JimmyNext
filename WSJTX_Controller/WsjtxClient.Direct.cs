@@ -453,6 +453,17 @@ namespace WSJTX_Controller
         // ConnectDirectEngine.
         private bool _startupTxLevelRestored;
 
+        // 2026-09-23: has the hidden per-application Engine Host Windows Volume Mixer session
+        // level (ctrl.NativeEngine.EngineAudioInput/OutputAppLevel) been applied at least once
+        // this connection? One flag per direction -- ISimpleAudioVolume only has something to
+        // set once the engine host process has actually opened its own capture/render session on
+        // the device, which can lag a moment behind the process starting, so
+        // ApplyEngineAppAudioLevelsOnceAvailable retries each poll until each side succeeds once,
+        // then stops. Reset per connection in ConnectDirectEngine so a restarted/relaunched
+        // engine gets this reapplied to its own fresh session.
+        private bool _engineInputAppLevelApplied;
+        private bool _engineOutputAppLevelApplied;
+
         // Tier-confirmation redesign, 2026-09-15: the bounded-window/poll-based confirmation that
         // used to live here (ArmTierConfirmation/CheckPendingTierConfirmation/
         // _pendingTierConfirmation*/TierConfirmationWindowMs) has been retired. It existed to
@@ -751,6 +762,8 @@ namespace WSJTX_Controller
             _directFirstStatusShown = false;
             _directStartupBandResolved = false;
             _startupTxLevelRestored = false;
+            _engineInputAppLevelApplied = false;
+            _engineOutputAppLevelApplied = false;
             _startupRestoreCaptured = false;
             _startupRestoreDialHz = 0;
             _startupRestoreBandIdx = -1;
@@ -1173,6 +1186,30 @@ namespace WSJTX_Controller
             _lastCatOk = catOk;
         }
 
+        // 2026-09-23: applies the hidden per-application Engine Host levels (ctrl.NativeEngine.
+        // EngineAudioInput/OutputAppLevel, Options > Decode Engine no longer exposes these --
+        // see that setting's own comment) to jimmy-engine-host.exe's own Windows Volume Mixer
+        // session, once that session actually exists. ProcessAudioSessionVolume.SetVolume
+        // returns false until the engine process has opened its own capture/render stream on the
+        // device -- which can lag a moment behind the process starting -- so this simply retries,
+        // harmlessly, on every poll until each direction succeeds once, then stops touching it.
+        private void ApplyEngineAppAudioLevelsOnceAvailable()
+        {
+            if (_engineInputAppLevelApplied && _engineOutputAppLevelApplied) return;
+            int pid = ctrl.nativeEngineClient?.ProcessId ?? 0;
+            if (pid <= 0) return;
+
+            if (!_engineInputAppLevelApplied
+                && ProcessAudioSessionVolume.SetVolume(pid, ctrl.NativeEngine.AudioInputDevice, false,
+                    ctrl.NativeEngine.EngineAudioInputAppLevel / 100f))
+                _engineInputAppLevelApplied = true;
+
+            if (!_engineOutputAppLevelApplied
+                && ProcessAudioSessionVolume.SetVolume(pid, ctrl.NativeEngine.AudioOutputDevice, true,
+                    ctrl.NativeEngine.EngineAudioOutputAppLevel / 100f))
+                _engineOutputAppLevelApplied = true;
+        }
+
         private void DirectApplyStatus(DirectSnapshot snap)
         {
             _completedThisPollTick.Clear();
@@ -1487,6 +1524,11 @@ namespace WSJTX_Controller
                 if (ctrl.Radio.LastTxLevel >= 0.0)
                     DirectSetEngineTxLevel(ctrl.Radio.LastTxLevel);
             }
+
+            // 2026-09-23: apply the hidden per-application Engine Host levels once its audio
+            // sessions actually exist -- unrelated to radio/TX state, so unlike the restore just
+            // above this runs on every poll regardless (cheap no-op once both sides succeed).
+            ApplyEngineAppAudioLevelsOnceAvailable();
 
             // Options > Radio "Remember F11/F12 audio level per band" -- only on a genuine
             // confirmed band change (newBand, set just above), not every poll tick. See
@@ -1885,6 +1927,18 @@ namespace WSJTX_Controller
                 && string.Equals(callInProg, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase)
                 && _smartStart.NoteCallingOverTransmitted((int)ctrl.timeoutNumUpDown.Value))
                 SmartStartRepeatLimitReached();
+
+            // Consecutive target-not-heard limit (2026-09-22 rework of the old "busy dead-end"
+            // cap -- see TargetMonitor.NoteCallOverCompletedAndCheckNotHeardLimit for exactly what
+            // counts as "heard"). Same transmitting-just-ended edge and guard as the Repeat Limit
+            // check just above, but a SEPARATE if -- Repeat Limit's own && short-circuits before
+            // reaching NoteCallingOverTransmitted once its condition is false, so this must not be
+            // chained onto it; both need to run independently for every completed calling over.
+            if (wasTransmitting && !transmitting
+                && _smartStart.IsActive && _smartStart.AwaitingEngagement && !_smartStart.EngagedUs
+                && string.Equals(callInProg, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase)
+                && _smartStart.NoteCallOverCompletedAndCheckNotHeardLimit(ctrl.smartStartMaxStandbyRounds))
+                SmartStartNotHeardLimitReached();
 
             // Premature "no response" fix (see _directNoResponseAwaitingCall). A real over to the
             // call in progress just ended: arm the "no response" timing gate and clear the
@@ -3519,6 +3573,8 @@ namespace WSJTX_Controller
         internal bool TestSmartStartBusyWithOther => _smartStart.BusyWithOther;
         internal bool TestSmartStartAwaitingEngagement => _smartStart.AwaitingEngagement;
         internal int TestSmartStartTransmittedCallCount => _smartStart.TransmittedCallCount;
+        // Consecutive target-not-heard limit test hook (2026-09-22).
+        internal int TestSmartStartTargetNotHeardStreak => _smartStart.TargetNotHeardStreak;
         internal bool TestAutoStartPending => _pendingAutoStart != null;
         // Accumulated silence-progression state -- a redundant re-capture of an already-armed
         // target must not reset these (TJ1GD live-radio finding, 2026-09-08).
