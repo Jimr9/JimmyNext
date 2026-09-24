@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using WsjtxUdpLib.Messages.Out;
@@ -574,6 +575,7 @@ static class JimmyTests
         SemanticBoundaryAndJoinTimingTests();
         OrderedListMigrationTests();
         TargetActivityUnificationTests();
+        IniFileBatchTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -18262,6 +18264,207 @@ static class JimmyTests
             Console.WriteLine($"  FAIL  SuppressReceiveNotificationsDuringTxTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
+    }
+
+    // ── Perf, 2026-09-23: IniFile.BeginBatch/CommitBatch -- Options OK, a clean shutdown, and
+    // Save Profile As now queue their whole run of Write() calls in memory and apply them as ONE
+    // atomic file replace instead of one WritePrivateProfileString per setting. This is the parser
+    // test for that new code path: unknown-key/section preservation, case-insensitive section/key
+    // matching, read-your-own-writes mid-batch, delete semantics, the new-file-vs-existing-file
+    // atomic-replace split, encoding/newline preservation, and exception/overlap safety. ──
+    static void IniFileBatchTests()
+    {
+        Console.WriteLine("\n── Perf: IniFile batched saves -- THE FIX ──");
+        string tmpDir = Path.Combine(Path.GetTempPath(), "JimmyTest_IniBatch_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tmpDir);
+
+            // -- Unknown key/section preservation, case-insensitive matching, comment/blank-line
+            //    preservation, atomic replace of an EXISTING destination file. --
+            {
+                string path = Path.Combine(tmpDir, "preserve.ini");
+                File.WriteAllText(path,
+                    "[Jimmy Next]\r\n" +
+                    "myCall=KB0UZT\r\n" +
+                    "; a hand-written comment, never touched by any Write\r\n" +
+                    "\r\n" +
+                    "futureKey=fromANewerVersion\r\n" +
+                    "\r\n" +
+                    "[SomeUnrelatedSection]\r\n" +
+                    "untouched=stillHere\r\n");
+                var ini = new IniFile(path);
+
+                using (var batch = ini.BeginBatchScope())
+                {
+                    // Case-insensitive: different casing than the on-disk section/key must update
+                    // the SAME existing line, not create a duplicate.
+                    ini.Write("MYCALL", "N0CALL", "jimmy next");
+                    ini.Write("newKey", "newValue"); // new key appended into the existing default section
+                    batch.Commit();
+                }
+
+                Check("Batch not left open after Commit", ini.IsBatching, false);
+                string result = File.ReadAllText(path);
+                Check("Updated key's value changed", result.Contains("N0CALL"), true);
+                Check("Updated key kept its on-disk casing (MYCALL), not a duplicate under the new casing",
+                    result.IndexOf("myCall=N0CALL", StringComparison.OrdinalIgnoreCase) >= 0
+                    && CountOccurrences(result, "N0CALL") == 1, true);
+                Check("Hand-written comment preserved verbatim",
+                    result.Contains("; a hand-written comment, never touched by any Write"), true);
+                Check("Unrecognized forward-compat key preserved",
+                    result.Contains("futureKey=fromANewerVersion"), true);
+                Check("Unrelated section untouched by this batch is fully preserved",
+                    result.Contains("[SomeUnrelatedSection]") && result.Contains("untouched=stillHere"), true);
+                Check("New key appended into the existing section",
+                    result.Contains("newKey=newValue"), true);
+
+                var reread = new IniFile(path);
+                CheckStr("Reload after commit: updated key reads back correctly", reread.Read("myCall", "Jimmy Next"), "N0CALL");
+                CheckStr("Reload after commit: untouched section's key still reads correctly", reread.Read("untouched", "SomeUnrelatedSection"), "stillHere");
+            }
+
+            // -- Brand-new file (no existing destination) -- exercises the File.Move path, since
+            //    File.Replace requires an existing destination. --
+            {
+                string path = Path.Combine(tmpDir, "brandnew.ini");
+                Check("Destination genuinely does not exist yet", File.Exists(path), false);
+                var ini = new IniFile(path);
+                using (var batch = ini.BeginBatchScope())
+                {
+                    ini.Write("a", "1");
+                    ini.Write("b", "2", "Other");
+                    batch.Commit();
+                }
+                Check("File created by the batch commit", File.Exists(path), true);
+                var reread = new IniFile(path);
+                CheckStr("New file: first key reads back", reread.Read("a"), "1");
+                CheckStr("New file: second key (new section) reads back", reread.Read("b", "Other"), "2");
+            }
+
+            // -- Read-your-own-writes mid-batch, plus DeleteKey/DeleteSection semantics. --
+            {
+                string path = Path.Combine(tmpDir, "readback.ini");
+                File.WriteAllText(path, "[Jimmy Next]\r\nkeepMe=1\r\ndeleteMe=1\r\n\r\n[GoneSection]\r\nx=1\r\n");
+                var ini = new IniFile(path);
+                using (var batch = ini.BeginBatchScope())
+                {
+                    ini.Write("keepMe", "2");
+                    CheckStr("Mid-batch Read sees the queued value, not the stale on-disk one", ini.Read("keepMe"), "2");
+
+                    ini.DeleteKey("deleteMe");
+                    Check("Mid-batch KeyExists reflects a queued DeleteKey", ini.KeyExists("deleteMe"), false);
+
+                    ini.DeleteSection("GoneSection");
+                    Check("Mid-batch KeyExists reflects a queued DeleteSection for a key in that section", ini.KeyExists("x", "GoneSection"), false);
+                    batch.Commit();
+                }
+                string result = File.ReadAllText(path);
+                CheckStr("Committed: updated key's new value on disk", new IniFile(path).Read("keepMe"), "2");
+                Check("Committed: deleted key is gone from disk", result.Contains("deleteMe"), false);
+                Check("Committed: deleted whole section is gone from disk", result.Contains("GoneSection"), false);
+            }
+
+            // -- Encoding/newline preservation: UTF-8 BOM + LF-only file stays UTF-8 BOM + LF. --
+            {
+                string path = Path.Combine(tmpDir, "utf8bom.ini");
+                var utf8Bom = new UTF8Encoding(true);
+                File.WriteAllText(path, "[Jimmy Next]\nname=café\n", utf8Bom);
+                var ini = new IniFile(path);
+                using (var batch = ini.BeginBatchScope())
+                {
+                    ini.Write("added", "x");
+                    batch.Commit();
+                }
+                byte[] bytes = File.ReadAllBytes(path);
+                Check("UTF-8 BOM preserved after batch commit",
+                    bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF, true);
+                string text = new UTF8Encoding(true).GetString(bytes);
+                Check("Non-ASCII value round-tripped correctly", text.Contains("café"), true);
+                Check("LF-only newline style preserved (no \\r introduced)", text.Contains("\r"), false);
+            }
+
+            // -- Zero queued writes: CommitBatch must not touch disk at all. --
+            {
+                string path = Path.Combine(tmpDir, "neverwritten.ini");
+                var ini = new IniFile(path);
+                using (var batch = ini.BeginBatchScope())
+                {
+                    batch.Commit();
+                }
+                Check("A batch with nothing queued never creates the file", File.Exists(path), false);
+            }
+
+            // -- Nested/overlapping BeginBatch is explicitly rejected, and doesn't corrupt the
+            //    already-open batch's pending state. --
+            {
+                string path = Path.Combine(tmpDir, "nested.ini");
+                var ini = new IniFile(path);
+                ini.BeginBatch();
+                ini.Write("a", "1");
+                bool threw = false;
+                try { ini.BeginBatch(); }
+                catch (InvalidOperationException) { threw = true; }
+                Check("Nested BeginBatch throws InvalidOperationException", threw, true);
+                Check("Still batching after the rejected nested attempt (original batch intact)", ini.IsBatching, true);
+                ini.CommitBatch();
+                CheckStr("Original batch's queued write still committed correctly", new IniFile(path).Read("a"), "1");
+            }
+
+            // -- CommitBatch with no open batch throws. --
+            {
+                var ini = new IniFile(Path.Combine(tmpDir, "nobatch.ini"));
+                bool threw = false;
+                try { ini.CommitBatch(); }
+                catch (InvalidOperationException) { threw = true; }
+                Check("CommitBatch with no BeginBatch throws InvalidOperationException", threw, true);
+            }
+
+            // -- Exception-safety: if the caller's own code throws between BeginBatchScope() and
+            //    Commit(), Dispose() aborts -- disk is untouched, IsBatching goes back to false,
+            //    and the IniFile keeps working normally afterward. --
+            {
+                string path = Path.Combine(tmpDir, "abort.ini");
+                var ini = new IniFile(path);
+                bool threw = false;
+                try
+                {
+                    using (var batch = ini.BeginBatchScope())
+                    {
+                        ini.Write("shouldNeverLand", "1");
+                        throw new InvalidOperationException("simulated failure gathering settings");
+                    }
+                }
+                catch (InvalidOperationException) { threw = true; }
+                Check("Simulated failure propagated out of the using block", threw, true);
+                Check("Batch mode was exited even though Commit() was never reached", ini.IsBatching, false);
+                Check("Nothing was written to disk -- file was never created", File.Exists(path), false);
+
+                // Instance must still work normally (not stuck) for a plain immediate write.
+                ini.Write("afterAbort", "ok");
+                CheckStr("Immediate (non-batched) write still works after an aborted batch", new IniFile(path).Read("afterAbort"), "ok");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  IniFileBatchTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            try { Directory.Delete(tmpDir, true); } catch { }
+        }
+    }
+
+    static int CountOccurrences(string haystack, string needle)
+    {
+        int count = 0, idx = 0;
+        while ((idx = haystack.IndexOf(needle, idx, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            idx += needle.Length;
+        }
+        return count;
     }
 
     // ── Profiles feature, 2026-08-24 (operator request): ResolveActiveIniPath -- the startup

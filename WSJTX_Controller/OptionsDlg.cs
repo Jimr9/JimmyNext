@@ -746,6 +746,12 @@ namespace WSJTX_Controller
         private void okButton_Click(object sender, EventArgs e)
         {
             if (!ValidateHotkeys()) return;
+            // Perf, 2026-09-23: every Save*Tab() below (plus SaveOptionsRelatedSettings and
+            // whatever they call, e.g. SetAndPersistMyContinent/SaveHotkeyConfig) writes straight
+            // to the active ini. Batched into one atomic save instead of one disk write per
+            // setting -- see IniFile.BeginBatchScope's own comment.
+            using (var batch = ctrl.BeginSettingsBatch())
+            {
             ApplyGeneralSettings();
             SaveReceiveReplyTab();
             SaveTransmitTab();
@@ -766,6 +772,8 @@ namespace WSJTX_Controller
             // (Controller.cs). Every Save*Tab() above already applied its changes live to
             // memory; this just makes that change durable immediately too.
             ctrl.SaveOptionsRelatedSettings();
+            batch?.Commit();
+            }
             // Give Club Log real-time upload another chance now that the user has
             // had an opportunity to fix credentials/settings -- see
             // LiveQsoUploadOrchestrator's circuit breaker.

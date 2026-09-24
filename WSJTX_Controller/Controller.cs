@@ -1520,6 +1520,14 @@ namespace WSJTX_Controller
         {
             if (iniFile != null && formLoaded)
             {
+                // Perf, 2026-09-23: this method alone fires 150+ iniFile.Write calls (plus
+                // whatever SaveOptionsRelatedSettings/hotkeyConfig.SaveToIni add on top) --
+                // batched so a clean shutdown and Save Profile As (which just calls this same
+                // method, see its own comment below) do ONE atomic file replace instead of one
+                // WritePrivateProfileString per line. Nothing below this point changed; only the
+                // wrapping batch scope and the Commit() call at the very end are new.
+                using (var batch = iniFile.BeginBatchScope())
+                {
                 iniFile.Write("debug", wsjtxClient.debug.ToString());
                 // Save the Normal-state bounds even if currently maximized/minimized, so
                 // restoring later doesn't land on maximized dimensions.
@@ -1746,6 +1754,8 @@ namespace WSJTX_Controller
                 iniFile.DeleteKey("radioStartupPowerWatts");
                 iniFile.DeleteKey("radioStartupPowerMaxWatts");
                 hotkeyConfig?.SaveToIni(iniFile);
+                batch.Commit();
+                }
             }
         }
 
@@ -2154,6 +2164,13 @@ namespace WSJTX_Controller
             if (iniFile != null) hotkeyConfig?.SaveToIni(iniFile);
             RefreshHotkeyAccessibleNames();
         }
+
+        // Perf, 2026-09-23: lets OptionsDlg's okButton_Click (see its own comment) batch its whole
+        // run of Save*Tab()/SaveOptionsRelatedSettings writes into one atomic save, the same way
+        // SaveAllSettingsToIniFile batches its own. Returns null if there's no active ini file yet
+        // (Options can't meaningfully open before one exists) -- callers use the null-conditional
+        // Commit on it, and `using` already tolerates a null resource.
+        public IniFile.BatchScope BeginSettingsBatch() => iniFile?.BeginBatchScope();
 
         // Release-audit finding, 2026-08-20 ("settings persistence should not rely only on
         // clean shutdown"): Radio/Decode/Frequencies/Notifications/NativeEngine/Settings all
