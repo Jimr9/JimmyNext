@@ -11,12 +11,14 @@ namespace WSJTX_Controller
     // Non-modal Ham Radio Center / Logbook window.
     // Open via Controller.OpenLogbookWindow() — singleton (one instance at a time).
     //
-    // partial: the Contesting tab's own controls/logic live in LogbookWindow.Contesting.cs --
-    // ported from the former standalone ContestingWindow (see that file's own removal note) so
-    // an operator running a contest has it inside the same accessible workspace as their log,
-    // instead of a second top-level window. Split into its own file, not inlined here, purely to
-    // keep this already-large file's diff to what this change actually touches.
-    public partial class LogbookWindow : Form
+    // Nexus contesting foundation: Contesting is NOT a page here. It was, briefly (a "Contesting
+    // tab" inside this window) -- live JAWS testing (2026-09-25) found Logbook Center's own
+    // category navigation followed by three MORE nested tabs inside that one entry confusing and
+    // poorly announced. Contesting is back to being its own standalone, modeless window (see
+    // ContestingWindow.cs), opened by Options -> Station & Operator's "Open Contesting" button
+    // and the configurable Contesting hotkey (Controller.OpenContestingWindow) -- this window has
+    // no involvement in it at all.
+    public class LogbookWindow : Form
     {
         // ── Dependencies ──────────────────────────────────────────────────────────
         // Credentials are read live (via these delegates), not snapshotted once at
@@ -52,13 +54,6 @@ namespace WSJTX_Controller
         // contest operator's focus can stay on the Callsign field between contacts.
         private readonly Action _onQsoLogged;
 
-        // ── Contesting tab dependencies (LogbookWindow.Contesting.cs) ───────────────
-        private readonly Func<string> _contestMyCall;
-        private readonly Func<string> _contestMyGrid;
-        private readonly Func<string> _contestOperatorCall;
-        private readonly Func<ContestWorkflow> _contestWorkflowFn;
-        private readonly Func<StationSettings> _contestStationFn;
-
         // ── Database ──────────────────────────────────────────────────────────────
         // Nexus contesting foundation, boundary-completion pass: ILogbookService, not LogbookDb
         // -- every method this window calls is now on the interface; SQLite details stay inside
@@ -69,8 +64,15 @@ namespace WSJTX_Controller
         private Panel _activePage;
 
         // ── Layout controls ───────────────────────────────────────────────────────
-        private TabControl _tabControl;
-        private TextBox    _statusTb;
+        // Nexus contesting foundation, JAWS correction pass (2026-09-25): replaces the former
+        // TabControl with the same category-list-and-page arrangement Options already uses
+        // (OptionsDlg._categoryListBox/_categoryDetailHost, WireCategoryList) -- proven with real
+        // JAWS/NVDA testing there. Mechanical container swap only: every page's own controls,
+        // AccessibleName values, Build*Page()/Populate*() methods, and behavior are unchanged;
+        // only how the operator selects which one is visible changes.
+        private ListBox _categoryListBox;
+        private Panel   _categoryDetailHost;
+        private TextBox _statusTb;
 
         // ── Page panels ───────────────────────────────────────────────────────────
         private Panel _myLogPanel;
@@ -164,7 +166,6 @@ namespace WSJTX_Controller
         private const int PAGE_LOOKUP    = 3;
         private const int PAGE_EDITLOG   = 4;
         private const int PAGE_SYNC      = 5;
-        private const int PAGE_CONTESTING = 6;
 
         private static readonly string[] AllBands =
         {
@@ -184,16 +185,7 @@ namespace WSJTX_Controller
             Func<string> currentBand = null,
             Func<string> currentMode = null,
             Func<string, LookupRecord> lookupCallsign = null,
-            Action onQsoLogged = null,
-            // Nexus contesting foundation: the Contesting tab's own dependencies (formerly
-            // ContestingWindow's constructor parameters). Read live, same reasoning as every
-            // other Func above -- e.g. Options→Station & Operator edits made while this window
-            // is already open take effect on the next contest entry without a reopen.
-            Func<string> contestMyCall = null,
-            Func<string> contestMyGrid = null,
-            Func<string> contestOperatorCall = null,
-            Func<ContestWorkflow> contestWorkflow = null,
-            Func<StationSettings> contestStation = null)
+            Action onQsoLogged = null)
         {
             _ini              = ini;
             _qrzApiKey        = qrzApiKey        ?? (() => "");
@@ -213,11 +205,6 @@ namespace WSJTX_Controller
             _currentMode           = currentMode            ?? (() => null);
             _lookupCallsign        = lookupCallsign         ?? (call => null);
             _onQsoLogged           = onQsoLogged            ?? (() => { });
-            _contestMyCall         = contestMyCall          ?? (() => "");
-            _contestMyGrid         = contestMyGrid          ?? (() => "");
-            _contestOperatorCall   = contestOperatorCall    ?? (() => "");
-            _contestWorkflowFn     = contestWorkflow        ?? (() => null);
-            _contestStationFn      = contestStation         ?? (() => null);
 
             Text            = "Ham Radio Center — Logbook";
             MinimumSize     = new Size(720, 500);
@@ -298,12 +285,28 @@ namespace WSJTX_Controller
             };
             statusPanel.Controls.Add(_statusTb);
 
-            // TabControl — JAWS announces tab name on each tab; Left/Right arrows switch sections.
-            _tabControl = new TabControl
+            // Category list -- same role/behavior as Options' _categoryListBox: JAWS announces
+            // "Logbook Center categories, My Log, 1 of 6" on entry; Up/Down selects a category.
+            _categoryListBox = new ListBox
+            {
+                Dock           = DockStyle.Left,
+                Width          = 150,
+                Font           = font,
+                IntegralHeight = false,
+                AccessibleName = "Logbook Center categories",
+                TabIndex       = 1,
+            };
+
+            // Pure layout wrapper -- the one category panel actually parented inside it carries
+            // its own real AccessibleName (set on each page panel below), same reasoning as
+            // Options' _categoryDetailHost: left unnamed so WinForms/JAWS's own "infer a name for
+            // this container" fallback never attaches to the host itself.
+            _categoryDetailHost = new Panel
             {
                 Dock           = DockStyle.Fill,
-                Font           = font,
-                TabIndex       = 1,
+                AccessibleName = "",
+                AccessibleRole = AccessibleRole.None,
+                TabIndex       = 2,
             };
 
             BuildMyLogPage(font, hfont);
@@ -312,22 +315,28 @@ namespace WSJTX_Controller
             BuildLookupPage(font, hfont);
             BuildEditLogPage(font, hfont);
             BuildSyncPage(font, hfont);
-            BuildContestingPage(font, hfont);
 
-            string[] tabNames  = { "My Log", "Awards", "Still Need", "Lookup", "Edit Log", "Sync", "Contesting" };
-            Panel[]  tabPanels = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel, _contestingPanel };
-            for (int i = 0; i < tabNames.Length; i++)
+            string[] pageNames  = { "My Log", "Awards", "Still Need", "Lookup", "Edit Log", "Sync" };
+            Panel[]  pagePanels = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel };
+            for (int i = 0; i < pageNames.Length; i++)
             {
-                tabPanels[i].Dock    = DockStyle.Fill;
-                tabPanels[i].Visible = true;
-                var tp = new TabPage(tabNames[i]) { UseVisualStyleBackColor = true };
-                tp.Controls.Add(tabPanels[i]);
-                _tabControl.TabPages.Add(tp);
+                pagePanels[i].Dock = DockStyle.Fill;
+                // Each page panel now carries its own real AccessibleName -- safe (unlike the old
+                // TabControl model) because WireCategoryList below Adds/Removes only the ONE
+                // currently-selected panel into _categoryDetailHost; there is never a hidden
+                // sibling still parented in the tree for JAWS's own "infer a name" fallback to
+                // wander into and bleed stale content from (see MakePage()'s own comment for the
+                // real, live-confirmed bug this used to cause under the TabControl model).
+                pagePanels[i].AccessibleName = pageNames[i];
+                pagePanels[i].AccessibleRole = AccessibleRole.Grouping;
+                _categoryListBox.Items.Add(pageNames[i]);
             }
+            WireCategoryList(_categoryListBox, _categoryDetailHost, pagePanels.Cast<Control>().ToList());
 
-            _tabControl.SelectedIndexChanged += (s, e) => NavigateToPage(_tabControl.SelectedIndex);
+            _categoryListBox.SelectedIndexChanged += (s, e) => NavigateToPage(_categoryListBox.SelectedIndex);
 
-            Controls.Add(_tabControl);
+            Controls.Add(_categoryDetailHost);
+            Controls.Add(_categoryListBox);
             Controls.Add(statusPanel);
 
             this.Load += (s, e) =>
@@ -335,8 +344,28 @@ namespace WSJTX_Controller
                 NavigateToPage(PAGE_MYLOG);
                 if (RuleLibrary.LoadErrors.Count > 0)
                     SetStatus($"{RuleLibrary.LoadErrors.Count} Rule Definition load error(s) — see log_rules_errors.txt.");
-                _tabControl.Focus();
             };
+            // Initial focus goes to the category list itself, set in Shown (not Load, which fires
+            // before the window is actually visible/activated) -- same fix and same reasoning as
+            // OptionsDlg.OptionsDlg_Load's own Shown-based _categoryListBox.Focus() comment.
+            this.Shown += (s, e) => _categoryListBox.Focus();
+        }
+
+        // Shows only the page matching _categoryListBox's current selection, hiding the rest --
+        // same mechanism, same method, as OptionsDlg.WireCategoryList.
+        private static void WireCategoryList(ListBox listBox, Control host, List<Control> panels)
+        {
+            Control current = null;
+            void UpdateVisibility()
+            {
+                if (current != null) host.Controls.Remove(current);
+                int idx = listBox.SelectedIndex;
+                current = (idx >= 0 && idx < panels.Count) ? panels[idx] : null;
+                if (current != null) host.Controls.Add(current);
+            }
+            listBox.SelectedIndexChanged += (s, e) => UpdateVisibility();
+            if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;
+            UpdateVisibility();
         }
 
         // ── Page construction ─────────────────────────────────────────────────────
@@ -1316,13 +1345,13 @@ namespace WSJTX_Controller
 
         private void NavigateToPage(int page)
         {
-            Panel[] pages = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel, _contestingPanel };
+            Panel[] pages = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel };
             if (page >= 0 && page < pages.Length)
                 _activePage = pages[page];
 
-            // Keep TabControl in sync when called programmatically
-            if (_tabControl != null && _tabControl.SelectedIndex != page)
-                _tabControl.SelectedIndex = page;
+            // Keep the category list in sync when called programmatically
+            if (_categoryListBox != null && _categoryListBox.SelectedIndex != page)
+                _categoryListBox.SelectedIndex = page;
 
             switch (page)
             {
@@ -1332,16 +1361,7 @@ namespace WSJTX_Controller
                 case PAGE_LOOKUP:    break;
                 case PAGE_EDITLOG:   break;
                 case PAGE_SYNC:      PopulateSync();   break;
-                case PAGE_CONTESTING: PopulateContesting(); break;
             }
-        }
-
-        // Nexus contesting foundation: lets Controller's Contesting hotkey (and OpenContestingWindow)
-        // open this window directly on the Contesting tab in one call, whether the window is being
-        // created fresh or already open.
-        public void ShowContestingTab()
-        {
-            NavigateToPage(PAGE_CONTESTING);
         }
 
         // Root cause (found live, 2026-09-18, via a real Form.SelectNextControl walk -- not
@@ -1356,9 +1376,9 @@ namespace WSJTX_Controller
         // out to use the list/header's Z-order (Controls-collection) position rather than
         // TabIndex, both confirmed live against the actual control tree, not assumed:
         //   1. Entering the page's panel for the first time from outside it (e.g. Tab pressed
-        //      while sitting on the tab strip) lands on Controls[0] of that panel -- the list,
-        //      since it must be added first for the layout reason above -- regardless of any
-        //      TabIndex value.
+        //      while sitting on the category list) lands on Controls[0] of that panel -- the
+        //      list, since it must be added first for the layout reason above -- regardless of
+        //      any TabIndex value.
         //   2. Leaving the header's own LAST child, moving forward, ascends back out to the
         //      header's own next sibling by the header's Z-order position among ITS parent's
         //      children -- since the list sits BEFORE the header in that collection (add-order,
@@ -1373,25 +1393,29 @@ namespace WSJTX_Controller
         // overridable hook (Panel is not a ContainerControl and cannot override it itself),
         // and drive the page's own content from one explicit, verified-correct order (see
         // PageOrder) instead of trusting the structural walk for it -- including BOTH
-        // boundary hops (entering from the tab strip, and leaving to Status). Confirmed live
-        // that leaving the exit hop to fall through to base.ProcessTabKey looked plausible
-        // (Status is a genuine, simply-structured Form-level sibling of the TabControl) but
+        // boundary hops (entering from the category list, and leaving to Status). Confirmed
+        // live that leaving the exit hop to fall through to base.ProcessTabKey looked plausible
+        // (Status is a genuine, simply-structured Form-level sibling of the category list) but
         // was NOT reliable in practice: asking WinForms "what comes after this page's last
         // control" can re-enter the page's own header container instead of ascending past it,
         // producing a real infinite loop between the header's content and the list rather than
         // ever reaching Status. Handling both directions explicitly avoids trusting that
         // ascension at all. Only genuinely simple, unambiguous transitions -- Status -> Close,
-        // Close -> wrap to the tab strip, arrow-key tab switching, disabled/hidden controls
-        // between OTHER Form-level controls -- are left to real, untouched WinForms behavior
-        // via base.ProcessTabKey. Disabled/hidden controls WITHIN a page's own order (e.g. the
-        // Award selector when no Rule Definitions are loaded, or Edit/Delete/Export before any
-        // row is selected) are skipped explicitly here, same as real Tab handling would.
+        // Close -> wrap to the category list, arrow-key category switching, disabled/hidden
+        // controls between OTHER Form-level controls -- are left to real, untouched WinForms
+        // behavior via base.ProcessTabKey. Disabled/hidden controls WITHIN a page's own order
+        // (e.g. the Award selector when no Rule Definitions are loaded, or Edit/Delete/Export
+        // before any row is selected) are skipped explicitly here, same as real Tab handling
+        // would. Unchanged by the TabControl -> category-list swap: this override is driven by
+        // _categoryListBox.SelectedIndex/ActiveControl checks exactly like it used to be driven
+        // by _tabControl's, because the underlying page panels (and their own internal add-order
+        // pitfall) are completely untouched by which outer container currently hosts them.
         protected override bool ProcessTabKey(bool forward)
         {
-            if (_tabControl == null) return base.ProcessTabKey(forward);
-            Control[] order = PageOrder(_tabControl.SelectedIndex);
+            if (_categoryListBox == null) return base.ProcessTabKey(forward);
+            Control[] order = PageOrder(_categoryListBox.SelectedIndex);
 
-            if (forward && ActiveControl == _tabControl && order != null && order.Length > 0)
+            if (forward && ActiveControl == _categoryListBox && order != null && order.Length > 0)
             {
                 Control first = FirstSelectable(order, 0, +1);
                 if (first != null) return first.Focus();
@@ -1413,7 +1437,7 @@ namespace WSJTX_Controller
                     int step = forward ? 1 : -1;
                     Control target = FirstSelectable(order, idx + step, step);
                     if (target != null) return target.Focus();
-                    if (!forward) return _tabControl.Focus();   // nothing selectable before the first item -> the strip
+                    if (!forward) return _categoryListBox.Focus();   // nothing selectable before the first item -> the list
                     if (_statusTb != null) return _statusTb.Focus();   // nothing selectable after the last item -> Status
                 }
             }
@@ -2375,7 +2399,7 @@ namespace WSJTX_Controller
 
         private void GoToLookup()
         {
-            _tabControl.SelectedIndex = PAGE_LOOKUP;
+            _categoryListBox.SelectedIndex = PAGE_LOOKUP;
             _searchTb?.Focus();
         }
 
@@ -2393,6 +2417,16 @@ namespace WSJTX_Controller
         // containers None/empty removes them from the accessibility tree as distinct named
         // regions entirely, so JAWS/NVDA pass straight through to their real, individually-
         // named children instead of trying to announce a name for the container itself.
+        //
+        // Category-list navigation pass (2026-09-25): every panel this method returns (the six
+        // top-level pages, each built via BuildUi's own MakePage() call) no longer keeps this
+        // default ""/None -- BuildUi explicitly overwrites AccessibleName/AccessibleRole right
+        // after construction, once per page. That's safe now (and gives JAWS the page's own name
+        // on entry, matching Options' category panels) specifically because WireCategoryList
+        // Adds/Removes only the ONE currently-selected page into the host; the exact hazard this
+        // comment describes (a hidden sibling bleeding stale content) requires a sibling to still
+        // be parented in the tree, which can no longer happen. This default is kept here (rather
+        // than set at each call site) purely so a future new page still starts safe-by-default.
         private static Panel MakePage()
         {
             return new Panel

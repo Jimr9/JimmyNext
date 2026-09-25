@@ -16236,7 +16236,11 @@ static class JimmyTests
 
                     T GetField<T>(string name) => (T)typeof(LogbookWindow).GetField(name,
                         System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(lw);
-                    var tabControl = GetField<System.Windows.Forms.TabControl>("_tabControl");
+                    // Nexus contesting foundation, JAWS correction pass (2026-09-25): the old
+                    // TabControl was replaced with the same category-list-and-page arrangement
+                    // Options uses (_categoryListBox/_categoryDetailHost, WireCategoryList) --
+                    // this walk now seeds from and re-selects via the ListBox instead.
+                    var categoryList = GetField<System.Windows.Forms.ListBox>("_categoryListBox");
 
                     // EVERY hop must go through LogbookWindow's own ProcessTabKey override, not
                     // just the first -- the fix corrects multiple distinct transitions (tab
@@ -16252,19 +16256,19 @@ static class JimmyTests
 
                     void CheckPage(string label, int tabIndex, string[] expectedFull)
                     {
-                        // Simulates: operator arrows to this tab while sitting on the tab strip,
-                        // then presses Tab to enter the page.
-                        tabControl.SelectedIndex = tabIndex;
-                        tabControl.Focus();
+                        // Simulates: operator arrows to this category while sitting on the
+                        // category list, then presses Tab to enter the page.
+                        categoryList.SelectedIndex = tabIndex;
+                        categoryList.Focus();
 
-                        var (forwardSeq, lastCtl) = TabOrderWalker.WalkReal(lw, tabControl, forward: true, StepViaProcessTabKey);
+                        var (forwardSeq, lastCtl) = TabOrderWalker.WalkReal(lw, categoryList, forward: true, StepViaProcessTabKey);
                         CheckStr($"{label}: forward Tab sequence matches bb1a7a0",
                             string.Join(" -> ", forwardSeq), string.Join(" -> ", expectedFull));
 
                         // WalkReal's own wrap-detecting step still PERFORMS that last hop as a
                         // side effect before recognizing it as a wrap (it has to call step() to
                         // find out where it lands) -- so by the time it returns, ActiveControl
-                        // has already moved PAST lastCtl (e.g. to the tab strip, wrapped from
+                        // has already moved PAST lastCtl (e.g. to the category list, wrapped from
                         // Close). Re-focus lastCtl explicitly so the backward walk's own
                         // precondition (ActiveControl == seedFrom) actually holds.
                         lastCtl.Focus();
@@ -16272,12 +16276,16 @@ static class JimmyTests
                         // Shift+Tab from the actual last real stop (e.g. "Close") must retrace
                         // the exact same route in reverse, continuing one step further than the
                         // forward walk: Shift+Tab off the page's own first control naturally
-                        // wraps back to the tab strip (the exact mirror of how the forward walk
-                        // started), which is correct, desired behavior, not an artifact.
+                        // wraps back to the category list (the exact mirror of how the forward
+                        // walk started), which is correct, desired behavior, not an artifact.
                         var (backwardSeq, _) = TabOrderWalker.WalkReal(lw, lastCtl, forward: false, StepViaProcessTabKey);
                         backwardSeq.Reverse();
+                        // "Logbook Center categories" -- categoryList's own AccessibleName, what
+                        // TabOrderWalker.Describe reports when the walk wraps back to it. (The
+                        // pre-2026-09-25 TabControl had no AccessibleName set, so this used to be
+                        // the bare-type-name fallback "<TabControl>" instead.)
                         var expectedBackward = expectedFull.Length > 0
-                            ? expectedFull.Take(expectedFull.Length - 1).Prepend("<TabControl>").ToList()
+                            ? expectedFull.Take(expectedFull.Length - 1).Prepend("Logbook Center categories").ToList()
                             : new List<string>();
                         CheckStr($"{label}: Shift+Tab reverse sequence is the exact mirror of Tab",
                             string.Join(" -> ", backwardSeq), string.Join(" -> ", expectedBackward));
@@ -16320,17 +16328,20 @@ static class JimmyTests
                         "Export all QSOs to ADIF file", "Import history", "Status", "Close",
                     });
 
-                    // Left/Right Arrow while the tab strip has focus must NOT move focus into the
-                    // page -- the live-reported regression from an earlier fix attempt. Real
-                    // Left/Right key SendInput isn't reliable headlessly, but the actual mechanism
-                    // (changing SelectedIndex while the strip is focused) is exercised for real:
-                    // TabControl's own arrow-key handler does exactly this, nothing more.
-                    tabControl.SelectedIndex = 0;
-                    tabControl.Focus();
-                    bool stripFocusedBefore = tabControl.Focused;
-                    tabControl.SelectedIndex = 2;
-                    Check("Arrow-key tab switch: focus stays on the tab strip (does not jump into the page)",
-                        stripFocusedBefore && tabControl.Focused, true);
+                    // Up/Down Arrow while the category list has focus must NOT move focus into
+                    // the page -- the same "arrow-key category switch never jumps into the page"
+                    // guarantee the old tab strip had, now for a ListBox instead of a TabControl.
+                    // Real Up/Down key SendInput isn't reliable headlessly, but the actual
+                    // mechanism (changing SelectedIndex while the list is focused) is exercised
+                    // for real: ListBox's own arrow-key handler does exactly this, nothing more,
+                    // and WireCategoryList's SelectedIndexChanged handler only swaps the visible
+                    // page panel -- it never calls .Focus() on anything.
+                    categoryList.SelectedIndex = 0;
+                    categoryList.Focus();
+                    bool listFocusedBefore = categoryList.Focused;
+                    categoryList.SelectedIndex = 2;
+                    Check("Arrow-key category switch: focus stays on the category list (does not jump into the page)",
+                        listFocusedBefore && categoryList.Focused, true);
 
                     lw.Hide();
                 }

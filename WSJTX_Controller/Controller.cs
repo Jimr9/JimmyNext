@@ -288,11 +288,11 @@ namespace WSJTX_Controller
         public System.Windows.Forms.Button callCqOptionsButton;
 
         // Nexus contesting foundation, phase 6/7. ContestWorkflow's reconciliation runs on its
-        // own persistent timer, independent of whether the Contesting tab (inside LogbookWindow,
-        // via OpenContestingWindow below) is open -- same "keep running regardless of the window"
-        // precedent as OtaSpotsWindow's own live feeds (see ARCHITECTURE.md's Alt+G section) --
-        // so a completed contact is never delayed just because the operator closed Logbook
-        // Center to focus on Operate.
+        // own persistent timer, independent of whether ContestingWindow is open -- same "keep
+        // running regardless of the window" precedent as OtaSpotsWindow's own live feeds (see
+        // ARCHITECTURE.md's Alt+G section) -- so a completed contact is never delayed just
+        // because the operator closed the workspace window to focus on Operate.
+        private ContestingWindow _contestingWindow;
         public ContestWorkflow contestWorkflow;
         private System.Windows.Forms.Timer contestPollTimer;
 
@@ -423,7 +423,7 @@ namespace WSJTX_Controller
             _txLevelPersistTimer.Tick += new System.EventHandler(txLevelPersistTimer_Tick);
 
             // Nexus contesting foundation, phase 6/7: reconciliation runs on its own persistent
-            // timer, independent of whether the Contesting tab is open (see contestWorkflow's own
+            // timer, independent of whether ContestingWindow is open (see contestWorkflow's own
             // comment). 2000ms -- fast enough that delivery reads as prompt to an operator, cheap
             // enough (an in-memory EngineHost read, same cost class as SNAPSHOT) to poll even
             // when idle. PollAndReconcile itself is a no-op whenever no session is active.
@@ -2205,6 +2205,7 @@ namespace WSJTX_Controller
             _otaSpotsWindow?.Close();
             _notificationHistoryWindow?.Close();
             contestPollTimer?.Stop();
+            _contestingWindow?.Close();
         }
 
         public void SaveHotkeyConfig()
@@ -3412,12 +3413,7 @@ namespace WSJTX_Controller
                     currentBand: () => wsjtxClient?.CurrentBandStr,
                     currentMode: () => wsjtxClient?.CurrentMode,
                     lookupCallsign: call => lookupManager?.Build(call),
-                    onQsoLogged: () => wsjtxClient?.Sounds?.PlaySoundEvent(soundEnabled_Logged, soundFile_Logged),
-                    contestMyCall: () => NativeEngine.MyCall,
-                    contestMyGrid: () => NativeEngine.MyGrid,
-                    contestOperatorCall: () => Station.OperatorCallsign,
-                    contestWorkflow: () => contestWorkflow,
-                    contestStation: () => Station);
+                    onQsoLogged: () => wsjtxClient?.Sounds?.PlaySoundEvent(soundEnabled_Logged, soundFile_Logged));
                 // Deliberately no Owner assignment -- an owned window is always kept in front
                 // of its owner at the Win32 level, which made it impossible to Alt+Tab back to
                 // Jimmy's main window while the Logbook was open (found 2026-07-11: previously
@@ -3466,15 +3462,37 @@ namespace WSJTX_Controller
             }
         }
 
-        // Nexus contesting foundation, phase 6 (boundary-completion pass: the Contesting
-        // workspace is now a tab inside Logbook Center -- see LogbookWindow.Contesting.cs --
-        // rather than its own top-level window). Opens (or activates) Logbook Center and
-        // switches it straight to the Contesting tab, so the Contesting hotkey still lands the
-        // operator exactly where the standalone window used to, in one call either way.
+        // Nexus contesting foundation. Opens (or activates/focuses) the standalone Contesting
+        // window -- the SAME instance either way, whether called from Options -> Station &
+        // Operator's "Open Contesting" button or the configurable Contesting hotkey (live JAWS
+        // testing, 2026-09-25, found an earlier "Contesting tab inside Logbook Center" design
+        // confusing; see ContestingWindow.cs's own header comment).
         public void OpenContestingWindow()
         {
-            OpenLogbookWindow();
-            _logbookWindow?.ShowContestingTab();
+            if (_contestingWindow != null && !_contestingWindow.IsDisposed)
+            {
+                _contestingWindow.Activate();
+                return;
+            }
+            try
+            {
+                _contestingWindow = new ContestingWindow(
+                    () => LogbookDb.DbPath,
+                    () => NativeEngine.MyCall, () => NativeEngine.MyGrid,
+                    () => Station.OperatorCallsign,
+                    () => contestWorkflow, () => Station);
+                _contestingWindow.FormClosed += (s, e) => _contestingWindow = null;
+                _contestingWindow.Show();
+            }
+            catch (Exception ex)
+            {
+                _contestingWindow = null;
+                MessageBox.Show(
+                    ex.GetType().Name + ": " + ex.Message + "\r\n\r\n" + ex.StackTrace,
+                    "Contesting Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
         }
 
         public void OpenNotificationHistoryWindow()

@@ -2634,6 +2634,26 @@ namespace WSJTX_Controller
             AddRow("ITU Zone:", out _stationItuZoneTextBox, "ITU Zone", 10,
                    null, out _, null, 0);
             _stationItuZoneTextBox.Text = ctrl.Station.ItuZone;
+            y += 12;
+
+            // Nexus contesting foundation, JAWS correction pass (2026-09-25): opens/focuses the
+            // SAME standalone Contesting window (Controller.OpenContestingWindow, a singleton)
+            // the configurable Contesting hotkey also opens -- never a second instance. Lives
+            // here, not as a main-window button or its own Options page, per that pass's explicit
+            // instructions; Station & Operator is where it belongs because entering a contest
+            // reads this same page's own Station Callsign/Grid/Operator Callsign/Contest Email.
+            var openContestingBtn = new System.Windows.Forms.Button
+            {
+                Text = "Open &Contesting",
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(150, 26),
+                Font = font,
+                TabIndex = 11,
+                AccessibleName = "Open Contesting",
+                AccessibleDescription = "Opens the standalone Contesting window to select, configure, enter, and log a contest.",
+            };
+            openContestingBtn.Click += (s, e) => ctrl.OpenContestingWindow();
+            stationOperatorPanel.Controls.Add(openContestingBtn);
         }
 
         // Mirrors SaveRadioTab's own MyCall/MyGrid normalization (trim/uppercase, callsign- and
