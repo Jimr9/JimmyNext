@@ -27,7 +27,12 @@ namespace WSJTX_Controller
     // (_categoryDetailHost). Only the selected category's page is ever actually parented in the
     // tree, so it is the only one visible, enabled, exposed to accessibility, or reachable by Tab
     // -- there is no hidden sibling left for JAWS's speech buffer to re-expose. No TabControl and
-    // no nested tabs anywhere in this file.
+    // no nested tabs anywhere in this file. This list behaves EXACTLY like Options' and Logbook
+    // Center's own category lists, not merely similarly: choosing a category only swaps which
+    // page is shown, the same way CategoryListNav.Wire already does everywhere else it's used --
+    // it never also moves focus into the page (an earlier version of this window did that, found
+    // live, 2026-09-25, to make this list behave differently from the other two for no real
+    // benefit); a real Tab press is what enters the page, same as Options/Logbook Center.
     //
     // Categories:
     //   Select & Configure -- Nexus contest list, support level, refresh, selected contest,
@@ -158,10 +163,9 @@ namespace WSJTX_Controller
             // categories, Select and Configure, 1 of 4" the instant the window opens), matching
             // the same Shown-based fix OptionsDlg/LogbookWindow already use -- Load fires before
             // the window is actually visible/activated, so a Focus() call made there is
-            // unreliable. Choosing a DIFFERENT category afterward focuses that page's own first
-            // control directly (see BuildUi's own SelectedIndexChanged handler) -- this initial
-            // open is the one moment that intentionally does not, so it matches Options/Logbook
-            // Center's own established first-open behavior.
+            // unreliable. Choosing a different category afterward keeps focus on the list too
+            // (see BuildUi's own SelectedIndexChanged handler) -- a real Tab press is what enters
+            // the page, exactly like Options/Logbook Center's own identical category lists.
             Shown += (s, e) => _categoryListBox.Focus();
             FormClosed += (s, e) => { _statusTimer.Stop(); };
         }
@@ -212,25 +216,18 @@ namespace WSJTX_Controller
             }
             CategoryListNav.Wire(_categoryListBox, _categoryDetailHost, pagePanels.Cast<Control>().ToList());
 
-            // Reviewed/corrected focus traversal (2026-09-25): choosing a category moves focus
-            // DIRECTLY into that page's own first useful control -- the operator never has to
-            // press Tab an extra time after Up/Down just to reach real content, and (together
-            // with CategoryListNav.Wire only ever parenting the one selected page) JAWS is never
-            // left sitting on a list item while a DIFFERENT page's stale content is still what's
-            // actually in the tree. Also refreshes Active Contest's own live status on every
-            // visit, same reasoning as RefreshSessionStatus's own timer tick.
-            //
-            // The target is found dynamically (FirstSelectableIn), not a fixed per-page control
-            // reference: Export's own first control (Export Cabrillo) starts disabled until a
-            // session is active, and a fixed reference would try to focus a disabled control and
-            // silently fail, leaving focus nowhere. Scanning for the first genuinely selectable
-            // control instead is correct in every state, not just the common one.
+            // Corrected 2026-09-25 (live report): an earlier version of this handler also moved
+            // focus DIRECTLY into the newly selected page's first control. Live testing found that
+            // made this list behave differently from the identical-looking category lists in
+            // Options and Logbook Center (which only swap the visible page and leave focus on the
+            // list itself -- a real Tab press is what enters the page), which was confusing rather
+            // than helpful. This list now matches that same, single established convention
+            // exactly: CategoryListNav.Wire already handles showing the right page; the only thing
+            // still needed here is refreshing Active Contest's own live status on every visit
+            // (content, not focus -- same reasoning as RefreshSessionStatus's own timer tick).
             _categoryListBox.SelectedIndexChanged += (s, e) =>
             {
-                int idx = _categoryListBox.SelectedIndex;
-                if (idx == PAGE_ACTIVE) RefreshSessionStatus();
-                if (idx >= 0 && idx < pagePanels.Count)
-                    FirstSelectableIn(pagePanels[idx])?.Focus();
+                if (_categoryListBox.SelectedIndex == PAGE_ACTIVE) RefreshSessionStatus();
             };
 
             Controls.Add(_categoryDetailHost);
@@ -833,22 +830,6 @@ namespace WSJTX_Controller
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────────
-
-        // Depth-first, add-order scan (matching this page's own real Tab order, since nothing
-        // here uses Dock=Top/Dock=Fill add-order tricks) for the first control that can actually
-        // take focus right now -- skips disabled/invisible controls and non-selectable ones
-        // (Labels, plain layout Panels) exactly the way a real Tab press would, mirroring
-        // LogbookWindow.ProcessTabKey's own FirstSelectable helper.
-        private static Control FirstSelectableIn(Control container)
-        {
-            foreach (Control c in container.Controls)
-            {
-                if (c.CanSelect) return c;
-                var nested = FirstSelectableIn(c);
-                if (nested != null) return nested;
-            }
-            return null;
-        }
 
         // Same pure-layout-container reasoning as LogbookWindow.MakePage() -- AccessibleRole.None
         // + empty AccessibleName here, overwritten with a real name/Grouping role per page in
