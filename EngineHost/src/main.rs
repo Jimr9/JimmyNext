@@ -317,6 +317,7 @@ mod crashlog {
 
 use std::sync::{Arc, Mutex};
 
+mod contest_bridge;
 mod decode_semantics;
 mod external_data;
 mod live_feeds;
@@ -484,6 +485,20 @@ struct Args {
     /// not an inappropriate one. Empty (default) = Nexus's own stock table, matching every other
     /// startup field's "absent = stock behavior" convention.
     working_frequencies: Vec<tempo_app::settings::WorkingFreq>,
+}
+
+/// Nexus contesting foundation, phase 3: where the contest bridge's own small sidecar files
+/// (session-instance identity, restored across a restart) live. Self-contained default -- no
+/// coordinated Jimmy-side CLI-arg change needed for this phase -- under LOCALAPPDATA, the same
+/// root Jimmy's own C# side already uses for its per-install data (LookupManager.DataRoot),
+/// just EngineHost's own subtree so the two processes never write the same file.
+fn contest_data_dir() -> std::path::PathBuf {
+    let base = std::env::var("LOCALAPPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let dir = base.join("jimmy-engine-host").join("contest");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 fn parse_args() -> Args {
@@ -949,6 +964,7 @@ fn handle_control_connection(
     external_cache: Arc<external_data::SharedCache>,
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
     session_token: Arc<str>,
+    contest_bridge_state: Arc<Mutex<contest_bridge::ContestBridge>>,
 ) {
     use std::io::Write;
 
@@ -1018,6 +1034,22 @@ fn handle_control_connection(
                     obj.insert(
                         "qsoTxSemantics".to_string(),
                         serde_json::to_value(&qso_tx_semantics).unwrap_or(serde_json::Value::Null),
+                    );
+                    // Nexus contesting foundation, phase 3: same injection pattern as
+                    // sessionToken/pid above -- never touches the pinned AppSnapshot struct.
+                    // Lets Jimmy confirm a contest session is active (and which durable instance
+                    // id to expect completions under) without waiting for the first completion.
+                    let contest_session_instance_id = contest_bridge_state
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .active_session_instance_id()
+                        .map(|s| s.to_string());
+                    obj.insert(
+                        "contestSessionInstanceId".to_string(),
+                        match contest_session_instance_id {
+                            Some(id) => serde_json::Value::String(id),
+                            None => serde_json::Value::Null,
+                        },
                     );
                     let _ = writeln!(stream, "{}", serde_json::Value::Object(obj));
                 }
@@ -1250,6 +1282,102 @@ fn handle_control_connection(
                     let _ = writeln!(stream, "ERR bad SET_DECODE_DEPTH value: {}", v.trim());
                 }
             }
+        } else if line == "CONTEST_LIST_EVENTS" {
+            // Pure in-memory read of the bundled seed -- always fast, inline like SNAPSHOT.
+            let _ = writeln!(stream, "{}", contest_bridge::list_events_json());
+        } else if let Some(event_id) = line.strip_prefix("CONTEST_GET_RULESET ") {
+            let _ = writeln!(stream, "{}", contest_bridge::get_ruleset_json(event_id.trim()));
+        } else if let Some(json) = line.strip_prefix("CONTEST_ENTER ") {
+            match serde_json::from_str::<contest_bridge::EnterArgs>(json) {
+                Ok(args) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+                    match bridge.enter(&mut eng, &args) {
+                        Ok(j) => { let _ = writeln!(stream, "OK {j}"); }
+                        Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+                    }
+                }
+                Err(e) => { let _ = writeln!(stream, "ERR bad CONTEST_ENTER args: {e}"); }
+            }
+        } else if line == "CONTEST_EXIT" {
+            let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            let mut bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+            match bridge.exit(&mut eng) {
+                Ok(()) => { let _ = writeln!(stream, "OK"); }
+                Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+            }
+        } else if let Some(v) = line.strip_prefix("CONTEST_QSOS_SINCE ") {
+            match v.trim().parse::<u64>() {
+                Ok(after_seq) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+                    let _ = writeln!(stream, "{}", bridge.qsos_since(&mut eng, after_seq));
+                }
+                Err(_) => { let _ = writeln!(stream, "ERR bad CONTEST_QSOS_SINCE seq: {}", v.trim()); }
+            }
+        } else if let Some(v) = line.strip_prefix("CONTEST_QSO_ACK ") {
+            match v.trim().parse::<u64>() {
+                Ok(seq) => {
+                    let mut bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+                    bridge.ack(seq);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(_) => { let _ = writeln!(stream, "ERR bad CONTEST_QSO_ACK seq: {}", v.trim()); }
+            }
+        } else if line == "CONTEST_REBUILD_BEGIN" {
+            let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            let mut bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+            match bridge.rebuild_begin(&mut eng) {
+                Ok(j) => { let _ = writeln!(stream, "OK {j}"); }
+                Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+            }
+        } else if let Some(json) = line.strip_prefix("CONTEST_REBUILD_APPEND ") {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct AppendArgs {
+                rebuild_token: String,
+                contacts: Vec<contest_bridge::RebuildContact>,
+            }
+            match serde_json::from_str::<AppendArgs>(json) {
+                Ok(args) => {
+                    let mut bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+                    match bridge.rebuild_append(&args.rebuild_token, &args.contacts) {
+                        Ok(()) => { let _ = writeln!(stream, "OK"); }
+                        Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+                    }
+                }
+                Err(e) => { let _ = writeln!(stream, "ERR bad CONTEST_REBUILD_APPEND args: {e}"); }
+            }
+        } else if let Some(token) = line.strip_prefix("CONTEST_REBUILD_COMMIT ") {
+            let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            let mut bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+            match bridge.rebuild_commit(&mut eng, token.trim()) {
+                Ok(j) => { let _ = writeln!(stream, "OK {j}"); }
+                Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+            }
+        } else if let Some(json) = line.strip_prefix("CONTEST_EXPORT ") {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct ExportArgs {
+                format: String,
+                #[serde(default)]
+                operator_name: String,
+                #[serde(default)]
+                contest_email: String,
+            }
+            match serde_json::from_str::<ExportArgs>(json) {
+                Ok(args) => {
+                    let bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+                    match bridge.export(&args.format, &args.operator_name, &args.contest_email) {
+                        Ok(text) => match serde_json::to_string(&text) {
+                            Ok(j) => { let _ = writeln!(stream, "OK {j}"); }
+                            Err(e) => { let _ = writeln!(stream, "ERR could not encode export: {e}"); }
+                        },
+                        Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+                    }
+                }
+                Err(e) => { let _ = writeln!(stream, "ERR bad CONTEST_EXPORT args: {e}"); }
+            }
         } else if line == "OTA_SPOTS" {
             // Cache-only, always fast -- safe to handle inline on this accept loop like SNAPSHOT.
             let _ = writeln!(stream, "{}", external_cache.spots_json());
@@ -1398,6 +1526,7 @@ fn run_control_server(
     external_cache: Arc<external_data::SharedCache>,
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
     session_token: Arc<str>,
+    contest_bridge_state: Arc<Mutex<contest_bridge::ContestBridge>>,
 ) {
     for incoming in listener.incoming() {
         let stream = match incoming {
@@ -1408,8 +1537,9 @@ fn run_control_server(
         let external_cache = Arc::clone(&external_cache);
         let live_feeds_cache = Arc::clone(&live_feeds_cache);
         let session_token = Arc::clone(&session_token);
+        let contest_bridge_state = Arc::clone(&contest_bridge_state);
         std::thread::spawn(move || {
-            handle_control_connection(stream, engine, external_cache, live_feeds_cache, session_token);
+            handle_control_connection(stream, engine, external_cache, live_feeds_cache, session_token, contest_bridge_state);
         });
     }
 }
@@ -1616,6 +1746,19 @@ fn main() {
     // picker yet; add a --tier arg here when FT4/other modes are wired up.
     engine.lock().unwrap().set_tier(tempo_app::dto::Tier::Ft8);
 
+    // Nexus contesting foundation, phase 3: startup wiring for the contest bridge. Cheap,
+    // no-op-when-idle -- installing the call resolver costs nothing when no contest is ever
+    // entered, so it happens unconditionally rather than lazily on first use (avoiding an
+    // install-after-read ordering hazard for zero benefit). No --data-dir CLI arg yet (a
+    // coordinated Jimmy-side change, deferred) -- defaults to a self-contained location under
+    // LOCALAPPDATA so this works out of the box; see contest_data_dir's own comment.
+    contest_bridge::install_call_resolver();
+    let contest_bridge_state = Arc::new(Mutex::new(contest_bridge::ContestBridge::new(contest_data_dir())));
+    contest_bridge_state
+        .lock()
+        .unwrap()
+        .restore_if_present(&engine.lock().unwrap());
+
     // POTA/SOTA spots + space weather: background-refreshed, credential-free, cached in memory
     // (see external_data.rs's own header comment). Independent of the engine/radio loop
     // entirely -- a POTA/SWPC outage can never affect decode/TX.
@@ -1656,8 +1799,9 @@ fn main() {
         let control_cache = external_cache.clone();
         let control_live_feeds = live_feeds_cache.clone();
         let control_session_token = Arc::clone(&session_token);
+        let control_contest_bridge = Arc::clone(&contest_bridge_state);
         std::thread::spawn(move || {
-            run_control_server(control_listener, control_engine, control_cache, control_live_feeds, control_session_token)
+            run_control_server(control_listener, control_engine, control_cache, control_live_feeds, control_session_token, control_contest_bridge)
         });
     }
 
