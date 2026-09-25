@@ -73,6 +73,13 @@ namespace WSJTX_Controller
         // (schema v10) -- used by ContestWorkflow's completed-QSO delivery.
         void SetContestAssociation(long qsoId, string contestId, string contestSessionId);
 
+        // Nexus contesting foundation, phase 5: every one of Jimmy's own authoritative rows for
+        // a contest session, in call order -- what ContestWorkflow.RebuildScoreAndExport replays
+        // into Nexus via CONTEST_REBUILD_APPEND. A narrowly-scoped query (unlike LogbookWindow's
+        // much wider stats/search surface, deliberately kept off this interface) because it is
+        // exactly what the storage-neutral rebuild path needs, nothing more.
+        List<ContestSessionRow> GetContestSessionRows(string contestSessionId);
+
         // Storage-neutral bulk-import primitive: runs perItemAction once per item, batching the
         // implementation's own underlying commits for performance. Deliberately does NOT expose
         // a transaction object, a commit/rollback method, or any other SQLite-specific
@@ -106,5 +113,15 @@ namespace WSJTX_Controller
         int LogImportStart(string source);
         void LogImportFinish(int logId, int total, int newCount, int newlyConfirmed, int corrected,
             int skipped, string errorText);
+    }
+
+    // Nexus contesting foundation, phase 5. WhenUnix is derived from the row's own
+    // qso_date/time_on (UTC) at query time.
+    public class ContestSessionRow
+    {
+        public long Id { get; set; }
+        public string Callsign { get; set; }
+        public string Mode { get; set; }
+        public long WhenUnix { get; set; }
     }
 }

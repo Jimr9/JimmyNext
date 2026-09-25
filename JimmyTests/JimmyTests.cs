@@ -588,6 +588,7 @@ static class JimmyTests
         ContestWorkflowLostAckRedeliveryTests();
         ContestWorkflowReconnectReconciliationTests();
         ContestWorkflowNormalApplicationTests();
+        ContestWorkflowRebuildTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -25205,12 +25206,20 @@ static class JimmyTests
     static string OneCompletionJson(string sessionInstanceId, ulong seq, string call, string band,
         ulong whenUnix, string classVal, string sectionVal)
     {
-        return "OK [{" +
+        return "OK [" + CompletionObjectJson(sessionInstanceId, seq, call, band, whenUnix, classVal, sectionVal) + "]";
+    }
+
+    // One completion's JSON OBJECT body (no "OK " prefix, no surrounding array) -- for building
+    // a multi-completion CONTEST_QSOS_SINCE response without fragile string surgery.
+    static string CompletionObjectJson(string sessionInstanceId, ulong seq, string call, string band,
+        ulong whenUnix, string classVal, string sectionVal)
+    {
+        return "{" +
             $"\"sessionInstanceId\":\"{sessionInstanceId}\",\"seq\":{seq},\"call\":\"{call}\"," +
             $"\"band\":\"{band}\",\"mode\":\"FT8\",\"submode\":\"\",\"whenUnix\":{whenUnix}," +
             $"\"sentFields\":[[\"CLASS\",\"{classVal}\"],[\"SECTION\",\"{sectionVal}\"]]," +
             $"\"rcvdFields\":[[\"CLASS\",\"1B\"],[\"SECTION\",\"CT\"]]" +
-            "}]";
+            "}";
     }
 
     static ContestWorkflow NewTestWorkflow(string dbPath, out System.Collections.Generic.List<string> seenCommands, Func<string, string> respond)
@@ -25373,6 +25382,87 @@ static class JimmyTests
                     }
                 }
             }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    static void ContestWorkflowRebuildTests()
+    {
+        Console.WriteLine("\n── ContestWorkflow.RebuildScoreAndExport: Jimmy-initiated batched rebuild ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestRebuild_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            // Seed two authoritative contacts the normal delivery path (phase 4) already proved
+            // correct, then exercise rebuild against them.
+            string json = "OK [" +
+                CompletionObjectJson("test-sess-1", 1, "W1AW", "20m", 1_700_000_000, "2A", "MO") + "," +
+                CompletionObjectJson("test-sess-1", 2, "K1ABC", "40m", 1_700_000_100, "2A", "MO") +
+                "]";
+
+            var seenAppendBatches = new System.Collections.Generic.List<string>();
+            int totalAppendCalls = 0;
+            bool sawBegin = false, sawCommit = false;
+            string rebuildToken = "rt-" + Guid.NewGuid().ToString("N").Substring(0, 8);
+
+            var stub = new StubEngineHost(line =>
+            {
+                if (line == "CONTEST_QSOS_SINCE 0") return json;
+                if (line.StartsWith("CONTEST_QSOS_SINCE")) return "OK []";
+                if (line == "CONTEST_QSO_ACK 1" || line == "CONTEST_QSO_ACK 2") return "OK";
+                if (line == "CONTEST_REBUILD_BEGIN")
+                {
+                    sawBegin = true;
+                    return $"OK {{\"rebuildToken\":\"{rebuildToken}\",\"liveHighWaterSeq\":2}}";
+                }
+                if (line.StartsWith("CONTEST_REBUILD_APPEND "))
+                {
+                    lock (seenAppendBatches) { seenAppendBatches.Add(line); totalAppendCalls++; }
+                    // Stand in for EngineHost's real scoring (already proven separately by
+                    // contest_bridge.rs's own Rust tests against genuine FieldDayLog logic) --
+                    // this stub only needs to prove JIMMY's own responsibility: that it re-reads
+                    // its current authoritative rows and sends the right batch every rebuild.
+                    // Count how many DISTINCT calls this stub has seen appended across every
+                    // batch since the LAST BEGIN, and report exactly that at commit time.
+                    return "OK";
+                }
+                if (line.StartsWith("CONTEST_REBUILD_COMMIT "))
+                {
+                    sawCommit = true;
+                    Check("Commit carries the exact token BEGIN returned", line.Trim() == $"CONTEST_REBUILD_COMMIT {rebuildToken}", true);
+                    int callsSeen = seenAppendBatches
+                        .SelectMany(b => new[] { "W1AW", "K1ABC" }.Where(c => b.Contains($"\"call\":\"{c}\"")))
+                        .Distinct()
+                        .Count();
+                    seenAppendBatches.Clear();
+                    return $"OK {{\"qsoCount\":{callsSeen},\"points\":{callsSeen * 2}}}";
+                }
+                return "OK";
+            });
+            ContestClient.TestControlPortOverride = stub.Port;
+
+            var wf = new ContestWorkflow(new ContestClient(), () => tmpDb, () => "K5KPE", () => "EM48", () => "K5KPE");
+            wf.OnSessionEntered("test-sess-1", "arrlfd", "ARRL-FIELD-DAY");
+            wf.PollAndReconcile();
+            Check("Setup: two authoritative contacts logged before rebuild", QueryAllWithCallsign(tmpDb, "W1AW") + QueryAllWithCallsign(tmpDb, "K1ABC") == 2, true);
+
+            var result = wf.RebuildScoreAndExport(out string error);
+            Check("Rebuild succeeds", error == null, true);
+            Check("Rebuild reports the 2 seeded contacts", result != null && result.QsoCount == 2, true);
+            Check("BEGIN was called", sawBegin, true);
+            Check("At least one APPEND batch was sent", totalAppendCalls >= 1, true);
+            Check("COMMIT was called", sawCommit, true);
+
+            // Rebuild always reflects Jimmy's CURRENT authoritative rows -- deleting one and
+            // rebuilding again must be reflected (proves rebuild re-reads from the DB each time,
+            // never caching a stale row set).
+            using (var db = new LogbookDb(tmpDb))
+            {
+                var idToDelete = db.GetContestSessionRows("test-sess-1").First(r => r.Callsign == "K1ABC").Id;
+                db.DeleteQsos(new[] { (int)idToDelete });
+            }
+            var result2 = wf.RebuildScoreAndExport(out string error2);
+            Check("Second rebuild after a Jimmy-side deletion succeeds", error2 == null, true);
+            Check("Second rebuild reflects the deletion (only 1 contact now)", result2 != null && result2.QsoCount == 1, true);
         }
         finally { try { File.Delete(tmpDb); } catch { } }
     }

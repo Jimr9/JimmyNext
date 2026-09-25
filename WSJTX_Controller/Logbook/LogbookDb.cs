@@ -1536,6 +1536,54 @@ WHERE id=@id;";
             }
         }
 
+        // Nexus contesting foundation, phase 5: every authoritative row for one contest session,
+        // in call order (Nexus's own FieldDayLog::log_fields_at assigns dupe/scoring position by
+        // replay order, so this must be deterministic, not database-default row order).
+        public List<ContestSessionRow> GetContestSessionRows(string contestSessionId)
+        {
+            var result = new List<ContestSessionRow>();
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText =
+                        "SELECT id, callsign, mode, qso_date, time_on FROM qso " +
+                        "WHERE contest_session_id=@sid ORDER BY qso_date, time_on, id;";
+                    cmd.Parameters.AddWithValue("@sid", contestSessionId ?? "");
+                    using (var r = cmd.ExecuteReader())
+                    {
+                        while (r.Read())
+                        {
+                            long id = r.GetInt64(0);
+                            string callsign = r.IsDBNull(1) ? "" : r.GetString(1);
+                            string mode = r.IsDBNull(2) ? "" : r.GetString(2);
+                            string qsoDate = r.IsDBNull(3) ? "" : r.GetString(3);
+                            string timeOn = r.IsDBNull(4) ? "" : r.GetString(4);
+                            long whenUnix = ParseAdifDateTimeToUnix(qsoDate, timeOn);
+                            result.Add(new ContestSessionRow { Id = id, Callsign = callsign, Mode = mode, WhenUnix = whenUnix });
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+
+        private static long ParseAdifDateTimeToUnix(string qsoDate, string timeOn)
+        {
+            // qsoDate: "yyyyMMdd", timeOn: "HHmmss" or "HHmm" -- same formats ContestWorkflow
+            // itself writes (DateTimeOffset.FromUnixTimeSeconds(...).ToString("yyyyMMdd"/"HHmmss")).
+            if (string.IsNullOrEmpty(qsoDate)) return 0;
+            string t = (timeOn ?? "").PadRight(6, '0');
+            string full = qsoDate + t.Substring(0, Math.Min(6, t.Length)).PadRight(6, '0');
+            if (DateTime.TryParseExact(full, "yyyyMMddHHmmss", System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var dt))
+            {
+                return ((DateTimeOffset)dt).ToUnixTimeSeconds();
+            }
+            return 0;
+        }
+
         // Returns full-fidelity ADIF field dictionaries (every stored column, not just
         // the Edit Log tab's display subset) for export. ids null/empty exports every QSO.
         // sources null/empty applies no source filter; otherwise only rows whose "source"

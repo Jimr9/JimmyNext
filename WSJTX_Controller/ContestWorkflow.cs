@@ -165,7 +165,72 @@ namespace WSJTX_Controller
 
             var qsoId = db.GetIdByDedupKey(dedupKey);
             if (qsoId.HasValue)
+            {
                 db.SetContestAssociation(qsoId.Value, _activeContestId ?? _activeEventId ?? "", c.SessionInstanceId);
+
+                // Nexus contesting foundation, phase 5: the STRUCTURED received-exchange field
+                // pairs (real ruleset keys, e.g. "CLASS"->"1B"), reusing the qso_extra_field
+                // round-trip primitive (phase 2) rather than a new schema column. exchange_rcvd
+                // above is the flattened display/ADIF-STX_STRING form; this is what
+                // CONTEST_REBUILD_APPEND actually needs to replay through Nexus's own
+                // FieldDayLog::log_fields_at, which requires real field keys, not just values.
+                // Safe to share the same table: a NEXUS_CONTEST row never goes through
+                // AdifImporter.Import (no ADIF text is ever parsed for it), so there is no
+                // competing "unknown ADIF field" use of this storage for these rows.
+                var rcvdPairs = (c.RcvdFields ?? new List<List<string>>())
+                    .Where(f => f.Count > 1)
+                    .Select(f => (Tag: f[0], Value: f[1]))
+                    .ToList();
+                if (rcvdPairs.Count > 0) db.SaveExtraFields(qsoId.Value, rcvdPairs);
+            }
+        }
+
+        // Nexus contesting foundation, phase 5: Jimmy-initiated, batched rebuild of Nexus's
+        // contest score/dupe-state/export from Jimmy's own authoritative records -- called
+        // before official score presentation and always before export, per the accepted design.
+        // Batches in chunks of 200 (matching the message-size discipline noted in
+        // ContestClient.RebuildAppend's own comment). Returns the commit result, or null with
+        // `error` set on any failure -- callers must treat a failed rebuild as "nothing changed,
+        // try again," never assume partial progress (EngineHost's own commit is all-or-nothing;
+        // see contest_bridge.rs's rebuild_commit for the atomicity argument).
+        public ContestRebuildCommitResult RebuildScoreAndExport(out string error)
+        {
+            error = null;
+            if (_activeSessionInstanceId == null)
+            {
+                error = "no contest session is active";
+                return null;
+            }
+
+            var begin = _contestClient.RebuildBegin(out error);
+            if (begin == null) return null;
+
+            using (ILogbookService db = new LogbookDb(_dbPath()))
+            {
+                var rows = db.GetContestSessionRows(_activeSessionInstanceId);
+
+                const int batchSize = 200;
+                for (int i = 0; i < rows.Count; i += batchSize)
+                {
+                    var batch = new List<RebuildAppendContact>();
+                    foreach (var row in rows.Skip(i).Take(batchSize))
+                    {
+                        var fields = db.GetExtraFields(row.Id).Select(f => new List<string> { f.Tag, f.Value }).ToList();
+                        batch.Add(new RebuildAppendContact
+                        {
+                            Call = row.Callsign,
+                            Fields = fields,
+                            Mode = row.Mode,
+                            Submode = "",
+                            WhenUnix = (ulong)Math.Max(0, row.WhenUnix),
+                        });
+                    }
+                    if (!_contestClient.RebuildAppend(begin.RebuildToken, batch, out error))
+                        return null;
+                }
+            }
+
+            return _contestClient.RebuildCommit(begin.RebuildToken, out error);
         }
     }
 }
