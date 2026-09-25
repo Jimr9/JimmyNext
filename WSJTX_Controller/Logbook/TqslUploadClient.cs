@@ -103,7 +103,7 @@ namespace WSJTX_Controller
         // per-record builder CatchUpQrz/CatchUpClubLog/CatchUpHrdLog already use, so this stays
         // consistent with the rest of the upload-catch-up family rather than switching to the
         // separate ID-based export path the Logbook window's manual ADIF export uses instead).
-        public async Task<bool> UploadPendingAsync(string stationLocation, LogbookDb db)
+        public async Task<bool> UploadPendingAsync(string stationLocation, ILogbookService db)
         {
             LastError = null;
             LastUploadedCount = null;

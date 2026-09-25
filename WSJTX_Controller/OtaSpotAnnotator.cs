@@ -24,7 +24,7 @@ namespace WSJTX_Controller
     {
         public static OtaSpotAnnotation Annotate(
             string call, string band,
-            LogbookDb logbookDb, LookupManager lookupManager,
+            ILogbookService logbookDb, LookupManager lookupManager,
             Dictionary<string, WsjtxClient.ActiveAwardTag> activeAwardTags)
         {
             var result = new OtaSpotAnnotation();

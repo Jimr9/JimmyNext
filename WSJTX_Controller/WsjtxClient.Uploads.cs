@@ -100,7 +100,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    using (var db = new LogbookDb(dbPath))
+                    using (ILogbookService db = new LogbookDb(dbPath))
                     {
                         var client = new TqslUploadClient();
                         bool ok = await client.UploadPendingAsync(ctrl.tqslStationLocation, db).ConfigureAwait(false);
@@ -172,7 +172,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    using (var db = new LogbookDb(dbPath))
+                    using (ILogbookService db = new LogbookDb(dbPath))
                     {
                         if (ctrl.qrzUploadEnabled && !string.IsNullOrWhiteSpace(ctrl.qrzLogbookApiKey))
                             await CatchUpQrz(db).ConfigureAwait(false);
@@ -199,7 +199,7 @@ namespace WSJTX_Controller
         // QRZ's INSERT is single-QSO-per-call (no batch parameter), so a backlog is
         // sent as a loop with a small courtesy delay between calls -- QRZ documents
         // no hard rate limit, but other logging software follows this same pattern.
-        private async Task CatchUpQrz(LogbookDb db)
+        private async Task CatchUpQrz(ILogbookService db)
         {
             var pending = db.GetPendingUploads("QRZ");
             if (pending.Count == 0) return;
@@ -260,7 +260,7 @@ namespace WSJTX_Controller
         // Club Log's own guidance is that a backlog must go through putlogs.php
         // (one file, one request) rather than looping realtime.php -- so the whole
         // pending set is sent as a single batch upload here.
-        private async Task CatchUpClubLog(LogbookDb db)
+        private async Task CatchUpClubLog(ILogbookService db)
         {
             var pending = db.GetPendingUploads("CLUBLOG");
             if (pending.Count == 0) return;
@@ -305,7 +305,7 @@ namespace WSJTX_Controller
         // HRDLog.net's NewEntry.aspx is single-QSO-per-call like QRZ (no batch endpoint), so
         // this follows CatchUpQrz's exact per-QSO-loop-with-delay shape, not CatchUpClubLog's
         // single-batch shape.
-        private async Task CatchUpHrdLog(LogbookDb db)
+        private async Task CatchUpHrdLog(ILogbookService db)
         {
             var pending = db.GetPendingUploads("HRDLOG");
             if (pending.Count == 0) return;

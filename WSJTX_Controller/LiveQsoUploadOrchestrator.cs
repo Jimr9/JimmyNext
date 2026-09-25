@@ -156,7 +156,7 @@ namespace WSJTX_Controller
             // log -- same real outcome as before -- it just must not also crash Jimmy.
             try
             {
-                using (var db = new LogbookDb(dbPath))
+                using (ILogbookService db = new LogbookDb(dbPath))
                 {
                     // resolveUsState is the same lookupManager-backed callback every other US
                     // state lookup in the app already uses (queue display, raw decodes row, HRC
@@ -211,7 +211,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    using (var db = new LogbookDb(dbPath))
+                    using (ILogbookService db = new LogbookDb(dbPath))
                     {
                         var creds = _credentials();
                         bool needQrz = creds.QrzUploadEnabled && creds.QrzUploadRealtime &&

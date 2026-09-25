@@ -35,7 +35,9 @@ namespace WSJTX_Controller
         // instance pointed at the same file is the established, already-proven-safe way to
         // read it from a second window (see LogbookWindow.cs), rather than reaching into
         // WsjtxClient's private field.
-        private readonly LogbookDb _logbookDb = new LogbookDb();
+        // Nexus contesting foundation, phase 2 (completed): ILogbookService, not LogbookDb --
+        // OtaSpotAnnotator only needs HasWorkedBefore, on the interface.
+        private readonly ILogbookService _logbookDb = new LogbookDb();
         private readonly LookupManager _lookupManager;
         private readonly Func<System.Collections.Generic.Dictionary<string, WsjtxClient.ActiveAwardTag>> _activeAwardTags;
         private readonly Func<string> _currentBand;

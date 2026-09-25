@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Data.SQLite;
 using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -61,7 +60,7 @@ namespace WSJTX_Controller
         // AdifRawRecord overload below with an empty Ordered list per record, so no extras are
         // ever recorded for these (never a wrong or fabricated order).
         public static ImportResult Import(
-            LogbookDb db,
+            ILogbookService db,
             IEnumerable<Dictionary<string, string>> records,
             string source,
             Action<int> progressCallback = null,
@@ -74,8 +73,14 @@ namespace WSJTX_Controller
         // Nexus contesting foundation, phase 2: the AdifRawRecord form carries true file
         // order/duplicates (via AdifParser.ParseWithOrder), so this overload also populates
         // qso_extra_field for whatever the record's raw fields didn't map onto a modeled column.
+        //
+        // db is ILogbookService, not LogbookDb -- RunBatch is the storage-neutral bulk-import
+        // primitive that replaced this method's own direct BeginTransaction()/SQLiteTransaction
+        // management (phase 2, completed). LogbookDb still satisfies every caller here unchanged
+        // (it implements the interface directly), so this is a pure refactor, not a behavior
+        // change -- verified by the same test suite that covered the transaction-managing version.
         public static ImportResult Import(
-            LogbookDb db,
+            ILogbookService db,
             IEnumerable<AdifRawRecord> records,
             string source,
             Action<int> progressCallback = null,
@@ -84,87 +89,61 @@ namespace WSJTX_Controller
             var result = new ImportResult();
             var errors = new StringBuilder();
 
-            int batchSize = 0;
-            SQLiteTransaction tx = db.BeginTransaction();
-            try
+            db.RunBatch(records, raw =>
             {
-                foreach (var raw in records)
+                try
                 {
-                    try
+                    var q = Normalize(raw.Fields, source, resolveUsState);
+                    if (q == null) { result.Skipped++; result.Processed++; return; }
+
+                    var (isNew, newlyConfirmed, corrected) = db.Upsert(
+                        q.callsign, q.band, q.mode, q.qsoDate, q.timeOn, q.timeOff,
+                        q.freqHz, q.rstSent, q.rstRcvd, q.state, q.country,
+                        q.dxcc, q.cqZone, q.grid, q.name, q.comment, q.txPwr,
+                        q.operatorCall, q.stationCall, q.myGrid,
+                        q.lotwQslSent, q.lotwQslRcvd, q.qrzQslSent, q.qrzQslRcvd,
+                        source, q.sourceQsoId, q.dedupKey,
+                        q.continent, q.ituZone, q.county, q.iota,
+                        q.sig, q.sigInfo, q.mySig, q.mySigInfo,
+                        q.darcDok, q.wpxPrefix, q.exchangeSent, q.exchangeRcvd);
+
+                    // Nexus contesting foundation, phase 2: preserve whatever this record's raw
+                    // fields didn't map onto a modeled column -- a real (if usually empty) row
+                    // lookup by dedup_key, not a guess, so extras always land on the correct qso
+                    // id even when Upsert corrected an existing row rather than inserting a new
+                    // one.
+                    if (raw.Ordered != null && raw.Ordered.Count > 0)
                     {
-                        var q = Normalize(raw.Fields, source, resolveUsState);
-                        if (q == null) { result.Skipped++; result.Processed++; continue; }
-
-                        var (isNew, newlyConfirmed, corrected) = db.Upsert(
-                            q.callsign, q.band, q.mode, q.qsoDate, q.timeOn, q.timeOff,
-                            q.freqHz, q.rstSent, q.rstRcvd, q.state, q.country,
-                            q.dxcc, q.cqZone, q.grid, q.name, q.comment, q.txPwr,
-                            q.operatorCall, q.stationCall, q.myGrid,
-                            q.lotwQslSent, q.lotwQslRcvd, q.qrzQslSent, q.qrzQslRcvd,
-                            source, q.sourceQsoId, q.dedupKey,
-                            q.continent, q.ituZone, q.county, q.iota,
-                            q.sig, q.sigInfo, q.mySig, q.mySigInfo,
-                            q.darcDok, q.wpxPrefix, q.exchangeSent, q.exchangeRcvd);
-
-                        // Nexus contesting foundation, phase 2: preserve whatever this record's
-                        // raw fields didn't map onto a modeled column -- a real (if usually
-                        // empty) row lookup by dedup_key, not a guess, so extras always land on
-                        // the correct qso id even when Upsert corrected an existing row rather
-                        // than inserting a new one.
-                        if (raw.Ordered != null && raw.Ordered.Count > 0)
+                        var extras = AdifExtraFields.ExtractUnmodeled(raw.Ordered);
+                        if (extras.Count > 0)
                         {
-                            var extras = AdifExtraFields.ExtractUnmodeled(raw.Ordered);
-                            if (extras.Count > 0)
-                            {
-                                var qsoId = db.GetIdByDedupKey(q.dedupKey);
-                                if (qsoId.HasValue) db.SaveExtraFields(qsoId.Value, extras);
-                            }
+                            var qsoId = db.GetIdByDedupKey(q.dedupKey);
+                            if (qsoId.HasValue) db.SaveExtraFields(qsoId.Value, extras);
                         }
-
-                        if (isNew)
-                        {
-                            result.NewQsos++;
-                        }
-                        else
-                        {
-                            if (newlyConfirmed) result.NewlyConfirmed++;
-                            if (corrected)       result.Corrected++;
-                            if (!newlyConfirmed && !corrected) result.Skipped++;
-                        }
-
-                        result.Processed++;
-
-                        batchSize++;
-                        if (batchSize >= 500)
-                        {
-                            tx.Commit();
-                            tx.Dispose();
-                            tx = db.BeginTransaction();
-                            batchSize = 0;
-                        }
-
-                        progressCallback?.Invoke(result.Processed);
                     }
-                    catch (Exception ex)
+
+                    if (isNew)
                     {
-                        result.Processed++;
-                        result.Skipped++;
-                        if (errors.Length < 2000)
-                            errors.AppendLine(ex.Message);
+                        result.NewQsos++;
                     }
+                    else
+                    {
+                        if (newlyConfirmed) result.NewlyConfirmed++;
+                        if (corrected)       result.Corrected++;
+                        if (!newlyConfirmed && !corrected) result.Skipped++;
+                    }
+
+                    result.Processed++;
+                    progressCallback?.Invoke(result.Processed);
                 }
-
-                tx.Commit();
-            }
-            catch
-            {
-                try { tx.Rollback(); } catch { }
-                throw;
-            }
-            finally
-            {
-                tx.Dispose();
-            }
+                catch (Exception ex)
+                {
+                    result.Processed++;
+                    result.Skipped++;
+                    if (errors.Length < 2000)
+                        errors.AppendLine(ex.Message);
+                }
+            });
 
             result.Errors = errors.ToString().Trim();
             return result;

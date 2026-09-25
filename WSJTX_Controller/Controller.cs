@@ -3248,7 +3248,9 @@ namespace WSJTX_Controller
         {
             try
             {
-                using (var db = new LogbookDb())
+                // Nexus contesting foundation, phase 2 (completed): ILogbookService, not
+                // LogbookDb -- BackfillMissingStates/SetMeta are both on the interface.
+                using (ILogbookService db = new LogbookDb())
                 {
                     int fixedCount = db.BackfillMissingStates(call => lookupManager?.Build(call)?.State);
                     if (fixedCount > 0)

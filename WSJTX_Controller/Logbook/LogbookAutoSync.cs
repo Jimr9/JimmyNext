@@ -85,7 +85,7 @@ namespace WSJTX_Controller
             _mainStatus("Syncing logbooks in the background…");
             bool anyError = false;
 
-            LogbookDb db = null;
+            ILogbookService db = null;
             try
             {
                 db = new LogbookDb();
@@ -109,7 +109,7 @@ namespace WSJTX_Controller
                 : "Logbook sync complete.");
         }
 
-        private async Task<bool> SyncQrzAsync(LogbookDb db)
+        private async Task<bool> SyncQrzAsync(ILogbookService db)
         {
             _logbookWindowStatus("Auto-sync: fetching QRZ Logbook…");
             var client = new QrzLogbookClient();
@@ -122,7 +122,7 @@ namespace WSJTX_Controller
             return ImportAndReport(db, adif, "QRZ", "LogbookLastQrzRefresh");
         }
 
-        private async Task<bool> SyncLotwAsync(LogbookDb db)
+        private async Task<bool> SyncLotwAsync(ILogbookService db)
         {
             _logbookWindowStatus("Auto-sync: fetching LoTW Logbook…");
             var client = new LoTWQsoClient();
@@ -146,7 +146,7 @@ namespace WSJTX_Controller
             return ImportAndReport(db, adif1 + "\r\n" + adif2, "LOTW", "LogbookLastLoTWRefresh");
         }
 
-        private async Task<bool> SyncClubLogAsync(LogbookDb db)
+        private async Task<bool> SyncClubLogAsync(ILogbookService db)
         {
             _logbookWindowStatus("Auto-sync: fetching Club Log…");
             var client = new ClubLogUploadClient();
@@ -159,7 +159,7 @@ namespace WSJTX_Controller
             return ImportAndReport(db, adif, "CLUBLOG", "LogbookLastClubLogRefresh");
         }
 
-        private bool ImportAndReport(LogbookDb db, string adifText, string source, string lastRefreshIniKey)
+        private bool ImportAndReport(ILogbookService db, string adifText, string source, string lastRefreshIniKey)
         {
             int logId = db.LogImportStart(source);
             var result = AdifImporter.Import(db, AdifParser.ParseWithOrder(adifText), source, null, _resolveUsState);

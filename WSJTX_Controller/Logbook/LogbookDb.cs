@@ -1642,9 +1642,45 @@ WHERE id=@id;";
             return result;
         }
 
-        // ── Transactions (for batch imports) ──────────────────────────────────────
+        // ── Batch operations (storage-neutral -- ILogbookService.RunBatch) ─────────
 
-        public SQLiteTransaction BeginTransaction() => _conn.BeginTransaction();
+        // Nexus contesting foundation, phase 2 (completed): the domain-level replacement for the
+        // old public BeginTransaction()/SQLiteTransaction pair AdifImporter.Import used to manage
+        // itself. SQLite transaction/chunking details stay entirely internal here -- callers
+        // (AdifImporter.Import, and any future bulk operation) get an atomic-per-chunk batch
+        // without ever seeing a SQLiteTransaction, so the storage-neutral interface never leaks
+        // that primitive. Same chunk size (500) and rollback-on-exception behavior as the code
+        // this replaces -- a pure refactor, not a behavior change.
+        public void RunBatch<T>(IEnumerable<T> items, Action<T> perItemAction)
+        {
+            int batchSize = 0;
+            SQLiteTransaction tx = _conn.BeginTransaction();
+            try
+            {
+                foreach (var item in items)
+                {
+                    perItemAction(item);
+                    batchSize++;
+                    if (batchSize >= 500)
+                    {
+                        tx.Commit();
+                        tx.Dispose();
+                        tx = _conn.BeginTransaction();
+                        batchSize = 0;
+                    }
+                }
+                tx.Commit();
+            }
+            catch
+            {
+                try { tx.Rollback(); } catch { }
+                throw;
+            }
+            finally
+            {
+                tx.Dispose();
+            }
+        }
 
         // ── Helpers ───────────────────────────────────────────────────────────────
 
