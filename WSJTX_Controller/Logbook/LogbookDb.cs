@@ -1516,6 +1516,26 @@ WHERE id=@id;";
             }
         }
 
+        // Nexus contesting foundation, phase 4: stamps which contest/session a row belongs to.
+        // A separate follow-up call rather than two more Upsert parameters -- contest
+        // association only ever applies to NEXUS_CONTEST-sourced rows, a small subset of every
+        // upsert caller, and Upsert's signature is already large enough that a narrowly-scoped
+        // setter is the smaller, safer diff.
+        public void SetContestAssociation(long qsoId, string contestId, string contestSessionId)
+        {
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = "UPDATE qso SET contest_id=@cid, contest_session_id=@csid WHERE id=@id;";
+                    cmd.Parameters.AddWithValue("@cid", contestId ?? "");
+                    cmd.Parameters.AddWithValue("@csid", contestSessionId ?? "");
+                    cmd.Parameters.AddWithValue("@id", qsoId);
+                    cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
         // Returns full-fidelity ADIF field dictionaries (every stored column, not just
         // the Edit Log tab's display subset) for export. ids null/empty exports every QSO.
         // sources null/empty applies no source filter; otherwise only rows whose "source"

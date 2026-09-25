@@ -69,6 +69,10 @@ namespace WSJTX_Controller
         List<(string Tag, string Value)> GetExtraFields(long qsoId);
         long? GetIdByDedupKey(string dedupKey);
 
+        // Nexus contesting foundation, phase 4: contest_id/contest_session_id association
+        // (schema v10) -- used by ContestWorkflow's completed-QSO delivery.
+        void SetContestAssociation(long qsoId, string contestId, string contestSessionId);
+
         // Storage-neutral bulk-import primitive: runs perItemAction once per item, batching the
         // implementation's own underlying commits for performance. Deliberately does NOT expose
         // a transaction object, a commit/rollback method, or any other SQLite-specific
@@ -84,9 +88,11 @@ namespace WSJTX_Controller
         bool HasWorkedDxcc(int dxcc, string band = null);
 
         // Startup state-backfill repair (Controller.BackfillMissingStates) and the generic
-        // key/value meta store it records completion in.
+        // key/value meta store it records completion in. Also used by ContestWorkflow for its
+        // own per-session reconciliation watermark (phase 4).
         int BackfillMissingStates(Func<string, string> resolveState);
         void SetMeta(string key, string value);
+        string GetMeta(string key);
 
         // Per-service outbound upload tracking (QRZ/Club Log/HRDLog/LoTW-via-TQSL catch-up and
         // real-time upload paths). PendingUploadQso stays nested on LogbookDb rather than moved

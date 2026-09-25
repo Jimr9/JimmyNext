@@ -584,6 +584,10 @@ static class JimmyTests
         AdifExtraFieldsRoundTripTests();
         AdifImporterExtraFieldsIntegrationTests();
         NexusContestIdempotencyIndexTests();
+        ContestWorkflowIdempotentDeliveryTests();
+        ContestWorkflowLostAckRedeliveryTests();
+        ContestWorkflowReconnectReconciliationTests();
+        ContestWorkflowNormalApplicationTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -25189,6 +25193,185 @@ static class JimmyTests
                 }
                 catch (System.Data.SQLite.SQLiteException) { threw2 = true; }
                 Check("A different sequence under the same session id is accepted", threw2, false);
+            }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    // ── Nexus contesting foundation, phase 4/9: ContestWorkflow reliability ────────────────────
+
+    // Minimal CONTEST_QSOS_SINCE JSON for one completion, matching ContestCompletion's own
+    // camelCase shape exactly (contest_bridge.rs's CompletionWire).
+    static string OneCompletionJson(string sessionInstanceId, ulong seq, string call, string band,
+        ulong whenUnix, string classVal, string sectionVal)
+    {
+        return "OK [{" +
+            $"\"sessionInstanceId\":\"{sessionInstanceId}\",\"seq\":{seq},\"call\":\"{call}\"," +
+            $"\"band\":\"{band}\",\"mode\":\"FT8\",\"submode\":\"\",\"whenUnix\":{whenUnix}," +
+            $"\"sentFields\":[[\"CLASS\",\"{classVal}\"],[\"SECTION\",\"{sectionVal}\"]]," +
+            $"\"rcvdFields\":[[\"CLASS\",\"1B\"],[\"SECTION\",\"CT\"]]" +
+            "}]";
+    }
+
+    static ContestWorkflow NewTestWorkflow(string dbPath, out System.Collections.Generic.List<string> seenCommands, Func<string, string> respond)
+    {
+        var seen = new System.Collections.Generic.List<string>();
+        var seenLocal = seen;
+        var stub = new StubEngineHost(line => { lock (seenLocal) seenLocal.Add(line); return respond(line); });
+        ContestClient.TestControlPortOverride = stub.Port;
+        seenCommands = seen;
+        var client = new ContestClient();
+        var wf = new ContestWorkflow(client, () => dbPath, () => "K5KPE", () => "EM48", () => "K5KPE");
+        wf.OnSessionEntered("test-sess-1", "arrlfd", "ARRL-FIELD-DAY");
+        return wf;
+    }
+
+    static void ContestWorkflowIdempotentDeliveryTests()
+    {
+        Console.WriteLine("\n── ContestWorkflow: idempotent delivery (redelivery of the same completion never duplicates) ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestIdempotent_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            // Every CONTEST_QSOS_SINCE call (regardless of afterSeq) returns the SAME single
+            // completion -- simulates EngineHost never having learned the ack succeeded
+            // (a lost ack, or Jimmy calling ack but the packet never arriving).
+            string json = OneCompletionJson("test-sess-1", 1, "W1AW", "20m", 1_700_000_000, "2A", "MO");
+            var wf = NewTestWorkflow(tmpDb, out var seen, line =>
+                line.StartsWith("CONTEST_QSOS_SINCE") ? json : "OK");
+
+            int applied1 = wf.PollAndReconcile();
+            int applied2 = wf.PollAndReconcile();
+            int applied3 = wf.PollAndReconcile();
+            Check("First poll applies the completion", applied1 == 1, true);
+            Check("Second poll (redelivered) still reports applying it (idempotent write, not skipped)", applied2 == 1, true);
+            Check("Third poll (redelivered again) still applies without error", applied3 == 1, true);
+
+            using (var db = new LogbookDb(tmpDb))
+            {
+                var rows = QueryAllWithCallsign(tmpDb, "W1AW");
+                Check("Exactly ONE row exists after three redeliveries of the same completion", rows == 1, true);
+            }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    static int QueryAllWithCallsign(string dbPath, string call)
+    {
+        using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={dbPath};"))
+        {
+            conn.Open();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT COUNT(*) FROM qso WHERE callsign=@c;";
+                cmd.Parameters.AddWithValue("@c", call);
+                return Convert.ToInt32(cmd.ExecuteScalar());
+            }
+        }
+    }
+
+    static void ContestWorkflowLostAckRedeliveryTests()
+    {
+        Console.WriteLine("\n── ContestWorkflow: a lost CONTEST_QSO_ACK never causes a duplicate or a lost contact ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestLostAck_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            int ackCount = 0;
+            string json = OneCompletionJson("test-sess-1", 7, "K1ABC", "40m", 1_700_000_100, "1B", "EMA");
+            var wf = NewTestWorkflow(tmpDb, out var seen, line =>
+            {
+                if (line.StartsWith("CONTEST_QSO_ACK"))
+                {
+                    ackCount++;
+                    // Simulate the ack itself being lost -- EngineHost never actually applies
+                    // it (the stub just doesn't change what QSOS_SINCE returns next).
+                    return "OK";
+                }
+                return line.StartsWith("CONTEST_QSOS_SINCE") ? json : "OK";
+            });
+
+            wf.PollAndReconcile();
+            wf.PollAndReconcile();
+            Check("Ack was sent both times (Jimmy's own commit succeeded both times)", ackCount == 2, true);
+            Check("Exactly one row despite the ack never taking effect on EngineHost's side",
+                QueryAllWithCallsign(tmpDb, "K1ABC") == 1, true);
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    static void ContestWorkflowReconnectReconciliationTests()
+    {
+        Console.WriteLine("\n── ContestWorkflow: reconnect/restart reconciliation resumes from the persisted watermark ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestReconnect_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            string json1 = OneCompletionJson("test-sess-1", 1, "W1AW", "20m", 1_700_000_000, "2A", "MO");
+            var wf1 = NewTestWorkflow(tmpDb, out var seen1, line =>
+                line.StartsWith("CONTEST_QSOS_SINCE") ? json1 : "OK");
+            wf1.PollAndReconcile();
+            Check("Setup: first session logs its one contact", QueryAllWithCallsign(tmpDb, "W1AW") == 1, true);
+
+            // Simulate a Jimmy restart: a BRAND NEW ContestWorkflow instance (no in-memory state
+            // carried over), same db path, same session-instance id (as if EngineHost restored
+            // it from its own sidecar and Jimmy reconnected to the same still-active session).
+            // Only a seq-2 completion is offered this time (representing "what's actually new").
+            var seenCommands2 = new System.Collections.Generic.List<string>();
+            ulong[] lastAfterSeq = { ulong.MaxValue };
+            string json2 = OneCompletionJson("test-sess-1", 2, "K1ABC", "40m", 1_700_000_200, "1B", "EMA");
+            var stub2 = new StubEngineHost(line =>
+            {
+                lock (seenCommands2) seenCommands2.Add(line);
+                if (line.StartsWith("CONTEST_QSOS_SINCE "))
+                {
+                    ulong.TryParse(line.Substring("CONTEST_QSOS_SINCE ".Length).Trim(), out lastAfterSeq[0]);
+                    return json2;
+                }
+                return "OK";
+            });
+            ContestClient.TestControlPortOverride = stub2.Port;
+            var wf2 = new ContestWorkflow(new ContestClient(), () => tmpDb, () => "K5KPE", () => "EM48", () => "K5KPE");
+            wf2.OnSessionEntered("test-sess-1", "arrlfd", "ARRL-FIELD-DAY");
+            wf2.PollAndReconcile();
+
+            Check("Reconnected workflow asked EngineHost for completions AFTER seq 1 (the persisted watermark), not from 0",
+                lastAfterSeq[0] == 1UL, true);
+            Check("The seq-1 contact from before the restart is still present (not lost)",
+                QueryAllWithCallsign(tmpDb, "W1AW") == 1, true);
+            Check("The seq-2 contact delivered after reconnect is applied",
+                QueryAllWithCallsign(tmpDb, "K1ABC") == 1, true);
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    static void ContestWorkflowNormalApplicationTests()
+    {
+        Console.WriteLine("\n── ContestWorkflow: normal application sets contest association and exchange fields ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestNormal_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            string json = OneCompletionJson("test-sess-1", 42, "N9XYZ", "15m", 1_700_000_500, "3A", "STL");
+            var wf = NewTestWorkflow(tmpDb, out var seen, line =>
+                line.StartsWith("CONTEST_QSOS_SINCE") ? json : "OK");
+            int applied = wf.PollAndReconcile();
+            Check("Applies exactly one completion", applied == 1, true);
+
+            using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={tmpDb};"))
+            {
+                conn.Open();
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT source, contest_id, contest_session_id, exchange_sent, exchange_rcvd, station_call, operator_call FROM qso WHERE callsign='N9XYZ';";
+                    using (var r = cmd.ExecuteReader())
+                    {
+                        Check("Row exists", r.Read(), true);
+                        CheckStr("source is NEXUS_CONTEST", r.GetString(0), "NEXUS_CONTEST");
+                        CheckStr("contest_id is set", r.GetString(1), "ARRL-FIELD-DAY");
+                        CheckStr("contest_session_id is the session-instance id", r.GetString(2), "test-sess-1");
+                        CheckStr("exchange_sent is the space-joined sent field values", r.GetString(3), "3A STL");
+                        CheckStr("exchange_rcvd is the space-joined received field values", r.GetString(4), "1B CT");
+                        CheckStr("station_call is Jimmy's own station callsign", r.GetString(5), "K5KPE");
+                        CheckStr("operator_call defaults to station callsign when unset", r.GetString(6), "K5KPE");
+                    }
+                }
             }
         }
         finally { try { File.Delete(tmpDb); } catch { } }
