@@ -578,6 +578,29 @@ impl ContestBridge {
         Ok(())
     }
 
+    /// CONTEST_LOG_MANUAL (phase 8): the general manual contest-QSO workflow's entry point into
+    /// Nexus's own validation/duplicate-checking, for a contact the operator made by some means
+    /// this bridge doesn't control (voice, CW, another rig, or FT8/FT4 typed by hand). Calls
+    /// Engine::contest_log_manual -- Nexus's own real manual-entry function (the same one a
+    /// contest entry line in its own UI uses), never a Jimmy-side reimplementation of dupe
+    /// logic. Requires an active session (Mode::FieldDay) -- manual logging for a Nexus-known
+    /// contest still runs through Nexus's live session context, per the accepted design.
+    /// Returns Ok(true) logged, Ok(false) refused as a duplicate (Nexus's own DupeRule, not a
+    /// Jimmy-side guess) -- both are legitimate outcomes the caller must distinguish, not errors.
+    pub fn log_manual(
+        &self,
+        engine: &mut Engine,
+        call: &str,
+        fields: &[(String, String)],
+        mode: &str,
+        submode: &str,
+    ) -> Result<bool, String> {
+        if self.active.is_none() {
+            return Err("no contest session is active -- CONTEST_ENTER first".to_string());
+        }
+        engine.contest_log_manual(call, fields, mode, if submode.is_empty() { None } else { Some(submode) })
+    }
+
     pub fn active_session_instance_id(&self) -> Option<&str> {
         self.active.as_ref().map(|a| a.session_instance_id.as_str())
     }

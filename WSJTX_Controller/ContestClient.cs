@@ -174,6 +174,29 @@ namespace WSJTX_Controller
             return error == null;
         }
 
+        // Nexus contesting foundation, phase 8: the general manual contest-QSO workflow's entry
+        // point into Nexus's own validation/dupe-checking (Engine::contest_log_manual). Returns
+        // true if logged, false if Nexus's own DupeRule refused it as a duplicate -- both are
+        // legitimate outcomes, not failures; error is set only for a real problem (no active
+        // session, bad args, no response).
+        public bool LogManual(string call, List<List<string>> fields, string mode, string submode, out string error)
+        {
+            var args = new { call, fields, mode, submode = submode ?? "" };
+            string json = JsonSerializer.Serialize(args, JsonOptions);
+            string resultJson = ParseOkOrError(SendCommand("CONTEST_LOG_MANUAL " + json, TimeoutMs), out error);
+            if (resultJson == null) return false;
+            try
+            {
+                using (var doc = JsonDocument.Parse(resultJson))
+                    return doc.RootElement.GetProperty("logged").GetBoolean();
+            }
+            catch (Exception ex)
+            {
+                error = $"Could not parse CONTEST_LOG_MANUAL response: {ex.Message}";
+                return false;
+            }
+        }
+
         public List<ContestCompletion> QsosSince(ulong afterSeq, out string error)
         {
             string resultJson = ParseOkOrError(SendCommand("CONTEST_QSOS_SINCE " + afterSeq, TimeoutMs), out error);

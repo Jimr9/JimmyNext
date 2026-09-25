@@ -116,6 +116,7 @@ namespace WSJTX_Controller
                 new Item(HotkeyAction.OpenLogbook,         "Open the Ham Radio Center logbook."),
                 new Item(HotkeyAction.AddManualQso,        "Add a manually-logged QSO (worked on another mode or rig)."),
                 new Item(HotkeyAction.OpenOtaSpots,        "Open POTA / SOTA spots, DX spots, band conditions, and space weather."),
+                new Item(HotkeyAction.OpenContesting,      "Open the Contesting workspace (select a contest, enter/exit a session, manual contest logging)."),
                 new Item(HotkeyAction.UpdateCheck,         "Check for a program update."),
                 new Item(HotkeyAction.ResetWindowSize,     "Reset the window size and position to default."),
                 new Item(HotkeyAction.Help,                "Read this list of shortcut keys."),

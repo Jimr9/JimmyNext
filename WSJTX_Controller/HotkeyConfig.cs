@@ -49,6 +49,8 @@ namespace WSJTX_Controller
         OpenLogbook,
         AddManualQso,
         OpenOtaSpots,
+        // Nexus contesting foundation, phase 6.
+        OpenContesting,
         ResetWindowSize,
         // Accessibility Navigation
         NavStatus,
@@ -145,6 +147,9 @@ namespace WSJTX_Controller
             [HotkeyAction.OpenLogbook]     = Keys.None,
             [HotkeyAction.AddManualQso]    = Keys.None,
             [HotkeyAction.OpenOtaSpots]    = Keys.Alt | Keys.G,
+            // Unbound by default (same as OpenLogbook/AddManualQso) -- no free default combo
+            // identified without risking a conflict; the operator binds it via Options > Hotkeys.
+            [HotkeyAction.OpenContesting]  = Keys.None,
             [HotkeyAction.ResetWindowSize] = Keys.Control | Keys.Shift | Keys.R,
             [HotkeyAction.NavStatus]       = Keys.Control | Keys.S,
             [HotkeyAction.NavCallList]     = Keys.Control | Keys.W,
@@ -209,6 +214,7 @@ namespace WSJTX_Controller
             [HotkeyAction.OpenLogbook]     = "Open Ham Radio Center Logbook",
             [HotkeyAction.AddManualQso]    = "Add Manual QSO to Logbook",
             [HotkeyAction.OpenOtaSpots]    = "Open POTA / SOTA / DX Spots",
+            [HotkeyAction.OpenContesting]  = "Open Contesting",
             [HotkeyAction.ResetWindowSize] = "Reset Window Size to Default",
             [HotkeyAction.NavStatus]       = "Focus Status Area",
             [HotkeyAction.NavCallList]     = "Focus Available Stations List",
@@ -235,6 +241,7 @@ namespace WSJTX_Controller
             HotkeyAction.OpenLogbook,
             HotkeyAction.AddManualQso,
             HotkeyAction.OpenOtaSpots,
+            HotkeyAction.OpenContesting,
             HotkeyAction.CallCqOptions,
             HotkeyAction.NavAdvTx1,
             HotkeyAction.NavAdvTx2,

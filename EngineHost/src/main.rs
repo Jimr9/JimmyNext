@@ -1299,6 +1299,27 @@ fn handle_control_connection(
                 }
                 Err(e) => { let _ = writeln!(stream, "ERR bad CONTEST_ENTER args: {e}"); }
             }
+        } else if let Some(json) = line.strip_prefix("CONTEST_LOG_MANUAL ") {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct LogManualArgs {
+                call: String,
+                fields: Vec<(String, String)>,
+                mode: String,
+                #[serde(default)]
+                submode: String,
+            }
+            match serde_json::from_str::<LogManualArgs>(json) {
+                Ok(args) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());
+                    match bridge.log_manual(&mut eng, &args.call, &args.fields, &args.mode, &args.submode) {
+                        Ok(logged) => { let _ = writeln!(stream, "OK {{\"logged\":{logged}}}"); }
+                        Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+                    }
+                }
+                Err(e) => { let _ = writeln!(stream, "ERR bad CONTEST_LOG_MANUAL args: {e}"); }
+            }
         } else if line == "CONTEST_EXIT" {
             let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
             let mut bridge = contest_bridge_state.lock().unwrap_or_else(|e| e.into_inner());

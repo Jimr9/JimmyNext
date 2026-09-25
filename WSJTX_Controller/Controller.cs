@@ -287,6 +287,15 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Button otaSpotsButton;
         public System.Windows.Forms.Button callCqOptionsButton;
 
+        // Nexus contesting foundation, phase 6/7. ContestWorkflow's reconciliation runs on its
+        // own persistent timer, independent of whether ContestingWindow is open -- same "keep
+        // running regardless of the window" precedent as OtaSpotsWindow's own live feeds (see
+        // ARCHITECTURE.md's Alt+G section) -- so a completed contact is never delayed just
+        // because the operator closed the workspace window to focus on Operate.
+        private ContestingWindow _contestingWindow;
+        public ContestWorkflow contestWorkflow;
+        private System.Windows.Forms.Timer contestPollTimer;
+
         // Ids of the Rule Definitions checked for live FT8 tagging in the Logbook window's
         // Still Need tab, persisted so tagging survives across sessions and works even before
         // the Logbook window has been opened. Empty = none actively tracked. Several awards
@@ -412,6 +421,21 @@ namespace WSJTX_Controller
             _txLevelPersistTimer = new System.Windows.Forms.Timer();
             _txLevelPersistTimer.Interval = 750;
             _txLevelPersistTimer.Tick += new System.EventHandler(txLevelPersistTimer_Tick);
+
+            // Nexus contesting foundation, phase 6/7: reconciliation runs on its own persistent
+            // timer, independent of whether ContestingWindow is open (see that field's own
+            // comment). 2000ms -- fast enough that delivery reads as prompt to an operator, cheap
+            // enough (an in-memory EngineHost read, same cost class as SNAPSHOT) to poll even
+            // when idle. PollAndReconcile itself is a no-op whenever no session is active.
+            contestWorkflow = new ContestWorkflow(
+                new ContestClient(),
+                () => LogbookDb.DbPath,
+                () => NativeEngine.MyCall,
+                () => NativeEngine.MyGrid,
+                () => Station.OperatorCallsign);
+            contestPollTimer = new System.Windows.Forms.Timer { Interval = 2000 };
+            contestPollTimer.Tick += (s, e) => contestWorkflow.PollAndReconcile();
+            contestPollTimer.Start();
         }
 
 #if DEBUG
@@ -2161,6 +2185,8 @@ namespace WSJTX_Controller
             _logbookWindow?.Close();
             _otaSpotsWindow?.Close();
             _notificationHistoryWindow?.Close();
+            contestPollTimer?.Stop();
+            _contestingWindow?.Close();
         }
 
         public void SaveHotkeyConfig()
@@ -2621,6 +2647,14 @@ namespace WSJTX_Controller
             if (keyData == hotkeyConfig[HotkeyAction.OpenOtaSpots] && hotkeyConfig[HotkeyAction.OpenOtaSpots] != Keys.None)
             {
                 OpenOtaSpotsWindow();
+                return true;
+            }
+
+            // Nexus contesting foundation, phase 6. Self-contained session window, same
+            // independent-of-WSJT-X-connection reasoning as OpenLogbook/OpenOtaSpots above.
+            if (keyData == hotkeyConfig[HotkeyAction.OpenContesting] && hotkeyConfig[HotkeyAction.OpenContesting] != Keys.None)
+            {
+                OpenContestingWindow();
                 return true;
             }
 
@@ -3404,6 +3438,35 @@ namespace WSJTX_Controller
                 MessageBox.Show(
                     ex.GetType().Name + ": " + ex.Message + "\r\n\r\n" + ex.StackTrace,
                     "POTA / SOTA / DX Spots Error",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+        }
+
+        // Nexus contesting foundation, phase 6.
+        public void OpenContestingWindow()
+        {
+            if (_contestingWindow != null && !_contestingWindow.IsDisposed)
+            {
+                _contestingWindow.Activate();
+                return;
+            }
+            try
+            {
+                _contestingWindow = new ContestingWindow(
+                    () => LogbookDb.DbPath,
+                    () => NativeEngine.MyCall, () => NativeEngine.MyGrid,
+                    () => Station.OperatorCallsign,
+                    () => contestWorkflow, () => Station);
+                _contestingWindow.FormClosed += (s, e) => _contestingWindow = null;
+                _contestingWindow.Show();
+            }
+            catch (Exception ex)
+            {
+                _contestingWindow = null;
+                MessageBox.Show(
+                    ex.GetType().Name + ": " + ex.Message + "\r\n\r\n" + ex.StackTrace,
+                    "Contesting Error",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
             }
