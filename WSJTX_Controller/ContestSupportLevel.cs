@@ -46,7 +46,8 @@ namespace WSJTX_Controller
         }
 
         // Single, short, screen-reader-friendly label -- the ONE accessible surface a support
-        // level is ever announced through (see ContestingWindow's own accessibility comment).
+        // level is ever announced through (see LogbookWindow.Contesting.cs's own accessibility
+        // comment, the Contesting tab that used to be the standalone ContestingWindow).
         public static string Label(ContestSupportLevel level)
         {
             switch (level)

@@ -71,6 +71,15 @@ namespace WSJTX_Controller
                         AddTextEntry(zip, "jimmy_settings_redacted.ini", redacted);
                     }
 
+                    // Nexus contesting foundation: the profile's companion contest ini (saved
+                    // per-contest entry defaults -- class, section, run style) beside the main
+                    // settings file. Holds no credentials, so it's attached as-is, not redacted.
+                    string contestIniPath = ContestConfigStore.CompanionPathFor(iniPath);
+                    if (!string.IsNullOrEmpty(contestIniPath) && File.Exists(contestIniPath))
+                    {
+                        AddTextEntry(zip, "jimmy_settings_contests.ini", File.ReadAllText(contestIniPath));
+                    }
+
                     // Only create ZIP entries for files that were successfully read.
                     // This prevents 0-byte ghost entries when a read fails.
                     foreach (var lr in logResults)
@@ -269,6 +278,9 @@ namespace WSJTX_Controller
                 sb.AppendLine($"Settings last modified: {Safe(() => File.GetLastWriteTime(iniPath).ToString("yyyy-MM-dd HH:mm:ss"))}");
                 sb.AppendLine($"Settings file size:    {Safe(() => new FileInfo(iniPath).Length + " bytes")}");
                 sb.AppendLine("(Redacted copy included as jimmy_settings_redacted.ini in the ZIP)");
+                string contestIniPath = ContestConfigStore.CompanionPathFor(iniPath);
+                if (!string.IsNullOrEmpty(contestIniPath) && File.Exists(contestIniPath))
+                    sb.AppendLine("(Companion contest settings included as jimmy_settings_contests.ini in the ZIP)");
             }
             else
             {

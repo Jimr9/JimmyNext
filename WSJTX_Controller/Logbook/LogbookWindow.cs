@@ -10,7 +10,13 @@ namespace WSJTX_Controller
 {
     // Non-modal Ham Radio Center / Logbook window.
     // Open via Controller.OpenLogbookWindow() — singleton (one instance at a time).
-    public class LogbookWindow : Form
+    //
+    // partial: the Contesting tab's own controls/logic live in LogbookWindow.Contesting.cs --
+    // ported from the former standalone ContestingWindow (see that file's own removal note) so
+    // an operator running a contest has it inside the same accessible workspace as their log,
+    // instead of a second top-level window. Split into its own file, not inlined here, purely to
+    // keep this already-large file's diff to what this change actually touches.
+    public partial class LogbookWindow : Form
     {
         // ── Dependencies ──────────────────────────────────────────────────────────
         // Credentials are read live (via these delegates), not snapshotted once at
@@ -45,6 +51,13 @@ namespace WSJTX_Controller
         // on each successful manual Add -- audible confirmation with no focus movement, so a
         // contest operator's focus can stay on the Callsign field between contacts.
         private readonly Action _onQsoLogged;
+
+        // ── Contesting tab dependencies (LogbookWindow.Contesting.cs) ───────────────
+        private readonly Func<string> _contestMyCall;
+        private readonly Func<string> _contestMyGrid;
+        private readonly Func<string> _contestOperatorCall;
+        private readonly Func<ContestWorkflow> _contestWorkflowFn;
+        private readonly Func<StationSettings> _contestStationFn;
 
         // ── Database ──────────────────────────────────────────────────────────────
         // Nexus contesting foundation, boundary-completion pass: ILogbookService, not LogbookDb
@@ -151,6 +164,7 @@ namespace WSJTX_Controller
         private const int PAGE_LOOKUP    = 3;
         private const int PAGE_EDITLOG   = 4;
         private const int PAGE_SYNC      = 5;
+        private const int PAGE_CONTESTING = 6;
 
         private static readonly string[] AllBands =
         {
@@ -170,7 +184,16 @@ namespace WSJTX_Controller
             Func<string> currentBand = null,
             Func<string> currentMode = null,
             Func<string, LookupRecord> lookupCallsign = null,
-            Action onQsoLogged = null)
+            Action onQsoLogged = null,
+            // Nexus contesting foundation: the Contesting tab's own dependencies (formerly
+            // ContestingWindow's constructor parameters). Read live, same reasoning as every
+            // other Func above -- e.g. Options→Station & Operator edits made while this window
+            // is already open take effect on the next contest entry without a reopen.
+            Func<string> contestMyCall = null,
+            Func<string> contestMyGrid = null,
+            Func<string> contestOperatorCall = null,
+            Func<ContestWorkflow> contestWorkflow = null,
+            Func<StationSettings> contestStation = null)
         {
             _ini              = ini;
             _qrzApiKey        = qrzApiKey        ?? (() => "");
@@ -190,6 +213,11 @@ namespace WSJTX_Controller
             _currentMode           = currentMode            ?? (() => null);
             _lookupCallsign        = lookupCallsign         ?? (call => null);
             _onQsoLogged           = onQsoLogged            ?? (() => { });
+            _contestMyCall         = contestMyCall          ?? (() => "");
+            _contestMyGrid         = contestMyGrid          ?? (() => "");
+            _contestOperatorCall   = contestOperatorCall    ?? (() => "");
+            _contestWorkflowFn     = contestWorkflow        ?? (() => null);
+            _contestStationFn      = contestStation         ?? (() => null);
 
             Text            = "Ham Radio Center — Logbook";
             MinimumSize     = new Size(720, 500);
@@ -284,9 +312,10 @@ namespace WSJTX_Controller
             BuildLookupPage(font, hfont);
             BuildEditLogPage(font, hfont);
             BuildSyncPage(font, hfont);
+            BuildContestingPage(font, hfont);
 
-            string[] tabNames  = { "My Log", "Awards", "Still Need", "Lookup", "Edit Log", "Sync" };
-            Panel[]  tabPanels = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel };
+            string[] tabNames  = { "My Log", "Awards", "Still Need", "Lookup", "Edit Log", "Sync", "Contesting" };
+            Panel[]  tabPanels = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel, _contestingPanel };
             for (int i = 0; i < tabNames.Length; i++)
             {
                 tabPanels[i].Dock    = DockStyle.Fill;
@@ -1287,7 +1316,7 @@ namespace WSJTX_Controller
 
         private void NavigateToPage(int page)
         {
-            Panel[] pages = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel };
+            Panel[] pages = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel, _contestingPanel };
             if (page >= 0 && page < pages.Length)
                 _activePage = pages[page];
 
@@ -1303,7 +1332,16 @@ namespace WSJTX_Controller
                 case PAGE_LOOKUP:    break;
                 case PAGE_EDITLOG:   break;
                 case PAGE_SYNC:      PopulateSync();   break;
+                case PAGE_CONTESTING: PopulateContesting(); break;
             }
+        }
+
+        // Nexus contesting foundation: lets Controller's Contesting hotkey (and OpenContestingWindow)
+        // open this window directly on the Contesting tab in one call, whether the window is being
+        // created fresh or already open.
+        public void ShowContestingTab()
+        {
+            NavigateToPage(PAGE_CONTESTING);
         }
 
         // Root cause (found live, 2026-09-18, via a real Form.SelectNextControl walk -- not

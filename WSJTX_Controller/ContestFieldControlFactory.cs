@@ -107,5 +107,28 @@ namespace WSJTX_Controller
                     return "";
             }
         }
+
+        // Prefills a control with a previously-saved value (ContestConfigStore's own per-contest
+        // entry defaults) -- the write-side counterpart to ReadValue above. A no-op for an empty/
+        // absent saved default (e.g. a contest entered for the first time) so a blank field is
+        // never overwritten with an empty string the operator would then have to notice and clear.
+        public static void WriteValue(Control control, string value)
+        {
+            if (string.IsNullOrEmpty(value)) return;
+            switch (control)
+            {
+                case ComboBox combo:
+                    combo.Text = value;
+                    break;
+                case NumericUpDown num:
+                    if (decimal.TryParse(value, System.Globalization.NumberStyles.Number,
+                        System.Globalization.CultureInfo.InvariantCulture, out var d))
+                        num.Value = Math.Max(num.Minimum, Math.Min(num.Maximum, d));
+                    break;
+                case TextBox tb:
+                    tb.Text = value;
+                    break;
+            }
+        }
     }
 }
