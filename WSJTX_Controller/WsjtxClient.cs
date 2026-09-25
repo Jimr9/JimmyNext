@@ -2949,13 +2949,19 @@ namespace WSJTX_Controller
 
             // Reuses the same shared builder as HandleLiveQsoLogged/HandleLiveAdifLogged (see
             // AdifRecordBuilder.cs) instead of maintaining a separate hand-rolled field list here.
-            // name/comment/tx_pwr/operator/exchange are passed empty -- WSJT-X's own
-            // QsoLoggedMessage carries those (typed into WSJT-X's own logging dialog); Jimmy's
-            // self-initiated log here has no equivalent source for them today.
+            // name/comment/tx_pwr/exchange are passed empty -- WSJT-X's own QsoLoggedMessage
+            // carries those (typed into WSJT-X's own logging dialog); Jimmy's self-initiated log
+            // here has no equivalent source for them today. operatorCall now comes from the
+            // Station & Operator profile (Nexus contesting foundation, phase 1) instead of always
+            // being blank -- defaults to Station Callsign when the operator hasn't set a distinct
+            // Operator Callsign, matching the single-operator common case.
+            string operatorCall = string.IsNullOrWhiteSpace(ctrl.Station.OperatorCallsign)
+                ? myCall
+                : ctrl.Station.OperatorCallsign.Trim().ToUpperInvariant();
             string adifRecord = AdifRecordBuilder.Build(
                 call, band, (long)(dialFrequency + txOffset), mode,
                 qsoDateOn, qsoTimeOn, qsoTimeOff, rstSent, rstRecd, grid,
-                name: "", comment: "", txPwr: "", operatorCall: "",
+                name: "", comment: "", txPwr: "", operatorCall: operatorCall,
                 stationCall: myCall, myGrid: myGrid, qsoDateOff: qsoDateOff);
 
             // Jimmy has every field needed to record this Jimmy-initiated QSO itself, so it does

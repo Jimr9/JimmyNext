@@ -294,6 +294,7 @@ namespace WSJTX_Controller
             BuildLogbookSyncTab();
             BuildLookupDataTab();
             BuildAppearanceTab();
+            BuildStationOperatorTab();
             BuildProfilesTab();
             ReparentControlsToDialog();
 
@@ -306,7 +307,7 @@ namespace WSJTX_Controller
                 basicPanel, generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
                 advUiPanel, wantedCallsPanel, spotWatchPanel, soundsPanel, radioPanel,
                 decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
-                appearancePanel, profilesPanel
+                appearancePanel, stationOperatorPanel, profilesPanel
             };
             WireCategoryList(_categoryListBox, _categoryDetailHost, categoryPanels);
 
@@ -760,6 +761,7 @@ namespace WSJTX_Controller
             SaveWantedCallsTab();
             SaveSpotWatchTab();
             SaveRadioTab();
+            SaveStationOperatorTab();
             SaveDecodeTab();
             SaveRepeatLimitTab();
             SaveFrequenciesTab();
@@ -1253,6 +1255,16 @@ namespace WSJTX_Controller
 
         private System.Windows.Forms.TextBox _engineMyCallTextBox;
         private System.Windows.Forms.TextBox _engineMyGridTextBox;
+        // Nexus contesting foundation, phase 1: Station & Operator page (BuildStationOperatorTab/
+        // SaveStationOperatorTab, StationSettings.cs).
+        private System.Windows.Forms.TextBox _stationOperatorCallTextBox;
+        private System.Windows.Forms.TextBox _stationOperatorNameTextBox;
+        private System.Windows.Forms.TextBox _stationContestEmailTextBox;
+        private System.Windows.Forms.TextBox _stationQthStateTextBox;
+        private System.Windows.Forms.TextBox _stationCountyTextBox;
+        private System.Windows.Forms.TextBox _stationArrlSectionTextBox;
+        private System.Windows.Forms.TextBox _stationCqZoneTextBox;
+        private System.Windows.Forms.TextBox _stationItuZoneTextBox;
         private System.Windows.Forms.ComboBox _engineAudioDeviceCombo;
         private System.Windows.Forms.ComboBox _engineAudioOutputDeviceCombo;
         // T13 fix, 2026-08-23: the audio input/output device combos' visible name for the
@@ -2313,48 +2325,10 @@ namespace WSJTX_Controller
             decodeEnginePanel.Controls.Add(engineInstrBox);
             y += 56;
 
-            var myCallLabel = new System.Windows.Forms.Label
-            {
-                Text = "My Call:",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left, y + 3),
-                Font = font,
-                TabStop = false,
-            };
-            decodeEnginePanel.Controls.Add(myCallLabel);
-
-            _engineMyCallTextBox = new System.Windows.Forms.TextBox
-            {
-                Text = ctrl.NativeEngine.MyCall,
-                Location = new System.Drawing.Point(left + 65, y),
-                Size = new System.Drawing.Size(100, 21),
-                TabIndex = 2,
-                Font = font,
-                AccessibleName = "My Call",
-            };
-            decodeEnginePanel.Controls.Add(_engineMyCallTextBox);
-
-            var myGridLabel = new System.Windows.Forms.Label
-            {
-                Text = "My Grid:",
-                AutoSize = true,
-                Location = new System.Drawing.Point(left + 180, y + 3),
-                Font = font,
-                TabStop = false,
-            };
-            decodeEnginePanel.Controls.Add(myGridLabel);
-
-            _engineMyGridTextBox = new System.Windows.Forms.TextBox
-            {
-                Text = ctrl.NativeEngine.MyGrid,
-                Location = new System.Drawing.Point(left + 245, y),
-                Size = new System.Drawing.Size(80, 21),
-                TabIndex = 3,
-                Font = font,
-                AccessibleName = "My Grid",
-            };
-            decodeEnginePanel.Controls.Add(_engineMyGridTextBox);
-            y += 32;
+            // My Call/My Grid moved to the new Station & Operator category (Nexus contesting
+            // foundation, phase 1) -- see BuildStationOperatorTab. _engineMyCallTextBox/
+            // _engineMyGridTextBox are unchanged field instances, just built/parented there now;
+            // SaveRadioTab() below still reads them directly and needs no change.
 
             var audioDeviceLabel = new System.Windows.Forms.Label
             {
@@ -2520,6 +2494,166 @@ namespace WSJTX_Controller
             };
             decodeEnginePanel.Controls.Add(_dxClusterAddressTextBox);
             y += 24;
+        }
+
+        // Nexus contesting foundation, phase 1: the operator's persistent station/operator/
+        // location profile. Station Callsign and Grid Locator are the SAME _engineMyCallTextBox/
+        // _engineMyGridTextBox fields BuildDecodeEngineTab used to build -- moved here, same ini
+        // keys (nativeEngineMyCall/nativeEngineMyGrid via NativeEngineSettings), same
+        // engine-relaunch behavior (SaveRadioTab's engineIdentityChanged check reads these same
+        // field instances and needs no change), same Profiles behavior (a profile is a full ini
+        // swap, unaffected by which panel currently parents the control). Only their
+        // Text/AccessibleName wording changes, to match this page's field names.
+        //
+        // Every other field here is new (StationSettings.cs) and has exactly one authoritative
+        // saved location: no other class persists these values. CqZone/ItuZone/ArrlSection/
+        // QthState/County are free text (not yet validated against Nexus's own rules/domains --
+        // that validation is Nexus's job once the contest bridge consumes these values, not
+        // Jimmy's to duplicate here).
+        private void BuildStationOperatorTab()
+        {
+            stationOperatorPanel.Controls.Clear();
+
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            int y = 8;
+            const int left = 8;
+            const int w = 640;
+            const int col2Label = 280;
+            const int col2Box = 430;
+            const int boxW = 140;
+
+            var instrBox = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true,
+                Multiline = true,
+                BorderStyle = System.Windows.Forms.BorderStyle.None,
+                BackColor = stationOperatorPanel.BackColor,
+                ForeColor = System.Drawing.SystemColors.ControlText,
+                Location = new System.Drawing.Point(left, y),
+                Size = new System.Drawing.Size(w, 40),
+                Text = "Your persistent station, operator, and location profile. Station Callsign and Grid " +
+                       "Locator drive the decode engine directly; everything else here is used by logging, " +
+                       "exports, and future contest support.",
+                TabStop = false,
+                Font = font,
+            };
+            stationOperatorPanel.Controls.Add(instrBox);
+            y += 48;
+
+            void AddRow(string label1, out System.Windows.Forms.TextBox box1, string accessibleName1, int tabIndex1,
+                        string label2, out System.Windows.Forms.TextBox box2, string accessibleName2, int tabIndex2)
+            {
+                var lbl1 = new System.Windows.Forms.Label
+                {
+                    Text = label1,
+                    AutoSize = true,
+                    Location = new System.Drawing.Point(left, y + 3),
+                    Font = font,
+                    TabStop = false,
+                };
+                stationOperatorPanel.Controls.Add(lbl1);
+                box1 = new System.Windows.Forms.TextBox
+                {
+                    Location = new System.Drawing.Point(left + 150, y),
+                    Size = new System.Drawing.Size(boxW, 21),
+                    TabIndex = tabIndex1,
+                    Font = font,
+                    AccessibleName = accessibleName1,
+                };
+                stationOperatorPanel.Controls.Add(box1);
+
+                if (label2 != null)
+                {
+                    var lbl2 = new System.Windows.Forms.Label
+                    {
+                        Text = label2,
+                        AutoSize = true,
+                        Location = new System.Drawing.Point(left + col2Label, y + 3),
+                        Font = font,
+                        TabStop = false,
+                    };
+                    stationOperatorPanel.Controls.Add(lbl2);
+                    box2 = new System.Windows.Forms.TextBox
+                    {
+                        Location = new System.Drawing.Point(left + col2Box, y),
+                        Size = new System.Drawing.Size(boxW, 21),
+                        TabIndex = tabIndex2,
+                        Font = font,
+                        AccessibleName = accessibleName2,
+                    };
+                    stationOperatorPanel.Controls.Add(box2);
+                }
+                else
+                {
+                    box2 = null;
+                }
+                y += 28;
+            }
+
+            AddRow("Station Callsign:", out _engineMyCallTextBox, "Station Callsign", 1,
+                   "Grid Locator:", out _engineMyGridTextBox, "Grid Locator", 2);
+            _engineMyCallTextBox.Text = ctrl.NativeEngine.MyCall;
+            _engineMyGridTextBox.Text = ctrl.NativeEngine.MyGrid;
+
+            AddRow("Operator Callsign:", out _stationOperatorCallTextBox, "Operator Callsign", 3,
+                   "Operator Name:", out _stationOperatorNameTextBox, "Operator Name", 4);
+            _stationOperatorCallTextBox.Text = ctrl.Station.OperatorCallsign;
+            _stationOperatorNameTextBox.Text = ctrl.Station.OperatorName;
+
+            var emailLabel = new System.Windows.Forms.Label
+            {
+                Text = "Contest-Log Email:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            stationOperatorPanel.Controls.Add(emailLabel);
+            _stationContestEmailTextBox = new System.Windows.Forms.TextBox
+            {
+                Text = ctrl.Station.ContestEmail,
+                Location = new System.Drawing.Point(left + 150, y),
+                Size = new System.Drawing.Size(300, 21),
+                TabIndex = 5,
+                Font = font,
+                AccessibleName = "Contest-Log Email",
+            };
+            stationOperatorPanel.Controls.Add(_stationContestEmailTextBox);
+            y += 28;
+
+            AddRow("State/Province:", out _stationQthStateTextBox, "State/Province", 6,
+                   "County:", out _stationCountyTextBox, "County", 7);
+            _stationQthStateTextBox.Text = ctrl.Station.QthState;
+            _stationCountyTextBox.Text = ctrl.Station.County;
+
+            AddRow("ARRL/RAC Section:", out _stationArrlSectionTextBox, "ARRL/RAC Section", 8,
+                   "CQ Zone:", out _stationCqZoneTextBox, "CQ Zone", 9);
+            _stationArrlSectionTextBox.Text = ctrl.Station.ArrlSection;
+            _stationCqZoneTextBox.Text = ctrl.Station.CqZone;
+
+            AddRow("ITU Zone:", out _stationItuZoneTextBox, "ITU Zone", 10,
+                   null, out _, null, 0);
+            _stationItuZoneTextBox.Text = ctrl.Station.ItuZone;
+        }
+
+        // Mirrors SaveRadioTab's own MyCall/MyGrid normalization (trim/uppercase, callsign- and
+        // grid-shaped) for Operator Callsign, and uppercases State/Province/ARRL Section to match
+        // ham-radio convention (both are short codes, e.g. "MO", "ON") -- County/Operator
+        // Name/Contest Email/CQ Zone/ITU Zone are trimmed only, never case-forced. No engine
+        // restart is needed for any field here -- see StationSettings.cs's own comment: these are
+        // pure Jimmy-side values with no EngineHost launch-arg dependency today.
+        private void SaveStationOperatorTab()
+        {
+            if (_stationOperatorCallTextBox == null) return;
+
+            ctrl.Station.OperatorCallsign = _stationOperatorCallTextBox.Text.Trim().ToUpperInvariant();
+            ctrl.Station.OperatorName = _stationOperatorNameTextBox.Text.Trim();
+            ctrl.Station.ContestEmail = _stationContestEmailTextBox.Text.Trim();
+            ctrl.Station.QthState = _stationQthStateTextBox.Text.Trim().ToUpperInvariant();
+            ctrl.Station.County = _stationCountyTextBox.Text.Trim();
+            ctrl.Station.ArrlSection = _stationArrlSectionTextBox.Text.Trim().ToUpperInvariant();
+            ctrl.Station.CqZone = _stationCqZoneTextBox.Text.Trim();
+            ctrl.Station.ItuZone = _stationItuZoneTextBox.Text.Trim();
         }
 
         // Seeds the Windows ENDPOINT (device) master level for the given direction (input

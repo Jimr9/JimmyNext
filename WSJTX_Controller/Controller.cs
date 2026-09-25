@@ -302,6 +302,9 @@ namespace WSJTX_Controller
         // real process there.
         public NativeEngineClient nativeEngineClient;
         public NativeEngineSettings NativeEngine = new NativeEngineSettings();
+        // Nexus contesting foundation, phase 1: operator/station/location profile. See
+        // StationSettings.cs -- pure Jimmy-side data, no EngineHost launch-arg dependency.
+        public StationSettings Station = new StationSettings();
         public List<string> spotWatchRowOrderFields;
         // "callsign" (alphabetical, default), "evenodd", or "snr".
         public string spotWatchSortKey = "callsign";
@@ -801,6 +804,7 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("useNexusSemantics")) SemanticCutover.UseNexusSemantics = iniFile.Read("useNexusSemantics") == "True";
                 if (iniFile.KeyExists("logSemanticParityMismatches")) SemanticParityLogger.Enabled = iniFile.Read("logSemanticParityMismatches") == "True";
                 NativeEngine.LoadFromIni(iniFile);
+                Station.LoadFromIni(iniFile);
                 Radio.LoadFromIni(iniFile);
                 Decode.LoadFromIni(iniFile);
                 Frequencies.LoadFromIni(iniFile);
@@ -2302,6 +2306,7 @@ namespace WSJTX_Controller
             Frequencies.SaveToIni(iniFile);
             Notifications.SaveToIni(iniFile);
             NativeEngine.SaveToIni(iniFile);
+            Station.SaveToIni(iniFile);
 
             // Fix, 2026-09-14: this method's own header comment already claimed to extend
             // "commit to disk now" to "every other Options-governed settings object," but it only

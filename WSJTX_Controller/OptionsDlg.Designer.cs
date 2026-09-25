@@ -41,6 +41,7 @@ namespace WSJTX_Controller
             this.notificationsPanel = new System.Windows.Forms.Panel();
             this.soundsPanel = new System.Windows.Forms.Panel();
             this.appearancePanel = new System.Windows.Forms.Panel();
+            this.stationOperatorPanel = new System.Windows.Forms.Panel();
             this.profilesPanel = new System.Windows.Forms.Panel();
             this.udpOnTopCheckBox = new System.Windows.Forms.CheckBox();
             this.udpDiagLogCheckBox = new System.Windows.Forms.CheckBox();
@@ -114,6 +115,7 @@ namespace WSJTX_Controller
                 "Logbook Sync",
                 "Lookup Data",
                 "Appearance",
+                "Station & Operator",
                 "Profiles"});
             this._categoryListBox.Anchor = ((System.Windows.Forms.AnchorStyles)((System.Windows.Forms.AnchorStyles.Top | System.Windows.Forms.AnchorStyles.Bottom | System.Windows.Forms.AnchorStyles.Left)));
             this._categoryListBox.Location = new System.Drawing.Point(0, 0);
@@ -362,6 +364,19 @@ namespace WSJTX_Controller
             this.appearancePanel.AutoScroll = true;
             this.appearancePanel.Dock = System.Windows.Forms.DockStyle.Fill;
             this.appearancePanel.Name = "appearancePanel";
+            //
+            // stationOperatorPanel
+            //
+            // Nexus contesting foundation, phase 1: persistent station/operator/location profile.
+            // My Call/My Grid move here from decodeEnginePanel (same fields, same ini keys, same
+            // engine-relaunch behavior -- see BuildStationOperatorTab/SaveRadioTab) alongside the
+            // new Operator Callsign/Name/Contest Email/State/County/Section/CQ Zone/ITU Zone
+            // fields (SaveStationOperatorTab, StationSettings.cs).
+            //
+            this.stationOperatorPanel.AccessibleName = "Station & Operator";
+            this.stationOperatorPanel.AutoScroll = true;
+            this.stationOperatorPanel.Dock = System.Windows.Forms.DockStyle.Fill;
+            this.stationOperatorPanel.Name = "stationOperatorPanel";
             //
             // profilesPanel
             //
@@ -788,6 +803,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.Panel logbookSyncPanel;
         private System.Windows.Forms.Panel lookupPanel;
         private System.Windows.Forms.Panel appearancePanel;
+        private System.Windows.Forms.Panel stationOperatorPanel;
         private System.Windows.Forms.Panel profilesPanel;
     }
 }
