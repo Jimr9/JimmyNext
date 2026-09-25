@@ -1014,6 +1014,31 @@ mod tests {
     }
 
     #[test]
+    fn session_instance_id_does_not_repeat_across_identical_reentries_unlike_nexus_own_session_id() {
+        // Directly documents the distinction the architecture requires: Nexus's own
+        // ContestSession.id for two IDENTICAL entries (same event, same section -- exactly
+        // "this year" vs "next year" from the same location) is the SAME string, because it is
+        // deliberately a "<contest_id>:<location>" key, not an instance id. This bridge's own
+        // session_instance_id must never repeat for that same case.
+        let active = test_active_session(); // event "arrlfd", section "MO"
+        let nexus_session_1 = ContestBridge::build_session(&active).unwrap();
+        let nexus_session_2 = ContestBridge::build_session(&active).unwrap();
+        assert_eq!(
+            nexus_session_1.id, nexus_session_2.id,
+            "confirms the real behavior this architecture works around: Nexus's own \
+             ContestSession.id collides for two identical entries"
+        );
+
+        let jimmy_id_1 = mint_session_instance_id();
+        let jimmy_id_2 = mint_session_instance_id();
+        assert_ne!(
+            jimmy_id_1, jimmy_id_2,
+            "this bridge's own session_instance_id must never repeat, even for the identical \
+             event+section Nexus's own id collides on"
+        );
+    }
+
+    #[test]
     fn rebuild_append_and_commit_produce_a_real_cabrillo_export() {
         // Exercises the actual data path rebuild_begin/commit use (FieldDayLog::log_fields_at +
         // qso_points + cabrillo_with), end to end, without needing a live Engine -- proves the

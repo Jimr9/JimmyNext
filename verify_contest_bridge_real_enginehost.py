@@ -192,8 +192,14 @@ def main():
         resp = connect_and_send("CONTEST_REBUILD_APPEND " + json.dumps(append_args))
         expect_ok("CONTEST_REBUILD_APPEND returns OK", resp, results)
 
+        # 7b. Commit with the WRONG token must be refused AND leave the real pending rebuild
+        # intact for a subsequent correct commit -- never silently abandoned.
+        resp = connect_and_send("CONTEST_REBUILD_COMMIT wrong-token-entirely")
+        expect_ok("CONTEST_REBUILD_COMMIT with a wrong token is correctly REFUSED",
+                   "OK" if resp.startswith("ERR") else "ERR should have been refused", results)
+
         resp = connect_and_send(f"CONTEST_REBUILD_COMMIT {token}")
-        body = expect_ok("CONTEST_REBUILD_COMMIT returns OK", resp, results)
+        body = expect_ok("CONTEST_REBUILD_COMMIT with the CORRECT token still succeeds after the wrong-token attempt (pending rebuild was preserved)", resp, results)
         commit = json.loads(body) if body else {}
         expect_ok(f"Rebuild reports a real, non-zero score from real Nexus scoring ({commit})",
                    "OK" if commit.get("qsoCount", 0) >= 1 and commit.get("points", 0) > 0 else "ERR zero/missing", results)
