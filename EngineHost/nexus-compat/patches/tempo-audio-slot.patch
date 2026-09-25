@@ -1,5 +1,5 @@
 diff --git a/src/slot.rs b/src/slot.rs
-index c8e9db0e..ec593ba6 100644
+index a0b4d487..cc592c94 100644
 --- a/src/slot.rs
 +++ b/src/slot.rs
 @@ -93,18 +93,41 @@ pub struct SlotAction {
@@ -123,7 +123,16 @@ index c8e9db0e..ec593ba6 100644
                  rig_split_engaged: false,
              }
          }
-@@ -294,7 +348,7 @@ pub fn slot_tx_phase(
+@@ -287,7 +341,7 @@ pub fn slot_tx_phase(
+                 did_rx,
+                 rx_frame,
+                 tx_this_slot: false,
+-                fake_it_restore: split.fake_it_restore,
++                fake_it_shift: split.fake_it_shift,
+                 rig_split_engaged: split.rig_split_engaged,
+             };
+         }
+@@ -333,7 +387,7 @@ pub fn slot_tx_phase(
              did_rx,
              rx_frame,
              tx_this_slot: true,
@@ -132,7 +141,7 @@ index c8e9db0e..ec593ba6 100644
              rig_split_engaged: split.rig_split_engaged,
          }
      } else {
-@@ -305,7 +359,7 @@ pub fn slot_tx_phase(
+@@ -344,7 +398,7 @@ pub fn slot_tx_phase(
              did_rx,
              rx_frame,
              tx_this_slot: false,
@@ -141,7 +150,7 @@ index c8e9db0e..ec593ba6 100644
              rig_split_engaged: false,
          }
      }
-@@ -826,12 +880,54 @@ mod tests {
+@@ -991,12 +1045,54 @@ mod tests {
          );
      }
  
@@ -201,7 +210,7 @@ index c8e9db0e..ec593ba6 100644
          let mut eng = Engine::new("W9XYZ", "EN37", 0);
          eng.set_tier(tempo_app::dto::Tier::Ft8);
          let mut st = eng.settings().clone();
-@@ -840,30 +936,118 @@ mod tests {
+@@ -1005,30 +1101,118 @@ mod tests {
          eng.set_tx_enabled(true);
          eng.set_tx_offset(750.0); // f0 1750, dial -1000
          eng.broadcast("CQ W9XYZ EN37");

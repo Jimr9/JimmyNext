@@ -1,8 +1,8 @@
 diff --git a/src/engine.rs b/src/engine.rs
-index 3f3ca64c..9452201c 100644
+index ad6d5a9c..f97cf609 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
-@@ -2410,6 +2410,17 @@ pub struct Engine {
+@@ -2809,6 +2809,17 @@ pub struct Engine {
      /// Set by the radio loop when the sound card failed to open, so the UI can
      /// explain a blank waterfall instead of failing silently.
      audio_error: Option<String>,
@@ -17,19 +17,19 @@ index 3f3ca64c..9452201c 100644
 +    /// `RadioStatus` so Jimmy dedups per EPISODE across a Direct reconnect, not per message
 +    /// text. `Some` iff `fake_it_restore_warning` is `Some`.
 +    fake_it_restore_warning_id: Option<u64>,
-     /// The last per-QSO recording that failed, with the path. Set by the shell (which owns the
-     /// file write), carried out in the snapshot, cleared by the next recording that succeeds.
-     recording_warning: Option<String>,
-@@ -4095,6 +4106,8 @@ impl Engine {
+     scope_error: Option<String>,
+     /// See `RadioStatus::scope_span_refused`.
+     scope_span_refused: Option<String>,
+@@ -4592,6 +4603,8 @@ impl Engine {
              amp_live: std::collections::HashMap::new(),
              cat_reprobe: false,
              audio_error: None,
 +            fake_it_restore_warning: None,
 +            fake_it_restore_warning_id: None,
-             recording_warning: None,
-             qsy,
-             rtty_armed: false,
-@@ -6485,6 +6498,15 @@ impl Engine {
+             scope_error: None,
+             scope_span_refused: None,
+             scope_mode_code: None,
+@@ -7416,6 +7429,15 @@ impl Engine {
      /// The mode the radio loop should COMMAND: the operator's transient Phone override when set,
      /// else the band-derived policy (`settings.rig_mode`). Write-side canon for the rig `M` verb.
      pub fn rig_mode_effective(&self) -> String {
@@ -45,7 +45,7 @@ index 3f3ca64c..9452201c 100644
          // APRS parks the rig in FM regardless of the operating section it was navigated from — a
          // 2 m packet signal demodulated as USB is garbage, so this is a correctness gate, not a
          // preference. Gated on STILL being on 2 m: a knob-QSY (`observe_rig_freq`) or a manual
-@@ -6871,6 +6893,14 @@ impl Engine {
+@@ -7937,6 +7959,14 @@ impl Engine {
          self.settings.decode_depth = depth.clamp(1, 3);
      }
  
@@ -60,7 +60,7 @@ index 3f3ca64c..9452201c 100644
      /// Operator CW decode sensitivity in [0, 1] (0.5 = the original gates; higher catches
      /// weaker/off-pitch marks like the skimmer, lower rejects more noise).
      pub fn set_cw_sensitivity(&mut self, s: f32) {
-@@ -9584,6 +9614,18 @@ impl Engine {
+@@ -11758,6 +11788,18 @@ Pick the one you operate from on the Contesting tab in Settings.",
          }
      }
  
@@ -79,7 +79,7 @@ index 3f3ca64c..9452201c 100644
      /// Send the delivery ACKs we owe: a 1-frame RR73 to each sender whose directed
      /// message we just fully received. Queued onto the chat broadcast path; the receiver
      /// (the original sender) sees it and marks the message delivered, ending the resend.
-@@ -14522,6 +14564,17 @@ impl Engine {
+@@ -17183,6 +17225,17 @@ contact yourself."
          self.cat_probe_gen = self.cat_probe_gen.wrapping_add(1);
      }
  
@@ -97,7 +97,7 @@ index 3f3ca64c..9452201c 100644
      /// Ask the radio loop to re-probe the current rig and refresh the CAT status
      /// (the "Test CAT" button). The loop consumes this via [`Self::take_cat_reprobe`].
      pub fn request_cat_reprobe(&mut self) {
-@@ -15168,6 +15221,8 @@ impl Engine {
+@@ -18151,6 +18204,8 @@ contact yourself."
          }
          .to_string();
          s.radio.audio_error = self.audio_error.clone();
@@ -106,9 +106,9 @@ index 3f3ca64c..9452201c 100644
          // A map lookup and a clone: no I/O and no second lock. `Engine::snapshot` runs under
          // the engine mutex on the UI's 300 ms poll, and work done inside it has twice stalled
          // the radio loop.
-@@ -16990,8 +17045,25 @@ impl Engine {
-         while self.decode_history.len() > 240 {
-             self.decode_history.pop_front();
+@@ -20076,8 +20131,25 @@ contact yourself."
+         if self.app.tier() == Tier::Js8 {
+             self.js8_ingest(&decodes, slot);
          }
 -        self.last_wire_decodes = wire_copy.unwrap_or_else(|| decodes.clone());
 -        self.last_decodes = decodes;

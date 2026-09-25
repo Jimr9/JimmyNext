@@ -27,15 +27,19 @@ tool versions) into `EngineHost/.nexus-src-info.json`. This process exists becau
 pre-v1.10.3 integration drifted ~175 commits behind `main` silently -- exact pinning gives
 reproducibility, this gives visibility.
 
-## Eight-patch re-assessment -- 2026-09-08 (Nexus modernization Stage 12)
+## Eight-patch re-assessment -- 2026-09-24 (v1.10.3 -> v1.14.0 upgrade)
 
-Re-checked against the current pin `v1.10.3` (`7618390`). Decisions from the
-`93b9f012 -> v1.10.3` upgrade (below) stand unchanged: **all eight KEEP**. `nexus-status.ps1`
-confirmed the pin is AT the current stable tag; upstream `main` is ~173 commits ahead but is
-overwhelmingly new-scope (JS8, Winlink, contest widening, FT-710 scope UI, a tempo-audio
-process refactor) -- no ordinary-FT8/FT4 safety or API improvement there outweighs the stable
-boundary. Next re-assessment at the next Nexus stable tag. Long-term goal: this count decreases
-as upstream matures; nothing here is superseded at v1.10.3.
+Re-checked against the new pin `v1.14.0` (`12efe3d2`), ~1369 commits ahead of the prior pin
+`v1.10.3` (`7618390`, spanning the `v1.11.0`/`v1.11.1` betas and the `v1.12.0`/`v1.13.0` stable
+tags). Each of the 8 patches' individual behaviors was checked with its own "How to check" grep
+against the actual v1.14.0 file contents (not commit messages) -- see "Audited upgrade,
+v1.10.3 -> v1.14.0" below for the full per-behavior evidence. **Result: all eight KEEP, zero
+deletions.** None of the 8 behaviors gained an upstream equivalent. Every patch needed only a
+mechanical re-anchor: upstream inserted unrelated new fields/lines near several anchors (an
+FT-710 RF-scope DTO block, a Remote-control revocation system, a new JS8 ingest hook, a
+`sstv_hold_data_submode` field, a fourth RFPOWER-adjacent read site), but never touched the
+patched lines themselves. Next re-assessment at the next Nexus stable tag. Long-term goal: this
+count decreases as upstream matures; nothing here is superseded at v1.14.0.
 
 ## Rules
 
@@ -52,21 +56,110 @@ as upstream matures; nothing here is superseded at v1.10.3.
 
 ## Current pin
 
-`pin.txt` points at the **newest official stable release tag, `v1.10.3`**, by its exact commit:
+`pin.txt` points at the **newest official stable release tag, `v1.14.0`**, by its exact commit:
 
 ```
-NEXUS_TAG=v1.10.3
-NEXUS_COMMIT=7618390658f8f92431dec0ac65979b84f2c0fb76
+NEXUS_TAG=v1.14.0
+NEXUS_COMMIT=12efe3d2970729465add40d62cecd76bbaf5b63f
 ```
 
-`NEXUS_COMMIT` is the real lock; `NEXUS_TAG` is the honest human reference. `v1.10.3` is a
-lightweight tag pointing straight at `7618390` (2026-09-04). `prepare-nexus.ps1` clones
-`--branch v1.10.3 --single-branch` (a lightweight tag checks out in detached HEAD, which is
+`NEXUS_COMMIT` is the real lock; `NEXUS_TAG` is the honest human reference. `v1.14.0` is a
+lightweight tag pointing straight at `12efe3d2` (2026-09-20). `prepare-nexus.ps1` clones
+`--branch v1.14.0 --single-branch` (a lightweight tag checks out in detached HEAD, which is
 fine) and still verifies the resolved `HEAD` equals `NEXUS_COMMIT`. The `NEXUS_TAG=main`
 branch-and-detach path in that script is retained for any future exact-commit-on-`main` pin
 but is not used here.
 
-## Audited upgrade, 93b9f012 -> v1.10.3 (7618390)
+## Audited upgrade, v1.10.3 -> v1.14.0 (7618390 -> 12efe3d2)
+
+Agent-audited upgrade (2026-09-24) from the prior pin `v1.10.3` (`7618390`) to the newest tagged
+stable `v1.14.0` (`12efe3d2`) -- **~1369 commits**, spanning the `v1.11.0-beta.1/.2`,
+`v1.11.1-beta.1`, `v1.12.0`, and `v1.13.0` tags along the way. Chosen as simply the newest
+official stable tag at the time of this upgrade; no intervening stable tag was skipped.
+
+Each of the 8 patches' individual behaviors was independently re-verified against the actual
+v1.14.0 file contents (not commit messages or docstrings), grepping/reading the pinned files
+directly -- see each patch's own `###` section below for its current "How to check" command.
+**Result: all eight KEEP, zero deletions, zero new patches.** Every anchor needed only a
+mechanical rebase: upstream inserted unrelated new code near several of them, but never touched
+the patched lines themselves. New code found nearby, for context and for the "possible future
+opportunities" note below:
+
+- An FT-710 RF-scope feature (`Settings.yaesu_rf_scope`, `RadioStatus.scope_error` /
+  `scope_span_refused` / `scope_mode_code` / `scope_fix_start_mhz`) -- inserted immediately
+  after `audio_error` in both `dto.rs`'s `RadioStatus` and `engine.rs`'s `Engine` struct/snapshot,
+  exactly where `tempo-app-snapshot.patch` and half of `tempo-app-engine.patch` anchor.
+  Visual-only; not relevant to a screen-reader-first product.
+- A new Remote-control revocation system (`Engine.remote_actuation: remote_control::Revocation`,
+  a new `crates/tempo-app/src/remote_control.rs`), wired via `self.remote_actuation.revoke()`
+  into ~40 operator-facing `Engine` setters -- including `set_decode_depth`, which
+  `tempo-app-engine.patch`'s new `set_pskreporter` sits next to. Not adopted into Jimmy's new
+  setter (out of scope for this upgrade; see "possible future opportunities" below).
+- A new `sstv_hold_data_submode` field on `Settings`/`RadioProfile` (widened to HF, #191),
+  inserted immediately after `data_modes_plain_ssb` -- exactly where `tempo-app-settings.patch`
+  anchors its three fields.
+- A new JS8 decode-ingest hook (`self.js8_ingest(&decodes, slot)`) inserted in `process_decodes`
+  immediately before the same-slot-accumulation overwrite `tempo-app-engine.patch` patches; it
+  only reads `decodes` by reference before the patch's move, so there is no interaction.
+- A fourth RFPOWER-adjacent drive-READ call site in `service.rs` (`be942eb7`, #234 -- restores
+  the rig's own power level after a Tune: "adopt the operator's level, don't overwrite it"),
+  calling `rig.read_level("RFPOWER")` from a site `tempo-audio-service.patch`'s old Layer-2
+  enumeration ("three call sites") predates. It needs no new gate: Jimmy's Layer-1 chokepoint in
+  `rig.rs` (`rfpower_suppressed`) blocks `read_level("RFPOWER")` by exact token match for
+  **every** caller, present or future, so this site is already fully covered -- the
+  `tempo-audio-service.patch` section below now says "four" call sites, not "three".
+- A new keyed-write-safety pattern (`operator_keyed()`, `99e59211`) that withholds (not drops)
+  XIT/VFO writes from a keyed rig -- conceptually adjacent to Jimmy's own `tuning_keyed`/
+  `transmitting` RFPOWER gates but not evaluated for adoption in this upgrade.
+- A new rig-model-driven ATU tune-capability gate (`hamlib_atu_start_tune_reaches`, #322) that
+  distrusts a Hamlib backend's own `RPRT 0` ack for starting a tune on rigs known to lie about
+  it -- a similar "don't trust the rig's ack" pattern to Jimmy's own RFPOWER distrust, not
+  evaluated for adoption here.
+- `tempo-core` gained `rusqlite` (bundled SQLite, via `cc`) for the logbook, and `tempo-audio`
+  gained `opus` (via `opusic-sys`, via CMake) for Nexus Remote's receive-audio encoder -- both
+  unconditional new dependencies (not feature-gated) pulled in by crates EngineHost already
+  depends on. Built clean here with the MSYS2 UCRT64 toolchain (`gcc`/`cmake`/`dlltool`) this
+  integration already requires for `tempo-fast-sys`'s native Fortran build -- no new
+  build-environment requirement, just more volume through the same mechanism.
+
+**Possible future opportunities surveyed, not adopted (out of scope for this upgrade):** the
+Remote-control revocation system, the keyed-write-withholding pattern, and the ATU
+capability-gating pattern above. None replace a current Jimmy-owned compatibility patch outright
+(checked one-for-one against each patch's own behavior); each is a general pattern that *might*
+simplify a future Jimmy feature. Not implemented here -- reported for a separate, deliberate
+decision rather than folded into this upgrade.
+
+**Patch impact:** all 8 patches re-anchored with context/offset changes only -- confirmed by
+diffing the regenerated patch files against their pre-upgrade versions: every `+`/`-` payload
+line is byte-identical (only surrounding `@@` line numbers and context lines moved), except two
+`tempo-audio-service.patch` hunks whose immediate context itself gained new upstream lines (the
+`RadioLoop`-construction hunk, now immediately after a new `clock_jump` field; and the
+fast/freq-poll knob-QSY gate, now after a new `remote_read`/`remote_observe_*` block) -- both
+re-derived by hand at the new anchor, same conceptual change, verified by the same
+byte-identical `+`/`-` payload check. `tempo-app-snapshot.patch`'s two fixture files were
+regenerated from scratch against the patched v1.14.0 tree (`cargo test -p tempo-app --test
+station_identity regenerate_station_fixture -- --ignored` and the `watch_identity` sibling,
+`regenerate_golden_fixtures`) rather than hand-edited, so they also carry upstream's own new
+`scopeError`/`scopeSpanRefused`/`scopeModeCode`/`scopeFixStartMhz` fields alongside Jimmy's
+`fakeItRestoreWarning`/`fakeItRestoreWarningId` pair. No patch was deleted; no ninth patch was
+created.
+
+**Two genuinely NEW hunks were needed, found only by building** (a clean `patch --dry-run`
+apply is a syntax check, not a semantic one -- see "Checking a patch against a newer Nexus"
+below): upstream added a `crates/tempo-audio/src/rig/remote/release.rs` (a new Remote-radio
+PTT-release path, `remote_unkey_idle`) that calls `rig::ptt_line(false)` with the OLD one-`bool`
+signature `tempo-audio-rig.patch` changes to two -- fixed by passing `self.ptt_data_source`,
+now a second `diff --git` section inside `tempo-audio-rig.patch`. And `slot_tx_phase` gained a
+third `SlotAction { .. }` construction site (a new early-return, "preserve split cleanup even
+when permission disappears during CAT preparation") that the original patch's two hunks did not
+cover because it did not exist at `v1.10.3` -- it still used the pre-patch field name
+`fake_it_restore: split.fake_it_restore`, which no longer compiles against
+`tempo-audio-slot.patch`'s renamed `fake_it_shift: Option<FakeItShift>`; fixed the same way as
+the other two `SlotAction` sites, now a new hunk in `tempo-audio-slot.patch`. Both are pure
+mechanical field-rename/signature-argument fixes -- no new behavior, no change to what either
+patch does -- confirmed by `cargo build` (clean) and the full `cargo test` run recorded below.
+
+### Superseded: audited upgrade 93b9f012 -> v1.10.3 (7618390)
 
 Codex-audited upgrade (2026-09-07 audit, executed 2026-09-08) from the prior pin `93b9f012`
 (an untagged `v1.10.2`-era commit on `main`) to the tagged stable `v1.10.3` -- **2 commits**:
@@ -103,7 +196,7 @@ fully-patched `service.rs`; the added/removed *code* is byte-identical to the pr
 except that one hunk (verified by md5 of the `+`/`-` lines). No patch was deleted; no ninth
 patch was created.
 
-### Superseded: audited upgrade 44bca866 -> 93b9f012
+#### Superseded: audited upgrade 44bca866 -> 93b9f012
 
 Codex-audited upgrade (2026-09-05) from the prior pin `44bca866` to `93b9f012` (the 40 commits
 in between: World Radio League logbook/eQSL integration, a WSJT-X-forward multi-target fix, the
@@ -138,7 +231,7 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.10.3`, commit `7618390`)
+## Current patches (against Nexus `v1.14.0`, commit `12efe3d2`)
 
 Eight patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the eight are itemised in the `###` sections below). Jimmy's downstream
@@ -196,14 +289,21 @@ re-baseline is regenerated with `cargo test -p tempo-app --test station_identity
 regenerate_station_fixture -- --ignored` and the `watch_identity` sibling -- and is *only* the
 one new `null` field; anything else in the diff is a real change to find.
 
-### `patches/tempo-audio-rig.patch` -- DATA/ACC PTT + RFPOWER chokepoint, `crates/tempo-audio/src/rig.rs`
+### `patches/tempo-audio-rig.patch` -- DATA/ACC PTT + RFPOWER chokepoint, `crates/tempo-audio/src/rig.rs` (+ callers)
 
 Two concerns, both "how this `Rig` talks to the radio":
 
 1. **DATA/ACC PTT.** `rig::ptt_line(on: bool)` -> `ptt_line(on: bool, data_source: bool)`,
    emitting Hamlib `RIG_PTT_ON_DATA` (`T 3`) instead of plain `RIG_PTT_ON` (`T 1`) when the
    operator has selected the rig's rear DATA/ACC port for transmit audio. `unkey` is `T 0`
-   either way. Plus a `Rig::set_ptt_data_source` / `ptt_data_source` field.
+   either way. Plus a `Rig::set_ptt_data_source` / `ptt_data_source` field. Changing this
+   function's signature means EVERY caller needs the new argument, not just the ones existing
+   when a hunk was last written -- since v1.11 that includes a second file,
+   `crates/tempo-audio/src/rig/remote/release.rs`'s `remote_unkey_idle` (the Remote-radio PTT
+   release path, new since v1.10.3), patched alongside `rig.rs` in the same patch file as a
+   second `diff --git` section. `cargo build` is the only reliable way to catch a new caller
+   like this -- a clean `patch --dry-run` only proves the patch's OWN hunks still apply, not
+   that every consumer of the changed signature was found.
 2. **RFPOWER never-touch chokepoint (Layer 1).** A `Rig::rfpower_suppressed` field +
    `Rig::set_rfpower_suppressed`. When set: `read_level("RFPOWER")` returns `Err` with **no
    bytes on the wire** (EXACT token match -- `RFPOWER_METER_WATTS` and every `read_meter_f32`
@@ -219,7 +319,10 @@ to change anything on the radio, and the engine never adjusts the operator's dri
 operator override.**
 **Obsoleted when:** `rig::ptt_line` gains a mic/data distinction; AND upstream gives a real way
 to forbid RFPOWER drive read/write per rig (or Hamlib #1595 is fixed in the bundled backend).
-**How to check:** `grep -n "fn ptt_line\|fn read_level\|fn set_power\|rfpower_suppressed" crates/tempo-audio/src/rig.rs`.
+**How to check:** `grep -n "fn ptt_line\|fn read_level\|fn set_power\|rfpower_suppressed" crates/tempo-audio/src/rig.rs`
+-- and separately `grep -rn "ptt_line(" crates/tempo-audio/src` to confirm every caller (not just
+`rig.rs`'s own PTT command site) passes both arguments; a caller upstream added since the last
+check is a real compile error, not a false alarm.
 
 ### `patches/tempo-audio-service.patch` -- radio-loop wiring, `crates/tempo-audio/src/service.rs`
 
@@ -239,7 +342,14 @@ One file, one concern (the radio loop / CAT service). Carries:
   On v1.10.3 the per-mode power-ceiling site is upstream's #126 `should_command_rf_power(...)`
   helper (FTDX-101D mid-over foldback fix); Jimmy's Layer-2 gate sits in **front** of it as
   `if !self.disable_rfpower_probe && should_command_rf_power(...)`. The two are orthogonal --
-  #126 says "not mid-over", Jimmy says "not at all when suppressed".
+  #126 says "not mid-over", Jimmy says "not at all when suppressed". Since v1.11 upstream added
+  a **fourth** RFPOWER-adjacent site, a drive-READ in the Tune-power restore path (`be942eb7`,
+  #234, "adopt the rig's own power level after a tune instead of overwriting it") -- this one
+  has NO Layer-2 gate of its own, but needs none: it calls the same `rig.read_level("RFPOWER")`
+  Layer 1 blocks by exact token match for every caller, so it is already fully suppressed when
+  Jimmy sets `disable_rfpower_probe`. Only three sites are Layer-2-gated writes/reads that
+  needed their own `if !self.disable_rfpower_probe`; the fourth relies on Layer 1 alone -- see
+  "How to check" below, which now lists all four.
 - **`Status.tx_message`** changes from a hardcoded `""` to `eng.last_own_tx_text()`.
 - **Corrected Fake-It dial restore** (rewritten in the Codex correction pass; the state model
   now lives in the `FakeItRestore` enum -- `None` / `Armed` / `Unresolved`):
@@ -282,15 +392,26 @@ on failure.
 **How to check:** `grep -n "disable_rfpower_probe\|fake_it_restore\|last_own_tx_text\|ptt_data_source\|should_command_rf_power" crates/tempo-audio/src/service.rs`
 -- and re-read the Fake-It teardown block and every `read_level("RFPOWER")` / `set_power` /
 `should_command_rf_power` call site by hand (grep -- do not assume the counts are unchanged).
-On v1.10.3 there are three `disable_rfpower_probe` drive gates in the loop body: the heavy-poll
+On v1.14.0 there are three `disable_rfpower_probe` drive gates in the loop body: the heavy-poll
 `l RFPOWER` read (`if !self.disable_rfpower_probe` before `rig.read_level("RFPOWER")`), the
 per-mode ceiling (`if !self.disable_rfpower_probe && should_command_rf_power(...)`), and the
 Tune-power write (`tune_power.filter(|_| !self.disable_rfpower_probe)`), plus the two stamp
-sites (`finish_cat_open`, `open_monitor`).
+sites (`finish_cat_open`, `open_monitor`). Since v1.11 (`be942eb7`, #234) there is also a
+**fourth**, ungated `rig.read_level("RFPOWER")` in the Tune-power-restore path -- it needs no
+Layer-2 gate of its own because Layer 1 (`rig.rs`'s `rfpower_suppressed`) already blocks that
+exact call for every caller; confirm this fourth site is still present and still uncounted by
+`disable_rfpower_probe` (if upstream ever adds its own gate there, that is fine -- redundant,
+not a regression) by grepping `read_level("RFPOWER")` across the whole file and hand-checking
+each hit's own gating.
 
 ### `patches/tempo-audio-slot.patch` -- Fake-It physical capture + Rig-split do-not-set-mode
 
-`crates/tempo-audio/src/slot.rs`, `apply_tx_dial_shift`:
+`crates/tempo-audio/src/slot.rs`, `apply_tx_dial_shift` (+ every `SlotAction` builder that
+consumes its result -- as of v1.14.0 there are three inside `slot_tx_phase`: the successful-key
+branch, the receive branch, and a permission-lost-during-CAT-prep early return added since
+v1.10.3; all three must construct `fake_it_shift`, not the old `fake_it_restore`, or the crate
+does not compile -- `cargo build` catches a fourth one appearing, a plain patch dry-run does
+not):
 
 - **`SplitMode::FakeIt`** now returns a `FakeItShift { original_hz, shifted_to_hz,
   shift_confirmed }` (was a bare `Option<u64>`). `original_hz` is a FRESH `rig.read_freq()`
@@ -307,7 +428,11 @@ sites (`finish_cat_open`, `open_monitor`).
 
 **Obsoleted when:** upstream captures a fresh physical dial for Fake-It and honours a
 do-not-set-mode option on the Rig-split path.
-**How to check:** `grep -n "read_freq\|FakeItShift\|dont_set_mode" crates/tempo-audio/src/slot.rs`.
+**How to check:** `grep -n "read_freq\|FakeItShift\|dont_set_mode" crates/tempo-audio/src/slot.rs`
+-- and separately `grep -n "fake_it_restore\|fake_it_shift" crates/tempo-audio/src/slot.rs` to
+confirm every `SlotAction`/`SplitApply` literal uses `fake_it_shift`; any surviving
+`fake_it_restore` is a caller the patch's own hunks don't yet cover (a compile error, not a
+cosmetic issue).
 
 ### `patches/tempo-audio-rigctld-test-portability.patch` -- test-only Windows fixes
 

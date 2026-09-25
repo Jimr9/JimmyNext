@@ -1,8 +1,8 @@
 diff --git a/src/rigctld_proc.rs b/src/rigctld_proc.rs
-index 1903a854..6eb01c22 100644
+index f725238d..43cee373 100644
 --- a/src/rigctld_proc.rs
 +++ b/src/rigctld_proc.rs
-@@ -3508,6 +3508,14 @@ mod tests {
+@@ -3040,6 +3040,14 @@ mod tests {
      /// that DOES finish comes back with its output intact.
      #[test]
      fn run_bounded_returns_the_output_of_a_command_that_finishes() {
@@ -17,7 +17,7 @@ index 1903a854..6eb01c22 100644
          let out = run_bounded(std::ffi::OsStr::new("echo"), &["hello"], 10)
              .expect("a command that exits must produce output");
          assert!(out.status.success());
-@@ -3524,9 +3532,14 @@ mod tests {
+@@ -3056,9 +3064,14 @@ mod tests {
      #[test]
      fn rigctl_is_found_beside_rigctld() {
          use std::ffi::OsString;
@@ -34,7 +34,7 @@ index 1903a854..6eb01c22 100644
          );
          // The .exe arm, as a bare name: a Windows-style path with backslashes is a single
          // file_name on Unix (only `/` separates there), so spelling one here would test the host's
-@@ -3535,9 +3548,11 @@ mod tests {
+@@ -3067,9 +3080,11 @@ mod tests {
              rigctl_beside(OsString::from("rigctld.exe")),
              OsString::from("rigctl.exe")
          );

@@ -167,6 +167,7 @@ impl LiveFeedsCache {
                     &RBN_STOP,
                     &cache.rbn_connected,
                     &RBN_OUTBOX,
+                    |_| {},
                 );
             });
         }
@@ -197,6 +198,7 @@ impl LiveFeedsCache {
                     &CLUSTER_STOP,
                     &cache.human_cluster_connected,
                     &CLUSTER_OUTBOX,
+                    |_| {},
                 );
             });
         }

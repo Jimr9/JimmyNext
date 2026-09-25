@@ -1,8 +1,8 @@
 diff --git a/src/settings.rs b/src/settings.rs
-index 9b6397a9..48000ecf 100644
+index 0505b6cd..247077a0 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
-@@ -909,6 +909,29 @@ pub struct Settings {
+@@ -1250,6 +1250,29 @@ pub struct Settings {
      /// (flat mirror — see [`RadioProfile::data_modes_plain_ssb`]). Default off.
      #[serde(default)]
      pub data_modes_plain_ssb: bool,
@@ -29,16 +29,16 @@ index 9b6397a9..48000ecf 100644
 +    /// behavior); Jimmy's EngineHost always sets it on. No operator override.
 +    #[serde(default)]
 +    pub disable_rfpower_probe: bool,
-     /// DEPRECATED / ignored. Digital now ALWAYS forces the DATA submode (like Phone/CW
-     /// force their mode), so this opt-out is no longer consulted by
-     /// [`rig_mode`](Self::rig_mode). Kept only so older settings files still deserialize.
-@@ -3143,6 +3166,9 @@ impl Default for Settings {
-             split_detect_enabled: false,
+     /// Hold the DATA submode (FM-D on FM, USB-D/LSB-D on HF) for as long as the SSTV receiver
+     /// is running, for the active radio (flat mirror — see
+     /// [`RadioProfile::sstv_hold_data_submode`]). Default off.
+@@ -3927,6 +3950,9 @@ impl Default for Settings {
+             yaesu_rf_scope: false,
              icom_data_mode: 1,
              data_modes_plain_ssb: false,
 +            ptt_data_source: false,
 +            dont_set_mode: false,
 +            disable_rfpower_probe: false,
+             sstv_hold_data_submode: false,
              set_rig_mode: true, // force the DATA submode for digital, so sections set the rig
              operating_mode: OperatingMode::Digital, // digital obeys; phone/CW force
-             license_class: LicenseClass::Open, // no TX lockout until the operator declares a class
