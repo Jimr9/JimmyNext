@@ -339,6 +339,7 @@ pub struct ContestBridge {
 struct SidecarV1 {
     session_instance_id: String,
     event_id: String,
+    run_mode: String,
     mycall: String,
     mygrid: String,
     class: String,
@@ -360,7 +361,9 @@ struct ActiveSession {
     // Station/entry basis captured at ENTER time, so CONTEST_REBUILD_BEGIN can construct a
     // fresh, standalone session equivalent to the live one without reading Engine's private
     // Mode state (see rebuild's own doc comment for why it's standalone rather than reaching
-    // into the live session at all).
+    // into the live session at all), AND so restore_if_present can actively re-enter the same
+    // mode after a restart (see that function's own comment -- a passive check is not enough).
+    run_mode: String,
     mycall: String,
     mygrid: String,
     class: String,
@@ -420,14 +423,28 @@ impl ContestBridge {
     }
 
     /// Restores a session-instance id (and the station/entry basis rebuild needs) left by a
-    /// prior EngineHost process, if the sidecar file names one and Nexus's own journal still
-    /// thinks a Field Day session is live (matches Nexus's own restore-not-rebuild rule: this
-    /// bridge's identity survives exactly as long as the session it names does, never longer,
-    /// never shorter). acked_seq always restarts at 0 -- safe by design, since it is only a
-    /// resend-suppression optimization (see its own field comment); the worst case is one
-    /// harmless redundant reconciliation delivery after a restart, never a lost or duplicated
-    /// contact (the Logbook Service's own idempotent write is what actually prevents that).
-    pub fn restore_if_present(&mut self, engine: &Engine) {
+    /// prior EngineHost process -- ACTIVELY (calls the same apply_settings + set_mode as a real
+    /// CONTEST_ENTER), not passively.
+    ///
+    /// ⚠️ A confirmed bug this replaced: the first version of this function only CHECKED
+    /// `engine.snapshot().field_day.is_some()` before restoring -- but a freshly-constructed
+    /// `Engine` at startup is always `Mode::Chat` (nothing has called `set_mode` yet), so that
+    /// check could never once pass, and restore silently did nothing on every real restart.
+    /// Found by actually killing and relaunching the real compiled binary mid-session and
+    /// observing the restored process report no active session at all -- not assumed from
+    /// reading the code alone. Mirrors Nexus's OWN restore mechanism
+    /// (`Engine::restore_field_day_if_enabled`, called from persisted-settings-file loading in
+    /// its own app) applied to this bridge's own sidecar instead, since EngineHost never loads
+    /// Nexus's settings.json at all.
+    ///
+    /// If re-entering the mode fails (e.g. a section retired between runs -- unlikely but
+    /// possible), the sidecar is removed and no session is restored, rather than leaving a
+    /// half-restored identity with no live engine mode behind it. acked_seq always restarts at
+    /// 0 -- safe by design (a resend-suppression optimization only, see its own field comment);
+    /// the worst case is one harmless redundant reconciliation delivery, never a lost or
+    /// duplicated contact (the Logbook Service's own idempotent write is what actually prevents
+    /// that).
+    pub fn restore_if_present(&mut self, engine: &mut Engine) {
         if self.active.is_some() {
             return;
         }
@@ -442,21 +459,11 @@ impl ContestBridge {
                 return;
             }
         };
-        // Only restore if Nexus's own snapshot agrees a Field Day session is actually live --
-        // an EngineHost restart where the operator never re-entered the mode must not resurrect
-        // a stale identity for a session that no longer exists.
-        if engine.snapshot().field_day.is_none() {
-            let _ = std::fs::remove_file(self.sidecar_path());
-            return;
-        }
-        eprintln!(
-            "contest_bridge: restored session-instance id {} for event {}",
-            saved.session_instance_id, saved.event_id
-        );
-        self.active = Some(ActiveSession {
+        let a = ActiveSession {
             session_instance_id: saved.session_instance_id,
             event_id: saved.event_id,
             acked_seq: 0,
+            run_mode: saved.run_mode,
             mycall: saved.mycall,
             mygrid: saved.mygrid,
             class: saved.class,
@@ -465,7 +472,20 @@ impl ContestBridge {
             category_power: saved.category_power,
             category_assisted: saved.category_assisted,
             category_station: saved.category_station,
-        });
+        };
+        match Self::apply_and_enter_mode(engine, &a, "") {
+            Ok(()) => {
+                eprintln!(
+                    "contest_bridge: restored session-instance id {} for event {}",
+                    a.session_instance_id, a.event_id
+                );
+                self.active = Some(a);
+            }
+            Err(e) => {
+                eprintln!("contest_bridge: could not restore session {}: {e} -- sidecar removed", a.session_instance_id);
+                let _ = std::fs::remove_file(self.sidecar_path());
+            }
+        }
     }
 
     fn persist_sidecar(&self) {
@@ -473,6 +493,7 @@ impl ContestBridge {
             let saved = SidecarV1 {
                 session_instance_id: a.session_instance_id.clone(),
                 event_id: a.event_id.clone(),
+                run_mode: a.run_mode.clone(),
                 mycall: a.mycall.clone(),
                 mygrid: a.mygrid.clone(),
                 class: a.class.clone(),
@@ -514,41 +535,11 @@ impl ContestBridge {
         if self.active.is_some() {
             return Err("a contest session is already active -- call CONTEST_EXIT first".to_string());
         }
-        if args.run_mode != "run" && args.run_mode != "sp" {
-            return Err(format!("unknown run_mode {:?} -- must be \"run\" or \"sp\"", args.run_mode));
-        }
-
-        let mut s = engine.settings().clone();
-        s.mycall = args.station_callsign.trim().to_ascii_uppercase();
-        s.mygrid = args.grid.trim().to_ascii_uppercase();
-        if !args.operator_callsign.trim().is_empty() {
-            s.fd_operator = args.operator_callsign.trim().to_ascii_uppercase();
-        }
-        s.fd_event = args.event_id.clone();
-        s.fd_class = args.class.clone();
-        s.fd_section = args.section.clone();
-        if !args.category_operator.is_empty() {
-            s.contest_category_operator = args.category_operator.clone();
-        }
-        if !args.category_power.is_empty() {
-            s.contest_category_power = args.category_power.clone();
-        }
-        if !args.category_assisted.is_empty() {
-            s.contest_category_assisted = args.category_assisted.clone();
-        }
-        if !args.category_station.is_empty() {
-            s.contest_category_station = args.category_station.clone();
-        }
-        engine.apply_settings(s);
-
-        let spec = if args.run_mode == "run" { "fieldday-run" } else { "fieldday-sp" };
-        engine.set_mode(spec)?;
-
-        let session_instance_id = mint_session_instance_id();
-        self.active = Some(ActiveSession {
-            session_instance_id: session_instance_id.clone(),
+        let a = ActiveSession {
+            session_instance_id: mint_session_instance_id(),
             event_id: args.event_id.clone(),
             acked_seq: 0,
+            run_mode: args.run_mode.clone(),
             mycall: args.station_callsign.trim().to_ascii_uppercase(),
             mygrid: args.grid.trim().to_ascii_uppercase(),
             class: args.class.clone(),
@@ -557,11 +548,65 @@ impl ContestBridge {
             category_power: args.category_power.clone(),
             category_assisted: args.category_assisted.clone(),
             category_station: args.category_station.clone(),
-        });
+        };
+        Self::apply_and_enter_mode(engine, &a, args.operator_callsign.trim())?;
+
+        let session_instance_id = a.session_instance_id.clone();
+        self.active = Some(a);
         self.persist_sidecar();
 
         let wire = EnterOkWire { session_instance_id };
         serde_json::to_string(&wire).map_err(|e| format!("could not encode CONTEST_ENTER result: {e}"))
+    }
+
+    /// The engine-mutating half of CONTEST_ENTER, factored out so `restore_if_present` can call
+    /// the exact same logic (apply_settings + set_mode) rather than a second, drifting copy of
+    /// it. `apply_settings` (not a narrow per-field setter) is used deliberately: its own doc
+    /// comment warns it is heavyweight ("the TX gate generation bumps... never the way to
+    /// persist ONE field") and names narrow setters for anything hot-path. Entering (or
+    /// restoring) a contest is a rare, deliberate transition -- exactly Nexus's own UI's usage
+    /// pattern (a Settings save, then a mode-entry click) -- not a hot path, so the heavyweight
+    /// cost is correct here, not a shortcut.
+    fn apply_and_enter_mode(engine: &mut Engine, a: &ActiveSession, operator_callsign: &str) -> Result<(), String> {
+        if a.run_mode != "run" && a.run_mode != "sp" {
+            return Err(format!("unknown run_mode {:?} -- must be \"run\" or \"sp\"", a.run_mode));
+        }
+        let mut s = engine.settings().clone();
+        s.mycall = a.mycall.clone();
+        s.mygrid = a.mygrid.clone();
+        if !operator_callsign.is_empty() {
+            s.fd_operator = operator_callsign.trim().to_ascii_uppercase();
+        }
+        s.fd_event = a.event_id.clone();
+        s.fd_class = a.class.clone();
+        s.fd_section = a.section.clone();
+        // ⚠️ The master switch (spec §1.3, verified directly against engine.rs's own snapshot
+        // construction): Engine::snapshot() defensively blanks `field_day`/reverts `mode` to
+        // Chat in its OUTPUT whenever `fd_active` is false, EVEN THOUGH the real internal
+        // `self.mode` is genuinely `Mode::FieldDay` -- a real, confirmed miss this comment
+        // exists because of, found by actually running CONTEST_ENTER against the real compiled
+        // binary end-to-end (not assumed from reading the code alone) and observing
+        // SNAPSHOT.fieldDay come back null despite a successful entry. Without this line,
+        // CONTEST_ENTER "succeeds" (set_mode itself does not check fd_active) but every
+        // downstream consumer of SNAPSHOT.fieldDay -- the accessible status display -- sees
+        // nothing.
+        s.fd_active = true;
+        if !a.category_operator.is_empty() {
+            s.contest_category_operator = a.category_operator.clone();
+        }
+        if !a.category_power.is_empty() {
+            s.contest_category_power = a.category_power.clone();
+        }
+        if !a.category_assisted.is_empty() {
+            s.contest_category_assisted = a.category_assisted.clone();
+        }
+        if !a.category_station.is_empty() {
+            s.contest_category_station = a.category_station.clone();
+        }
+        engine.apply_settings(s);
+
+        let spec = if a.run_mode == "run" { "fieldday-run" } else { "fieldday-sp" };
+        engine.set_mode(spec)
     }
 
     /// CONTEST_EXIT. Returns the engine to Chat (the same idle mode `set_mode` documents every
@@ -573,6 +618,13 @@ impl ContestBridge {
             return Err("no contest session is active".to_string());
         }
         engine.set_mode("chat")?;
+        // Mirrors the master-switch set in enter() -- an exited session must not leave
+        // fd_active stranded true (harmless today since mode is already Chat, but a future
+        // restore_field_day_if_enabled-style path could otherwise resurrect FD chrome the
+        // operator explicitly turned off).
+        let mut s = engine.settings().clone();
+        s.fd_active = false;
+        engine.apply_settings(s);
         self.active = None;
         self.persist_sidecar();
         Ok(())
@@ -899,6 +951,7 @@ mod tests {
             session_instance_id: "test-instance-1".to_string(),
             event_id: "arrlfd".to_string(),
             acked_seq: 0,
+            run_mode: "sp".to_string(),
             mycall: "K5KPE".to_string(),
             mygrid: "EM48".to_string(),
             class: "2A".to_string(),

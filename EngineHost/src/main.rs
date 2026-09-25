@@ -1774,11 +1774,21 @@ fn main() {
     // coordinated Jimmy-side change, deferred) -- defaults to a self-contained location under
     // LOCALAPPDATA so this works out of the box; see contest_data_dir's own comment.
     contest_bridge::install_call_resolver();
+    // ⚠️ Must be set BEFORE any CONTEST_ENTER/restore -- Nexus's own set_mode (called by both)
+    // reads this field to decide whether to merge a durable FD journal back into the fresh
+    // session (engine.rs's own FieldDay mode-entry arm). Left unset, persist_fd_log() silently
+    // no-ops (its own early return) and merge_adif() never runs -- a confirmed, found-live gap:
+    // a contact logged before an EngineHost crash was NOT present after a real restart until
+    // this line was added (session-instance identity restored correctly via the sidecar below,
+    // but Nexus's own contest rows did not, because nothing had ever told Nexus where to
+    // journal them). Cheap and safe to set unconditionally -- the file is only touched when a
+    // contest is actually entered.
+    engine.lock().unwrap().set_fd_log_path(contest_data_dir().join("field_day_journal.adi"));
     let contest_bridge_state = Arc::new(Mutex::new(contest_bridge::ContestBridge::new(contest_data_dir())));
     contest_bridge_state
         .lock()
         .unwrap()
-        .restore_if_present(&engine.lock().unwrap());
+        .restore_if_present(&mut engine.lock().unwrap());
 
     // POTA/SOTA spots + space weather: background-refreshed, credential-free, cached in memory
     // (see external_data.rs's own header comment). Independent of the engine/radio loop
