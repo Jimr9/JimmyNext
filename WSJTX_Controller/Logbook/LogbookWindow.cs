@@ -47,7 +47,10 @@ namespace WSJTX_Controller
         private readonly Action _onQsoLogged;
 
         // ── Database ──────────────────────────────────────────────────────────────
-        private LogbookDb _db;
+        // Nexus contesting foundation, boundary-completion pass: ILogbookService, not LogbookDb
+        // -- every method this window calls is now on the interface; SQLite details stay inside
+        // LogbookDb, the sole implementation.
+        private ILogbookService _db;
 
         // ── Navigation state ──────────────────────────────────────────────────────
         private Panel _activePage;

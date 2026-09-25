@@ -17,30 +17,20 @@ namespace WSJTX_Controller
     // storage-neutral common representation (see the logbook-ownership design), so this is the
     // natural contract shape, not leftover SQLite leakage.
     //
-    // Scope note (final, phase 2 completion pass): this covers every method the app's non-UI
-    // consumers actually call -- classification's worked-before checks, the upload-catch-up
-    // paths (QRZ/Club Log/HRDLog/LoTW-via-TQSL), auto-sync's import-log bookkeeping, and the
-    // startup state-backfill repair -- so WsjtxClient.cs, OtaSpotsWindow.cs (via
-    // OtaSpotAnnotator), WsjtxClient.Uploads.cs (+ TqslUploadClient), LogbookAutoSync.cs,
-    // LiveQsoUploadOrchestrator.cs, and Controller.cs's BackfillMissingStates all hold this
-    // interface type now, not LogbookDb concretely.
-    //
-    // ONE deliberate, identified exception remains: LogbookWindow.cs (the Logbook UI) stays on
-    // LogbookDb concretely. It calls 21 distinct methods -- DxccProgress/WasProgress/WazProgress,
+    // Scope note (final, boundary-completion pass): this now covers the FULL surface every
+    // consumer in the app actually calls, including LogbookWindow.cs (the Logbook Center UI) --
+    // its own stats/search/progress methods (DxccProgress/WasProgress/WazProgress,
     // ConfirmedQsos/LotwConfirmedQsos/QrzConfirmedQsos/EqslConfirmedQsos, SearchQsos/
-    // SearchByCallsign, GetRecentQsos, GetUploadSyncStatus, GetDxccCountryNames, and more --
-    // Jimmy's own rich, multi-join, SQLite-optimized query/stats layer for the Logbook window
-    // specifically. Forcing that whole surface into this interface now would mean designing a
-    // second, much larger query contract under time pressure, not a real abstraction. This does
-    // NOT obstruct a future Nexus-backed service: the accepted architecture already scopes
-    // exactly this kind of rich local query/stats need to its own future surface (a rebuildable
-    // local cache/query layer, the same shape already planned for the Awards engine's own
-    // eventual Nexus-backed consumption) rather than this CRUD-focused contract -- LogbookWindow
-    // would move to THAT surface when it exists, not to this one. RuleEngine.cs/AwardTagger.cs
-    // are a second, pre-existing, even-lower-level example of the same kind of deliberately
-    // out-of-scope dependency: they already bypass LogbookDb entirely and query a raw
-    // SQLiteConnection directly for performance (their own established pattern, not something
-    // this phase touches).
+    // SearchByCallsign, GetRecentQsos/GetQso, GetUploadSyncStatus, GetDxccCountryNames,
+    // GetAdifFieldDicts, GetImportHistory, TotalQsos) are declared below alongside everything
+    // else. LogbookDb remains the sole implementation (SQLite details -- SQL text, connections,
+    // locking -- stay entirely inside it); every consumer, LogbookWindow.cs included, now holds
+    // this interface type, never LogbookDb concretely. A future Nexus-backed implementation
+    // satisfies the same contract without any consumer changing.
+    //
+    // RuleEngine.cs/AwardTagger.cs remain a deliberate, pre-existing, lower-level exception:
+    // they already bypass LogbookDb entirely and query a raw SQLiteConnection directly for
+    // performance (their own established pattern, predating this boundary, not touched here).
     public interface ILogbookService : IDisposable
     {
         (bool isNew, bool newlyConfirmed, bool corrected) Upsert(
@@ -109,10 +99,34 @@ namespace WSJTX_Controller
         List<LogbookDb.PendingUploadQso> GetPendingUploads(string service, int limit = 1000);
         void MarkUploaded(string dedupKey, string service, DateTime whenUtc);
 
-        // Import-log bookkeeping (LogbookAutoSync's own sync-status reporting).
+        // Import-log bookkeeping (LogbookAutoSync's own sync-status reporting; also
+        // LogbookWindow's own Import History display).
         int LogImportStart(string source);
         void LogImportFinish(int logId, int total, int newCount, int newlyConfirmed, int corrected,
             int skipped, string errorText);
+        List<ImportLogEntry> GetImportHistory(int limit = 25);
+
+        // Boundary-completion pass: LogbookWindow.cs's (Logbook Center UI) own stats/search
+        // surface -- SQLite details (SQL text, joins, locking) stay entirely inside LogbookDb;
+        // this interface only names the operations.
+        int TotalQsos(string source = null);
+        int ConfirmedQsos(string source = null);
+        int LotwConfirmedQsos();
+        int QrzConfirmedQsos();
+        int EqslConfirmedQsos();
+        (int worked, int confirmed) WasProgress(string band = null);
+        (int worked, int confirmed) DxccProgress(string band = null);
+        (int worked, int confirmed) WazProgress(string band = null);
+        List<QsoRecord> GetRecentQsos(int limit = 10);
+        QsoRecord GetQso(int id);
+        List<QsoRecord> SearchByCallsign(string pattern, int limit = 200);
+        List<QsoRecord> SearchQsos(string callsignPattern, string source, string dateFrom, string dateTo, int limit = 500);
+        LogbookDb.UploadSyncStatus GetUploadSyncStatus(string service);
+        Dictionary<int, string> GetDxccCountryNames();
+        List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null);
+
+        // eQSL InBox reconciliation (EqslReconciler.Reconcile, called from LogbookWindow).
+        LogbookDb.EqslReconcileOutcome TryMarkEqslConfirmed(string callsign, string band, string qsoDateAdif, string mode);
     }
 
     // Nexus contesting foundation, phase 5. WhenUnix is derived from the row's own

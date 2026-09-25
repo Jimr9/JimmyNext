@@ -27,7 +27,7 @@ namespace WSJTX_Controller
                 $"{Ambiguous} ambiguous (skipped), {Unmatched} not found locally, {Skipped} not a confirmation record";
         }
 
-        public static Result Reconcile(LogbookDb db, string adifText)
+        public static Result Reconcile(ILogbookService db, string adifText)
         {
             var result = new Result();
             foreach (Dictionary<string, string> rec in AdifParser.Parse(adifText))
