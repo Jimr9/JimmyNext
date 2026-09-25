@@ -331,7 +331,7 @@ namespace WSJTX_Controller
                 pagePanels[i].AccessibleRole = AccessibleRole.Grouping;
                 _categoryListBox.Items.Add(pageNames[i]);
             }
-            WireCategoryList(_categoryListBox, _categoryDetailHost, pagePanels.Cast<Control>().ToList());
+            CategoryListNav.Wire(_categoryListBox, _categoryDetailHost, pagePanels.Cast<Control>().ToList());
 
             _categoryListBox.SelectedIndexChanged += (s, e) => NavigateToPage(_categoryListBox.SelectedIndex);
 
@@ -352,21 +352,7 @@ namespace WSJTX_Controller
         }
 
         // Shows only the page matching _categoryListBox's current selection, hiding the rest --
-        // same mechanism, same method, as OptionsDlg.WireCategoryList.
-        private static void WireCategoryList(ListBox listBox, Control host, List<Control> panels)
-        {
-            Control current = null;
-            void UpdateVisibility()
-            {
-                if (current != null) host.Controls.Remove(current);
-                int idx = listBox.SelectedIndex;
-                current = (idx >= 0 && idx < panels.Count) ? panels[idx] : null;
-                if (current != null) host.Controls.Add(current);
-            }
-            listBox.SelectedIndexChanged += (s, e) => UpdateVisibility();
-            if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;
-            UpdateVisibility();
-        }
+        // same mechanism CategoryListNav.Wire also gives Options and Contesting.
 
         // ── Page construction ─────────────────────────────────────────────────────
 

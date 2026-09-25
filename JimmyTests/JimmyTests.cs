@@ -589,6 +589,9 @@ static class JimmyTests
         ContestWorkflowReconnectReconciliationTests();
         ContestWorkflowNormalApplicationTests();
         ContestWorkflowRebuildTests();
+        ContestingWindowCategoryNavigationTests();
+        ContestingWindowStationInfoTests();
+        OptionsStationOperatorContinentRelocationTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
@@ -16441,6 +16444,363 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  OptionsDlgKeyboardTraversalBaselineTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+    }
+
+    // ── Contesting window: category-list-and-page navigation (2026-09-25 JAWS correction) ──────
+    // Same accessible pattern as Options/Logbook Center (CategoryListNav.Wire): exactly one
+    // category's page is ever parented in _categoryDetailHost at a time. This walks the SAME real
+    // route TabOrderWalker.WalkReal already proves for Logbook Center, confirms only the selected
+    // page is actually present in the tree (not merely hidden -- the earlier flattened-GroupBox
+    // design's own bug was every group staying simultaneously parented), and confirms choosing a
+    // category moves focus directly into that page's own first control -- this window's own
+    // explicit requirement, unlike Options/Logbook Center, which leave initial focus on the
+    // category list itself and let a later real Tab press enter the page.
+    static void ContestingWindowCategoryNavigationTests()
+    {
+        Console.WriteLine("\n── Contesting: category-list-and-page navigation ──");
+        using (var stub = new StubEngineHost(line => "OK []"))
+        {
+            ContestClient.TestControlPortOverride = stub.Port;
+            try
+            {
+                TabOrderWalker.OnSTA(() =>
+                {
+                    using (var cw = new ContestingWindow(
+                        () => ":memory:", () => "K5KPE", () => "EM48", () => "K5KPE",
+                        () => null, () => new StationSettings()))
+                    {
+                        cw.Show();
+
+                        T GetField<T>(string name) => (T)typeof(ContestingWindow).GetField(name,
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(cw);
+                        var categoryList = GetField<System.Windows.Forms.ListBox>("_categoryListBox");
+                        var host          = GetField<System.Windows.Forms.Panel>("_categoryDetailHost");
+                        var selectPanel   = GetField<System.Windows.Forms.Panel>("_selectConfigPanel");
+                        var activePanel   = GetField<System.Windows.Forms.Panel>("_activeContestPanel");
+                        var manualPanel   = GetField<System.Windows.Forms.Panel>("_manualContactPanel");
+                        var exportPanel   = GetField<System.Windows.Forms.Panel>("_exportPanel");
+                        var panels = new[] { selectPanel, activePanel, manualPanel, exportPanel };
+                        var eventList             = GetField<System.Windows.Forms.ListBox>("_eventList");
+                        var enterButton           = GetField<System.Windows.Forms.Button>("_enterButton");
+                        var manualCallBox         = GetField<System.Windows.Forms.TextBox>("_manualCallBox");
+                        var exportCabrilloButton  = GetField<System.Windows.Forms.Button>("_exportCabrilloButton");
+
+                        Check("Category list lists exactly 4 categories", categoryList.Items.Count == 4, true);
+                        CheckStr("Category order matches the accepted design",
+                            string.Join(" | ", categoryList.Items.Cast<object>()),
+                            "Select and Configure | Active Contest | Manual Contact | Export");
+
+                        // ── Only the selected page is ever actually present in the tree --
+                        // "visible, enabled, exposed to accessibility, and included in keyboard
+                        // navigation" all follow from this one fact by construction. ──
+                        for (int i = 0; i < panels.Length; i++)
+                        {
+                            categoryList.SelectedIndex = i;
+                            for (int j = 0; j < panels.Length; j++)
+                            {
+                                bool shouldBePresent = (i == j);
+                                Check($"Category {i} selected: page {j} present in host == {shouldBePresent}",
+                                    host.Controls.Contains(panels[j]), shouldBePresent);
+                            }
+                        }
+
+                        // ── Choosing a category focuses that page's own first useful control --
+                        // found dynamically (FirstSelectableIn), not a fixed reference, since
+                        // Export's own first control starts disabled (no session yet). ──
+                        categoryList.SelectedIndex = 1;   // force a real change onto some other page first
+                        categoryList.SelectedIndex = PAGE_SELECT_TEST;
+                        Check("Selecting Select and Configure focuses the contest list",
+                            cw.ActiveControl == eventList, true);
+                        categoryList.SelectedIndex = PAGE_ACTIVE_TEST;
+                        Check("Selecting Active Contest focuses Enter Contest",
+                            cw.ActiveControl == enterButton, true);
+                        categoryList.SelectedIndex = PAGE_MANUAL_TEST;
+                        Check("Selecting Manual Contact focuses the contacted station's callsign",
+                            cw.ActiveControl == manualCallBox, true);
+
+                        // Export, baseline (no session active): NOTHING on the page is currently
+                        // selectable (Export Cabrillo/ADIF both start disabled) -- the dynamic
+                        // lookup itself (FirstSelectableIn) must correctly find nothing to focus,
+                        // rather than the fixed-reference bug this design replaced (which tried to
+                        // focus a disabled button and silently failed). What WinForms then does
+                        // with a previously-focused control that just got unparented (the Manual
+                        // Contact page being removed) is real, but not this class's own
+                        // behavior to assert on here.
+                        var firstSelectableIn = typeof(ContestingWindow).GetMethod("FirstSelectableIn",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+                        categoryList.SelectedIndex = PAGE_EXPORT_TEST;
+                        var foundInExport = firstSelectableIn.Invoke(null, new object[] { exportPanel });
+                        Check("Export, no active session: FirstSelectableIn correctly finds nothing to focus",
+                            foundInExport == null, true);
+
+                        // ── Keyboard traversal per category (real Tab route, Form.ProcessTabKey
+                        // via reflection -- same technique LogbookWindowKeyboardTraversalBaselineTests
+                        // uses; ContestingWindow does not override ProcessTabKey, so this exercises
+                        // real, unmodified WinForms behavior, which is sufficient here since (unlike
+                        // Logbook Center's pages) no page mixes a Dock=Fill list with a Dock=Top
+                        // header -- every control here uses explicit Location/Anchor). ──
+                        var processTabKey = typeof(ContestingWindow).GetMethod("ProcessTabKey",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        bool StepReal(bool fwd) => (bool)processTabKey.Invoke(cw, new object[] { fwd });
+
+                        void CheckPage(string label, int idx, string[] expected)
+                        {
+                            categoryList.SelectedIndex = (idx + 1) % panels.Length;
+                            categoryList.SelectedIndex = idx;
+                            categoryList.Focus();
+                            var (seq, _) = TabOrderWalker.WalkReal(cw, categoryList, forward: true, StepReal);
+                            CheckStr($"{label}: forward Tab sequence",
+                                string.Join(" -> ", seq), string.Join(" -> ", expected));
+                        }
+
+                        CheckPage("Select and Configure (baseline)", PAGE_SELECT_TEST, new[] {
+                            "Contests", "Refresh contest list", "Selected event id", "Load contest fields", "Operating style",
+                        });
+                        CheckPage("Active Contest (baseline, no session)", PAGE_ACTIVE_TEST, new[] { "Enter contest" });
+                        CheckPage("Manual Contact", PAGE_MANUAL_TEST, new[] {
+                            "Contacted station callsign", "Band", "Mode",
+                            "Contest, from Nexus's known list",
+                            "Contest name, not in Nexus's list -- unvalidated and unscored", "Log contact",
+                        });
+                        CheckPage("Export (baseline, no session)", PAGE_EXPORT_TEST, new string[0]);
+
+                        // ── Simulate an active session (the same Enabled flips DoEnter itself
+                        // performs on a real CONTEST_ENTER) -- exercises the traversal consequence
+                        // of "controls that do not currently apply are disabled" without
+                        // re-testing CONTEST_ENTER's own logic (already covered by ContestWorkflow's
+                        // tests). ──
+                        GetField<System.Windows.Forms.Button>("_exitButton").Enabled = true;
+                        GetField<System.Windows.Forms.Button>("_rebuildButton").Enabled = true;
+                        GetField<System.Windows.Forms.Button>("_exportCabrilloButton").Enabled = true;
+                        GetField<System.Windows.Forms.Button>("_exportAdifButton").Enabled = true;
+
+                        CheckPage("Active Contest (session active)", PAGE_ACTIVE_TEST,
+                            new[] { "Enter contest", "Exit contest", "Recalculate score" });
+                        CheckPage("Export (session active)", PAGE_EXPORT_TEST,
+                            new[] { "Export Cabrillo", "Export ADIF" });
+
+                        // Now that Export has something selectable, choosing it DOES focus it --
+                        // confirms FirstSelectableIn's dynamic lookup, not merely its safe no-op.
+                        categoryList.SelectedIndex = PAGE_SELECT_TEST;
+                        categoryList.SelectedIndex = PAGE_EXPORT_TEST;
+                        Check("Selecting Export once a session is active focuses Export Cabrillo",
+                            cw.ActiveControl == exportCabrilloButton, true);
+
+                        cw.Hide();
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  FAIL  ContestingWindowCategoryNavigationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+                failed++;
+            }
+            finally { ContestClient.TestControlPortOverride = null; }
+        }
+    }
+    const int PAGE_SELECT_TEST = 0, PAGE_ACTIVE_TEST = 1, PAGE_MANUAL_TEST = 2, PAGE_EXPORT_TEST = 3;
+
+    // ── Contesting window: station-information reuse and missing-info validation ───────────────
+    // Jimmy's own station identity is read live from Options -> Station & Operator (the myCall/
+    // myGrid/operatorCall Funcs) and never re-typed in Contesting; if Station Callsign or Grid
+    // Locator is missing, entering a contest or logging a manual contact is refused with an
+    // accessible explanation naming the missing field, never a silent guess or a silent proceed.
+    static void ContestingWindowStationInfoTests()
+    {
+        Console.WriteLine("\n── Contesting: station-information reuse and missing-info validation ──");
+        using (var stub = new StubEngineHost(line => "OK []"))
+        {
+            ContestClient.TestControlPortOverride = stub.Port;
+            try
+            {
+                TabOrderWalker.OnSTA(() =>
+                {
+                    var requireMethod = typeof(ContestingWindow).GetMethod("RequireStationInfo",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+
+                    using (var bothBlank = new ContestingWindow(() => ":memory:", () => "", () => "", () => "",
+                        () => null, () => new StationSettings()))
+                    {
+                        string msg = (string)requireMethod.Invoke(bothBlank, null);
+                        Check("Both blank: names Station Callsign (checked before Grid)",
+                            msg != null && msg.Contains("Station Callsign"), true);
+                    }
+                    using (var gridBlank = new ContestingWindow(() => ":memory:", () => "K5KPE", () => "", () => "K5KPE",
+                        () => null, () => new StationSettings()))
+                    {
+                        string msg = (string)requireMethod.Invoke(gridBlank, null);
+                        Check("Station Callsign set, Grid blank: names Grid Locator",
+                            msg != null && msg.Contains("Grid Locator"), true);
+                    }
+                    using (var bothSet = new ContestingWindow(() => ":memory:", () => "K5KPE", () => "EM48", () => "K5KPE",
+                        () => null, () => new StationSettings()))
+                    {
+                        string msg = (string)requireMethod.Invoke(bothSet, null);
+                        CheckStr("Station Callsign and Grid both set: nothing missing", msg, null);
+                    }
+
+                    // Operator Callsign is deliberately NOT required: StationSettings.
+                    // OperatorCallsign's own comment documents that it already falls back to
+                    // Station Callsign wherever it's consumed elsewhere in the app (WsjtxClient.
+                    // RequestLog's same convention) -- reused here, not re-implemented, via the
+                    // real observable consumer (DoManualLog's own logged row), not by reflecting
+                    // a second private helper.
+                    string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestingOpFallback_" + Guid.NewGuid().ToString("N") + ".db");
+                    try
+                    {
+                        using (var cw = new ContestingWindow(() => tmpDb, () => "K5KPE", () => "EM48", () => "",
+                            () => null, () => new StationSettings()))
+                        {
+                            cw.Show();
+                            T GetField<T>(string name) => (T)typeof(ContestingWindow).GetField(name,
+                                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(cw);
+                            GetField<System.Windows.Forms.TextBox>("_manualCallBox").Text = "W1AW";
+                            GetField<System.Windows.Forms.TextBox>("_manualBandBox").Text = "20m";
+                            GetField<System.Windows.Forms.ComboBox>("_manualModeCombo").Text = "FT8";
+                            var logMethod = typeof(ContestingWindow).GetMethod("DoManualLog",
+                                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                            logMethod.Invoke(cw, null);
+                            cw.Hide();
+                        }
+                        using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={tmpDb};"))
+                        {
+                            conn.Open();
+                            using (var cmd = conn.CreateCommand())
+                            {
+                                cmd.CommandText = "SELECT operator_call, station_call FROM qso WHERE callsign='W1AW';";
+                                using (var rdr = cmd.ExecuteReader())
+                                {
+                                    Check("A logged manual contact exists", rdr.Read(), true);
+                                    CheckStr("Blank Operator Callsign fell back to Station Callsign (K5KPE), the app's established convention",
+                                        rdr.GetString(0), "K5KPE");
+                                }
+                            }
+                        }
+                    }
+                    finally { try { File.Delete(tmpDb); } catch { } }
+
+                    // Missing station info blocks Manual Contact's own Log Contact the same way,
+                    // with an accessible explanation in that page's own status label -- never a
+                    // silent proceed.
+                    using (var cw2 = new ContestingWindow(() => ":memory:", () => "", () => "EM48", () => "K5KPE",
+                        () => null, () => new StationSettings()))
+                    {
+                        cw2.Show();
+                        T GetField<T>(string name) => (T)typeof(ContestingWindow).GetField(name,
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(cw2);
+                        GetField<System.Windows.Forms.TextBox>("_manualCallBox").Text = "W1AW";
+                        var logMethod = typeof(ContestingWindow).GetMethod("DoManualLog",
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                        logMethod.Invoke(cw2, null);
+                        var statusLabel = GetField<System.Windows.Forms.Label>("_manualStatusLabel");
+                        Check("Missing Station Callsign blocks Log Contact with an accessible explanation",
+                            statusLabel.Text.Contains("Station Callsign"), true);
+                        cw2.Hide();
+                    }
+
+                    // ── Structural: no control anywhere re-asks for Jimmy's own station identity,
+                    // and Manual Contact's callsign field is unambiguously the CONTACTED station's. ──
+                    using (var cw3 = new ContestingWindow(() => ":memory:", () => "K5KPE", () => "EM48", () => "K5KPE",
+                        () => null, () => new StationSettings()))
+                    {
+                        T GetField<T>(string name) => (T)typeof(ContestingWindow).GetField(name,
+                            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(cw3);
+                        var manualCallBox = GetField<System.Windows.Forms.TextBox>("_manualCallBox");
+                        CheckStr("Manual Contact's callsign field is unambiguously labeled 'Contacted station callsign', never bare 'Callsign'",
+                            manualCallBox.AccessibleName, "Contacted station callsign");
+
+                        var names = new List<string>();
+                        void Walk(System.Windows.Forms.Control c)
+                        {
+                            if (!string.IsNullOrEmpty(c.AccessibleName)) names.Add(c.AccessibleName);
+                            foreach (System.Windows.Forms.Control child in c.Controls) Walk(child);
+                        }
+                        foreach (var panelName in new[] { "_selectConfigPanel", "_activeContestPanel", "_manualContactPanel", "_exportPanel" })
+                            Walk(GetField<System.Windows.Forms.Panel>(panelName));
+                        bool anyAmbiguousOwnStationField = names.Any(n =>
+                            string.Equals(n, "Callsign", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(n, "Station Callsign", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(n, "Operator Callsign", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(n, "Grid Locator", StringComparison.OrdinalIgnoreCase));
+                        Check("No control anywhere in Contesting re-asks for Jimmy's own station callsign/operator callsign/grid",
+                            anyAmbiguousOwnStationField, false);
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  FAIL  ContestingWindowStationInfoTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+                failed++;
+            }
+            finally { ContestClient.TestControlPortOverride = null; }
+        }
+    }
+
+    // ── Options: My Continent relocated to Station & Operator (2026-09-25) -- UI move only ─────
+    // Preserves the existing INI key ("myContinent" via Controller.SetAndPersistMyContinent,
+    // completely unchanged code), the saved value, and every existing consumer
+    // (WsjtxClient.myContinent/NormalizeContinent and its DX-classification callers) -- only
+    // which Options page builds/saves the control moved, from Receive/Auto Reply to Station &
+    // Operator.
+    static void OptionsStationOperatorContinentRelocationTests()
+    {
+        Console.WriteLine("\n── Options: My Continent relocated to Station & Operator, behavior preserved ──");
+        try
+        {
+            TabOrderWalker.OnSTA(() =>
+            {
+                var ctrl = new Controller();
+                // Same minimal control-field seeding OptionsDlgKeyboardTraversalBaselineTests
+                // already needs before constructing a real WsjtxClient against a bare Controller()
+                // -- its constructor (ResetNego/UpdateDebug et al.) reads several main-form
+                // controls directly.
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.hotkeyConfig = new HotkeyConfig();
+                ctrl.freqCheckBox = new System.Windows.Forms.CheckBox();
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                ctrl.wsjtxClient = wc;
+                wc.myContinent = "EU";   // pre-existing saved value, as if loaded from ini at startup
+
+                using (var dlg = new OptionsDlg(wc, ctrl))
+                {
+                    var _ = dlg.Handle;
+                    dlg.BuildStationOperatorTab();
+
+                    T GetField<T>(string name) => (T)typeof(OptionsDlg).GetField(name,
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg);
+                    var combo = GetField<System.Windows.Forms.ComboBox>("_myContinentCombo");
+                    var stationPanel = GetField<System.Windows.Forms.Panel>("stationOperatorPanel");
+
+                    Check("My Continent combo is built on Station & Operator's own panel",
+                        combo != null && stationPanel.Controls.Contains(combo), true);
+                    CheckStr("My Continent combo's AccessibleName is unchanged", combo.AccessibleName, "My continent");
+                    CheckStr("My Continent items are unchanged",
+                        string.Join("|", combo.Items.Cast<object>()),
+                        "Not specified|Africa|Antarctica|Asia|Europe|North America|Oceania|South America");
+                    CheckStr("Existing saved value (EU) is correctly pre-selected on open",
+                        combo.SelectedItem?.ToString(), "Europe");
+
+                    // Change it and save -- SaveStationOperatorTab must persist through the SAME
+                    // Controller.SetAndPersistMyContinent path as before (unchanged code; only
+                    // which tab calls it moved).
+                    combo.SelectedIndex = Array.IndexOf(
+                        new[] { "Not specified", "Africa", "Antarctica", "Asia", "Europe", "North America", "Oceania", "South America" },
+                        "Oceania");
+                    dlg.SaveStationOperatorTab();
+
+                    CheckStr("Saving persists the new continent to WsjtxClient.myContinent (the real field DX classification reads)",
+                        wc.myContinent, "OC");
+                }
+            }, timeoutMs: 15000);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  OptionsStationOperatorContinentRelocationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }

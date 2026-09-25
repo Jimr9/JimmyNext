@@ -309,7 +309,7 @@ namespace WSJTX_Controller
                 decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
                 appearancePanel, stationOperatorPanel, profilesPanel
             };
-            WireCategoryList(_categoryListBox, _categoryDetailHost, categoryPanels);
+            CategoryListNav.Wire(_categoryListBox, _categoryDetailHost, categoryPanels);
 
             // Accessibility fix, 2026-09-17: every NumericUpDown here is a composite control --
             // internally it hosts its own child TextBox (the editable number) plus spin buttons.
@@ -349,20 +349,10 @@ namespace WSJTX_Controller
         // a bare TabPage, converted to a Panel here -- confirmed live that WinForms' TabPage
         // throws ArgumentException if reparented to anything other than a real TabControl,
         // despite TabPage technically inheriting from Panel).
-        private static void WireCategoryList(ListBox listBox, Control host, List<Control> panels)
-        {
-            Control current = null;
-            void UpdateVisibility()
-            {
-                if (current != null) host.Controls.Remove(current);
-                int idx = listBox.SelectedIndex;
-                current = (idx >= 0 && idx < panels.Count) ? panels[idx] : null;
-                if (current != null) host.Controls.Add(current);
-            }
-            listBox.SelectedIndexChanged += (s, e) => UpdateVisibility();
-            if (listBox.Items.Count > 0) listBox.SelectedIndex = 0;
-            UpdateVisibility();
-        }
+        //
+        // The mechanism itself now lives in CategoryListNav.Wire (extracted 2026-09-25 once
+        // Logbook Center and Contesting each needed their own copy of this same method) --
+        // this call site, and this comment's own reasoning, are unchanged.
 
         // Recursively finds every NumericUpDown under root and marks its internal editable
         // TextBox part as accessibility-invisible. NumericUpDown is a composite Win32 control
@@ -754,7 +744,6 @@ namespace WSJTX_Controller
             using (var batch = ctrl.BeginSettingsBatch())
             {
             ApplyGeneralSettings();
-            SaveReceiveReplyTab();
             SaveTransmitTab();
             SaveHotkeysTab();
             SaveAdvancedUiTab();
@@ -788,17 +777,6 @@ namespace WSJTX_Controller
         private void cancelButton_Click(object sender, EventArgs e)
         {
             Close();
-        }
-
-        // 2.0.58: persist the operator continent selector. Stored as a 2-letter code (never a
-        // friendly display string); index 0 ("Not specified") stores blank. Jimmy does NOT
-        // derive the operator's continent when it is blank -- the wording says exactly that.
-        private void SaveReceiveReplyTab()
-        {
-            if (_myContinentCombo == null) return;
-            int i = _myContinentCombo.SelectedIndex;
-            string code = (i >= 0 && i < _continentCode.Length) ? _continentCode[i] : "";
-            ctrl.SetAndPersistMyContinent(code);
         }
 
         // ===== ADVANCED UI TAB =====
@@ -2510,7 +2488,10 @@ namespace WSJTX_Controller
         // QthState/County are free text (not yet validated against Nexus's own rules/domains --
         // that validation is Nexus's job once the contest bridge consumes these values, not
         // Jimmy's to duplicate here).
-        private void BuildStationOperatorTab()
+        // internal (not private): JimmyTests builds this tab directly to check the relocated
+        // My Continent control (InternalsVisibleTo, see AssemblyInfo.Testing.cs) -- same pattern
+        // as BuildGeneralTab/BuildFrequenciesTab/BuildNotificationsTab.
+        internal void BuildStationOperatorTab()
         {
             stationOperatorPanel.Controls.Clear();
 
@@ -2634,6 +2615,39 @@ namespace WSJTX_Controller
             AddRow("ITU Zone:", out _stationItuZoneTextBox, "ITU Zone", 10,
                    null, out _, null, 0);
             _stationItuZoneTextBox.Text = ctrl.Station.ItuZone;
+
+            // Relocated from Options -> Receive / Auto Reply (2026-09-25 correction pass): this
+            // is station/location information, so it belongs on this page with everything else
+            // that describes the operator -- not a settings migration, the INI key
+            // (SetAndPersistMyContinent's own "myContinent"), saved value, public behavior
+            // (WsjtxClient.myContinent/NormalizeContinent and every DX-classification consumer),
+            // and blank-means-"not specified" semantics are all completely unchanged, only this
+            // control's own parent tab moved. See SaveStationOperatorTab's own continent-save
+            // block below (folded in from the old, now-removed SaveReceiveReplyTab).
+            var continentLabel = new System.Windows.Forms.Label
+            {
+                Text = "My Continent:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            stationOperatorPanel.Controls.Add(continentLabel);
+            _myContinentCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left + 150, y),
+                Size = new System.Drawing.Size(160, 21),
+                TabIndex = 11,
+                Font = font,
+                AccessibleName = "My continent",
+            };
+            _myContinentCombo.Items.AddRange(_continentDisplay);
+            int curContinentIdx = System.Array.IndexOf(_continentCode,
+                WsjtxClient.NormalizeContinent(ctrl.wsjtxClient?.myContinent) ?? "");
+            _myContinentCombo.SelectedIndex = curContinentIdx >= 0 ? curContinentIdx : 0;
+            stationOperatorPanel.Controls.Add(_myContinentCombo);
+            y += 28;
             y += 12;
 
             // Nexus contesting foundation, JAWS correction pass (2026-09-25): opens/focuses the
@@ -2648,7 +2662,7 @@ namespace WSJTX_Controller
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(150, 26),
                 Font = font,
-                TabIndex = 11,
+                TabIndex = 12,
                 AccessibleName = "Open Contesting",
                 AccessibleDescription = "Opens the standalone Contesting window to select, configure, enter, and log a contest.",
             };
@@ -2662,7 +2676,9 @@ namespace WSJTX_Controller
         // Name/Contest Email/CQ Zone/ITU Zone are trimmed only, never case-forced. No engine
         // restart is needed for any field here -- see StationSettings.cs's own comment: these are
         // pure Jimmy-side values with no EngineHost launch-arg dependency today.
-        private void SaveStationOperatorTab()
+        // internal (not private): JimmyTests calls this directly to verify the relocated My
+        // Continent control's save path (InternalsVisibleTo, see AssemblyInfo.Testing.cs).
+        internal void SaveStationOperatorTab()
         {
             if (_stationOperatorCallTextBox == null) return;
 
@@ -2674,6 +2690,17 @@ namespace WSJTX_Controller
             ctrl.Station.ArrlSection = _stationArrlSectionTextBox.Text.Trim().ToUpperInvariant();
             ctrl.Station.CqZone = _stationCqZoneTextBox.Text.Trim();
             ctrl.Station.ItuZone = _stationItuZoneTextBox.Text.Trim();
+
+            // 2.0.58, relocated here 2026-09-25 (see BuildStationOperatorTab's own comment):
+            // persist the operator continent selector. Stored as a 2-letter code (never a
+            // friendly display string); index 0 ("Not specified") stores blank. Jimmy does NOT
+            // derive the operator's continent when it is blank -- the wording says exactly that.
+            if (_myContinentCombo != null)
+            {
+                int i = _myContinentCombo.SelectedIndex;
+                string code = (i >= 0 && i < _continentCode.Length) ? _continentCode[i] : "";
+                ctrl.SetAndPersistMyContinent(code);
+            }
         }
 
         // Seeds the Windows ENDPOINT (device) master level for the given direction (input
@@ -4913,28 +4940,8 @@ namespace WSJTX_Controller
 
             // 2.0.58: operator continent selector -- affects DX classification only when set
             // (a blank value keeps the existing conservative "not DX unless known" fallback).
-            var continentLabel = new System.Windows.Forms.Label
-            {
-                Text = "My continent:",
-                AutoSize = true,
-                Location = new Point(410, 22),
-                Font = rcvReplyingGroupBox.Font,
-                TabStop = false,
-            };
-            _myContinentCombo = new System.Windows.Forms.ComboBox
-            {
-                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
-                Location = new Point(492, 19),
-                Size = new Size(150, 21),
-                Font = rcvReplyingGroupBox.Font,
-                AccessibleName = "My continent",
-            };
-            _myContinentCombo.Items.AddRange(_continentDisplay);
-            int curContinentIdx = System.Array.IndexOf(_continentCode,
-                WsjtxClient.NormalizeContinent(ctrl.wsjtxClient?.myContinent) ?? "");
-            _myContinentCombo.SelectedIndex = curContinentIdx >= 0 ? curContinentIdx : 0;
-            rcvReplyingGroupBox.Controls.Add(continentLabel);
-            rcvReplyingGroupBox.Controls.Add(_myContinentCombo);
+            // Relocated to Options -> Station & Operator (2026-09-25 correction pass, see
+            // BuildStationOperatorTab's own comment) -- built there now, not reparented here.
             ReparentTo(ctrl.bandComboBox,        rcvReplyingGroupBox, new Point(112, 43));
             ReparentTo(ctrl.forLabel,            rcvReplyingGroupBox, new Point(190, 46));
             ReparentTo(ctrl.ExcludeHelpLabel,    rcvReplyingGroupBox, new Point(215, 46));

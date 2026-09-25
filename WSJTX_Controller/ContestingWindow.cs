@@ -13,30 +13,49 @@ namespace WSJTX_Controller
     // hotkey (see Controller.OpenContestingWindow) -- the SAME window either way, never a second
     // instance.
     //
-    // Live JAWS testing (2026-09-25) found the earlier "Contesting tab inside Logbook Center"
-    // design confusing: Logbook Center's own category list, followed by three MORE nested tabs
-    // inside the Contesting entry, read poorly. This is back to being its own standalone window,
-    // and its three former nested tabs (Select Contest / Active Session / Manual Entry) are now
-    // flattened into ONE straightforward top-to-bottom keyboard sequence -- six GroupBoxes, each
-    // a real accessible grouping (native GroupBox Text IS its accessible name/Grouping role, no
-    // TabControl re-announcement noise), stacked in a single AutoScroll content panel so nothing
-    // is nested and Tab order is exactly visual order:
-    //   1. Contest selection and support level
-    //   2. Contest configuration and generated exchange fields
-    //   3. Start/stop and active-session status
-    //   4. Score, warnings, and advisories
-    //   5. Manual contact entry
-    //   6. Cabrillo and ADIF export
+    // Live JAWS testing went through two designs before this one:
+    //   1. A tab inside Logbook Center -- rejected: Logbook Center's own category list followed
+    //      by three MORE nested tabs inside that one entry read poorly.
+    //   2. A single flattened top-to-bottom sequence of six GroupBoxes in the standalone window
+    //      -- also rejected (2026-09-25): with every group simultaneously parented in one
+    //      AutoScroll panel, JAWS's own speech buffer (which reads the whole present, focusable
+    //      tree, not just whatever currently has focus) kept re-exposing the same groups and
+    //      controls regardless of where focus actually was.
+    // This is the corrected design: the SAME accessible category-list-and-page arrangement
+    // Options and Logbook Center already use (CategoryListNav.Wire) -- a plain ListBox
+    // (_categoryListBox) driving exactly ONE visible page at a time in a host panel
+    // (_categoryDetailHost). Only the selected category's page is ever actually parented in the
+    // tree, so it is the only one visible, enabled, exposed to accessibility, or reachable by Tab
+    // -- there is no hidden sibling left for JAWS's speech buffer to re-expose. No TabControl and
+    // no nested tabs anywhere in this file.
+    //
+    // Categories:
+    //   Select & Configure -- Nexus contest list, support level, refresh, selected contest,
+    //     required/generated contest fields, operating style, loading saved contest configuration.
+    //   Active Contest -- enter/exit, current contest and session status, score, warnings/
+    //     advisories, score recalculation.
+    //   Manual Contact -- the CONTACTED station's callsign/band/mode, a known-Nexus-contest
+    //     selection or an unvalidated/unscored free-text contest name, and Log Contact.
+    //   Export -- Cabrillo and ADIF export.
+    //
     // Every list here is a single-column ListBox with pre-formatted row text (never a
     // multi-column ListView) -- OtaSpotsWindow's own comment documents why: a live-tested NVDA
     // gap with multi-column ListView that a plain ListBox does not have. Every status/warning
-    // surface below is exactly ONE label per concern (one per group), updated in place -- never
-    // duplicated -- so nothing is announced twice. No MessageBox anywhere in this file: a warning
-    // from Nexus (e.g. Winter Field Day's mode advisory) is shown as status text the operator can
-    // read on their own schedule, never a focus-stealing dialog that interrupts typing an
-    // exchange mid-contact. Controls that do not currently apply (Exit/Recalculate/Export before
-    // a session is active) are disabled, not merely rejected at click time, so JAWS announces
-    // them as unavailable rather than the operator discovering that only after activating one.
+    // surface below is exactly ONE label per concern, updated in place -- never duplicated -- so
+    // nothing is announced twice. No MessageBox anywhere in this file: a warning from Nexus (e.g.
+    // Winter Field Day's mode advisory) is shown as status text the operator can read on their
+    // own schedule, never a focus-stealing dialog that interrupts typing an exchange mid-contact.
+    // Controls that do not currently apply (Exit/Recalculate/Export before a session is active)
+    // are disabled, not merely rejected at click time, so JAWS announces them as unavailable
+    // rather than the operator discovering that only after activating one.
+    //
+    // Jimmy's OWN station identity (station callsign, operator callsign, grid, ARRL/RAC section)
+    // is never re-typed here -- it is read live from Options -> Station & Operator (the _myCall/
+    // _myGrid/_operatorCall/_station Funcs below, same live-read pattern LiveQsoUploadOrchestrator
+    // already uses), matching that page's own role as the single authoritative place for it. If
+    // Station Callsign or Grid Locator is blank, entering a contest or logging a manual contact is
+    // refused with an accessible explanation naming the missing field and pointing at Station &
+    // Operator (RequireStationInfo below) -- never a silent guess and never a proceed-anyway.
     public class ContestingWindow : Form
     {
         private readonly ContestClient _contestClient = new ContestClient();
@@ -49,12 +68,20 @@ namespace WSJTX_Controller
 
         private readonly System.Windows.Forms.Timer _statusTimer;
 
-        // ── Group 1: Contest selection and support level ────────────────────────
+        // ── Category list / page host ────────────────────────────────────────────
+        private ListBox _categoryListBox;
+        private Panel   _categoryDetailHost;
+
+        private const int PAGE_SELECT = 0;
+        private const int PAGE_ACTIVE = 1;
+        private const int PAGE_MANUAL = 2;
+        private const int PAGE_EXPORT = 3;
+
+        // ── Select & Configure ────────────────────────────────────────────────────
+        private Panel _selectConfigPanel;
         private ListBox _eventList;
         private Label _eventStatusLabel;
         private List<ContestEventListEntry> _events = new List<ContestEventListEntry>();
-
-        // ── Group 2: Contest configuration and generated exchange fields ────────
         private TextBox _eventIdBox;
         private ComboBox _runModeCombo;
         private Panel _entryFieldsPanel;
@@ -63,23 +90,24 @@ namespace WSJTX_Controller
         private string _selectedEventId;
         private readonly List<(ContestField Field, Control Control)> _entryControls = new List<(ContestField, Control)>();
 
-        // ── Group 3: Start/stop and active-session status ───────────────────────
+        // ── Active Contest ────────────────────────────────────────────────────────
+        private Panel _activeContestPanel;
         private Button _enterButton, _exitButton;
         private Label _sessionStatusLabel;
-
-        // ── Group 4: Score, warnings, and advisories ─────────────────────────────
         private Button _rebuildButton;
         private Label _scoreLabel;
         private Label _warningLabel;
 
-        // ── Group 5: Manual contact entry ────────────────────────────────────────
+        // ── Manual Contact ────────────────────────────────────────────────────────
+        private Panel _manualContactPanel;
         private TextBox _manualCallBox, _manualBandBox, _manualContestFreeTextBox;
         private ComboBox _manualModeCombo, _manualContestCombo;
         private Panel _manualFieldsPanel;
         private readonly List<(ContestField Field, Control Control)> _manualControls = new List<(ContestField, Control)>();
         private Label _manualStatusLabel;
 
-        // ── Group 6: Cabrillo and ADIF export ────────────────────────────────────
+        // ── Export ────────────────────────────────────────────────────────────────
+        private Panel _exportPanel;
         private Button _exportCabrilloButton, _exportAdifButton;
         private Label _exportStatusLabel;
 
@@ -98,34 +126,13 @@ namespace WSJTX_Controller
             FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
-            MinimumSize = new Size(640, 420);
-            Size = new Size(720, 660);
+            MinimumSize = new Size(760, 460);
+            Size = new Size(880, 560);
             Font = new Font("Microsoft Sans Serif", 9F);
             KeyPreview = true;
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); };
 
-            var content = new Panel { Dock = DockStyle.Fill, AutoScroll = true, AccessibleName = "", AccessibleRole = AccessibleRole.None };
-            // Each group gets an explicit Location (Y accumulated top-to-bottom below), never
-            // Dock=Top stacking -- LogbookWindow.MakePage()'s own comment documents a real,
-            // live-confirmed WinForms pitfall where Dock=Top/Dock=Fill add-order and visual/Tab
-            // order can disagree. Explicit positioning sidesteps that class of bug entirely: with
-            // no TabIndex set on any group (all default to 0), WinForms breaks the tie by
-            // Controls-collection add-order, so adding groups 1 -> 6 in this same visual order
-            // makes Tab order match visual order exactly, with no ProcessTabKey override needed.
-            int y = 8;
-            var group1 = BuildSelectGroup(y);    y += group1.Height + 8;
-            var group2 = BuildConfigureGroup(y); y += group2.Height + 8;
-            var group3 = BuildStartStopGroup(y); y += group3.Height + 8;
-            var group4 = BuildScoreGroup(y);     y += group4.Height + 8;
-            var group5 = BuildManualEntryGroup(y); y += group5.Height + 8;
-            var group6 = BuildExportGroup(y);
-            content.Controls.Add(group1);
-            content.Controls.Add(group2);
-            content.Controls.Add(group3);
-            content.Controls.Add(group4);
-            content.Controls.Add(group5);
-            content.Controls.Add(group6);
-            Controls.Add(content);
+            BuildUi();
 
             _statusTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             _statusTimer.Tick += (s, e) => RefreshSessionStatus();
@@ -147,74 +154,203 @@ namespace WSJTX_Controller
                 _exportAdifButton.Enabled = active;
                 RefreshSessionStatus();
             };
-            Shown += (s, e) => _eventList.Focus();
+            // Initial focus goes to the category list itself (JAWS announces "Contesting
+            // categories, Select and Configure, 1 of 4" the instant the window opens), matching
+            // the same Shown-based fix OptionsDlg/LogbookWindow already use -- Load fires before
+            // the window is actually visible/activated, so a Focus() call made there is
+            // unreliable. Choosing a DIFFERENT category afterward focuses that page's own first
+            // control directly (see BuildUi's own SelectedIndexChanged handler) -- this initial
+            // open is the one moment that intentionally does not, so it matches Options/Logbook
+            // Center's own established first-open behavior.
+            Shown += (s, e) => _categoryListBox.Focus();
             FormClosed += (s, e) => { _statusTimer.Stop(); };
         }
 
-        // ── Group 1: Contest selection and support level ────────────────────────
+        // ── UI construction ──────────────────────────────────────────────────────
 
-        private const int GroupWidth = 680;
-
-        private GroupBox BuildSelectGroup(int y0)
+        private void BuildUi()
         {
-            var box = new GroupBox
+            var font = Font;
+
+            _categoryListBox = new ListBox
             {
-                Text = "Contest selection and support level",
-                AccessibleName = "Contest selection and support level",
-                Location = new Point(8, y0),
-                Size = new Size(GroupWidth, 190),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Dock           = DockStyle.Left,
+                Width          = 160,
+                Font           = font,
+                IntegralHeight = false,
+                AccessibleName = "Contesting categories",
+                TabIndex       = 0,
             };
-            int y = 20;
+
+            // Pure layout wrapper -- the one category page actually parented inside it carries
+            // its own real AccessibleName (set below); left unnamed so WinForms/JAWS's own "infer
+            // a name for this container" fallback never attaches to the host itself. Safe for
+            // each page to carry a real name (rather than the ""/None a single always-present
+            // container would need) specifically because CategoryListNav.Wire Adds/Removes only
+            // the ONE currently-selected page -- see this class's own header comment.
+            _categoryDetailHost = new Panel
+            {
+                Dock           = DockStyle.Fill,
+                AccessibleName = "",
+                AccessibleRole = AccessibleRole.None,
+                TabIndex       = 1,
+            };
+
+            _selectConfigPanel   = BuildSelectConfigPage(font);
+            _activeContestPanel  = BuildActiveContestPage(font);
+            _manualContactPanel  = BuildManualContactPage(font);
+            _exportPanel         = BuildExportPage(font);
+
+            string[] pageNames = { "Select and Configure", "Active Contest", "Manual Contact", "Export" };
+            var pagePanels = new List<Panel> { _selectConfigPanel, _activeContestPanel, _manualContactPanel, _exportPanel };
+            for (int i = 0; i < pageNames.Length; i++)
+            {
+                pagePanels[i].Dock = DockStyle.Fill;
+                pagePanels[i].AccessibleName = pageNames[i];
+                pagePanels[i].AccessibleRole = AccessibleRole.Grouping;
+                _categoryListBox.Items.Add(pageNames[i]);
+            }
+            CategoryListNav.Wire(_categoryListBox, _categoryDetailHost, pagePanels.Cast<Control>().ToList());
+
+            // Reviewed/corrected focus traversal (2026-09-25): choosing a category moves focus
+            // DIRECTLY into that page's own first useful control -- the operator never has to
+            // press Tab an extra time after Up/Down just to reach real content, and (together
+            // with CategoryListNav.Wire only ever parenting the one selected page) JAWS is never
+            // left sitting on a list item while a DIFFERENT page's stale content is still what's
+            // actually in the tree. Also refreshes Active Contest's own live status on every
+            // visit, same reasoning as RefreshSessionStatus's own timer tick.
+            //
+            // The target is found dynamically (FirstSelectableIn), not a fixed per-page control
+            // reference: Export's own first control (Export Cabrillo) starts disabled until a
+            // session is active, and a fixed reference would try to focus a disabled control and
+            // silently fail, leaving focus nowhere. Scanning for the first genuinely selectable
+            // control instead is correct in every state, not just the common one.
+            _categoryListBox.SelectedIndexChanged += (s, e) =>
+            {
+                int idx = _categoryListBox.SelectedIndex;
+                if (idx == PAGE_ACTIVE) RefreshSessionStatus();
+                if (idx >= 0 && idx < pagePanels.Count)
+                    FirstSelectableIn(pagePanels[idx])?.Focus();
+            };
+
+            Controls.Add(_categoryDetailHost);
+            Controls.Add(_categoryListBox);
+        }
+
+        // Required Jimmy-side station identity: Station Callsign and Grid Locator. Returns null
+        // when both are present; otherwise an accessible, specific explanation naming exactly
+        // which one is missing and where to fix it -- never a silent guess, never a generic
+        // "incomplete" message that leaves the operator to hunt for what's actually wrong.
+        // Operator Callsign is deliberately NOT required here: StationSettings.OperatorCallsign's
+        // own comment documents that it already falls back to Station Callsign wherever it's
+        // consumed (WsjtxClient.RequestLog's same pattern) -- ResolvedOperatorCall below reuses
+        // that existing convention rather than treating a blank value as an error.
+        private string RequireStationInfo()
+        {
+            if (string.IsNullOrWhiteSpace(_myCall()))
+                return "Station Callsign is not set. Go to Options, Station & Operator, to set it.";
+            if (string.IsNullOrWhiteSpace(_myGrid()))
+                return "Grid Locator is not set. Go to Options, Station & Operator, to set it.";
+            return null;
+        }
+
+        private string ResolvedOperatorCall() =>
+            string.IsNullOrWhiteSpace(_operatorCall()) ? _myCall() : _operatorCall();
+
+        // ── Select & Configure ────────────────────────────────────────────────────
+
+        private Panel BuildSelectConfigPage(Font font)
+        {
+            var page = MakePage();
+            int y = 8;
+            const int left = 8;
+
             var instr = new Label
             {
                 Text = "Contests Nexus can validate, score, and export. Support level is Jimmy's own assessment of what it can do for each one -- not a claim about Nexus.",
                 AutoSize = false,
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 36),
+                Location = new Point(left, y),
+                Size = new Size(660, 36),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Font = font,
                 TabStop = false,
             };
-            box.Controls.Add(instr);
+            page.Controls.Add(instr);
             y += 40;
 
             _eventList = new ListBox
             {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 90),
+                Location = new Point(left, y),
+                Size = new Size(660, 90),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Font = font,
                 AccessibleName = "Contests",
             };
-            box.Controls.Add(_eventList);
+            page.Controls.Add(_eventList);
             y += 96;
 
-            var refreshBtn = new Button
-            {
-                Text = "&Refresh List",
-                Location = new Point(8, y),
-                Size = new Size(120, 24),
-                Font = Font,
-                AccessibleName = "Refresh contest list",
-            };
+            var refreshBtn = new Button { Text = "&Refresh List", Location = new Point(left, y), Size = new Size(120, 24), Font = font, AccessibleName = "Refresh contest list" };
             refreshBtn.Click += (s, e) => RefreshEventList();
-            box.Controls.Add(refreshBtn);
+            page.Controls.Add(refreshBtn);
 
             _eventStatusLabel = new Label
             {
-                Location = new Point(140, y + 3),
-                Size = new Size(box.Width - 148, 20),
+                Location = new Point(left + 132, y + 3),
+                Size = new Size(520, 20),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Font = font,
                 AutoSize = false,
                 TabStop = false,
                 AccessibleName = "Contest list status",
             };
-            box.Controls.Add(_eventStatusLabel);
+            page.Controls.Add(_eventStatusLabel);
+            y += 32;
 
-            return box;
+            var eventLabel = new Label { Text = "Selected event id:", AutoSize = true, Location = new Point(left, y + 3), Font = font, TabStop = false };
+            page.Controls.Add(eventLabel);
+            _eventIdBox = new TextBox { Location = new Point(left + 140, y), Size = new Size(160, 21), Font = font, AccessibleName = "Selected event id" };
+            _eventIdBox.TextChanged += (s, e) => { _selectedEventId = _eventIdBox.Text.Trim(); };
+            page.Controls.Add(_eventIdBox);
+
+            var loadBtn = new Button { Text = "&Load Fields", Location = new Point(left + 310, y - 1), Size = new Size(100, 23), Font = font, AccessibleName = "Load contest fields" };
+            loadBtn.Click += (s, e) => LoadSelectedRuleset(_eventIdBox.Text.Trim());
+            page.Controls.Add(loadBtn);
+            y += 32;
+
+            var runModeLabel = new Label { Text = "Operating style:", AutoSize = true, Location = new Point(left, y + 3), Font = font, TabStop = false };
+            page.Controls.Add(runModeLabel);
+            _runModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(left + 140, y), Size = new Size(160, 21), Font = font, AccessibleName = "Operating style" };
+            _runModeCombo.Items.Add("Run (auto-CQ)");
+            _runModeCombo.Items.Add("Search & Pounce");
+            _runModeCombo.SelectedIndex = 0;
+            page.Controls.Add(_runModeCombo);
+            y += 32;
+
+            _entryFieldsPanel = new Panel
+            {
+                Location = new Point(left, y),
+                Size = new Size(660, 140),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                AutoScroll = true,
+                AccessibleName = "",
+                AccessibleRole = AccessibleRole.None,
+            };
+            page.Controls.Add(_entryFieldsPanel);
+            y += 146;
+
+            _configStatusLabel = new Label
+            {
+                Location = new Point(left, y),
+                Size = new Size(660, 20),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                Font = font,
+                AutoSize = false,
+                TabStop = false,
+                AccessibleName = "Contest configuration status",
+            };
+            page.Controls.Add(_configStatusLabel);
+
+            return page;
         }
 
         private void RefreshEventList()
@@ -233,68 +369,6 @@ namespace WSJTX_Controller
                 _eventList.Items.Add($"{ev.EventId} ({ev.ContestId}) - {ContestSupportLevels.Label(level)}");
             }
             _eventStatusLabel.Text = $"{events.Count} contest(s) from Nexus's current rules table.";
-        }
-
-        // ── Group 2: Contest configuration and generated exchange fields ────────
-
-        private GroupBox BuildConfigureGroup(int y0)
-        {
-            var box = new GroupBox
-            {
-                Text = "Contest configuration and generated exchange fields",
-                AccessibleName = "Contest configuration and generated exchange fields",
-                Location = new Point(8, y0),
-                Size = new Size(GroupWidth, 250),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-            };
-            int y = 20;
-
-            var eventLabel = new Label { Text = "Selected event id:", AutoSize = true, Location = new Point(8, y + 3), Font = Font, TabStop = false };
-            box.Controls.Add(eventLabel);
-            _eventIdBox = new TextBox { Location = new Point(148, y), Size = new Size(160, 21), Font = Font, AccessibleName = "Selected event id" };
-            _eventIdBox.TextChanged += (s, e) => { _selectedEventId = _eventIdBox.Text.Trim(); };
-            box.Controls.Add(_eventIdBox);
-
-            var loadBtn = new Button { Text = "&Load Fields", Location = new Point(318, y - 1), Size = new Size(100, 23), Font = Font, AccessibleName = "Load contest fields" };
-            loadBtn.Click += (s, e) => LoadSelectedRuleset(_eventIdBox.Text.Trim());
-            box.Controls.Add(loadBtn);
-            y += 32;
-
-            var runModeLabel = new Label { Text = "Operating style:", AutoSize = true, Location = new Point(8, y + 3), Font = Font, TabStop = false };
-            box.Controls.Add(runModeLabel);
-            _runModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(148, y), Size = new Size(160, 21), Font = Font, AccessibleName = "Operating style" };
-            _runModeCombo.Items.Add("Run (auto-CQ)");
-            _runModeCombo.Items.Add("Search & Pounce");
-            _runModeCombo.SelectedIndex = 0;
-            box.Controls.Add(_runModeCombo);
-            y += 32;
-
-            _entryFieldsPanel = new Panel
-            {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 140),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                AutoScroll = true,
-                AccessibleName = "",
-                AccessibleRole = AccessibleRole.None,
-            };
-            box.Controls.Add(_entryFieldsPanel);
-            y += 146;
-
-            _configStatusLabel = new Label
-            {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 20),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-                AutoSize = false,
-                TabStop = false,
-                AccessibleName = "Contest configuration status",
-            };
-            box.Controls.Add(_configStatusLabel);
-
-            return box;
         }
 
         private void LoadSelectedRuleset(string eventId)
@@ -321,66 +395,107 @@ namespace WSJTX_Controller
                 y += 28;
             }
 
-            // Prefill from this profile's own saved defaults for this contest (ContestConfigStore
-            // -- the operator's usual/last-used CLASS/SECTION/run style), never overwriting a
-            // field this contest doesn't actually have.
+            // Prefill CLASS/SECTION from this profile's own saved defaults for this contest
+            // (ContestConfigStore -- the operator's usual/last-used values), never overwriting a
+            // field this contest doesn't actually have. SECTION additionally falls back to the
+            // operator's own ARRL/RAC Section from Station & Operator when there is no saved
+            // value yet -- "automatically obtain... other applicable identity/location values"
+            // (the one exchange value CONTEST_ENTER actually accepts that also has a direct
+            // Station & Operator equivalent; CLASS has none, and category operator/power/
+            // assisted/station are contest-specific operating choices, not station identity).
             var defaults = ContestConfigStore.Load(eventId);
+            string sectionFallback = _station()?.ArrlSection ?? "";
             foreach (var (field, control) in _entryControls)
             {
                 if (string.Equals(field.Key, "CLASS", StringComparison.OrdinalIgnoreCase))
                     ContestFieldControlFactory.WriteValue(control, defaults.Class);
                 else if (string.Equals(field.Key, "SECTION", StringComparison.OrdinalIgnoreCase))
-                    ContestFieldControlFactory.WriteValue(control, defaults.Section);
+                    ContestFieldControlFactory.WriteValue(control,
+                        !string.IsNullOrWhiteSpace(defaults.Section) ? defaults.Section : sectionFallback);
             }
             _runModeCombo.SelectedIndex = string.Equals(defaults.RunMode, "sp", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
 
             _configStatusLabel.Text = $"Loaded {_selectedRuleset.Fields.Count} exchange field(s) for {eventId}. Not yet entered.";
         }
 
-        // ── Group 3: Start/stop and active-session status ────────────────────────
+        // ── Active Contest ────────────────────────────────────────────────────────
 
-        private GroupBox BuildStartStopGroup(int y0)
+        private Panel BuildActiveContestPage(Font font)
         {
-            var box = new GroupBox
-            {
-                Text = "Start/stop and active-session status",
-                AccessibleName = "Start/stop and active-session status",
-                Location = new Point(8, y0),
-                Size = new Size(GroupWidth, 100),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-            };
-            int y = 20;
+            var page = MakePage();
+            int y = 8;
+            const int left = 8;
 
-            _enterButton = new Button { Text = "E&nter Contest", Location = new Point(8, y), Size = new Size(120, 26), Font = Font, AccessibleName = "Enter contest" };
+            _enterButton = new Button { Text = "E&nter Contest", Location = new Point(left, y), Size = new Size(120, 26), Font = font, AccessibleName = "Enter contest" };
             _enterButton.Click += (s, e) => DoEnter();
-            box.Controls.Add(_enterButton);
+            page.Controls.Add(_enterButton);
 
-            _exitButton = new Button { Text = "E&xit Contest", Location = new Point(138, y), Size = new Size(120, 26), Font = Font, AccessibleName = "Exit contest", Enabled = false };
+            _exitButton = new Button { Text = "E&xit Contest", Location = new Point(left + 130, y), Size = new Size(120, 26), Font = font, AccessibleName = "Exit contest", Enabled = false };
             _exitButton.Click += (s, e) => DoExit();
-            box.Controls.Add(_exitButton);
+            page.Controls.Add(_exitButton);
             y += 34;
 
             _sessionStatusLabel = new Label
             {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 40),
+                Location = new Point(left, y),
+                Size = new Size(660, 40),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Font = font,
                 AutoSize = false,
                 TabStop = false,
-                AccessibleName = "Active session status",
+                AccessibleName = "Current contest and session status",
             };
-            box.Controls.Add(_sessionStatusLabel);
+            page.Controls.Add(_sessionStatusLabel);
+            y += 44;
 
-            return box;
+            _rebuildButton = new Button { Text = "&Recalculate Score", Location = new Point(left, y), Size = new Size(150, 26), Font = font, AccessibleName = "Recalculate score", Enabled = false };
+            _rebuildButton.Click += (s, e) => DoRebuild();
+            page.Controls.Add(_rebuildButton);
+            y += 34;
+
+            _scoreLabel = new Label
+            {
+                Location = new Point(left, y),
+                Size = new Size(660, 20),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                Font = font,
+                AutoSize = false,
+                TabStop = false,
+                AccessibleName = "Score",
+            };
+            page.Controls.Add(_scoreLabel);
+            y += 24;
+
+            // The mode-eligibility advisory surface (Winter Field Day and similar) -- Nexus's own
+            // warning text, shown accessibly, never blocking. Empty when there is nothing to say
+            // -- see RefreshSessionStatus.
+            _warningLabel = new Label
+            {
+                Location = new Point(left, y),
+                Size = new Size(660, 40),
+                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                Font = font,
+                AutoSize = false,
+                TabStop = false,
+                ForeColor = Color.DarkOrange,
+                AccessibleName = "Contest advisory",
+            };
+            page.Controls.Add(_warningLabel);
+
+            return page;
         }
 
         private void DoEnter()
         {
+            string missing = RequireStationInfo();
+            if (missing != null)
+            {
+                _sessionStatusLabel.Text = missing;
+                return;
+            }
             if (_selectedRuleset == null || string.IsNullOrEmpty(_selectedEventId))
             {
-                _sessionStatusLabel.Text = "Load a contest's fields first.";
+                _sessionStatusLabel.Text = "Load a contest's fields first, on Select and Configure.";
                 return;
             }
             string runMode = _runModeCombo.SelectedIndex == 1 ? "sp" : "run";
@@ -390,7 +505,7 @@ namespace WSJTX_Controller
             string sectionValue = GetField("SECTION");
 
             var result = _contestClient.Enter(
-                _selectedEventId, runMode, _myCall(), _myGrid(), _operatorCall(),
+                _selectedEventId, runMode, _myCall(), _myGrid(), ResolvedOperatorCall(),
                 classValue, sectionValue,
                 categoryOperator: "", categoryPower: "", categoryAssisted: "", categoryStation: "",
                 out string error);
@@ -438,8 +553,8 @@ namespace WSJTX_Controller
 
             // Reconciliation itself runs on Controller's own persistent timer, independent of
             // whether this window is open -- same "keep running regardless of the window"
-            // precedent as OtaSpotsWindow's live feeds (see ARCHITECTURE.md). This tick only
-            // refreshes what's displayed here.
+            // precedent as OtaSpotsWindow's live feeds (see ARCHITECTURE.md). This tick (and
+            // every visit to the Active Contest category) only refreshes what's displayed here.
 
             // Winter Field Day / advisory-mode warn-and-continue: if the selected ruleset bans
             // the mode Jimmy currently operates (FT8/FT4), show Nexus's own advisory here --
@@ -456,58 +571,6 @@ namespace WSJTX_Controller
             }
         }
 
-        // ── Group 4: Score, warnings, and advisories ─────────────────────────────
-
-        private GroupBox BuildScoreGroup(int y0)
-        {
-            var box = new GroupBox
-            {
-                Text = "Score, warnings, and advisories",
-                AccessibleName = "Score, warnings, and advisories",
-                Location = new Point(8, y0),
-                Size = new Size(GroupWidth, 130),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-            };
-            int y = 20;
-
-            _rebuildButton = new Button { Text = "&Recalculate Score", Location = new Point(8, y), Size = new Size(150, 26), Font = Font, AccessibleName = "Recalculate score", Enabled = false };
-            _rebuildButton.Click += (s, e) => DoRebuild();
-            box.Controls.Add(_rebuildButton);
-            y += 34;
-
-            _scoreLabel = new Label
-            {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 20),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-                AutoSize = false,
-                TabStop = false,
-                AccessibleName = "Score",
-            };
-            box.Controls.Add(_scoreLabel);
-            y += 24;
-
-            // The mode-eligibility advisory surface (Winter Field Day and similar) -- Nexus's own
-            // warning text, shown accessibly, never blocking. Empty when there is nothing to say
-            // -- see RefreshSessionStatus.
-            _warningLabel = new Label
-            {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 40),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-                AutoSize = false,
-                TabStop = false,
-                ForeColor = Color.DarkOrange,
-                AccessibleName = "Contest advisory",
-            };
-            box.Controls.Add(_warningLabel);
-
-            return box;
-        }
-
         private void DoRebuild()
         {
             var wf = _workflow();
@@ -522,100 +585,93 @@ namespace WSJTX_Controller
                 : "Recalculate failed: " + error;
         }
 
-        // ── Group 5: Manual contact entry ────────────────────────────────────────
+        // ── Manual Contact ────────────────────────────────────────────────────────
 
-        private GroupBox BuildManualEntryGroup(int y0)
+        private Panel BuildManualContactPage(Font font)
         {
-            var box = new GroupBox
-            {
-                Text = "Manual contact entry",
-                AccessibleName = "Manual contact entry",
-                Location = new Point(8, y0),
-                Size = new Size(GroupWidth, 300),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-            };
-            int y = 20;
+            var page = MakePage();
+            int y = 8;
+            const int left = 8;
 
             var instr = new Label
             {
                 Text = "Log a contact made by any means (voice, CW, another rig, or a contest Jimmy doesn't automate). For a contest Nexus knows, its own validation/duplicate/scoring apply. For any other contest, this is a plain, unvalidated, unscored record.",
                 AutoSize = false,
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 48),
+                Location = new Point(left, y),
+                Size = new Size(660, 48),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Font = font,
                 TabStop = false,
             };
-            box.Controls.Add(instr);
+            page.Controls.Add(instr);
             y += 52;
 
-            var callLabel = new Label { Text = "Callsign:", AutoSize = true, Location = new Point(8, y + 3), Font = Font, TabStop = false };
-            box.Controls.Add(callLabel);
-            _manualCallBox = new TextBox { Location = new Point(100, y), Size = new Size(120, 21), Font = Font, AccessibleName = "Callsign" };
-            box.Controls.Add(_manualCallBox);
-
-            var bandLabel = new Label { Text = "Band:", AutoSize = true, Location = new Point(240, y + 3), Font = Font, TabStop = false };
-            box.Controls.Add(bandLabel);
-            _manualBandBox = new TextBox { Location = new Point(290, y), Size = new Size(70, 21), Font = Font, AccessibleName = "Band" };
-            box.Controls.Add(_manualBandBox);
-
-            var modeLabel = new Label { Text = "Mode:", AutoSize = true, Location = new Point(380, y + 3), Font = Font, TabStop = false };
-            box.Controls.Add(modeLabel);
-            _manualModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Location = new Point(430, y), Size = new Size(90, 21), Font = Font, AccessibleName = "Mode" };
-            _manualModeCombo.Items.AddRange(new object[] { "FT8", "FT4", "CW", "SSB", "RTTY" });
-            box.Controls.Add(_manualModeCombo);
+            // "Callsign" alone was found live to read ambiguously -- easily misheard/misread as
+            // asking for the OPERATOR's own callsign (which Jimmy already obtains automatically
+            // from Station & Operator and never asks for here). This is always the OTHER
+            // station's callsign.
+            var callLabel = new Label { Text = "Contacted station callsign:", AutoSize = true, Location = new Point(left, y + 3), Font = font, TabStop = false };
+            page.Controls.Add(callLabel);
+            _manualCallBox = new TextBox { Location = new Point(left + 190, y), Size = new Size(120, 21), Font = font, AccessibleName = "Contacted station callsign" };
+            page.Controls.Add(_manualCallBox);
             y += 30;
 
-            var contestLabel = new Label { Text = "Contest:", AutoSize = true, Location = new Point(8, y + 3), Font = Font, TabStop = false };
-            box.Controls.Add(contestLabel);
-            _manualContestCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(100, y), Size = new Size(200, 21), Font = Font, AccessibleName = "Contest, from Nexus's known list" };
-            _manualContestCombo.SelectedIndexChanged += (s, e) => LoadManualFields();
-            box.Controls.Add(_manualContestCombo);
+            var bandLabel = new Label { Text = "Band:", AutoSize = true, Location = new Point(left, y + 3), Font = font, TabStop = false };
+            page.Controls.Add(bandLabel);
+            _manualBandBox = new TextBox { Location = new Point(left + 190, y), Size = new Size(70, 21), Font = font, AccessibleName = "Band" };
+            page.Controls.Add(_manualBandBox);
 
-            var freeLabel = new Label { Text = "Or, contest not listed:", AutoSize = true, Location = new Point(320, y + 3), Font = Font, TabStop = false };
-            box.Controls.Add(freeLabel);
-            _manualContestFreeTextBox = new TextBox { Location = new Point(470, y), Size = new Size(180, 21), Font = Font, AccessibleName = "Contest name, not in Nexus's list -- unvalidated and unscored" };
-            box.Controls.Add(_manualContestFreeTextBox);
+            var modeLabel = new Label { Text = "Mode:", AutoSize = true, Location = new Point(left + 280, y + 3), Font = font, TabStop = false };
+            page.Controls.Add(modeLabel);
+            _manualModeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDown, Location = new Point(left + 330, y), Size = new Size(90, 21), Font = font, AccessibleName = "Mode" };
+            _manualModeCombo.Items.AddRange(new object[] { "FT8", "FT4", "CW", "SSB", "RTTY" });
+            page.Controls.Add(_manualModeCombo);
+            y += 30;
+
+            var contestLabel = new Label { Text = "Contest:", AutoSize = true, Location = new Point(left, y + 3), Font = font, TabStop = false };
+            page.Controls.Add(contestLabel);
+            _manualContestCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(left + 190, y), Size = new Size(200, 21), Font = font, AccessibleName = "Contest, from Nexus's known list" };
+            _manualContestCombo.SelectedIndexChanged += (s, e) => LoadManualFields();
+            page.Controls.Add(_manualContestCombo);
+
+            var freeLabel = new Label { Text = "Or, contest not listed:", AutoSize = true, Location = new Point(left + 400, y + 3), Font = font, TabStop = false };
+            page.Controls.Add(freeLabel);
+            _manualContestFreeTextBox = new TextBox { Location = new Point(left + 540, y), Size = new Size(120, 21), Anchor = AnchorStyles.Top | AnchorStyles.Left, Font = font, AccessibleName = "Contest name, not in Nexus's list -- unvalidated and unscored" };
+            page.Controls.Add(_manualContestFreeTextBox);
             y += 32;
 
             _manualFieldsPanel = new Panel
             {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 90),
+                Location = new Point(left, y),
+                Size = new Size(660, 90),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
                 AutoScroll = true,
                 AccessibleName = "",
                 AccessibleRole = AccessibleRole.None,
             };
-            box.Controls.Add(_manualFieldsPanel);
+            page.Controls.Add(_manualFieldsPanel);
             y += 96;
 
-            var logBtn = new Button { Text = "&Log Contact", Location = new Point(8, y), Size = new Size(120, 26), Font = Font, AccessibleName = "Log contact" };
+            var logBtn = new Button { Text = "&Log Contact", Location = new Point(left, y), Size = new Size(120, 26), Font = font, AccessibleName = "Log contact" };
             logBtn.Click += (s, e) => DoManualLog();
-            box.Controls.Add(logBtn);
+            page.Controls.Add(logBtn);
             y += 32;
 
             _manualStatusLabel = new Label
             {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 20),
+                Location = new Point(left, y),
+                Size = new Size(660, 20),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Font = font,
                 AutoSize = false,
                 TabStop = false,
                 AccessibleName = "Manual entry status",
             };
-            box.Controls.Add(_manualStatusLabel);
+            page.Controls.Add(_manualStatusLabel);
 
-            return box;
+            return page;
         }
 
-        // Populates the Manual Entry group's own Contest picker -- called once from Load,
-        // alongside RefreshEventList. Unlike the former tabbed design (where TabPage.Enter was
-        // the natural "operator just reached this section" trigger), every group here is visible
-        // at once -- there is no longer a meaningful "not yet visible" moment to lazily hook, so
-        // this simply populates eagerly like every other group's own initial content.
         private void PopulateManualContestCombo()
         {
             if (_manualContestCombo.Items.Count > 0) return;
@@ -649,12 +705,19 @@ namespace WSJTX_Controller
 
         private void DoManualLog()
         {
+            string missing = RequireStationInfo();
+            if (missing != null)
+            {
+                _manualStatusLabel.Text = missing;
+                return;
+            }
+
             string call = _manualCallBox.Text.Trim().ToUpperInvariant();
             string band = _manualBandBox.Text.Trim();
             string mode = _manualModeCombo.Text.Trim().ToUpperInvariant();
             if (string.IsNullOrEmpty(call))
             {
-                _manualStatusLabel.Text = "Enter a callsign first.";
+                _manualStatusLabel.Text = "Enter the contacted station's callsign first.";
                 return;
             }
 
@@ -687,7 +750,7 @@ namespace WSJTX_Controller
                     freqHz: 0, rstSent: "", rstRcvd: "",
                     state: "", country: "", dxcc: 0, cqZone: 0,
                     grid: "", name: "", comment: "Manual contest entry, unvalidated: " + contestTag, txPwr: "",
-                    operatorCall: _operatorCall(), stationCall: _myCall(), myGrid: _myGrid(),
+                    operatorCall: ResolvedOperatorCall(), stationCall: _myCall(), myGrid: _myGrid(),
                     lotwQslSent: "", lotwQslRcvd: "", qrzQslSent: "", qrzQslRcvd: "",
                     source: "MANUAL", sourceQsoId: "", dedupKey: dedupKey,
                     continent: "", ituZone: 0, county: "", iota: "",
@@ -701,43 +764,36 @@ namespace WSJTX_Controller
                 (string.IsNullOrEmpty(contestTag) ? "." : $" (contest: {contestTag}, not supported by Nexus -- not validated or scored).");
         }
 
-        // ── Group 6: Cabrillo and ADIF export ─────────────────────────────────────
+        // ── Export ────────────────────────────────────────────────────────────────
 
-        private GroupBox BuildExportGroup(int y0)
+        private Panel BuildExportPage(Font font)
         {
-            var box = new GroupBox
-            {
-                Text = "Cabrillo and ADIF export",
-                AccessibleName = "Cabrillo and ADIF export",
-                Location = new Point(8, y0),
-                Size = new Size(GroupWidth, 100),
-                Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
-            };
-            int y = 20;
+            var page = MakePage();
+            int y = 8;
+            const int left = 8;
 
-            _exportCabrilloButton = new Button { Text = "Export &Cabrillo...", Location = new Point(8, y), Size = new Size(140, 26), Font = Font, AccessibleName = "Export Cabrillo", Enabled = false };
+            _exportCabrilloButton = new Button { Text = "Export &Cabrillo...", Location = new Point(left, y), Size = new Size(140, 26), Font = font, AccessibleName = "Export Cabrillo", Enabled = false };
             _exportCabrilloButton.Click += (s, e) => DoExport("cabrillo");
-            box.Controls.Add(_exportCabrilloButton);
+            page.Controls.Add(_exportCabrilloButton);
 
-            _exportAdifButton = new Button { Text = "Export &ADIF...", Location = new Point(158, y), Size = new Size(140, 26), Font = Font, AccessibleName = "Export ADIF", Enabled = false };
+            _exportAdifButton = new Button { Text = "Export &ADIF...", Location = new Point(left + 150, y), Size = new Size(140, 26), Font = font, AccessibleName = "Export ADIF", Enabled = false };
             _exportAdifButton.Click += (s, e) => DoExport("adif");
-            box.Controls.Add(_exportAdifButton);
+            page.Controls.Add(_exportAdifButton);
             y += 34;
 
             _exportStatusLabel = new Label
             {
-                Location = new Point(8, y),
-                Size = new Size(box.Width - 16, 40),
+                Location = new Point(left, y),
+                Size = new Size(660, 40),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
-                Font = Font,
+                Font = font,
                 AutoSize = false,
                 TabStop = false,
                 AccessibleName = "Export status",
             };
-            box.Controls.Add(_exportStatusLabel);
+            page.Controls.Add(_exportStatusLabel);
 
-            return box;
+            return page;
         }
 
         private void DoExport(string format)
@@ -774,6 +830,38 @@ namespace WSJTX_Controller
                     _exportStatusLabel.Text = "Exported to " + dlg.FileName;
                 }
             }
+        }
+
+        // ── Helpers ───────────────────────────────────────────────────────────────
+
+        // Depth-first, add-order scan (matching this page's own real Tab order, since nothing
+        // here uses Dock=Top/Dock=Fill add-order tricks) for the first control that can actually
+        // take focus right now -- skips disabled/invisible controls and non-selectable ones
+        // (Labels, plain layout Panels) exactly the way a real Tab press would, mirroring
+        // LogbookWindow.ProcessTabKey's own FirstSelectable helper.
+        private static Control FirstSelectableIn(Control container)
+        {
+            foreach (Control c in container.Controls)
+            {
+                if (c.CanSelect) return c;
+                var nested = FirstSelectableIn(c);
+                if (nested != null) return nested;
+            }
+            return null;
+        }
+
+        // Same pure-layout-container reasoning as LogbookWindow.MakePage() -- AccessibleRole.None
+        // + empty AccessibleName here, overwritten with a real name/Grouping role per page in
+        // BuildUi once CategoryListNav.Wire makes that safe (see this class's own header comment).
+        private static Panel MakePage()
+        {
+            return new Panel
+            {
+                Dock           = DockStyle.Fill,
+                AutoScroll     = true,
+                AccessibleName = "",
+                AccessibleRole = AccessibleRole.None,
+            };
         }
     }
 }
