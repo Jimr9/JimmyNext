@@ -33,7 +33,10 @@ namespace WSJTX_Controller
         // Every value the "source" column is ever written with. Single source of truth
         // for the Edit Log source filter and the export source-filter dialog -- add a
         // new logging service here and both pick it up automatically.
-        public static readonly string[] KnownSources = { "WSJTX", "QRZ", "LOTW", "CLUBLOG", "MANUAL" };
+        // NEXUS_CONTEST added for the Nexus contesting foundation (phase 2/3/4) -- completed
+        // contest QSOs delivered from EngineHost. See ix_nexus_contest_source_qso (LogbookDb
+        // schema v10) for the idempotency constraint scoped to this source only.
+        public static readonly string[] KnownSources = { "WSJTX", "QRZ", "LOTW", "CLUBLOG", "MANUAL", "NEXUS_CONTEST" };
     }
 
     public class ImportLogEntry
@@ -57,7 +60,14 @@ namespace WSJTX_Controller
         public string Pct => Total > 0 ? $"{100.0 * Confirmed / Total:0.0}%" : "—";
     }
 
-    public class LogbookDb : IDisposable
+    // Nexus contesting foundation, phase 2: LogbookDb IS the (only, on this branch) ILogbookService
+    // implementation -- every method that interface declares, LogbookDb already had. This is
+    // deliberately implementation-by-inheritance, not a separate wrapper: existing construction
+    // call sites (`new LogbookDb(...)`) need no change at all to become usable wherever
+    // ILogbookService is expected. New code (the contest bridge, phase 3+) depends on
+    // ILogbookService; a future Nexus-backed implementation would be its own class satisfying
+    // the same interface, not a subclass of this one.
+    public class LogbookDb : IDisposable, ILogbookService
     {
         private SQLiteConnection _conn;
         private readonly object  _lock = new object();
@@ -359,6 +369,56 @@ namespace WSJTX_Controller
                 }
 
                 SetMeta("db_version", "9");
+            }
+
+            // v10: Nexus contesting foundation, phase 2 -- the accepted minimum schema support
+            // for the initial contest implementation and a reliable future migration. See
+            // ARCHITECTURE.md's "Nexus contesting foundation" sections for the full design.
+            //
+            // contest_id/contest_session_id: which contest (Nexus's ADIF CONTEST_ID, e.g.
+            // "ARRL-FIELD-DAY") and which operating instance a contact belongs to. Blank for
+            // every non-contest QSO -- existing rows are untouched by this migration.
+            //
+            // modified_at: row-edit audit timestamp. imported_at (v1) already covers row
+            // CREATION; this is the first column that tracks an EDIT distinct from that. Wired
+            // into UpdateQso (the operator-edit path) only, not into every automated
+            // upload/confirmation-mark UPDATE elsewhere in this file -- those are system status
+            // writes, not operator edits, and are out of scope for this phase.
+            //
+            // qso_extra_field: lossless, ordered, duplicate-safe storage for ADIF fields Jimmy's
+            // modeled qso columns don't capture (AdifExtraFields.cs). One row per OCCURRENCE
+            // (never collapsed), ordinal preserves original file order. Not yet populated by
+            // any export path -- SaveExtraFields/GetExtraFields are the round-trip primitive a
+            // later phase wires into Import()/exporters.
+            //
+            // ix_nexus_contest_source_qso: the Nexus-contest idempotency constraint, scoped
+            // ONLY to source='NEXUS_CONTEST' rows (a brand-new source with zero existing rows at
+            // this migration -- no pre-check/repair pass needed, unlike v9's MFSK repair). A
+            // partial index, not a plain unique constraint: source_qso_id is blank ('') on the
+            // overwhelming majority of existing rows (MANUAL/live-logged entries never populated
+            // it), and this index must never apply to them. Historical QRZ/LOTW/CLUBLOG/WSJTX/
+            // MANUAL rows are untouched -- this establishes a new constraint for a new source
+            // only, never merges/deletes/alters anything from another source.
+            if (ver < 10)
+            {
+                Exec("ALTER TABLE qso ADD COLUMN contest_id TEXT DEFAULT '';");
+                Exec("ALTER TABLE qso ADD COLUMN contest_session_id TEXT DEFAULT '';");
+                Exec("ALTER TABLE qso ADD COLUMN modified_at TEXT DEFAULT '';");
+                Exec("CREATE INDEX IF NOT EXISTS ix_contest_session ON qso(contest_session_id);");
+
+                Exec(@"CREATE TABLE IF NOT EXISTS qso_extra_field (
+                    qso_id     INTEGER NOT NULL,
+                    tag_name   TEXT    NOT NULL,
+                    tag_value  TEXT    NOT NULL DEFAULT '',
+                    ordinal    INTEGER NOT NULL,
+                    PRIMARY KEY (qso_id, ordinal)
+                );");
+
+                Exec(@"CREATE UNIQUE INDEX IF NOT EXISTS ix_nexus_contest_source_qso
+                    ON qso(source, source_qso_id)
+                    WHERE source = 'NEXUS_CONTEST' AND source_qso_id <> '';");
+
+                SetMeta("db_version", "10");
             }
         }
 
@@ -1336,8 +1396,10 @@ ON CONFLICT(dedup_key) DO UPDATE SET
 UPDATE qso SET
     callsign=@callsign, band=@band, mode=@mode, qso_date=@qso_date, time_on=@time_on,
     time_off=@time_off, state=@state, country=@country, grid=@grid, name=@name,
-    rst_sent=@rst_sent, rst_rcvd=@rst_rcvd, comment=@comment, dedup_key=@dedup_key
+    rst_sent=@rst_sent, rst_rcvd=@rst_rcvd, comment=@comment, dedup_key=@dedup_key,
+    modified_at=@modified_at
 WHERE id=@id;";
+                    cmd.Parameters.AddWithValue("@modified_at", DateTime.UtcNow.ToString("o"));
                     cmd.Parameters.AddWithValue("@callsign",  callsign);
                     cmd.Parameters.AddWithValue("@band",      band);
                     cmd.Parameters.AddWithValue("@mode",      mode);
@@ -1359,20 +1421,97 @@ WHERE id=@id;";
         }
 
         // Deletes the given rows by id. Local-only -- never touches QRZ/Club Log/LoTW;
-        // those remain separate services a local delete has no effect on.
+        // those remain separate services a local delete has no effect on. Also purges any
+        // qso_extra_field rows for the same ids (no FK cascade is declared -- SQLite's own
+        // recommendation for a manually-managed child table like this one -- so this stays the
+        // one place responsible for not leaving orphans behind).
         public int DeleteQsos(IEnumerable<int> ids)
         {
             var idList = ids?.Distinct().ToList() ?? new List<int>();
             if (idList.Count == 0) return 0;
             lock (_lock)
             {
+                string placeholders = string.Join(",", idList.Select((_, i) => $"@id{i}"));
+                using (var extraCmd = _conn.CreateCommand())
+                {
+                    extraCmd.CommandText = $"DELETE FROM qso_extra_field WHERE qso_id IN ({placeholders});";
+                    for (int i = 0; i < idList.Count; i++)
+                        extraCmd.Parameters.AddWithValue($"@id{i}", idList[i]);
+                    extraCmd.ExecuteNonQuery();
+                }
                 using (var cmd = _conn.CreateCommand())
                 {
-                    string placeholders = string.Join(",", idList.Select((_, i) => $"@id{i}"));
                     cmd.CommandText = $"DELETE FROM qso WHERE id IN ({placeholders});";
                     for (int i = 0; i < idList.Count; i++)
                         cmd.Parameters.AddWithValue($"@id{i}", idList[i]);
                     return cmd.ExecuteNonQuery();
+                }
+            }
+        }
+
+        // Nexus contesting foundation, phase 2: the qso_extra_field round-trip (schema v10).
+        // Replaces (delete-then-insert) rather than merges -- a re-import/correction of the same
+        // qso row gets a fresh, correctly-ordered extras set rather than accumulating stale ones.
+        public void SaveExtraFields(long qsoId, List<(string Tag, string Value)> extras)
+        {
+            lock (_lock)
+            {
+                using (var del = _conn.CreateCommand())
+                {
+                    del.CommandText = "DELETE FROM qso_extra_field WHERE qso_id=@id;";
+                    del.Parameters.AddWithValue("@id", qsoId);
+                    del.ExecuteNonQuery();
+                }
+                if (extras == null || extras.Count == 0) return;
+                int ordinal = 0;
+                foreach (var (tag, value) in extras)
+                {
+                    using (var ins = _conn.CreateCommand())
+                    {
+                        ins.CommandText =
+                            "INSERT INTO qso_extra_field (qso_id, tag_name, tag_value, ordinal) " +
+                            "VALUES (@id, @tag, @val, @ord);";
+                        ins.Parameters.AddWithValue("@id", qsoId);
+                        ins.Parameters.AddWithValue("@tag", tag);
+                        ins.Parameters.AddWithValue("@val", value ?? "");
+                        ins.Parameters.AddWithValue("@ord", ordinal++);
+                        ins.ExecuteNonQuery();
+                    }
+                }
+            }
+        }
+
+        // Returns extras in original file order (ordinal ascending) -- see AdifExtraFields.
+        public List<(string Tag, string Value)> GetExtraFields(long qsoId)
+        {
+            var result = new List<(string Tag, string Value)>();
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText =
+                        "SELECT tag_name, tag_value FROM qso_extra_field WHERE qso_id=@id ORDER BY ordinal;";
+                    cmd.Parameters.AddWithValue("@id", qsoId);
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read())
+                            result.Add((r.GetString(0), r.GetString(1)));
+                }
+            }
+            return result;
+        }
+
+        // Looks up a row's id by its dedup_key -- used to associate freshly-upserted extras with
+        // the correct row without changing Upsert's own long-established return signature.
+        public long? GetIdByDedupKey(string dedupKey)
+        {
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT id FROM qso WHERE dedup_key=@k;";
+                    cmd.Parameters.AddWithValue("@k", dedupKey);
+                    var result = cmd.ExecuteScalar();
+                    return result == null || result == DBNull.Value ? (long?)null : Convert.ToInt64(result);
                 }
             }
         }

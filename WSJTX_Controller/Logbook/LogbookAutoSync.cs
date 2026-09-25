@@ -162,7 +162,7 @@ namespace WSJTX_Controller
         private bool ImportAndReport(LogbookDb db, string adifText, string source, string lastRefreshIniKey)
         {
             int logId = db.LogImportStart(source);
-            var result = AdifImporter.Import(db, AdifParser.Parse(adifText), source, null, _resolveUsState);
+            var result = AdifImporter.Import(db, AdifParser.ParseWithOrder(adifText), source, null, _resolveUsState);
             db.LogImportFinish(logId, result.Processed, result.NewQsos, result.NewlyConfirmed, result.Corrected, result.Skipped, result.Errors);
             // Independent audit finding 3, 2026-08-23 (CONFIRMED bug): matches
             // LogbookWindow.RunImportFromText's own fix -- only write the checkpoint on a

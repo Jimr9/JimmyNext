@@ -577,6 +577,14 @@ static class JimmyTests
         TargetActivityUnificationTests();
         IniFileBatchTests();
 
+        // Nexus contesting foundation, phase 2/9.
+        StationSettingsIniRoundTripTests();
+        LogbookSchemaV10MigrationTests();
+        AdifParseWithOrderTests();
+        AdifExtraFieldsRoundTripTests();
+        AdifImporterExtraFieldsIntegrationTests();
+        NexusContestIdempotencyIndexTests();
+
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
         if (failed > 0)
@@ -24903,6 +24911,287 @@ static class JimmyTests
             else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
             try { File.Delete(tmpDb); } catch { }
         }
+    }
+
+    // ── Nexus contesting foundation, phase 2/9 ──────────────────────────────────────────────
+
+    // StationSettings.cs: every new Station & Operator field round-trips through the ini
+    // (matches NativeEngineSettings' own established LoadFromIni/SaveToIni test shape), and a
+    // missing key leaves the in-memory default untouched rather than resetting it -- same
+    // upgrade-safety contract every other settings object in this codebase already has.
+    static void StationSettingsIniRoundTripTests()
+    {
+        Console.WriteLine("\n── StationSettings: ini round trip ──");
+        string tmpIni = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_StationSettings_" + Guid.NewGuid().ToString("N") + ".ini");
+        try
+        {
+            var s1 = new StationSettings
+            {
+                OperatorCallsign = "KB0UZT",
+                OperatorName = "Test Operator",
+                ContestEmail = "test@example.com",
+                QthState = "MO",
+                County = "ST LOUIS",
+                ArrlSection = "MO",
+                CqZone = "4",
+                ItuZone = "7",
+            };
+            var ini = new IniFile(tmpIni);
+            s1.SaveToIni(ini);
+
+            var ini2 = new IniFile(tmpIni);
+            var s2 = new StationSettings();
+            s2.LoadFromIni(ini2);
+            CheckStr("Operator Callsign round-trips", s2.OperatorCallsign, "KB0UZT");
+            CheckStr("Operator Name round-trips", s2.OperatorName, "Test Operator");
+            CheckStr("Contest-Log Email round-trips", s2.ContestEmail, "test@example.com");
+            CheckStr("State/Province round-trips", s2.QthState, "MO");
+            CheckStr("County round-trips", s2.County, "ST LOUIS");
+            CheckStr("ARRL/RAC Section round-trips", s2.ArrlSection, "MO");
+            CheckStr("CQ Zone round-trips", s2.CqZone, "4");
+            CheckStr("ITU Zone round-trips", s2.ItuZone, "7");
+
+            // Upgrade-safety: a fresh StationSettings loaded from an ini that has NONE of these
+            // keys (e.g. an older profile) must keep the in-memory "" defaults, not throw and
+            // not silently invent a value.
+            string tmpIni2 = Path.Combine(Path.GetTempPath(),
+                "JimmyTest_StationSettingsEmpty_" + Guid.NewGuid().ToString("N") + ".ini");
+            try
+            {
+                var emptyIni = new IniFile(tmpIni2);
+                emptyIni.Write("someUnrelatedKey", "x");
+                var s3 = new StationSettings();
+                s3.LoadFromIni(new IniFile(tmpIni2));
+                CheckStr("Missing keys: Operator Callsign stays default empty", s3.OperatorCallsign, "");
+                CheckStr("Missing keys: ARRL Section stays default empty", s3.ArrlSection, "");
+            }
+            finally { try { File.Delete(tmpIni2); } catch { } }
+        }
+        finally { try { File.Delete(tmpIni); } catch { } }
+    }
+
+    // LogbookDb schema v10: new columns/table/index exist, default correctly, and the migration
+    // is idempotent (opening an already-v10 database a second time is a no-op, not an error).
+    static void LogbookSchemaV10MigrationTests()
+    {
+        Console.WriteLine("\n── LogbookDb schema v10: contest columns, extra-field table, Nexus idempotency index ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_SchemaV10_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                CheckStr("db_version reaches 10", db.GetMeta("db_version"), "10");
+
+                InsertQso(db, "K5KPE", "MO", dxcc: 291, zone: 4);
+                var (id, contestId, contestSessionId, modifiedAt) = QueryContestCols(tmpDb, "K5KPE");
+                CheckStr("contest_id defaults to blank on an ordinary QSO", contestId, "");
+                CheckStr("contest_session_id defaults to blank on an ordinary QSO", contestSessionId, "");
+                CheckStr("modified_at defaults to blank until an edit happens", modifiedAt, "");
+
+                // UpdateQso (the operator-edit path) stamps modified_at.
+                // Signature: (id, callsign, band, mode, qsoDate, timeOn, timeOff, state,
+                // country, grid, name, rstSent, rstRcvd, comment)
+                db.UpdateQso((int)id, "K5KPE", "20m", "FT8",
+                    "20241201", "1200", "1215", "MO", "Test",
+                    "EM48", "", "-10", "-05", "");
+                var (_, _, _, modifiedAfterEdit) = QueryContestCols(tmpDb, "K5KPE");
+                Check("modified_at is stamped after UpdateQso", modifiedAfterEdit.Length > 0, true);
+            }
+
+            // Re-opening an already-migrated database must not throw and must stay at v10.
+            using (var db2 = new LogbookDb(tmpDb))
+            {
+                CheckStr("Re-opening an already-v10 database: version unchanged", db2.GetMeta("db_version"), "10");
+            }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    // Reads contest_id/contest_session_id/modified_at directly (LogbookDb has no public getter
+    // for these yet -- a later phase adds one alongside the contest bridge; this test only needs
+    // to prove the schema migration itself is correct).
+    static (long id, string contestId, string contestSessionId, string modifiedAt) QueryContestCols(string dbPath, string call)
+    {
+        using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={dbPath};"))
+        {
+            conn.Open();
+            using (var cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "SELECT id, contest_id, contest_session_id, modified_at FROM qso WHERE callsign=@c LIMIT 1;";
+                cmd.Parameters.AddWithValue("@c", call);
+                using (var r = cmd.ExecuteReader())
+                {
+                    if (!r.Read()) throw new Exception("row not found");
+                    return (r.GetInt64(0), r.GetString(1), r.GetString(2), r.GetString(3));
+                }
+            }
+        }
+    }
+
+    // AdifParser.ParseWithOrder: Fields matches Parse()'s own Dictionary exactly (same
+    // last-value-wins/empty-value-dropped semantics), while Ordered captures every real
+    // occurrence in file order, INCLUDING a duplicate tag Parse()'s Dictionary would silently
+    // collapse -- the whole reason this method exists.
+    static void AdifParseWithOrderTests()
+    {
+        Console.WriteLine("\n── AdifParser.ParseWithOrder: order/duplicate preservation ──");
+
+        string adif = "<call:5>K5KPE<band:3>20m<mode:3>FT8<cnty:8>ST LOUIS<cnty:8>ST CHASE<eor>\r\n";
+
+        var viaParse = new List<Dictionary<string, string>>(AdifParser.Parse(adif));
+        Check("Parse(): exactly one record", viaParse.Count == 1, true);
+        CheckStr("Parse(): CNTY is last-value-wins (ST CHASE)", viaParse[0]["CNTY"], "ST CHASE");
+
+        var viaOrdered = new List<AdifRawRecord>(AdifParser.ParseWithOrder(adif));
+        Check("ParseWithOrder(): exactly one record", viaOrdered.Count == 1, true);
+        CheckStr("ParseWithOrder(): Fields matches Parse()'s own Dictionary for CNTY",
+            viaOrdered[0].Fields["CNTY"], "ST CHASE");
+        Check("ParseWithOrder(): Ordered has 5 occurrences (CALL, BAND, MODE, CNTY x2)",
+            viaOrdered[0].Ordered.Count == 5, true);
+        int cntyOccurrences = viaOrdered[0].Ordered.FindAll(t => t.Tag == "CNTY").Count;
+        Check("ParseWithOrder(): both CNTY occurrences survive in Ordered (Parse() loses one)",
+            cntyOccurrences == 2, true);
+        CheckStr("ParseWithOrder(): first CNTY occurrence preserved in file order",
+            viaOrdered[0].Ordered[3].Value, "ST LOUIS");
+        CheckStr("ParseWithOrder(): second CNTY occurrence preserved in file order",
+            viaOrdered[0].Ordered[4].Value, "ST CHASE");
+    }
+
+    // AdifExtraFields.cs: pure set-difference/re-emission logic, no database involved.
+    static void AdifExtraFieldsRoundTripTests()
+    {
+        Console.WriteLine("\n── AdifExtraFields: extraction and re-emission round trip ──");
+
+        var ordered = new List<(string Tag, string Value)>
+        {
+            ("CALL", "K5KPE"),           // modeled -- excluded
+            ("BAND", "20m"),             // modeled -- excluded
+            ("MY_SOTA_REF", "W5O/AA-001"), // unmodeled -- kept
+            ("MY_SOTA_REF", "W5O/AA-002"), // unmodeled duplicate -- BOTH kept, in order
+            ("QSLMSG", "TNX FER QSO"),   // unmodeled -- kept
+        };
+
+        var extras = AdifExtraFields.ExtractUnmodeled(ordered);
+        Check("3 unmodeled occurrences extracted (CALL/BAND excluded)", extras.Count == 3, true);
+        CheckStr("First extra is MY_SOTA_REF #1, in original order", extras[0].Value, "W5O/AA-001");
+        CheckStr("Second extra is MY_SOTA_REF #2 (duplicate preserved, not collapsed)", extras[1].Value, "W5O/AA-002");
+        CheckStr("Third extra is QSLMSG", extras[2].Value, "TNX FER QSO");
+
+        string fragment = AdifExtraFields.ToAdifFragment(extras);
+        Check("Fragment contains both MY_SOTA_REF occurrences",
+            fragment.Split(new[] { "MY_SOTA_REF" }, StringSplitOptions.None).Length - 1 == 2, true);
+        Check("Fragment length-prefixes match each value's own length",
+            fragment.Contains("<MY_SOTA_REF:10>W5O/AA-001") && fragment.Contains("<QSLMSG:11>TNX FER QSO"), true);
+
+        // Deterministic: re-running extraction/re-emission on the same input is byte-identical.
+        var extras2 = AdifExtraFields.ExtractUnmodeled(ordered);
+        string fragment2 = AdifExtraFields.ToAdifFragment(extras2);
+        CheckStr("Deterministic round trip: identical fragment on a second run", fragment2, fragment);
+    }
+
+    // End-to-end: AdifImporter.Import(db, AdifParser.ParseWithOrder(text), ...) actually stores
+    // the extras against the right qso row, in order, duplicates included -- not just the pure
+    // unit-level pieces above.
+    static void AdifImporterExtraFieldsIntegrationTests()
+    {
+        Console.WriteLine("\n── AdifImporter + LogbookDb: unknown ADIF fields round-trip through a real import ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_AdifExtrasIntegration_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                string adif =
+                    "<call:5>K5KPE<band:3>20m<mode:3>FT8<qso_date:8>20241201<time_on:4>1200" +
+                    "<rst_sent:3>-10<rst_rcvd:3>-05<my_sota_ref:10>W5O/AA-001<my_sota_ref:10>W5O/AA-002" +
+                    "<qslmsg:11>TNX FER QSO<eor>\r\n";
+
+                var result = AdifImporter.Import(db, AdifParser.ParseWithOrder(adif), "MANUAL");
+                Check("Import: 1 new QSO", result.NewQsos == 1, true);
+
+                var (id, _, _, _) = QueryContestCols(tmpDb, "K5KPE");
+                var extras = db.GetExtraFields(id);
+                Check("3 extra occurrences stored against the real qso row", extras.Count == 3, true);
+                CheckStr("Stored extra #1 in file order", extras[0].Value, "W5O/AA-001");
+                CheckStr("Stored extra #2 (duplicate tag) in file order", extras[1].Value, "W5O/AA-002");
+                CheckStr("Stored extra #3", extras[2].Value, "TNX FER QSO");
+
+                // Re-importing the same record (a correction/re-sync) replaces, not accumulates.
+                AdifImporter.Import(db, AdifParser.ParseWithOrder(adif), "MANUAL");
+                var extrasAfterReimport = db.GetExtraFields(id);
+                Check("Re-import replaces extras rather than duplicating them", extrasAfterReimport.Count == 3, true);
+            }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    // ix_nexus_contest_source_qso: enforces uniqueness ONLY for source='NEXUS_CONTEST' rows with
+    // a non-empty source_qso_id -- must not block the many pre-existing MANUAL/blank-source_qso_id
+    // rows from coexisting, and must not merge/alter/touch any row from another source.
+    static void NexusContestIdempotencyIndexTests()
+    {
+        Console.WriteLine("\n── ix_nexus_contest_source_qso: Nexus-contest-only idempotency ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(),
+            "JimmyTest_NexusIdempotency_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                // Two ordinary MANUAL rows, both with blank source_qso_id -- must coexist freely;
+                // the partial index's WHERE clause must exclude them.
+                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, timeOn: "1200");
+                InsertQso(db, "K1ABC", "CT", dxcc: 291, zone: 5, timeOn: "1300");
+                var afterManual = QueryContestCols(tmpDb, "W1AW");
+                Check("Two blank-source_qso_id MANUAL rows both exist (partial index did not block them)",
+                    afterManual.id > 0, true);
+
+                // First NEXUS_CONTEST row with a real source_qso_id -- must succeed.
+                string key1 = AdifImporter.BuildDedupKey("N9XYZ", "20m", "FT8", "20260627", "1800");
+                db.Upsert("N9XYZ", "20m", "FT8", "20260627", "1800", "1815",
+                    14_074_000, "-05", "+02", "MO", "Test", 291, 4,
+                    "", "", "", "", "", "", "",
+                    "", "", "", "",
+                    "NEXUS_CONTEST", "sess-abc123:1", key1,
+                    "", 0, "", "", "", "", "", "", "", "", "", "");
+
+                // Second, DIFFERENT contact but the SAME (source, source_qso_id) pair -- the
+                // idempotent-delivery case a redelivered CONTEST_QSO_LOGGED notification hits.
+                // Must be rejected by the unique index, not silently duplicated.
+                string key2 = AdifImporter.BuildDedupKey("W9DEF", "20m", "FT8", "20260627", "1801");
+                bool threw = false;
+                try
+                {
+                    db.Upsert("W9DEF", "20m", "FT8", "20260627", "1801", "1816",
+                        14_074_000, "-05", "+02", "MO", "Test", 291, 4,
+                        "", "", "", "", "", "", "",
+                        "", "", "", "",
+                        "NEXUS_CONTEST", "sess-abc123:1", key2,
+                        "", 0, "", "", "", "", "", "", "", "", "", "");
+                }
+                catch (System.Data.SQLite.SQLiteException) { threw = true; }
+                Check("Same (source, source_qso_id) pair for a NEXUS_CONTEST row is rejected",
+                    threw, true);
+
+                // A DIFFERENT sequence under the same session id must succeed -- the index keys
+                // on the whole (source, source_qso_id) string, not just the session prefix.
+                string key3 = AdifImporter.BuildDedupKey("VE3TST", "20m", "FT8", "20260627", "1802");
+                bool threw2 = false;
+                try
+                {
+                    db.Upsert("VE3TST", "20m", "FT8", "20260627", "1802", "1817",
+                        14_074_000, "-05", "+02", "ON", "Test", 1, 4,
+                        "", "", "", "", "", "", "",
+                        "", "", "", "",
+                        "NEXUS_CONTEST", "sess-abc123:2", key3,
+                        "", 0, "", "", "", "", "", "", "", "", "", "");
+                }
+                catch (System.Data.SQLite.SQLiteException) { threw2 = true; }
+                Check("A different sequence under the same session id is accepted", threw2, false);
+            }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
     }
 
 }

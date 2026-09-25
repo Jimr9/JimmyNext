@@ -2247,7 +2247,7 @@ namespace WSJTX_Controller
             {
                 result = await Task.Run(() =>
                 {
-                    return AdifImporter.Import(_db, AdifParser.Parse(adifText), source,
+                    return AdifImporter.Import(_db, AdifParser.ParseWithOrder(adifText), source,
                         count => BeginInvoke(new Action(() =>
                             SetStatus($"Importing {source}: {count:N0} processed…"))),
                         _resolveUsState);

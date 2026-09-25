@@ -165,7 +165,10 @@ namespace WSJTX_Controller
                     // the grid square, which is blank when no grid was heard and an unusable
                     // compound string like "OR-ID" when the grid straddles a state border, so the
                     // QSO silently never counted toward a State-grouped award.
-                    AdifImporter.Import(db, new[] { fields }, "WSJTX", null, _resolveUsState);
+                    // ParseWithOrder(adifRecord) rather than wrapping fields directly: this is
+                    // Jimmy's own AdifRecordBuilder-authored text, so true file order/duplicates
+                    // are available and cheap to use -- see AdifImporter.Import's own comment.
+                    AdifImporter.Import(db, AdifParser.ParseWithOrder(adifRecord), "WSJTX", null, _resolveUsState);
                 }
             }
             catch (Exception ex)

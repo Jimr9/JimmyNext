@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SQLite;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -55,9 +56,27 @@ namespace WSJTX_Controller
         // sometimes omits STATE for a contact even though QRZ's own site already credits
         // the state (found 2026-07-08, several confirmed Alaska/Hawaii contacts). Pass null
         // to disable (matches prior behavior exactly).
+        // Overload for every existing caller/test that only has plain field Dictionaries (no
+        // ADIF text to preserve true order from) -- unchanged behavior, just routed through the
+        // AdifRawRecord overload below with an empty Ordered list per record, so no extras are
+        // ever recorded for these (never a wrong or fabricated order).
         public static ImportResult Import(
             LogbookDb db,
             IEnumerable<Dictionary<string, string>> records,
+            string source,
+            Action<int> progressCallback = null,
+            Func<string, string> resolveUsState = null)
+        {
+            return Import(db, records?.Select(r => (AdifRawRecord)r) ?? Enumerable.Empty<AdifRawRecord>(),
+                source, progressCallback, resolveUsState);
+        }
+
+        // Nexus contesting foundation, phase 2: the AdifRawRecord form carries true file
+        // order/duplicates (via AdifParser.ParseWithOrder), so this overload also populates
+        // qso_extra_field for whatever the record's raw fields didn't map onto a modeled column.
+        public static ImportResult Import(
+            LogbookDb db,
+            IEnumerable<AdifRawRecord> records,
             string source,
             Action<int> progressCallback = null,
             Func<string, string> resolveUsState = null)
@@ -73,7 +92,7 @@ namespace WSJTX_Controller
                 {
                     try
                     {
-                        var q = Normalize(raw, source, resolveUsState);
+                        var q = Normalize(raw.Fields, source, resolveUsState);
                         if (q == null) { result.Skipped++; result.Processed++; continue; }
 
                         var (isNew, newlyConfirmed, corrected) = db.Upsert(
@@ -86,6 +105,21 @@ namespace WSJTX_Controller
                             q.continent, q.ituZone, q.county, q.iota,
                             q.sig, q.sigInfo, q.mySig, q.mySigInfo,
                             q.darcDok, q.wpxPrefix, q.exchangeSent, q.exchangeRcvd);
+
+                        // Nexus contesting foundation, phase 2: preserve whatever this record's
+                        // raw fields didn't map onto a modeled column -- a real (if usually
+                        // empty) row lookup by dedup_key, not a guess, so extras always land on
+                        // the correct qso id even when Upsert corrected an existing row rather
+                        // than inserting a new one.
+                        if (raw.Ordered != null && raw.Ordered.Count > 0)
+                        {
+                            var extras = AdifExtraFields.ExtractUnmodeled(raw.Ordered);
+                            if (extras.Count > 0)
+                            {
+                                var qsoId = db.GetIdByDedupKey(q.dedupKey);
+                                if (qsoId.HasValue) db.SaveExtraFields(qsoId.Value, extras);
+                            }
+                        }
 
                         if (isNew)
                         {
