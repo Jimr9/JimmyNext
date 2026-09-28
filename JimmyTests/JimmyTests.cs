@@ -360,6 +360,186 @@ static class JimmyTests
         }
     }
 
+    // Applies an approved list of confirmation repairs to a Nexus log through Nexus's own edit
+    // (LOG_EDIT), contact by contact, only after every listed contact's identity and current value
+    // check out; nothing is edited if any does not. Afterwards every contact is compared with its
+    // state before: the listed fields on the listed contacts must be the only change anywhere.
+    //   --nexus-repair <engine exe> <NexusLog folder> <repair list> <work dir> <apply|rehearse>
+    // repair list lines: "<CALL> <band> <mode> <yyyymmdd> <hhmm[ss]> (row <jimmy row id>): <LoTW|QRZ> confirmed -> ..."
+    static void NexusRepair(string engineExe, string logDir, string listPath, string work, bool apply)
+    {
+        Console.WriteLine($"\n--- Nexus confirmation repair ({(apply ? "APPLY" : "rehearsal")}) on {logDir} ---");
+        var rx = new System.Text.RegularExpressions.Regex(@"^\s*(\S+) (\S+) (\S+) (\d{8}) (\d{4,6}) \(row (\d+)\): (LoTW|QRZ) confirmed ->");
+        var items = File.ReadAllLines(listPath).Select(l => rx.Match(l)).Where(m => m.Success)
+            .Select(m => (Call: m.Groups[1].Value, Band: m.Groups[2].Value, Mode: m.Groups[3].Value, Date: m.Groups[4].Value,
+                          Time: m.Groups[5].Value.Substring(0, 4), Row: long.Parse(m.Groups[6].Value), Field: m.Groups[7].Value)).ToList();
+        var byRow = items.GroupBy(i => i.Row).ToList();
+        Console.WriteLine($"  repair list: {items.Count} fields on {byRow.Count} contacts");
+
+        string adiBefore = File.ReadAllText(Path.Combine(logDir, "log.adi"));
+        Directory.CreateDirectory(work);
+        string token = Guid.NewGuid().ToString("N");
+        const int port = 58298;
+        var json = new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase };
+        string Snap(NexusQso q) { var e = q.EditKey; q.EditKey = null; var s = System.Text.Json.JsonSerializer.Serialize(q, json); q.EditKey = e; return s; }
+        using (LogbookOnlyEngine.Start(engineExe, logDir, Path.Combine(work, "appdata"), port, token))
+        {
+            var client = new NexusLogClient(port);
+            var before = client.Rows();
+            if (before.Error != null) { Console.WriteLine("  STOPPED: " + before.Error); failed++; client.Shutdown(token); return; }
+            Console.WriteLine($"  log: {before.Rows.Count} contacts, read {before.Freshness}");
+            var snapBefore = before.Rows.ToDictionary(r => r.Id, Snap);
+
+            // 1. Identity and current value of every listed contact -- all must check out before any edit.
+            var plan = new List<(NexusQso Q, bool Lotw, bool Qrz)>();
+            var problems = new List<string>();
+            foreach (var g in byRow)
+            {
+                var it = g.First();
+                var hits = before.Rows.Where(r => r.ExtraValue(NexusMigration.RowIdTag) == g.Key.ToString()).ToList();
+                if (hits.Count != 1) { problems.Add($"row {g.Key}: {hits.Count} contacts carry this row id"); continue; }
+                var q = hits[0];
+                var when = DateTimeOffset.FromUnixTimeSeconds((long)q.WhenUnix).UtcDateTime;
+                bool same = string.Equals(q.Call, it.Call, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(q.Band, it.Band, StringComparison.OrdinalIgnoreCase) &&
+                            string.Equals(q.Mode, it.Mode, StringComparison.OrdinalIgnoreCase) &&
+                            when.ToString("yyyyMMdd") == it.Date && when.ToString("HHmm") == it.Time;
+                if (!same) { problems.Add($"row {g.Key}: identity differs (log has {q.Call} {q.Band} {q.Mode} {when:yyyyMMdd HHmm})"); continue; }
+                bool lotw = g.Any(x => x.Field == "LoTW"), qrz = g.Any(x => x.Field == "QRZ");
+                if (lotw && !q.QslRcvd.Lotw) problems.Add($"row {g.Key}: LoTW is not confirmed now");
+                if (qrz && !q.QslRcvd.Qrz) problems.Add($"row {g.Key}: QRZ is not confirmed now");
+                plan.Add((q, lotw, qrz));
+            }
+            foreach (var p in problems) Console.WriteLine("  PROBLEM " + p);
+            Check("every listed contact found once, identity and current value match", problems.Count == 0, true);
+            if (problems.Count > 0) { Console.WriteLine("  Nothing edited."); client.Shutdown(token); return; }
+
+            // 2. Nexus keeps LoTW/QRZ confirmations through an edit by design (tempo-core
+            //    logbook::edited) and has no op that withdraws one, so each listed contact is removed
+            //    and put back through Nexus's own import: its full record from Nexus's own ADIF copy,
+            //    with only the listed confirmation field(s) as they were before the move
+            //    (LOTW_QSL_RCVD -> N; APP_QRZLOG_STATUS removed). Its Nexus id is free again once
+            //    removed, so the import keeps it.
+            var adiRecs = System.Text.RegularExpressions.Regex.Split(adiBefore.Substring(adiBefore.IndexOf("<eoh>", StringComparison.OrdinalIgnoreCase) + 5), "<eor>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            var fieldRx2 = new System.Text.RegularExpressions.Regex(@"<([A-Za-z0-9_]+):(\d+)(?::[A-Za-z])?>");
+            var readd = new StringBuilder("Jimmy Next confirmation repair\n<eoh>\n");
+            foreach (var (q, lotw, qrz) in plan)
+            {
+                var hit = adiRecs.Where(r => r.Contains($"<APP_NEXUS_ID:{q.Id.Length}>{q.Id}")).ToList();
+                if (hit.Count != 1) { Console.WriteLine($"  STOPPED: {q.Call}: {hit.Count} ADIF records carry its Nexus id; nothing removed."); failed++; client.Shutdown(token); return; }
+                var sbRec = new StringBuilder();
+                foreach (System.Text.RegularExpressions.Match m in fieldRx2.Matches(hit[0]))
+                {
+                    string tag = m.Groups[1].Value, val = hit[0].Substring(m.Index + m.Length, int.Parse(m.Groups[2].Value));
+                    if (lotw && tag.Equals("LOTW_QSL_RCVD", StringComparison.OrdinalIgnoreCase)) val = "N";
+                    if (qrz && tag.Equals("APP_QRZLOG_STATUS", StringComparison.OrdinalIgnoreCase)) continue;
+                    sbRec.Append('<').Append(tag).Append(':').Append(Encoding.UTF8.GetByteCount(val)).Append('>').Append(val).Append(' ');
+                }
+                readd.Append(sbRec).Append("<eor>\n");
+            }
+            string readdFile = Path.Combine(work, "repaired-contacts.adi");
+            File.WriteAllText(readdFile, readd.ToString(), new UTF8Encoding(false));
+            foreach (var (q, _, _) in plan)
+            {
+                var d = client.Delete(q.Id, q.EditKey);
+                Check($"removed {q.Call} {q.ExtraValue(NexusMigration.RowIdTag)}", d.State == "saved", true);
+                if (d.State != "saved") { Console.WriteLine($"  STOPPED at {q.Call}: {d.State} {d.Why}. Restore from the backup."); client.Shutdown(token); return; }
+            }
+            var imp = client.Import(readdFile);
+            Console.WriteLine($"  put back: {imp.State} {imp.Why} {imp.Detail}");
+            Check("put back through Nexus's import", imp.State == "saved", true);
+
+            // 3. Every contact against its state before.
+            var after = client.Rows();
+            var planned = plan.ToDictionary(p => p.Q.Id);
+            int otherChanged = 0, wrongOnTarget = 0;
+            foreach (var a in after.Rows)
+            {
+                if (!snapBefore.TryGetValue(a.Id, out var was)) { otherChanged++; Console.WriteLine($"  NEW contact appeared: {a.Call}"); continue; }
+                if (!planned.TryGetValue(a.Id, out var p)) { if (Snap(a) != was) { otherChanged++; Console.WriteLine($"  CHANGED (not listed): {a.Call} {a.Id}"); } continue; }
+                // Expected: the snapshot before, with only the intended flags changed.
+                var expect = System.Text.Json.JsonSerializer.Deserialize<NexusQso>(was, json);
+                if (p.Lotw) expect.QslRcvd.Lotw = false;
+                if (p.Qrz) expect.QslRcvd.Qrz = false;
+                expect.AwardConfirmed = expect.QslRcvd.Card || expect.QslRcvd.Lotw;
+                expect.Confirmed = expect.QslRcvd.Card || expect.QslRcvd.Lotw || expect.QslRcvd.Eqsl || expect.QslRcvd.Qrz;
+                if (Snap(a) != Snap(expect)) { wrongOnTarget++; Console.WriteLine($"  UNEXPECTED on {a.Call}:\n    want {Snap(expect)}\n    got  {Snap(a)}"); }
+            }
+            Check($"contact count unchanged ({before.Rows.Count})", after.Rows.Count == before.Rows.Count, true);
+            Check("no contact outside the list changed", otherChanged == 0, true);
+            Check("each listed contact changed in the listed fields only", wrongOnTarget == 0, true);
+            Console.WriteLine("  engine shutdown: " + client.Shutdown(token));
+        }
+
+        // 4. Nexus's own full record (its ADIF copy) of every contact: only the listed ones may differ,
+        //    and in them only the confirmation fields.
+        var ids = new HashSet<string>(byRow.Select(g => g.Key.ToString()));
+        Dictionary<string, string> Recs(string adi) =>
+            System.Text.RegularExpressions.Regex.Split(adi.Substring(adi.IndexOf("<eoh>", StringComparison.OrdinalIgnoreCase) + 5), "<eor>", System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                .Select(r => r.Trim()).Where(r => r.Length > 0)
+                .GroupBy(r => { var m = System.Text.RegularExpressions.Regex.Match(r, @"<APP_JIMMY_ROW_ID:\d+>(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase); return m.Success ? m.Groups[1].Value : r; })
+                .ToDictionary(g => g.Key, g => string.Join("|", g));
+        var b4 = Recs(adiBefore); var af = Recs(File.ReadAllText(Path.Combine(logDir, "log.adi")));
+        var otherAdi = b4.Keys.Where(k => !ids.Contains(k) && (!af.TryGetValue(k, out var v) || v != b4[k])).ToList();
+        Check($"ADIF copy: every contact outside the list byte-identical ({b4.Count - ids.Count})", otherAdi.Count == 0 && af.Count == b4.Count, true);
+        var fieldRx = new System.Text.RegularExpressions.Regex(@"<([A-Za-z0-9_]+):(\d+)[^>]*>");
+        Dictionary<string, string> Fields(string r) { var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (System.Text.RegularExpressions.Match m in fieldRx.Matches(r)) d[m.Groups[1].Value] = r.Substring(m.Index + m.Length, Math.Min(int.Parse(m.Groups[2].Value), r.Length - m.Index - m.Length)); return d; }
+        var touched = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var k in ids)
+        {
+            var x = Fields(b4[k]); var y = Fields(af[k]);
+            foreach (var t in x.Keys.Union(y.Keys, StringComparer.OrdinalIgnoreCase))
+                if (!x.TryGetValue(t, out var v1) || !y.TryGetValue(t, out var v2) || v1 != v2) touched.Add(t);
+        }
+        Console.WriteLine("  ADIF fields that differ on the listed contacts: " + string.Join(", ", touched));
+        Check("ADIF copy: listed contacts differ only in confirmation fields",
+            touched.All(t => t.Equals("LOTW_QSL_RCVD", StringComparison.OrdinalIgnoreCase) || t.Equals("APP_QRZLOG_STATUS", StringComparison.OrdinalIgnoreCase)
+                          || t.Equals("QSL_RCVD", StringComparison.OrdinalIgnoreCase)), true);
+    }
+
+    // After a repair: the fixed sync path (downloads through NexusReportPairing) on a copy of the
+    // repaired log must not put the repaired confirmations back.
+    //   --nexus-guarded-sync <engine exe> <NexusLog copy> <work dir> <lotw qso_qsl=yes file> <qrz raw file> <repair list>
+    static void NexusGuardedSyncCheck(string engineExe, string logDir, string work, string lotwFile, string qrzFile, string listPath)
+    {
+        Console.WriteLine("\n--- fixed sync path on a copy of the repaired log ---");
+        var rx = new System.Text.RegularExpressions.Regex(@"\(row (\d+)\): (LoTW|QRZ) confirmed ->");
+        var items = File.ReadAllLines(listPath).Select(l => rx.Match(l)).Where(m => m.Success).Select(m => (Row: m.Groups[1].Value, Field: m.Groups[2].Value)).ToList();
+        Directory.CreateDirectory(work);
+        string token = Guid.NewGuid().ToString("N");
+        const int port = 58299;
+        using (LogbookOnlyEngine.Start(engineExe, logDir, Path.Combine(work, "appdata"), port, token))
+        {
+            var client = new NexusLogClient(port);
+            int Count(Func<NexusQso, bool> f) => client.Rows().Rows.Count(f);
+            Console.WriteLine($"  repaired log: total {Count(_ => true)}, LoTW {Count(q => q.QslRcvd.Lotw)}, QRZ {Count(q => q.QslRcvd.Qrz)}, LoTW or QRZ {Count(q => q.QslRcvd.Lotw || q.QslRcvd.Qrz)}");
+            foreach (var (kind, file) in new[] { ("lotw", lotwFile), ("qrz", qrzFile) })
+            {
+                string text = File.ReadAllText(file);
+                if (kind == "qrz") text = NexusSyncDiagnosis.JimmyQrzAdif(text);
+                text = NexusLogbookService.ToAdifText(AdifParser.ParseWithOrder(text), kind == "lotw" ? "LOTW" : "QRZ");
+                var prep = NexusReportPairing.Prepare(text, client.Rows().Rows);
+                string f = Path.Combine(work, $"guarded-{kind}.adi");
+                File.WriteAllText(f, prep.Text, new UTF8Encoding(false));
+                var r = client.Merge(kind, f);
+                Console.WriteLine($"  {kind}: {prep.Sent} sent, {prep.Held} held; {r.State} {r.Detail}");
+                foreach (var h in prep.HeldDetails) Console.WriteLine("     held " + h);
+            }
+            var rows = client.Rows().Rows;
+            Console.WriteLine($"  after sync:   total {rows.Count}, LoTW {rows.Count(q => q.QslRcvd.Lotw)}, QRZ {rows.Count(q => q.QslRcvd.Qrz)}, LoTW or QRZ {rows.Count(q => q.QslRcvd.Lotw || q.QslRcvd.Qrz)}");
+            int back = 0;
+            foreach (var (row, field) in items)
+            {
+                var q = rows.Single(x => x.ExtraValue(NexusMigration.RowIdTag) == row);
+                bool on = field == "LoTW" ? q.QslRcvd.Lotw : q.QslRcvd.Qrz;
+                if (on) { back++; Console.WriteLine($"  PUT BACK: {q.Call} row {row} {field}"); }
+            }
+            Check($"the sync puts none of the {items.Count} repaired confirmations back", back == 0, true);
+            client.Shutdown(token);
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -575,6 +755,18 @@ static class JimmyTests
         //   --nexus-sync-diagnosis <engine exe> <start logbook.db> <empty work dir> <lotw yes> <lotw no> <nexus lotw yes> <qrz raw> [real read copy]
         // Pairing of confirmation downloads with logged contacts, against a real engine on temp data:
         //   --nexus-pairing-tests <engine exe> <empty work dir>
+        if (args.Length >= 7 && args[0] == "--nexus-guarded-sync")
+        {
+            NexusGuardedSyncCheck(args[1], args[2], args[3], args[4], args[5], args[6]);
+            Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
+        if (args.Length >= 6 && args[0] == "--nexus-repair")
+        {
+            NexusRepair(args[1], args[2], args[3], args[4], args[5] == "apply");
+            Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
         if (args.Length >= 3 && args[0] == "--nexus-pairing-tests")
         {
             NexusPairingTests(args[1], args[2]);
