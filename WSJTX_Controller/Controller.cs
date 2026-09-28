@@ -1215,6 +1215,9 @@ namespace WSJTX_Controller
             _ = dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls); // fire-and-observe -- see UpdateWatchList's own comment
             spotWatchAgeTimer.Start();
             ApplyEngineMode();      // Phase 4g: always launches the native engine host
+            // Logbook migration: while Nexus owns the logbook, keep its outbox sent and the read
+            // projection current (no-op otherwise).
+            NexusLogbook.StartWorker(msg => wsjtxClient?.DebugOutput(msg));
             wsjtxClient.rawPriorityTags = rawPriorityTags;
             wsjtxClient.cmdPrompts = cmdPrompts;
             wsjtxClient.usePskReporter = usePskReporter;
@@ -3308,7 +3311,7 @@ namespace WSJTX_Controller
             {
                 // Nexus contesting foundation, phase 2 (completed): ILogbookService, not
                 // LogbookDb -- BackfillMissingStates/SetMeta are both on the interface.
-                using (ILogbookService db = new LogbookDb())
+                using (ILogbookService db = LogbookFactory.Open())
                 {
                     int fixedCount = db.BackfillMissingStates(call => lookupManager?.Build(call)?.State);
                     if (fixedCount > 0)
@@ -3418,7 +3421,10 @@ namespace WSJTX_Controller
                     currentBand: () => wsjtxClient?.CurrentBandStr,
                     currentMode: () => wsjtxClient?.CurrentMode,
                     lookupCallsign: call => lookupManager?.Build(call),
-                    onQsoLogged: () => wsjtxClient?.Sounds?.PlaySoundEvent(soundEnabled_Logged, soundFile_Logged));
+                    onQsoLogged: () => wsjtxClient?.Sounds?.PlaySoundEvent(soundEnabled_Logged, soundFile_Logged),
+                    // Duplicates Nexus refused show in Logbook Center's Status field (D2) -- only
+                    // while Nexus owns the logbook.
+                    nexusOutbox: NexusLogbook.Active ? NexusLogbook.Outbox : null);
                 // Deliberately no Owner assignment -- an owned window is always kept in front
                 // of its owner at the Win32 level, which made it impossible to Alt+Tab back to
                 // Jimmy's main window while the Logbook was open (found 2026-07-11: previously
@@ -4355,6 +4361,22 @@ namespace WSJTX_Controller
         // baseline instead of forcing a level the operator never set in Jimmy. Called from
         // ApplyEngineMode() -- see its own call site comment for why that single place covers
         // every trigger this needs (startup, engine restart, device change).
+        // Logbook migration Phase 4: a radio/audio settings save applied to the RUNNING engine,
+        // the way the Nexus desktop applies a settings save -- no engine restart, so no dropped
+        // contact, no Direct reconnect, and the logbook host keeps running. False when there is
+        // no running engine or it did not accept the change; the caller then restarts it as before.
+        public bool TryApplyEngineSettingsLive()
+        {
+            if (TestModeGuard.IsTestMode) return false;
+            var client = nativeEngineClient;
+            if (client == null || !client.Running) return false;
+            if (!client.ApplySettingsLive(Radio, NativeEngine.AudioInputDevice, NativeEngine.AudioOutputDevice))
+                return false;
+            ApplyRadioMasterAudioLevels();
+            wsjtxClient?.DebugOutput("[NativeEngine] radio/audio settings applied live (no restart)");
+            return true;
+        }
+
         public void ApplyRadioMasterAudioLevels()
         {
             ApplyOneRadioMasterAudioLevel(isRender: false);

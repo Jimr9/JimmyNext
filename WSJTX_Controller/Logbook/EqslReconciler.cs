@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 
 namespace WSJTX_Controller
@@ -30,6 +31,14 @@ namespace WSJTX_Controller
         public static Result Reconcile(ILogbookService db, string adifText)
         {
             var result = new Result();
+            if (db is NexusLogbookService nexus)
+            {
+                // Nexus owns the logbook: its own eQSL merge (monotonic, never adds a contact).
+                var r = nexus.ImportFile(adifText, "EQSL");
+                result.Matched = r.NewlyConfirmed;
+                result.AlreadyConfirmed = Math.Max(0, r.Processed - r.NewlyConfirmed);
+                return result;
+            }
             foreach (Dictionary<string, string> rec in AdifParser.Parse(adifText))
             {
                 if (!IsConfirmed(rec)) { result.Skipped++; continue; }

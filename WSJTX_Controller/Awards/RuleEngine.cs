@@ -598,16 +598,19 @@ namespace WSJTX_Controller
             {
                 case RuleConfirmation.Sources:
                 {
-                    // Any one of the named channels confirms. CARD: Jimmy's own logbook database
-                    // holds no paper-card confirmations (its importers never stored them), so it
-                    // matches nothing here until the logbook's reads come from Nexus, which keeps
-                    // cards as their own channel -- it can never inflate a total.
+                    // Any one of the named channels confirms. CARD: a paper card, which only a
+                    // Nexus-owned logbook records (its read projection keeps it as a QSL_RCVD=Y
+                    // extra -- NexusMigration.Rebuild). Jimmy's own database never stores QSL_RCVD
+                    // (its importers consume it), so on it CARD matches nothing -- it can never
+                    // inflate a total.
                     var parts = new List<string>();
                     foreach (var s in def.ConfirmationSources)
                     {
                         if (s == RuleConfirmationSources.Lotw) parts.Add("lotw_qsl_rcvd='Y'");
                         else if (s == RuleConfirmationSources.Qrz) parts.Add("qrz_qsl_rcvd='Y'");
                         else if (s == RuleConfirmationSources.Eqsl) parts.Add("eqsl_qsl_rcvd='Y'");
+                        else if (s == RuleConfirmationSources.Card)
+                            parts.Add("EXISTS(SELECT 1 FROM qso_extra_field e WHERE e.qso_id=qso.id AND e.tag_name='QSL_RCVD' AND e.tag_value='Y')");
                     }
                     return parts.Count == 0 ? "0" : "(" + string.Join(" OR ", parts) + ")";
                 }

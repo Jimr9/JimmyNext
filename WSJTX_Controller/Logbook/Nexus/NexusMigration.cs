@@ -41,6 +41,10 @@ namespace WSJTX_Controller
         // A value Nexus would drop or reduce, kept verbatim for the rollback. Restored only while
         // Nexus's own current value does not supersede it (an edit in Nexus always wins).
         public const string IotaRawTag = "APP_JIMMY_IOTA";
+        // Contest contacts logged while Nexus owns the log: the operating instance, and the
+        // structured received exchange (one field per ruleset key), as namespaced extras.
+        public const string ContestSessionTag = "APP_JIMMY_CONTEST_SESSION";
+        public const string ContestRxPrefix = "APP_JIMMY_RX_";
         public const string RawExtraPrefix = "APP_JIMMY_X_";
         // Jimmy extras Nexus reads into a yes/no: a "N" (or any non-Y) would otherwise vanish.
         private static readonly HashSet<string> ReducedExtraTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -60,7 +64,7 @@ namespace WSJTX_Controller
             "LOTW_QSL_SENT","LOTW_QSL_RCVD","EQSL_QSL_RCVD","APP_QRZLOG_STATUS","STX_STRING","SRX_STRING","CONTEST_ID",
             "APP_TEMPO_UL_QRZ","APP_TEMPO_UL_CLUBLOG","APP_TEMPO_UL_LOTW","APP_TEMPO_UL_EQSL",
             RowIdTag, SourceTag, SourceQsoIdTag, ImportedAtTag, ModifiedAtTag, QrzQslSentTag,
-            LotwQslRcvdRawTag, LotwQslSentRawTag, HrdlogUploadedTag, IotaRawTag,
+            LotwQslRcvdRawTag, LotwQslSentRawTag, HrdlogUploadedTag, IotaRawTag, ContestSessionTag,
         };
 
         // One Jimmy row as the migration reads it.
@@ -412,7 +416,11 @@ namespace WSJTX_Controller
 
         // Builds a NEW Jimmy-format logbook.db at outDbPath (which must not exist) from Nexus's
         // current rows. Original row ids are kept where the contact came from Jimmy.
-        public static RebuildResult Rebuild(List<NexusQso> nexus, string outDbPath)
+        // idFor: a STABLE Jimmy row id for a contact that has none from Jimmy (logged after the
+        // migration) -- the read projection passes NexusLogbook's persistent map, so a row keeps its
+        // id across rebuilds and an edit or delete can never land on a different contact. Without
+        // it (the rollback), such contacts are numbered after the highest Jimmy id.
+        public static RebuildResult Rebuild(List<NexusQso> nexus, string outDbPath, Func<NexusQso, long> idFor = null)
         {
             if (File.Exists(outDbPath)) throw new IOException("Rebuild target already exists: " + outDbPath);
             using (new LogbookDb(outDbPath)) { } // Jimmy's own schema, current version
@@ -426,7 +434,7 @@ namespace WSJTX_Controller
                 {
                     foreach (var q in nexus)
                     {
-                        long id = long.TryParse(q.ExtraValue(RowIdTag), out var rid) ? rid : nextId++;
+                        long id = long.TryParse(q.ExtraValue(RowIdTag), out var rid) ? rid : idFor != null ? idFor(q) : nextId++;
                         var when = DateTimeOffset.FromUnixTimeSeconds((long)q.WhenUnix).UtcDateTime;
                         string date = when.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
                         string timeOn = when.ToString("HHmm", CultureInfo.InvariantCulture);
@@ -471,7 +479,7 @@ namespace WSJTX_Controller
                             ["lotw_uploaded_at"] = UploadedAt(q.Upload?.Lotw), ["eqsl_uploaded_at"] = UploadedAt(q.Upload?.Eqsl),
                             ["hrdlog_uploaded_at"] = q.ExtraValue(HrdlogUploadedTag) ?? "",
                             ["exchange_sent"] = q.ExtraValue("STX_STRING") ?? "", ["exchange_rcvd"] = q.ExtraValue("SRX_STRING") ?? "",
-                            ["contest_id"] = q.ExtraValue("CONTEST_ID") ?? "", ["contest_session_id"] = "",
+                            ["contest_id"] = q.ExtraValue("CONTEST_ID") ?? "", ["contest_session_id"] = q.ExtraValue(ContestSessionTag) ?? "",
                         };
                         using (var cmd = conn.CreateCommand())
                         {

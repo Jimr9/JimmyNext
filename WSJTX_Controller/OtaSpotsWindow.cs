@@ -37,7 +37,7 @@ namespace WSJTX_Controller
         // WsjtxClient's private field.
         // Nexus contesting foundation, phase 2 (completed): ILogbookService, not LogbookDb --
         // OtaSpotAnnotator only needs HasWorkedBefore, on the interface.
-        private readonly ILogbookService _logbookDb = new LogbookDb();
+        private readonly ILogbookService _logbookDb = LogbookFactory.Open();
         private readonly LookupManager _lookupManager;
         private readonly Func<System.Collections.Generic.Dictionary<string, WsjtxClient.ActiveAwardTag>> _activeAwardTags;
         private readonly Func<string> _currentBand;

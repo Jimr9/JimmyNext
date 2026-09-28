@@ -4623,7 +4623,16 @@ namespace WSJTX_Controller
                 wasSplitMode != r.SplitMode || wasPttSerialPort != r.PttSerialPort;
 
             if (engineIdentityChanged || radioSettingsChanged)
-                ctrl.ApplyEngineMode();
+            {
+                // Phase 4: radio and audio changes go to the running engine live (Nexus's own radio
+                // loop rebuilds CAT / reopens audio). A callsign, grid or DX cluster change still
+                // restarts the engine, as does a live apply that was not accepted.
+                bool identityOrClusterChanged =
+                    wasMyCall != ctrl.NativeEngine.MyCall || wasMyGrid != ctrl.NativeEngine.MyGrid ||
+                    wasDxClusterAddress != ctrl.dxClusterAddress;
+                if (identityOrClusterChanged || !ctrl.TryApplyEngineSettingsLive())
+                    ctrl.ApplyEngineMode();
+            }
         }
 
         // Options > Decode tab. Only DecodeDepth has a live control-port path (see

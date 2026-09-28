@@ -70,6 +70,9 @@ namespace WSJTX_Controller
             // 10. The database cannot be opened at all: Nexus keeps the log in log.adi for the
             //     session (its own fallback), says so, and saves still survive a restart.
             Scenario("database-cannot-open", (dir, log) => StoreCannotOpen(engineExe, dir, port, log));
+            // 11. Phase 4 contract: Jimmy's own APPLY_SETTINGS JSON (receive-only and Hamlib) is
+            //     accepted by the real engine host, and a malformed one is refused.
+            Scenario("apply-settings-contract", (dir, log) => ApplySettingsContract(engineExe, dir, port, log));
 
             sb.AppendLine(all ? "ALL PASS" : "SOME FAILED");
             var r = new Result { Passed = all, Report = sb.ToString() };
@@ -328,6 +331,41 @@ namespace WSJTX_Controller
                 client.Shutdown(token);
             }
             return ok && outbox.Count == 0;
+        }
+
+        private static string SendLine(int port, string line)
+        {
+            using (var c = new System.Net.Sockets.TcpClient())
+            {
+                c.Connect(System.Net.IPAddress.Loopback, port);
+                using (var st = c.GetStream())
+                {
+                    st.ReadTimeout = 5000;
+                    var b = Encoding.UTF8.GetBytes(line + "\n");
+                    st.Write(b, 0, b.Length);
+                    using (var r = new StreamReader(st, Encoding.UTF8)) return r.ReadLine();
+                }
+            }
+        }
+
+        private static bool ApplySettingsContract(string engineExe, string dir, int port, StringBuilder log)
+        {
+            string token = Guid.NewGuid().ToString("N");
+            using (var engine = Start(engineExe, dir, port, token))
+            {
+                var hamlib = new RadioSettings
+                {
+                    Mode = RadioControlMode.HamlibRigctld, RigModel = "3073", ComPort = "COM7", BaudRate = "38400",
+                    PttEnabled = true, PttMethod = PttMethod.Cat, TxMode = RadioTxMode.None, PttDataSource = true,
+                    SplitMode = RadioSplitMode.FakeIt,
+                };
+                string a = SendLine(port, "APPLY_SETTINGS " + NativeEngineClient.BuildApplySettingsJson(hamlib, "In", "Out"));
+                string b = SendLine(port, "APPLY_SETTINGS " + NativeEngineClient.BuildApplySettingsJson(new RadioSettings(), "", ""));
+                string c = SendLine(port, "APPLY_SETTINGS {\"rigModel\":1}");
+                log.AppendLine($"    Hamlib: {a}; receive-only: {b}; malformed: {c}");
+                new NexusLogClient(port).Shutdown(token);
+                return a == "OK" && b == "OK" && c != null && c.StartsWith("ERR");
+            }
         }
 
         private static bool JimmyRestart(string engineExe, string dir, int port, StringBuilder log)

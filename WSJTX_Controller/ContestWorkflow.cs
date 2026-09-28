@@ -89,7 +89,7 @@ namespace WSJTX_Controller
         {
             if (_activeSessionInstanceId == null) return 0;
 
-            using (ILogbookService db = new LogbookDb(_dbPath()))
+            using (ILogbookService db = LogbookFactory.Open(_dbPath()))
             {
                 ulong watermark = LoadWatermark(db, _activeSessionInstanceId);
                 var completions = _contestClient.QsosSince(watermark, out string error);
@@ -150,6 +150,27 @@ namespace WSJTX_Controller
             string exchangeSent = string.Join(" ", (c.SentFields ?? new List<List<string>>()).Select(f => f.Count > 1 ? f[1] : ""));
             string exchangeRcvd = string.Join(" ", (c.RcvdFields ?? new List<List<string>>()).Select(f => f.Count > 1 ? f[1] : ""));
 
+            if (db is NexusLogbookService nexus)
+            {
+                // Nexus owns the logbook: the contact, its contest association and its structured
+                // received exchange in ONE durable write -- it throws unless saved, so the caller
+                // never acknowledges an unsaved completion.
+                var q = new NexusQso
+                {
+                    Call = call, Band = band, Mode = mode, WhenUnix = c.WhenUnix, TimeKnown = true,
+                    Operator = operatorCall, StationCallsign = myCall, MyGrid = myGrid,
+                    Extra = new List<List<string>>
+                    {
+                        new List<string> { "STX_STRING", exchangeSent }, new List<string> { "SRX_STRING", exchangeRcvd },
+                        new List<string> { NexusMigration.SourceTag, "NEXUS_CONTEST" }, new List<string> { NexusMigration.SourceQsoIdTag, sourceQsoId },
+                    },
+                };
+                var pairs = (c.RcvdFields ?? new List<List<string>>()).Where(f => f.Count > 1).Select(f => (Tag: f[0], Value: f[1])).ToList();
+                nexus.LogContestCompletion(NexusLogbookService.RequestIdFor("NEXUS_CONTEST", sourceQsoId), q,
+                    _activeContestId ?? _activeEventId ?? "", c.SessionInstanceId, pairs);
+                return;
+            }
+
             var (_, _, _) = db.Upsert(
                 call, band, mode, qsoDate, timeOn, timeOn,
                 freqHz: 0, rstSent: "", rstRcvd: "",
@@ -205,7 +226,7 @@ namespace WSJTX_Controller
             var begin = _contestClient.RebuildBegin(out error);
             if (begin == null) return null;
 
-            using (ILogbookService db = new LogbookDb(_dbPath()))
+            using (ILogbookService db = LogbookFactory.Open(_dbPath()))
             {
                 var rows = db.GetContestSessionRows(_activeSessionInstanceId);
 

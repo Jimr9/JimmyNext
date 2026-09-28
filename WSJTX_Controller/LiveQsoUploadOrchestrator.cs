@@ -131,6 +131,7 @@ namespace WSJTX_Controller
             // at the moment the QSO was actually logged, which is also the semantically correct
             // behavior for production use, not just a test workaround.
             string dbPath = LogbookDb.DbPath;
+            bool nexus = NexusLogbook.Active;
 
             // Release-audit finding, 2026-08-20 (release blocker): the durable local database
             // write used to happen as the FIRST statement inside the fire-and-forget Task.Run
@@ -156,7 +157,7 @@ namespace WSJTX_Controller
             // log -- same real outcome as before -- it just must not also crash Jimmy.
             try
             {
-                using (ILogbookService db = new LogbookDb(dbPath))
+                using (ILogbookService db = LogbookFactory.Open(dbPath))
                 {
                     // resolveUsState is the same lookupManager-backed callback every other US
                     // state lookup in the app already uses (queue display, raw decodes row, HRC
@@ -211,7 +212,9 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    using (ILogbookService db = new LogbookDb(dbPath))
+                    // Nexus owns the logbook: stamp uploads only once the contact has reached it.
+                    if (nexus) NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor("WSJTX", dedupKey), 90_000);
+                    using (ILogbookService db = LogbookFactory.Open(dbPath))
                     {
                         var creds = _credentials();
                         bool needQrz = creds.QrzUploadEnabled && creds.QrzUploadRealtime &&

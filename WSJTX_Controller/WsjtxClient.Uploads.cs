@@ -100,7 +100,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    using (ILogbookService db = new LogbookDb(dbPath))
+                    using (ILogbookService db = LogbookFactory.Open(dbPath))
                     {
                         var client = new TqslUploadClient();
                         bool ok = await client.UploadPendingAsync(ctrl.tqslStationLocation, db).ConfigureAwait(false);
@@ -172,7 +172,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    using (ILogbookService db = new LogbookDb(dbPath))
+                    using (ILogbookService db = LogbookFactory.Open(dbPath))
                     {
                         if (ctrl.qrzUploadEnabled && !string.IsNullOrWhiteSpace(ctrl.qrzLogbookApiKey))
                             await CatchUpQrz(db).ConfigureAwait(false);

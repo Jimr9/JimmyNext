@@ -90,6 +90,15 @@ namespace WSJTX_Controller
                 MessageBox.Show("An instance of this application is already running.");
                 return;
             }
+
+            // Logbook migration (Phase 6): the operator's move / move-back commands. Here, after the
+            // single-instance check, so Jimmy Next itself can never be running while they work.
+            var cmdArgs = Environment.GetCommandLineArgs();
+            if (cmdArgs.Contains("--nexus-logbook-migrate") || cmdArgs.Contains("--nexus-logbook-rollback"))
+            {
+                NexusLogbookMigration.RunInteractive(migrate: cmdArgs.Contains("--nexus-logbook-migrate"));
+                return;
+            }
             try
             {
                 Application.EnableVisualStyles();

@@ -324,6 +324,9 @@ namespace WSJTX_Controller
                 if (!string.IsNullOrWhiteSpace(sessionToken))
                     args += $" --session-token {sessionToken}";
                 _sessionToken = sessionToken ?? "";
+                // Logbook migration: while Nexus owns the logbook this engine host is its owner.
+                if (NexusLogbook.Active)
+                    args += $" --log-dir {EscapeCommandLineArg(NexusLogbook.Folder)}";
                 if (repeatLimit.HasValue)
                     args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
                 // Frequency-override authority split, 2026-08-24 -- see
@@ -719,6 +722,66 @@ namespace WSJTX_Controller
         // and it falls back to no real control, with nothing surfacing the failure. Found live,
         // 2026-08-06: TX audio stayed on the radio's front mic even after CAT-mode tests passed
         // and settings looked correct, which a lost race here fully explains.
+        // Logbook migration Phase 4 (the Nexus desktop's lifecycle): the radio/audio part of
+        // Launch's command line, as APPLY_SETTINGS JSON -- the SAME conditions as the
+        // "--rig-*"/"--ptt-*"/"--device" arguments above, and EngineHost's own parse_args defaults
+        // wherever Launch passes nothing (receive-only mode passes no radio argument at all).
+        // Applied live, Nexus's radio loop rebuilds CAT and reopens audio itself on its next tick.
+        internal static string BuildApplySettingsJson(RadioSettings radio, string audioIn, string audioOut)
+        {
+            uint rigModel = 0, baud = 38_400;
+            string rigPort = "", ptt = "vox", pttSerial = "", split = "none";
+            int rigctldPort = 4532;
+            bool plainSsb = false, dontSetMode = false, dataSource = false;
+            if (radio != null && radio.Mode == RadioControlMode.HamlibRigctld)
+            {
+                if (!string.IsNullOrWhiteSpace(radio.RigModel)) uint.TryParse(radio.RigModel.Trim(), out rigModel);
+                if (!radio.UseExternalRigctld && !string.IsNullOrWhiteSpace(radio.ComPort)) rigPort = radio.ComPort;
+                if (!radio.UseExternalRigctld && !string.IsNullOrWhiteSpace(radio.BaudRate) && !uint.TryParse(radio.BaudRate.Trim(), out baud)) baud = 38_400;
+                ptt = (radio.PttEnabled ? radio.PttMethod : PttMethod.Vox).ToCliString();
+                rigctldPort = radio.RigctldPort;
+                plainSsb = radio.TxMode == RadioTxMode.Usb;
+                dontSetMode = radio.TxMode == RadioTxMode.None;
+                dataSource = radio.PttDataSource;
+                if (!string.IsNullOrWhiteSpace(radio.PttSerialPort)) pttSerial = radio.PttSerialPort;
+                if (radio.SplitMode != RadioSplitMode.None) split = radio.SplitMode.ToString().ToLowerInvariant();
+            }
+            return JsonSerializer.Serialize(new
+            {
+                audioIn = audioIn?.Trim() ?? "", audioOut = audioOut?.Trim() ?? "",
+                rigModel, rigConn = "serial", rigPort, rigAddr = "", rigBaud = baud, pttMethod = ptt,
+                rigctldPort, plainSsbDataModes = plainSsb, dontSetMode, pttDataSource = dataSource,
+                pttSerialPort = pttSerial, splitMode = split,
+            });
+        }
+
+        // Sends APPLY_SETTINGS to this running engine. True only on its "OK".
+        public bool ApplySettingsLive(RadioSettings radio, string audioIn, string audioOut)
+        {
+            if (!Running) return false;
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    if (!connectTask.Wait(1000) || !client.Connected) return false;
+                    using (var stream = client.GetStream())
+                    {
+                        stream.WriteTimeout = 1000;
+                        stream.ReadTimeout = 5000;
+                        byte[] cmd = Encoding.UTF8.GetBytes("APPLY_SETTINGS " + BuildApplySettingsJson(radio, audioIn, audioOut) + "\n");
+                        stream.Write(cmd, 0, cmd.Length);
+                        using (var reader = new StreamReader(stream, Encoding.UTF8))
+                            return reader.ReadLine()?.Trim() == "OK";
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         // The session token this process was launched with -- SHUTDOWN only obeys its owner.
         private string _sessionToken = "";
 

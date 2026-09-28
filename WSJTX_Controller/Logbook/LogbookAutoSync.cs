@@ -88,7 +88,7 @@ namespace WSJTX_Controller
             ILogbookService db = null;
             try
             {
-                db = new LogbookDb();
+                db = LogbookFactory.Open();
 
                 if (qrzDue) anyError |= !await SyncQrzAsync(db);
                 if (lotwDue) anyError |= !await SyncLotwAsync(db);

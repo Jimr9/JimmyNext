@@ -54,7 +54,7 @@ namespace WSJTX_Controller
         // arrives, Controller's startup sequence has long since finished.
         // Nexus contesting foundation, phase 2 (completed): ILogbookService, not LogbookDb --
         // ClassificationEngine only needs HasWorkedBefore/HasWorkedDxcc, both on the interface.
-        private readonly ILogbookService _logbookDb = new LogbookDb();
+        private readonly ILogbookService _logbookDb = LogbookFactory.Open();
         private ClassificationEngine _classificationEngine;
         private ClassificationEngine Classifier => _classificationEngine ?? (_classificationEngine = new ClassificationEngine(_logbookDb, lookupManager));
         // udpClient/ipAddress/multicast (the classic UDP receive-socket's own identity) and

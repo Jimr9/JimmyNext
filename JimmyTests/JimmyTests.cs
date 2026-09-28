@@ -401,6 +401,27 @@ static class JimmyTests
         // Logbook migration Phase 3: crash / recovery tests against a logbook-only engine host in
         // isolated temp folders (TEST-only crash points). Never touches a real data path.
         //   --nexus-recovery-tests <engine exe> <empty work root> [port]
+        // Logbook migration Phase 6: the REAL migrate and roll-back commands, on a copy in the
+        // isolated test data folder. --nexus-migrate-command-tests <engine exe> <logbook copy> <empty work root> [port]
+        if (args.Length >= 4 && args[0] == "--nexus-migrate-command-tests")
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            int port = args.Length >= 5 ? int.Parse(args[4]) : 58294;
+            var (passed, report) = NexusMigrationCommandTests.Run(args[1], args[2], args[3], port);
+            Console.WriteLine(report);
+            Environment.Exit(passed ? 0 : 1);
+        }
+        // Logbook migration Phases 5-6: Jimmy's logbook code running on Nexus, against a COPY of a
+        // logbook in temp folders.
+        //   --nexus-integration-tests <engine exe> <logbook copy> <rules folder> <empty work root> [port]
+        if (args.Length >= 5 && args[0] == "--nexus-integration-tests")
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            int port = args.Length >= 6 ? int.Parse(args[5]) : 58295;
+            var r = NexusIntegrationTests.Run(args[1], args[2], args[3], args[4], port);
+            Console.WriteLine(r.Report);
+            Environment.Exit(r.Passed ? 0 : 1);
+        }
         if (args.Length >= 3 && args[0] == "--nexus-recovery-tests")
         {
             int port = args.Length >= 4 ? int.Parse(args[3]) : 58296;
@@ -3507,7 +3528,7 @@ static class JimmyTests
             Check("the exemption is already spent -- the SECOND closing over counts as an ordinary orphan (still just tolerated)",
                   !SeenCmd("HALT_TX") && wc.TestOrphanTxOvers == 1 && wc.TestFinishingCall == qsoCall, true);
             FinishingOver(2014);
-            PumpUntil(() => SeenCmd("HALT_TX"));
+            PumpUntil(() => SeenCmd("HALT_TX") && SeenCmd("SET_TX_ENABLED 0"), 10000);
             Check("a THIRD repeat trips the ordinary 2-strike halt -- an indefinitely-repeating stale tail can no longer hide behind Finishing forever",
                   SeenCmd("HALT_TX") && SeenCmd("SET_TX_ENABLED 0"), true);
             Check("orphan counter resets after firing", wc.TestOrphanTxOvers == 0, true);

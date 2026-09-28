@@ -222,7 +222,7 @@ namespace WSJTX_Controller
 
             try
             {
-                _db = new LogbookDb();
+                _db = LogbookFactory.Open();
             }
             catch (Exception ex)
             {
@@ -1225,7 +1225,12 @@ namespace WSJTX_Controller
                         "MANUAL", "", dedupKey,
                         "", 0, "", "", "", "", "", "", "", "",
                         "", "");
-                    SetStatus($"Added {r.Callsign}.");
+                    // While Nexus keeps the logbook, say exactly what happened: a duplicate Nexus
+                    // refused is shown by the Status field's own held-duplicate message (D2), and
+                    // a contact still on its way is said to be queued, never "added".
+                    string state = (_db as NexusLogbookService)?.LastLogState ?? "saved";
+                    if (state == "saved" || state == "already") SetStatus($"Added {r.Callsign}.");
+                    else if (state == "queued") SetStatus($"{r.Callsign} queued; it will be saved when the logbook is available.");
                     DoEditSearch();
                     return null;
                 }

@@ -86,6 +86,22 @@ namespace WSJTX_Controller
             Action<int> progressCallback = null,
             Func<string, string> resolveUsState = null)
         {
+            // Nexus owns the logbook: the records go to Nexus's own import / merge as one file,
+            // and Jimmy's own live-logged contact goes through the durable outbox.
+            if (db is NexusLogbookService nexus)
+            {
+                var list = records.ToList();
+                if (source == "WSJTX" && list.Count == 1)
+                {
+                    var f = list[0].Fields;
+                    string key = BuildDedupKey(f.TryGetValue("CALL", out var c) ? c : "", (f.TryGetValue("BAND", out var b) ? b : "").ToLowerInvariant(),
+                        f.TryGetValue("MODE", out var m) ? m : "", f.TryGetValue("QSO_DATE", out var d) ? d : "", f.TryGetValue("TIME_ON", out var t) ? t : "");
+                    NexusLogbookService.QueueLiveContact(f, key);
+                    return new ImportResult { Processed = 1, NewQsos = 1 };
+                }
+                return nexus.ImportFile(NexusLogbookService.ToAdifText(list, source), source);
+            }
+
             var result = new ImportResult();
             var errors = new StringBuilder();
 

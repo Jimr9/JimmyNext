@@ -737,7 +737,7 @@ namespace WSJTX_Controller
             string contestTag = !string.IsNullOrWhiteSpace(_manualContestFreeTextBox.Text)
                 ? _manualContestFreeTextBox.Text.Trim()
                 : (knownEventId ?? "");
-            using (ILogbookService db = new LogbookDb(_dbPath()))
+            using (ILogbookService db = LogbookFactory.Open(_dbPath()))
             {
                 var now = DateTime.UtcNow;
                 string qsoDate = now.ToString("yyyyMMdd");
