@@ -52,6 +52,13 @@ namespace WSJTX_Controller
         public int EngineAudioOutputAppLevel { get; set; } = 100;
         private const string RetiredInputAppLevelKey = "engineAudioInputAppLevel";
 
+        // 2026-09-28 (operator request): how long an Alt+T tune carrier runs before the engine
+        // releases it (Nexus settings.tune_timeout_secs, stock 12 s -- too short to finish a
+        // tune-up). Ini only (tuneTimeoutSeconds), no Options control. Nexus itself never holds
+        // a tune longer than 60 s whatever this says, so 1-60 is the whole usable range.
+        public const int MaxTuneTimeoutSeconds = 60;
+        public int TuneTimeoutSeconds { get; set; } = 60;
+
         // UDP-to-Direct parity/cleanup pass, 2026-08-12: the "talk over classic WSJT-X UDP
         // instead of Direct" choice (UseDirectEngine) is retired as a production option -- UDP
         // mode never had a working way to tell jimmy-engine-host.exe to actually enable
@@ -86,6 +93,8 @@ namespace WSJTX_Controller
                 OutputMasterLevelPercent = outMaster;
             if (int.TryParse(ini.Read("engineAudioOutputAppLevel"), out int outApp) && outApp >= 0 && outApp <= 100)
                 EngineAudioOutputAppLevel = outApp;
+            if (int.TryParse(ini.Read("tuneTimeoutSeconds"), out int tune) && tune >= 1)
+                TuneTimeoutSeconds = System.Math.Min(tune, MaxTuneTimeoutSeconds);
         }
 
         public void SaveToIni(IniFile ini)
@@ -100,6 +109,7 @@ namespace WSJTX_Controller
                 ini.Write("radioOutputMasterLevelPercent", OutputMasterLevelPercent.Value.ToString());
             if (ini.KeyExists(RetiredInputAppLevelKey)) ini.DeleteKey(RetiredInputAppLevelKey);
             ini.Write("engineAudioOutputAppLevel", EngineAudioOutputAppLevel.ToString());
+            ini.Write("tuneTimeoutSeconds", TuneTimeoutSeconds.ToString());
         }
     }
 }

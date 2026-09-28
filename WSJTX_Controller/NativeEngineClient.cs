@@ -277,7 +277,8 @@ namespace WSJTX_Controller
                             DecodeSettings decode = null, bool pskreporter = false,
                             string dxClusterAddress = null, string sessionToken = null,
                             int? repeatLimit = null,
-                            List<WorkingFreqArg> workingFrequencies = null)
+                            List<WorkingFreqArg> workingFrequencies = null,
+                            int? tuneTimeoutSeconds = null)
         {
             LastError = null;
             try
@@ -329,6 +330,9 @@ namespace WSJTX_Controller
                     args += $" --log-dir {EscapeCommandLineArg(NexusLogbook.Folder)}";
                 if (repeatLimit.HasValue)
                     args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
+                // Alt+T tune carrier auto-release (NativeEngineSettings.TuneTimeoutSeconds, ini only).
+                if (tuneTimeoutSeconds.HasValue)
+                    args += $" --tune-timeout-secs {tuneTimeoutSeconds.Value}";
                 // Frequency-override authority split, 2026-08-24 -- see
                 // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
                 // empty (no band customized), matching every other startup arg's "absent =

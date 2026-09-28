@@ -4392,7 +4392,8 @@ namespace WSJTX_Controller
                     msg => wsjtx?.DebugOutput(msg),
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, wsjtx != null && wsjtx.usePskReporter,
-                    dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot);
+                    dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
+                    NativeEngine.TuneTimeoutSeconds);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-

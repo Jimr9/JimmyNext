@@ -467,6 +467,10 @@ struct Args {
     /// Defaults to Nexus's own Settings::default() (6) when not passed, matching every other
     /// startup-only field's own "absent = stock behavior" convention.
     tx_watchdog_min: u32,
+    /// Alt+T tune carrier auto-release, seconds (Jimmy's ini-only tuneTimeoutSeconds) ->
+    /// Settings.tune_timeout_secs. Nexus clamps it to its own 60 s ceiling at the point of use.
+    /// Absent = Nexus's stock 12 s.
+    tune_timeout_secs: Option<u32>,
     /// Frequency-override authority split, 2026-08-24 (independent audit finding): mirrors
     /// Jimmy's own Options>Frequencies per-band/per-mode overrides (FrequencySettings.cs) into
     /// Nexus's own documented working-frequency override mechanism (Engine::band_plan's own doc
@@ -555,6 +559,7 @@ fn parse_args() -> Args {
     let mut session_token = String::new();
     let mut log_dir: Option<std::path::PathBuf> = None;
     let mut no_radio = false;
+    let mut tune_timeout_secs: Option<u32> = None;
     let mut tx_watchdog_min: u32 = 6; // Nexus's own Settings::default() -- see Args::tx_watchdog_min's own comment
     let mut working_frequencies: Vec<tempo_app::settings::WorkingFreq> = Vec::new(); // empty = Nexus's own stock table
 
@@ -644,6 +649,9 @@ fn parse_args() -> Args {
                     tx_watchdog_min = v.parse().unwrap_or(tx_watchdog_min);
                 }
             }
+            "--tune-timeout-secs" => {
+                tune_timeout_secs = it.next().and_then(|v| v.parse().ok()).filter(|v: &u32| *v >= 1);
+            }
             "--working-frequencies" => {
                 if let Some(v) = it.next() {
                     match serde_json::from_str::<Vec<tempo_app::settings::WorkingFreq>>(&v) {
@@ -687,6 +695,7 @@ fn parse_args() -> Args {
         dx_cluster_addr,
         session_token,
         tx_watchdog_min,
+        tune_timeout_secs,
         working_frequencies,
         log_dir,
         no_radio,
@@ -2035,6 +2044,8 @@ fn main() {
         // Args::tx_watchdog_min's own comment for where this value comes from (Jimmy's own
         // Automatic calculation, or Nexus's stock 6 if not passed at all).
         tx_watchdog_min: args.tx_watchdog_min,
+        // Jimmy's ini-only tuneTimeoutSeconds when passed, else Nexus's stock value.
+        tune_timeout_secs: args.tune_timeout_secs.unwrap_or_else(|| Settings::default().tune_timeout_secs),
         // Frequency-override authority split, 2026-08-24 -- see Args::working_frequencies' own
         // comment. Engine::band_plan (read by Engine::set_tier's own internal auto-QSY on every
         // tier switch) applies these the same way Nexus's own Settings panel would, so Nexus
