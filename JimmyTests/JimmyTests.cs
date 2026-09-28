@@ -1536,6 +1536,7 @@ static class JimmyTests
         NotificationParkedEventTypesGuardTests();
         ClockSyncNotificationTests();
         ClockSyncDirectPathStateHygieneTests();
+        ClockSyncPartlyHeardFirstPeriodTests();
         DirectTxHoldSafetyNetTests();
         DirectPollFailureNotificationTests();
         DirectCatHealthNotificationTests();
@@ -16892,6 +16893,40 @@ static class JimmyTests
         PublishDt(1.20);
         Check("Mode switch clears stale samples: a boundary-acceptable FT4 reading is recognized as acceptable, not dragged over threshold by the prior mode's stale bad sample",
             delivery.AnnounceCount == beforeSwitch + 1, true);
+    }
+
+    // 2026-09-28 (live): Jimmy restarted 2 s into an FT8 period; that period's decodes read
+    // ~2 s off and "Computer clock is out of sync, -1.6" was announced though the clock was
+    // fine. A period that began before the engine connection gets no clock verdict; the next,
+    // fully heard period is judged normally.
+    static void ClockSyncPartlyHeardFirstPeriodTests()
+    {
+        Console.WriteLine("\n── Clock-sync: partly heard first period after the engine starts ──");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var delivery = new FakeNotificationDelivery();
+        wc.Notify = NewTestNotificationCenter(new NotificationSettings(), delivery);
+
+        // Engine connected 2 s into FT8 period k; the engine reports its decodes as slot k+1.
+        long k = new DateTimeOffset(2026, 9, 28, 20, 50, 0, TimeSpan.Zero).ToUnixTimeSeconds() / 15;
+        wc.TestSetDirectAudioStartUtc(DateTimeOffset.FromUnixTimeSeconds(k * 15 + 2).UtcDateTime);
+        void Publish(long slot, double dt)
+        {
+            var snap = ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                ""recentDecodes"": [ { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" } ] }");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap);
+        }
+        Publish(k + 1, -2.2);   // the partly heard period
+        Publish(k + 2, 2.0);    // first full period -- here a genuinely bad clock
+        Check("partly heard first period: no clock warning", delivery.AnnounceCount == 0, true);
+        Publish(k + 3, 2.0);
+        Check("a bad clock in the first full period is still announced",
+            delivery.AnnounceCount == 1 && delivery.LastText == "Computer clock is out of sync, offset 2.0 seconds.", true);
     }
 
     // ── Rx/Tx frequency control, 2026-08-27: Tx stays stable during an active contact ──

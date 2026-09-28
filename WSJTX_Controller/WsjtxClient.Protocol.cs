@@ -146,6 +146,7 @@ namespace WSJTX_Controller
                     // "still fine"/"still bad" on every mode toggle.
                     timeOffsets.Clear();
                     timeOffset = 0;
+                    _timeOffsetsFromPartialPeriod = false;
                     _rawDecodeHistory.Clear();
                     if (ctrl.advShowRaw) ShowRawDecodes();
                     // The canonical trio -- a tier switch is a context reset just like a band

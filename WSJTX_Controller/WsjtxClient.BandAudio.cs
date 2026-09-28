@@ -964,7 +964,13 @@ namespace WSJTX_Controller
             // clock that STAYS bad for many periods in a row publishes exactly once, not once
             // per period -- see ClockOutOfSyncEvent/ClockSyncedEvent's own dedup-key comments
             // for the second, independent backstop against exactly that kind of repeat.
-            if (clear)
+            if (clear && _timeOffsetsFromPartialPeriod)
+            {
+                // Audio began mid-period (see _directAudioStartUtc): no verdict either way.
+                _timeOffsetsFromPartialPeriod = false;
+                DebugOutput($"{Time()} CalcAvgTimeOffset: partly heard first period, no clock verdict");
+            }
+            else if (clear)
             {
                 bool acceptable = Math.Abs(timeOffset) <= maxTimeOffset;
                 if (_clockWasAcceptable == false && acceptable)

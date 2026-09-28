@@ -837,6 +837,8 @@ namespace WSJTX_Controller
             timeOffsets.Clear();
             timeOffset = 0;
             _clockWasAcceptable = null;
+            _directAudioStartUtc = DateTime.UtcNow;
+            _timeOffsetsFromPartialPeriod = false;
             opMode = OpModes.ACTIVE;
             // jimmy-engine-host itself always starts a fresh session hardcoded to Tier::Ft8
             // (main.rs's own startup set_tier call) -- match that here so this tracked value
@@ -2624,6 +2626,19 @@ namespace WSJTX_Controller
             // decode in this poll's RecentDecodes (they all belong to the slot that just ended).
             bool directTargetMonitorEvenSlot = snap.Radio != null && (snap.Radio.Slot % 2UL) == 0UL;
 
+            // Clock check: RadioStatus.Slot is the Unix-time period index one past the audio
+            // these decodes came from (Nexus alltxt: period start = (slot - 1) * period secs).
+            // A period that began before the engine connection is only partly heard -- mark it
+            // so CalcAvgTimeOffset gives it no clock verdict.
+            if (snap.Radio != null && snap.Radio.Slot > 0 && snap.RecentDecodes.Count > 0 && _directAudioStartUtc.HasValue)
+            {
+                double periodSecs = PeriodSecondsForMode(mode);
+                DateTime periodStart = DateTimeOffset.FromUnixTimeMilliseconds(
+                    (long)((snap.Radio.Slot - 1) * periodSecs * 1000.0)).UtcDateTime;
+                if (periodStart < _directAudioStartUtc.Value && _directAudioStartUtc.Value < periodStart.AddSeconds(periodSecs))
+                    _timeOffsetsFromPartialPeriod = true;
+            }
+
             foreach (var row in snap.RecentDecodes)
             {
                 if (string.IsNullOrEmpty(row.Message)) continue;
@@ -3855,6 +3870,9 @@ namespace WSJTX_Controller
         // WsjtxClient.Protocol.cs's SetOperatingMode, 2026-08-19). Lets a mode-switch clock-sync
         // test drive the post-switch STATE directly (TestSetMode + this) without needing
         // SetOperatingMode's own wire round-trip to succeed.
+        // Test-only: the moment the engine connection began (ConnectDirectEngine stamps now).
+        internal void TestSetDirectAudioStartUtc(DateTime utc) => _directAudioStartUtc = utc;
+
         internal void TestClearTimeOffsetState()
         {
             timeOffsets.Clear();

@@ -689,6 +689,13 @@ namespace WSJTX_Controller
         private List<double> timeOffsets = new List<double>();
         private double timeOffset = 0;
         private double maxTimeOffset = 1.20;
+        // 2026-09-28: when the engine connection began (it is already capturing audio by then),
+        // and whether the DT samples now in timeOffsets came from a period that started before
+        // it. That period's audio is only its tail, so every station's DT reads ~2 s off
+        // (live: -1.6 s "out of sync" 26 s after a restart, +0.17 s the next period) -- it says
+        // nothing about the computer's clock and gets no clock verdict.
+        private DateTime? _directAudioStartUtc;
+        private bool _timeOffsetsFromPartialPeriod;
         // Clock-sync notification, 2026-08-12: null = not yet evaluated this session (the
         // clock's actual condition is unknown, not assumed good) -- see CalcAvgTimeOffset
         // (WsjtxClient.BandAudio.cs) for the transition-detection logic this backs. Deliberately
