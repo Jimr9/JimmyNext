@@ -103,6 +103,12 @@ namespace WSJTX_Controller
             if (db is NexusLogbookService nexus)
             {
                 var list = records.ToList();
+                // The T12 backfill, as Jimmy's own import applies it: DXCC / country / continent a
+                // contact left blank, filled from Club Log -- for the live contact and for plain
+                // imports that add contacts. (The LoTW / QRZ / eQSL downloads merge confirmations;
+                // the contacts QRZ adds carry their own DXCC.)
+                if (source != "LOTW" && source != "QRZ" && source != "EQSL")
+                    foreach (var r in list) FillEntityGaps(r);
                 if (source == "WSJTX" && list.Count == 1)
                 {
                     var f = list[0].Fields;
@@ -257,17 +263,7 @@ namespace WSJTX_Controller
             // narrow startup/test window before it's assigned; a missing/undeleted resolution
             // simply leaves the field at its prior (possibly still zero/blank) value, same as
             // before this fix existed.
-            if ((dxcc == 0 || string.IsNullOrEmpty(country) || string.IsNullOrEmpty(continent))
-                && RuleLibrary.ClubLog != null)
-            {
-                var entity = RuleLibrary.ClubLog.FindByCallsign(call);
-                if (entity != null && !entity.Deleted)
-                {
-                    if (dxcc == 0) dxcc = entity.Adif;
-                    if (string.IsNullOrEmpty(country)) country = entity.Name;
-                    if (string.IsNullOrEmpty(continent)) continent = entity.Continent;
-                }
-            }
+            FillEntityGaps(call, ref dxcc, ref country, ref continent);
 
             // QSL field mapping differs by source.
             // LoTW download: QSL_RCVD:Y means confirmed (LOTW_QSL_RCVD is a logging-software field, absent in LoTW's own export).
@@ -360,6 +356,49 @@ namespace WSJTX_Controller
                 exchangeSent = GetField(f, "STX_STRING") ?? "",
                 exchangeRcvd = GetField(f, "SRX_STRING") ?? "",
             };
+        }
+
+        // The T12 backfill (see its comment in the import above), as ONE rule shared by Jimmy's own
+        // import and the Nexus paths: DXCC / country / continent a record left blank or zero, from
+        // Club Log's offline entity data (RuleLibrary.ClubLog); never overrides a value present.
+        internal static void FillEntityGaps(string call, ref int dxcc, ref string country, ref string continent)
+        {
+            if ((dxcc == 0 || string.IsNullOrEmpty(country) || string.IsNullOrEmpty(continent))
+                && RuleLibrary.ClubLog != null && !string.IsNullOrEmpty(call))
+            {
+                var entity = RuleLibrary.ClubLog.FindByCallsign(call);
+                if (entity != null && !entity.Deleted)
+                {
+                    if (dxcc == 0) dxcc = entity.Adif;
+                    if (string.IsNullOrEmpty(country)) country = entity.Name;
+                    if (string.IsNullOrEmpty(continent)) continent = entity.Continent;
+                }
+            }
+        }
+
+        // The same rule on an ADIF record handed to Nexus: fills DXCC / COUNTRY / CONT the record
+        // left blank, in its fields and (when it keeps file order) its ordered field list.
+        internal static void FillEntityGaps(AdifRawRecord r)
+        {
+            var f = r.Fields;
+            string call = f.TryGetValue("CALL", out var c) ? c : "";
+            int.TryParse(f.TryGetValue("DXCC", out var d) ? d : "", out int dxcc);
+            string country = f.TryGetValue("COUNTRY", out var co) ? co : "";
+            string continent = f.TryGetValue("CONT", out var ct) ? ct : "";
+            int dxcc0 = dxcc; string country0 = country, continent0 = continent;
+            FillEntityGaps(call, ref dxcc, ref country, ref continent);
+            void Set(string tag, string value)
+            {
+                f[tag] = value;
+                if (r.Ordered != null)
+                {
+                    r.Ordered.RemoveAll(o => string.Equals(o.Tag, tag, StringComparison.OrdinalIgnoreCase));
+                    r.Ordered.Add((tag, value));
+                }
+            }
+            if (dxcc != dxcc0 && dxcc > 0) Set("DXCC", dxcc.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (country != country0 && !string.IsNullOrEmpty(country)) Set("COUNTRY", country);
+            if (continent != continent0 && !string.IsNullOrEmpty(continent)) Set("CONT", continent.ToUpperInvariant());
         }
 
         public static string BuildDedupKey(string call, string band, string mode, string qsoDate, string timeOn)

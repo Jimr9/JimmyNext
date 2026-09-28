@@ -1272,6 +1272,7 @@ namespace WSJTX_Controller
             RuleLibrary.ClubLog = lookupManager.ClubLog;
             try { RuleLibrary.Load(); } catch { }
             RefreshStillNeedCache();   // must run after RuleLibrary.Load() so the saved selection resolves
+            BackfillMissingDxccWhenReady();
 
 
             mainLoopTimer.Interval = 10;           //actual is 11-12 msec (due to OS limitations)
@@ -3319,6 +3320,32 @@ namespace WSJTX_Controller
         // then grid.dat) -- never a live query. Must run after lookupManager is initialized and
         // before RefreshStillNeedCache() so the first cache build already reflects any
         // corrected states.
+        // While Nexus keeps the log: the same kind of gap repair for a missing DXCC entity (and
+        // blank country / continent), from Club Log's offline data -- which is why it runs after
+        // RuleLibrary.ClubLog is set, not beside BackfillMissingStates. On a background task that
+        // first waits (bounded) for the engine that owns the log to answer, so startup never waits
+        // on it; Still Need is refreshed afterwards when anything was filled.
+        private void BackfillMissingDxccWhenReady()
+        {
+            if (!NexusLogbook.Active) return;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
+                {
+                    for (int i = 0; i < 60 && NexusLogbook.Client.StatusJson() == null; i++)
+                        System.Threading.Thread.Sleep(1000);
+                    var nexus = new NexusLogbookService();
+                    int n = nexus.BackfillMissingEntities();
+                    if (n > 0)
+                    {
+                        nexus.SetMeta("dxcc_backfill_last_fixed", $"{DateTime.UtcNow:o} ({n} rows)");
+                        SafeBeginInvoke(() => { RefreshStillNeedCache(); RefreshLogbookWindowIfOpen(); });
+                    }
+                }
+                catch { /* best-effort repair -- must never affect operation */ }
+            });
+        }
+
         private void BackfillMissingStates()
         {
             try

@@ -916,6 +916,83 @@ static class JimmyTests
         }
     }
 
+    // DXCC while Nexus keeps the log: the live-logged contact carries its DXCC entity / country /
+    // continent (Club Log, as Jimmy's own import fills them), and the startup repair fills a contact
+    // stored without one -- changing nothing else. Temp engine and data only.
+    //   --nexus-dxcc-tests <engine exe> <empty work dir>
+    static void NexusDxccTests(string engineExe, string work)
+    {
+        Console.WriteLine("\n--- NexusDxccTests ---");
+        Directory.CreateDirectory(Path.Combine(work, "cl", "ClubLog"));
+        File.WriteAllText(Path.Combine(work, "cl", "ClubLog", "clublog_cty.xml"),
+            "<clublog><entities>" +
+            "<ENTITY><adif>291</adif><name>UNITED STATES OF AMERICA</name><prefix>K</prefix><deleted>FALSE</deleted><cqz>5</cqz><cont>NA</cont></ENTITY>" +
+            "<ENTITY><adif>522</adif><name>REPUBLIC OF KOSOVO</name><prefix>Z6</prefix><deleted>FALSE</deleted><cqz>15</cqz><cont>EU</cont></ENTITY>" +
+            "</entities></clublog>");
+        var prevClubLog = RuleLibrary.ClubLog;
+        var provider = new ClubLogProvider(Path.Combine(work, "cl"));
+        provider.Configure(true, "");
+        provider.Load();
+        RuleLibrary.ClubLog = provider;
+        const int port = 58303;
+        string token = Guid.NewGuid().ToString("N");
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = Path.Combine(work, "NexusLog");
+        NexusLogbook.TestPortOverride = port;
+        NexusLogbook.TestForceActive = true;
+        try
+        {
+            using (LogbookOnlyEngine.Start(engineExe, Path.Combine(work, "NexusLog"), Path.Combine(work, "appdata"), port, token))
+            {
+                var client = new NexusLogClient(port);
+                string F(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+                // A contact stored without a DXCC entity, as the live path left them before this fix.
+                string seed = Path.Combine(work, "seed.adi");
+                File.WriteAllText(seed, "test\n<eoh>\n" + F("CALL", "Z62NS") + F("BAND", "20m") + F("MODE", "FT8") + F("QSO_DATE", "20260928") +
+                    F("TIME_ON", "201700") + F("COUNTRY", "Republic of Kosovo") + F("GRIDSQUARE", "KN02") + " <eor>\n");
+                client.Import(seed);
+                var json = new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase };
+                string Snap(NexusQso q)
+                {
+                    q.EditKey = null; q.Dxcc = null;
+                    q.Extra = q.Extra.Where(e => e.Count < 1 || !string.Equals(e[0], "CONT", StringComparison.OrdinalIgnoreCase)).ToList();
+                    return System.Text.Json.JsonSerializer.Serialize(q, json);
+                }
+                NexusQso Row(string call) => client.Rows().Rows.Single(q => q.Call == call);
+                string before = Snap(Row("Z62NS"));
+                Check("seeded contact has no DXCC (the defect)", (Row("Z62NS").Dxcc ?? 0) == 0, true);
+
+                int fixedCount = new NexusLogbookService().BackfillMissingEntities();
+                var z = Row("Z62NS");
+                Console.WriteLine($"  repair: {fixedCount} fixed; Z62NS dxcc {z.Dxcc}, CONT {z.ExtraValue("CONT")}, country '{z.Country}'");
+                Check("repair: Z62NS gets DXCC 522 and continent EU", z.Dxcc == 522 && z.ExtraValue("CONT") == "EU", true);
+                Check("repair: its country (already set) and everything else unchanged", Snap(Row("Z62NS")) == before, true);
+                Check("repair again: nothing left to fill", new NexusLogbookService().BackfillMissingEntities() == 0, true);
+
+                // The live path: Jimmy's own record for a completed QSO (no DXCC in it), into Nexus.
+                string liveAdif = AdifRecordBuilder.Build("K1ABC", "20m", 14_075_500, "FT8", "20260928", "210000", "210100",
+                    "-10", "-12", "FN42", "", "", "", "KB0UZT", "KB0UZT", "EN34");
+                AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(liveAdif), "WSJTX");
+                NexusQso live = null;
+                for (int i = 0; i < 100 && live == null; i++)
+                {
+                    live = client.Rows().Rows.FirstOrDefault(q => q.Call == "K1ABC");
+                    if (live == null) Thread.Sleep(100);
+                }
+                Console.WriteLine($"  live: dxcc {live?.Dxcc}, CONT {live?.ExtraValue("CONT")}, country '{live?.Country}'");
+                Check("live-logged contact arrives with DXCC 291, continent NA and Club Log's country",
+                    live != null && live.Dxcc == 291 && live.ExtraValue("CONT") == "NA" && live.Country == "UNITED STATES OF AMERICA", true);
+                client.Shutdown(token);
+            }
+        }
+        finally
+        {
+            RuleLibrary.ClubLog = prevClubLog;
+            NexusLogbook.Reset();
+            NexusLogbook.TestFolderOverride = null; NexusLogbook.TestPortOverride = null; NexusLogbook.TestForceActive = null;
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -1152,6 +1229,12 @@ static class JimmyTests
         if (args.Length >= 3 && args[0] == "--nexus-upload-tests")
         {
             NexusUploadTests(args[1], args[2]);
+            Console.WriteLine("=== " + passed + " passed, " + failed + " failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
+        if (args.Length >= 3 && args[0] == "--nexus-dxcc-tests")
+        {
+            NexusDxccTests(args[1], args[2]);
             Console.WriteLine("=== " + passed + " passed, " + failed + " failed ===");
             Environment.Exit(failed > 0 ? 1 : 0);
         }

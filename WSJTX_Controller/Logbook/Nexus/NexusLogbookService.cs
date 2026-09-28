@@ -421,6 +421,32 @@ namespace WSJTX_Controller
         private static void SaveImportHistory(List<ImportLogEntry> h) =>
             NexusLogbook.SetMeta("import_history", NexusLogClient.ToJson(h.Take(100).ToList()));
 
+        // DXCC fill for contacts that have none (the same rule as Jimmy's own import, Club Log's
+        // offline data): the DXCC entity, and the country / continent where blank, by a Nexus edit per
+        // contact -- only filling blanks. Repairs contacts logged while Nexus kept the log before the
+        // live path filled them (2026-09-28), and any that ever arrive without one.
+        public int BackfillMissingEntities()
+        {
+            var rows = Client.Rows();
+            if (rows.Error != null) return 0;
+            int n = 0;
+            foreach (var q in rows.Rows.Where(q => (q.Dxcc ?? 0) == 0))
+            {
+                int dxcc = 0;
+                string country = q.Country ?? "";
+                string continent = q.ExtraValue("CONT") ?? "";
+                AdifImporter.FillEntityGaps(q.Call, ref dxcc, ref country, ref continent);
+                if (dxcc <= 0) continue;
+                q.Dxcc = (uint)dxcc;
+                if (string.IsNullOrEmpty(q.Country)) q.Country = country;
+                if (string.IsNullOrEmpty(q.ExtraValue("CONT")) && !string.IsNullOrEmpty(continent))
+                    q.Extra.Add(new List<string> { "CONT", continent.ToUpperInvariant() });
+                if (Client.Edit(q.Id, q.EditKey, q).State == "saved") n++;
+            }
+            if (n > 0) NexusLogbook.Refresh();
+            return n;
+        }
+
         // State fill for contacts that have none: a Nexus edit per contact, only filling a blank.
         public int BackfillMissingStates(Func<string, string> resolveState)
         {
