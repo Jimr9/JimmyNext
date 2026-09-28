@@ -277,8 +277,7 @@ namespace WSJTX_Controller
                             DecodeSettings decode = null, bool pskreporter = false,
                             string dxClusterAddress = null, string sessionToken = null,
                             int? repeatLimit = null,
-                            List<WorkingFreqArg> workingFrequencies = null,
-                            string catTimingLog = null)
+                            List<WorkingFreqArg> workingFrequencies = null)
         {
             LastError = null;
             try
@@ -328,11 +327,6 @@ namespace WSJTX_Controller
                 // Logbook migration: while Nexus owns the logbook this engine host is its owner.
                 if (NexusLogbook.Active)
                     args += $" --log-dir {EscapeCommandLineArg(NexusLogbook.Folder)}";
-                // Band-change timing diagnostics (only while Jimmy's debug log is on): Nexus's own
-                // CAT diagnostic log, where EngineHost notes each SET_FREQUENCY's arrival beside
-                // Nexus's "dial→rig" note -- see main.rs's --cat-timing-log.
-                if (!string.IsNullOrEmpty(catTimingLog))
-                    args += $" --cat-timing-log {EscapeCommandLineArg(catTimingLog)}";
                 if (repeatLimit.HasValue)
                     args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
                 // Frequency-override authority split, 2026-08-24 -- see
