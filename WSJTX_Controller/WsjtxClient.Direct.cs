@@ -2660,6 +2660,12 @@ namespace WSJTX_Controller
                 };
 
                 EnqueueDecodeMessage enq = EnqueueDecodeMessage.FromStandardDecode(dmsg);
+                if (row.Worked.HasValue)
+                    enq.NexusWorked = new NexusWorkedFlags
+                    {
+                        Worked = row.Worked.Value, WorkedBand = row.WorkedBand ?? false,
+                        NewDxcc = row.NewDxcc ?? false, NewBand = row.NewBand ?? false, Country = row.Country,
+                    };
 
                 // Nexus modernization Stage 5: shadow-compare Jimmy's own WsjtxMessage parse of
                 // this decode against Nexus's parse (the Stage 3 DecodeRow flags + the Stage 4
@@ -4362,6 +4368,14 @@ namespace WSJTX_Controller
         // alone; 1/2 = joint-combined that many retransmissions; -1 = not applicable
         // (DecodeRow.rv). Left 0 when absent.
         public int Rv { get; set; }
+
+        // Nexus's worked-before facts (DecodeRow.worked / worked_band / new_dxcc / new_band /
+        // country), read only by WorkedShadowComparer. Null when the engine did not send them.
+        public bool? Worked { get; set; }
+        public bool? WorkedBand { get; set; }
+        public bool? NewDxcc { get; set; }
+        public bool? NewBand { get; set; }
+        public string Country { get; set; }
     }
 
     // Wire shape for the REPLY control command -- field names (once camelCase'd by

@@ -340,6 +340,11 @@ namespace WsjtxUdpLib.Messages.Out
         // the shadow comparison keeps working.
         internal WSJTX_Controller.SemanticDecode Semantic { get; set; }
 
+        // Nexus's own worked-before facts for this decode (DecodeRow worked / worked_band /
+        // new_dxcc / new_band / country), carried only for WorkedShadowComparer. Nothing decides
+        // on them. Null when the engine did not send them.
+        internal WSJTX_Controller.NexusWorkedFlags NexusWorked { get; set; }
+
         // Minor words a title-caser should leave lowercase (mid-string) rather than
         // capitalizing every word blindly -- e.g. "Isle of Man", not "Isle Of Man".
         private static readonly HashSet<string> CountryMinorWords =

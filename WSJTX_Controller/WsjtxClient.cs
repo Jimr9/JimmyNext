@@ -2070,6 +2070,9 @@ namespace WSJTX_Controller
             // DIST_DECR/DIST_INCR and beam ranking) -- confirmed via tracing this is not
             // display-only.
             dmsg.Classified = Classifier.Classify(deCall, CurrentBandStr, dmsg.Message, myGrid, myContinent, idSem.Grid);
+            // Worked-before shadow comparison (Nexus's per-decode facts beside Jimmy's): records
+            // only, decides nothing -- see WorkedShadowComparer.
+            WorkedShadowComparer.Compare(dmsg.Classified, dmsg.NexusWorked, deCall, CurrentBandStr);
             // T15 fix, 2026-08-23 (LIKELY bug -- KJ5OUL, 2026-08-21): Classify() is stateless per
             // decode -- a CQ carrying a grid resolves real distance/bearing/country/continent,
             // but a later report/73/RR73 from the SAME station in the SAME band session often
@@ -2817,6 +2820,7 @@ namespace WSJTX_Controller
             ClassificationParityLogger.Close();
             // Nexus modernization Stage 5 diagnostic -- see Semantic/SemanticParityLogger.cs.
             SemanticParityLogger.Close();
+            WorkedShadowComparer.Close();
 
             SetLogFileState(false);         //close log file
         }

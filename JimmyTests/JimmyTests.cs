@@ -731,6 +731,49 @@ static class JimmyTests
         }
     }
 
+    // Worked-before shadow comparison: records only; each distinct disagreement written once;
+    // country facts compared only when both sides resolved a country; nothing while loading.
+    static void WorkedShadowComparerTests()
+    {
+        Console.WriteLine("\n--- WorkedShadowComparerTests ---");
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy-shadow-" + Guid.NewGuid().ToString("N"));
+        string log = Path.Combine(dir, "shadow.txt");
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = Path.Combine(dir, "NexusLog");
+        NexusLogbook.TestForceActive = true;
+        WorkedShadowComparer.TestPathOverride = log;
+        WorkedShadowComparer.Reset();
+        try
+        {
+            var j = new ClassifiedCall { IsNewCallAnyBand = true, IsNewCallOnBand = true, Country = "USA" };
+            var n = new NexusWorkedFlags { Worked = false, WorkedBand = false, Country = "United States" };
+            WorkedShadowComparer.Compare(j, n, "W1AW", "20m");
+            Check("while the log is loading nothing is compared", WorkedShadowComparer.Compared == 0, true);
+
+            Directory.CreateDirectory(NexusLogbook.ProjectionFolder);
+            File.WriteAllText(Path.Combine(NexusLogbook.ProjectionFolder, "p-20260928000000000-1.db"), "");
+            NexusLogbook.Reset();
+            NexusLogbook.TestFolderOverride = Path.Combine(dir, "NexusLog");
+            WorkedShadowComparer.Compare(j, n, "W1AW", "20m");                 // all agree
+            var jWorked = new ClassifiedCall { IsNewCallAnyBand = false, IsNewCallOnBand = true, Country = "USA" };
+            WorkedShadowComparer.Compare(jWorked, n, "K1ABC", "20m");          // NewCall differs
+            WorkedShadowComparer.Compare(jWorked, n, "K1ABC", "20m");          // same again
+            WorkedShadowComparer.Compare(new ClassifiedCall { IsNewCountry = true, IsNewCountryOnBand = true },
+                new NexusWorkedFlags { NewDxcc = false, Worked = true, WorkedBand = true }, "VP8XX", "20m"); // no countries: not compared
+            var lines = File.Exists(log) ? File.ReadAllLines(log) : new string[0];
+            Check("4 decodes compared", WorkedShadowComparer.Compared == 4, true);
+            Check("one distinct disagreement written once", lines.Count(l => l.Contains("K1ABC 20m NewCall:")) == 1 && lines.Length == 1, true);
+            Check("country facts skipped when a side has no country", !WorkedShadowComparer.ByFact.ContainsKey("NewCountry") ||
+                WorkedShadowComparer.ByFact["NewCountry"].Agree + WorkedShadowComparer.ByFact["NewCountry"].Disagree == 3, true);
+        }
+        finally
+        {
+            WorkedShadowComparer.TestPathOverride = null; WorkedShadowComparer.Reset();
+            NexusLogbook.Reset(); NexusLogbook.TestForceActive = null; NexusLogbook.TestFolderOverride = null;
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -1361,6 +1404,7 @@ static class JimmyTests
         RuleConfirmationSourcesTests();
         NexusDuplicateStatusTests();
         NexusLogbookLoadingTests();
+        WorkedShadowComparerTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");
