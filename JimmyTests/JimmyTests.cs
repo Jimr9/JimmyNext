@@ -258,6 +258,8 @@ static class JimmyTests
         string QrzRec(string call, string date, string time, string lotw, string qrz) =>
             F("CALL", call) + F("BAND", "20M") + F("MODE", "FT8") + F("QSO_DATE", date) + F("TIME_ON", time + "00") +
             (lotw == null ? "" : F("LOTW_QSL_RCVD", lotw)) + (qrz == null ? "" : F("APP_QRZLOG_STATUS", qrz)) + " <eor>\n";
+        string EqslRec(string call, string date, string time) =>
+            F("CALL", call) + F("BAND", "20M") + F("MODE", "FT8") + F("QSO_DATE", date) + F("TIME_ON", time + "00") + F("EQSL_QSL_RCVD", "Y") + " <eor>\n";
         var E = new Func<(string T, bool L, bool Q)[], Dictionary<string, (bool Lotw, bool Qrz)>>(xs => xs.ToDictionary(x => x.T, x => (x.L, x.Q)));
 
         // name, log (date, time) in log order, merge kind, report rows, expected held rows,
@@ -305,6 +307,19 @@ static class JimmyTests
                 new[] { ("20260901", "001000"), ("20260901", "001030") }, "lotw",
                 c => Lotw + Rec(c, "20260901", "0010", "Y", null), 1,
                 E(new[] { ("0010", false, false) }), 0),
+            // eQSL (the other station's time): the Qrz slot of Expect stands for the eQSL flag here.
+            ("11 eQSL row 7 minutes off the only contact that day",
+                new[] { ("20260901", "0010") }, "eqsl",
+                c => EqslRec(c, "20260901", "0017"), 0,
+                E(new[] { ("0010", false, true) }), 0),
+            ("12 eQSL row off-minute, two contacts that day",
+                new[] { ("20260901", "0010"), ("20260901", "0040") }, "eqsl",
+                c => EqslRec(c, "20260901", "0025"), 1,
+                E(new[] { ("0010", false, false), ("0040", false, false) }), 0),
+            ("13 eQSL row dated the next day (other clock past midnight), only contact",
+                new[] { ("20260901", "2359") }, "eqsl",
+                c => EqslRec(c, "20260902", "0001"), 0,
+                E(new[] { ("2359", false, true) }), 0),
         };
 
         Directory.CreateDirectory(work);
@@ -335,14 +350,14 @@ static class JimmyTests
                 File.WriteAllText(rawFile, cs.Report(rawCall));
                 client.Merge(cs.Kind, rawFile);
                 // Guarded.
-                var prep = NexusReportPairing.Prepare(cs.Report(guardCall), client.Rows().Rows);
+                var prep = NexusReportPairing.Prepare(cs.Report(guardCall), client.Rows().Rows, nearbyUnique: cs.Kind == "eqsl");
                 string grdFile = Path.Combine(work, $"guarded-{n}.adi");
                 File.WriteAllText(grdFile, prep.Text);
                 if (prep.Sent > 0) client.Merge(cs.Kind, grdFile);
 
                 var after = client.Rows().Rows;
                 string Show(string call) => string.Join(", ", after.Where(r => r.Call == call).Select(r =>
-                    $"{DateTimeOffset.FromUnixTimeSeconds((long)r.WhenUnix).UtcDateTime:ddHHmm} L{(r.QslRcvd.Lotw ? "Y" : "-")} Q{(r.QslRcvd.Qrz ? "Y" : "-")}"));
+                    $"{DateTimeOffset.FromUnixTimeSeconds((long)r.WhenUnix).UtcDateTime:ddHHmm} L{(r.QslRcvd.Lotw ? "Y" : "-")} Q{(r.QslRcvd.Qrz ? "Y" : "-")} E{(r.QslRcvd.Eqsl ? "Y" : "-")}"));
                 Console.WriteLine($"  case {cs.Name}");
                 Console.WriteLine($"     Nexus alone : {Show(rawCall)}");
                 Console.WriteLine($"     guarded     : {Show(guardCall)}   (held {prep.Held}{(prep.Held > 0 ? ": " + string.Join(" / ", prep.HeldDetails) : "")})");
@@ -351,7 +366,7 @@ static class JimmyTests
                 foreach (var r in g)
                 {
                     string t = DateTimeOffset.FromUnixTimeSeconds((long)r.WhenUnix).UtcDateTime.ToString("HHmm");
-                    if (cs.Expect.TryGetValue(t, out var e)) ok &= r.QslRcvd.Lotw == e.Lotw && r.QslRcvd.Qrz == e.Qrz;
+                    if (cs.Expect.TryGetValue(t, out var e)) ok &= r.QslRcvd.Lotw == e.Lotw && (cs.Kind == "eqsl" ? r.QslRcvd.Eqsl : r.QslRcvd.Qrz) == e.Qrz;
                 }
                 Check($"case {n}: guarded pairing puts each confirmation on its own contact or changes nothing", ok, true);
                 Check($"case {n}: held rows as expected ({cs.Held})", prep.Held == cs.Held, true);

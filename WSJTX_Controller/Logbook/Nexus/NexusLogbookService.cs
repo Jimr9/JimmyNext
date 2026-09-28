@@ -192,7 +192,7 @@ namespace WSJTX_Controller
             var rows = Client.Rows();
             if (rows.Error != null)
                 return new ImportResult { Errors = "Nexus logbook: could not read the log to pair the download: " + rows.Error };
-            var prep = NexusReportPairing.Prepare(adifText, rows.Rows);
+            var prep = NexusReportPairing.Prepare(adifText, rows.Rows, nearbyUnique: source == "EQSL");
             var result = ImportFile(prep.Text, source);
             // "Newly confirmed" = contacts that gained a confirmation (LoTW, QRZ, eQSL or card) in
             // this merge, read from the log itself: Nexus's own count covers LoTW and card only, and

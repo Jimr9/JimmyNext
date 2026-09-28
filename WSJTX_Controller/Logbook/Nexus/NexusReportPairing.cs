@@ -29,6 +29,11 @@ namespace WSJTX_Controller
     //     call and band on that day or the day either side (QRZ: a contact the log lacks, which
     //     Nexus adds; LoTW: an unmatched confirmation Nexus reports); otherwise it is held;
     //   - two contacts at one minute, or two rows for one contact, hold the group.
+    // With nearbyUnique (eQSL, whose rows carry the OTHER station's time, often minutes off ours --
+    // Jimmy's own eQSL matcher never used the time): a row with no contact at its minute is also
+    // sent when exactly ONE logged contact has its call, band and mode class on that day or the day
+    // either side and no other row claims it -- the only contact Nexus can pair it with. More than
+    // one such contact holds it, as Jimmy's matcher skipped it as ambiguous.
     // The header and each row sent are passed on exactly as received.
     public static class NexusReportPairing
     {
@@ -61,7 +66,7 @@ namespace WSJTX_Controller
 
         private static string Bucket(string callBand, string modeClass, long day) => $"{callBand}|{modeClass}|{day}";
 
-        public static Result Prepare(string text, IReadOnlyList<NexusQso> logInOrder)
+        public static Result Prepare(string text, IReadOnlyList<NexusQso> logInOrder, bool nearbyUnique = false)
         {
             text = text ?? "";
             var m = Eoh.Match(text);
@@ -138,6 +143,20 @@ namespace WSJTX_Controller
                     if (!matched.TryGetValue(c.Bucket, out var g)) matched[c.Bucket] = g = new List<(Row, Contact)>();
                     g.Add((r, c));
                     continue;
+                }
+                if (nearbyUnique)
+                {
+                    var cands = new List<Contact>();
+                    for (long dd = r.Day - 1; dd <= r.Day + 1; dd++)
+                        if (contacts.TryGetValue(Bucket(r.CallBand, r.ModeClass, dd), out var l)) cands.AddRange(l);
+                    if (cands.Count == 1)
+                    {
+                        var c = cands[0];
+                        if (!matched.TryGetValue(c.Bucket, out var g)) matched[c.Bucket] = g = new List<(Row, Contact)>();
+                        g.Add((r, c));
+                        continue;
+                    }
+                    if (cands.Count > 1) { Hold(r, $"{cands.Count} logged contacts with this station and band that day or the day either side, none at this minute"); continue; }
                 }
                 bool near = callBandDays.Contains($"{r.CallBand}|{r.ModeClass}|{r.Day}") ||
                             callBandDays.Contains($"{r.CallBand}|{r.ModeClass}|{r.Day - 1}") ||

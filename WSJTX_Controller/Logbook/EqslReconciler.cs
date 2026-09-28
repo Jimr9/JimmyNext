@@ -33,10 +33,15 @@ namespace WSJTX_Controller
             var result = new Result();
             if (db is NexusLogbookService nexus)
             {
-                // Nexus owns the logbook: its own eQSL merge (monotonic, never adds a contact).
-                var r = nexus.ImportFile(adifText, "EQSL");
+                // Nexus owns the logbook: its own eQSL merge (monotonic, never adds a contact),
+                // through the same pairing guard as LoTW and QRZ (see NexusReportPairing) --
+                // rows it cannot be sure of are held, as this matcher skips ambiguous ones.
+                var r = nexus.MergeDownload(adifText, "EQSL");
+                if (!string.IsNullOrEmpty(r.Errors)) throw new InvalidOperationException(r.Errors);
                 result.Matched = r.NewlyConfirmed;
-                result.AlreadyConfirmed = Math.Max(0, r.Processed - r.NewlyConfirmed);
+                result.Ambiguous = r.Held;
+                result.Unmatched = r.Unmatched;
+                result.AlreadyConfirmed = Math.Max(0, r.Processed - r.NewlyConfirmed - r.Unmatched);
                 return result;
             }
             foreach (Dictionary<string, string> rec in AdifParser.Parse(adifText))
