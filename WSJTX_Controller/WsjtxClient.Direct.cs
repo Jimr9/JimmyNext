@@ -405,6 +405,24 @@ namespace WSJTX_Controller
         // re-establish that same "never more than one poll in flight" invariant explicitly.
         private bool _directPollInFlight;
 
+        // Set when a fresh snapshot was requested while a poll was already out: that poll's
+        // result may predate the request, so exactly one more poll follows it. Any number of
+        // requests during one poll collapse into this single flag.
+        private bool _directPollAgain;
+
+        // After a successful SET_FREQUENCY the engine already holds the new band, so ask for a
+        // snapshot now instead of waiting up to a second for the poll timer -- the band-change
+        // status and announcement then follow the key press immediately. Same DirectPollTick,
+        // same in-flight guard: polls never overlap and results apply in order, so an older
+        // snapshot cannot overwrite a newer one. The timer keeps running as the fallback.
+        // UI thread only (both fields are UI-thread state).
+        private void RequestDirectPollNow()
+        {
+            if (!_directConnected) return;
+            if (_directPollInFlight) { _directPollAgain = true; return; }
+            DirectPollTick();
+        }
+
         // Incremented on every ConnectDirectEngine() call. A background poll captures this value
         // when it starts; if a NEW connection (reconnect, or the engine auto-restarting) happens
         // while that poll's network I/O is still in flight, its eventual continuation compares
@@ -765,6 +783,7 @@ namespace WSJTX_Controller
             // being accepted for the session about to start below.
             lock (_directQueueLock) { PurgeAllDirectQueues_NoLock(); }
             _directPollInFlight = false;
+            _directPollAgain = false;
             _directSeenDecodeSignatures.Clear();
             _directLastSlotSeen = 0;
             _directFirstStatusShown = false;
@@ -934,6 +953,13 @@ namespace WSJTX_Controller
                 ctrl.BeginInvoke(new Action(() =>
                 {
                     _directPollInFlight = false;
+                    // A fresh snapshot was requested while this one was out: queue exactly one
+                    // more poll, to run after this result has been applied.
+                    if (_directPollAgain)
+                    {
+                        _directPollAgain = false;
+                        ctrl.BeginInvoke(new Action(DirectPollTick));
+                    }
                     // Superseded by a disconnect or a fresh reconnect while this poll was still
                     // running -- this result belongs to a connection that's no longer current;
                     // the new/absent connection's own state is authoritative now, not this.
@@ -1522,7 +1548,10 @@ namespace WSJTX_Controller
                 dialFrequency = newDialFrequency;
                 lastDialFrequency = dialFrequency;
                 ctrl.RefreshStillNeedCache();
-                StatusView.ShowMessage($"Band changed to {FreqToBandStr(newDialFrequency / 1e6)}", false);
+                // Rapid band changes: a band only passed through is not announced when a newer
+                // band change is already on its way -- only the band landed on is.
+                if (_pendingBandIdx == null || _pendingBandIdx == FreqToBandIdx(newDialFrequency / 1e6))
+                    StatusView.ShowMessage($"Band changed to {FreqToBandStr(newDialFrequency / 1e6)}", false);
             }
             dialFrequency = newDialFrequency;
             lastDialFrequency = dialFrequency;
@@ -3428,6 +3457,8 @@ namespace WSJTX_Controller
                 bool ok = resp != null && resp.Length > 0 && !resp.StartsWith("ERR");
                 if (!ok)
                     DebugOutput($"{Time()} [DIRECT] SET_FREQUENCY {band}/{hz}Hz/{mode} did not return OK (response: {(resp ?? "<no response>")})");
+                else
+                    RequestDirectPollNow();
                 onComplete?.Invoke(ok);
             });
         }

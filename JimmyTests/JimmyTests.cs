@@ -671,6 +671,7 @@ static class JimmyTests
         DirectPathTxLevelBandTrackingTests();
         DirectPathTxEnabledReconciliationTests();
         DirectPathPendingBandIdxClearedOnConfirmationTests();
+        BandChangeRequestsImmediateSnapshotTests();
         RetuneBandFailureDoesNotLeakPendingBandIdxTests();
         SelectFrequencyHotkeyModeStaysPutTests();
         FrequencyEntrySidebandTests();
@@ -6082,6 +6083,76 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  DirectPathPendingBandIdxClearedOnConfirmationTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            engineListener.Stop();
+        }
+    }
+
+    // A successful SET_FREQUENCY reply asks for a snapshot at once (no wait for the 1 s poll
+    // timer, which is not running here), rapid presses never overlap polls, and only the band
+    // actually landed on is announced.
+    static void BandChangeRequestsImmediateSnapshotTests()
+    {
+        Console.WriteLine("\n── Band change: immediate snapshot, coalesced polls, one announcement ──");
+        double engineMhz = 14.074;
+        int snapshots = 0, inFlight = 0, maxInFlight = 0;
+        var engineListener = new StubEngineHost(line =>
+        {
+            if (line.StartsWith("SET_FREQUENCY "))
+            {
+                using (var doc = System.Text.Json.JsonDocument.Parse(line.Substring("SET_FREQUENCY ".Length)))
+                    engineMhz = doc.RootElement.GetProperty("hz").GetDouble() / 1e6;
+                return "OK";
+            }
+            if (line == "SNAPSHOT")
+            {
+                int now = Interlocked.Increment(ref inFlight);
+                lock (typeof(JimmyTests)) { snapshots++; if (now > maxInFlight) maxInFlight = now; }
+                Thread.Sleep(40); // widen the window a second poll could overlap in
+                Interlocked.Decrement(ref inFlight);
+                return $"{{\"mycall\":\"KB0UZT\",\"mygrid\":\"FN42\",\"radio\":{{\"dialMhz\":{engineMhz.ToString(System.Globalization.CultureInfo.InvariantCulture)},\"transmitting\":false,\"tuning\":false,\"slot\":3000}},\"recentDecodes\":[]}}";
+            }
+            return "OK";
+        });
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var view = new FakeStatusView();
+            wc.StatusView = view;
+            wc.TestSetDirectConnected(true);
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(
+                @"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"", ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""slot"": 3000 }, ""recentDecodes"": [] }"));
+
+            int before = view.ShowMessageCount;
+            wc.BandDown();
+            PumpUntil(() => wc.TestBandIdx == 4, 2000);
+            Check("band change confirmed by the snapshot requested after the reply (no poll timer)", wc.TestBandIdx == 4, true);
+            Check("...and announced once", view.ShowMessageCount - before == 1 && view.LastShowMessageText == "Band changed to 30m", true);
+
+            before = view.ShowMessageCount;
+            int snapsBefore = snapshots;
+            wc.BandDown();
+            wc.BandDown();
+            PumpUntil(() => wc.TestBandIdx == 2 && inFlight == 0, 2000);
+            PumpUntil(() => false, 300); // let any extra (wrong) poll or announcement show itself
+            Check("rapid presses: lands on 60m", wc.TestBandIdx == 2, true);
+            Check("...polls never overlap", maxInFlight == 1, true);
+            Check("...requests coalesce (at most 2 snapshots for 2 presses)", snapshots - snapsBefore <= 2, true);
+            Check("...only the band landed on is announced", view.ShowMessageCount - before == 1 && view.LastShowMessageText == "Band changed to 60m", true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  BandChangeRequestsImmediateSnapshotTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
         finally
