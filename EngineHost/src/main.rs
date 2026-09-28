@@ -1071,7 +1071,13 @@ fn handle_control_connection(
             // split_provenance is read under the SAME lock as the snapshot, so its flags line up
             // with this snapshot's recent_decodes rows (built 1:1, in order, from last_decodes).
             let (snap, special_op, split_provenance) = {
-                let eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                // Nexus-owned logbook only (logbook_host.rs): Nexus's own resend of a change the
+                // disk refused for a reason that can pass -- where the Nexus desktop makes the same
+                // call, on the snapshot poll. No I/O.
+                if log_host.is_some() {
+                    eng.log_resend_due();
+                }
                 (eng.snapshot(), special_op_wire(&eng), eng.last_decodes_multiplexed().to_vec())
             };
             // Independent audit finding, 2026-08-23 (EngineHost ownership / session identity):
@@ -2005,6 +2011,16 @@ fn main() {
         }
     };
     let engine = Arc::new(Mutex::new(engine_value));
+    // TEST ONLY (logbook migration Phase 3): a crash point for the recovery tests, honoured only
+    // in a logbook-only start (--no-radio) and armed BEFORE the control server can take a
+    // command -- see logbook_host.rs's "Phase 3 crash testing".
+    if args.no_radio {
+        if let Ok(spec) = std::env::var("JIMMY_TEST_CRASH_AT") {
+            if !spec.trim().is_empty() {
+                logbook_host::arm_test_crash(&spec);
+            }
+        }
+    }
 
     // `Tier` (the FT8/FT4/TempoFast/... waveform selector) is separate from Settings'
     // "Digital" operating-mode category and is ONLY ever set by a live operator command in

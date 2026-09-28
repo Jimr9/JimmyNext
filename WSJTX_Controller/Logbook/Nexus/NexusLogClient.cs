@@ -106,6 +106,9 @@ namespace WSJTX_Controller
         public string State { get; set; }
         public string Id { get; set; }
         public string Why { get; set; }
+        // On "duplicate": the contact already in the log that Nexus's rule matched, when known.
+        public string ExistingId { get; set; }
+        public ulong? ExistingWhenUnix { get; set; }
     }
 
     public class NexusWriteReply

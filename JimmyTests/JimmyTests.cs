@@ -301,6 +301,16 @@ static class JimmyTests
         // Logbook migration Phase 2: the full round trip on a COPY of a logbook, in a temp work
         // folder, through a logbook-only engine host. Never touches a real data path.
         //   --nexus-migration-dry-run <copy of logbook.db> <empty work folder> <engine exe> [port]
+        // Logbook migration Phase 3: crash / recovery tests against a logbook-only engine host in
+        // isolated temp folders (TEST-only crash points). Never touches a real data path.
+        //   --nexus-recovery-tests <engine exe> <empty work root> [port]
+        if (args.Length >= 3 && args[0] == "--nexus-recovery-tests")
+        {
+            int port = args.Length >= 4 ? int.Parse(args[3]) : 58296;
+            var r = NexusRecoveryTests.Run(args[1], args[2], port);
+            Console.WriteLine(r.Report);
+            Environment.Exit(r.Passed ? 0 : 1);
+        }
         if (args.Length >= 4 && args[0] == "--nexus-migration-dry-run")
         {
             int port = args.Length >= 5 ? int.Parse(args[4]) : 58297;

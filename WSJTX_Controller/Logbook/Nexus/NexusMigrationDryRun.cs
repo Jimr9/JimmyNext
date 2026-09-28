@@ -209,7 +209,9 @@ namespace WSJTX_Controller
         private readonly Process _process;
         private LogbookOnlyEngine(Process p) { _process = p; }
 
-        public static LogbookOnlyEngine Start(string exe, string logDir, string appDataDir, int port, string token)
+        // crashAt: TEST ONLY -- a crash point for the recovery tests (JIMMY_TEST_CRASH_AT, see
+        // logbook_host.rs). null in every other use.
+        public static LogbookOnlyEngine Start(string exe, string logDir, string appDataDir, int port, string token, string crashAt = null)
         {
             Directory.CreateDirectory(appDataDir);
             var psi = new ProcessStartInfo(exe)
@@ -223,6 +225,7 @@ namespace WSJTX_Controller
                                       "--session-token", token, "--no-radio", "--log-dir", logDir })
                 psi.ArgumentList.Add(a);
             psi.Environment["LOCALAPPDATA"] = appDataDir;
+            psi.Environment["JIMMY_TEST_CRASH_AT"] = crashAt ?? "";
             var p = Process.Start(psi);
             p.BeginErrorReadLine();
             p.BeginOutputReadLine();
@@ -240,6 +243,7 @@ namespace WSJTX_Controller
         }
 
         public bool WaitForExit(int ms) => _process.WaitForExit(ms);
+        public int? ExitCode => _process.HasExited ? _process.ExitCode : (int?)null;
 
         public void Dispose()
         {

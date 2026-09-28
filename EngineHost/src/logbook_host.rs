@@ -180,6 +180,18 @@ pub struct LogQsoReply {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<String>,
+    /// On "duplicate": the contact already in the log that Nexus's rule matched, when a read can
+    /// name it (same call spelling; a portable-call variant matches the rule but not this lookup).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub existing_when_unix: Option<u64>,
+}
+
+impl LogQsoReply {
+    fn new(state: &'static str, id: String, why: Option<String>) -> Self {
+        LogQsoReply { state, id, why, existing_id: None, existing_when_unix: None }
+    }
 }
 
 /// LOG_QSO: log one contact, idempotently, and answer only once it is on disk (or say it is not).
@@ -188,7 +200,7 @@ pub fn log_qso(host: &LogHost, engine: &Mutex<Engine>, args: LogQsoArgs) -> LogQ
     let id_text = id.to_string();
     let gate = host.writes.lock().unwrap_or_else(|e| e.into_inner());
     if gate.closed {
-        return LogQsoReply { state: "closed", id: id_text, why: None };
+        return LogQsoReply::new("closed", id_text, None);
     }
 
     // A re-send? The row is looked up by id with the lock released (a plan reads the store, and
@@ -203,15 +215,15 @@ pub fn log_qso(host: &LogHost, engine: &Mutex<Engine>, args: LogQsoArgs) -> LogQ
                 Err(e) => Some(e.to_string()),
             };
             let state = if why.is_none() { "already" } else { "unconfirmed" };
-            return LogQsoReply { state, id: id_text, why };
+            return LogQsoReply::new(state, id_text, why);
         }
         Ok(None) => {}
         Err(e) => {
-            return LogQsoReply {
-                state: "unconfirmed",
-                id: id_text,
-                why: Some(format!("the logbook could not be read to check for a re-send: {e}")),
-            }
+            return LogQsoReply::new(
+                "unconfirmed",
+                id_text,
+                Some(format!("the logbook could not be read to check for a re-send: {e}")),
+            )
         }
     }
 
@@ -221,17 +233,72 @@ pub fn log_qso(host: &LogHost, engine: &Mutex<Engine>, args: LogQsoArgs) -> LogQ
     rec.extra.push((REQ_ID_FIELD.to_string(), args.req_id.clone()));
     rec.extra.sort();
 
+    test_crash_point("before_log");
+    let probe = rec.clone();
     let (outcome, durability) = lock(engine).with_log_tickets(|e| e.log_qso_for_sync(rec));
     // The receipts inside PendingSync are Nexus's per-contact durability for the Remote path; the
     // tickets collected above cover the same change, and are what is waited on below.
     if matches!(outcome, LogWriteOutcome::Duplicate) {
-        return LogQsoReply { state: "duplicate", id: id_text, why: None };
+        // Nexus's own live rule refused it (plan decision D2: adopted as is). Name the contact
+        // it matched, with Nexus's own predicate, read off the lock -- so Jimmy can say why.
+        let mut reply = LogQsoReply::new("duplicate", id_text, None);
+        let plan = lock(engine).log_plan();
+        const DUPE_COLUMNS: tempo_core::logbook::sqlite::Narrow = tempo_core::logbook::sqlite::Narrow {
+            columns: &["call", "band", "mode", "when_unix"],
+            uploads: false,
+        };
+        if let Ok(Some(existing)) = plan.newest(&probe.call, DUPE_COLUMNS, |r| {
+            tempo_core::logbook::dedup::is_recent_duplicate(r, &probe)
+        }) {
+            reply.existing_id = existing.id.map(|i| i.to_string());
+            reply.existing_when_unix = Some(existing.when_unix);
+        }
+        return reply;
     }
     drop(gate);
+    // Handed to Nexus, not yet confirmed on disk: whether it lands is a race with the writer.
+    test_crash_point("after_log");
     // Nexus's `durable_command`: wait with every lock released.
     match durability.wait(DURABLE_WAIT) {
-        Ok(()) => LogQsoReply { state: "saved", id: id_text, why: None },
-        Err(why) => LogQsoReply { state: "unconfirmed", id: id_text, why: Some(why) },
+        Ok(()) => {
+            // On disk, and the reply not yet sent.
+            test_crash_point("after_save");
+            LogQsoReply::new("saved", id_text, None)
+        }
+        Err(why) => LogQsoReply::new("unconfirmed", id_text, Some(why)),
+    }
+}
+
+// ── Phase 3 crash testing ─────────────────────────────────────────────────────────────────
+//
+// TEST ONLY. main() arms this only for a logbook-only start (--no-radio) AND only when the
+// environment variable JIMMY_TEST_CRASH_AT names a point -- so it can never fire in a radio
+// session or in normal use. The spec is "<point>" or "<point>:<n>" (crash at the n-th time that
+// point is reached, 1 = the first). The crash is a hard exit: no reply, no flush, no destructors
+// -- nothing this process had not already put on disk survives it, exactly as with a real crash.
+
+static TEST_CRASH: std::sync::OnceLock<(String, u32)> = std::sync::OnceLock::new();
+static TEST_CRASH_SEEN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Arm a crash point (see above). Called by main() only under --no-radio.
+pub fn arm_test_crash(spec: &str) {
+    let (point, n) = match spec.split_once(':') {
+        Some((p, n)) => (p.trim().to_string(), n.trim().parse().unwrap_or(1)),
+        None => (spec.trim().to_string(), 1),
+    };
+    eprintln!("jimmy-engine-host: TEST crash armed at {point} #{n}");
+    let _ = TEST_CRASH.set((point, n));
+}
+
+fn test_crash_point(name: &str) {
+    if let Some((point, n)) = TEST_CRASH.get() {
+        if point == name {
+            let seen = TEST_CRASH_SEEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if seen == *n {
+                eprintln!("jimmy-engine-host: TEST crash at {name} #{seen}");
+                std::process::exit(86);
+            }
+        }
     }
 }
 
@@ -549,9 +616,13 @@ pub fn rows_json(engine: &Mutex<Engine>, args: &LogRowsArgs) -> String {
     }
 }
 
-/// LOG_STATUS: what the store is and where the changes stand. Never waits.
+/// LOG_STATUS: what the store is and where the changes stand. Never waits. Also the poll that
+/// drives Nexus's resend of refused changes in a logbook-only start (no SNAPSHOT poll there).
 pub fn status_json(host: &LogHost, engine: &Mutex<Engine>) -> String {
-    let e = lock(engine);
+    let mut e = lock(engine);
+    // Nexus's own retry for a change the disk refused for a reason that can pass (the desktop
+    // makes this call on its UI snapshot poll). No I/O.
+    e.log_resend_due();
     let standing = e.log_unsaved().standing();
     let (store, detail) = match &host.kind {
         StoreKind::Database { detail } => ("database", detail.clone()),
@@ -745,7 +816,10 @@ mod tests {
         let (eng, host) = launch(&d.0);
         assert_eq!(log_qso(&host, &eng, args("a", qso("W1AW", T0, "20m"))).state, "saved");
         // A different request for the same station, band and mode two minutes later.
-        assert_eq!(log_qso(&host, &eng, args("b", qso("W1AW", T0 + 120, "20m"))).state, "duplicate");
+        let dup = log_qso(&host, &eng, args("b", qso("W1AW", T0 + 120, "20m")));
+        assert_eq!(dup.state, "duplicate");
+        assert_eq!(dup.existing_id, Some(record_id_for_request("a").to_string()), "names the contact it matched");
+        assert_eq!(dup.existing_when_unix, Some(T0));
         // The same station on another band is a new contact.
         assert_eq!(log_qso(&host, &eng, args("c", qso("W1AW", T0 + 120, "40m"))).state, "saved");
         assert_eq!(rows(&eng)["total"], 2);
