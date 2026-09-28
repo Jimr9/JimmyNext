@@ -1278,6 +1278,17 @@ static class JimmyTests
             DxccShadowDump();
             return;
         }
+        // 2026-09-28: a full run while the operator's Jimmy was open reached the LIVE engine on its
+        // control port (tests that fall back to NativeEngineClient.ControlPort) and retuned the
+        // real radio mid-QSO. The suite and --only runs refuse to start while anything is
+        // listening there; only checks the listener table, never connects to it.
+        if (System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+                .Any(ep => ep.Port == NativeEngineClient.ControlPort))
+        {
+            Console.WriteLine($"REFUSED: an engine is listening on control port {NativeEngineClient.ControlPort} " +
+                "(Jimmy / Jimmy Next is running). Close it before running the test suite.");
+            Environment.Exit(2);
+        }
         // Focused run (2026-09-26): `--only NameA,NameB` runs just those test methods (the same
         // static void ...Tests() methods Main calls below), so a change can be verified with the
         // groups that exercise it instead of the whole 3,000+ assertion suite.
