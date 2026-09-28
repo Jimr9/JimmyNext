@@ -21,9 +21,14 @@ namespace WSJTX_Controller
         // (Nexus's own list, one line each; also saved under NexusLog\diagnostics).
         public int    Unmatched       { get; set; }
         public List<string> UnmatchedDetails { get; } = new List<string>();
+        // Rows held back because Nexus could not be sure to pair them with the right contact.
+        public int    Held            { get; set; }
+        public List<string> HeldDetails { get; } = new List<string>();
 
-        // ", N not matched" for the status line, or "" when every row matched.
-        public string UnmatchedText => Unmatched > 0 ? $", {Unmatched:N0} not matched to a logged contact" : "";
+        // ", N not matched" / ", N held for review" for the status line, or "".
+        public string UnmatchedText =>
+            (Unmatched > 0 ? $", {Unmatched:N0} not matched to a logged contact" : "") +
+            (Held > 0 ? $", {Held:N0} held for review" : "");
 
         public override string ToString() =>
             $"Processed {Processed}: {NewQsos} new, {NewlyConfirmed} newly confirmed, {Corrected} corrected, {Skipped} unchanged{UnmatchedText}" +
@@ -106,7 +111,8 @@ namespace WSJTX_Controller
                     NexusLogbookService.QueueLiveContact(f, key);
                     return new ImportResult { Processed = 1, NewQsos = 1 };
                 }
-                return nexus.ImportFile(NexusLogbookService.ToAdifText(list, source), source);
+                string text = NexusLogbookService.ToAdifText(list, source);
+                return source == "LOTW" || source == "QRZ" ? nexus.MergeDownload(text, source) : nexus.ImportFile(text, source);
             }
 
             var result = new ImportResult();

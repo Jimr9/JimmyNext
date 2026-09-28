@@ -41,6 +41,13 @@ namespace WSJTX_Controller
 
         public static void RunInteractive(string[] files)
         {
+            // Say what is about to happen: nothing else appears until the result, a few minutes later.
+            if (MessageBox.Show(
+                    "This downloads your LoTW and QRZ records (nothing is changed there or in your log) and " +
+                    "compares ways of merging them, on copies. It takes about 3 to 5 minutes, mostly waiting " +
+                    "for LoTW; nothing else appears until the result.\n\nStart now?",
+                    "Jimmy Next - Logbook sync diagnosis", MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
+                return;
             string report; bool ok;
             try { (ok, report) = Run(files); }
             catch (Exception ex) { ok = false; report = "Stopped: " + ex.Message; }
@@ -152,6 +159,7 @@ namespace WSJTX_Controller
             public List<string> Merges = new List<string>();
             public List<(string Kind, string Key, string Line)> Unmatched = new List<(string, string, string)>();
             public Dictionary<long, (string Lotw, string Qrz)> After = new Dictionary<long, (string, string)>();
+            public List<string> Held = new List<string>();
         }
 
         private static Outcome RunScenario(string name, string engineExe, string startDb, string work, params (string Kind, string Text)[] merges)
@@ -168,9 +176,17 @@ namespace WSJTX_Controller
                 foreach (var (kind, text) in merges)
                 {
                     if (string.IsNullOrEmpty(text)) { o.Merges.Add($"{kind}: (no download)"); continue; }
+                    string mergeKind = kind.TrimStart('+'), toMerge = text;
+                    if (kind.StartsWith("+"))
+                    {
+                        var prep = NexusReportPairing.Prepare(text, client.Rows().Rows);
+                        toMerge = prep.Text;
+                        o.Merges.Add($"{mergeKind}: paired first -- {prep.Sent} rows sent, {prep.Held} held for review");
+                        o.Held.AddRange(prep.HeldDetails.Select(h => mergeKind + " " + h));
+                    }
                     string f = Path.Combine(dir, $"merge-{++n}-{kind}.adi");
-                    File.WriteAllText(f, text, new UTF8Encoding(false));
-                    var r = client.Merge(kind, f);
+                    File.WriteAllText(f, toMerge, new UTF8Encoding(false));
+                    var r = client.Merge(mergeKind, f);
                     if (r.State != "saved" || r.Detail == null) { o.Error = $"{kind} merge: {r.State} {r.Why}"; break; }
                     var d = r.Detail.Value;
                     int N(string k) => d.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
@@ -226,6 +242,7 @@ namespace WSJTX_Controller
                 RunScenario("A-jimmy-today", engineExe, start, work, ("lotw", lotwJoined), ("qrz", qrzAsJimmy)),
                 RunScenario("B-nexus-desktop", engineExe, start, work, ("lotw", r.NexusLotwYes), ("qrz", qrzNexus)),
                 RunScenario("C-jimmy-confirmations-only", engineExe, start, work, ("lotw", r.JimmyLotwYes), ("qrz", qrzAsJimmy)),
+                RunScenario("F-fixed-jimmy", engineExe, start, work, ("+lotw", NexusLogbookService.ToAdifText(AdifParser.ParseWithOrder(r.JimmyLotwYes ?? ""), "LOTW")), ("+qrz", qrzAsJimmy)),
             };
 
             var sb = new StringBuilder();
@@ -261,6 +278,11 @@ namespace WSJTX_Controller
                 sb.AppendLine($"  LoTW newly confirmed: {lotwUp.Count}, of which {lotwUp.Count - lotwFalse.Count} a download confirms at that contact's minute and {lotwFalse.Count} NO download confirms");
                 sb.AppendLine($"  QRZ newly confirmed:  {qrzUp.Count}, of which {qrzUp.Count - qrzFalse.Count} QRZ confirms at that minute and {qrzFalse.Count} QRZ does NOT confirm");
                 sb.AppendLine($"  LoTW-confirmed at their minute but left unconfirmed in the log: {lotwMissed.Count}");
+                if (o.Held.Count > 0)
+                {
+                    sb.AppendLine($"  Held for review (not merged, nothing changed): {o.Held.Count}");
+                    foreach (var h in o.Held.Take(60)) sb.AppendLine("    " + h);
+                }
                 foreach (var id in lotwFalse.Concat(qrzFalse).Distinct().Take(60))
                 {
                     string k = keyOf[id], pre = k.Substring(0, k.LastIndexOf('|'));
@@ -281,6 +303,35 @@ namespace WSJTX_Controller
                     (Yes(real[id].C("lotw_qsl_rcvd")) != Yes(v.Lotw) || Yes(real[id].C("qrz_qsl_rcvd")) != Yes(v.Qrz)));
                 sb.AppendLine($"Replay check: path A against your real log now: {diff} contact(s) differ in LoTW/QRZ confirmation " +
                               "(0 = this replay reproduces what your syncs did).");
+
+                var f = outcomes.First(x => x.Name.StartsWith("F-"));
+                var repair = new List<string>();
+                var review = new List<string>();
+                foreach (var id in real.Keys.Where(before.ContainsKey).OrderBy(i => keyOf[i]))
+                {
+                    var b = before[id]; var now = real[id];
+                    string label = $"{b.C("callsign")} {b.C("band")} {b.C("mode")} {b.C("qso_date")} {b.C("time_on")} (row {id})";
+                    f.After.TryGetValue(id, out var fixedV);
+                    void Look(string field, string col, bool fixedYes, bool confirmedAtMinute)
+                    {
+                        bool gained = !Yes(b.C(col)) && Yes(now.C(col));
+                        if (!gained) return;
+                        if (!fixedYes && !confirmedAtMinute)
+                            repair.Add($"{label}: {field} confirmed -> back to '{b.C(col)}' (as before the move); no download confirms this contact at its minute");
+                        else if (!fixedYes)
+                            review.Add($"{label}: {field} -- a download confirms this minute, but the fixed path held it; left as it is");
+                    }
+                    Look("LoTW", "lotw_qsl_rcvd", Yes(fixedV.Lotw), lotwConfirmed.Contains(keyOf[id]) || qrzSaysLotw.Contains(keyOf[id]));
+                    Look("QRZ", "qrz_qsl_rcvd", Yes(fixedV.Qrz), qrzConfirmed.Contains(keyOf[id]));
+                }
+                sb.AppendLine();
+                sb.AppendLine($"PROPOSED REPAIR (not applied): {repair.Count} confirmation(s) your log gained since the move that the fixed path does not give and no download confirms at that contact's minute:");
+                foreach (var l in repair) sb.AppendLine("  " + l);
+                if (review.Count > 0)
+                {
+                    sb.AppendLine($"For review, left unchanged: {review.Count}");
+                    foreach (var l in review) sb.AppendLine("  " + l);
+                }
             }
             return sb.ToString();
         }

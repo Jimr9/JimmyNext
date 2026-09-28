@@ -243,6 +243,123 @@ static class JimmyTests
         }
     }
 
+    // Each case: contacts logged in a given order, a download's rows in a given order; merged once
+    // as received (what Nexus does on its own) and once through NexusReportPairing. The guarded
+    // result must put every confirmation on the contact at its minute, or change nothing and
+    // report the row.
+    static void NexusPairingTests(string engineExe, string work)
+    {
+        Console.WriteLine("\n--- NexusPairingTests ---");
+        const string Lotw = "ARRL Logbook of the World Status Report\n<PROGRAMID:4>LoTW\n<eoh>\n";
+        string F(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+        string Rec(string call, string date, string time, string lotw, string qrz) =>
+            F("CALL", call) + F("BAND", "20M") + F("MODE", "FT8") + F("QSO_DATE", date) + F("TIME_ON", time.Length == 4 ? time + "00" : time) +
+            (lotw == null ? "" : F("QSL_RCVD", lotw)) + (qrz == null ? "" : F("APP_QRZLOG_STATUS", qrz)) + " <eor>\n";
+        string QrzRec(string call, string date, string time, string lotw, string qrz) =>
+            F("CALL", call) + F("BAND", "20M") + F("MODE", "FT8") + F("QSO_DATE", date) + F("TIME_ON", time + "00") +
+            (lotw == null ? "" : F("LOTW_QSL_RCVD", lotw)) + (qrz == null ? "" : F("APP_QRZLOG_STATUS", qrz)) + " <eor>\n";
+        var E = new Func<(string T, bool L, bool Q)[], Dictionary<string, (bool Lotw, bool Qrz)>>(xs => xs.ToDictionary(x => x.T, x => (x.L, x.Q)));
+
+        // name, log (date, time) in log order, merge kind, report rows, expected held rows,
+        // expected per logged minute after the guarded merge, contacts the guarded merge adds.
+        var cases = new List<(string Name, (string Date, string Time)[] Log, string Kind, Func<string, string> Report, int Held,
+                              Dictionary<string, (bool Lotw, bool Qrz)> Expect, int Added)>
+        {
+            ("1 LoTW confirms a LATER contact, the earlier is unconfirmed",
+                new[] { ("20260901", "0010"), ("20260901", "0020") }, "lotw",
+                c => Lotw + Rec(c, "20260901", "0020", "Y", null), 1,
+                E(new[] { ("0010", false, false), ("0020", false, false) }), 0),
+            ("2 LoTW confirms the EARLIER contact of two",
+                new[] { ("20260901", "0010"), ("20260901", "0020") }, "lotw",
+                c => Lotw + Rec(c, "20260901", "0010", "Y", null), 0,
+                E(new[] { ("0010", true, false), ("0020", false, false) }), 0),
+            ("3 log order differs from time order, QRZ lists both in time order",
+                new[] { ("20260901", "0020"), ("20260901", "0010") }, "qrz",
+                c => QrzRec(c, "20260901", "0010", "N", "C") + QrzRec(c, "20260901", "0020", "Y", "C"), 0,
+                E(new[] { ("0010", false, true), ("0020", true, true) }), 0),
+            ("4 a row missing for the earliest of three contacts",
+                new[] { ("20260901", "0010"), ("20260901", "0020"), ("20260901", "0030") }, "qrz",
+                c => QrzRec(c, "20260901", "0020", "N", "C") + QrzRec(c, "20260901", "0030", "Y", "C"), 2,
+                E(new[] { ("0010", false, false), ("0020", false, false), ("0030", false, false) }), 0),
+            ("5 three same-day contacts, rows shuffled, all present",
+                new[] { ("20260901", "0010"), ("20260901", "0020"), ("20260901", "0030") }, "qrz",
+                c => QrzRec(c, "20260901", "0030", "Y", null) + QrzRec(c, "20260901", "0010", "N", null) + QrzRec(c, "20260901", "0020", null, "C"), 0,
+                E(new[] { ("0010", false, false), ("0020", false, true), ("0030", true, false) }), 0),
+            ("6 later contact confirmed, earlier not, both rows present",
+                new[] { ("20260901", "0010"), ("20260901", "0020") }, "qrz",
+                c => QrzRec(c, "20260901", "0010", "N", null) + QrzRec(c, "20260901", "0020", "Y", "C"), 0,
+                E(new[] { ("0010", false, false), ("0020", true, true) }), 0),
+            ("7 QRZ has a contact the log lacks, the day after a logged one",
+                new[] { ("20260901", "0010") }, "qrz",
+                c => QrzRec(c, "20260902", "0100", null, "C"), 1,
+                E(new[] { ("0010", false, false) }), 0),
+            ("8 QRZ has a contact the log lacks, nothing near it",
+                new (string, string)[0], "qrz",
+                c => QrzRec(c, "20260901", "0100", null, "C"), 0,
+                E(new (string, bool, bool)[0]), 1),
+            ("9 report time one minute off the only logged contact",
+                new[] { ("20260901", "0010") }, "qrz",
+                c => QrzRec(c, "20260901", "0011", null, "C"), 1,
+                E(new[] { ("0010", false, false) }), 0),
+            ("10 two contacts at the same minute",
+                new[] { ("20260901", "001000"), ("20260901", "001030") }, "lotw",
+                c => Lotw + Rec(c, "20260901", "0010", "Y", null), 1,
+                E(new[] { ("0010", false, false) }), 0),
+        };
+
+        Directory.CreateDirectory(work);
+        string token = Guid.NewGuid().ToString("N");
+        const int port = 58297;
+        using (LogbookOnlyEngine.Start(engineExe, Path.Combine(work, "NexusLog"), Path.Combine(work, "appdata"), port, token))
+        {
+            var client = new NexusLogClient(port);
+            int n = 0;
+            foreach (var cs in cases)
+            {
+                n++;
+                string rawCall = $"K{n}RAW", guardCall = $"K{n}GRD";
+                // Both copies logged in the case's order, through Nexus's own import (file order = log order).
+                string logFile = Path.Combine(work, $"log-{n}.adi");
+                var sbLog = new StringBuilder("test\n<eoh>\n");
+                foreach (var call in new[] { rawCall, guardCall })
+                    foreach (var (d, t) in cs.Log) sbLog.Append(Rec(call, d, t, null, null));
+                File.WriteAllText(logFile, sbLog.ToString());
+                if (cs.Log.Length > 0) client.Import(logFile);
+                var rows = client.Rows().Rows;
+                var inOrder = rows.Where(r => r.Call == guardCall).Select(r => DateTimeOffset.FromUnixTimeSeconds((long)r.WhenUnix).UtcDateTime.ToString("HHmm")).ToList();
+                if (cs.Log.Length > 1 && cs.Log.Select(x => x.Time.Substring(0, 4)).Distinct().Count() == cs.Log.Length)
+                    Check($"case {n}: LOG_ROWS keeps the order the contacts were added", inOrder.SequenceEqual(cs.Log.Select(x => x.Time)), true);
+
+                // As received: what Nexus does on its own.
+                string rawFile = Path.Combine(work, $"raw-{n}.adi");
+                File.WriteAllText(rawFile, cs.Report(rawCall));
+                client.Merge(cs.Kind, rawFile);
+                // Guarded.
+                var prep = NexusReportPairing.Prepare(cs.Report(guardCall), client.Rows().Rows);
+                string grdFile = Path.Combine(work, $"guarded-{n}.adi");
+                File.WriteAllText(grdFile, prep.Text);
+                if (prep.Sent > 0) client.Merge(cs.Kind, grdFile);
+
+                var after = client.Rows().Rows;
+                string Show(string call) => string.Join(", ", after.Where(r => r.Call == call).Select(r =>
+                    $"{DateTimeOffset.FromUnixTimeSeconds((long)r.WhenUnix).UtcDateTime:ddHHmm} L{(r.QslRcvd.Lotw ? "Y" : "-")} Q{(r.QslRcvd.Qrz ? "Y" : "-")}"));
+                Console.WriteLine($"  case {cs.Name}");
+                Console.WriteLine($"     Nexus alone : {Show(rawCall)}");
+                Console.WriteLine($"     guarded     : {Show(guardCall)}   (held {prep.Held}{(prep.Held > 0 ? ": " + string.Join(" / ", prep.HeldDetails) : "")})");
+                var g = after.Where(r => r.Call == guardCall).ToList();
+                bool ok = g.Count == cs.Log.Length + cs.Added; // every contact still there (none merged away)
+                foreach (var r in g)
+                {
+                    string t = DateTimeOffset.FromUnixTimeSeconds((long)r.WhenUnix).UtcDateTime.ToString("HHmm");
+                    if (cs.Expect.TryGetValue(t, out var e)) ok &= r.QslRcvd.Lotw == e.Lotw && r.QslRcvd.Qrz == e.Qrz;
+                }
+                Check($"case {n}: guarded pairing puts each confirmation on its own contact or changes nothing", ok, true);
+                Check($"case {n}: held rows as expected ({cs.Held})", prep.Held == cs.Held, true);
+            }
+            client.Shutdown(token);
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -456,6 +573,14 @@ static class JimmyTests
         //   --nexus-integration-tests <engine exe> <logbook copy> <rules folder> <empty work root> [port]
         // Logbook sync diagnosis on copies:
         //   --nexus-sync-diagnosis <engine exe> <start logbook.db> <empty work dir> <lotw yes> <lotw no> <nexus lotw yes> <qrz raw> [real read copy]
+        // Pairing of confirmation downloads with logged contacts, against a real engine on temp data:
+        //   --nexus-pairing-tests <engine exe> <empty work dir>
+        if (args.Length >= 3 && args[0] == "--nexus-pairing-tests")
+        {
+            NexusPairingTests(args[1], args[2]);
+            Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
         if (args.Length >= 8 && args[0] == "--nexus-sync-diagnosis")
         {
             string Read(string p) => File.Exists(p) ? File.ReadAllText(p) : "";

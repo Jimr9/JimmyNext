@@ -179,6 +179,28 @@ namespace WSJTX_Controller
 
         // Nexus's own import for the source: LoTW / QRZ / eQSL downloads merge (monotonic; QRZ also
         // adds what the log lacks, as Jimmy's QRZ download always did); everything else imports.
+        // A LoTW or QRZ download merged so that every confirmation lands on its own contact:
+        // NexusReportPairing hands Nexus only the rows its pairing is certain to put on the contact
+        // at the same minute; the rest are held (nothing changes for them), counted, and saved for
+        // review under NexusLog\diagnostics. Contacts still queued for Nexus are sent first, so the
+        // pairing sees the whole log; if any stay queued, nothing is merged.
+        public ImportResult MergeDownload(string adifText, string source)
+        {
+            if (NexusLogbook.Outbox.Count > 0) NexusLogbook.Outbox.Replay(Client);
+            if (NexusLogbook.Outbox.Count > 0)
+                return new ImportResult { Errors = "Nexus logbook: contacts are still waiting to be saved; nothing was merged. Try again shortly." };
+            var rows = Client.Rows();
+            if (rows.Error != null)
+                return new ImportResult { Errors = "Nexus logbook: could not read the log to pair the download: " + rows.Error };
+            var prep = NexusReportPairing.Prepare(adifText, rows.Rows);
+            var result = ImportFile(prep.Text, source);
+            result.Held = prep.Held;
+            result.HeldDetails.AddRange(prep.HeldDetails);
+            NexusSyncDiagnostics.WriteList("held-" + source.ToLowerInvariant(),
+                $"{source} rows held back -- not merged, nothing changed -- because Nexus could not be sure to pair them with the right contact", prep.HeldDetails);
+            return result;
+        }
+
         public ImportResult ImportFile(string adifText, string source)
         {
             string kind = source == "LOTW" ? "lotw" : source == "QRZ" ? "qrz" : source == "EQSL" ? "eqsl" : null;

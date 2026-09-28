@@ -2150,6 +2150,13 @@ namespace WSJTX_Controller
                     return;
                 }
 
+                // While Nexus keeps the log, only the confirmations download is merged -- see
+                // LogbookAutoSync.SyncLotwAsync.
+                if (NexusLogbook.Active)
+                {
+                    await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true);
+                    return;
+                }
                 SetStatus("Fetching LoTW unconfirmed QSOs…");
                 string adif2 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: false).ConfigureAwait(true);
                 // Independent audit finding 2, 2026-08-23 (CONFIRMED bug, HIGH PRIORITY): this

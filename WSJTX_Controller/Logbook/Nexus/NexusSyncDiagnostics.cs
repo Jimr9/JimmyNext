@@ -40,13 +40,16 @@ namespace WSJTX_Controller
             Directory.Exists(Folder) ? Directory.GetFiles(Folder, kind + "-2*.txt").OrderByDescending(f => f).FirstOrDefault() : null;
 
         // One line per unmatched confirmation, as Nexus reported it. Returns the file written, or null.
-        public static string WriteUnmatched(string source, IReadOnlyList<string> lines)
+        public static string WriteUnmatched(string source, IReadOnlyList<string> lines) =>
+            WriteList("unmatched-" + source.ToLowerInvariant(), $"{source} confirmations that matched no logged contact", lines);
+
+        public static string WriteList(string kind, string title, IReadOnlyList<string> lines)
         {
             if (lines == null || lines.Count == 0) return null;
             var sb = new StringBuilder();
-            sb.AppendLine($"{source} confirmations that matched no logged contact ({lines.Count}), {DateTime.UtcNow:u}");
+            sb.AppendLine($"{title} ({lines.Count}), {DateTime.UtcNow:u}");
             foreach (var l in lines) sb.AppendLine(l);
-            return Retain("unmatched-" + source.ToLowerInvariant(), sb.ToString(), force: true);
+            return Retain(kind, sb.ToString(), force: true);
         }
     }
 }
