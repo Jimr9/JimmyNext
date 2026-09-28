@@ -356,6 +356,25 @@ static class JimmyTests
                 Check($"case {n}: guarded pairing puts each confirmation on its own contact or changes nothing", ok, true);
                 Check($"case {n}: held rows as expected ({cs.Held})", prep.Held == cs.Held, true);
             }
+
+            // The sync result's "newly confirmed" counts every contact that gained a confirmation:
+            // one already LoTW-confirmed gaining QRZ, and one gaining QRZ from nothing = 2.
+            NexusLogbook.TestPortOverride = port;
+            NexusLogbook.TestFolderOverride = Path.Combine(work, "NexusLog");
+            try
+            {
+                string seed = Path.Combine(work, "count-log.adi");
+                File.WriteAllText(seed, "test\n<eoh>\n" + Rec("KCOUNT1", "20260901", "0010", null, null) + Rec("KCOUNT2", "20260901", "0010", null, null));
+                client.Import(seed);
+                string lotwFile = Path.Combine(work, "count-lotw.adi");
+                File.WriteAllText(lotwFile, Lotw + Rec("KCOUNT1", "20260901", "0010", "Y", null));
+                client.Merge("lotw", lotwFile);
+                var res = new NexusLogbookService().MergeDownload(
+                    QrzRec("KCOUNT1", "20260901", "0010", null, "C") + QrzRec("KCOUNT2", "20260901", "0010", null, "C"), "QRZ");
+                Console.WriteLine($"  QRZ merge result: {res}");
+                Check("sync result counts both contacts that gained a QRZ confirmation (2)", res.NewlyConfirmed == 2 && res.Skipped == 0, true);
+            }
+            finally { NexusLogbook.TestPortOverride = null; NexusLogbook.TestFolderOverride = null; NexusLogbook.Reset(); }
             client.Shutdown(token);
         }
     }

@@ -194,6 +194,18 @@ namespace WSJTX_Controller
                 return new ImportResult { Errors = "Nexus logbook: could not read the log to pair the download: " + rows.Error };
             var prep = NexusReportPairing.Prepare(adifText, rows.Rows);
             var result = ImportFile(prep.Text, source);
+            // "Newly confirmed" = contacts that gained a confirmation (LoTW, QRZ, eQSL or card) in
+            // this merge, read from the log itself: Nexus's own count covers LoTW and card only, and
+            // its "any source" count misses a contact already confirmed another way.
+            var afterRows = string.IsNullOrEmpty(result.Errors) ? Client.Rows() : null;
+            if (afterRows?.Error == null && afterRows != null)
+            {
+                var was = rows.Rows.Where(q => q.Id != null).ToDictionary(q => q.Id, q => q.QslRcvd);
+                int gained = afterRows.Rows.Count(q => q.Id != null && was.TryGetValue(q.Id, out var b) &&
+                    ((q.QslRcvd.Lotw && !b.Lotw) || (q.QslRcvd.Qrz && !b.Qrz) || (q.QslRcvd.Eqsl && !b.Eqsl) || (q.QslRcvd.Card && !b.Card)));
+                result.Skipped = Math.Max(0, result.Skipped + result.NewlyConfirmed - gained);
+                result.NewlyConfirmed = gained;
+            }
             result.Held = prep.Held;
             result.HeldDetails.AddRange(prep.HeldDetails);
             NexusSyncDiagnostics.WriteList("held-" + source.ToLowerInvariant(),
