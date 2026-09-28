@@ -165,6 +165,8 @@ namespace WSJTX_Controller
             // HaltTxAndWaitForShutdown's own blocking shutdown-only HALT_TX -- see that method's
             // own comment for why marshaling would deadlock there.
             public bool MarshalToUiThread = true;
+            // Band-change timing diagnostics: Stopwatch timestamp when queued.
+            public long QueuedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
         }
         private readonly object _directQueueLock = new object();
         private readonly Queue<DirectCommandRequest> _directPriorityQueue = new Queue<DirectCommandRequest>();
@@ -363,7 +365,14 @@ namespace WSJTX_Controller
                     else if (_directNormalQueue.Count > 0) req = _directNormalQueue.Dequeue();
                 }
                 if (req == null) continue; // defensive only -- the semaphore count always matches enqueued items exactly
+                long sentTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 string response = DirectSendCommandSafe(req.Command, trackForAbort: true);
+                if (req.Command.StartsWith("SET_FREQUENCY ", StringComparison.Ordinal))
+                {
+                    long repliedTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                    double msPerTick = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    DebugOutput($"{Time()} [BAND-TIMING] jimmy: SET_FREQUENCY queued {(sentTicks - req.QueuedTicks) * msPerTick:0} ms, engine reply {(repliedTicks - sentTicks) * msPerTick:0} ms ({(response ?? "no response").Trim()})");
+                }
                 DeliverDirectCompletion(req, response);
             }
         }

@@ -4345,6 +4345,8 @@ namespace WSJTX_Controller
             // mutated by OptionsDlg's own SaveFrequenciesTab (also UI-thread, but not
             // necessarily this exact call).
             var workingFrequenciesSnapshot = WsjtxClient.BuildWorkingFrequencyEntries(Frequencies);
+            // Band-change timing diagnostics: only while the debug log is on, beside it.
+            string catTimingLogSnapshot = wsjtx != null && wsjtx.diagLog ? Path.Combine(wsjtx.path, "engine-cat-timing.log") : null;
 
             // Launch() (specifically Process.Start()) runs on a background thread -- Process.Start()
             // for a new, unsigned exe is well known to be able to block synchronously on real-time
@@ -4365,7 +4367,8 @@ namespace WSJTX_Controller
                     msg => wsjtx?.DebugOutput(msg),
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, wsjtx != null && wsjtx.usePskReporter,
-                    dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot);
+                    dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
+                    catTimingLogSnapshot);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-

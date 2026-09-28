@@ -495,6 +495,12 @@ struct Args {
     /// loop (no audio device, no CAT, no PTT). For the migration/comparison tools and for Jimmy
     /// with no radio configured (plan section 6.1). Only meaningful with --log-dir.
     no_radio: bool,
+    /// `--cat-timing-log <path>`: band-change timing diagnostics. Starts Nexus's own CAT
+    /// diagnostic log (`tempo_audio::civ::diag`, the same file the Nexus desktop's diagnostic
+    /// toggle writes) at this path, and SET_FREQUENCY adds a note to it on arrival -- so the gap
+    /// between that note and Nexus's own "dial→rig" note is the radio loop's time to reach the
+    /// rig. Jimmy passes it only while its debug log is on. `None` = off.
+    cat_timing_log: Option<std::path::PathBuf>,
 }
 
 /// Set by SHUTDOWN before it stops the radio loop. `run_radio` returns once it has unkeyed, and
@@ -555,6 +561,7 @@ fn parse_args() -> Args {
     let mut session_token = String::new();
     let mut log_dir: Option<std::path::PathBuf> = None;
     let mut no_radio = false;
+    let mut cat_timing_log: Option<std::path::PathBuf> = None;
     let mut tx_watchdog_min: u32 = 6; // Nexus's own Settings::default() -- see Args::tx_watchdog_min's own comment
     let mut working_frequencies: Vec<tempo_app::settings::WorkingFreq> = Vec::new(); // empty = Nexus's own stock table
 
@@ -636,6 +643,9 @@ fn parse_args() -> Args {
             }
             "--session-token" => session_token = it.next().unwrap_or(session_token),
             "--no-radio" => no_radio = true,
+            "--cat-timing-log" => {
+                cat_timing_log = it.next().filter(|v| !v.trim().is_empty()).map(std::path::PathBuf::from);
+            }
             "--log-dir" => {
                 log_dir = it.next().filter(|v| !v.trim().is_empty()).map(std::path::PathBuf::from);
             }
@@ -690,6 +700,7 @@ fn parse_args() -> Args {
         working_frequencies,
         log_dir,
         no_radio,
+        cat_timing_log,
     }
 }
 
@@ -1356,8 +1367,28 @@ fn handle_control_connection(
             match serde_json::from_str::<SetFrequencyArgs>(json) {
                 Ok(a) => match validate_set_frequency(&a) {
                     Ok(()) => {
-                        engine.lock().unwrap_or_else(|e| e.into_inner()).set_frequency(a.hz / 1_000_000.0, &a.band, &a.mode);
+                        // Band-change timing diagnostics: how long this command waited for the
+                        // engine lock and how long Engine::set_frequency took. The radio loop does
+                        // the actual rig retune afterwards; with --cat-timing-log the note below and
+                        // Nexus's own "dial→rig" note time that part.
+                        let received = std::time::Instant::now();
+                        tempo_audio::civ::diag::note(&format!(
+                            "Jimmy SET_FREQUENCY {:.4} MHz {} {} received",
+                            a.hz / 1_000_000.0, a.band, a.mode
+                        ));
+                        let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                        let locked = std::time::Instant::now();
+                        eng.set_frequency(a.hz / 1_000_000.0, &a.band, &a.mode);
+                        drop(eng);
+                        let done = std::time::Instant::now();
                         let _ = writeln!(stream, "OK");
+                        eprintln!(
+                            "{} [BAND-TIMING] engine: SET_FREQUENCY {} lock wait {} ms, set_frequency {} ms",
+                            utc_hms(),
+                            a.band,
+                            (locked - received).as_millis(),
+                            (done - locked).as_millis()
+                        );
                     }
                     Err(e) => {
                         let _ = writeln!(stream, "ERR bad SET_FREQUENCY args: {e}");
@@ -1847,6 +1878,17 @@ struct ApplyRadioArgs {
 /// rebuild from launch arguments: `Engine::apply_settings` replaces the whole Settings, and
 /// everything changed live since launch (dial and band, decode depth, PSK Reporter, special
 /// operation, working frequencies) must survive a radio-settings save.
+/// UTC time of day as HHMMSS.fff -- the same format as Jimmy's own debug-log Time(), so the
+/// engine's [BAND-TIMING] lines (which Jimmy copies into its debug log) line up with Jimmy's.
+fn utc_hms() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+        % 86_400_000;
+    format!("{:02}{:02}{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
+}
+
 fn with_radio_settings(current: &Settings, a: &ApplyRadioArgs) -> Settings {
     let mut s = current.clone();
     s.audio_in = a.audio_in.clone();
@@ -2077,6 +2119,12 @@ fn main() {
         }
     };
     let engine = Arc::new(Mutex::new(engine_value));
+    if let Some(path) = args.cat_timing_log.as_deref() {
+        match tempo_audio::civ::diag::start(path) {
+            Ok(()) => eprintln!("{} [BAND-TIMING] CAT timing log: {}", utc_hms(), path.display()),
+            Err(e) => eprintln!("{} [BAND-TIMING] could not start the CAT timing log {}: {e}", utc_hms(), path.display()),
+        }
+    }
     // TEST ONLY (logbook migration Phase 3): a crash point for the recovery tests, honoured only
     // in a logbook-only start (--no-radio) and armed BEFORE the control server can take a
     // command -- see logbook_host.rs's "Phase 3 crash testing".
