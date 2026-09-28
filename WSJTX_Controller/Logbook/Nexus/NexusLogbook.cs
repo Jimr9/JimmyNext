@@ -82,6 +82,26 @@ namespace WSJTX_Controller
             }
         }
 
+        // What readers open while Nexus owns the log: the newest projection, or -- before the first
+        // one exists (a first start before the engine answers) -- an EMPTY one. Never Jimmy's own
+        // logbook.db: that file is frozen at the move and must not be read as if it were current.
+        // Everything in the projection folder is a disposable read cache, rebuilt from Nexus.
+        public static string ReadCachePath
+        {
+            get
+            {
+                string p = ProjectionPath;
+                if (p != null) return p;
+                lock (_lock)
+                {
+                    Directory.CreateDirectory(ProjectionFolder);
+                    string empty = Path.Combine(ProjectionFolder, "p-00000000000000000-empty.db");
+                    if (!File.Exists(empty)) NexusMigration.Rebuild(new List<NexusQso>(), empty);
+                    return empty;
+                }
+            }
+        }
+
         // Rebuilds the projection when Nexus's revision moved (or always, with force). Returns
         // false when Nexus could not be read -- readers keep the last projection.
         public static bool Refresh(bool force = false)
@@ -152,8 +172,7 @@ namespace WSJTX_Controller
         {
             lock (_lock)
             {
-                string path = ProjectionPath;
-                if (path == null) return whenUnavailable;
+                string path = ReadCachePath;
                 if (_reader == null || _readerPath != path)
                 {
                     _reader?.Dispose();

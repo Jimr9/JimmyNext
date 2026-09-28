@@ -84,6 +84,15 @@ namespace WSJTX_Controller
                     }
                     Check($"every shipped award reads the same ({awardsChecked} checked)", awardsChecked > 0 && awardsDiffer == 0, $"{awardsDiffer} differ");
 
+                    // ── The rebuilt Jimmy copy is only a disposable read cache ───────────────
+                    int totalBefore = svc.TotalQsos();
+                    NexusLogbook.Reset();
+                    NexusLogbook.TestFolderOverride = folder;
+                    foreach (var f in Directory.GetFiles(NexusLogbook.ProjectionFolder)) File.Delete(f);
+                    Check("with the read cache deleted, reads are empty (never an old Jimmy file)", svc.TotalQsos() == 0);
+                    NexusLogbook.Refresh(force: true);
+                    Check("the read cache rebuilds from Nexus, identical", svc.TotalQsos() == totalBefore);
+
                     // ── Live logging (Jimmy's own RequestLog path) ───────────────────────────
                     int before = svc.TotalQsos();
                     string live = "<CALL:6>ZZ9ZZZ <BAND:3>20m <FREQ:9>14.075500 <MODE:3>FT8 <QSO_DATE:8>20260928 <TIME_ON:6>120000 " +

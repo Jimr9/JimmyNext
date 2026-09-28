@@ -11,6 +11,13 @@ namespace WSJTX_Controller
     //   migrate -> a session on Nexus (a live contact, an edit) -> roll back -> check.
     public static class NexusMigrationCommandTests
     {
+        private static string Hash(string file)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            using (var f = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                return BitConverter.ToString(sha.ComputeHash(f));
+        }
+
         public static (bool passed, string report) Run(string engineExe, string jimmyDbCopy, string workRoot, int port)
         {
             var sb = new StringBuilder();
@@ -34,6 +41,20 @@ namespace WSJTX_Controller
             NexusLogbookMigration.TestEngineExeOverride = engineExe;
             try
             {
+                // A leftover queue from an earlier Nexus session still holding a contact: the move
+                // must refuse, change nothing, and not even make a backup.
+                Directory.CreateDirectory(folder);
+                var leftover = new NexusLogOutbox(Path.Combine(folder, "outbox.json"));
+                leftover.Add("left-behind", new NexusQso { Call = "ZZ5ZZZ", Band = "20m", Mode = "FT8", WhenUnix = 1_790_000_000, TimeKnown = true });
+                var (okPending, repPending) = NexusLogbookMigration.Migrate();
+                sb.AppendLine("  with a contact pending: " + repPending.Replace("\n", " | "));
+                Check("the move refuses while a contact is still pending, and changes nothing",
+                    !okPending && !File.Exists(NexusLogbook.ActiveMarker) &&
+                    Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.before-nexus-*.db").Length == 0 &&
+                    new NexusLogOutbox(Path.Combine(folder, "outbox.json")).Count == 1);
+                Directory.Delete(folder, true);
+
+                string hashBefore = Hash(jimmyDb);
                 var (ok1, rep1) = NexusLogbookMigration.Migrate();
                 sb.AppendLine("  migrate: " + rep1.Replace("\n", " | "));
                 Check("migrate succeeded and switched", ok1 && File.Exists(NexusLogbook.ActiveMarker));
@@ -61,6 +82,9 @@ namespace WSJTX_Controller
                 }
                 NexusLogbook.Reset();
                 NexusLogbook.TestPortOverride = null;
+                Check("Jimmy's own logbook file is untouched while Nexus keeps the log", Hash(jimmyDb) == hashBefore);
+                var backupFile = Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.before-nexus-*.db").Single();
+                Check("the backup holds the logbook as it was at the move", NexusMigration.ReadJimmyRows(backupFile).Count == original.Count);
 
                 var (ok2, rep2) = NexusLogbookMigration.Rollback();
                 sb.AppendLine("  rollback: " + rep2.Replace("\n", " | "));

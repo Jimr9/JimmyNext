@@ -84,7 +84,7 @@ namespace WSJTX_Controller
         // in normal operation, so behavior is unchanged.
         public static string DbPath =>
             Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH") ??
-            (NexusLogbook.Active ? (NexusLogbook.ProjectionPath ?? JimmyDbPath) : JimmyDbPath);
+            (NexusLogbook.Active ? NexusLogbook.ReadCachePath : JimmyDbPath);
 
         // Jimmy's own logbook file. DbPath is "the database readers read": this file, or -- while
         // Nexus owns the logbook -- Nexus's read-only projection (NexusLogbook).

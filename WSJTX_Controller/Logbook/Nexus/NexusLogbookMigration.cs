@@ -53,6 +53,31 @@ namespace WSJTX_Controller
             }
         }
 
+        // null when the backup is whole and holds exactly the logbook's contacts.
+        private static string CheckBackup(string source, string backup)
+        {
+            long Count(string db)
+            {
+                using (var c = new SQLiteConnection($"Data Source={db};Read Only=True;"))
+                {
+                    c.Open();
+                    using (var cmd = c.CreateCommand()) { cmd.CommandText = "SELECT COUNT(*) FROM qso;"; return (long)cmd.ExecuteScalar(); }
+                }
+            }
+            using (var c = new SQLiteConnection($"Data Source={backup};Read Only=True;"))
+            {
+                c.Open();
+                using (var cmd = c.CreateCommand())
+                {
+                    cmd.CommandText = "PRAGMA integrity_check;";
+                    string r = Convert.ToString(cmd.ExecuteScalar());
+                    if (r != "ok") return $"the backup failed its integrity check ({r}).";
+                }
+            }
+            long a = Count(source), b = Count(backup);
+            return a == b ? null : $"the backup holds {b} contacts but the logbook holds {a}.";
+        }
+
         public static (bool ok, string report) Migrate()
         {
             if (NexusLogbook.Active) return (false, "The logbook is already kept by Nexus.");
@@ -61,11 +86,28 @@ namespace WSJTX_Controller
             string jimmyDb = LogbookDb.JimmyDbPath;
             if (!File.Exists(jimmyDb)) return (false, "No Jimmy Next logbook was found at " + jimmyDb);
 
+            // Nothing may be pending: contacts queued (or duplicates held) by an earlier Nexus
+            // session that were never brought back would be left behind by a fresh move.
+            string folder = NexusLogbook.Folder;
+            string oldOutbox = Path.Combine(folder, "outbox.json");
+            if (File.Exists(oldOutbox))
+            {
+                var old = new NexusLogOutbox(oldOutbox);
+                if (old.Count > 0 || old.Refused.Count > 0)
+                    return (false, $"The move was NOT made: an earlier Nexus logbook folder still holds {old.Count} queued contact(s) " +
+                                   $"and {old.Refused.Count} held duplicate(s) that are not in your Jimmy logbook.\n\n{folder}\n\n" +
+                                   "Nothing was changed. Tell Claude before going further.");
+            }
+
+            // A CURRENT backup, taken now through SQLite itself (includes anything still in the
+            // write-ahead file), then checked: whole, and exactly the same contacts.
             string stamp = Stamp;
             string backup = Path.Combine(Path.GetDirectoryName(jimmyDb), $"logbook.before-nexus-{stamp}.db");
             BackupDatabase(jimmyDb, backup);
+            string backupProblem = CheckBackup(jimmyDb, backup);
+            if (backupProblem != null)
+                return (false, "The move was NOT made: " + backupProblem + " Nothing was changed.");
 
-            string folder = NexusLogbook.Folder;
             if (Directory.Exists(folder)) Directory.Move(folder, folder + ".old-" + stamp);
             Directory.CreateDirectory(folder);
             var sb = new StringBuilder();
