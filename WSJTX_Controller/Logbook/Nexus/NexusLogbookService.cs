@@ -320,6 +320,48 @@ namespace WSJTX_Controller
                 ? new List<LogbookDb.PendingUploadQso>() // D4: HRDLog is not carried under Nexus
                 : R(db => db.GetPendingUploads(service, limit), new List<LogbookDb.PendingUploadQso>());
 
+        // The Nexus id of the contact Jimmy knows by its dedup key: from the read copy, or -- for a
+        // live contact not in it yet -- the id its logging request deterministically carries.
+        private static string NexusIdForDedupKey(string dedupKey) =>
+            R(db =>
+            {
+                var id = db.GetIdByDedupKey(dedupKey);
+                return id.HasValue ? db.GetExtraFields(id.Value).FirstOrDefault(e => e.Tag == "APP_NEXUS_ID").Value : null;
+            }, null) ?? NexusLogbook.RecordIdForRequest(RequestIdFor("WSJTX", dedupKey));
+
+        // One contact to one service (QRZ, CLUBLOG, EQSL) through Nexus: EngineHost writes the
+        // record from Nexus's full data, sends it with Nexus's transport, and Nexus classifies and
+        // records the answer (accepted, duplicate, rejected, authfail -- a rejection is now kept,
+        // visible, not just "not uploaded"). Returns true when the service holds the contact;
+        // otherwise false with the reason. Jimmy still decides WHEN (real-time, catch-up, the
+        // Club Log breaker) exactly as before.
+        public bool UploadThroughNexus(string dedupKey, string service, LiveUploadCredentials creds, out string error)
+        {
+            error = null;
+            string svc = (service ?? "").ToUpperInvariant();
+            string nexusService = svc == "QRZ" ? "qrz" : svc == "CLUBLOG" ? "clublog" : svc == "EQSL" ? "eqsl" : null;
+            if (nexusService == null) throw new ArgumentException("Nexus does not upload to " + service + " here");
+            string nexusId = NexusIdForDedupKey(dedupKey);
+            if (string.IsNullOrEmpty(nexusId)) { error = "contact not found in the logbook"; return false; }
+            var reply = Client.Upload(new
+            {
+                id = nexusId,
+                service = nexusService,
+                qrzKey = nexusService == "qrz" ? creds?.QrzLogbookApiKey ?? "" : "",
+                clublogEmail = nexusService == "clublog" ? creds?.ClubLogUploadEmail ?? "" : "",
+                clublogPassword = nexusService == "clublog" ? creds?.ClubLogUploadPassword ?? "" : "",
+                clublogCallsign = nexusService == "clublog" ? creds?.ClubLogUploadCallsign ?? "" : "",
+                clublogAppKey = nexusService == "clublog" ? ClubLogAppKey.Resolve() ?? "" : "",
+                eqslUsername = nexusService == "eqsl" ? creds?.EqslUsername ?? "" : "",
+                eqslPassword = nexusService == "eqsl" ? creds?.EqslPassword ?? "" : "",
+            });
+            if (reply.State == "stamped" || reply.State == "sent-not-stamped") NexusLogbook.Refresh();
+            bool held = reply.Outcome == "accepted" || reply.Outcome == "duplicate" || reply.Outcome == "pending";
+            if (held && reply.State != "unsent" && reply.State != "unknown") return true;
+            error = reply.Why ?? (reply.Outcome != null ? $"{reply.Outcome}{(reply.Message != null ? ": " + reply.Message : "")}" : reply.State);
+            return false;
+        }
+
         public void MarkUploaded(string dedupKey, string service, DateTime whenUtc)
         {
             string svc = (service ?? "").ToUpperInvariant();
@@ -328,11 +370,7 @@ namespace WSJTX_Controller
             if (nexusService == null) throw new ArgumentException("Unknown upload service: " + service);
             // TQSL gives no per-contact answer: LoTW is "pending" until a LoTW download echoes it.
             string outcome = nexusService == "lotw" ? "pending" : "accepted";
-            string nexusId = R(db =>
-            {
-                var id = db.GetIdByDedupKey(dedupKey);
-                return id.HasValue ? db.GetExtraFields(id.Value).FirstOrDefault(e => e.Tag == "APP_NEXUS_ID").Value : null;
-            }, null) ?? NexusLogbook.RecordIdForRequest(RequestIdFor("WSJTX", dedupKey));
+            string nexusId = NexusIdForDedupKey(dedupKey);
             var reply = Client.StampUpload(nexusId, nexusService, outcome, new DateTimeOffset(whenUtc.ToUniversalTime()).ToUnixTimeSeconds());
             if (reply.State == "saved") NexusLogbook.Refresh();
         }

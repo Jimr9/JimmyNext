@@ -1599,6 +1599,24 @@ fn handle_control_connection(
                 Ok(r) => { let _ = writeln!(stream, "{}", serde_json::to_string(&r).unwrap_or_default()); }
                 Err(e) => { let _ = writeln!(stream, "ERR {name}: {e}"); }
             }
+        } else if let Some(json) = line.strip_prefix("LOG_UPLOAD ") {
+            // Real network I/O (a service can take up to a minute): its own thread, like
+            // EQSL_UPLOAD, so the accept loop and Jimmy's SNAPSHOT poll never wait on it.
+            match (&log_host, serde_json::from_str::<logbook_host::LogUploadArgs>(json)) {
+                (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOG_UPLOAD args"); let _ = e; }
+                (Some(host), Ok(a)) => {
+                    let host = host.clone();
+                    let engine = engine.clone();
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let reply = logbook_host::log_upload(&host, &engine, a);
+                        let _ = writeln!(stream, "{reply}");
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                    return;
+                }
+            }
         } else if let Some(json) = line.strip_prefix("LOG_EXPORT ") {
             match (&log_host, serde_json::from_str::<logbook_host::LogFileArgs>(json)) {
                 (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
@@ -2087,6 +2105,12 @@ fn main() {
     // in a logbook-only start (--no-radio) and armed BEFORE the control server can take a
     // command -- see logbook_host.rs's "Phase 3 crash testing".
     if args.no_radio {
+        // TEST ONLY, same gate: LOG_UPLOAD's service addresses pointed at a local fake server.
+        if let Ok(base) = std::env::var("JIMMY_TEST_UPLOAD_BASE") {
+            if !base.trim().is_empty() {
+                logbook_host::set_upload_test_base(base.trim());
+            }
+        }
         if let Ok(spec) = std::env::var("JIMMY_TEST_CRASH_AT") {
             if !spec.trim().is_empty() {
                 logbook_host::arm_test_crash(&spec);

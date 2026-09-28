@@ -241,6 +241,24 @@ namespace WSJTX_Controller
 
                         if (!needQrz && !needClubLog && !needHrdLog && !needEqsl) return;
 
+                        // Nexus keeps the log: each upload is Nexus's own transaction (its record,
+                        // transport, answer and per-QSO stamp) -- the same services, the same
+                        // conditions and the same Club Log breaker as below.
+                        if (nexus && db is NexusLogbookService nx)
+                        {
+                            if (needQrz && !nx.UploadThroughNexus(dedupKey, "QRZ", creds, out var qrzErr))
+                                _debugLog($"QRZ real-time upload failed for {dxCall}: {qrzErr}");
+                            if (needClubLog && !nx.UploadThroughNexus(dedupKey, "CLUBLOG", creds, out var clErr))
+                            {
+                                _debugLog($"Club Log real-time upload failed for {dxCall}: {clErr}");
+                                _clubLogRealtimeBroken = true;
+                                _showStatus($"Club Log real-time upload error, automatic upload paused: {clErr}", true);
+                            }
+                            if (needEqsl && !nx.UploadThroughNexus(dedupKey, "EQSL", creds, out var eqErr))
+                                _debugLog($"eQSL real-time upload failed for {dxCall}: {eqErr}");
+                            return;
+                        }
+
                         if (needQrz)
                         {
                             var qrzClient = new QrzLogbookClient();

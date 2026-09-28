@@ -111,6 +111,15 @@ namespace WSJTX_Controller
         public ulong? ExistingWhenUnix { get; set; }
     }
 
+    public class NexusUploadReply
+    {
+        public string State { get; set; }    // stamped | sent-not-stamped | unsent | unknown
+        public string Outcome { get; set; }  // accepted | duplicate | pending | rejected | authfail
+        public string Detail { get; set; }
+        public string Message { get; set; }  // the service's own words, when it gave any
+        public string Why { get; set; }      // why nothing was sent or recorded
+    }
+
     public class NexusExportReply
     {
         public string State { get; set; }   // saved | error | unknown
@@ -139,6 +148,7 @@ namespace WSJTX_Controller
         // A durable write waits up to Nexus's DURABLE_WAIT (60 s) for the disk; allow for that.
         private const int WriteTimeoutMs = 75_000;
         private const int ReadTimeoutMs = 30_000;
+        private const int UploadTimeoutMs = 100_000; // eQSL alone can take a minute to answer
 
         private readonly int _port;
         public NexusLogClient(int port) { _port = port; }
@@ -176,6 +186,16 @@ namespace WSJTX_Controller
         // kind: "lotw" | "qrz" | "eqsl". A LoTW file must be LoTW's download exactly as received
         // (its "ARRL Logbook of the World Status Report" header is how Nexus knows QSL_RCVD there
         // means LoTW, not a paper card).
+        // One contact (Nexus id) to one service (qrz | clublog | eqsl), sent, classified and recorded
+        // by Nexus (LOG_UPLOAD). The service's credentials ride with this one request only.
+        public NexusUploadReply Upload(object args)
+        {
+            string resp = Send("LOG_UPLOAD " + JsonSerializer.Serialize(args, Json), UploadTimeoutMs);
+            if (resp == null || !resp.StartsWith("{")) return new NexusUploadReply { State = "unknown", Why = resp ?? "no reply" };
+            try { return JsonSerializer.Deserialize<NexusUploadReply>(resp, Json); }
+            catch (JsonException e) { return new NexusUploadReply { State = "unknown", Why = e.Message }; }
+        }
+
         // Nexus's own ADIF export of the whole log, written by EngineHost to adifPath.
         public NexusExportReply Export(string adifPath)
         {

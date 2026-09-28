@@ -586,6 +586,165 @@ pub fn log_stamp(host: &LogHost, engine: &Mutex<Engine>, args: LogStampArgs) -> 
     after_durable(durability, serde_json::json!({ "id": args.id }))
 }
 
+/// TEST ONLY: a local fake server LOG_UPLOAD posts to instead of the services, set only in a
+/// logbook-only start (--no-radio) with JIMMY_TEST_UPLOAD_BASE (an http://127.0.0.1:PORT). Nexus's
+/// transports accept HTTPS only (by design), so the fake is reached by `test_post` below; every
+/// other step -- record, request body, answer classification, stamp -- is the production one. A
+/// real Jimmy never sets it and always uses Nexus's own transports and service addresses.
+static UPLOAD_TEST_BASE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn set_upload_test_base(base: &str) {
+    let _ = UPLOAD_TEST_BASE.set(base.trim_end_matches('/').to_string());
+}
+
+/// TEST ONLY: one HTTP/1.1 POST to the fake server ("http://127.0.0.1:PORT" + path). Returns
+/// (status, body); a closed connection with no answer is an Err, like a transport failure.
+fn test_post(base: &str, path: &str, body: String) -> Result<(u16, String), String> {
+    use std::io::{Read, Write};
+    let host = base.trim_start_matches("http://");
+    let mut s = std::net::TcpStream::connect(host).map_err(|e| format!("test: connect failed: {e}"))?;
+    s.set_read_timeout(Some(Duration::from_secs(20))).ok();
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    s.write_all(req.as_bytes()).map_err(|e| format!("test: send failed: {e}"))?;
+    let mut raw = Vec::new();
+    s.read_to_end(&mut raw).map_err(|e| format!("test: request failed: {e}"))?;
+    let text = String::from_utf8_lossy(&raw).to_string();
+    let status = text.split(' ').nth(1).and_then(|c| c.parse::<u16>().ok()).ok_or("test: request failed")?;
+    let body = text.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or_default();
+    Ok((status, body))
+}
+
+fn send_qrz(body: String) -> Result<String, String> {
+    match UPLOAD_TEST_BASE.get() {
+        Some(base) => test_post(base, "/qrz", body).map(|(_, b)| b),
+        None => propagation::live::qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, body),
+    }
+}
+
+fn send_clublog(body: String) -> Result<(u16, String), String> {
+    match UPLOAD_TEST_BASE.get() {
+        Some(base) => test_post(base, "/clublog", body),
+        None => propagation::live::clublog::push_realtime(tempo_core::clublog::CLUBLOG_REALTIME_URL, body),
+    }
+}
+
+fn send_eqsl(body: String) -> Result<String, String> {
+    match UPLOAD_TEST_BASE.get() {
+        Some(base) => test_post(base, "/eqsl", body).map(|(_, b)| b),
+        None => propagation::live::eqsl::post_form(tempo_core::eqsl::EQSL_IMPORT_URL, body),
+    }
+}
+
+/// LOG_UPLOAD's argument: one contact (Nexus id), one service, and that service's credentials,
+/// which arrive with the request and live only as long as it (never stored or logged here).
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogUploadArgs {
+    pub id: String,
+    /// "qrz" | "clublog" | "eqsl"
+    pub service: String,
+    #[serde(default)]
+    pub qrz_key: String,
+    #[serde(default)]
+    pub clublog_email: String,
+    #[serde(default)]
+    pub clublog_password: String,
+    #[serde(default)]
+    pub clublog_callsign: String,
+    #[serde(default)]
+    pub clublog_app_key: String,
+    #[serde(default)]
+    pub eqsl_username: String,
+    #[serde(default)]
+    pub eqsl_password: String,
+}
+
+/// LOG_UPLOAD: one contact to one service, the way the Nexus desktop's connector push does it --
+/// the record as Nexus writes it for a service (`logbook::adif_record`), Nexus's request builder
+/// and transport, Nexus's classification of the answer, and Nexus's per-QSO stamp
+/// (`logwrite::stamp_push`) of accepted / duplicate / rejected / authfail. A transport failure or an
+/// answer Nexus does not classify (Club Log busy) stamps nothing, so the contact stays owed.
+/// Reply: {"state":"stamped","outcome":...,"detail":...,"message":...} or {"state":"unsent","why":...}.
+pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -> serde_json::Value {
+    use tempo_core::logbook::{UploadService, UploadStatus};
+    let id = match parse_id(&args.id) {
+        Ok(id) => id,
+        Err(_) => return serde_json::json!({ "state": "unsent", "why": format!("not a contact id: {}", args.id) }),
+    };
+    // The plan is taken under the Engine lock and read with it released (a store read).
+    let plan = lock(engine).log_plan();
+    let row = match plan.row(id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return serde_json::json!({ "state": "unsent", "why": "no such contact" }),
+        Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
+    };
+    let adif = tempo_core::logbook::adif_record(&row);
+    let (service, outcome, detail, message) = match args.service.as_str() {
+        "qrz" => {
+            if args.qrz_key.trim().is_empty() {
+                return serde_json::json!({ "state": "unsent", "why": "no QRZ Logbook API key" });
+            }
+            let body = tempo_core::qrz::build_insert_body(args.qrz_key.trim(), &adif, false);
+            let resp = match send_qrz(body) {
+                Ok(r) => r,
+                Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
+            };
+            let push = tempo_core::qrz::parse_push_response(&resp);
+            (UploadService::Qrz, Some(push.result.to_upload_outcome()), push.result.to_upload_detail(), push.reason)
+        }
+        "clublog" => {
+            let query = tempo_core::clublog::ClubLogQuery {
+                email: args.clublog_email.trim().to_string(),
+                password: args.clublog_password.clone(),
+                callsign: args.clublog_callsign.trim().to_string(),
+                api_key: args.clublog_app_key.trim().to_string(),
+                adif,
+            };
+            let body = tempo_core::clublog::build_realtime_body(&query);
+            let (status, resp) = match send_clublog(body) {
+                Ok(r) => r,
+                Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
+            };
+            let push = tempo_core::clublog::classify_response(status, &resp);
+            (UploadService::Clublog, push.result.to_upload_outcome(), push.result.to_upload_detail(), push.message)
+        }
+        "eqsl" => {
+            let body = tempo_core::eqsl::build_upload_body(&args.eqsl_username, &args.eqsl_password, &adif, None);
+            let html = match send_eqsl(body) {
+                Ok(h) => h,
+                Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
+            };
+            (UploadService::Eqsl, tempo_core::eqsl::classify_upload(&html), None, None)
+        }
+        other => return serde_json::json!({ "state": "unsent", "why": format!("Nexus does not upload to {other} here") }),
+    };
+    let Some(outcome) = outcome else {
+        return serde_json::json!({ "state": "unsent", "why": message.unwrap_or_else(|| "the service's answer was not recognised (busy?)".into()) });
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let gate = host.writes.lock().unwrap_or_else(|e| e.into_inner());
+    if gate.closed {
+        return serde_json::json!({ "state": "sent-not-stamped", "outcome": outcome.code(), "why": "logbook closing" });
+    }
+    let status = UploadStatus { outcome, when_unix: now, detail };
+    let (stamped, durability) = tempo_app::logwrite::stamp_push(engine, &row, service, status);
+    drop(gate);
+    let durable = durability.wait(DURABLE_WAIT).is_ok();
+    serde_json::json!({
+        "state": if stamped { "stamped" } else { "sent-not-stamped" },
+        "outcome": outcome.code(),
+        "detail": detail.map(|d| d.code()),
+        "message": message,
+        "durable": durable,
+    })
+}
+
 /// LOG_ROWS's argument.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]

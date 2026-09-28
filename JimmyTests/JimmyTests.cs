@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -774,6 +774,116 @@ static class JimmyTests
         }
     }
 
+    // Uploads through Nexus (LOG_UPLOAD) against FAKE services on 127.0.0.1 -- never a real one:
+    // what is sent, and what Nexus records for each kind of answer.
+    //   --nexus-upload-tests <engine exe> <empty work dir>
+    static void NexusUploadTests(string engineExe, string work)
+    {
+        Console.WriteLine("\n--- NexusUploadTests (fake QRZ / Club Log / eQSL) ---");
+        Directory.CreateDirectory(work);
+        const int port = 58302;
+        int fakePort;
+        { var l = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0); l.Start(); fakePort = ((IPEndPoint)l.LocalEndpoint).Port; l.Stop(); }
+        var answers = new System.Collections.Concurrent.ConcurrentQueue<(int Status, string Body, bool Drop)>();
+        var bodies = new System.Collections.Concurrent.ConcurrentQueue<(string Path, string Body)>();
+        var http = new HttpListener();
+        http.Prefixes.Add($"http://127.0.0.1:{fakePort}/");
+        http.Start();
+        var serve = new Thread(() =>
+        {
+            while (http.IsListening)
+            {
+                HttpListenerContext ctx;
+                try { ctx = http.GetContext(); } catch { return; }
+                using (var rd = new StreamReader(ctx.Request.InputStream)) bodies.Enqueue((ctx.Request.Url.AbsolutePath, rd.ReadToEnd()));
+                if (!answers.TryDequeue(out var a)) a = (500, "no answer queued", false);
+                if (a.Drop) { ctx.Response.Abort(); continue; }
+                ctx.Response.StatusCode = a.Status;
+                var b = Encoding.UTF8.GetBytes(a.Body); ctx.Response.ContentLength64 = b.Length;
+                ctx.Response.OutputStream.Write(b, 0, b.Length);
+                ctx.Response.Close();
+            }
+        }) { IsBackground = true };
+        serve.Start();
+
+        string token = Guid.NewGuid().ToString("N");
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = Path.Combine(work, "NexusLog");
+        NexusLogbook.TestPortOverride = port;
+        NexusLogbook.TestForceActive = true;
+        try
+        {
+            using (LogbookOnlyEngine.Start(engineExe, Path.Combine(work, "NexusLog"), Path.Combine(work, "appdata"), port, token, uploadTestBase: $"http://127.0.0.1:{fakePort}"))
+            {
+                var client = new NexusLogClient(port);
+                string F(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+                var calls = new[] { "UP1", "UP2", "UP3", "UP4", "UP5", "UP6", "UP7", "UP8", "UP9" };
+                string seed = Path.Combine(work, "seed.adi");
+                File.WriteAllText(seed, "test\n<eoh>\n" + string.Concat(calls.Select(c =>
+                    F("CALL", c) + F("BAND", "20m") + F("MODE", "FT8") + F("QSO_DATE", "20260901") + F("TIME_ON", "001000") + F("RST_SENT", "-10") + " <eor>\n")));
+                client.Import(seed);
+                NexusLogbook.Refresh(force: true);
+                var svc = new NexusLogbookService();
+                var creds = new LiveUploadCredentials
+                {
+                    QrzLogbookApiKey = "test-qrz-key", ClubLogUploadEmail = "me@example.com", ClubLogUploadPassword = "app-pass",
+                    ClubLogUploadCallsign = "KB0UZT", EqslUsername = "KB0UZT", EqslPassword = "eqsl-pass",
+                };
+                string Key(string call) => AdifImporter.BuildDedupKey(call, "20m", "FT8", "20260901", "001000");
+                string Outcome(string call, Func<NexusUploadState, NexusUploadStatus> leg) =>
+                    leg(client.Rows().Rows.Single(q => q.Call == call).Upload)?.Outcome ?? "none";
+
+                (bool ok, string err, string path, string body) Up(string call, string service, int status, string answer, bool drop = false)
+                {
+                    while (bodies.TryDequeue(out _)) { }
+                    answers.Enqueue((status, answer, drop));
+                    bool ok = svc.UploadThroughNexus(Key(call), service, creds, out var err);
+                    bodies.TryDequeue(out var sent);
+                    Console.WriteLine($"     {call} {service}: ok={ok} err={err} path={sent.Path}");
+                    return (ok, err, sent.Path, sent.Body ?? "");
+                }
+
+                var r = Up("UP1", "QRZ", 200, "RESULT=OK&COUNT=1&LOGID=123456");
+                Check("QRZ accepted: true, recorded accepted", r.ok && Outcome("UP1", u => u.Qrz) == "accepted", true);
+                Check("QRZ request: key, INSERT, and the contact's ADIF from Nexus", r.path == "/qrz" && r.body.Contains("KEY=test-qrz-key") &&
+                    r.body.Contains("ACTION=INSERT") && WebUtility.UrlDecode(r.body).IndexOf("<call:3>UP1", StringComparison.OrdinalIgnoreCase) >= 0, true);
+                r = Up("UP2", "QRZ", 200, "RESULT=FAIL&COUNT=0&REASON=Unable+to+add+QSO%3A+duplicate");
+                Check("QRZ duplicate: true (QRZ holds it), recorded duplicate", r.ok && Outcome("UP2", u => u.Qrz) == "duplicate", true);
+                r = Up("UP3", "QRZ", 200, "RESULT=AUTH");
+                Check("QRZ auth failure: false, recorded authfail (visible, not silent)", !r.ok && Outcome("UP3", u => u.Qrz) == "authfail", true);
+                r = Up("UP4", "QRZ", 0, "", drop: true);
+                Check("QRZ unreachable: false, nothing recorded (stays owed)", !r.ok && Outcome("UP4", u => u.Qrz) == "none", true);
+
+                r = Up("UP5", "CLUBLOG", 200, "QSO OK");
+                Check("Club Log OK: true, recorded accepted", r.ok && Outcome("UP5", u => u.Clublog) == "accepted", true);
+                string clBody = WebUtility.UrlDecode(r.body);
+                Check("Club Log request: email, password, callsign, app key and the ADIF", r.path == "/clublog" && clBody.Contains("me@example.com") &&
+                    clBody.Contains("app-pass") && clBody.Contains("KB0UZT") && clBody.IndexOf("<call:3>UP5", StringComparison.OrdinalIgnoreCase) >= 0, true);
+                r = Up("UP6", "CLUBLOG", 500, "busy");
+                Check("Club Log busy (500): false, nothing recorded (stays owed)", !r.ok && Outcome("UP6", u => u.Clublog) == "none", true);
+                r = Up("UP7", "CLUBLOG", 403, "Access denied");
+                Check("Club Log 403: false, recorded authfail", !r.ok && Outcome("UP7", u => u.Clublog) == "authfail", true);
+
+                r = Up("UP8", "EQSL", 200, "Result: 1 out of 1 records added");
+                Check("eQSL added: true, recorded accepted", r.ok && Outcome("UP8", u => u.Eqsl) == "accepted" && r.path == "/eqsl", true);
+                r = Up("UP9", "EQSL", 200, "Error: The system is down until 1200Z");
+                Check("eQSL down: false, nothing recorded (stays owed)", !r.ok && Outcome("UP9", u => u.Eqsl) == "none", true);
+
+                while (bodies.TryDequeue(out _)) { }
+                bool okMissing = svc.UploadThroughNexus(AdifImporter.BuildDedupKey("NOSUCH", "20m", "FT8", "20260901", "001000"), "QRZ", creds, out var missErr);
+                Thread.Sleep(300);
+                Check("a contact not in the log: nothing sent", !okMissing && bodies.IsEmpty, true);
+                client.Shutdown(token);
+            }
+        }
+        finally
+        {
+            http.Stop();
+            NexusLogbook.Reset();
+            NexusLogbook.TestFolderOverride = null; NexusLogbook.TestPortOverride = null; NexusLogbook.TestForceActive = null;
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -1005,6 +1115,12 @@ static class JimmyTests
         {
             NexusExportTests(args[1], args[2], args[3]);
             Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
+        if (args.Length >= 3 && args[0] == "--nexus-upload-tests")
+        {
+            NexusUploadTests(args[1], args[2]);
+            Console.WriteLine("=== " + passed + " passed, " + failed + " failed ===");
             Environment.Exit(failed > 0 ? 1 : 0);
         }
         if (args.Length >= 3 && args[0] == "--nexus-pairing-tests")

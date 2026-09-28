@@ -211,7 +211,10 @@ namespace WSJTX_Controller
 
         // crashAt: TEST ONLY -- a crash point for the recovery tests (JIMMY_TEST_CRASH_AT, see
         // logbook_host.rs). null in every other use.
-        public static LogbookOnlyEngine Start(string exe, string logDir, string appDataDir, int port, string token, string crashAt = null)
+        // uploadTestBase: TEST ONLY -- LOG_UPLOAD's service addresses pointed at a local fake server
+        // (JIMMY_TEST_UPLOAD_BASE, honoured only in this logbook-only start). null everywhere else.
+        public static LogbookOnlyEngine Start(string exe, string logDir, string appDataDir, int port, string token, string crashAt = null,
+                                              string uploadTestBase = null)
         {
             Directory.CreateDirectory(appDataDir);
             var psi = new ProcessStartInfo(exe)
@@ -226,6 +229,7 @@ namespace WSJTX_Controller
                 psi.ArgumentList.Add(a);
             psi.Environment["LOCALAPPDATA"] = appDataDir;
             psi.Environment["JIMMY_TEST_CRASH_AT"] = crashAt ?? "";
+            psi.Environment["JIMMY_TEST_UPLOAD_BASE"] = uploadTestBase ?? "";
             var p = Process.Start(psi);
             p.BeginErrorReadLine();
             p.BeginOutputReadLine();

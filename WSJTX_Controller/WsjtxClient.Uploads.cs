@@ -214,25 +214,38 @@ namespace WSJTX_Controller
                 ctrl.ShowUploadStatus($"QRZ upload: starting, {pending.Count} pending QSO(s)...", false)));
 
             var client = new QrzLogbookClient();
+            var nexus = db as NexusLogbookService;
+            var creds = new LiveUploadCredentials { QrzLogbookApiKey = ctrl.qrzLogbookApiKey };
             int done = 0, succeeded = 0, failedCount = 0;
             DateTime lastStatusUpdate = DateTime.UtcNow;
             foreach (var q in pending)
             {
-                string adifRecord = AdifRecordBuilder.Build(
-                    q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
-                    q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
-                    q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd);
-                bool ok = await client.InsertAsync(ctrl.qrzLogbookApiKey, adifRecord).ConfigureAwait(false);
+                bool ok;
+                string error;
+                if (nexus != null)
+                {
+                    // Nexus keeps the log: Nexus's own QRZ transaction (record, send, answer, stamp).
+                    ok = nexus.UploadThroughNexus(q.DedupKey, "QRZ", creds, out error);
+                }
+                else
+                {
+                    string adifRecord = AdifRecordBuilder.Build(
+                        q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
+                        q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
+                        q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd);
+                    ok = await client.InsertAsync(ctrl.qrzLogbookApiKey, adifRecord).ConfigureAwait(false);
+                    if (ok) db.MarkUploaded(q.DedupKey, "QRZ", DateTime.UtcNow);
+                    error = client.LastError;
+                }
                 done++;
                 if (ok)
                 {
-                    db.MarkUploaded(q.DedupKey, "QRZ", DateTime.UtcNow);
                     succeeded++;
                 }
                 else
                 {
                     failedCount++;
-                    DebugOutput($"{Time()} QRZ upload catch-up failed for {q.Callsign}: {client.LastError}");
+                    DebugOutput($"{Time()} QRZ upload catch-up failed for {q.Callsign}: {error}");
                 }
 
                 bool isLast = done == pending.Count;
