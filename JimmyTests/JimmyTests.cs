@@ -11300,6 +11300,17 @@ static class JimmyTests
                 Check($"{id}: SupportsLiveTag (same as plain DXCC)", RuleEngine.SupportsLiveTag(def), true);
             }
 
+            // 2026-09-28 (operator): WAS_30M was missing from the per-band set. Every per-band
+            // WAS award must keep shipping -- State, 50 states, that one band only.
+            foreach (string band in new[] { "160m", "80m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m" })
+            {
+                string id = "WAS_" + band.ToUpperInvariant();
+                bool found = byId.TryGetValue(id, out RuleDefinition was);
+                Check($"{id}: shipped, State over US_50_STATES, {band} only",
+                      found && was.GroupBy == RuleGroupBy.State && was.Universe == "US_50_STATES"
+                      && was.Bands.Count == 1 && was.Bands[0].Equals(band, StringComparison.OrdinalIgnoreCase), true);
+            }
+
             // Spot-check DXCC Honor Roll -- Basis=CONFIRMED + a dynamic ThresholdFrom, not a
             // literal Threshold (see RuleLoaderBasisAndDynamicThresholdTests for the engine
             // behavior this shape actually drives).
