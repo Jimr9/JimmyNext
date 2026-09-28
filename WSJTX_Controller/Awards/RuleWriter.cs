@@ -40,7 +40,9 @@ namespace WSJTX_Controller
             sb.AppendLine();
 
             sb.AppendLine("[Confirmation]");
-            sb.AppendLine($"Requires={def.Confirmation}");
+            sb.AppendLine(def.Confirmation == RuleConfirmation.Sources
+                ? $"Requires={string.Join(",", def.ConfirmationSources)}"
+                : $"Requires={def.Confirmation}");
             sb.AppendLine();
 
             sb.AppendLine("[Target]");

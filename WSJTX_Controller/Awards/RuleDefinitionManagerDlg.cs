@@ -236,7 +236,7 @@ namespace WSJTX_Controller
             _detailTb.Text = d == null ? "" :
                 $"Id: {d.Id}\r\n" +
                 $"Description: {d.Description}\r\n" +
-                $"GroupBy: {d.GroupBy}   Target: {d.Target}   Confirmation: {d.Confirmation}\r\n" +
+                $"GroupBy: {d.GroupBy}   Target: {d.Target}   Confirmation: {RuleConfirmationSources.Describe(d)}\r\n" +
                 $"Source file: {d.SourceFile}";
         }
 
@@ -870,6 +870,7 @@ namespace WSJTX_Controller
             DateFrom = d.DateFrom,
             DateTo = d.DateTo,
             Confirmation = d.Confirmation,
+            ConfirmationSources = new List<string>(d.ConfirmationSources),
             Target = d.Target,
             Threshold = d.Threshold,
             Levels = d.Levels.Select(l => new RuleLevel { Name = l.Name, Threshold = l.Threshold }).ToList(),

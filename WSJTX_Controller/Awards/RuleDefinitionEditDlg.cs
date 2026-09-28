@@ -33,6 +33,8 @@ namespace WSJTX_Controller
 
         // ── Confirmation & Target tab ────────────────────────────────────────
         private ComboBox _confirmationCb, _targetTypeCb;
+        // Confirmation Requires = Sources: which channels confirm (D1, 2026-09-28).
+        private CheckBox _srcLotwCb, _srcQrzCb, _srcEqslCb, _srcCardCb;
         private NumericUpDown _thresholdNum;
         private TextBox _levelsTb;
         private Label _thresholdLbl, _levelsLbl, _levelsHintLbl;
@@ -229,6 +231,13 @@ namespace WSJTX_Controller
             return page;
         }
 
+        private void UpdateSourcesEnabled()
+        {
+            bool on = (string)_confirmationCb.SelectedItem == RuleConfirmation.Sources.ToString();
+            foreach (var cb in new[] { _srcLotwCb, _srcQrzCb, _srcEqslCb, _srcCardCb })
+                if (cb != null) cb.Enabled = on;
+        }
+
         private TabPage BuildConfirmationTargetTab()
         {
             var page = new TabPage("Confirmation && Target");
@@ -241,7 +250,26 @@ namespace WSJTX_Controller
                 DropDownStyle = ComboBoxStyle.DropDownList, AccessibleName = "Confirmation Requires",
             };
             _confirmationCb.Items.AddRange(Enum.GetNames(typeof(RuleConfirmation)));
+            _confirmationCb.SelectedIndexChanged += (s, e) => UpdateSourcesEnabled();
             page.Controls.Add(_confirmationCb);
+            y += 28;
+
+            // Only for Requires = Sources: any ticked channel confirms. Right after the combo in
+            // Tab order; disabled (so Tab skips them) for every other choice.
+            CheckBox Source(string text, string name, int x)
+            {
+                var cb = new CheckBox
+                {
+                    Text = text, AccessibleName = name, AutoSize = true,
+                    Location = new Point(x, y), TabIndex = tab++,
+                };
+                page.Controls.Add(cb);
+                return cb;
+            }
+            _srcLotwCb = Source("LoTW", "LoTW confirms", 180);
+            _srcQrzCb  = Source("QRZ", "QRZ confirms", 250);
+            _srcEqslCb = Source("eQSL", "eQSL confirms", 310);
+            _srcCardCb = Source("Paper card", "Paper card confirms", 375);
             y += 32;
 
             page.Controls.Add(MakeLabel("Target Type:", 10, y));
@@ -342,6 +370,12 @@ namespace WSJTX_Controller
             _dateToTb.Text          = d?.DateTo ?? "";
 
             _confirmationCb.SelectedItem = (d?.Confirmation ?? RuleConfirmation.Any).ToString();
+            var sources = d?.ConfirmationSources ?? new List<string>();
+            _srcLotwCb.Checked = sources.Contains(RuleConfirmationSources.Lotw);
+            _srcQrzCb.Checked  = sources.Contains(RuleConfirmationSources.Qrz);
+            _srcEqslCb.Checked = sources.Contains(RuleConfirmationSources.Eqsl);
+            _srcCardCb.Checked = sources.Contains(RuleConfirmationSources.Card);
+            UpdateSourcesEnabled();
             _targetTypeCb.SelectedItem   = (d?.Target ?? RuleTargetType.Count).ToString();
             _thresholdNum.Value          = Math.Max(1, d?.Threshold ?? 1);
             _levelsTb.Text               = string.Join("\r\n", (d?.Levels ?? new List<RuleLevel>()).Select(l => $"{l.Name}={l.Threshold}"));
@@ -414,6 +448,22 @@ namespace WSJTX_Controller
                 }
             }
 
+            var confirmation = (RuleConfirmation)Enum.Parse(typeof(RuleConfirmation), (string)_confirmationCb.SelectedItem);
+            var confirmationSources = new List<string>();
+            if (confirmation == RuleConfirmation.Sources)
+            {
+                if (_srcLotwCb.Checked) confirmationSources.Add(RuleConfirmationSources.Lotw);
+                if (_srcQrzCb.Checked)  confirmationSources.Add(RuleConfirmationSources.Qrz);
+                if (_srcEqslCb.Checked) confirmationSources.Add(RuleConfirmationSources.Eqsl);
+                if (_srcCardCb.Checked) confirmationSources.Add(RuleConfirmationSources.Card);
+                if (confirmationSources.Count == 0)
+                {
+                    MessageBox.Show(this, "Tick at least one confirmation source when Confirmation Requires is Sources.",
+                        "Missing Sources", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+            }
+
             var endBands = SplitList(_endBandsTb.Text);
             var endModes = SplitList(_endModesTb.Text);
 
@@ -436,7 +486,8 @@ namespace WSJTX_Controller
                 Sig             = _sigTb.Text.Trim(),
                 DateFrom        = _dateFromTb.Text.Trim(),
                 DateTo          = _dateToTb.Text.Trim(),
-                Confirmation    = (RuleConfirmation)Enum.Parse(typeof(RuleConfirmation), (string)_confirmationCb.SelectedItem),
+                Confirmation    = confirmation,
+                ConfirmationSources = confirmationSources,
                 Target          = targetType,
                 Threshold       = (int)_thresholdNum.Value,
                 Levels          = levels,

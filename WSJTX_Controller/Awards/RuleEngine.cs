@@ -233,7 +233,7 @@ namespace WSJTX_Controller
                 }
             }
 
-            string confirmExpr = ConfirmationExpression(def.Confirmation);
+            string confirmExpr = ConfirmationExpression(def);
 
             var whereParts = new List<string>();
             var parms = new List<SQLiteParameter>();
@@ -592,10 +592,25 @@ namespace WSJTX_Controller
             }
         }
 
-        private static string ConfirmationExpression(RuleConfirmation c)
+        private static string ConfirmationExpression(RuleDefinition def)
         {
-            switch (c)
+            switch (def.Confirmation)
             {
+                case RuleConfirmation.Sources:
+                {
+                    // Any one of the named channels confirms. CARD: Jimmy's own logbook database
+                    // holds no paper-card confirmations (its importers never stored them), so it
+                    // matches nothing here until the logbook's reads come from Nexus, which keeps
+                    // cards as their own channel -- it can never inflate a total.
+                    var parts = new List<string>();
+                    foreach (var s in def.ConfirmationSources)
+                    {
+                        if (s == RuleConfirmationSources.Lotw) parts.Add("lotw_qsl_rcvd='Y'");
+                        else if (s == RuleConfirmationSources.Qrz) parts.Add("qrz_qsl_rcvd='Y'");
+                        else if (s == RuleConfirmationSources.Eqsl) parts.Add("eqsl_qsl_rcvd='Y'");
+                    }
+                    return parts.Count == 0 ? "0" : "(" + string.Join(" OR ", parts) + ")";
+                }
                 case RuleConfirmation.Lotw: return "lotw_qsl_rcvd='Y'";
                 case RuleConfirmation.Qrz:  return "qrz_qsl_rcvd='Y'";
                 case RuleConfirmation.Both: return "(lotw_qsl_rcvd='Y' AND qrz_qsl_rcvd='Y')";

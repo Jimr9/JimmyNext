@@ -161,9 +161,29 @@ namespace WSJTX_Controller
 
             string confirmStr = file.Get("Confirmation", "Requires", "ANY");
             RuleConfirmation confirmation;
-            if (!Enum.TryParse(confirmStr, true, out confirmation))
+            var confirmationSources = new List<string>();
+            // D1 (2026-09-28): a list of channels (e.g. "LOTW,CARD"), or one of the channels the
+            // five original words have no single word for (EQSL, CARD), means Sources -- any one
+            // of them confirms. The five original words keep exactly their meaning.
+            var tokens = SplitList(confirmStr).Select(t => t.ToUpperInvariant()).Distinct().ToList();
+            bool isList = tokens.Count > 1 ||
+                          (tokens.Count == 1 && (tokens[0] == RuleConfirmationSources.Eqsl || tokens[0] == RuleConfirmationSources.Card));
+            if (isList)
             {
-                error = $"[Confirmation] Requires='{confirmStr}' is not recognized. Supported: ANY, LOTW, QRZ, BOTH, NONE.";
+                var unknown = tokens.Where(t => !RuleConfirmationSources.All.Contains(t)).ToList();
+                if (unknown.Count > 0)
+                {
+                    error = $"[Confirmation] Requires='{confirmStr}': '{string.Join(",", unknown)}' is not a confirmation source. " +
+                            "Supported sources: LOTW, QRZ, EQSL, CARD.";
+                    return null;
+                }
+                confirmation = RuleConfirmation.Sources;
+                confirmationSources = tokens;
+            }
+            else if (!Enum.TryParse(confirmStr, true, out confirmation) || confirmation == RuleConfirmation.Sources)
+            {
+                error = $"[Confirmation] Requires='{confirmStr}' is not recognized. Supported: ANY, LOTW, QRZ, BOTH, NONE, " +
+                        "or a list of sources from LOTW, QRZ, EQSL, CARD (e.g. LOTW,CARD).";
                 return null;
             }
 
@@ -261,6 +281,7 @@ namespace WSJTX_Controller
                 DateFrom        = file.Get("Match", "DateFrom"),
                 DateTo          = file.Get("Match", "DateTo"),
                 Confirmation    = confirmation,
+                ConfirmationSources = confirmationSources,
                 Target          = targetType,
                 Basis           = basis,
                 Threshold       = threshold,

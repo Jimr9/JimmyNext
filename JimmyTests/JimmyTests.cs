@@ -106,6 +106,103 @@ static class JimmyTests
         Check("repeated extra written once", fx.Count(x => x.Tag == "QTH") == 1, true);
     }
 
+    // D1 (2026-09-28): confirmation sources per Rule Definition. The five original words keep their
+    // meaning (so no total moves); a list of sources is new, and any one of them confirms.
+    static void RuleConfirmationSourcesTests()
+    {
+        Console.WriteLine("\n--- RuleConfirmationSourcesTests ---");
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy-d1-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            RuleDefinition Load(string requires)
+            {
+                string f = Path.Combine(dir, "t.ini");
+                File.WriteAllText(f, "[Award]\nId=T\nName=T\nFormatVersion=1\n[Match]\nGroupBy=None\n" +
+                                     $"[Confirmation]\nRequires={requires}\n[Target]\nType=Count\nThreshold=1\n");
+                var d = RuleLoader.ParseAndValidate(f, out string err);
+                if (d == null) Console.WriteLine("    (load error: " + err + ")");
+                return d;
+            }
+            var any = Load("ANY");
+            Check("ANY still loads as Any", any?.Confirmation == RuleConfirmation.Any, true);
+            var list = Load("LOTW,CARD");
+            Check("LOTW,CARD loads as Sources [LOTW, CARD]",
+                list?.Confirmation == RuleConfirmation.Sources && list.ConfirmationSources.SequenceEqual(new[] { "LOTW", "CARD" }), true);
+            Check("an unknown source is refused", Load("LOTW,FOO") == null, true);
+            string saved = Path.Combine(dir, "saved.ini");
+            RuleWriter.Save(list, saved);
+            Check("Sources written back as a list", File.ReadAllText(saved).Contains("Requires=LOTW,CARD"), true);
+
+            // Totals: three contacts, one confirmed each by LoTW, QRZ and eQSL.
+            string db = Path.Combine(dir, "log.db");
+            using (new LogbookDb(db)) { }
+            using (var c = new System.Data.SQLite.SQLiteConnection($"Data Source={db};"))
+            {
+                c.Open();
+                foreach (var (call, lotw, qrz, eqsl) in new[] { ("A1A", "Y", "", ""), ("B2B", "", "Y", ""), ("C3C", "", "", "Y") })
+                    using (var cmd = c.CreateCommand())
+                    {
+                        cmd.CommandText = "INSERT INTO qso (callsign, band, mode, qso_date, time_on, imported_at, dedup_key, lotw_qsl_rcvd, qrz_qsl_rcvd, eqsl_qsl_rcvd, source) " +
+                                          $"VALUES ('{call}','20m','FT8','20260101','1200','x','{call}','{lotw}','{qrz}','{eqsl}','MANUAL');";
+                        cmd.ExecuteNonQuery();
+                    }
+            }
+            int Confirmed(string requires) => RuleEngine.Evaluate(Load(requires), db).Confirmed;
+            Check("Any (LoTW or QRZ) unchanged: 2", Confirmed("ANY") == 2, true);
+            Check("QRZ award counts QRZ: 1", Confirmed("QRZ") == 1, true);
+            Check("Sources EQSL counts eQSL: 1", Confirmed("EQSL") == 1, true);
+            Check("Sources LOTW,QRZ,EQSL: 3", Confirmed("LOTW,QRZ,EQSL") == 3, true);
+            Check("Sources CARD: 0 (no card data in Jimmy's database)", Confirmed("CARD") == 0, true);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // D2: a duplicate Nexus refused shows in Logbook Center's Status field only -- not announced,
+    // not the main status line, and focus does not move.
+    static void NexusDuplicateStatusTests()
+    {
+        Console.WriteLine("\n--- NexusDuplicateStatusTests ---");
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy-dup-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        string prevDb = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", Path.Combine(dir, "logbook.db"));
+        try
+        {
+            var outbox = new NexusLogOutbox(Path.Combine(dir, "outbox.json"));
+            var refused = new NexusLogOutbox.RefusedEntry
+            {
+                ReqId = "r1", RefusedUtc = DateTime.UtcNow, ExistingWhenUnix = 1_790_000_000,
+                Qso = new NexusQso { Call = "W1AW", Band = "20m", Mode = "FT8", WhenUnix = 1_790_000_120, RstSent = "-10" },
+            };
+            string text = LogbookWindow.DuplicateStatusText(new List<NexusLogOutbox.RefusedEntry> { refused });
+            Check("status text names the contact and how to review", text.Contains("W1AW 20m FT8") && text.Contains("Enter here to review"), true);
+            Check("review line keeps the details", NexusRefusedReviewDlg.Describe(refused).Contains("sent -10"), true);
+
+            // A held refusal in the outbox file, then the window: Status shows it, focus stays put.
+            File.WriteAllText(Path.Combine(dir, "outbox.json"), NexusLogClient.ToJson(new { queued = new object[0], refused = new[] { refused } }));
+            outbox = new NexusLogOutbox(Path.Combine(dir, "outbox.json"));
+            TabOrderWalker.OnSTA(() =>
+            {
+                using (var lw = new LogbookWindow(null, () => "", () => "", () => "", nexusOutbox: outbox))
+                {
+                    lw.Show();
+                    System.Windows.Forms.Application.DoEvents();
+                    var status = (System.Windows.Forms.TextBox)typeof(LogbookWindow).GetField("_statusTb",
+                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(lw);
+                    Check("Logbook Center Status shows the held duplicate", status.Text.StartsWith("Duplicate not logged: W1AW"), true);
+                    Check("focus did not move to Status", lw.ActiveControl == status, false);
+                    lw.Close();
+                }
+            });
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb);
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -676,6 +773,8 @@ static class JimmyTests
         ContestingWindowStationInfoTests();
         OptionsStationOperatorContinentRelocationTests();
         NexusMigrationMappingTests();
+        RuleConfirmationSourcesTests();
+        NexusDuplicateStatusTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");

@@ -1367,6 +1367,19 @@ fn handle_control_connection(
                     let _ = writeln!(stream, "ERR bad SET_FREQUENCY args: {e}");
                 }
             }
+        } else if let Some(json) = line.strip_prefix("APPLY_SETTINGS ") {
+            // Phase 4 lifecycle: radio/audio settings applied live (see ApplyRadioArgs).
+            match serde_json::from_str::<ApplyRadioArgs>(json) {
+                Ok(a) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    let next = with_radio_settings(eng.settings(), &a);
+                    eng.apply_settings(next);
+                    let _ = writeln!(stream, "OK");
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad APPLY_SETTINGS args: {e}");
+                }
+            }
         } else if let Some(json) = line.strip_prefix("SET_WORKING_FREQUENCIES ") {
             // Live counterpart of --working-frequencies (Args's own doc comment) -- Jimmy sends
             // this when the operator saves an edited Options>Frequencies entry mid-session, so
@@ -1806,6 +1819,59 @@ struct ReplyArgs {
     dx_freq_hz: Option<f32>,
 }
 
+/// Wire shape for APPLY_SETTINGS (logbook migration plan Phase 4 -- the Nexus desktop's lifecycle):
+/// the radio and audio settings Jimmy passes on the command line at launch, applied LIVE instead of
+/// relaunching this process. Same meanings as the CLI flags (see parse_args / the Settings literal in
+/// main()). Nexus's radio loop rebuilds CAT (Transport::from_settings, rig_differs) and reopens audio
+/// on its next tick by itself -- exactly how the Nexus desktop applies a settings save.
+#[derive(serde::Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ApplyRadioArgs {
+    audio_in: String,
+    audio_out: String,
+    rig_model: u32,
+    rig_conn: String,
+    rig_port: String,
+    rig_addr: String,
+    rig_baud: u32,
+    ptt_method: String,
+    rigctld_port: u16,
+    plain_ssb_data_modes: bool,
+    dont_set_mode: bool,
+    ptt_data_source: bool,
+    ptt_serial_port: String,
+    split_mode: String,
+}
+
+/// The engine's CURRENT settings with only the radio/audio fields replaced. Deliberately not a
+/// rebuild from launch arguments: `Engine::apply_settings` replaces the whole Settings, and
+/// everything changed live since launch (dial and band, decode depth, PSK Reporter, special
+/// operation, working frequencies) must survive a radio-settings save.
+fn with_radio_settings(current: &Settings, a: &ApplyRadioArgs) -> Settings {
+    let mut s = current.clone();
+    s.audio_in = a.audio_in.clone();
+    s.audio_out = a.audio_out.clone();
+    s.rig_model = a.rig_model;
+    s.rig_conn = a.rig_conn.clone();
+    s.serial_port = a.rig_port.clone();
+    s.rig_addr = a.rig_addr.clone();
+    s.baud = a.rig_baud;
+    s.ptt_method = a.ptt_method.clone();
+    s.rigctld_port = a.rigctld_port;
+    s.data_modes_plain_ssb = a.plain_ssb_data_modes;
+    s.dont_set_mode = a.dont_set_mode;
+    s.ptt_data_source = a.ptt_data_source;
+    s.ptt_serial_port = a.ptt_serial_port.clone();
+    s.split_mode = match a.split_mode.as_str() {
+        "rig" => tempo_app::settings::SplitMode::Rig,
+        "fakeit" => tempo_app::settings::SplitMode::FakeIt,
+        _ => tempo_app::settings::SplitMode::None,
+    };
+    // JIMMY COMPAT: RFPOWER never-touch, unconditionally -- a settings save can never turn it off.
+    s.disable_rfpower_probe = true;
+    s
+}
+
 /// Wire shape for the SET_FREQUENCY command's JSON argument -- field names match what
 /// WsjtxClient.Direct.cs sends (camelCase, mirroring ReplyArgs's own convention). `mode` is the
 /// logical sideband/class label Engine::set_frequency expects ("USB"/"LSB"/"FM"/"CW"), not a raw
@@ -2206,6 +2272,62 @@ fn wait_for_shutdown(backstop: Option<std::time::Duration>) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn radio_args() -> ApplyRadioArgs {
+        ApplyRadioArgs {
+            audio_in: "USB Audio CODEC".into(),
+            audio_out: "USB Audio CODEC out".into(),
+            rig_model: 3073,
+            rig_conn: "serial".into(),
+            rig_port: "COM7".into(),
+            rig_addr: String::new(),
+            rig_baud: 38_400,
+            ptt_method: "cat".into(),
+            rigctld_port: 4540,
+            plain_ssb_data_modes: false,
+            dont_set_mode: true,
+            ptt_data_source: true,
+            ptt_serial_port: String::new(),
+            split_mode: "fakeit".into(),
+        }
+    }
+
+    // APPLY_SETTINGS replaces only the radio/audio fields: everything changed live since launch
+    // (here the dial, decode depth and PSK Reporter) survives, and RFPOWER stays suppressed even
+    // if the current settings somehow had it off.
+    #[test]
+    fn apply_settings_changes_only_the_radio_fields() {
+        let mut current = Settings::default();
+        current.dial_mhz = 7.074;
+        current.decode_depth = 1;
+        current.pskreporter = true;
+        current.disable_rfpower_probe = false;
+        let next = with_radio_settings(&current, &radio_args());
+        assert_eq!(next.rig_model, 3073);
+        assert_eq!(next.serial_port, "COM7");
+        assert_eq!(next.ptt_method, "cat");
+        assert_eq!(next.audio_in, "USB Audio CODEC");
+        assert!(next.dont_set_mode && next.ptt_data_source);
+        assert!(matches!(next.split_mode, tempo_app::settings::SplitMode::FakeIt));
+        assert!(next.disable_rfpower_probe, "a settings save can never turn RFPOWER protection off");
+        assert_eq!(next.dial_mhz, 7.074, "the dial the operator is on is kept");
+        assert_eq!(next.decode_depth, 1);
+        assert!(next.pskreporter);
+    }
+
+    // Applied to a real Engine, the change is visible in its settings and nothing else moved.
+    #[test]
+    fn apply_settings_reaches_the_engine() {
+        let mut eng = Engine::new("KB0UZT", "EN34", 0);
+        let before_dial = eng.settings().dial_mhz;
+        let next = with_radio_settings(eng.settings(), &radio_args());
+        eng.apply_settings(next);
+        assert_eq!(eng.settings().rig_model, 3073);
+        assert_eq!(eng.settings().rigctld_port, 4540);
+        assert!(eng.settings().disable_rfpower_probe);
+        assert_eq!(eng.settings().dial_mhz, before_dial);
+        assert_eq!(eng.settings().mycall, "KB0UZT", "identity is not part of APPLY_SETTINGS");
+    }
 
     // Regression coverage for the REPLY handler fix: previously call_station_ctx's Result was
     // discarded and "OK" was written unconditionally, so a refusal (Engine's own "No recent

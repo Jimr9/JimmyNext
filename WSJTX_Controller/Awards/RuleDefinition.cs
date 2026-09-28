@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Linq;
 
 namespace WSJTX_Controller
 {
@@ -13,7 +14,26 @@ namespace WSJTX_Controller
 
     // Which QSL source(s) count as "confirmed". None means the award doesn't
     // require confirmation at all -- completion is judged on worked QSOs.
-    public enum RuleConfirmation { Any, Lotw, Qrz, Both, None }
+    // Any = LoTW or QRZ (unchanged since it shipped). Sources = the explicit set in
+    // RuleDefinition.ConfirmationSources, any one of which confirms (D1, 2026-09-28: lets an
+    // award accept eQSL or a paper card, or e.g. "LoTW or card" -- the existing five keep
+    // exactly their meaning, so no shipped or saved definition's totals move).
+    public enum RuleConfirmation { Any, Lotw, Qrz, Both, None, Sources }
+
+    // The confirmation channels a Sources definition can name. Card = a paper QSL card.
+    public static class RuleConfirmationSources
+    {
+        public const string Lotw = "LOTW", Qrz = "QRZ", Eqsl = "EQSL", Card = "CARD";
+        public static readonly string[] All = { Lotw, Qrz, Eqsl, Card };
+
+        // "LoTW or paper card" -- for display in the manager and the editor.
+        public static string Describe(RuleDefinition d)
+        {
+            if (d.Confirmation != RuleConfirmation.Sources) return d.Confirmation.ToString();
+            return string.Join(" or ", d.ConfirmationSources.Select(s =>
+                s == Lotw ? "LoTW" : s == Qrz ? "QRZ" : s == Eqsl ? "eQSL" : s == Card ? "paper card" : s));
+        }
+    }
 
     public enum RuleTargetType { All, Count, Levels }
 
@@ -59,6 +79,8 @@ namespace WSJTX_Controller
         public string        DateTo;
 
         public RuleConfirmation Confirmation = RuleConfirmation.Any;
+        // Confirmation = Sources only: which channels confirm (RuleConfirmationSources values).
+        public List<string> ConfirmationSources = new List<string>();
 
         public RuleTargetType  Target;
         public RuleBasis        Basis = RuleBasis.Worked;  // Target=Count/Levels only; see RuleBasis

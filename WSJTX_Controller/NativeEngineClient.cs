@@ -323,6 +323,7 @@ namespace WSJTX_Controller
                 var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
                 if (!string.IsNullOrWhiteSpace(sessionToken))
                     args += $" --session-token {sessionToken}";
+                _sessionToken = sessionToken ?? "";
                 if (repeatLimit.HasValue)
                     args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
                 // Frequency-override authority split, 2026-08-24 -- see
@@ -718,6 +719,42 @@ namespace WSJTX_Controller
         // and it falls back to no real control, with nothing surfacing the failure. Found live,
         // 2026-08-06: TX audio stayed on the radio's front mic even after CAT-mode tests passed
         // and settings looked correct, which a lost race here fully explains.
+        // The session token this process was launched with -- SHUTDOWN only obeys its owner.
+        private string _sessionToken = "";
+
+        // Logbook migration Phase 4: stop the engine the way the Nexus desktop quits -- SHUTDOWN
+        // takes the transmitter off the air through the radio loop itself (and waits for the
+        // loop to confirm it has unkeyed), puts any Nexus logbook changes on disk, answers, and
+        // exits. True when that answer came back; the caller then only waits for the exit.
+        private bool TryGracefulShutdown()
+        {
+            try
+            {
+                using (var client = new TcpClient())
+                {
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    if (!connectTask.Wait(300) || !client.Connected) return false;
+                    using (var stream = client.GetStream())
+                    {
+                        stream.WriteTimeout = 1000;
+                        // Up to 3 s for the radio loop to unkey, plus the logbook save when there is one.
+                        stream.ReadTimeout = 8000;
+                        byte[] cmd = System.Text.Encoding.ASCII.GetBytes("SHUTDOWN " + _sessionToken + "\n");
+                        stream.Write(cmd, 0, cmd.Length);
+                        using (var reader = new StreamReader(stream, System.Text.Encoding.UTF8))
+                        {
+                            string reply = reader.ReadLine();
+                            return reply != null && reply.StartsWith("{");
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         public void Stop()
         {
             _stopping = true;
@@ -725,6 +762,9 @@ namespace WSJTX_Controller
             {
                 if (_process != null && !_process.HasExited)
                 {
+                    // Graceful first (Phase 4); Kill only when that did not end the process.
+                    if (TryGracefulShutdown() && _process.WaitForExit(StopWaitMs))
+                        return;
                     _process.Kill();
                     // Found live, 2026-08-10, auditing against production: WaitForExit's own
                     // return value (did it actually exit within StopWaitMs, or time out) was

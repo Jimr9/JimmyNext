@@ -53,6 +53,10 @@ namespace WSJTX_Controller
         // on each successful manual Add -- audible confirmation with no focus movement, so a
         // contest operator's focus can stay on the Callsign field between contacts.
         private readonly Action _onQsoLogged;
+        // Logbook migration: the Nexus logbook outbox, when live logging goes through Nexus
+        // (null until then -- nothing below runs). Duplicate refusals it holds are shown in the
+        // Status field only: no main status line, no announcement, no focus change.
+        private readonly NexusLogOutbox _nexusOutbox;
 
         // ── Database ──────────────────────────────────────────────────────────────
         // Nexus contesting foundation, boundary-completion pass: ILogbookService, not LogbookDb
@@ -185,7 +189,8 @@ namespace WSJTX_Controller
             Func<string> currentBand = null,
             Func<string> currentMode = null,
             Func<string, LookupRecord> lookupCallsign = null,
-            Action onQsoLogged = null)
+            Action onQsoLogged = null,
+            NexusLogOutbox nexusOutbox = null)
         {
             _ini              = ini;
             _qrzApiKey        = qrzApiKey        ?? (() => "");
@@ -205,6 +210,7 @@ namespace WSJTX_Controller
             _currentMode           = currentMode            ?? (() => null);
             _lookupCallsign        = lookupCallsign         ?? (call => null);
             _onQsoLogged           = onQsoLogged            ?? (() => { });
+            _nexusOutbox           = nexusOutbox;
 
             Text            = "Ham Radio Center — Logbook";
             MinimumSize     = new Size(720, 500);
@@ -229,6 +235,14 @@ namespace WSJTX_Controller
                 ?? new List<string>(EditLogRowOrderDlg.DefaultFields);
 
             BuildUi();
+
+            if (_nexusOutbox != null)
+            {
+                _nexusOutbox.DuplicateRefused += OnNexusDuplicateRefused;
+                this.Load += (s, e) => ShowHeldDuplicates();
+                this.FormClosed += (s, e) => _nexusOutbox.DuplicateRefused -= OnNexusDuplicateRefused;
+                _statusTb.KeyDown += StatusTb_KeyDown;
+            }
 
             this.KeyDown    += LogbookWindow_KeyDown;
             this.FormClosed += (s, e) => { _db?.Dispose(); _db = null; };
@@ -2505,6 +2519,48 @@ namespace WSJTX_Controller
         // Public so Controller can mirror QRZ/Club Log upload progress here too
         // (see Controller.ShowUploadStatus) -- lets someone watch the same
         // status while working in this window instead of only the main form.
+        // ── Duplicate contacts Nexus refused (logbook migration, D2) ────────────────────────
+
+        // Raised on whatever thread sent the contact; the Status field is updated on the UI
+        // thread. Status text only -- never spoken, never focused.
+        private void OnNexusDuplicateRefused(NexusLogOutbox.RefusedEntry entry)
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try { BeginInvoke((Action)ShowHeldDuplicates); } catch (InvalidOperationException) { }
+        }
+
+        private void ShowHeldDuplicates()
+        {
+            var held = _nexusOutbox?.Refused;
+            if (held == null || held.Count == 0) return;
+            SetStatus(DuplicateStatusText(held));
+        }
+
+        internal static string DuplicateStatusText(List<NexusLogOutbox.RefusedEntry> held)
+        {
+            var latest = held.OrderBy(r => r.RefusedUtc).Last();
+            var q = latest.Qso;
+            string when = DateTimeOffset.FromUnixTimeSeconds((long)q.WhenUnix).UtcDateTime.ToString("HH:mm");
+            string matched = latest.ExistingWhenUnix.HasValue
+                ? $", matches the contact logged at {DateTimeOffset.FromUnixTimeSeconds((long)latest.ExistingWhenUnix.Value).UtcDateTime:HH:mm} UTC"
+                : "";
+            return $"Duplicate not logged: {q.Call} {q.Band} {q.Mode} {when} UTC{matched}. " +
+                   $"{held.Count} held. Press Enter here to review.";
+        }
+
+        // Enter on the Status field opens the review, only while something is held.
+        private void StatusTb_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode != Keys.Enter || e.Modifiers != Keys.None) return;
+            if (_nexusOutbox == null || _nexusOutbox.Refused.Count == 0) return;
+            e.Handled = true;
+            e.SuppressKeyPress = true;
+            using (var dlg = new NexusRefusedReviewDlg(_nexusOutbox))
+                dlg.ShowDialog(this);
+            if (_nexusOutbox.Refused.Count > 0) ShowHeldDuplicates();
+            else SetStatus("No duplicate contacts held.");
+        }
+
         public void SetStatus(string msg)
         {
             SetStatus_Text = msg ?? "";
