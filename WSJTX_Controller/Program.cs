@@ -99,6 +99,13 @@ namespace WSJTX_Controller
                 NexusLogbookMigration.RunInteractive(migrate: cmdArgs.Contains("--nexus-logbook-migrate"));
                 return;
             }
+            // Read-only LoTW/QRZ sync diagnosis on copies (optional: four saved download files).
+            int diag = Array.IndexOf(cmdArgs, "--nexus-logbook-diagnose-sync");
+            if (diag >= 0)
+            {
+                NexusSyncDiagnosis.RunInteractive(cmdArgs.Skip(diag + 1).ToArray());
+                return;
+            }
             try
             {
                 Application.EnableVisualStyles();

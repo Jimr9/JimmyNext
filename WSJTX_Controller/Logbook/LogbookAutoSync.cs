@@ -172,7 +172,7 @@ namespace WSJTX_Controller
             bool clean = string.IsNullOrWhiteSpace(result.Errors);
             if (clean) _ini?.Write(lastRefreshIniKey, DateTime.UtcNow.ToString("o"));
             _logbookWindowStatus($"Auto-sync: {source} import complete: {result.NewQsos:N0} new, " +
-                $"{result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged." +
+                $"{result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged{result.UnmatchedText}." +
                 (clean ? "" : " (errors -- will retry this source in full next time)"));
             return clean;
         }

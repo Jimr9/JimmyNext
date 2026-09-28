@@ -20,6 +20,8 @@ namespace WSJTX_Controller
         private const string ApiUrl = "https://logbook.qrz.com/api";
 
         public string LastError { get; private set; }
+        // The last FETCH reply exactly as QRZ sent it (header + HTML-escaped ADIF; no API key).
+        public string LastRawResponse { get; private set; }
 
         // Fetches logbook as ADIF text.
         // If since is not null, only records created after that date are returned.
@@ -85,6 +87,11 @@ namespace WSJTX_Controller
                 LogFailure("HTTP error", LastError, response);
                 return null;
             }
+
+            // The whole reply as received (no API key in it), for sync diagnosis while Nexus keeps
+            // the log -- see NexusSyncDiagnostics.
+            LastRawResponse = response;
+            NexusSyncDiagnostics.Retain("qrz-fetch", response);
 
             // QRZ signals failure via RESULT=FAIL (general failure) or RESULT=AUTH
             // (bad/expired API key) -- any RESULT other than OK is a failure.

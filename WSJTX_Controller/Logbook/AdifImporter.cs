@@ -17,9 +17,16 @@ namespace WSJTX_Controller
         public int    Corrected       { get; set; }
         public int    Skipped         { get; set; }
         public string Errors          { get; set; } = "";
+        // While Nexus keeps the log: confirmations in a download that matched no logged contact
+        // (Nexus's own list, one line each; also saved under NexusLog\diagnostics).
+        public int    Unmatched       { get; set; }
+        public List<string> UnmatchedDetails { get; } = new List<string>();
+
+        // ", N not matched" for the status line, or "" when every row matched.
+        public string UnmatchedText => Unmatched > 0 ? $", {Unmatched:N0} not matched to a logged contact" : "";
 
         public override string ToString() =>
-            $"Processed {Processed}: {NewQsos} new, {NewlyConfirmed} newly confirmed, {Corrected} corrected, {Skipped} unchanged" +
+            $"Processed {Processed}: {NewQsos} new, {NewlyConfirmed} newly confirmed, {Corrected} corrected, {Skipped} unchanged{UnmatchedText}" +
             (string.IsNullOrEmpty(Errors) ? "" : $"; {Errors.Split('\n').Length} errors");
     }
 

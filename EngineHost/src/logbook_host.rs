@@ -467,6 +467,15 @@ fn summary_json(s: &tempo_core::reconcile::ReconcileSummary) -> serde_json::Valu
         "newlyCredited": s.newly_credited,
         "newlySubmitted": s.newly_submitted,
         "orphans": s.orphans.len(),
+        // Nexus's own list of the confirmations that matched no logged contact (its reason for
+        // each), so Jimmy can show and diagnose them -- read-only, as Nexus reported them.
+        "unmatched": s.orphans.iter().map(|o| serde_json::json!({
+            "call": o.call,
+            "band": o.band,
+            "mode": o.mode,
+            "whenUnix": o.when_unix,
+            "reason": o.reason,
+        })).collect::<Vec<_>>(),
     })
 }
 

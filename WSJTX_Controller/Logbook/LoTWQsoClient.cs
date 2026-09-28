@@ -98,6 +98,8 @@ namespace WSJTX_Controller
                 return null;
             }
 
+            // Kept as received while Nexus keeps the log, for sync diagnosis (no password in it).
+            NexusSyncDiagnostics.Retain(confirmedOnly ? "lotw-qsl-yes" : "lotw-qsl-no", response);
             return response;
         }
     }

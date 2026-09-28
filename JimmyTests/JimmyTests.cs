@@ -454,6 +454,15 @@ static class JimmyTests
         // Logbook migration Phases 5-6: Jimmy's logbook code running on Nexus, against a COPY of a
         // logbook in temp folders.
         //   --nexus-integration-tests <engine exe> <logbook copy> <rules folder> <empty work root> [port]
+        // Logbook sync diagnosis on copies:
+        //   --nexus-sync-diagnosis <engine exe> <start logbook.db> <empty work dir> <lotw yes> <lotw no> <nexus lotw yes> <qrz raw> [real read copy]
+        if (args.Length >= 8 && args[0] == "--nexus-sync-diagnosis")
+        {
+            string Read(string p) => File.Exists(p) ? File.ReadAllText(p) : "";
+            var rep = new NexusSyncDiagnosis.Reports { JimmyLotwYes = Read(args[4]), JimmyLotwNo = Read(args[5]), NexusLotwYes = Read(args[6]), QrzRaw = Read(args[7]) };
+            Console.WriteLine(NexusSyncDiagnosis.Diagnose(args[1], args[2], args[3], rep, args.Length >= 9 ? args[8] : null));
+            Environment.Exit(0);
+        }
         if (args.Length >= 5 && args[0] == "--nexus-integration-tests")
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);

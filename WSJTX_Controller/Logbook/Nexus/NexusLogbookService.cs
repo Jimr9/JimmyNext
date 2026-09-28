@@ -200,6 +200,15 @@ namespace WSJTX_Controller
                     result.NewlyConfirmed = N("newlyConfirmed");
                     result.Skipped = kind == null ? N("skipped") : Math.Max(0, N("matched") - N("newlyConfirmed"));
                     result.Processed = kind == null ? N("added") + N("skipped") : N("matched") + N("added") + N("orphans");
+                    result.Unmatched = kind == null ? 0 : N("orphans");
+                    if (d.TryGetProperty("unmatched", out var list) && list.ValueKind == System.Text.Json.JsonValueKind.Array)
+                        foreach (var u in list.EnumerateArray())
+                        {
+                            string S(string k) => u.TryGetProperty(k, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : "";
+                            long when = u.TryGetProperty("whenUnix", out var w) && w.ValueKind == System.Text.Json.JsonValueKind.Number ? w.GetInt64() : 0;
+                            result.UnmatchedDetails.Add($"{S("call")} {S("band")} {S("mode")} {DateTimeOffset.FromUnixTimeSeconds(when).UtcDateTime:yyyy-MM-dd HH:mm}Z: {S("reason")}");
+                        }
+                    NexusSyncDiagnostics.WriteUnmatched(source, result.UnmatchedDetails);
                 }
                 NexusLogbook.Refresh();
                 return result;
