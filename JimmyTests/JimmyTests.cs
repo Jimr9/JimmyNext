@@ -574,6 +574,140 @@ static class JimmyTests
         }
     }
 
+    // Export through Nexus, on a COPY of a Nexus log folder: whole-log and selected exports, the
+    // old Jimmy export compared field by field, and the new file re-imported into an empty log.
+    //   --nexus-export-tests <engine exe> <NexusLog copy> <work dir>
+    static void NexusExportTests(string engineExe, string logDir, string work)
+    {
+        Console.WriteLine("\n--- NexusExportTests (copy) ---");
+        Directory.CreateDirectory(work);
+        const int port = 58300, port2 = 58301;
+        string token = Guid.NewGuid().ToString("N");
+        var fieldRx = new System.Text.RegularExpressions.Regex(@"<([A-Za-z0-9_]+):(\d+)(?::[A-Za-z])?>");
+        List<Dictionary<string, string>> Parse(string text)
+        {
+            // ADIF lengths are UTF-8 bytes: walk the bytes, not the characters.
+            var list = new List<Dictionary<string, string>>();
+            var b = Encoding.UTF8.GetBytes(text);
+            int i = 0;
+            var f = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            bool inBody = text.IndexOf("<eoh>", StringComparison.OrdinalIgnoreCase) < 0;
+            while (i < b.Length)
+            {
+                if (b[i] != (byte)'<') { i++; continue; }
+                int close = Array.IndexOf(b, (byte)'>', i);
+                if (close < 0) break;
+                string tag = Encoding.ASCII.GetString(b, i + 1, close - i - 1);
+                i = close + 1;
+                if (tag.Equals("eoh", StringComparison.OrdinalIgnoreCase)) { inBody = true; f.Clear(); continue; }
+                if (tag.Equals("eor", StringComparison.OrdinalIgnoreCase)) { if (inBody && f.ContainsKey("CALL")) list.Add(f); f = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); continue; }
+                var parts = tag.Split(':');
+                if (parts.Length < 2 || !int.TryParse(parts[1], out int len)) continue;
+                len = Math.Min(len, b.Length - i);
+                f[parts[0]] = Encoding.UTF8.GetString(b, i, len);
+                i += len;
+            }
+            return list;
+        }
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = logDir;
+        NexusLogbook.TestPortOverride = port;
+        NexusLogbook.TestForceActive = true;
+        try
+        {
+            using (LogbookOnlyEngine.Start(engineExe, logDir, Path.Combine(work, "appdata"), port, token))
+            {
+                var client = new NexusLogClient(port);
+                var rows = client.Rows().Rows;
+                NexusLogbook.Refresh(force: true);
+                var svc = new NexusLogbookService();
+
+                // 1. Whole log, every source.
+                string all = Path.Combine(work, "export-all.adi");
+                var (written, note) = svc.ExportAdif(null, QsoRecord.KnownSources.ToList(), all);
+                var recs = Parse(File.ReadAllText(all));
+                Console.WriteLine($"  whole log: {written} written, note: {note ?? "(none)"}; Nexus holds {rows.Count}");
+                Check("whole-log export has every contact once", recs.Count == rows.Count &&
+                    new HashSet<string>(recs.Select(r => r.TryGetValue("APP_NEXUS_ID", out var v) ? v : "")).SetEquals(rows.Select(q => q.Id)), true);
+                Check("whole-log export in date/time order", recs.Select(r => r["QSO_DATE"] + (r.TryGetValue("TIME_ON", out var t) ? t : "")).SequenceEqual(
+                    recs.Select(r => r["QSO_DATE"] + (r.TryGetValue("TIME_ON", out var t) ? t : "")).OrderBy(x => x, StringComparer.Ordinal)), true);
+
+                // 2. Old Jimmy export (from the read copy) against the new, field by field.
+                var old = svc.GetAdifFieldDicts(null, QsoRecord.KnownSources.ToList());
+                var diffs = new SortedDictionary<string, (int Count, string Example)>();
+                int n = Math.Min(old.Count, recs.Count);
+                for (int i = 0; i < n; i++)
+                {
+                    var a = old[i]; var b = recs[i];
+                    foreach (var tag in a.Keys.Union(b.Keys, StringComparer.OrdinalIgnoreCase))
+                    {
+                        a.TryGetValue(tag, out var va); b.TryGetValue(tag, out var vb);
+                        string na = va ?? "", nb = vb ?? "";
+                        if (tag.Equals("TIME_ON", StringComparison.OrdinalIgnoreCase) || tag.Equals("TIME_OFF", StringComparison.OrdinalIgnoreCase))
+                        { na = na.Length >= 4 ? na.Substring(0, 4) : na; nb = nb.Length >= 4 ? nb.Substring(0, 4) : nb; }
+                        if (tag.Equals("FREQ", StringComparison.OrdinalIgnoreCase) && double.TryParse(na, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var fa)
+                            && double.TryParse(nb, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var fb) && Math.Abs(fa - fb) < 0.0000005) continue;
+                        if (string.Equals(na.Trim(), nb.Trim(), StringComparison.OrdinalIgnoreCase)) continue;
+                        if (tag.Equals("MODE", StringComparison.OrdinalIgnoreCase) && b.TryGetValue("SUBMODE", out var sm) && string.Equals(sm, va, StringComparison.OrdinalIgnoreCase)) continue;
+                        string kind = va == null ? "only in NEW" : vb == null ? "only in OLD" : "value differs";
+                        string key = $"{tag.ToUpperInvariant()} ({kind})";
+                        diffs.TryGetValue(key, out var d);
+                        diffs[key] = (d.Count + 1, d.Example ?? $"{a["CALL"]} {a["QSO_DATE"]}: old '{va}' new '{vb}'");
+                    }
+                }
+                Console.WriteLine($"  old export {old.Count} records, new {recs.Count}; field differences by kind:");
+                foreach (var d in diffs) Console.WriteLine($"     {d.Key}: {d.Value.Count}  e.g. {d.Value.Example}");
+                // TIME_ON only in the old file = a contact logged without a time (old wrote 0000).
+                bool keyFieldsSame = !diffs.Keys.Any(k => k.StartsWith("CALL ") || k.StartsWith("BAND ") || k.StartsWith("QSO_DATE ") || k == "TIME_ON (value differs)" || k == "TIME_ON (only in NEW)" || k.StartsWith("MODE ("));
+                Check("old and new exports agree on call, band, mode, date and time for every contact", old.Count == recs.Count && keyFieldsSame, true);
+
+                // 3. Selected contacts and a source filter pick the same rows the old export picks.
+                var someIds = new List<int>();
+                using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={NexusLogbook.ProjectionPath};Read Only=True;"))
+                {
+                    conn.Open();
+                    using (var cmd = new System.Data.SQLite.SQLiteCommand("SELECT id FROM qso ORDER BY qso_date DESC, time_on DESC LIMIT 5;", conn))
+                    using (var r = cmd.ExecuteReader()) while (r.Read()) someIds.Add(r.GetInt32(0));
+                }
+                string sel = Path.Combine(work, "export-selected.adi");
+                var (selWritten, _) = svc.ExportAdif(someIds, QsoRecord.KnownSources.ToList(), sel);
+                var oldSel = svc.GetAdifFieldDicts(someIds, QsoRecord.KnownSources.ToList());
+                var selRecs = Parse(File.ReadAllText(sel));
+                Check($"selected export: the same {oldSel.Count} contacts as the old export", selRecs.Count == oldSel.Count &&
+                    selRecs.Select(r => r["CALL"] + r["QSO_DATE"]).SequenceEqual(oldSel.Select(r => r["CALL"] + r["QSO_DATE"])), true);
+                string lotwOnly = Path.Combine(work, "export-lotw.adi");
+                var (lw, _) = svc.ExportAdif(null, new List<string> { "LOTW" }, lotwOnly);
+                Check($"source filter (LOTW): the same {svc.GetAdifFieldDicts(null, new List<string> { "LOTW" }).Count} contacts as the old export",
+                    lw == svc.GetAdifFieldDicts(null, new List<string> { "LOTW" }).Count, true);
+
+                // 4. The new file read back by Nexus into an empty log: same contacts, same confirmations.
+                string emptyDir = Path.Combine(work, "reimport", "NexusLog");
+                Directory.CreateDirectory(emptyDir);
+                string token2 = Guid.NewGuid().ToString("N");
+                using (LogbookOnlyEngine.Start(engineExe, emptyDir, Path.Combine(work, "appdata2"), port2, token2))
+                {
+                    var c2 = new NexusLogClient(port2);
+                    var imp = c2.Import(all);
+                    var back = c2.Rows().Rows;
+                    int L(List<NexusQso> x) => x.Count(q => q.QslRcvd.Lotw);
+                    int Q(List<NexusQso> x) => x.Count(q => q.QslRcvd.Qrz);
+                    int E(List<NexusQso> x) => x.Count(q => q.QslRcvd.Eqsl);
+                    Console.WriteLine($"  re-import: {imp.State} {imp.Detail}; LoTW {L(rows)}->{L(back)}, QRZ {Q(rows)}->{Q(back)}, eQSL {E(rows)}->{E(back)}");
+                    int folded = imp.Detail is System.Text.Json.JsonElement d2 && d2.TryGetProperty("skipped", out var sk) ? sk.GetInt32() : 0;
+                    Check($"re-imported export: every contact back ({rows.Count} = {back.Count} + {folded} same-minute duplicates Nexus's import folds) and the same LoTW/QRZ/eQSL confirmations",
+                        back.Count + folded == rows.Count && L(back) == L(rows) && Q(back) == Q(rows) && E(back) == E(rows), true);
+                    c2.Shutdown(token2);
+                }
+                client.Shutdown(token);
+            }
+        }
+        finally
+        {
+            NexusLogbook.Reset();
+            NexusLogbook.TestFolderOverride = null; NexusLogbook.TestPortOverride = null; NexusLogbook.TestForceActive = null;
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -798,6 +932,12 @@ static class JimmyTests
         if (args.Length >= 6 && args[0] == "--nexus-repair")
         {
             NexusRepair(args[1], args[2], args[3], args[4], args[5] == "apply");
+            Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
+        if (args.Length >= 4 && args[0] == "--nexus-export-tests")
+        {
+            NexusExportTests(args[1], args[2], args[3]);
             Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
             Environment.Exit(failed > 0 ? 1 : 0);
         }

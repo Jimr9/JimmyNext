@@ -1341,6 +1341,13 @@ namespace WSJTX_Controller
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
+                    if (_db is NexusLogbookService nexus)
+                    {
+                        // Nexus keeps the log: its own exporter writes the records.
+                        var (written, note) = nexus.ExportAdif(ids, sources, dlg.FileName);
+                        SetStatus($"Exported {written:N0} QSO(s) to {dlg.FileName}." + (note != null ? " " + note : ""));
+                        return;
+                    }
                     var fields = _db.GetAdifFieldDicts(ids, sources);
                     File.WriteAllText(dlg.FileName, AdifExporter.BuildFile(fields));
                     SetStatus($"Exported {fields.Count:N0} QSO(s) to {dlg.FileName}.");

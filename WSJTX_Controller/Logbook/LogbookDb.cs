@@ -1592,6 +1592,39 @@ WHERE id=@id;";
         // the Edit Log tab's display subset) for export. ids null/empty exports every QSO.
         // sources null/empty applies no source filter; otherwise only rows whose "source"
         // column matches one of the given values are included.
+        // The rows GetAdifFieldDicts would export (same ids / sources selection, same order), as
+        // each row's value of one extra-field tag, or null where the row has none -- used while
+        // Nexus keeps the log to pick Nexus's own exported records by APP_NEXUS_ID.
+        public List<string> GetExtraFieldForExport(string tag, IEnumerable<int> ids, IEnumerable<string> sources = null)
+        {
+            var idList = ids?.Distinct().ToList();
+            var sourceList = sources?.Distinct().ToList();
+            lock (_lock)
+            {
+                var result = new List<string>();
+                using (var cmd = _conn.CreateCommand())
+                {
+                    var clauses = new List<string>();
+                    if (idList != null && idList.Count > 0)
+                    {
+                        clauses.Add($"q.id IN ({string.Join(",", idList.Select((_, i) => $"@id{i}"))})");
+                        for (int i = 0; i < idList.Count; i++) cmd.Parameters.AddWithValue($"@id{i}", idList[i]);
+                    }
+                    if (sourceList != null && sourceList.Count > 0)
+                    {
+                        clauses.Add($"q.source IN ({string.Join(",", sourceList.Select((_, i) => $"@src{i}"))})");
+                        for (int i = 0; i < sourceList.Count; i++) cmd.Parameters.AddWithValue($"@src{i}", sourceList[i]);
+                    }
+                    cmd.Parameters.AddWithValue("@tag", tag);
+                    cmd.CommandText = "SELECT e.tag_value FROM qso q LEFT JOIN qso_extra_field e ON e.qso_id = q.id AND e.tag_name = @tag " +
+                        (clauses.Count > 0 ? "WHERE " + string.Join(" AND ", clauses) : "") + " ORDER BY q.qso_date, q.time_on;";
+                    using (var r = cmd.ExecuteReader())
+                        while (r.Read()) result.Add(r.IsDBNull(0) ? null : r.GetString(0));
+                }
+                return result;
+            }
+        }
+
         public List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null)
         {
             var idList = ids?.Distinct().ToList();

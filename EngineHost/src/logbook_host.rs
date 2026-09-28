@@ -668,6 +668,32 @@ pub struct FlushReply {
 /// LOG_FLUSH (while running) and the logbook half of SHUTDOWN: send again whatever the writer
 /// gave up on for a reason that can pass, then wait -- with every lock released -- for the
 /// writer and the log.adi mirror. Nexus's quit does the same (`flush_logbook`).
+/// LOG_EXPORT: the whole logbook as ADIF, written by Nexus's own exporter
+/// (`logexport::export_logbook`, the Nexus Logbook's Export: it waits briefly for this process's
+/// changes, then writes what the store holds) to `path` (a temp file, then renamed into place).
+/// The reply says how many recent changes the file lacks (`saving`: still on their way; `held`:
+/// refused by the store) so Jimmy can say so.
+pub fn log_export(engine: &Mutex<Engine>, args: LogFileArgs) -> serde_json::Value {
+    let source = {
+        let e = lock(engine);
+        tempo_app::logexport::Source::of(&e)
+    };
+    match tempo_app::logexport::export_logbook(&source, "adif", None, None) {
+        Ok(x) => {
+            let tmp = format!("{}.part", args.path);
+            let written = std::fs::write(&tmp, x.text.as_bytes()).and_then(|_| std::fs::rename(&tmp, &args.path));
+            match written {
+                Ok(()) => serde_json::json!({ "state": "saved", "saving": x.saving, "held": x.held, "bytes": x.text.len() }),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&tmp);
+                    serde_json::json!({ "state": "error", "why": format!("could not write {}: {e}", args.path) })
+                }
+            }
+        }
+        Err(e) => serde_json::json!({ "state": "error", "why": e }),
+    }
+}
+
 pub fn flush(engine: &Mutex<Engine>, cap: Duration) -> FlushReply {
     let unsaved = {
         let mut e = lock(engine);

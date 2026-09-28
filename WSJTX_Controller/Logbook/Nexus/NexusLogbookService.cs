@@ -428,5 +428,45 @@ namespace WSJTX_Controller
         public Dictionary<int, string> GetDxccCountryNames() => R(db => db.GetDxccCountryNames(), new Dictionary<int, string>());
         public List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null) =>
             R(db => db.GetAdifFieldDicts(ids, sources), new List<Dictionary<string, string>>());
+
+        // Export while Nexus keeps the log: Nexus's own exporter writes the whole log (its full
+        // records, the file other programs read), and the records Jimmy's selection names --
+        // the same rows and sources, in the same order, as Jimmy's own export picks them from the
+        // read copy -- are kept exactly as Nexus wrote them. Returns (records written, a note for
+        // the status line, or null).
+        public (int Written, string Note) ExportAdif(IList<int> ids, IList<string> sources, string outPath)
+        {
+            var wanted = R(db => db.GetExtraFieldForExport("APP_NEXUS_ID", ids, sources), new List<string>());
+            string tmp = Path.Combine(Path.GetTempPath(), $"jimmy-nexus-export-{Guid.NewGuid():N}.adi");
+            try
+            {
+                var reply = Client.Export(tmp);
+                if (reply.State != "saved") throw new InvalidOperationException($"Nexus export: {reply.State} {reply.Why}".Trim());
+                string text = File.ReadAllText(tmp, Encoding.UTF8);
+                var m = System.Text.RegularExpressions.Regex.Match(text, "<eoh>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                string header = m.Success ? text.Substring(0, m.Index + m.Length) : "";
+                var byId = new Dictionary<string, string>(StringComparer.Ordinal);
+                foreach (var rec in System.Text.RegularExpressions.Regex.Split(m.Success ? text.Substring(m.Index + m.Length) : text, "<eor>",
+                                                                               System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                {
+                    var id = System.Text.RegularExpressions.Regex.Match(rec, @"<APP_NEXUS_ID:(\d+)>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (id.Success) byId[rec.Substring(id.Index + id.Length, int.Parse(id.Groups[1].Value))] = rec.Trim();
+                }
+                var sb = new StringBuilder(header).Append('\n');
+                int written = 0, missing = 0;
+                foreach (var nid in wanted)
+                {
+                    if (nid != null && byId.TryGetValue(nid, out var rec)) { sb.Append(rec).Append(" <eor>\n"); written++; }
+                    else missing++;
+                }
+                File.WriteAllText(outPath, sb.ToString(), new UTF8Encoding(false));
+                var notes = new List<string>();
+                if (missing > 0) notes.Add($"{missing} selected contact(s) not in Nexus's file");
+                if (reply.Saving > 0) notes.Add($"{reply.Saving} recent change(s) still being saved are not in the file");
+                if (reply.Held > 0) notes.Add($"{reply.Held} change(s) the logbook refused are not in the file");
+                return (written, notes.Count > 0 ? string.Join("; ", notes) + "." : null);
+            }
+            finally { try { File.Delete(tmp); } catch { } }
+        }
     }
 }

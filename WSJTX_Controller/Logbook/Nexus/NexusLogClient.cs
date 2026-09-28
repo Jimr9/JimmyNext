@@ -111,6 +111,14 @@ namespace WSJTX_Controller
         public ulong? ExistingWhenUnix { get; set; }
     }
 
+    public class NexusExportReply
+    {
+        public string State { get; set; }   // saved | error | unknown
+        public string Why { get; set; }
+        public int Saving { get; set; }     // recent changes the file lacks, still being saved
+        public int Held { get; set; }       // recent changes the file lacks, refused by the store
+    }
+
     public class NexusWriteReply
     {
         // saved | unconfirmed | changed | gone | busy | error | closed -- or "unknown" when no whole reply came.
@@ -168,6 +176,15 @@ namespace WSJTX_Controller
         // kind: "lotw" | "qrz" | "eqsl". A LoTW file must be LoTW's download exactly as received
         // (its "ARRL Logbook of the World Status Report" header is how Nexus knows QSL_RCVD there
         // means LoTW, not a paper card).
+        // Nexus's own ADIF export of the whole log, written by EngineHost to adifPath.
+        public NexusExportReply Export(string adifPath)
+        {
+            string resp = Send("LOG_EXPORT " + JsonSerializer.Serialize(new { path = adifPath }, Json), WriteTimeoutMs);
+            if (resp == null || !resp.StartsWith("{")) return new NexusExportReply { State = "unknown", Why = resp ?? "no reply" };
+            try { return JsonSerializer.Deserialize<NexusExportReply>(resp, Json); }
+            catch (JsonException e) { return new NexusExportReply { State = "unknown", Why = e.Message }; }
+        }
+
         public NexusWriteReply Merge(string kind, string adifPath) =>
             Write("LOG_MERGE " + JsonSerializer.Serialize(new { path = adifPath, kind }, Json));
 

@@ -1599,6 +1599,12 @@ fn handle_control_connection(
                 Ok(r) => { let _ = writeln!(stream, "{}", serde_json::to_string(&r).unwrap_or_default()); }
                 Err(e) => { let _ = writeln!(stream, "ERR {name}: {e}"); }
             }
+        } else if let Some(json) = line.strip_prefix("LOG_EXPORT ") {
+            match (&log_host, serde_json::from_str::<logbook_host::LogFileArgs>(json)) {
+                (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOG_EXPORT args: {e}"); }
+                (Some(_), Ok(a)) => { let _ = writeln!(stream, "{}", logbook_host::log_export(&engine, a)); }
+            }
         } else if line == "LOG_FLUSH" {
             match &log_host {
                 None => { let _ = writeln!(stream, "ERR logbook not enabled"); }
