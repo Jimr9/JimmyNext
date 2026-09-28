@@ -62,19 +62,25 @@ function Git-Quiet { param([string[]]$a) $prev=$ErrorActionPreference; $ErrorAct
 
 # --- upstream refs via ls-remote (no clone, no fetch) ----------------------------------
 Write-Host "Querying $repo ..." -ForegroundColor DarkGray
-$lsTags = Git-Quiet @("ls-remote","--tags","--refs",$repo)
+# No --refs: an ANNOTATED tag (v1.15.0 is one) lists as its tag-object hash, and only the
+# peeled "^{}" line carries the commit the pin names. The peeled line wins when present.
+$lsTags = Git-Quiet @("ls-remote","--tags",$repo)
 $lsHead = Git-Quiet @("ls-remote",$repo,"HEAD","refs/heads/main")
 
 $stableTag = $null; $stableCommit = $null
-$verRe = [regex]'refs/tags/(v(\d+)\.(\d+)\.(\d+))$'
-$best = $null
+$verRe = [regex]'refs/tags/(v(\d+)\.(\d+)\.(\d+))(\^\{\})?$'
+$tagCommits = @{}
 foreach ($l in $lsTags) {
     $m = $verRe.Match($l)
     if (-not $m.Success) { continue }
+    $tag = $m.Groups[1].Value
+    if ($m.Groups[5].Success -or -not $tagCommits.ContainsKey($tag)) { $tagCommits[$tag] = $l.Split("`t")[0] }
+}
+$best = $null
+foreach ($tag in $tagCommits.Keys) {
+    $m = $verRe.Match("refs/tags/$tag")
     $key = [version]("{0}.{1}.{2}" -f $m.Groups[2].Value,$m.Groups[3].Value,$m.Groups[4].Value)
-    if ($null -eq $best -or $key -gt $best.Key) {
-        $best = @{ Key = $key; Tag = $m.Groups[1].Value; Commit = $l.Split("`t")[0] }
-    }
+    if ($null -eq $best -or $key -gt $best.Key) { $best = @{ Key = $key; Tag = $tag; Commit = $tagCommits[$tag] } }
 }
 if ($best) { $stableTag = $best.Tag; $stableCommit = $best.Commit }
 

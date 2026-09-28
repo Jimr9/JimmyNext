@@ -1,8 +1,8 @@
 diff --git a/src/dto.rs b/src/dto.rs
-index 59c6f9ef..8012ef96 100644
+index 8a4133b4..26e7b828 100644
 --- a/src/dto.rs
 +++ b/src/dto.rs
-@@ -953,6 +953,22 @@ pub struct RadioStatus {
+@@ -1301,6 +1301,22 @@ pub struct RadioStatus {
      /// why the waterfall is blank instead of failing silently.
      #[serde(default)]
      pub audio_error: Option<String>,
@@ -22,27 +22,27 @@ index 59c6f9ef..8012ef96 100644
 +    /// episode (identical wording included) still announces.
 +    #[serde(default)]
 +    pub fake_it_restore_warning_id: Option<u64>,
-     /// A problem with the RF SCOPE source, separate from `audio_error` on purpose: they have
-     /// different cures and can be true at once. `None` = nothing to say.
+     /// Why this station is NOT sharing its radio, when the CAT broker asked for its port and
+     /// could not have it — `None` = it is serving, or sharing is switched off (#165).
      ///
 diff --git a/src/lib.rs b/src/lib.rs
-index 43243555..292061b1 100644
+index 630a530f..f132acff 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -312,6 +312,8 @@ impl AppState {
+@@ -336,6 +336,8 @@ impl AppState {
                  cw_wpm: 25,
                  split_tx_mhz: None,
                  audio_error: None,
 +                fake_it_restore_warning: None,
 +                fake_it_restore_warning_id: None,
+                 cat_share_error: None,
                  scope_error: None,
                  scope_span_refused: None,
-                 scope_mode_code: None,
 diff --git a/tests/fixtures/station_identity_snapshot.json b/tests/fixtures/station_identity_snapshot.json
-index 846c3918..548c48b7 100644
+index 83f52ff0..fb48bffe 100644
 --- a/tests/fixtures/station_identity_snapshot.json
 +++ b/tests/fixtures/station_identity_snapshot.json
-@@ -61,6 +61,8 @@
+@@ -67,6 +67,8 @@
      "cwWpm": 25,
      "decodeDepth": 3,
      "dialMhz": 14.074,
@@ -50,12 +50,12 @@ index 846c3918..548c48b7 100644
 +    "fakeItRestoreWarningId": null,
      "filterWidthHz": null,
      "flexDaxTx": false,
-     "holdTxFreq": false,
+     "flexMeterStream": false,
 diff --git a/tests/fixtures/watch_identity_snapshot.json b/tests/fixtures/watch_identity_snapshot.json
-index 25bb9746..204fa385 100644
+index 05028f0c..89949eb3 100644
 --- a/tests/fixtures/watch_identity_snapshot.json
 +++ b/tests/fixtures/watch_identity_snapshot.json
-@@ -57,6 +57,8 @@
+@@ -63,6 +63,8 @@
      "cwWpm": 25,
      "decodeDepth": 3,
      "dialMhz": 14.08,
@@ -63,4 +63,4 @@ index 25bb9746..204fa385 100644
 +    "fakeItRestoreWarningId": null,
      "filterWidthHz": null,
      "flexDaxTx": false,
-     "holdTxFreq": false,
+     "flexMeterStream": false,

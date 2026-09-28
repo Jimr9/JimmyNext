@@ -1,8 +1,8 @@
 diff --git a/src/settings.rs b/src/settings.rs
-index 0505b6cd..247077a0 100644
+index d5bc2789..dde41bb9 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
-@@ -1250,6 +1250,29 @@ pub struct Settings {
+@@ -1313,6 +1313,29 @@ pub struct Settings {
      /// (flat mirror — see [`RadioProfile::data_modes_plain_ssb`]). Default off.
      #[serde(default)]
      pub data_modes_plain_ssb: bool,
@@ -32,7 +32,7 @@ index 0505b6cd..247077a0 100644
      /// Hold the DATA submode (FM-D on FM, USB-D/LSB-D on HF) for as long as the SSTV receiver
      /// is running, for the active radio (flat mirror — see
      /// [`RadioProfile::sstv_hold_data_submode`]). Default off.
-@@ -3927,6 +3950,9 @@ impl Default for Settings {
+@@ -4117,6 +4140,9 @@ impl Default for Settings {
              yaesu_rf_scope: false,
              icom_data_mode: 1,
              data_modes_plain_ssb: false,

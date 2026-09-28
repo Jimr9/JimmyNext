@@ -1,5 +1,5 @@
 diff --git a/src/rig.rs b/src/rig.rs
-index c2bb2f26..5cb5c8f8 100644
+index 7022cce1..2eae58b0 100644
 --- a/src/rig.rs
 +++ b/src/rig.rs
 @@ -61,8 +61,18 @@ pub enum PttMode {
@@ -23,7 +23,7 @@ index c2bb2f26..5cb5c8f8 100644
  }
  /// rigctld command line to set the dial frequency (Hz).
  pub fn freq_line(hz: u64) -> String {
-@@ -389,6 +399,23 @@ pub struct Rig {
+@@ -523,6 +533,23 @@ pub struct Rig {
      /// uses a much shorter per-command deadline — a stalled serial read then can't hold the radio
      /// loop (and the fast dial poll) for 2.5 s. Default false (serial / local).
      slow_transport: bool,
@@ -47,7 +47,7 @@ index c2bb2f26..5cb5c8f8 100644
      #[cfg(test)]
      before_remote_write: Option<Box<dyn FnOnce() + Send>>,
  }
-@@ -424,6 +451,8 @@ impl Rig {
+@@ -558,6 +585,8 @@ impl Rig {
              serial: None,
              keyed: false,
              slow_transport: false,
@@ -56,7 +56,7 @@ index c2bb2f26..5cb5c8f8 100644
              #[cfg(test)]
              before_remote_write: None,
          }
-@@ -435,6 +464,20 @@ impl Rig {
+@@ -569,6 +598,20 @@ impl Rig {
      pub fn set_slow_transport(&mut self, slow: bool) {
          self.slow_transport = slow;
      }
@@ -77,7 +77,7 @@ index c2bb2f26..5cb5c8f8 100644
      /// Change how this rig is keyed WITHOUT touching its (already-open) CAT control channel. Used by
      /// the dual-radio handoff: a monitor rig is opened read-only (`PttMode::Vox`), so when it's adopted
      /// as the ACTIVE radio it must be switched to the profile's real PTT mode (`Cat`/`Serial`) or
-@@ -737,7 +780,7 @@ impl Rig {
+@@ -958,7 +1001,7 @@ impl Rig {
                  } else {
                      // PTT is time-critical: a fixed 700 ms deadline (not the slow-transport
                      // 2.5 s read window) so the un-key can't hang the radio loop.
@@ -86,7 +86,7 @@ index c2bb2f26..5cb5c8f8 100644
                          Ok(reply) if reply_ok(&reply) || reply.is_empty() => Ok(()),
                          Ok(reply) => Err(std::io::Error::other(format!(
                              "rigctld PTT error: {reply:?}"
-@@ -966,6 +1009,16 @@ impl Rig {
+@@ -1191,6 +1234,16 @@ impl Rig {
      /// Read a rig LEVEL (e.g. "RFPOWER" → 0.0–1.0) via rigctld `l NAME`.
      /// CAT-only; errors on FakeIt/none like `read_freq`.
      pub fn read_level(&mut self, name: &str) -> std::io::Result<f32> {
@@ -103,7 +103,7 @@ index c2bb2f26..5cb5c8f8 100644
          if self.control.is_none() {
              return Err(std::io::Error::other("not a CAT rig"));
          }
-@@ -1241,6 +1294,14 @@ impl Rig {
+@@ -1526,6 +1579,14 @@ impl Rig {
      }
      /// Set RF output power as a 0.0–1.0 fraction (Hamlib `RFPOWER`).
      pub fn set_power(&mut self, frac: f32) -> std::io::Result<()> {
@@ -118,7 +118,7 @@ index c2bb2f26..5cb5c8f8 100644
          self.cat(&level_line(
              "RFPOWER",
              &format!("{:.3}", frac.clamp(0.0, 1.0)),
-@@ -1387,8 +1448,10 @@ mod tests {
+@@ -1740,8 +1801,10 @@ mod tests {
  
      #[test]
      fn command_lines_match_rigctld_protocol() {
@@ -131,7 +131,7 @@ index c2bb2f26..5cb5c8f8 100644
          assert_eq!(freq_line(14_074_000), "F 14074000\n");
          assert_eq!(mode_line("USB", 0), "M USB 0\n");
          assert_eq!(mode_line("FM", 0), "M FM 0\n");
-@@ -1402,6 +1465,54 @@ mod tests {
+@@ -1755,6 +1818,54 @@ mod tests {
          assert!(!reply_ok("RPRT -1\n"));
      }
  
@@ -187,10 +187,10 @@ index c2bb2f26..5cb5c8f8 100644
      ///
      /// Hamlib's Yaesu `newcat_send_morse` reads a ONE-character message as a keyer-memory
 diff --git a/src/rig/remote/release.rs b/src/rig/remote/release.rs
-index 2b39cf3b..14d46190 100644
+index e3c30498..11d6c37d 100644
 --- a/src/rig/remote/release.rs
 +++ b/src/rig/remote/release.rs
-@@ -34,7 +34,7 @@ impl Rig {
+@@ -45,7 +45,7 @@ impl Rig {
                  PttMode::Cat => {
                      let reply = self
                          .command_permitted(

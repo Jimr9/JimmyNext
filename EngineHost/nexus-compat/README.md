@@ -27,6 +27,31 @@ tool versions) into `EngineHost/.nexus-src-info.json`. This process exists becau
 pre-v1.10.3 integration drifted ~175 commits behind `main` silently -- exact pinning gives
 reproducibility, this gives visibility.
 
+## Ten-patch re-assessment -- 2026-09-28 (v1.14.0 -> v1.15.0 upgrade)
+
+Re-checked against the new pin `v1.15.0` (`f47d43cc`, an ANNOTATED tag -- tag object
+`458297d7`), 595 commits ahead of `v1.14.0` (`12efe3d2`). Each patch's "How to check" was run
+against the actual v1.15.0 files. **Result: all ten KEEP; one patch SHRANK.**
+
+- `tempo-core-message.patch`: the upstream #303 backport (`is_call_field`, both callsign fields
+  must be callsigns) is now IN the base, so that part was removed -- with its test and its
+  `is_signoff` doc/test changes. Only the no-grid part remains (`is_plain_std_call` + the
+  two-word Type 1 branch, placed before upstream's own #303-gated three-token arm).
+  Upstream still asserts `Msg::parse("CQ W1AW")` is `Msg::Other`, so the no-grid part (and its
+  companion `tempo-core-inbox.patch`) is still needed.
+- `tempo-app-snapshot.patch`, `tempo-app-engine.patch`, `tempo-audio-service.patch`:
+  re-anchored only. Upstream added `cat_share_error` (#165) beside `audio_error` in
+  `RadioStatus`, the `Engine` struct/init and the snapshot emit, and new TX-meter capability
+  fields beside `level_misses` in `RadioLoop`. Every `+`/`-` payload line is byte-identical to
+  the v1.14.0 patches (checked) except one test line in `tempo-app-engine.patch`: upstream
+  renamed the test helper `Engine::get_log()` to `stored_log()` (`test_util.rs`), so the Jimmy
+  test `an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger` now calls
+  `stored_log()`. Found only by compiling the lib tests -- a clean patch apply and a clean
+  `cargo build` both missed it.
+- The other six applied with offsets only.
+- `scripts/nexus-status.ps1` now reads peeled (`^{}`) tag refs, so an annotated stable tag no
+  longer shows a false "pin differs from stable" result.
+
 ## Eight-patch re-assessment -- 2026-09-24 (v1.10.3 -> v1.14.0 upgrade)
 
 Re-checked against the new pin `v1.14.0` (`12efe3d2`), ~1369 commits ahead of the prior pin
@@ -56,17 +81,17 @@ count decreases as upstream matures; nothing here is superseded at v1.14.0.
 
 ## Current pin
 
-`pin.txt` points at the **newest official stable release tag, `v1.14.0`**, by its exact commit:
+`pin.txt` points at the **newest official stable release tag, `v1.15.0`**, by its exact commit:
 
 ```
-NEXUS_TAG=v1.14.0
-NEXUS_COMMIT=12efe3d2970729465add40d62cecd76bbaf5b63f
+NEXUS_TAG=v1.15.0
+NEXUS_COMMIT=f47d43cc1053b90b882785dbc95a49c32395a890
 ```
 
-`NEXUS_COMMIT` is the real lock; `NEXUS_TAG` is the honest human reference. `v1.14.0` is a
-lightweight tag pointing straight at `12efe3d2` (2026-09-20). `prepare-nexus.ps1` clones
-`--branch v1.14.0 --single-branch` (a lightweight tag checks out in detached HEAD, which is
-fine) and still verifies the resolved `HEAD` equals `NEXUS_COMMIT`. The `NEXUS_TAG=main`
+`NEXUS_COMMIT` is the real lock; `NEXUS_TAG` is the honest human reference. `v1.15.0` is an
+ANNOTATED tag (tag object `458297d7`) whose peeled commit is `f47d43cc` (2026-09-26).
+`prepare-nexus.ps1` clones `--branch v1.15.0 --single-branch` (the tag checks out in detached
+HEAD, which is fine) and still verifies the resolved `HEAD` equals `NEXUS_COMMIT`. The `NEXUS_TAG=main`
 branch-and-detach path in that script is retained for any future exact-commit-on-`main` pin
 but is not used here.
 
@@ -231,7 +256,7 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.14.0`, commit `12efe3d2`)
+## Current patches (against Nexus `v1.15.0`, commit `f47d43cc`)
 
 Ten patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream
@@ -482,21 +507,15 @@ right thing and keeps the grid unknown. Updates the four upstream assertions tha
 rule and adds free-text negatives from the live log plus one sequencer test. EngineHost's
 `decode_semantics.rs` needs no change (it calls `Msg::parse`).
 
-**Also carries (2026-09-26) a BACKPORT of upstream #303** -- kd9taw/Nexus `0c68f705` + follow-up
-`df2c9d75` (post-v1.14.0, on `main`): a standard message needs BOTH callsign fields to be
-callsigns (`is_call_field` = `looks_like_call`, DE/CQ/QRZ exempt in the first field only, as
-`pack77_1` does; the Field Day arm exempts nothing). Before it, free text such as `KD9TAW HI -07`
-or `KD9TAW DE EM73` parsed as a message addressed to us from a station called "HI"/"DE", and the
-sequencer acted on it (verified on this pin: a CQ run left `CallingCq` for "DE"). Backported, not
-upgraded to: only `message.rs` changed upstream; the pin stays v1.14.0. Upstream's deliberate cost
-comes with it: a free-text goodbye ("HPE CUAGN 73") no longer counts as a signoff. The follow-up's
-unresolved-hash control (`<...>` stays a callsign field) is included, plus Jimmy controls for the
-multi-answer part/split-half shapes.
+**Upstream #303 is now in the base (v1.15.0).** From 2026-09-26 to 2026-09-28 this patch also
+carried a backport of kd9taw/Nexus `0c68f705` + `df2c9d75` (both callsign fields must be
+callsigns, `is_call_field`). v1.15.0 contains it, so that part was removed at the upgrade; the
+no-grid branch now sits directly before upstream's own `is_call_field`-gated three-token arm.
 
 **Obsoleted when:** upstream `Msg::parse("CQ W1AW")` returns a `Msg::Cq` (and `"W9XYZ K2DEF"` a
-`Msg::Grid`) -- and, for the #303 part, when the pin reaches a revision containing `0c68f705`.
+`Msg::Grid`).
 **How to check:** `grep -n 'parse("CQ W1AW")' crates/tempo-core/src/message.rs` -- upstream
-asserting `Msg::Other` there means the bug is still present; `grep -n "fn is_call_field"` for #303.
+asserting `Msg::Other` there means the bug is still present.
 
 **Companion:** the no-grid rule also matches a Nexus Tempo chat chunk whose header happens to read
 as a callsign (`A13DE W9XYZ` = header `A13` + payload `DE W9XYZ`) -- see `tempo-core-inbox.patch`
