@@ -1218,6 +1218,20 @@ namespace WSJTX_Controller
             // Logbook migration: while Nexus owns the logbook, keep its outbox sent and the read
             // projection current (no-op otherwise).
             NexusLogbook.StartWorker(msg => wsjtxClient?.DebugOutput(msg));
+            if (NexusLogbook.Active)
+            {
+                NexusLogbook.LogBecameReady += () => SafeBeginInvoke(() =>
+                {
+                    RefreshStillNeedCache();
+                    RefreshLogbookWindowIfOpen();
+                    if (_announcedLogbookLoading) { _announcedLogbookLoading = false; ShowMsg("Logbook ready", false); }
+                });
+                if (!NexusLogbook.LogReady)
+                {
+                    _announcedLogbookLoading = true;
+                    ShowMsg("Logbook loading; new-station alerts paused", false);
+                }
+            }
             wsjtxClient.rawPriorityTags = rawPriorityTags;
             wsjtxClient.cmdPrompts = cmdPrompts;
             wsjtxClient.usePskReporter = usePskReporter;
@@ -3342,9 +3356,22 @@ namespace WSJTX_Controller
         // awards), so BandAppliesToLiveTag() gates the whole thing on the current band actually
         // being one of the award's own bands -- otherwise the current band would get silently
         // substituted for the award's band, tagging decodes on the wrong band as "needed" for it.
+        // Set when "Logbook loading" was announced, so "Logbook ready" is said once, only then.
+        private bool _announcedLogbookLoading;
+
         public void RefreshStillNeedCache()
         {
             if (wsjtxClient == null) return;
+
+            // Logbook migration: while the Nexus logbook is loading there is no real log to judge
+            // "still needed" against -- no tags, no award alerts, until it is ready (LogBecameReady
+            // calls this again).
+            if (!NexusLogbook.LogReady)
+            {
+                wsjtxClient.activeAwardTags = new Dictionary<string, WsjtxClient.ActiveAwardTag>();
+                wsjtxClient.RefreshQueuedAwardTags();
+                return;
+            }
 
             var tags = new Dictionary<string, WsjtxClient.ActiveAwardTag>();
             foreach (string ruleId in activeAwardRuleIds)

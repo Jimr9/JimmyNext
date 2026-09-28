@@ -236,6 +236,9 @@ namespace WSJTX_Controller
 
             BuildUi();
 
+            if (NexusLogbook.Active && !NexusLogbook.LogReady)
+                this.Load += (s, e) => SetStatus("Logbook loading. Press F5 when it is ready.");
+
             if (_nexusOutbox != null)
             {
                 _nexusOutbox.DuplicateRefused += OnNexusDuplicateRefused;

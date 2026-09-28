@@ -336,6 +336,8 @@ namespace WSJTX_Controller
         internal static string FormatStatus(OtaSpotAnnotation a)
         {
             if (a == null) return "";
+            // Logbook migration: while the Nexus logbook is loading, worked-before is unknown.
+            if (!NexusLogbook.LogReady) return "log loading";
             if (a.NeededForAwardCount > 0)
                 return $"needed for {a.NeededForAwardCount} award{(a.NeededForAwardCount == 1 ? "" : "s")}";
             return a.WorkedBefore ? "worked" : "not worked";

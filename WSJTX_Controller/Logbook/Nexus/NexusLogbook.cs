@@ -82,6 +82,25 @@ namespace WSJTX_Controller
             }
         }
 
+        // Whether the log Jimmy reads is REAL: always with Jimmy's own logbook; while Nexus owns it,
+        // only once a projection built from Nexus exists. Not ready = "logbook loading": nothing may
+        // treat the empty placeholder as an empty log (no "new station", no "still needed").
+        // A complete earlier projection (from the last session) counts as ready.
+        public static bool LogReady => !Active || HasRealProjection;
+
+        private const string PlaceholderName = "p-00000000000000000-empty.db";
+        private static bool HasRealProjection
+        {
+            get
+            {
+                string p = ProjectionPath;
+                return p != null && !string.Equals(Path.GetFileName(p), PlaceholderName, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        // Raised (on a worker thread) when the log goes from loading to ready.
+        public static event Action LogBecameReady;
+
         // What readers open while Nexus owns the log: the newest projection, or -- before the first
         // one exists (a first start before the engine answers) -- an EMPTY one. Never Jimmy's own
         // logbook.db: that file is frozen at the move and must not be read as if it were current.
@@ -95,7 +114,7 @@ namespace WSJTX_Controller
                 lock (_lock)
                 {
                     Directory.CreateDirectory(ProjectionFolder);
-                    string empty = Path.Combine(ProjectionFolder, "p-00000000000000000-empty.db");
+                    string empty = Path.Combine(ProjectionFolder, PlaceholderName);
                     if (!File.Exists(empty)) NexusMigration.Rebuild(new List<NexusQso>(), empty);
                     return empty;
                 }
@@ -113,6 +132,7 @@ namespace WSJTX_Controller
             {
                 if (!force && rows.Revision == _projectionRevision && ProjectionPath != null) return true;
             }
+            bool wasReady = HasRealProjection;
             Directory.CreateDirectory(ProjectionFolder);
             string path = Path.Combine(ProjectionFolder, $"p-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{rows.Revision}.db");
             NexusMigration.Rebuild(rows.Rows, path, StableRowId(rows.Rows));
@@ -129,6 +149,7 @@ namespace WSJTX_Controller
                     if (f != path) TryDelete(f);
                 if (old != null && old != path) TryDelete(old);
             }
+            if (!wasReady) { try { LogBecameReady?.Invoke(); } catch { } }
             return true;
         }
 

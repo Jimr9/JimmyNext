@@ -203,6 +203,46 @@ static class JimmyTests
         }
     }
 
+    // While the Nexus logbook is loading (no read copy built from Nexus yet), an empty placeholder
+    // must never be taken for an empty log: classification says "not known", never "new".
+    static void NexusLogbookLoadingTests()
+    {
+        Console.WriteLine("\n--- NexusLogbookLoadingTests ---");
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy-loading-" + Guid.NewGuid().ToString("N"));
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = Path.Combine(dir, "NexusLog");
+        NexusLogbook.TestForceActive = true;
+        try
+        {
+            Check("no read copy yet -> logbook loading", NexusLogbook.LogReady, false);
+            var svc = new NexusLogbookService();
+            svc.TotalQsos();   // readers get the empty placeholder...
+            Check("...and the placeholder does not make it ready", NexusLogbook.LogReady, false);
+            var engine = new ClassificationEngine(svc, null);
+            var c = engine.Classify("W1AW", "20m");
+            Check("loading: a station is NOT classified new (call, any band / this band)", c.IsNewCallAnyBand || c.IsNewCallOnBand, false);
+            Check("loading: no new country claimed", c.IsNewCountry || c.IsNewCountryOnBand, false);
+
+            // A real read copy (as built from Nexus) holding one contact with W1AW on 20m.
+            Directory.CreateDirectory(NexusLogbook.ProjectionFolder);
+            NexusMigration.Rebuild(new List<NexusQso> { new NexusQso { Id = "x", Call = "W1AW", Band = "20m", Mode = "FT8", WhenUnix = 1_790_000_000, TimeKnown = true } },
+                Path.Combine(NexusLogbook.ProjectionFolder, "p-20260928000000000-1.db"));
+            NexusLogbook.Reset();
+            NexusLogbook.TestFolderOverride = Path.Combine(dir, "NexusLog");
+            Check("with a read copy built from Nexus -> ready", NexusLogbook.LogReady, true);
+            engine = new ClassificationEngine(new NexusLogbookService(), null);
+            Check("ready: the worked station is not new on its band", engine.Classify("W1AW", "20m").IsNewCallOnBand, false);
+            Check("ready: an unworked station is new", engine.Classify("K9XYZ", "20m").IsNewCallAnyBand, true);
+        }
+        finally
+        {
+            NexusLogbook.Reset();
+            NexusLogbook.TestForceActive = null;
+            NexusLogbook.TestFolderOverride = null;
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -796,6 +836,7 @@ static class JimmyTests
         NexusMigrationMappingTests();
         RuleConfirmationSourcesTests();
         NexusDuplicateStatusTests();
+        NexusLogbookLoadingTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");

@@ -90,8 +90,15 @@ namespace WSJTX_Controller
                     NexusLogbook.TestFolderOverride = folder;
                     foreach (var f in Directory.GetFiles(NexusLogbook.ProjectionFolder)) File.Delete(f);
                     Check("with the read cache deleted, reads are empty (never an old Jimmy file)", svc.TotalQsos() == 0);
+                    Check("...and the log counts as LOADING, not as an empty log", !NexusLogbook.LogReady);
+                    int readySignals = 0;
+                    Action onReady = () => readySignals++;
+                    NexusLogbook.LogBecameReady += onReady;
                     NexusLogbook.Refresh(force: true);
+                    NexusLogbook.Refresh(force: true);
+                    NexusLogbook.LogBecameReady -= onReady;
                     Check("the read cache rebuilds from Nexus, identical", svc.TotalQsos() == totalBefore);
+                    Check("ready again, and 'ready' is signalled exactly once", NexusLogbook.LogReady && readySignals == 1, $"{readySignals} signals");
 
                     // ── Live logging (Jimmy's own RequestLog path) ───────────────────────────
                     int before = svc.TotalQsos();

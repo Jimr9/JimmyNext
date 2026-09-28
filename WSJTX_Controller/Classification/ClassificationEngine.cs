@@ -108,15 +108,28 @@ namespace WSJTX_Controller
             result.Country = EnqueueDecodeMessage.WsjtxCountry(rec?.Country);
             result.Continent = rec?.Continent ?? "";
 
-            bool workedAnyBand = _logbookDb != null && _logbookDb.HasWorkedBefore(call, null);
-            result.IsNewCallAnyBand = !workedAnyBand;
-
+            // Logbook migration: while the Nexus logbook is still loading (no complete read copy
+            // yet), worked-before is UNKNOWN -- never "new". An empty placeholder must not make
+            // every station a new call / new country and drive ranking or automatic calling.
+            // Only these four log-derived flags are affected; location facts below are not.
+            bool logReady = NexusLogbook.LogReady;
             bool bandKnown = !string.IsNullOrEmpty(currentBand);
-            bool workedThisBand = bandKnown && _logbookDb != null && _logbookDb.HasWorkedBefore(call, currentBand);
-            result.IsNewCallOnBand = !bandKnown || !workedThisBand;
-
             int dxcc = rec?.Dxcc ?? 0;
-            if (dxcc > 0 && _logbookDb != null)
+            if (!logReady)
+            {
+                result.IsNewCallAnyBand = false;
+                result.IsNewCallOnBand = false;
+            }
+            else
+            {
+                bool workedAnyBand = _logbookDb != null && _logbookDb.HasWorkedBefore(call, null);
+                result.IsNewCallAnyBand = !workedAnyBand;
+
+                bool workedThisBand = bandKnown && _logbookDb != null && _logbookDb.HasWorkedBefore(call, currentBand);
+                result.IsNewCallOnBand = !bandKnown || !workedThisBand;
+            }
+
+            if (logReady && dxcc > 0 && _logbookDb != null)
             {
                 bool countryWorkedAnyBand = _logbookDb.HasWorkedDxcc(dxcc, null);
                 result.IsNewCountry = !countryWorkedAnyBand;
@@ -126,8 +139,8 @@ namespace WSJTX_Controller
             }
             else
             {
-                // DXCC entity unresolved (no lookup data yet): cannot classify as
-                // new/not-new, so both default to false rather than a guess.
+                // DXCC entity unresolved (no lookup data yet), or the logbook still loading:
+                // cannot classify as new/not-new, so both default to false rather than a guess.
                 result.IsNewCountry = false;
                 result.IsNewCountryOnBand = false;
             }
