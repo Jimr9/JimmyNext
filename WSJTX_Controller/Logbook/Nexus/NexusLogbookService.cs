@@ -315,10 +315,10 @@ namespace WSJTX_Controller
 
         // ── Uploads (Nexus's own upload state) ─────────────────────────────────────────
 
+        // HRDLog included: its upload time is kept on each contact (APP_JIMMY_HRDLOG_UL, the read
+        // copy's hrdlog_uploaded_at), recorded by Nexus's LOG_UPLOAD.
         public List<LogbookDb.PendingUploadQso> GetPendingUploads(string service, int limit = 1000) =>
-            string.Equals(service, "HRDLOG", StringComparison.OrdinalIgnoreCase)
-                ? new List<LogbookDb.PendingUploadQso>() // D4: HRDLog is not carried under Nexus
-                : R(db => db.GetPendingUploads(service, limit), new List<LogbookDb.PendingUploadQso>());
+            R(db => db.GetPendingUploads(service, limit), new List<LogbookDb.PendingUploadQso>());
 
         // The Nexus id of the contact Jimmy knows by its dedup key: from the read copy, or -- for a
         // live contact not in it yet -- the id its logging request deterministically carries.
@@ -339,7 +339,7 @@ namespace WSJTX_Controller
         {
             error = null;
             string svc = (service ?? "").ToUpperInvariant();
-            string nexusService = svc == "QRZ" ? "qrz" : svc == "CLUBLOG" ? "clublog" : svc == "EQSL" ? "eqsl" : null;
+            string nexusService = svc == "QRZ" ? "qrz" : svc == "CLUBLOG" ? "clublog" : svc == "EQSL" ? "eqsl" : svc == "HRDLOG" ? "hrdlog" : null;
             if (nexusService == null) throw new ArgumentException("Nexus does not upload to " + service + " here");
             string nexusId = NexusIdForDedupKey(dedupKey);
             if (string.IsNullOrEmpty(nexusId)) { error = "contact not found in the logbook"; return false; }
@@ -354,9 +354,13 @@ namespace WSJTX_Controller
                 clublogAppKey = nexusService == "clublog" ? ClubLogAppKey.Resolve() ?? "" : "",
                 eqslUsername = nexusService == "eqsl" ? creds?.EqslUsername ?? "" : "",
                 eqslPassword = nexusService == "eqsl" ? creds?.EqslPassword ?? "" : "",
+                hrdlogCallsign = nexusService == "hrdlog" ? creds?.HrdLogUploadCallsign ?? "" : "",
+                hrdlogCode = nexusService == "hrdlog" ? creds?.HrdLogUploadCode ?? "" : "",
             });
             if (reply.State == "stamped" || reply.State == "sent-not-stamped") NexusLogbook.Refresh();
             bool held = reply.Outcome == "accepted" || reply.Outcome == "duplicate" || reply.Outcome == "pending";
+            // "sent-not-stamped" (rare: the service holds it but the record could not be written) leaves
+            // the contact owed; the next catch-up sends it again and the service answers "duplicate".
             if (held && reply.State != "unsent" && reply.State != "unknown") return true;
             error = reply.Why ?? (reply.Outcome != null ? $"{reply.Outcome}{(reply.Message != null ? ": " + reply.Message : "")}" : reply.State);
             return false;
@@ -365,7 +369,9 @@ namespace WSJTX_Controller
         public void MarkUploaded(string dedupKey, string service, DateTime whenUtc)
         {
             string svc = (service ?? "").ToUpperInvariant();
-            if (svc == "HRDLOG") return; // not tracked by Nexus (D4)
+            // HRDLog has no Nexus upload state; while Nexus keeps the log its upload time is recorded
+            // on the contact by LOG_UPLOAD itself (UploadThroughNexus), so nothing to stamp here.
+            if (svc == "HRDLOG") return;
             string nexusService = svc == "LOTW" ? "lotw" : svc == "QRZ" ? "qrz" : svc == "CLUBLOG" ? "clublog" : svc == "EQSL" ? "eqsl" : null;
             if (nexusService == null) throw new ArgumentException("Unknown upload service: " + service);
             // TQSL gives no per-contact answer: LoTW is "pending" until a LoTW download echoes it.

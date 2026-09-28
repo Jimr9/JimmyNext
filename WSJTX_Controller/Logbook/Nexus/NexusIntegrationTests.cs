@@ -159,7 +159,11 @@ namespace WSJTX_Controller
                     int pendingQrz = svc.GetPendingUploads("QRZ").Count;
                     svc.MarkUploaded(liveKey, "QRZ", DateTime.UtcNow);
                     Check("QRZ upload of the live contact recorded", svc.GetPendingUploads("QRZ").Count == pendingQrz - 1);
-                    Check("HRDLog is not carried (D4)", svc.GetPendingUploads("HRDLOG").Count == 0);
+                    var owedHrd = svc.GetPendingUploads("HRDLOG").Select(p => p.Callsign).OrderBy(c => c).ToList();
+                    int migratedOwed = original.Count(r => string.IsNullOrEmpty(r.C("hrdlog_uploaded_at")));
+                    Check("HRDLog is carried: the two contacts added after the move are owed to HRDLog, the migrated history keeps its uploads",
+                        owedHrd.Count(c => c == "ZZ9ZZZ" || c == "ZZ8ZZZ") == 2 && owedHrd.Count == 2 + migratedOwed,
+                        $"owed: {string.Join(",", owedHrd.Take(8))} ({owedHrd.Count}), migrated without an HRDLog upload: {migratedOwed}");
 
                     // ── A contest completion, then its session rows and exchange ────────────
                     var nexusSvc = (NexusLogbookService)svc;

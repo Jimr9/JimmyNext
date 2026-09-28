@@ -328,25 +328,38 @@ namespace WSJTX_Controller
                 ctrl.ShowUploadStatus($"HRDLog.net upload: starting, {pending.Count} pending QSO(s)...", false)));
 
             var client = new HrdLogUploadClient();
+            var nexus = db as NexusLogbookService;
+            var creds = new LiveUploadCredentials { HrdLogUploadCallsign = ctrl.hrdLogUploadCallsign, HrdLogUploadCode = ctrl.hrdLogUploadCode };
             int done = 0, succeeded = 0, failedCount = 0;
             DateTime lastStatusUpdate = DateTime.UtcNow;
             foreach (var q in pending)
             {
-                string adifRecord = AdifRecordBuilder.Build(
-                    q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
-                    q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
-                    q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd);
-                bool ok = await client.InsertAsync(ctrl.hrdLogUploadCallsign, ctrl.hrdLogUploadCode, adifRecord).ConfigureAwait(false);
+                bool ok;
+                string hrdError = null;
+                if (nexus != null)
+                {
+                    // Nexus keeps the log: Nexus's HRDLog sender; the upload time kept on the contact.
+                    ok = nexus.UploadThroughNexus(q.DedupKey, "HRDLOG", creds, out hrdError);
+                }
+                else
+                {
+                    string adifRecord = AdifRecordBuilder.Build(
+                        q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
+                        q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
+                        q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd);
+                    ok = await client.InsertAsync(ctrl.hrdLogUploadCallsign, ctrl.hrdLogUploadCode, adifRecord).ConfigureAwait(false);
+                    if (ok) db.MarkUploaded(q.DedupKey, "HRDLOG", DateTime.UtcNow);
+                    else hrdError = client.LastError;
+                }
                 done++;
                 if (ok)
                 {
-                    db.MarkUploaded(q.DedupKey, "HRDLOG", DateTime.UtcNow);
                     succeeded++;
                 }
                 else
                 {
                     failedCount++;
-                    DebugOutput($"{Time()} HRDLog.net upload catch-up failed for {q.Callsign}: {client.LastError}");
+                    DebugOutput($"{Time()} HRDLog.net upload catch-up failed for {q.Callsign}: {hrdError}");
                 }
 
                 bool isLast = done == pending.Count;

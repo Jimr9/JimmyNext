@@ -1532,11 +1532,7 @@ namespace WSJTX_Controller
                 _statUploadQrzTb.Text     = FormatUploadStatus(_db.GetUploadSyncStatus("QRZ"));
                 _statUploadClubLogTb.Text = FormatUploadStatus(_db.GetUploadSyncStatus("CLUBLOG"));
                 _statUploadLotwTb.Text    = FormatUploadStatus(_db.GetUploadSyncStatus("LOTW"));
-                // HRDLog uploads are off while Nexus keeps the log (decision D4); the stored
-                // dates are only the history carried over from Jimmy's own logbook.
-                _statUploadHrdLogTb.Text  = NexusLogbook.Active
-                    ? "Disabled while Nexus keeps the log"
-                    : FormatUploadStatus(_db.GetUploadSyncStatus("HRDLOG"));
+                _statUploadHrdLogTb.Text  = FormatUploadStatus(_db.GetUploadSyncStatus("HRDLOG"));
 
                 var recent = _db.GetRecentQsos(10);
                 _dashRecentLv.Items.Clear();

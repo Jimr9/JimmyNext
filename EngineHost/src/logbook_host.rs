@@ -631,6 +631,71 @@ fn send_clublog(body: String) -> Result<(u16, String), String> {
     }
 }
 
+fn send_hrdlog(body: String) -> Result<String, String> {
+    match UPLOAD_TEST_BASE.get() {
+        Some(base) => test_post(base, "/hrdlog", body).map(|(_, b)| b),
+        None => propagation::live::hrdlog::post_form(tempo_core::hrdlog::HRDLOG_NEWENTRY_URL, env!("CARGO_PKG_VERSION"), body),
+    }
+}
+
+/// The tag that records an HRDLog.net upload on a contact: Nexus's own upload state has no HRDLog
+/// service, so the time is kept in the contact's own record (its extra ADIF fields -- the same tag
+/// Jimmy's logbook carried over at the move), stored and saved by Nexus like any other field.
+pub const HRDLOG_UPLOADED_TAG: &str = "APP_JIMMY_HRDLOG_UL";
+
+/// UTC seconds as ISO 8601 ("2026-09-28T15:04:05Z"), the form Jimmy reads the tag in.
+fn iso_utc(secs: i64) -> String {
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z", rem / 3600, rem / 60 % 60, rem % 60)
+}
+
+/// Record an HRDLog upload on contact `id`: its HRDLOG_UPLOADED_TAG set to `when`, through Nexus's
+/// own edit (`logwrite::update_row` -- the row as it stands, stale-safe by its edit key; an
+/// ordinary edit keeps every confirmation and upload state). A few tries if a sync moved the row
+/// on meanwhile. Returns whether it was recorded.
+fn record_hrdlog_upload(host: &LogHost, engine: &Mutex<Engine>, id: tempo_core::logbook::RecordId, when: i64) -> bool {
+    for _ in 0..3 {
+        let plan = lock(engine).log_plan();
+        let Ok(Some(row)) = plan.row(id) else { return false };
+        let key = tempo_core::logbook::QsoEdit::project(&row).key();
+        let stamp = iso_utc(when);
+        let gate = host.writes.lock().unwrap_or_else(|e| e.into_inner());
+        if gate.closed {
+            return false;
+        }
+        let (made, durability) = tempo_app::logwrite::update_row(
+            engine,
+            id,
+            &key,
+            |r| {
+                let mut rec = r.clone();
+                rec.extra.retain(|(k, _)| !k.eq_ignore_ascii_case(HRDLOG_UPLOADED_TAG));
+                rec.extra.push((HRDLOG_UPLOADED_TAG.to_string(), stamp.clone()));
+                rec
+            },
+            |_, made| made.1.is_some(),
+        );
+        drop(gate);
+        match made {
+            Ok(Ok(Some(true))) => return durability.wait(DURABLE_WAIT).is_ok(),
+            Ok(Err(_)) => continue, // stale edit key: the row moved on; read it again
+            _ => return false,
+        }
+    }
+    false
+}
+
 fn send_eqsl(body: String) -> Result<String, String> {
     match UPLOAD_TEST_BASE.get() {
         Some(base) => test_post(base, "/eqsl", body).map(|(_, b)| b),
@@ -660,6 +725,10 @@ pub struct LogUploadArgs {
     pub eqsl_username: String,
     #[serde(default)]
     pub eqsl_password: String,
+    #[serde(default)]
+    pub hrdlog_callsign: String,
+    #[serde(default)]
+    pub hrdlog_code: String,
 }
 
 /// LOG_UPLOAD: one contact to one service, the way the Nexus desktop's connector push does it --
@@ -718,6 +787,46 @@ pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -
                 Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
             };
             (UploadService::Eqsl, tempo_core::eqsl::classify_upload(&html), None, None)
+        }
+        "hrdlog" => {
+            let code = args.hrdlog_code.trim().to_string();
+            if code.is_empty() || args.hrdlog_callsign.trim().is_empty() {
+                return serde_json::json!({ "state": "unsent", "why": "no HRDLog.net callsign or upload code" });
+            }
+            let query = tempo_core::hrdlog::HrdLogQuery {
+                callsign: args.hrdlog_callsign.trim().to_string(),
+                code: code.clone(),
+                app: "Jimmy".to_string(), // what Jimmy has always sent HRDLog as its App
+                adif,
+            };
+            let body = tempo_core::hrdlog::build_upload_body(&query);
+            let resp = match send_hrdlog(body) {
+                Ok(r) => r,
+                Err(e) => return serde_json::json!({ "state": "unsent", "why": e }),
+            };
+            let push = tempo_core::hrdlog::classify_response(&resp);
+            let message = push.message.map(|m| tempo_core::hrdlog::scrub_code(&m, &code));
+            use tempo_core::hrdlog::HrdLogResult as H;
+            let code_str = match push.result {
+                H::Ok => "accepted",
+                H::Duplicate => "duplicate",
+                H::AuthFail => "authfail",
+                H::Rejected => "rejected",
+                H::Unknown => return serde_json::json!({ "state": "unsent", "why": message.unwrap_or_else(|| "HRDLog did not answer as expected (busy?)".into()) }),
+            };
+            // Nexus has no HRDLog upload state: an upload HRDLog holds is recorded on the contact's
+            // own record; a refusal records nothing (the contact stays owed), as Jimmy always did.
+            let held = matches!(push.result, H::Ok | H::Duplicate);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let recorded = held && record_hrdlog_upload(host, engine, id, now);
+            return serde_json::json!({
+                "state": if recorded { "stamped" } else if held { "sent-not-stamped" } else { "refused" },
+                "outcome": code_str,
+                "message": message,
+            });
         }
         other => return serde_json::json!({ "state": "unsent", "why": format!("Nexus does not upload to {other} here") }),
     };

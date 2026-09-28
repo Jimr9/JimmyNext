@@ -869,12 +869,44 @@ static class JimmyTests
                 r = Up("UP9", "EQSL", 200, "Error: The system is down until 1200Z");
                 Check("eQSL down: false, nothing recorded (stays owed)", !r.ok && Outcome("UP9", u => u.Eqsl) == "none", true);
 
+                // HRDLog.net: Nexus's sender; the upload time kept on the contact's own record, every
+                // other field of the contact unchanged.
+                string Tag(string call) => client.Rows().Rows.Single(q => q.Call == call).ExtraValue("APP_JIMMY_HRDLOG_UL");
+                var json = new System.Text.Json.JsonSerializerOptions { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase };
+                string Snap(string call)
+                {
+                    var q = client.Rows().Rows.Single(x => x.Call == call);
+                    q.EditKey = null;
+                    q.Extra = q.Extra.Where(e => e.Count < 1 || e[0] != "APP_JIMMY_HRDLOG_UL").ToList();
+                    return System.Text.Json.JsonSerializer.Serialize(q, json);
+                }
+                creds.HrdLogUploadCallsign = "KB0UZT"; creds.HrdLogUploadCode = "hrd-code";
+                string beforeUp1 = Snap("UP1");
+                r = Up("UP1", "HRDLOG", 200, "<?xml version=\"1.0\"?><HRDLog><insert>1</insert></HRDLog>");
+                string hrdBody = WebUtility.UrlDecode(r.body);
+                Check("HRDLog added: true, upload time recorded on the contact", r.ok && !string.IsNullOrEmpty(Tag("UP1")), true);
+                Check("HRDLog request: callsign, code, App=Jimmy and the ADIF", r.path == "/hrdlog" && hrdBody.Contains("Callsign=KB0UZT") &&
+                    hrdBody.Contains("Code=hrd-code") && hrdBody.Contains("App=Jimmy") && hrdBody.IndexOf("<call:3>UP1", StringComparison.OrdinalIgnoreCase) >= 0, true);
+                Check("HRDLog record: nothing else about the contact changed (confirmations, other uploads, fields)", Snap("UP1") == beforeUp1, true);
+                Check("HRDLog upload time readable in Jimmy's form", DateTime.TryParse(Tag("UP1"), null, System.Globalization.DateTimeStyles.RoundtripKind, out _), true);
+                r = Up("UP2", "HRDLOG", 200, "<?xml version=\"1.0\"?><HRDLog><error>Unknown user</error></HRDLog>");
+                Check("HRDLog unknown user: false, nothing recorded (stays owed)", !r.ok && string.IsNullOrEmpty(Tag("UP2")), true);
+                NexusLogbook.Refresh(force: true);
+                var owedHrd = svc.GetPendingUploads("HRDLOG").Select(p => p.Callsign).ToList();
+                Check("HRDLog pending list (Alt+U catch-up, Sync status): UP2 owed, UP1 done", owedHrd.Contains("UP2") && !owedHrd.Contains("UP1"), true);
+
                 while (bodies.TryDequeue(out _)) { }
                 bool okMissing = svc.UploadThroughNexus(AdifImporter.BuildDedupKey("NOSUCH", "20m", "FT8", "20260901", "001000"), "QRZ", creds, out var missErr);
                 Thread.Sleep(300);
                 Check("a contact not in the log: nothing sent", !okMissing && bodies.IsEmpty, true);
                 client.Shutdown(token);
             }
+            // Persistent: after a clean shutdown, Nexus's saved file carries UP1's HRDLog upload time.
+            string savedAdi = File.ReadAllText(Path.Combine(work, "NexusLog", "log.adi"));
+            int up1 = savedAdi.IndexOf("<CALL:3>UP1", StringComparison.OrdinalIgnoreCase);
+            int up1End = up1 < 0 ? -1 : savedAdi.IndexOf("<eor>", up1, StringComparison.OrdinalIgnoreCase);
+            Check("HRDLog upload time saved in Nexus's log file (survives a restart)",
+                up1 >= 0 && up1End > up1 && savedAdi.Substring(up1, up1End - up1).IndexOf("APP_JIMMY_HRDLOG_UL", StringComparison.OrdinalIgnoreCase) >= 0, true);
         }
         finally
         {

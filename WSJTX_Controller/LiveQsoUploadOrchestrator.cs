@@ -226,9 +226,9 @@ namespace WSJTX_Controller
                                        !_clubLogRealtimeBroken;
                         // No circuit breaker, same as QRZ -- HRDLog's own API isn't documented to
                         // require one the way Club Log's does.
-                        // D4: HRDLog is not carried while Nexus keeps the logbook -- no upload at all
-                        // (Nexus has no HRDLog upload state to record it in).
-                        bool needHrdLog = !nexus && creds.HrdLogUploadEnabled && creds.HrdLogUploadRealtime &&
+                        // While Nexus keeps the log, HRDLog goes through Nexus's sender too, and its
+                        // upload time is kept on the contact's own record (see UploadThroughNexus).
+                        bool needHrdLog = creds.HrdLogUploadEnabled && creds.HrdLogUploadRealtime &&
                                        !string.IsNullOrWhiteSpace(creds.HrdLogUploadCode) &&
                                        !string.IsNullOrWhiteSpace(creds.HrdLogUploadCallsign);
                         // No circuit breaker: eQSL's transport goes through EngineHost, which
@@ -256,6 +256,8 @@ namespace WSJTX_Controller
                             }
                             if (needEqsl && !nx.UploadThroughNexus(dedupKey, "EQSL", creds, out var eqErr))
                                 _debugLog($"eQSL real-time upload failed for {dxCall}: {eqErr}");
+                            if (needHrdLog && !nx.UploadThroughNexus(dedupKey, "HRDLOG", creds, out var hrdErr))
+                                _debugLog($"HRDLog.net real-time upload failed for {dxCall}: {hrdErr}");
                             return;
                         }
 
