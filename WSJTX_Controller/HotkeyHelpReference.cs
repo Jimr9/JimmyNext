@@ -63,6 +63,7 @@ namespace WSJTX_Controller
                 new Item(HotkeyAction.DeleteAllCalls,     "Delete all 'Stations calling'."),
                 new Item(HotkeyAction.TxPeriod,           "Toggle the transmit period."),
                 new Item(HotkeyAction.ToggleMode,         "Select operating mode (FT8 or FT4)."),
+                new Item(HotkeyAction.ToggleHound,        "Turn FT8 DXpedition Hound mode on or off (FT8 only, this session only)."),
                 new Item(HotkeyAction.AnalyzeSlot,        "Analyze the transmit slot to find the quietest CQ audio frequency (needs 'Use best Tx frequency')."),
                 new Item(HotkeyAction.ReportSlotAnalysis, "Report the latest transmit slot analysis without re-running it."),
             }, new[]

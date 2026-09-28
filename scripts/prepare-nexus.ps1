@@ -161,6 +161,8 @@ $PatchTargets = @{
     "tempo-audio-slot.patch"                     = "crates\tempo-audio"
     "tempo-audio-rigctld-test-portability.patch" = "crates\tempo-audio"
     "tempo-fast-sys-build.patch"                 = "crates\tempo-fast-sys"
+    "tempo-core-message.patch"                   = "crates\tempo-core"
+    "tempo-core-inbox.patch"                     = "crates\tempo-core"
 }
 
 # patch.exe writes "checking file ..." to stdout but any warning/failure detail to stderr;

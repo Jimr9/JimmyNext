@@ -12,9 +12,13 @@ namespace WSJTX_Controller
     // Engine::set_mic_gain (F11/F12): mic_gain scales the waveform digitally before the engine
     // ever hands samples to Windows; this scales AGAIN, afterward, as part of Windows' own
     // render/capture session mixing. Both genuinely affect what reaches the radio, just at
-    // different points in the chain. Per Microsoft's own docs, ISimpleAudioVolume applies to any
-    // shared-mode session, capture or render -- the classic Volume Mixer UI only ever surfacing a
-    // render slider is a UI limitation, not an API one.
+    // different points in the chain. Capture and render are NOT symmetric (Microsoft's
+    // IAudioEndpointVolume documentation): a shared-mode RENDER session's volume is independent
+    // of the endpoint master volume, but a shared-mode CAPTURE session's volume is tied directly
+    // to it -- setting a capture session's volume changes the device's master input level for
+    // every application. Jimmy therefore only ever sets the render session (see WsjtxClient.
+    // Direct.cs's ApplyEngineOutputAppLevelOnceAvailable); the input level is controlled by the
+    // endpoint master volume alone (AudioEndpointMasterVolume).
     public static class ProcessAudioSessionVolume
     {
         // 0.0-1.0, or null if the process isn't running, hasn't opened a session on that device

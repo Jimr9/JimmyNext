@@ -1499,7 +1499,7 @@ namespace WSJTX_Controller
                                                 curRxPayload = SpacifyPayload(NarrationText.StructuredPayload(rmsgSem)
                                                     ?? NarrationText.ResidualDisplayText(rmsg.Message));
                                                 //DebugOutput($"{spacer}found current:{curRxPayload}");
-                                                if (!rmsg.Is73orRR73() && msgList.Count >= 2)
+                                                if (!(rmsgSem.IsRr73 || rmsgSem.Is73) && msgList.Count >= 2)   // 2026-09-26 (was rmsg.Is73orRR73())
                                                 {   //Rx period previous to the one that just ended
                                                     rmsg = msgList[msgList.Count - 2];
                                                     rmsgSem = rmsg.EffectiveSemantic(myCall);
@@ -1852,49 +1852,49 @@ namespace WSJTX_Controller
             }
         }
 
+        // 2026-09-26 (operator request): the WHOLE Jimmy session, not just the current band (see
+        // _sessionLogged), newest first. Each row: callsign, then country (or US state when that
+        // option is on), then its band -- and its mode only when not FT8, to keep speech short --
+        // then the reports exchanged in THAT contact, so a station worked on two bands shows twice.
+        // Reports are labelled ("R -14, S -10"); 2026-09-11 tester feedback: Received leads, Sent
+        // follows, matching the status line's own order. Auto-logged calls are OUT of scope for
+        // "Space callsigns and grids" -- always the checkbox-independent Spacify().
+        internal List<string> LoggedListLines()
+        {
+            var lines = new List<string>();
+            for (int i = _sessionLogged.Count - 1; i >= 0; i--)
+            {
+                var e = _sessionLogged[i];
+                string line = string.IsNullOrEmpty(e.Country) ? Spacify(e.Call) : $"{Spacify(e.Call)}, {e.Country}";
+                if (!string.IsNullOrEmpty(e.Band))
+                {
+                    string band = e.Band.EndsWith("m") && !e.Band.EndsWith("cm")
+                        ? e.Band.Substring(0, e.Band.Length - 1) + " meters" : e.Band;
+                    line += $", {band}{(string.IsNullOrEmpty(e.Mode) || e.Mode == "FT8" ? "" : " " + e.Mode)}";
+                }
+                string sentPart = string.IsNullOrEmpty(e.Sent) ? "" : $"S {e.Sent}";
+                string rcvdPart = string.IsNullOrEmpty(e.Received) ? "" : $"R {e.Received}";
+                string reportsPart = rcvdPart.Length > 0 && sentPart.Length > 0 ? $"{rcvdPart}, {sentPart}"
+                    : rcvdPart.Length > 0 ? rcvdPart
+                    : sentPart;
+                if (reportsPart.Length > 0) line += $", {reportsPart}";
+                lines.Add(line);
+            }
+            return lines;
+        }
+
         private void ShowLogged()
         {
-            var logItems = new List<string>();
+            var logItems = LoggedListLines();
             var logKeys = new List<string>();
-            if (logList.Count == 0)
+            for (int i = _sessionLogged.Count - 1; i >= 0; i--) logKeys.Add(_sessionLogged[i].Call);   // the row's key stays the bare callsign
+            if (logItems.Count == 0)
             {
                 logItems.Add("[No calls auto-logged]");
                 logKeys.Add(null);
             }
-            else
-            {
-                var rList = logList.GetRange(0, logList.Count);
-                rList.Reverse();
-                foreach (string call in rList)
-                {
-                    // Callsign, then country (or US state when that option is on), then the
-                    // sent/received reports for this QSO so the row is a self-contained record
-                    // of what was logged -- labelled ("R -14, S -10") so the two aren't
-                    // ambiguous. The reports are a display-only snapshot captured at log time
-                    // (_loggedReports); the row's key stays the bare callsign.
-                    // 2026-09-11 fix (tester feedback: the ordering here read as contradicting the
-                    // status line, which always describes "received..." before "...sending" --
-                    // same two numbers, just presented in the opposite order). Received now leads,
-                    // Sent follows, matching the status line's own order; the S/R labels
-                    // themselves are unchanged.
-                    // Auto-logged calls are OUT of scope for "Space callsigns and grids" -- this
-                    // stays on the checkbox-independent Spacify(), always spaced as before.
-                    string line = $"{Spacify(call)}, {Country(call)}";
-                    if (_loggedReports.TryGetValue(call, out var rpt))
-                    {
-                        string sentPart = string.IsNullOrEmpty(rpt.Sent) ? "" : $"S {rpt.Sent}";
-                        string rcvdPart = string.IsNullOrEmpty(rpt.Received) ? "" : $"R {rpt.Received}";
-                        string reportsPart = rcvdPart.Length > 0 && sentPart.Length > 0 ? $"{rcvdPart}, {sentPart}"
-                            : rcvdPart.Length > 0 ? rcvdPart
-                            : sentPart;
-                        if (reportsPart.Length > 0) line += $", {reportsPart}";
-                    }
-                    logItems.Add(line);
-                    logKeys.Add(call);
-                }
-            }
 
-            LogView.RenderLoggedList($"Auto-logged calls: {logList.Count}", logItems, logKeys);
+            LogView.RenderLoggedList($"Auto-logged calls: {_sessionLogged.Count}", logItems, logKeys);
         }
 
         // Stage 12 audit (2026-09-14): this whole method is diagnostic-only display (the

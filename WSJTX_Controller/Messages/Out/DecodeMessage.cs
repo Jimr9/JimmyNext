@@ -197,14 +197,26 @@ namespace WsjtxUdpLib.Messages.Out
             return WsjtxMessage.IsInvalidType(Message);
         }
 
+        // 2026-09-26 (parser migration): a directed CQ's target comes from EffectiveSemantic
+        // (Nexus's own parse -- CqDirection) instead of WsjtxMessage.DirectedTo re-parsing the
+        // text; every caller (queue admission, award tagging, POTA logging) is covered here.
+        // myCall is irrelevant to IsCq/CqTarget, so none is passed. A bare DecodeMessage (never
+        // ingested, so never classified) keeps the WsjtxMessage parse.
+        private WSJTX_Controller.SemanticDecode CqSemantic() =>
+            this is EnqueueDecodeMessage e
+                ? WSJTX_Controller.SemanticExtensions.EffectiveSemantic(e, null)
+                : WSJTX_Controller.SemanticDecode.FromWsjtxMessage(Message, null);
+
         public bool IsPota()
         {
-            return WsjtxMessage.IsCQ(Message) && WsjtxMessage.IsPota(Message);
+            var s = CqSemantic();
+            return s.IsCq && s.CqTarget == "POTA";
         }
 
         public bool IsSota()
         {
-            return WsjtxMessage.IsCQ(Message) && WsjtxMessage.IsSota(Message);
+            var s = CqSemantic();
+            return s.IsCq && s.CqTarget == "SOTA";
         }
 
         public bool IsFoxHound()

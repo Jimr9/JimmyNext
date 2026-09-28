@@ -1,8 +1,17 @@
 diff --git a/src/engine.rs b/src/engine.rs
-index ad6d5a9c..f97cf609 100644
+index ad6d5a9c..776bd70c 100644
 --- a/src/engine.rs
 +++ b/src/engine.rs
-@@ -2809,6 +2809,17 @@ pub struct Engine {
+@@ -2343,6 +2343,8 @@ pub struct Engine {
+     /// The last ingest's decodes as they were ON AIR (pre hound-split/rewrite)
+     /// — what UDP consumers receive. Identical to `last_decodes` outside Hound.
+     last_wire_decodes: Vec<modes::Decode>,
++    /// JIMMY COMPAT: parallel to `last_decodes` -- see [`Engine::last_decodes_multiplexed`].
++    last_decodes_multiplexed: Vec<bool>,
+     /// Directed-CQ token for CQ runs ("DX", "NA", "POTA", …): applied to the
+     /// run's CQ message at start AND on the return-to-CQ after each pileup
+     /// contact. None = plain CQ. Sticky until the operator starts a plain run
+@@ -2809,6 +2811,17 @@ pub struct Engine {
      /// Set by the radio loop when the sound card failed to open, so the UI can
      /// explain a blank waterfall instead of failing silently.
      audio_error: Option<String>,
@@ -20,7 +29,15 @@ index ad6d5a9c..f97cf609 100644
      scope_error: Option<String>,
      /// See `RadioStatus::scope_span_refused`.
      scope_span_refused: Option<String>,
-@@ -4592,6 +4603,8 @@ impl Engine {
+@@ -4474,6 +4487,7 @@ impl Engine {
+             hrd_link_up: None,
+             cq_dir: None,
+             last_wire_decodes: Vec::new(),
++            last_decodes_multiplexed: Vec::new(),
+             tx_dial_shift_hz: 0,
+             tx_gate_gen: 0,
+             remote_receiver_gen: 0,
+@@ -4592,6 +4606,8 @@ impl Engine {
              amp_live: std::collections::HashMap::new(),
              cat_reprobe: false,
              audio_error: None,
@@ -29,7 +46,7 @@ index ad6d5a9c..f97cf609 100644
              scope_error: None,
              scope_span_refused: None,
              scope_mode_code: None,
-@@ -7416,6 +7429,15 @@ impl Engine {
+@@ -7416,6 +7432,15 @@ impl Engine {
      /// The mode the radio loop should COMMAND: the operator's transient Phone override when set,
      /// else the band-derived policy (`settings.rig_mode`). Write-side canon for the rig `M` verb.
      pub fn rig_mode_effective(&self) -> String {
@@ -45,7 +62,7 @@ index ad6d5a9c..f97cf609 100644
          // APRS parks the rig in FM regardless of the operating section it was navigated from — a
          // 2 m packet signal demodulated as USB is garbage, so this is a correctness gate, not a
          // preference. Gated on STILL being on 2 m: a knob-QSY (`observe_rig_freq`) or a manual
-@@ -7937,6 +7959,14 @@ impl Engine {
+@@ -7937,6 +7962,14 @@ impl Engine {
          self.settings.decode_depth = depth.clamp(1, 3);
      }
  
@@ -60,7 +77,7 @@ index ad6d5a9c..f97cf609 100644
      /// Operator CW decode sensitivity in [0, 1] (0.5 = the original gates; higher catches
      /// weaker/off-pitch marks like the skimmer, lower rejects more noise).
      pub fn set_cw_sensitivity(&mut self, s: f32) {
-@@ -11758,6 +11788,18 @@ Pick the one you operate from on the Contesting tab in Settings.",
+@@ -11758,6 +11791,18 @@ Pick the one you operate from on the Contesting tab in Settings.",
          }
      }
  
@@ -79,7 +96,7 @@ index ad6d5a9c..f97cf609 100644
      /// Send the delivery ACKs we owe: a 1-frame RR73 to each sender whose directed
      /// message we just fully received. Queued onto the chat broadcast path; the receiver
      /// (the original sender) sees it and marks the message delivered, ending the resend.
-@@ -17183,6 +17225,17 @@ contact yourself."
+@@ -17183,6 +17228,17 @@ contact yourself."
          self.cat_probe_gen = self.cat_probe_gen.wrapping_add(1);
      }
  
@@ -97,7 +114,7 @@ index ad6d5a9c..f97cf609 100644
      /// Ask the radio loop to re-probe the current rig and refresh the CAT status
      /// (the "Test CAT" button). The loop consumes this via [`Self::take_cat_reprobe`].
      pub fn request_cat_reprobe(&mut self) {
-@@ -18151,6 +18204,8 @@ contact yourself."
+@@ -18151,6 +18207,8 @@ contact yourself."
          }
          .to_string();
          s.radio.audio_error = self.audio_error.clone();
@@ -106,7 +123,24 @@ index ad6d5a9c..f97cf609 100644
          // A map lookup and a clone: no I/O and no second lock. `Engine::snapshot` runs under
          // the engine mutex on the UI's 300 ms poll, and work done inside it has twice stalled
          // the radio loop.
-@@ -20076,8 +20131,25 @@ contact yourself."
+@@ -19888,6 +19946,7 @@ contact yourself."
+             self.persist_pending_msgs();
+         }
+         self.last_wire_decodes = fresh.clone();
++        self.last_decodes_multiplexed = vec![false; fresh.len()]; // JIMMY COMPAT: never split here
+         self.last_decodes = fresh;
+         n
+     }
+@@ -20000,7 +20059,7 @@ contact yourself."
+             crate::settings::SpecialOp::Hound | crate::settings::SpecialOp::SuperHound
+         );
+         let wire_copy: Option<Vec<modes::Decode>> = hound_active.then(|| decodes.clone());
+-        let decodes = self.hound_split(decodes);
++        let (decodes, multiplexed) = self.hound_split(decodes);
+         let n = decodes.len();
+         // Tally IR-HARQ rescues (messages recovered by combining retransmissions).
+         self.harq_rescues += decodes
+@@ -20076,8 +20135,27 @@ contact yourself."
          if self.app.tier() == Tier::Js8 {
              self.js8_ingest(&decodes, slot);
          }
@@ -127,10 +161,177 @@ index ad6d5a9c..f97cf609 100644
 +        if self.last_decode_slot == Some(slot) {
 +            self.last_wire_decodes.extend(fresh_wire);
 +            self.last_decodes.extend(decodes);
++            self.last_decodes_multiplexed.extend(multiplexed);
 +        } else {
 +            self.last_wire_decodes = fresh_wire;
 +            self.last_decodes = decodes;
++            self.last_decodes_multiplexed = multiplexed;
 +        }
          self.last_decode_slot = Some(slot);
          n
      }
+@@ -20101,7 +20179,11 @@ contact yourself."
+     /// also keeps the blast radius small — a bystander's free text containing ';' is only
+     /// ever split while we are mid-contact, and even then `reattach` fires on nothing but an
+     /// exact 2-token `<call> RR73/RRR/73` half.
+-    fn hound_split(&self, decodes: Vec<modes::Decode>) -> Vec<modes::Decode> {
++    ///
++    /// JIMMY COMPAT: also returns, per output decode, whether it is one half of a GENUINE 0.1
++    /// multi-answer frame -- decided here, from the original combined text, at the one place
++    /// the frame is split (see [`Self::last_decodes_multiplexed`]).
++    fn hound_split(&self, decodes: Vec<modes::Decode>) -> (Vec<modes::Decode>, Vec<bool>) {
+         let fox_capable = self
+             .tier_mode_kind(self.app.tier())
+             .is_some_and(|k| modes::make_mode(k).capabilities().fox_hound);
+@@ -20115,7 +20197,8 @@ contact yourself."
+             // Fox multiplexing is an FT8 DXpedition construct — the mode declares
+             // `fox_hound` (FT8 only, matching WSJT-X). Free text may legitimately
+             // contain ';' and must never be split when we are not working anybody.
+-            return decodes;
++            let unsplit = vec![false; decodes.len()];
++            return (decodes, unsplit);
+         }
+         // A Fox confirm half is the SENDER-LESS 2-token "K1ABC RR73" — re-add
+         // the Fox's call so it parses as a standard Rr73 and passes the
+@@ -20140,8 +20223,15 @@ contact yourself."
+         // contact — the quiet finish, the >1000 Hz initial offset — was already captured once at
+         // `call_station_ctx`; this was the one live read. A QSO in flight keeps the rules it
+         // started under, and the toggle governs the NEXT one.
+-        let reattach = |m: String| -> String {
+-            if !hound_qso {
++        //
++        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): an ORDINARY QSO may also reattach,
++        // but only from the frame's OWN evidence -- a 0.1 frame (QEX type 0.1, `c28 c28 h10 r5`)
++        // is sent by ONE station, the hashed call in its second half. When that call is our
++        // partner, the sender-less `<us> RR73` first half IS our partner's roger, exactly as
++        // WSJT-X's normal mode treats a "dual Fox style message, possibly from MSHV". A bystander
++        // Fox's frame names a DIFFERENT station there, so #236 stays closed.
++        let reattach = |m: String, allowed: bool| -> String {
++            if !allowed {
+                 return m;
+             }
+             let t: Vec<&str> = m.split_whitespace().collect();
+@@ -20153,6 +20243,7 @@ contact yourself."
+             m
+         };
+         let mut out = Vec::with_capacity(decodes.len());
++        let mut multiplexed = Vec::with_capacity(decodes.len());
+         for d in decodes {
+             let halves = d
+                 .message
+@@ -20160,22 +20251,56 @@ contact yourself."
+                 .map(|(a, b)| (a.trim().to_string(), b.trim().to_string()));
+             match halves {
+                 Some((a, b)) if !a.is_empty() && !b.is_empty() => {
++                    let frame_from_partner = fox.as_deref().is_some_and(|f| {
++                        Msg::parse(&b)
++                            .sender()
++                            .is_some_and(|s| tempo_core::message::same_call(s, f))
++                    });
++                    let allowed = hound_qso || frame_from_partner;
++                    // JIMMY COMPAT: a GENUINE 0.1 frame by its original shape (the same gate
++                    // as `fox_multiplex`) -- free text that merely contains ';' is split too,
++                    // but is not marked.
++                    let genuine = matches!(
++                        a.split_whitespace().collect::<Vec<_>>()[..],
++                        [to, "RR73" | "RRR" | "73"] if tempo_core::message::is_callsign(to)
++                    ) && {
++                        let second = Msg::parse(&b);
++                        second.sender().is_some() && second.addressee().is_some()
++                    };
+                     let mut d1 = d.clone();
+-                    d1.message = reattach(a);
++                    d1.message = reattach(a, allowed);
+                     let mut d2 = d;
+-                    d2.message = reattach(b);
++                    d2.message = reattach(b, allowed);
+                     out.push(d1);
+                     out.push(d2);
++                    multiplexed.push(genuine);
++                    multiplexed.push(genuine);
+                 }
+                 // NOT a multiplex: pass through UNTOUCHED. Reattaching here
+                 // fabricated a Fox sender for any bystander's 2-token
+                 // "W9XYZ 73" free text — which could falsely COMPLETE and log
+                 // our QSO. Only the halves of a real Fox multiplex ever drop
+                 // their sender; a standalone Fox message carries the full form.
+-                _ => out.push(d),
++                _ => {
++                    out.push(d);
++                    multiplexed.push(false);
++                }
+             }
+         }
+-        out
++        (out, multiplexed)
++    }
++
++    /// JIMMY COMPAT: per [`Self::last_decodes`] row (same order, same length), true when that
++    /// row is one half of a genuine 0.1 multi-answer frame `hound_split` divided. Provenance
++    /// recorded at the split itself, never reconstructed from measurements. Empty (= nothing
++    /// marked) if it is ever out of step with `last_decodes`, so a missed write site can only
++    /// under-mark, never mis-mark.
++    pub fn last_decodes_multiplexed(&self) -> &[bool] {
++        if self.last_decodes_multiplexed.len() == self.last_decodes.len() {
++            &self.last_decodes_multiplexed
++        } else {
++            &[]
++        }
+     }
+ 
+     /// Fold a slot's decodes into the active mode's sequencer and, in QSO mode,
+@@ -20948,7 +21073,7 @@ contact yourself."
+     #[cfg(test)]
+     fn ingest_decodes_for_test(&mut self, decodes: &[modes::Decode], slot: u64) {
+         // Mirror the live path's Hound multi-payload split.
+-        let decodes: Vec<modes::Decode> = self.hound_split(decodes.to_vec());
++        let (decodes, multiplexed) = self.hound_split(decodes.to_vec());
+         let decodes = &decodes[..];
+         for d in decodes {
+             self.seen_decode = true;
+@@ -20985,6 +21110,7 @@ contact yourself."
+             self.decode_history.pop_front();
+         }
+         self.last_decodes = decodes.to_vec();
++        self.last_decodes_multiplexed = multiplexed;
+     }
+ 
+     /// Export the Field Day log in `format` ("cabrillo" or "adif"). `Err` unless
+@@ -30514,6 +30640,37 @@ mod tests {
+         );
+     }
+ 
++    /// JIMMY COMPAT: the other side of #236. A multi-answer frame FROM OUR PARTNER (MSHV
++    /// multi-answer "Special MSG" / WSJT-X Fox, live 2026-09-25) carries our roger in its
++    /// sender-less first half; the frame's own hashed sender proves who sent it, so an ORDINARY
++    /// QSO completes on it -- as WSJT-X's normal mode does -- and is logged exactly once.
++    #[test]
++    fn an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger() {
++        let mut e = Engine::new("W9XYZ", "EN37", 0);
++        e.set_tier(Tier::Ft8);
++        e.ingest_decodes_for_test(&[dec_at("CQ PJ4DX", -10, 400.0)], 1);
++        let _ = e.call_station_ctx("PJ4DX", None, Some("CQ PJ4DX"), Some(-10), Some(400.0));
++        e.ingest_decodes_for_test(&[dec_at("W9XYZ PJ4DX -08", -10, 400.0)], 3);
++        // The genuine frame, plus an UNRELATED decode with identical snr/dt/freq and free text
++        // that merely contains ';' (hound_split divides that too).
++        e.ingest_decodes_for_test(
++            &[
++                dec_at("W9XYZ RR73; K1ABC <PJ4DX> -12", -10, 400.0),
++                dec_at("K2DEF <K5MGY> -12", -10, 400.0),
++                dec_at("TNX FB; 73 GL", -10, 400.0),
++            ],
++            5,
++        );
++        assert_eq!(
++            e.get_log().len(),
++            1,
++            "the partner's own multi-answer roger completes and logs the ordinary QSO once"
++        );
++        // Provenance recorded AT THE SPLIT: only the genuine frame's two halves are marked --
++        // not the look-alike with identical measurements, not the split free text.
++        assert_eq!(e.last_decodes_multiplexed(), &[true, true, false, false, false]);
++    }
++
+     /// THE MID-QSO TOGGLE RULE, both directions: **a QSO in flight keeps the rules it started
+     /// under.** Written as a pair because one direction is half a test.
+     ///

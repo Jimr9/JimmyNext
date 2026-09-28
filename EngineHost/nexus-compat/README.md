@@ -233,12 +233,12 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 
 ## Current patches (against Nexus `v1.14.0`, commit `12efe3d2`)
 
-Eight patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
-the source of truth; the eight are itemised in the `###` sections below). Jimmy's downstream
+Ten patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
+the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream
 behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
 compatibility baseline.
 
-### `patches/tempo-app-engine.patch` -- 5 behaviors, `crates/tempo-app/src/engine.rs`
+### `patches/tempo-app-engine.patch` -- 7 behaviors, `crates/tempo-app/src/engine.rs`
 
 | Behavior | Why Jimmy needs it | What's missing / wrong upstream |
 |---|---|---|
@@ -246,6 +246,8 @@ compatibility baseline.
 | `Engine::set_pskreporter(bool)` | Jimmy's Options UI has a live PSK Reporter on/off toggle that must not require a restart. | No live setter; only a start-of-session `Settings.pskreporter` field. |
 | `Engine::last_own_tx_text()` | The **only** consumer is the WSJT-X-protocol `Status.tx_message` field (see the service.rs patch) -- the one signal a UDP logger (GridTracker/JTAlert) needs to track which callsign / exchange step is on the air. Jimmy's own Direct snapshot path derives own-TX from the snapshot's own rows and does **not** use this accessor. | No accessor for the most recent transmitted text. |
 | `dont_set_mode` guard in `rig_mode_effective()` | WSJT-X Radio tab "Mode: None" -- when set, the radio loop must never command the rig's mode. `rig_mode_effective()` returns `String::new()` first thing, which every mode-set call site already treats as "nothing to do". | No native "leave the mode alone" gate. |
+| Ordinary-QSO multi-answer roger (`hound_split`, added 2026-09-26) | A station answering several callers at once (MSHV multi-answer "Special MSG", WSJT-X Fox) sends our roger as the sender-less first half of a 0.1 frame, `<us> RR73; <other> <DX> -08`. Outside a Hound QSO Nexus never reattached a sender, so an ordinary QSO with such a station could NEVER complete (live 2026-09-25, K5MGY). The patch reattaches in an ordinary QSO **only** when the frame's own hashed sender (its second half) is our partner -- the frame names its sender, so this is evidence, not assumption; a bystander Fox's frame names another station and #236 stays closed. Matches WSJT-X normal mode's "dual Fox style message, possibly from MSHV" completion. Test: `an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger` beside Nexus's own #236 guard. | Reattach is gated on `hound_qso` alone. |
+| Multi-answer split provenance (`hound_split` + `Engine::last_decodes_multiplexed()`, added 2026-09-26) | During a QSO Nexus splits every 0.1 frame into two ordinary rows, so the fact that they came from ONE multi-answer transmission was lost -- Jimmy needs it (a station answering several callers is not "busy working someone else"). The patch records it AT THE SPLIT, from the original combined text (Nexus's own `fox_multiplex` shape gate), as one flag per `last_decodes` row kept in lockstep at every write site; EngineHost reads it under the snapshot's lock and sets the envelope's `multiAnswer`. Never reconstructed from snr/dt/frequency; the accessor returns empty if ever out of step (under-marks, never mis-marks). Test: extended `an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger` (a look-alike row with identical measurements and split free text stay unmarked). | `hound_split` returns only the rewritten decodes; no provenance survives. |
 | `Engine::set_fake_it_restore_status` + `RadioStatus.fake_it_restore_warning` / `fake_it_restore_warning_id` snapshot emit | Codex correction G (+ Audit #10): an UNRESOLVED Fake-It dial restore must reach the operator. The radio loop sets a concise string + a monotonic per-episode id while unresolved and clears both (`None`) the moment it reconciles; Jimmy dedups per `(id + session token)` so the same episode announces once even across a Direct reconnect. `None` in normal operation. | No engine-side path to surface Fake-It restore state. |
 
 **Obsoleted when:** upstream accumulates same-slot decodes across the early + boundary pass;
@@ -253,7 +255,10 @@ adds a live PSK-Reporter setter; adds a `dont_set_mode`-equivalent `Settings` ga
 Fake-It restore verifies + exposes an unresolved state.
 **How to check:** `grep -n "last_decode_slot ==" crates/tempo-app/src/engine.rs` (is the
 overwrite now slot-conditioned?); `grep -n "fn set_pskreporter\|fn last_own_tx_text"`;
-`grep -n "dont_set_mode" crates/tempo-app/src/settings.rs`.
+`grep -n "dont_set_mode" crates/tempo-app/src/settings.rs`; `grep -n "frame_from_partner\|fn hound_split" -A30
+crates/tempo-app/src/engine.rs` (does upstream reattach an ordinary QSO's roger from the frame's
+own sender?); `grep -n "fn last_decodes_multiplexed\|fn hound_split"` (does upstream keep split
+provenance?).
 
 ### `patches/tempo-app-settings.patch` -- 3 fields, `crates/tempo-app/src/settings.rs`
 
@@ -459,6 +464,60 @@ full rebuild from a **fresh** build directory fails every Fortran compile step i
 **Obsoleted when:** upstream's own `build.rs` strips/avoids the `\\?\` prefix.
 **How to check:** `grep -n "canonicalize\|strip_verbatim" crates/tempo-fast-sys/build.rs`, and
 try a build after `cargo clean` (the bug does not reproduce on an incremental build).
+
+### `patches/tempo-core-message.patch` -- grid-less standard CQ/reply (protocol fix)
+
+`crates/tempo-core/src/message.rs` (added 2026-09-26): `Msg::parse` treated `CQ W1AW` and
+`W9XYZ K2DEF` -- two plain standard calls with no third word -- as free text, on the stated
+assumption that "a standard sender would have carried its grid". That is wrong for FT4/FT8: the
+QEX paper's Table 1 defines the standard message's g15 field as "4-character grid, Report, RRR,
+RR73, 73, or blank", and WSJT-X's `pack77_1` packs any two-word message whose words pass
+`chkcall` as Type 1 with a blank g15 (`if(nwords.eq.2) ... igrid4=MAXGRID4+1`) before free text is
+ever tried; `unpack77` renders it as just the two calls. Live effect before the fix: `CQ N4NF`
+(32 times in one session) could not be worked, and a station answering us with `<mycall> <call>`
+was rejected. The patch adds one parse branch (both words must pass a `chkcall` mirror AND
+`is_std_call`; slashed calls stay with the existing i3=4 branches) returning `Msg::Cq`/`Msg::Grid`
+with an EMPTY grid -- the sequencer's existing empty-grid handling (built for i3=4) then does the
+right thing and keeps the grid unknown. Updates the four upstream assertions that encoded the old
+rule and adds free-text negatives from the live log plus one sequencer test. EngineHost's
+`decode_semantics.rs` needs no change (it calls `Msg::parse`).
+
+**Also carries (2026-09-26) a BACKPORT of upstream #303** -- kd9taw/Nexus `0c68f705` + follow-up
+`df2c9d75` (post-v1.14.0, on `main`): a standard message needs BOTH callsign fields to be
+callsigns (`is_call_field` = `looks_like_call`, DE/CQ/QRZ exempt in the first field only, as
+`pack77_1` does; the Field Day arm exempts nothing). Before it, free text such as `KD9TAW HI -07`
+or `KD9TAW DE EM73` parsed as a message addressed to us from a station called "HI"/"DE", and the
+sequencer acted on it (verified on this pin: a CQ run left `CallingCq` for "DE"). Backported, not
+upgraded to: only `message.rs` changed upstream; the pin stays v1.14.0. Upstream's deliberate cost
+comes with it: a free-text goodbye ("HPE CUAGN 73") no longer counts as a signoff. The follow-up's
+unresolved-hash control (`<...>` stays a callsign field) is included, plus Jimmy controls for the
+multi-answer part/split-half shapes.
+
+**Obsoleted when:** upstream `Msg::parse("CQ W1AW")` returns a `Msg::Cq` (and `"W9XYZ K2DEF"` a
+`Msg::Grid`) -- and, for the #303 part, when the pin reaches a revision containing `0c68f705`.
+**How to check:** `grep -n 'parse("CQ W1AW")' crates/tempo-core/src/message.rs` -- upstream
+asserting `Msg::Other` there means the bug is still present; `grep -n "fn is_call_field"` for #303.
+
+**Companion:** the no-grid rule also matches a Nexus Tempo chat chunk whose header happens to read
+as a callsign (`A13DE W9XYZ` = header `A13` + payload `DE W9XYZ`) -- see `tempo-core-inbox.patch`
+below, which keeps Tempo chat reassembly working (operator-approved 2026-09-26).
+
+### `patches/tempo-core-inbox.patch` -- Tempo chat chunk vs grid-less call, `crates/tempo-core/src/inbox.rs`
+
+Added 2026-09-26 as the companion to `tempo-core-message.patch`. The inbox asks "standard message?"
+before "chat chunk?", and a chunk whose 3-character header happens to spell a call (`A13DE W9XYZ`)
+now parses as a grid-less two-call message, so the chunk was dropped and the chat message never
+reassembled (`inbox::tests::chunked_broadcast_reassembles_and_routes` failed; it passes on pristine
+v1.14.0). Text alone cannot separate the two -- real Letter-Digit-Digit DX calls (T88xx, H44xx,
+P29xx) have the same shape; the decoder's i3 could, but Nexus discards it. So, for CHAT ONLY, a
+grid-less two-word frame that also carries a valid chunk header (`text::parse_chunk`) is treated as
+content. `Msg::parse` and every FT8 consumer (sequencer, decode rows, EngineHost semantics, Jimmy)
+are unchanged. Test: that inbox test, extended with a control that a real grid-less call (no chunk
+header) stays a standard frame.
+
+**Obsoleted when:** `tempo-core-message.patch` is (upstream parses grid-less standard pairs itself
+and resolves the chunk ambiguity, e.g. by carrying i3).
+**How to check:** `grep -n "gridless_pair_chunk" crates/tempo-core/src/inbox.rs`.
 
 ## Checking a patch against a newer Nexus
 

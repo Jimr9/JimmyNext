@@ -2739,6 +2739,11 @@ namespace WSJTX_Controller
                 return wsjtxClient.TogglePskReporter();
             }
 
+            if (keyData == hotkeyConfig[HotkeyAction.ToggleHound] && hotkeyConfig[HotkeyAction.ToggleHound] != Keys.None)
+            {
+                return wsjtxClient.ToggleHound();
+            }
+
             if (keyData == hotkeyConfig[HotkeyAction.Prompts])
             {
                 return wsjtxClient.TogglePrompts();

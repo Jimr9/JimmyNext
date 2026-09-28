@@ -63,8 +63,11 @@ namespace WSJTX_Controller
 
                 // Stage 12 audit (2026-09-14): operational -- decides whether to re-rank this
                 // queue entry, so identity comes from EffectiveSemantic (was WsjtxMessage.ToCall(..)
-                // == myCall, the same fact AddressedToMe already carries).
-                if (msg.EffectiveSemantic(_wc.myCall).AddressedToMe && dmsg.EffectiveSemantic(_wc.myCall).AddressedToMe && WsjtxMessage.Progress(msg.Message) > WsjtxMessage.Progress(dmsg.Message))
+                // == myCall, the same fact AddressedToMe already carries). 2026-09-26: the QSO-stage
+                // comparison migrates too (was WsjtxMessage.Progress on both texts).
+                var msgSem = msg.EffectiveSemantic(_wc.myCall);
+                var dmsgSem = dmsg.EffectiveSemantic(_wc.myCall);
+                if (msgSem.AddressedToMe && dmsgSem.AddressedToMe && msgSem.Progress > dmsgSem.Progress)
                 {
                     _wc.DebugOutput($"{WsjtxClient.spacer}update stage/sequence '{msg.Message}' (was '{dmsg.Message}')");
                     msg.LastHeardUtc = dmsg.LastHeardUtc;   // carry authoritative last-heard across the re-rank

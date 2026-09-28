@@ -137,6 +137,17 @@ pub struct DecodeSemantics {
     pub signoff: Option<SemSignoff>,
     pub call_form: SemCallForm,
     pub qso_relation: SemQsoRelation,
+    /// True when this decode is (part of) a MULTI-ANSWER transmission: the 0.1 "DXpedition"
+    /// frame `K1ABC RR73; W9XYZ <FOX> -08` (WSJT-X Fox, MSHV multi-answer "Special MSG") or a
+    /// half of one the engine has already split. From frame evidence only: the frame's own
+    /// shape (Nexus's `fox_multiplex` gate), or -- for split halves -- the engine's own record,
+    /// made when it split the frame (`apply_split_provenance`). A hashed sender is not evidence.
+    pub multi_answer: bool,
+    /// For a 0.1 frame only: one envelope per part, each parsed by Nexus on its own, the
+    /// `RR73|RRR|73` part credited to the frame's OWN hashed sender (never to a QSO partner
+    /// by assumption). Empty for every other decode.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<DecodeSemantics>,
 }
 
 impl DecodeSemantics {
@@ -149,6 +160,12 @@ impl DecodeSemantics {
         // deliberately left bracketed -- see the module header). Nexus applies this same step
         // where IT parses decodes; this brings the envelope into line. No Nexus patch:
         // `Msg::unhashed` is a public method. `Cq` / `Other` pass through untouched.
+        let parts = Self::multi_answer_parts(raw_message, my_call, partner);
+        // A single decode's text proves multi-answer only when it IS the combined frame. A half
+        // the engine already split is recognised from the engine's own record of the split
+        // instead -- see `apply_split_provenance`. (A hashed standard sender alone is NOT evidence:
+        // an ordinary i3=4 exchange with a compound call, `PJ4/K1ABC <W9XYZ>`, has one too.)
+        let multi_answer = parts.is_some();
         let msg = Msg::parse(raw_message).unhashed();
         let from = msg.sender().map(str::to_string);
         let to = msg.addressee().map(str::to_string);
@@ -226,7 +243,53 @@ impl DecodeSemantics {
             signoff,
             call_form,
             qso_relation,
+            multi_answer,
+            parts: parts.unwrap_or_default(),
         }
+    }
+
+    /// Mark the halves of a 0.1 frame the ENGINE already split (Nexus `hound_split` divides one
+    /// during any FT8 QSO), from provenance recorded AT THE SPLIT -- `Engine::
+    /// last_decodes_multiplexed` (Jimmy compat patch), one flag per `recent_decodes` row in the
+    /// same order -- never reconstructed from matching snr/dt/frequency. `flags` may be shorter
+    /// than `sems`: our own-TX rows are appended after the decodes and are never marked.
+    pub fn apply_split_provenance(flags: &[bool], sems: &mut [DecodeSemantics]) {
+        for (sem, &split) in sems.iter_mut().zip(flags) {
+            if split {
+                sem.multi_answer = true;
+            }
+        }
+    }
+
+    /// Per-part envelopes for a 0.1 multi-answer frame, `None` for anything else. The shape
+    /// gate is Nexus's own `fox_multiplex` rule (tempo-app engine.rs): first part exactly
+    /// `<call> RR73|RRR|73`, second part a directed message WITH a sender -- so free text that
+    /// merely contains ';' never qualifies. The whole frame is sent by ONE station, the
+    /// hashed call in its second part (QEX Table 1, type 0.1: `c28 c28 h10 r5`), so the
+    /// sender-less first part is credited to THAT call -- never to "whoever we are working",
+    /// which is how a bystander Fox's acknowledgment was once mis-credited (Nexus #236). An
+    /// unresolved `<...>` sender names nobody, so its first part is left out.
+    fn multi_answer_parts(raw: &str, my_call: &str, partner: Option<&str>) -> Option<Vec<Self>> {
+        let (a, b) = raw.split_once(';')?;
+        let (a, b) = (a.trim(), b.trim());
+        let [to, fin] = a.split_whitespace().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        if !matches!(fin, "RR73" | "RRR" | "73") || !message::is_callsign(to) {
+            return None;
+        }
+        let second = Msg::parse(b);
+        let fox = second.sender()?;
+        second.addressee()?;
+        let mut parts = Vec::with_capacity(2);
+        if message::unhash_call(fox) != "..." {
+            parts.push(Self::from_decode(&format!("{to} {fox} {fin}"), my_call, partner));
+        }
+        parts.push(Self::from_decode(b, my_call, partner));
+        for p in &mut parts {
+            p.multi_answer = true;
+        }
+        Some(parts)
     }
 }
 
@@ -431,8 +494,67 @@ mod tests {
         // Field Day exchange
         row!("W9XYZ K2DEF 3A WI", FieldDay, Some("K2DEF"), Some("W9XYZ"), None, None, None, true, None, Standard);
         row!("W9XYZ K2DEF R 3A WI", FieldDay, Some("K2DEF"), Some("W9XYZ"), None, None, None, true, None, Standard);
+        // Type 1 with a BLANK g15 (tempo-core-message.patch): grid-less CQ and grid-less
+        // call to me, grid unknown (None) -- not free text, not a completed QSO.
+        row!("CQ N4NF", Cq, Some("N4NF"), None, None, None, None, false, None, Standard);
+        row!("W9XYZ K1ABC", Reply, Some("K1ABC"), Some("W9XYZ"), None, None, None, true, None, Standard);
+        row!("W4AQL AD9AR", Reply, Some("AD9AR"), Some("W4AQL"), None, None, None, false, None, Standard);
+        row!("4JF1EU WD8PFS", Other, None, None, None, None, None, false, None, Unknown);
+        // Upstream #303 (backported in tempo-core-message.patch): free text naming us is not a
+        // report to us from a station called "HI" -- addressed to nobody.
+        row!("W9XYZ HI -07", Other, None, None, None, None, None, false, None, Unknown);
+        row!("W9XYZ DE EM73", Other, None, None, None, None, None, false, None, Unknown);
         // free text / not-a-report
         row!("HPE CUAGN OM", Other, None, None, None, None, None, false, None, Unknown);
         row!("W9XYZ K1ABC R73", Other, None, None, None, None, None, false, None, Unknown);
+    }
+
+    /// A 0.1 multi-answer frame (live 2026-09-25: K5MGY answering two callers per over) gets
+    /// one envelope PER PART, each from Nexus's parse, the RR73 part credited to the frame's
+    /// own hashed sender -- never the combined frame's "other" copied onto both halves.
+    #[test]
+    fn a_multi_answer_frame_yields_per_part_semantics_credited_to_its_own_sender() {
+        let s = DecodeSemantics::from_decode("KR4LQH RR73; KD9BIE <K5MGY> -08", "KD9BIE", Some("K5MGY"));
+        assert_eq!(s.kind, SemKind::Other, "the combined frame itself is not one standard message");
+        assert!(s.multi_answer);
+        assert_eq!(s.parts.len(), 2);
+        let (a, b) = (&s.parts[0], &s.parts[1]);
+        assert_eq!((a.kind, a.from.as_deref(), a.to.as_deref()), (SemKind::Rr73, Some("K5MGY"), Some("KR4LQH")));
+        assert!(!a.addressed_to_me && a.multi_answer);
+        assert_eq!((b.kind, b.from.as_deref(), b.to.as_deref(), b.report_db), (SemKind::Report, Some("K5MGY"), Some("KD9BIE"), Some(-8)));
+        assert!(b.addressed_to_me && b.multi_answer);
+        assert_eq!(b.qso_relation, SemQsoRelation::Partner);
+
+        // COUNTEREXAMPLE: a hashed STANDARD sender is not evidence on its own. Nexus's own i3=4
+        // test message -- an ordinary exchange with a compound call -- has one, and so does a
+        // lone split half; neither is marked from its text.
+        assert!(!DecodeSemantics::from_decode("PJ4/K1ABC <W9XYZ>", "PJ4/K1ABC", None).multi_answer);
+        assert!(!DecodeSemantics::from_decode("KD9BIE <K5MGY> -08", "KD9BIE", None).multi_answer);
+        assert!(!DecodeSemantics::from_decode("KD9BIE K5MGY -08", "KD9BIE", None).multi_answer);
+
+        // Halves the ENGINE split are marked ONLY from the engine's own record of the split
+        // (Engine::last_decodes_multiplexed, one flag per row) -- never from look-alike text or
+        // measurements. Rows 2-4 look exactly like split halves (a sender-less RR73 and a
+        // hashed-sender report, which the real engine test gives identical snr/dt/freq) but the
+        // engine did not split them; the trailing own-TX row has no flag at all.
+        let rows = [
+            "KR4LQH RR73",        // genuine split: first half
+            "KD9BIE <K5MGY> -08", // genuine split: second half
+            "W1ABC RR73",         // unrelated look-alike, not split
+            "K2DEF <K5MGY> -12",  // unrelated look-alike, not split
+            "PJ4/K1ABC <W9XYZ>",  // ordinary i3=4 exchange
+            "K5MGY KD9BIE R-10",  // our own transmission (appended after the decodes)
+        ];
+        let mut sems: Vec<DecodeSemantics> =
+            rows.iter().map(|m| DecodeSemantics::from_decode(m, "KD9BIE", None)).collect();
+        DecodeSemantics::apply_split_provenance(&[true, true, false, false, false], &mut sems);
+        let marked: Vec<bool> = sems.iter().map(|s| s.multi_answer).collect();
+        assert_eq!(marked, [true, true, false, false, false, false]);
+        // An unresolved hash names nobody: the RR73 part is left out rather than guessed.
+        let u = DecodeSemantics::from_decode("KR4LQH RR73; KD9BIE <...> -08", "KD9BIE", None);
+        assert_eq!(u.parts.len(), 1);
+        // Free text that merely contains ';' is not a multi-answer frame.
+        let f = DecodeSemantics::from_decode("TNX FB; 73 GL", "KD9BIE", None);
+        assert!(f.parts.is_empty() && !f.multi_answer);
     }
 }

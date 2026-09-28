@@ -1,0 +1,35 @@
+diff --git a/src/inbox.rs b/src/inbox.rs
+index 73fe1174..578a13b8 100644
+--- a/src/inbox.rs
++++ b/src/inbox.rs
+@@ -108,7 +108,17 @@ impl Inbox {
+             // Anything else is CONTENT — route a chunk to the reassembler and everything
+             // else (bare broadcast, plain line) to push_text, which sorts a "DE <CALL>
+             // <body>" broadcast from a directed line.
+-            let is_standard = !matches!(m, Msg::Other(_))
++            // JIMMY COMPAT (tempo-core-inbox.patch): Jimmy's tempo-core-message.patch reads two
++            // plain standard calls as a grid-less Type 1 message ("W4AQL AD9AR"), and a chat chunk
++            // whose header happens to spell a call does too ("A13DE W9XYZ" = header A13 + payload
++            // "DE W9XYZ"). Text alone cannot separate them (the decoder's i3 could), so for CHAT
++            // only, a grid-less two-word frame carrying a valid chunk header is content. The
++            // parse itself -- and every FT8 consumer -- is unchanged.
++            let gridless_pair_chunk = matches!(&m, Msg::Grid { grid, .. } if grid.is_empty())
++                && d.message.split_whitespace().count() == 2
++                && text::parse_chunk(&d.message).is_some();
++            let is_standard = !gridless_pair_chunk
++                && !matches!(m, Msg::Other(_))
+                 && m.sender().is_none_or(looks_like_call)
+                 && m.addressee().is_none_or(looks_like_call);
+             if !is_standard {
+@@ -486,5 +496,11 @@ mod tests {
+         assert_eq!(m.from.as_deref(), Some("W9XYZ"));
+         assert_eq!(m.to, None);
+         assert_eq!(m.text, text::normalize("NET ON 7130 AT 0200Z"));
++
++        // JIMMY COMPAT: that first chunk is "A13DE W9XYZ", which the grid-less rule reads as two
++        // calls. Control: a real grid-less call with no chunk header stays a standard frame --
++        // it identifies the talker and never becomes chat text.
++        inbox.observe(&[dec("K2DEF W9XYZ")], 9);
++        assert_eq!(inbox.messages.len(), 1, "a real grid-less call is not chat: {:?}", inbox.messages);
+     }
+ }

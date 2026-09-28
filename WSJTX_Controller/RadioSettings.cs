@@ -101,13 +101,17 @@ namespace WSJTX_Controller
         // was removed entirely, operator directive: RF power is controlled on the radio itself,
         // full stop -- Jimmy must never write to it, not even once, not even as a workaround.
 
-        // F11/F12 (Audio Level up/down) step size, as a percentage of the engine's 0.0-1.0
-        // tx_level range -- WsjtxClient.BandAudio.cs's AudioLevel() reads this instead of a
-        // hardcoded step. Default 5 matches the step size those hotkeys always used before this
-        // was configurable. Fractional since 2026-08-30 (0.5-25 in 0.5% increments) so the F11/F12
-        // step and the Options > Radio "FT8/FT4 transmit tone level" spinner can both move the
-        // level in half-percent steps.
-        public double AudioStepPercent { get; set; } = 5.0;
+        // F11/F12 (Audio Level up/down) step size in dB -- WsjtxClient.BandAudio.cs's AudioLevel()
+        // reads this. 2026-09-26: changed from a linear percent-of-range step to dB, matching
+        // WSJT-X's Pwr slider (0.1 dB resolution; its audio up/down keys step 0.5 dB). A fixed
+        // percent step was a different number of dB at every level -- about 1.3 dB per press at
+        // 3%, 0.25 dB at 17% -- a fixed dB step is the same change at any level. The old
+        // radioAudioStepPercent key has no meaningful dB equivalent, so it is not converted:
+        // an existing profile starts at the 0.5 dB default and the old key is removed on save.
+        public double AudioStepDb { get; set; } = 0.5;
+        public const double AudioStepDbMin = 0.1;
+        public const double AudioStepDbMax = 6.0;
+        private const string RetiredAudioStepPercentKey = "radioAudioStepPercent";
 
         // Added 2026-08-10: the last confirmed band index (WsjtxClient.bands: 160/80/60/40/30/
         // 20/17/15/12/10/6), persisted across sessions so Direct-mode startup can restore it
@@ -161,7 +165,7 @@ namespace WSJTX_Controller
         // hint ("SWR 1.4, good", "ALC 0.30, a little high, reduce audio") and the receive report
         // also includes the rig's CAT S-meter in S-units where the rig provides one. Requested
         // 2026-08-28 by operators who wanted the meaning spoken, not just the reading. Read live
-        // off ctrl.Radio -- no engine/radio restart needed, same shape as AudioStepPercent /
+        // off ctrl.Radio -- no engine/radio restart needed, same shape as AudioStepDb /
         // RememberTxLevelPerBand above.
         public bool ExplainMeterReadings { get; set; } = false;
 
@@ -191,9 +195,10 @@ namespace WSJTX_Controller
             HaltTxOnHighSwr = ini.Read("radioHaltTxOnHighSwr") == "True";
             if (double.TryParse(ini.Read("radioSwrHaltThreshold"), out double swrThreshold) && swrThreshold > 0)
                 SwrHaltThreshold = swrThreshold;
-            if (double.TryParse(ini.Read("radioAudioStepPercent"), System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out double audioStep) && audioStep >= 0.5 && audioStep <= 25)
-                AudioStepPercent = audioStep;
+            if (double.TryParse(ini.Read("radioAudioStepDb"), System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out double audioStep)
+                    && audioStep >= AudioStepDbMin && audioStep <= AudioStepDbMax)
+                AudioStepDb = audioStep;
             if (int.TryParse(ini.Read("radioLastBandIdx"), out int lastBandIdx) && lastBandIdx >= 0)
                 LastBandIdx = lastBandIdx;
             if (double.TryParse(ini.Read("radioLastDialFrequencyHz"), System.Globalization.NumberStyles.Float,
@@ -239,7 +244,8 @@ namespace WSJTX_Controller
             ini.Write("radioPttSerialPort", PttSerialPort);
             ini.Write("radioHaltTxOnHighSwr", HaltTxOnHighSwr.ToString());
             ini.Write("radioSwrHaltThreshold", SwrHaltThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture));
-            ini.Write("radioAudioStepPercent", AudioStepPercent.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            ini.Write("radioAudioStepDb", AudioStepDb.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (ini.KeyExists(RetiredAudioStepPercentKey)) ini.DeleteKey(RetiredAudioStepPercentKey);
             if (LastBandIdx >= 0) ini.Write("radioLastBandIdx", LastBandIdx.ToString());
             if (LastDialFrequencyHz > 0)
                 ini.Write("radioLastDialFrequencyHz", LastDialFrequencyHz.ToString(System.Globalization.CultureInfo.InvariantCulture));

@@ -172,6 +172,10 @@ namespace WSJTX_Controller
         internal Dictionary<string, EnqueueDecodeMessage> callDict = new Dictionary<string, EnqueueDecodeMessage>();
         internal Queue<string> callQueue = new Queue<string>();
         internal List<string> sentReportList = new List<string>();
+        // 2026-09-26: the report value we actually TRANSMITTED to each call (dB), from the engine's
+        // own outgoing message -- what the log's rst_sent must record. Kept in lockstep with
+        // sentReportList (cleared/removed at the same points).
+        internal Dictionary<string, int> sentReportDb = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         internal List<string> sentCallList = new List<string>();
         internal Dictionary<string, List<EnqueueDecodeMessage>> allCallDict = new Dictionary<string, List<EnqueueDecodeMessage>>();            //all calls to this station plus CQs (and replies: grids) processed
         internal Dictionary<string, int> timeoutCallDict = new Dictionary<string, int>();    //calls sent to myCall immed after timeout
@@ -448,6 +452,18 @@ namespace WSJTX_Controller
         // with logList (ClearCalls). Never read by any machine-readable path.
         private readonly Dictionary<string, (string Sent, string Received)> _loggedReports
             = new Dictionary<string, (string Sent, string Received)>(StringComparer.OrdinalIgnoreCase);
+
+        // 2026-09-26 (operator request): what the Auto-logged calls list SHOWS -- every contact
+        // logged this Jimmy session, with its band (and mode when not FT8) and its own reports,
+        // oldest first. Deliberately separate from logList: logList is also the per-band "already
+        // worked" gate (re-call suppression, late RR73/73 handling, double-log guard) and MUST stay
+        // cleared on a band change, or a station worked on 40m would read as worked on 20m. This
+        // list is presentation only and is never cleared on a band change -- only by a restart.
+        // Country/state is captured AT LOG TIME too: Country(call) reads the per-band decode
+        // history (allCallDict), which a band change clears, so looking it up at display time lost
+        // it for every earlier band's contacts (operator report 2026-09-27).
+        private readonly List<(string Call, string Band, string Mode, string Sent, string Received, string Country)> _sessionLogged
+            = new List<(string Call, string Band, string Mode, string Sent, string Received, string Country)>();
 
         // Dedup guard for a QSO logged via Direct mode's own real completion detection
         // (DirectApplyStatus's curTxMsg/callInProg/Is73orRR73 -> LogQso -> RequestLog,
@@ -2741,6 +2757,7 @@ namespace WSJTX_Controller
             allCallDict.Clear();
             sentCallList.Clear();
             sentReportList.Clear();
+            sentReportDb.Clear();
             unwantedCqList.Clear();
             _bandSessionLocationCache.Clear();
             logList.Clear();
@@ -2915,8 +2932,18 @@ namespace WSJTX_Controller
             //<time_on:6>042215 <qso_date_off:8>20201226 <time_off:6>042300 <band:3>40m <freq:8>7.076439 
             //<station_callsign:4>WM8Q <my_gridsquare:6>DN61OK <eor>
 
-            string rstSent = reptMsg.Snr == 0 ? "+00" : (reptMsg.Snr > 0 ? "+" + reptMsg.Snr.ToString("D2") : reptMsg.Snr.ToString("D2"));
-            string rstRecd = WsjtxMessage.RstRecd(reptMsg.Message);
+            // 2026-09-26: rst_sent is the report we actually TRANSMITTED (sentReportDb, from the
+            // engine's own outgoing message). It used to be the SNR of the station's report
+            // message -- right only by coincidence when we answered THEIR CQ; when they answered
+            // OURS it logged a later measurement (live: W9MDM sent +19, logged +08). The old value
+            // stays only as the fallback when no transmitted report was seen (legacy UDP/replay).
+            string rstSent = sentReportDb.TryGetValue(call, out int sentDb)
+                ? (sentDb < 0 ? "-" : "+") + Math.Abs(sentDb).ToString("D2")
+                : reptMsg.Snr == 0 ? "+00" : (reptMsg.Snr > 0 ? "+" + reptMsg.Snr.ToString("D2") : reptMsg.Snr.ToString("D2"));
+            // 2026-09-26 (parser migration): the received report is Nexus's ReportDb (was
+            // WsjtxMessage.RstRecd re-parsing the text), formatted exactly as before ("+05", "-08").
+            int? rptDb = reptMsg.EffectiveSemantic(myCall).ReportDb;
+            string rstRecd = rptDb == null ? null : (rptDb.Value < 0 ? "-" : "+") + Math.Abs(rptDb.Value).ToString("D2");
             string qsoDateOn = reptMsg.RxDate.ToString("yyyyMMdd");
             string qsoTimeOn = reptMsg.SinceMidnight.ToString("hhmmss");      //one of the report decodes
             EnqueueDecodeMessage cqMsg = CqMsg(call);
@@ -3057,6 +3084,7 @@ namespace WSJTX_Controller
                 // rstRecd can be null (RstRecd() found no report/roger-report to parse) -- never
                 // invented, stored/offered as "" per the field's own contract.
                 _loggedReports[call] = (rstSent ?? "", rstRecd ?? "");   // presentation only -- see field comment
+                _sessionLogged.Add((call, CurrentBandStr, mode, rstSent ?? "", rstRecd ?? "", Country(call)));
                 ShowLogged();
                 loggedCall = call;
                 loggedSentReport = rstSent ?? "";
@@ -3079,6 +3107,7 @@ namespace WSJTX_Controller
             if (call == null) return;
             if (allCallDict.Remove(call)) DebugOutput($"{spacer}removed '{call}' from allCallDict");
             if (sentReportList.Remove(call)) DebugOutput($"{spacer}removed '{call}' from sentReportList");
+            sentReportDb.Remove(call);
             if (sentCallList.Remove(call)) DebugOutput($"{spacer}removed '{call}' from sentCallList");
         }
 

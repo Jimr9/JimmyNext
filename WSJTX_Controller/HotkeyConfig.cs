@@ -26,6 +26,8 @@ namespace WSJTX_Controller
         BandUp,
         BandDown,
         ToggleMode,
+        // 2026-09-26: traditional FT8 DXpedition Hound on/off (session only -- see WsjtxClient.ToggleHound).
+        ToggleHound,
         // Frequency Control
         AnnounceFreq,
         TxFreqUp,
@@ -107,6 +109,9 @@ namespace WSJTX_Controller
             [HotkeyAction.BandUp]          = Keys.Alt | Keys.PageUp,
             [HotkeyAction.BandDown]        = Keys.Alt | Keys.PageDown,
             [HotkeyAction.ToggleMode]      = Keys.Alt | Keys.M,
+            // 2026-09-26: Ctrl+Shift+D ("DXpedition") -- free of every default here; NewerActions
+            // below keeps an upgrading operator's existing binding of it.
+            [HotkeyAction.ToggleHound]     = Keys.Control | Keys.Shift | Keys.D,
             // Frequency Control -- accessible equivalents of dragging the waterfall markers.
             // No arrow keys (screen readers own those) and no F10 (menu bar / Shift+F10 context
             // menu). The F11/F12 family pairs with those two keys already being audio level
@@ -192,6 +197,7 @@ namespace WSJTX_Controller
             [HotkeyAction.BandUp]          = "Band Up",
             [HotkeyAction.BandDown]        = "Band Down",
             [HotkeyAction.ToggleMode]      = "Toggle Mode (FT8 / FT4)",
+            [HotkeyAction.ToggleHound]     = "Toggle Hound (FT8 DXpedition)",
             [HotkeyAction.AnnounceFreq]    = "Announce Rx / Tx Frequencies",
             [HotkeyAction.TxFreqUp]        = "Transmit Frequency Up",
             [HotkeyAction.TxFreqDown]      = "Transmit Frequency Down",
@@ -264,6 +270,8 @@ namespace WSJTX_Controller
             // unassign them (spec: "user may leave them unassigned").
             HotkeyAction.ToggleStationWatch,
             HotkeyAction.WorkWatchedStationNow,
+            // 2026-09-26: has a default, but an upgrading operator's conflicting binding wins.
+            HotkeyAction.ToggleHound,
             // Ships with no default key (operator request, 2026-09-12) -- unassigned is expected,
             // not an error.
             HotkeyAction.SmartStartStatus,
@@ -298,6 +306,8 @@ namespace WSJTX_Controller
             HotkeyAction.ReportSlotAnalysis, HotkeyAction.NotificationHistory,
             // 2.0.63 additions -- same protection for Ctrl+Shift+W / Ctrl+Shift+Enter.
             HotkeyAction.ToggleStationWatch, HotkeyAction.WorkWatchedStationNow,
+            // 2026-09-26 -- same protection for Ctrl+Shift+D.
+            HotkeyAction.ToggleHound,
         };
 
         // Populated by LoadFromIni: newer actions that were left unassigned because this

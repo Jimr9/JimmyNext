@@ -37,14 +37,20 @@ namespace WSJTX_Controller
         public int? InputMasterLevelPercent { get; set; }
         public int? OutputMasterLevelPercent { get; set; }
 
-        // 2026-09-23 redesign: the Decode Engine tab's Input/Output level controls used to drive
-        // these two PER-APPLICATION Windows Volume Mixer session levels for jimmy-engine-host.exe
-        // directly (ProcessAudioSessionVolume) -- they now drive the device MASTER level above
-        // instead. Kept as hidden, ini-only settings (no UI control), always 100 unless
-        // hand-edited in the ini, applied once the Engine Host's own audio session becomes
-        // available -- see WsjtxClient.Direct.cs's ApplyEngineAppAudioLevelsOnceAvailable.
-        public int EngineAudioInputAppLevel { get; set; } = 100;
+        // 2026-09-23 redesign: the Decode Engine tab's Output level control used to drive this
+        // PER-APPLICATION Windows render session level for jimmy-engine-host.exe directly
+        // (ProcessAudioSessionVolume) -- it now drives the device MASTER level above instead.
+        // Kept as a hidden, ini-only setting (no UI control), always 100 unless hand-edited in
+        // the ini, applied once the Engine Host's own render session becomes available -- see
+        // WsjtxClient.Direct.cs's ApplyEngineOutputAppLevelOnceAvailable.
+        //
+        // 2026-09-26: the matching hidden INPUT setting (engineAudioInputAppLevel) is removed
+        // entirely, and its old ini key deleted on save. Windows ties a shared-mode capture
+        // session's volume to the endpoint master volume, so applying it overwrote the saved
+        // InputMasterLevelPercent above on every startup. The input master level is the only
+        // input control.
         public int EngineAudioOutputAppLevel { get; set; } = 100;
+        private const string RetiredInputAppLevelKey = "engineAudioInputAppLevel";
 
         // UDP-to-Direct parity/cleanup pass, 2026-08-12: the "talk over classic WSJT-X UDP
         // instead of Direct" choice (UseDirectEngine) is retired as a production option -- UDP
@@ -78,8 +84,6 @@ namespace WSJTX_Controller
                 && int.TryParse(ini.Read("radioOutputMasterLevelPercent"), out int outMaster)
                 && outMaster >= 0 && outMaster <= 100)
                 OutputMasterLevelPercent = outMaster;
-            if (int.TryParse(ini.Read("engineAudioInputAppLevel"), out int inApp) && inApp >= 0 && inApp <= 100)
-                EngineAudioInputAppLevel = inApp;
             if (int.TryParse(ini.Read("engineAudioOutputAppLevel"), out int outApp) && outApp >= 0 && outApp <= 100)
                 EngineAudioOutputAppLevel = outApp;
         }
@@ -94,7 +98,7 @@ namespace WSJTX_Controller
                 ini.Write("radioInputMasterLevelPercent", InputMasterLevelPercent.Value.ToString());
             if (OutputMasterLevelPercent.HasValue)
                 ini.Write("radioOutputMasterLevelPercent", OutputMasterLevelPercent.Value.ToString());
-            ini.Write("engineAudioInputAppLevel", EngineAudioInputAppLevel.ToString());
+            if (ini.KeyExists(RetiredInputAppLevelKey)) ini.DeleteKey(RetiredInputAppLevelKey);
             ini.Write("engineAudioOutputAppLevel", EngineAudioOutputAppLevel.ToString());
         }
     }

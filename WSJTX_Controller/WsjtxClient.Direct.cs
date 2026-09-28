@@ -363,7 +363,7 @@ namespace WSJTX_Controller
                     else if (_directNormalQueue.Count > 0) req = _directNormalQueue.Dequeue();
                 }
                 if (req == null) continue; // defensive only -- the semaphore count always matches enqueued items exactly
-                string response = DirectSendCommandSafe(req.Command);
+                string response = DirectSendCommandSafe(req.Command, trackForAbort: true);
                 DeliverDirectCompletion(req, response);
             }
         }
@@ -376,11 +376,11 @@ namespace WSJTX_Controller
         // not just the one that failed. A thrown exception becomes an ordinary null response here
         // -- exactly like every other already-expected failure mode (refused connection, read
         // timeout) already was, so no caller needs to special-case it.
-        private string DirectSendCommandSafe(string command)
+        private string DirectSendCommandSafe(string command, bool trackForAbort = false)
         {
             try
             {
-                return DirectSendCommand(command);
+                return DirectSendCommand(command, trackForAbort);
             }
             catch (Exception ex)
             {
@@ -453,15 +453,14 @@ namespace WSJTX_Controller
         // ConnectDirectEngine.
         private bool _startupTxLevelRestored;
 
-        // 2026-09-23: has the hidden per-application Engine Host Windows Volume Mixer session
-        // level (ctrl.NativeEngine.EngineAudioInput/OutputAppLevel) been applied at least once
-        // this connection? One flag per direction -- ISimpleAudioVolume only has something to
-        // set once the engine host process has actually opened its own capture/render session on
-        // the device, which can lag a moment behind the process starting, so
-        // ApplyEngineAppAudioLevelsOnceAvailable retries each poll until each side succeeds once,
-        // then stops. Reset per connection in ConnectDirectEngine so a restarted/relaunched
-        // engine gets this reapplied to its own fresh session.
-        private bool _engineInputAppLevelApplied;
+        // 2026-09-23: has the hidden per-application Engine Host OUTPUT (render) session level
+        // (ctrl.NativeEngine.EngineAudioOutputAppLevel) been applied at least once this
+        // connection? ISimpleAudioVolume only has something to set once the engine host process
+        // has actually opened its own render session on the device, which can lag a moment behind
+        // the process starting, so ApplyEngineOutputAppLevelOnceAvailable retries each poll until
+        // it succeeds once, then stops. Reset per connection in ConnectDirectEngine so a
+        // restarted/relaunched engine gets this reapplied to its own fresh session. Output only:
+        // see ApplyEngineOutputAppLevelOnceAvailable for why the input session is never touched.
         private bool _engineOutputAppLevelApplied;
 
         // Tier-confirmation redesign, 2026-09-15: the bounded-window/poll-based confirmation that
@@ -762,8 +761,8 @@ namespace WSJTX_Controller
             _directFirstStatusShown = false;
             _directStartupBandResolved = false;
             _startupTxLevelRestored = false;
-            _engineInputAppLevelApplied = false;
             _engineOutputAppLevelApplied = false;
+            _houndSentThisConnection = false;   // a restarted engine comes up with Hound off
             _startupRestoreCaptured = false;
             _startupRestoreDialHz = 0;
             _startupRestoreBandIdx = -1;
@@ -1186,28 +1185,66 @@ namespace WSJTX_Controller
             _lastCatOk = catOk;
         }
 
-        // 2026-09-23: applies the hidden per-application Engine Host levels (ctrl.NativeEngine.
-        // EngineAudioInput/OutputAppLevel, Options > Decode Engine no longer exposes these --
-        // see that setting's own comment) to jimmy-engine-host.exe's own Windows Volume Mixer
-        // session, once that session actually exists. ProcessAudioSessionVolume.SetVolume
-        // returns false until the engine process has opened its own capture/render stream on the
-        // device -- which can lag a moment behind the process starting -- so this simply retries,
-        // harmlessly, on every poll until each direction succeeds once, then stops touching it.
-        private void ApplyEngineAppAudioLevelsOnceAvailable()
+        // 2026-09-23: applies the hidden per-application Engine Host OUTPUT level (ctrl.
+        // NativeEngine.EngineAudioOutputAppLevel, not exposed in Options -- see that setting's own
+        // comment) to jimmy-engine-host.exe's own Windows render session, once that session
+        // actually exists. ProcessAudioSessionVolume.SetVolume returns false until the engine
+        // process has opened its render stream on the device -- which can lag a moment behind the
+        // process starting -- so this simply retries, harmlessly, on every poll until it succeeds
+        // once, then stops touching it.
+        //
+        // Input-volume startup fix, 2026-09-26: the INPUT (capture) session is deliberately never
+        // set here. Per Microsoft's IAudioEndpointVolume documentation, a shared-mode CAPTURE
+        // session's ISimpleAudioVolume is tied directly to the endpoint master volume -- setting
+        // one sets the other -- whereas a RENDER session's volume is independent of its endpoint.
+        // Writing the hidden input app level (default 100%) here, one poll after Controller.
+        // ApplyRadioMasterAudioLevels restored the operator's saved input master level, silently
+        // overwrote that level on every startup/engine restart (operator report: Alt+Q showed
+        // ~90 dB input until the Options input control was moved and moved back, which reapplied
+        // the endpoint level). The saved input master level is the only input control.
+        private void ApplyEngineOutputAppLevelOnceAvailable()
+            => ApplyEngineOutputAppLevelOnceAvailable(ctrl.nativeEngineClient?.ProcessId ?? 0, ProcessAudioSessionVolume.SetVolume);
+
+        private void ApplyEngineOutputAppLevelOnceAvailable(int pid, Func<int, string, bool, float, bool> setSessionVolume)
         {
-            if (_engineInputAppLevelApplied && _engineOutputAppLevelApplied) return;
-            int pid = ctrl.nativeEngineClient?.ProcessId ?? 0;
-            if (pid <= 0) return;
-
-            if (!_engineInputAppLevelApplied
-                && ProcessAudioSessionVolume.SetVolume(pid, ctrl.NativeEngine.AudioInputDevice, false,
-                    ctrl.NativeEngine.EngineAudioInputAppLevel / 100f))
-                _engineInputAppLevelApplied = true;
-
-            if (!_engineOutputAppLevelApplied
-                && ProcessAudioSessionVolume.SetVolume(pid, ctrl.NativeEngine.AudioOutputDevice, true,
+            if (_engineOutputAppLevelApplied || pid <= 0) return;
+            if (setSessionVolume(pid, ctrl.NativeEngine.AudioOutputDevice, true,
                     ctrl.NativeEngine.EngineAudioOutputAppLevel / 100f))
                 _engineOutputAppLevelApplied = true;
+        }
+
+        // Test-only: drives the per-poll apply with a fake engine pid and a recording session
+        // setter (the real one needs a live engine process and Windows audio session).
+        internal void TestApplyEngineOutputAppLevel(int pid, Func<int, string, bool, float, bool> setSessionVolume)
+            => ApplyEngineOutputAppLevelOnceAvailable(pid, setSessionVolume);
+
+        // Portable / compound calls, 2026-09-26 (live: a directed "CQ POTA VA3LG" -- WSJT-X cannot
+        // fit "/W2" into a directed CQ -- answered as "VA3LG/W2"). The engine recognised one station
+        // and completed the QSO under the full call; Jimmy kept waiting on "VA3LG", filed the
+        // station's report under "VA3LG/W2", and never logged the contact. Nexus is the authority
+        // on who we are working: when the engine's partner is the SAME station as callInProg under
+        // another spelling -- decided by Nexus's own base_call (snap.QsoDxcallBase), never
+        // re-derived here -- adopt the engine's spelling, carrying this contact's history and
+        // sent-report state with it so reports, completion and the logbook line up.
+        private void AdoptEnginePartnerSpelling(DirectSnapshot snap)
+        {
+            string engineCall = snap.Qso?.Dxcall;
+            string old = callInProg;
+            if (old == null || string.IsNullOrEmpty(engineCall) || string.IsNullOrEmpty(snap.QsoDxcallBase)) return;
+            if (string.Equals(old, engineCall, StringComparison.OrdinalIgnoreCase)) return;
+            if (!string.Equals(old, snap.QsoDxcallBase, StringComparison.OrdinalIgnoreCase)) return;   // a different station
+
+            DebugOutput($"{Time()} [DIRECT] partner spelling: engine is working '{engineCall}', the same station as callInProg '{old}' -- adopting it");
+            if (allCallDict.TryGetValue(old, out var oldMsgs))
+            {
+                if (allCallDict.TryGetValue(engineCall, out var newMsgs)) oldMsgs.AddRange(newMsgs);
+                allCallDict[engineCall] = oldMsgs;
+                allCallDict.Remove(old);
+            }
+            if (sentReportList.Contains(old) && !sentReportList.Contains(engineCall)) sentReportList.Add(engineCall);
+            if (sentReportDb.TryGetValue(old, out int oldSentDb) && !sentReportDb.ContainsKey(engineCall)) sentReportDb[engineCall] = oldSentDb;
+            _callQueueStore.RemoveCall(old);   // never offer the base spelling again for this same contact
+            SetCallInProg(engineCall);
         }
 
         private void DirectApplyStatus(DirectSnapshot snap)
@@ -1525,10 +1562,13 @@ namespace WSJTX_Controller
                     DirectSetEngineTxLevel(ctrl.Radio.LastTxLevel);
             }
 
-            // 2026-09-23: apply the hidden per-application Engine Host levels once its audio
-            // sessions actually exist -- unrelated to radio/TX state, so unlike the restore just
-            // above this runs on every poll regardless (cheap no-op once both sides succeed).
-            ApplyEngineAppAudioLevelsOnceAvailable();
+            // 2026-09-23: apply the hidden per-application Engine Host output level once its
+            // render session actually exists -- unrelated to radio/TX state, so unlike the restore
+            // just above this runs on every poll regardless (cheap no-op once it succeeds).
+            ApplyEngineOutputAppLevelOnceAvailable();
+
+            // Hound: track the engine's ACTUAL state every poll (restart / leaving FT8).
+            ApplyEngineSpecialOp(snap.SpecialOp);
 
             // Options > Radio "Remember F11/F12 audio level per band" -- only on a genuine
             // confirmed band change (newBand, set just above), not every poll tick. See
@@ -2116,6 +2156,7 @@ namespace WSJTX_Controller
             // Phase C: reuse the semantics cached when curTxMsg was set, above -- not a fresh
             // re-derivation from curTxMsg's text on every poll. Falls back to a direct compute
             // only if somehow nothing was ever cached (e.g. curTxMsg pre-dates this field).
+            AdoptEnginePartnerSpelling(snap);
             var txSem = _curTxMsgSemantic ?? SemanticExtensions.EffectiveTxSemantic(curTxMsg, snap.QsoTxSemantics, myCall);
             bool txSemFromNexus = SemanticCutover.UseNexusSemantics && snap.QsoTxSemantics != null;
             string engineQsoPartner = snap.Qso?.Dxcall;
@@ -2135,9 +2176,24 @@ namespace WSJTX_Controller
 
             if (!string.IsNullOrEmpty(curTxMsg) && callInProg != null && TxOverAddressedTo(callInProg))
             {
-                if ((txSem.IsReport || txSem.IsRReport) && !sentReportList.Contains(callInProg))
-                    sentReportList.Add(callInProg);
-                if (txSem.IsRr73 || txSem.Is73)
+                if (txSem.IsReport || txSem.IsRReport)
+                {
+                    if (!sentReportList.Contains(callInProg))
+                        sentReportList.Add(callInProg);
+                    // The value actually on the air -- what the log's rst_sent records.
+                    if (txSem.ReportDb.HasValue)
+                        sentReportDb[callInProg] = txSem.ReportDb.Value;
+                }
+                // 2026-09-26: a QUIET finish -- Nexus's Hound rule ends the QSO on the Fox's RR73
+                // and sends NOTHING after it (a 73 would land in the Fox's own segment), so no
+                // 73/RR73 ever becomes our "now sending" text. Nexus's own sequencer state is
+                // the authority on completion: "done" for this partner with nothing left to send
+                // completes the contact through exactly the same log-once path below.
+                bool engineDoneQuietly = snap.Qso != null
+                    && string.Equals(snap.Qso.State, "done", StringComparison.OrdinalIgnoreCase)
+                    && string.IsNullOrEmpty(snap.Qso.TxNow)
+                    && string.Equals(snap.Qso.Dxcall, callInProg, StringComparison.OrdinalIgnoreCase);
+                if (txSem.IsRr73 || txSem.Is73 || engineDoneQuietly)
                 {
                     // Mirrors the UDP path's ProcessTxEnd (WsjtxClient.cs, Is73orRR73(txMsg)
                     // branch): once the final 73/RR73 to callInProg is on its way, the QSO is
@@ -2583,6 +2639,7 @@ namespace WSJTX_Controller
                 // here changes behaviour -- SemanticCutover.UseNexusSemantics is still false and
                 // no consumer reads the Nexus side yet. Remove with the Semantic/ diagnostic
                 // once the migration is field-proven. See C:\chat gpt\nexus plan.txt Section 9.
+                List<DirectDecodeSemantics> rowParts = null;
                 {
                     string myCallForSem = myCall;
                     var semOld = SemanticDecode.FromWsjtxMessage(normMsg, myCallForSem);
@@ -2594,6 +2651,7 @@ namespace WSJTX_Controller
                             { envForRow = e; break; }
                     }
                     var semNew = SemanticDecode.FromNexus(row, envForRow, myCallForSem);
+                    rowParts = envForRow?.Parts;
                     // S2 (2026-09-08): running per-session coverage tally for the support ZIP.
                     _directDecodeRowsSeen++;
                     if (envForRow != null) _directDecodeRowsWithSemantics++;
@@ -2659,24 +2717,33 @@ namespace WSJTX_Controller
 
                 if (!enq.Message.Contains(";"))
                 {
-                    ProcessDecodeMsg(enq, false);
+                    // isSpecOp for a multi-answer decode (2026-09-26): the ENGINE splits every
+                    // 0.1 multi-answer frame itself while a QSO is in progress, so its halves
+                    // arrive here as ordinary rows -- EngineHost's MultiAnswer fact is what still
+                    // marks them (e.g. the station answering several callers must not count as
+                    // "busy working someone else").
+                    ProcessDecodeMsg(enq, enq.Semantic?.MultiAnswer == true);
                     FeedTargetMonitors(enq, directTargetMonitorEvenSlot);
                 }
-                else
+                else if (rowParts != null && rowParts.Count > 0)
                 {
-                    // Fox/hound-style multi-target message -- same split ProcessDecodeMsg's own
-                    // UDP-path caller uses (WsjtxClient.Protocol.cs), kept identical rather than
-                    // reinvented here.
-                    string[] words = enq.Message.Replace(";", "").Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-                    if (words.Length != 5) continue;
-                    EnqueueDecodeMessage enq2 = enq.DeepCopy();
-                    enq.Message = $"{words[0]} {words[3]} {words[1]}";
-                    ProcessDecodeMsg(enq, true);
-                    FeedTargetMonitors(enq, directTargetMonitorEvenSlot);
-                    enq2.Message = $"{words[2]} {words[3]} {words[4]}";
-                    ProcessDecodeMsg(enq2, true);
-                    FeedTargetMonitors(enq2, directTargetMonitorEvenSlot);
+                    // 2026-09-26: a 0.1 multi-answer frame the engine did NOT split (no QSO in
+                    // progress). One decode PER PART, each with its OWN Nexus classification from
+                    // EngineHost -- the RR73 part credited to the frame's own hashed sender. This
+                    // replaces Jimmy's old text split, which copied the whole frame's "other"
+                    // classification onto one half and left the other with none (both rejected:
+                    // live 2026-09-25, K5MGY).
+                    foreach (var part in rowParts)
+                    {
+                        EnqueueDecodeMessage penq = enq.DeepCopy();
+                        penq.Message = WsjtxMessage.NormalizeDecodedMessage(part.RawMessage);
+                        penq.Semantic = SemanticDecode.FromNexus(new DirectDecodeRow { Message = part.RawMessage }, part, myCall);
+                        ProcessDecodeMsg(penq, true);
+                        FeedTargetMonitors(penq, directTargetMonitorEvenSlot);
+                    }
                 }
+                // else: ';' text that is not a multi-answer frame (free text), or an EngineHost too
+                // old to send parts -- nothing to act on (the old split skipped these too).
             }
 
             // AfterRx: the receive period just ended AND its decodes are now processed. Fire the
@@ -3057,6 +3124,70 @@ namespace WSJTX_Controller
             EnqueueDirectCommand("SET_PSKREPORTER " + (on ? "1" : "0"), null);
         }
 
+        // ── Hound (traditional FT8 DXpedition Hound), 2026-09-26 ──
+        // Jimmy only ASKS; Nexus owns every Hound rule (the >1000 Hz first call, moving TX onto
+        // the Fox, the quiet finish on the Fox's RR73, the in-QSO Fox-frame reattach) -- see
+        // EngineHost set_special_op. Session only, never saved: Nexus drops Hound at every launch
+        // because, left on by accident, it silently breaks every ordinary QSO (no parting 73).
+        // FT8 only (EngineHost refuses it elsewhere and turns it off on leaving FT8). A contact
+        // already in progress keeps the rules it started under (Nexus hound_split).
+        private bool _houndRequested;                 // the operator's session choice
+        private string _engineSpecialOp = "none";     // what the engine last reported
+        private bool _houndSentThisConnection;        // re-sent once after an engine restart
+
+        internal bool HoundActive => _engineSpecialOp == "hound";
+
+        public bool ToggleHound()
+        {
+            if (!_directConnected)
+            {
+                StatusView.ShowMessage("Hound: engine not connected.", false);
+                return true;
+            }
+            if (!_houndRequested && mode != "FT8")
+            {
+                StatusView.ShowMessage("Hound is FT8 only.", false);
+                return true;
+            }
+            _houndRequested = !_houndRequested;
+            DirectSetSpecialOp(_houndRequested);
+            return true;
+        }
+
+        private void DirectSetSpecialOp(bool hound)
+        {
+            _houndSentThisConnection = true;
+            EnqueueDirectCommand("SET_SPECIAL_OP " + (hound ? "hound" : "none"), resp =>
+            {
+                if (resp != null && resp.StartsWith("OK "))
+                {
+                    ApplyEngineSpecialOp(resp.Substring(3).Trim());
+                    return;
+                }
+                _houndRequested = HoundActive;
+                StatusView.ShowMessage("Hound not changed: " + (resp == null ? "engine not responding" : resp.StartsWith("ERR ") ? resp.Substring(4) : resp), false);
+            });
+        }
+
+        // Reconcile with the engine's ACTUAL state (a command response, or SNAPSHOT's specialOp).
+        // Announces only a real change, shows HOUND in the window title while active, re-sends
+        // the operator's choice once after an engine restart (Nexus launches with Hound off), and
+        // drops the choice when the engine turned it off for leaving FT8.
+        private void ApplyEngineSpecialOp(string engineState)
+        {
+            if (engineState == null) return;   // older EngineHost: no specialOp in its snapshot
+            if (_houndRequested && engineState == "none")
+            {
+                if (mode != "FT8") _houndRequested = false;
+                else if (!_houndSentThisConnection) { DirectSetSpecialOp(true); return; }
+            }
+            if (engineState == _engineSpecialOp) return;
+            _engineSpecialOp = engineState;
+            ctrl.Text = pgmName + (HoundActive ? " - HOUND" : "");
+            DebugOutput($"{Time()} [DIRECT] Hound {(HoundActive ? "ON" : "OFF")} (engine specialOp:'{engineState}', requested:{_houndRequested}, mode:{mode})");
+            StatusView.ShowMessage(HoundActive ? "Hound on" : "Hound off", false);
+        }
+
         // Alt+T (Toggle Tune Mode) for direct-engine mode -- see WsjtxClient.BandAudio.cs's
         // ToggleTuningProcess for why this exists (F11/F12 apply live during Tune, unlike a
         // normal FT8/FT4 slot). Engine::set_tune already existed (Nexus's own Tauri UI uses it);
@@ -3358,6 +3489,15 @@ namespace WSJTX_Controller
         // priority enqueue can force it to fail fast instead of running out its full timeout.
         // volatile: read from whatever thread calls EnqueueDirectCommand (usually the UI
         // thread), written only by the single worker thread.
+        //
+        // Ownership fix, 2026-09-26: ONLY the command worker publishes here (trackForAbort in
+        // DirectSendCommand). The background SNAPSHOT poll (DirectPollTick) and the post-halt
+        // SNAPSHOT confirmation loop also call DirectSendCommand, concurrently with the worker;
+        // they used to publish and then CLEAR this field too, so a poll finishing while an
+        // ordinary command was stuck left HALT_TX nothing to abort (the halt then waited out the
+        // stuck command's own ~4s budget), and a HALT_TX landing mid-poll closed the POLL's
+        // socket instead ("SNAPSHOT poll failed: Cannot access a disposed object", live log
+        // 2026-09-25, six times -- each within a millisecond of a HALT_TX).
         private volatile TcpClient _directInFlightClient;
 
         // Closes whatever Direct command is currently blocked in DirectSendCommand, if any --
@@ -3380,12 +3520,14 @@ namespace WSJTX_Controller
         // blocking on a socket that will never send anything, only ever on this bounded
         // connect/read pair. Instance method (not static, as originally written) specifically so
         // it can publish the in-flight client to _directInFlightClient above -- T7's abort path
-        // needs a handle to whatever is currently blocked here.
-        private string DirectSendCommand(string command)
+        // needs a handle to whatever is currently blocked here. trackForAbort is true ONLY for the
+        // command worker (see _directInFlightClient's ownership comment); every other caller
+        // leaves the worker's published client alone.
+        private string DirectSendCommand(string command, bool trackForAbort = false)
         {
             using (var client = new TcpClient())
             {
-                _directInFlightClient = client;
+                if (trackForAbort) _directInFlightClient = client;
                 try
                 {
                     var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, _directControlPort);
@@ -3420,12 +3562,11 @@ namespace WSJTX_Controller
                 }
                 finally
                 {
-                    // Plain assignment, not compare-and-swap: RunDirectCommandWorkerAsync is the
-                    // ONLY caller of DirectSendCommandSafe/DirectSendCommand (single ordered
-                    // worker, awaited strictly one request at a time -- see this file's own
-                    // class comment), so there is never a second call whose "clear" could race
+                    // Plain assignment, not compare-and-swap: only the single ordered worker
+                    // (RunDirectCommandWorkerAsync, strictly one request at a time) ever passes
+                    // trackForAbort, so there is never a second publisher whose "clear" could race
                     // this one's.
-                    _directInFlightClient = null;
+                    if (trackForAbort) _directInFlightClient = null;
                 }
             }
         }
@@ -3846,6 +3987,7 @@ namespace WSJTX_Controller
         // same production DirectPollTick() the real timer calls, so the test proves the actual
         // authentication/NegoState-promotion logic rather than a hand-rolled stand-in for it.
         internal void TestTriggerDirectPollTick() => DirectPollTick();
+        internal System.Threading.Tasks.Task TestLastPollTask => _directLastPollTask;
         internal bool TestDirectAuthenticated => _directAuthenticated;
         // internal (not private): CAT mode command/readback correlation regression coverage
         // (RigModeMismatchGraceWindowAndReconciliationTests) seeds/backdates these directly so it
@@ -3906,6 +4048,14 @@ namespace WSJTX_Controller
         // path reads a typed kind instead of re-parsing curTxMsg with WsjtxMessage. Same
         // Msg::parse; no Nexus patch. Null when listening / no active QSO / older EngineHost.
         public DirectDecodeSemantics QsoTxSemantics { get; set; }
+
+        // 2026-09-26: the engine's ACTUAL special-operation state, "none" | "hound" (EngineHost
+        // SNAPSHOT injection -- see its set_special_op). Null from an older EngineHost.
+        public string SpecialOp { get; set; }
+
+        // 2026-09-26: Nexus's own base call (message::base_call) of qso.dxcall -- "VA3LG/W2" ->
+        // "VA3LG". EngineHost SNAPSHOT injection; null with no active QSO / older EngineHost.
+        public string QsoDxcallBase { get; set; }
 
         // Nexus modernization Stage 7c (additive, 2026-09-14, timing audit): mirrors
         // tempo_app::dto::AppSnapshot.link (LinkState) -- the engine's own already-computed,
@@ -3972,6 +4122,14 @@ namespace WSJTX_Controller
         // "none" | "partner" | "partnerWorkingOther" | "addressedToUsBystander" -- this
         // decode's relationship to the active QSO (QsoStatus.dxcall).
         public string QsoRelation { get; set; }
+        // 2026-09-26: (part of) a multi-answer transmission -- a 0.1 frame "K1ABC RR73; W9XYZ
+        // <FOX> -08" (WSJT-X Fox / MSHV multi-answer) or a half of one the engine already
+        // split. See EngineHost decode_semantics.rs `multi_answer`.
+        public bool MultiAnswer { get; set; }
+        // 2026-09-26: for a 0.1 frame only, one envelope per part (each parsed by Nexus, the
+        // RR73 part credited to the frame's own hashed sender). Null/empty otherwise. Replaces
+        // Jimmy's own text split of these frames.
+        public List<DirectDecodeSemantics> Parts { get; set; }
     }
 
     // Mirrors the QSO-relevant slice of tempo-app::dto::QsoStatus (Rust) -- only the fields

@@ -1299,10 +1299,10 @@ namespace WSJTX_Controller
         // Volume Mixer session volume (ProcessAudioSessionVolume) -- they now drive the Windows
         // ENDPOINT (device) master volume for the selected input/output device instead
         // (AudioEndpointMasterVolume), saved in the profile ini as ctrl.NativeEngine.
-        // InputMasterLevelPercent/OutputMasterLevelPercent. The old per-application levels still
-        // exist as hidden, ini-only settings (EngineAudioInputAppLevel/EngineAudioOutputAppLevel)
-        // applied automatically once the engine's own session appears -- see
-        // WsjtxClient.Direct.cs's ApplyEngineAppAudioLevelsOnceAvailable.
+        // InputMasterLevelPercent/OutputMasterLevelPercent. The old per-application OUTPUT level
+        // still exists as a hidden, ini-only setting (EngineAudioOutputAppLevel), applied once the
+        // engine's own render session appears -- see WsjtxClient.Direct.cs's
+        // ApplyEngineOutputAppLevelOnceAvailable. The old input one is removed (2026-09-26).
         private System.Windows.Forms.NumericUpDown _radioInputMasterLevelUpDown;
         private System.Windows.Forms.NumericUpDown _radioOutputMasterLevelUpDown;
         private System.Windows.Forms.TextBox _dxClusterAddressTextBox;
@@ -2031,7 +2031,7 @@ namespace WSJTX_Controller
 
             var audioStepLabel = new System.Windows.Forms.Label
             {
-                Text = "F11/F12 step (%):",
+                Text = "F11/F12 step (dB):",
                 AutoSize = true,
                 Location = new System.Drawing.Point(10, 119),
                 Font = font,
@@ -2041,16 +2041,16 @@ namespace WSJTX_Controller
 
             _radioAudioStepUpDown = new System.Windows.Forms.NumericUpDown
             {
-                Minimum = 0.5m,
-                Maximum = 25m,
+                Minimum = (decimal)RadioSettings.AudioStepDbMin,
+                Maximum = (decimal)RadioSettings.AudioStepDbMax,
                 DecimalPlaces = 1,
-                Increment = 0.5m,
-                Value = (decimal)Math.Max(0.5, Math.Min(25.0, ctrl.Radio.AudioStepPercent)),
+                Increment = 0.1m,
+                Value = (decimal)Math.Max(RadioSettings.AudioStepDbMin, Math.Min(RadioSettings.AudioStepDbMax, ctrl.Radio.AudioStepDb)),
                 Location = new System.Drawing.Point(125, 116),
                 Size = new System.Drawing.Size(64, 21),
                 TabIndex = 2,
                 Font = font,
-                AccessibleName = "F11 F12 audio level step percent",
+                AccessibleName = "F11 F12 audio level step dB",
             };
             _radioTxLevelGroupBox.Controls.Add(_radioAudioStepUpDown);
 
@@ -2357,9 +2357,9 @@ namespace WSJTX_Controller
 
             // 2026-09-23 redesign: the Windows ENDPOINT (device) master volume for the input
             // device above -- the same slider Windows Sound settings shows for that device,
-            // set via AudioEndpointMasterVolume -- not the engine's own per-application Volume
-            // Mixer session level any more (see EngineAudioInputAppLevel's own comment for
-            // that, now hidden). Separate from mic_gain (F11/F12), which scales the TX waveform
+            // set via AudioEndpointMasterVolume -- the ONLY input level control. The engine's own
+            // capture session level is never set (Windows links it to this same master level; the
+            // old hidden setting for it was removed 2026-09-26). Separate from mic_gain (F11/F12), which scales the TX waveform
             // digitally before it ever reaches Windows. Live -- applies immediately on change --
             // and also saved to the profile ini (ctrl.NativeEngine.InputMasterLevelPercent),
             // reapplied at startup, on an engine restart, and whenever this device changes (see
@@ -4575,7 +4575,7 @@ namespace WSJTX_Controller
             // reads ctrl.Radio.HaltTxOnHighSwr/SwrHaltThreshold directly on every SNAPSHOT poll
             // tick; neither one is ever baked into the engine host's own launch args the way an
             // actual radio-identity setting (rig model, CAT port, PTT method, ...) is. Same
-            // "not part of radioSettingsChanged, read live" shape as AudioStepPercent/
+            // "not part of radioSettingsChanged, read live" shape as AudioStepDb/
             // RememberTxLevelPerBand just below -- moved to sit with them instead of with the
             // real restart-requiring radio settings above.
             if (_radioHaltTxOnHighSwrCheckBox != null) ctrl.Radio.HaltTxOnHighSwr = _radioHaltTxOnHighSwrCheckBox.Checked;
@@ -4583,8 +4583,8 @@ namespace WSJTX_Controller
             // Not part of radioSettingsChanged below -- read live on every AudioLevel() call
             // (WsjtxClient.BandAudio.cs), never baked into the engine's own launch args, so no
             // restart is ever needed for this one to take effect.
-            if (_radioAudioStepUpDown != null) ctrl.Radio.AudioStepPercent = (double)_radioAudioStepUpDown.Value;
-            // Same live-read, no-restart-needed shape as AudioStepPercent just above --
+            if (_radioAudioStepUpDown != null) ctrl.Radio.AudioStepDb = (double)_radioAudioStepUpDown.Value;
+            // Same live-read, no-restart-needed shape as AudioStepDb just above --
             // WsjtxClient.BandAudio.cs's AudioLevel() and WsjtxClient.Direct.cs's band-change
             // restore both read this directly off ctrl.Radio.
             if (_radioRememberTxLevelPerBandCheckBox != null) ctrl.Radio.RememberTxLevelPerBand = _radioRememberTxLevelPerBandCheckBox.Checked;
@@ -5396,6 +5396,7 @@ namespace WSJTX_Controller
             HotkeyAction.BandUp,
             HotkeyAction.BandDown,
             HotkeyAction.ToggleMode,
+            HotkeyAction.ToggleHound,
             HotkeyAction.AnnounceFreq,
             HotkeyAction.TxFreqUp,
             HotkeyAction.TxFreqDown,

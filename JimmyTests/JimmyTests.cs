@@ -260,6 +260,23 @@ static class JimmyTests
             DxccShadowDump();
             return;
         }
+        // Focused run (2026-09-26): `--only NameA,NameB` runs just those test methods (the same
+        // static void ...Tests() methods Main calls below), so a change can be verified with the
+        // groups that exercise it instead of the whole 3,000+ assertion suite.
+        if (args.Length > 1 && args[0] == "--only")
+        {
+            foreach (string name in args[1].Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var m = typeof(JimmyTests).GetMethod(name.Trim(),
+                    System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public,
+                    null, Type.EmptyTypes, null);
+                if (m == null) { Console.WriteLine($"  FAIL  --only: no test method named '{name.Trim()}'"); failed++; continue; }
+                m.Invoke(null, null);
+            }
+            Console.WriteLine();
+            Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped (--only) ===");
+            Environment.Exit(failed > 0 ? 1 : 0);
+        }
         if (args.Length > 0 && args[0] == "--echo-argv")
         {
             // Test-only escape hatch for EscapeCommandLineArgRoundTripsThroughRealWindowsArgvTests
@@ -366,6 +383,7 @@ static class JimmyTests
         HotkeyConfigNewActionConflictTests();
         HotkeyHelpReferenceParityTests();
         TxLevelPerBandDurablePersistenceTests();
+        TxLevelDbStepTests();
         RxTxFreqControlsFeatureTests();
         SpaceCallsignsAndGridsTests();
         AutoLoggedReportsAndQsoCompletedTokensTests();
@@ -378,6 +396,7 @@ static class JimmyTests
         OptionsDlgSystemDefaultDeviceLabelTests();
         NativeEngineAudioDevicePreservationTests();
         NativeEngineAudioLevelPreservationTests();
+        EngineAppLevelNeverTouchesInputSessionTests();
         OptionsDlgExtractRigModelIdTests();
         TqslParseFinalStatusTests();
         TqslClassifyFinalStatusTests();
@@ -494,6 +513,7 @@ static class JimmyTests
         DirectActiveQsoStatusNoDuplicateCallTests();
         HaltPurgesQueuedTxArmCommandTests();
         HaltAbortsInFlightCommandTests();
+        HoundToggleLifecycleTests();
         HaltConfirmsStoppedStateViaFollowUpSnapshotTests();
         HaltDoesNotConfirmWhenStillTransmittingTests();
         RejectedReplyPreservesQueuedStationTests();
@@ -941,6 +961,73 @@ static class JimmyTests
                         envKind: "rr73", envFrom: "VP5/K5UR", envTo: myCall, envAddr: true));
                 Check("7: the RR73 close (arrives un-hashed) still matches the SAME canonical key",
                       wc.callQueue.Contains("<VP5/K5UR>"), false);
+            }
+
+            // 8-10. Grid-less STANDARD messages (tempo-core-message.patch, 2026-09-26): the
+            //    envelopes are exactly what the patched EngineHost emits (LOCKED by
+            //    decode_semantics.rs's stage5 corpus rows "CQ N4NF" / "W9XYZ K1ABC" /
+            //    "4JF1EU WD8PFS"). Live 2026-09-25: "CQ N4NF" was rejected 32 times.
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(170, "N4NF", "CQ N4NF", envKind: "cq", envFrom: "N4NF"));
+                Check("8: grid-less standard CQ (Nexus 'cq' envelope) -> queued", wc.callQueue.Contains("N4NF"), true);
+            }
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid,
+                    Snap(180, "W1ABC", $"{myCall} W1ABC", envKind: "reply", envFrom: "W1ABC", envTo: myCall, envAddr: true));
+                Check("9: grid-less call to me (Nexus 'reply' envelope) -> queued", wc.callQueue.Contains("W1ABC"), true);
+                Check("9: ...and is NOT treated as a completed QSO", wc.logList.Contains("W1ABC"), false);
+            }
+            {
+                var wc = MakeClient(out var ctrl);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(190, "WD8PFS", "4JF1EU WD8PFS", envKind: "other"));
+                Check("10: two-word free text (Nexus 'other') -> still rejected", wc.callQueue.Contains("WD8PFS"), false);
+            }
+
+            // 11. A 0.1 multi-answer frame while NOT in a QSO (the engine only splits during one):
+            //     one decode PER engine-provided part, each with its own Nexus identity -- LOCKED by
+            //     decode_semantics.rs a_multi_answer_frame_yields_per_part_semantics_credited_to_its_own_sender.
+            //     Live 2026-09-25 (K5MGY): Jimmy's old text split rejected both halves.
+            {
+                var wc = MakeClient(out var ctrl);
+                const string frame = "KR4LQH RR73; KD9BIE <K5MGY> -08";
+                var snap = ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""tuning"": false, ""txEnabled"": true, ""catOk"": true, ""slot"": 200 },
+                    ""recentDecodes"": [{ ""from"": ""K5MGY"", ""snr"": -2, ""dtSec"": 0.1, ""freqHz"": 1948.0, ""message"": """ + frame + @""" }],
+                    ""decodeSemantics"": [{ ""schemaVersion"": 1, ""rawMessage"": """ + frame + @""", ""kind"": ""other"", ""from"": null, ""to"": null,
+                        ""addressedToMe"": false, ""callForm"": ""unknown"", ""multiAnswer"": true, ""parts"": [
+                        { ""schemaVersion"": 1, ""rawMessage"": ""KR4LQH <K5MGY> RR73"", ""kind"": ""rr73"", ""from"": ""K5MGY"", ""to"": ""KR4LQH"",
+                          ""signoff"": ""rr73"", ""addressedToMe"": false, ""callForm"": ""standard"", ""multiAnswer"": true },
+                        { ""schemaVersion"": 1, ""rawMessage"": ""KD9BIE <K5MGY> -08"", ""kind"": ""report"", ""from"": ""K5MGY"", ""to"": ""KD9BIE"",
+                          ""reportDb"": -8, ""addressedToMe"": false, ""callForm"": ""standard"", ""multiAnswer"": true } ] }]
+                }");
+                wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
+                Check("11: multi-answer frame -> the answering station (K5MGY) is recognised, not rejected",
+                      wc.callQueue.Contains("K5MGY"), true);
+                Check("11: ...no phantom 'RR73' station built from the frame's text",
+                      wc.callQueue.Contains("RR73"), false);
+                // Test mode falls back to Jimmy's OLD parser for a decode with no attached
+                // classification, so "queued" alone cannot tell the old text split (which left a
+                // half unclassified) from the new path. Only the engine-provided part carries
+                // MultiAnswer -- this is what proves the part's own Nexus classification was used.
+                Check("11: ...the queued decode carries the engine's own per-part classification",
+                      wc.callDict.TryGetValue("K5MGY", out var queued11) && queued11.Semantic != null && queued11.Semantic.MultiAnswer, true);
+            }
+
+            // 12. Parser migration (2026-09-26): POTA/SOTA and QSO stage come from Nexus's facts.
+            //     The text reads "CQ POTA ..." but the attached classification says a PLAIN CQ, so
+            //     IsPota() can only be false if it reads the classification, not the text.
+            {
+                var d = new EnqueueDecodeMessage { Message = "CQ POTA K4YT EM63" };
+                d.Semantic = new SemanticDecode { Kind = "cq", IsCq = true, From = "K4YT" };
+                Check("12: IsPota() reads Nexus's directed-CQ target, not the text", d.IsPota(), false);
+                d.Semantic = new SemanticDecode { Kind = "directedCq", IsCq = true, IsDirectedCq = true, From = "K4YT", CqTarget = "POTA" };
+                Check("12: ...true when Nexus reports a POTA-directed CQ", d.IsPota() && !d.IsSota(), true);
+                Check("12: QSO stage from the message kind (grid-less reply 2 < report 3 < RR73 6)",
+                      new SemanticDecode { Kind = "reply" }.Progress == 2 && new SemanticDecode { Kind = "report" }.Progress == 3
+                      && new SemanticDecode { Kind = "rr73" }.Progress == 6, true);
             }
         }
         catch (Exception ex)
@@ -2278,6 +2365,10 @@ static class JimmyTests
             string loggedRpt = wc.TestLoggedReport(qsoCall);
             Check("Auto-logged list: sent/received reports captured for the logged row",
                   loggedRpt != null && loggedRpt.Contains(",") && loggedRpt.Contains("-15"), true);
+            // 2026-09-26 (live W9MDM: sent +19, logged +08): rst_sent is the report we actually
+            // TRANSMITTED (-12 above), not the SNR of the station's own R-15 message.
+            Check("Logged report sent is the value actually transmitted (-12), not the reply's SNR (-15)",
+                  wc.TestLoggedReportSent(qsoCall) == "-12" && wc.TestLoggedReportReceived(qsoCall) == "-15", true);
 
             // Regression guard, 2026-08-11: DirectApplyStatus logged the completed QSO above but
             // never cleared callInProg afterward -- unlike the UDP path's ProcessTxEnd, which
@@ -2332,6 +2423,107 @@ static class JimmyTests
             }
             Check("Direct mode: the background QSO write actually lands in the ISOLATED test database",
                   foundInTmpDb, true);
+
+            // ── Scenario 5q (2026-09-26): a QUIET finish -- Nexus's Hound rule ends the QSO on
+            //    the Fox's RR73 and sends NOTHING after it, so no 73/RR73 ever becomes tx_now.
+            //    The engine's own "done" (nothing left to send) must complete it: logged ONCE,
+            //    callInProg cleared.
+            const string foxCall = "K5MGY";
+            wc.callInProg = foxCall;
+            wc.allCallDict[foxCall] = new List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage
+                {
+                    Message = $"{myCall} {foxCall} -08",
+                    Snr = -8, RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay,
+                },
+            };
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": 1010 },
+                ""recentDecodes"": [],
+                ""qso"": { ""state"": ""awaitRr73"", ""dxcall"": """ + foxCall + @""", ""txNow"": """ + foxCall + " " + myCall + @" R-10"" }
+            }"));
+            var quietDone = ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1011 },
+                ""recentDecodes"": [],
+                ""qso"": { ""state"": ""done"", ""dxcall"": """ + foxCall + @""", ""txNow"": null }
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, quietDone);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, quietDone);
+            Check("Quiet finish: engine 'done' with nothing to send logs the QSO exactly once",
+                  wc.logList.Count(c => c == foxCall) == 1, true);
+            Check("Quiet finish: ...and ends the contact", wc.callInProg == null, true);
+            // The logbook itself, not just the in-memory list: exactly ONE record despite the
+            // repeated "done" snapshots (same isolated tmpDb + background-write polling as Step 4).
+            int foxRows = 0;
+            var swq = System.Diagnostics.Stopwatch.StartNew();
+            while (swq.ElapsedMilliseconds < 2000 && foxRows == 0)
+            {
+                using (var verifyDb = new LogbookDb(tmpDb)) foxRows = verifyDb.SearchQsos(foxCall, null, null, null).Count;
+                if (foxRows == 0) System.Threading.Thread.Sleep(50);
+            }
+            System.Threading.Thread.Sleep(300);   // let any (wrong) second write land before counting
+            using (var verifyDb = new LogbookDb(tmpDb)) foxRows = verifyDb.SearchQsos(foxCall, null, null, null).Count;
+            Check("Quiet finish: exactly one logbook record written", foxRows == 1, true);
+
+            // ── Scenario 5p (2026-09-26, live): a directed "CQ POTA VA3LG" (WSJT-X cannot fit
+            //    "/W2" into a directed CQ) answered as "VA3LG/W2". The engine completed it under
+            //    the full call; Jimmy, still on "VA3LG", never logged it. Nexus's own base call
+            //    of its partner (qsoDxcallBase) tells Jimmy it is the same station.
+            wc.callInProg = "VA3LG";
+            wc.allCallDict["VA3LG"] = new List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage { Message = "CQ POTA VA3LG", Snr = -2, RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay },
+            };
+            wc.allCallDict["VA3LG/W2"] = new List<EnqueueDecodeMessage>
+            {
+                new EnqueueDecodeMessage { Message = $"{myCall} VA3LG/W2 -23", Snr = -2, RxDate = DateTime.UtcNow.Date, SinceMidnight = DateTime.UtcNow.TimeOfDay, Country = "USA" },
+            };
+            DirectSnapshot PortableSnap(ulong slot, string state, string txNow) => ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" }, ""recentDecodes"": [],
+                ""qsoDxcallBase"": ""VA3LG"",
+                ""qso"": { ""state"": """ + state + @""", ""dxcall"": ""VA3LG/W2"", ""txNow"": """ + txNow + @""" }
+            }");
+            wc.TestApplyDirectSnapshot(myCall, myGrid, PortableSnap(1020, "awaitRr73", $"VA3LG/W2 {myCall} R-02"));
+            Check("Portable call: Jimmy follows the engine's spelling of the same station",
+                  wc.callInProg == "VA3LG/W2", true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, PortableSnap(1021, "done", $"VA3LG/W2 {myCall} 73"));
+            Check("Portable call: the completed contact is logged once, under the call actually used",
+                  wc.logList.Count(c => c == "VA3LG/W2") == 1 && !wc.logList.Contains("VA3LG"), true);
+            Check("Portable call: ...and its POTA CQ went with it (history carried over, not lost)",
+                  wc.CqMsg("VA3LG/W2")?.Message == "CQ POTA VA3LG", true);
+
+            // Control: the engine working a DIFFERENT station is never adopted.
+            wc.callInProg = "W1ABC";
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 1030 }, ""recentDecodes"": [],
+                ""qsoDxcallBase"": ""K2DEF"", ""qso"": { ""state"": ""awaitReport"", ""dxcall"": ""K2DEF/P"", ""txNow"": ""K2DEF/P " + myCall + @" FN42"" }
+            }"));
+            Check("Portable call: a different station is never adopted", wc.callInProg == "W1ABC", true);
+
+            // ── Session-wide Auto-logged list (2026-09-26, operator request): a band change still
+            //    clears the per-band "already worked" list (logList), but the Alt+A list keeps every
+            //    contact of the session, each with its band.
+            var linesBefore = wc.LoggedListLines();
+            int loggedBefore = linesBefore.Count;
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 7.074, ""transmitting"": false, ""slot"": 1040 }, ""recentDecodes"": []
+            }"));
+            Check("Session list: a band change still clears the per-band 'already worked' list", wc.logList.Count == 0, true);
+            var sessionLines = wc.LoggedListLines();
+            Check("Session list: ...but the Auto-logged list keeps the whole session",
+                  loggedBefore >= 3 && sessionLines.Count == loggedBefore, true);
+            Check("Session list: ...newest first, with the band it was worked on",
+                  sessionLines[0].StartsWith(wc.Spacify("VA3LG/W2")) && sessionLines[0].Contains("20 meters"), true);
+            // Operator report 2026-09-27: earlier-band rows lost their country/state after a band
+            // change (looked up from per-band history at display time). Rows must be unchanged.
+            Check("Session list: ...every row unchanged by the band change (country/state kept)",
+                  sessionLines.SequenceEqual(linesBefore) && sessionLines[0].Contains(", USA, 20 meters"), true);
         }
         catch (Exception ex)
         {
@@ -8262,8 +8454,9 @@ static class JimmyTests
     // controls (Windows ENDPOINT master volume) replaced the old per-application Windows Volume
     // Mixer session controls. Covers the new persisted surface: the two nullable master-level
     // percents round-trip and preserve an established value across a missing key exactly like
-    // the audio device names above; the two hidden EngineAudioInput/OutputAppLevel settings
-    // default to 100, round-trip when set, and reject an out-of-range ini value. Does not touch
+    // the audio device names above; the hidden EngineAudioOutputAppLevel setting defaults to 100,
+    // round-trips when set, and rejects an out-of-range ini value; the retired hidden input app
+    // level's old ini key is removed on save (2026-09-26). Does not touch
     // AudioEndpointMasterVolume/ProcessAudioSessionVolume themselves (real Windows Core Audio
     // calls) -- same "not unit-testable without real hardware" boundary ProcessAudioSessionVolume
     // already has zero coverage for.
@@ -8279,7 +8472,6 @@ static class JimmyTests
             var fresh = new NativeEngineSettings();
             Check("InputMasterLevelPercent defaults to null (never set)", fresh.InputMasterLevelPercent == null, true);
             Check("OutputMasterLevelPercent defaults to null (never set)", fresh.OutputMasterLevelPercent == null, true);
-            Check("EngineAudioInputAppLevel defaults to 100", fresh.EngineAudioInputAppLevel == 100, true);
             Check("EngineAudioOutputAppLevel defaults to 100", fresh.EngineAudioOutputAppLevel == 100, true);
 
             // Save -> reload round-trips all four once set.
@@ -8287,16 +8479,16 @@ static class JimmyTests
             {
                 InputMasterLevelPercent = 62,
                 OutputMasterLevelPercent = 88,
-                EngineAudioInputAppLevel = 100,
                 EngineAudioOutputAppLevel = 100,
             };
             var ini = new IniFile(tmpIni);
+            ini.Write("engineAudioInputAppLevel", "100");   // an existing profile's retired hidden input key
             saved.SaveToIni(ini);
             var reloaded = new NativeEngineSettings();
             reloaded.LoadFromIni(ini);
             Check("InputMasterLevelPercent round-trips through the INI", reloaded.InputMasterLevelPercent == 62, true);
             Check("OutputMasterLevelPercent round-trips through the INI", reloaded.OutputMasterLevelPercent == 88, true);
-            Check("EngineAudioInputAppLevel round-trips through the INI", reloaded.EngineAudioInputAppLevel == 100, true);
+            Check("THE FIX: an existing profile's hidden input app level key is removed on save", ini.KeyExists("engineAudioInputAppLevel"), false);
             Check("EngineAudioOutputAppLevel round-trips through the INI", reloaded.EngineAudioOutputAppLevel == 100, true);
 
             // A later load from an INI missing the master-level keys must not clear an
@@ -8307,14 +8499,13 @@ static class JimmyTests
             established.LoadFromIni(iniNoLevels);
             Check("missing master-level keys leave the established input value intact", established.InputMasterLevelPercent == 40, true);
             Check("missing master-level keys leave the established output value intact", established.OutputMasterLevelPercent == 75, true);
-            Check("missing app-level keys leave the default (100) in place", established.EngineAudioInputAppLevel == 100, true);
+            Check("missing app-level keys leave the default (100) in place", established.EngineAudioOutputAppLevel == 100, true);
 
             // Out-of-range / garbage ini values are rejected -- the established value survives,
             // mirroring the bounds-check convention JimmySettings' own numeric settings use.
             var iniBad = new IniFile(Path.Combine(Path.GetTempPath(), "JimmyTest_NativeAudioLevel_bad_" + Guid.NewGuid().ToString("N") + ".ini"));
             iniBad.Write("radioInputMasterLevelPercent", "150");     // above 100
             iniBad.Write("radioOutputMasterLevelPercent", "not-a-number");
-            iniBad.Write("engineAudioInputAppLevel", "-5");          // below 0
             iniBad.Write("engineAudioOutputAppLevel", "garbage");
             var rejecting = new NativeEngineSettings { InputMasterLevelPercent = 33, OutputMasterLevelPercent = 44 };
             rejecting.LoadFromIni(iniBad);
@@ -8322,8 +8513,6 @@ static class JimmyTests
                 rejecting.InputMasterLevelPercent == 33, true);
             Check("unparseable output master level is rejected -> established value (44) kept",
                 rejecting.OutputMasterLevelPercent == 44, true);
-            Check("out-of-range app input level (-5) is rejected -> default (100) kept",
-                rejecting.EngineAudioInputAppLevel == 100, true);
             Check("unparseable app output level is rejected -> default (100) kept",
                 rejecting.EngineAudioOutputAppLevel == 100, true);
         }
@@ -8335,6 +8524,62 @@ static class JimmyTests
         finally
         {
             try { File.Delete(tmpIni); } catch { }
+        }
+    }
+
+    // Input-volume startup fix, 2026-09-26: Windows ties a shared-mode CAPTURE session's volume
+    // to the input endpoint master volume, so the per-poll engine app-level apply must never touch
+    // the capture session (it overwrote the operator's saved input master level on every
+    // startup). Covers startup retry-until-ready, stop-once-applied, and re-apply after reconnect,
+    // all render-only.
+    static void EngineAppLevelNeverTouchesInputSessionTests()
+    {
+        Console.WriteLine("\n── Engine app level: output session only, never the input (capture) session ──");
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.NativeEngine.AudioInputDevice = "Radio In";
+            ctrl.NativeEngine.AudioOutputDevice = "Radio Out";
+            ctrl.NativeEngine.EngineAudioOutputAppLevel = 80;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+
+            var calls = new List<(string dev, bool isRender, float vol)>();
+            bool sessionReady = false;
+            Func<int, string, bool, float, bool> setter = (pid, dev, isRender, vol) =>
+            {
+                calls.Add((dev, isRender, vol));
+                return sessionReady;
+            };
+
+            // Startup: the render session isn't open yet -> retried on the next poll.
+            wc.TestApplyEngineOutputAppLevel(1234, setter);
+            wc.TestApplyEngineOutputAppLevel(1234, setter);
+            sessionReady = true;
+            wc.TestApplyEngineOutputAppLevel(1234, setter);
+            wc.TestApplyEngineOutputAppLevel(1234, setter);
+            Check("startup: retried until the render session was ready, then stopped", calls.Count == 3, true);
+            Check("startup: sets the output device at the hidden output level",
+                calls[2].dev == "Radio Out" && Math.Abs(calls[2].vol - 0.8f) < 0.001f, true);
+
+            // Engine reconnect/restart: reapplied once to the fresh session.
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+            wc.TestApplyEngineOutputAppLevel(1234, setter);
+            Check("reconnect: output level reapplied to the new engine session", calls.Count == 4, true);
+
+            Check("THE FIX: the input (capture) session is never set", calls.TrueForAll(c => c.isRender), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  EngineAppLevelNeverTouchesInputSessionTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
         }
     }
 
@@ -15661,6 +15906,66 @@ static class JimmyTests
         }
     }
 
+    // ── Hound (traditional FT8 DXpedition) toggle lifecycle, 2026-09-26: session only; the engine's
+    //    ACTUAL state (SNAPSHOT specialOp) is what Jimmy shows; re-sent once after an engine restart
+    //    (Nexus launches with Hound off); dropped when the mode leaves FT8. ──
+    static void HoundToggleLifecycleTests()
+    {
+        Console.WriteLine("\n── Hound toggle: engine-confirmed, restart re-send, FT8 only ──");
+        var seen = new List<string>();
+        var seenLock = new object();
+        var listener = new StubEngineHost(line =>
+        {
+            lock (seenLock) seen.Add(line);
+            return line.StartsWith("SET_SPECIAL_OP hound") ? "OK hound" : line.StartsWith("SET_SPECIAL_OP none") ? "OK none" : "OK";
+        });
+        int Sent(string cmd) { lock (seenLock) return seen.Count(c => c.StartsWith(cmd)); }
+        try
+        {
+            var ctrl = new Controller();
+            var __ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+            wc.TestSetMode("FT8");
+            DirectSnapshot Snap(ulong slot, string specialOp) => ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" }, ""recentDecodes"": [], ""specialOp"": """ + specialOp + @""" }");
+
+            Check("off at start (never saved)", wc.HoundActive, false);
+            wc.ToggleHound();
+            PumpUntil(() => wc.HoundActive, 3000);
+            Check("toggle -> SET_SPECIAL_OP hound sent and the engine-confirmed state shown", wc.HoundActive && Sent("SET_SPECIAL_OP hound") == 1, true);
+
+            // Engine restart: a fresh connection whose engine launched with Hound off.
+            wc.ConnectDirectEngine("KB0UZT", "FN42");
+            wc.TestStopPollTimer();
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(10, "none"));
+            PumpUntil(() => Sent("SET_SPECIAL_OP hound") == 2, 3000);
+            Check("after an engine restart the session choice is re-sent once", Sent("SET_SPECIAL_OP hound") == 2, true);
+
+            // Leaving FT8: EngineHost turns Hound off; Jimmy drops the choice instead of re-sending it.
+            PumpUntil(() => wc.HoundActive, 3000);
+            wc.TestSetMode("FT4");
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(11, "none"));
+            wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(12, "none"));
+            System.Threading.Thread.Sleep(100);
+            Check("FT4: Hound reads off and is not re-requested", !wc.HoundActive && Sent("SET_SPECIAL_OP hound") == 2, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  HoundToggleLifecycleTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            try { listener.Stop(); } catch { }
+        }
+    }
+
     // ── T7 fix, 2026-08-23: a priority HALT_TX aborts an already-in-flight ordinary command
     // instead of waiting behind its own ~4s worst-case budget ──
     // Reproduces the exact release-critical gap: a normal (non-priority) Direct command gets
@@ -15707,6 +16012,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var __ = ctrl.Handle;   // the overlapping poll below marshals its result via BeginInvoke
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             wc.ConnectDirectEngine("KB0UZT", "FN42");
             wc.TestStopPollTimer(); // the 1s SNAPSHOT poll would otherwise race this test's own connections
@@ -15720,6 +16026,14 @@ static class JimmyTests
             Check("Setup: the ordinary command was actually dequeued and is blocked mid-flight",
                 acceptedInTime, true);
 
+            // Ownership fix, 2026-09-26: a background SNAPSHOT poll runs and FINISHES while that
+            // command is still stuck (the live-log overlap). Before the fix the poll published
+            // its own client and then cleared the field in its finally, leaving HALT_TX nothing
+            // to abort -- the halt below then waited out the stuck command's full budget.
+            wc.TestTriggerDirectPollTick();
+            Check("Setup: an overlapping background SNAPSHOT poll completed while the command was stuck",
+                wc.TestLastPollTask != null && wc.TestLastPollTask.Wait(3000), true);
+
             var sw = System.Diagnostics.Stopwatch.StartNew();
             bool halted = wc.HaltTxAndWaitForShutdown(TimeSpan.FromMilliseconds(WsjtxClient.DirectHaltConfirmTimeoutMs));
             sw.Stop();
@@ -15728,10 +16042,13 @@ static class JimmyTests
                 halted, true);
             // Old worst case (waiting out the in-flight command's own ~4s budget, THEN sending
             // HALT_TX and waiting out ITS ~4s budget) was on the order of 8s+; the abort fix
-            // collapses this to roughly one HALT_TX round trip. 3000ms leaves generous margin
-            // above a healthy loopback round trip while still failing if the abort regresses.
-            Check($"THE FIX: round trip finished well under the old worst case ({sw.ElapsedMilliseconds}ms observed, < 3000ms expected)",
-                sw.ElapsedMilliseconds < 3000, true);
+            // collapses this to roughly one HALT_TX round trip (tens of ms on loopback).
+            // Tightened 3000 -> 1500ms, 2026-09-26: with the poll-ownership bug re-introduced, a
+            // halt that waited out the REMAINDER of the stuck command's 3s read measured 2974ms
+            // and slipped under the old 3000ms bound -- 1500ms still leaves wide margin above a
+            // real round trip but fails whenever the halt had to wait out a stuck read.
+            Check($"THE FIX: round trip finished well under the old worst case ({sw.ElapsedMilliseconds}ms observed, < 1500ms expected)",
+                sw.ElapsedMilliseconds < 1500, true);
         }
         catch (Exception ex)
         {
@@ -20674,11 +20991,16 @@ static class JimmyTests
                         SinceMidnight = DateTime.UtcNow.TimeOfDay,
                     },
                 };
+                // 2026-09-26: transmit the report this QSO is meant to have SENT. This used to be
+                // a fixed "-12" for every QSO while the assertions expected the decode SNR --
+                // i.e. it pinned the old rst_sent bug (logging the reply's SNR, not the report
+                // actually on the air; live W9MDM: sent +19, logged +08).
+                string sentWord = (snrHeard < 0 ? "-" : "+") + Math.Abs(snrHeard).ToString("D2");
                 wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
                     ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
                     ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""slot"": " + slot++ + @" },
                     ""recentDecodes"": [],
-                    ""qso"": { ""state"": ""awaitReport"", ""txNow"": """ + call + " " + myCall + @" -12"" }
+                    ""qso"": { ""state"": ""awaitReport"", ""txNow"": """ + call + " " + myCall + " " + sentWord + @""" }
                 }"));
                 wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
                     ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
@@ -20694,7 +21016,7 @@ static class JimmyTests
             Check("QSO A: logged", wc.logList.Contains(callA), true);
 
             // 2. {SentReport}/{ReceivedReport} contain the correct SEPARATE values.
-            CheckStr("QSO A: sent report is -10 (from the decode SNR)", wc.TestLoggedReportSent(callA), "-10");
+            CheckStr("QSO A: sent report is -10 (the report actually transmitted)", wc.TestLoggedReportSent(callA), "-10");
             CheckStr("QSO A: received report is -14 (from the roger-report text)", wc.TestLoggedReportReceived(callA), "-14");
             CheckStr("QSO A: one-shot SentReport token == -10 (not yet consumed by ShowStatus)", wc.TestLoggedSentReportToken, "-10");
             CheckStr("QSO A: one-shot ReceivedReport token == -14 (not yet consumed by ShowStatus)", wc.TestLoggedReceivedReportToken, "-14");
@@ -20787,6 +21109,43 @@ static class JimmyTests
     // ~750 ms debounce instead of waiting for the next clean shutdown, so a forced close or
     // an upgrade in between keeps the adjustment. These cover the serialization split and the
     // flush/persist path; the debounce timer itself is thin WinForms glue over these.
+    // 2026-09-26: F11/F12 steps in dB (like WSJT-X's Pwr slider), not a fixed linear percent.
+    static void TxLevelDbStepTests()
+    {
+        Console.WriteLine("\n── F11/F12 step is a fixed dB change at any level ──");
+        try
+        {
+            double upLow = WsjtxClient.StepTxLevelDb(0.03, 0.5, true);
+            double upHigh = WsjtxClient.StepTxLevelDb(0.17, 0.5, true);
+            Check("THE FIX: +0.5 dB is the same change at 3% and at 17%",
+                Math.Abs(20 * Math.Log10(upLow / 0.03) - 0.5) < 1e-9 && Math.Abs(20 * Math.Log10(upHigh / 0.17) - 0.5) < 1e-9, true);
+            Check("-0.5 dB steps down by 0.5 dB",
+                Math.Abs(20 * Math.Log10(WsjtxClient.StepTxLevelDb(0.03, 0.5, false) / 0.03) + 0.5) < 1e-9, true);
+            Check("never above full level", WsjtxClient.StepTxLevelDb(0.99, 0.5, true) == 1.0, true);
+            Check("a step up from 0 reaches the -45 dB floor (a multiply alone would stay at 0)",
+                WsjtxClient.StepTxLevelDb(0.0, 0.5, true) == WsjtxClient.MinSteppedTxLevel, true);
+
+            // The old percent step key is not converted: default 0.5 dB, old key removed on save.
+            string tmp = Path.Combine(Path.GetTempPath(), "JimmyTest_AudioStepDb_" + Guid.NewGuid().ToString("N") + ".ini");
+            try
+            {
+                var ini = new IniFile(tmp);
+                ini.Write("radioAudioStepPercent", "0.5");
+                var r = new RadioSettings();
+                r.LoadFromIni(ini);
+                Check("an old percent step loads as the 0.5 dB default", r.AudioStepDb == 0.5, true);
+                r.SaveToIni(ini);
+                Check("the old percent step key is removed on save", ini.KeyExists("radioAudioStepPercent"), false);
+            }
+            finally { try { File.Delete(tmp); } catch { } }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  TxLevelDbStepTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
     static void TxLevelPerBandDurablePersistenceTests()
     {
         Console.WriteLine("\n── Item 2: F11/F12 per-band TX level durable (debounced) persistence ──");
@@ -20816,13 +21175,13 @@ static class JimmyTests
 
             // 2. A partial write leaves other radio settings in the same file untouched.
             var mixed = new IniFile(tmpIni + ".mixed");
-            mixed.Write("radioAudioStepPercent", "3.5");
+            mixed.Write("radioAudioStepDb", "1.5");
             mixed.Write("radioRememberTxLevelPerBand", "True");
             var rMix = new RadioSettings();
             rMix.TxLevelByBand[3] = 0.25;
             rMix.SaveTxLevelByBandToIni(mixed);
-            CheckStr("partial write does not disturb radioAudioStepPercent",
-                mixed.Read("radioAudioStepPercent"), "3.5");
+            CheckStr("partial write does not disturb radioAudioStepDb",
+                mixed.Read("radioAudioStepDb"), "1.5");
             CheckStr("partial write does not disturb radioRememberTxLevelPerBand",
                 mixed.Read("radioRememberTxLevelPerBand"), "True");
             CheckStr("partial write did persist the map key", mixed.Read("radioTxLevelByBand"), "3=0.25");
@@ -21526,6 +21885,18 @@ static class JimmyTests
         smart2.OnSmartStartNonActionable();
         Check("CAT loss / TX disabled resets Smart Start silence", smart2.SilenceCount == 0, true);
         Check("CAT loss / TX disabled clears any pending ready", !smart2.ReadyToStart, true);
+
+        // Live 2026-09-26 (W6TK working a pileup, Smart Start silence setting 1): the busy-yield's
+        // OWN transmit disable ran OnSmartStartNonActionable, which wiped "the target was heard
+        // this period" -- so that same period then counted as "not heard, 1 of 1", marked the
+        // busy target ready, and Jimmy called straight back 3 s after "standing by".
+        var smart3 = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 1 };
+        smart3.Start(THEIR_CALL, "20m", "FT8", "tok1");
+        smart3.ObserveDecode(D($"K1XYZ {THEIR_CALL} -11"), true, MY_CALL);   // heard, working someone else
+        smart3.OnSmartStartNonActionable();                                   // the yield's TX disable
+        smart3.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false); // that same period completes
+        Check("A period the target was HEARD in never counts as 'not heard', even across a TX disable",
+            smart3.SilenceCount == 0 && !smart3.ReadyToStart && smart3.BusyWithOther, true);
 
         var watch2 = new TargetMonitor(TargetPurpose.StationWatch);
         watch2.Start(THEIR_CALL, "20m", "FT8", "tok1");
@@ -22291,6 +22662,31 @@ static class JimmyTests
                 Check("C2: partner -> peer RR73 (close, not an exchange) -> NO HALT_TX", Saw("HALT_TX"), false);
                 Check("C2: ...the contact is untouched", wc.callInProg == target, true);
                 Check("C2: ...no strike recorded either (RR73/73 is never busy evidence here)", wc.TestOtherPartyOverStrikes == 0, true);
+            }
+
+            // ── C2m (2026-09-26). A MULTI-ANSWER partner (MSHV multi-answer / Fox, live K5MGY)
+            //      reports to other callers every over while still taking us. The engine splits
+            //      its 0.1 frames during a QSO, so the half arrives as an ordinary row; the
+            //      EngineHost envelope's multiAnswer fact must keep it from counting as "busy". ──
+            {
+                lock (seenLock) seen.Clear();
+                var wc = MakeWc(out var ctrl);
+                ctrl.smartQsoStartEnabled = false;
+                ctrl.otherStationRepliesBeforeYielding = 2;
+                wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(310));
+                wc.callInProg = target;
+                DirectSnapshot HalfSnap(ulong slot, string other) => ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 10.136, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [{ ""from"": """ + target + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + other + " <" + target + @"> -10"" }],
+                    ""decodeSemantics"": [{ ""schemaVersion"": 1, ""rawMessage"": """ + other + " <" + target + @"> -10"", ""kind"": ""report"",
+                        ""from"": """ + target + @""", ""to"": """ + other + @""", ""reportDb"": -10, ""addressedToMe"": false,
+                        ""callForm"": ""standard"", ""qsoRelation"": ""partnerWorkingOther"", ""multiAnswer"": true }]
+                }");
+                wc.TestApplyDirectSnapshot(myCall, myGrid, HalfSnap(311, peer));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, HalfSnap(312, peer2));
+                Check("C2m: a multi-answer partner's reports to other callers are never busy evidence",
+                    wc.TestOtherPartyOverStrikes == 0 && wc.callInProg == target, true);
             }
 
             // ── C3. Partner's report is addressed TO US -> NO yield ──

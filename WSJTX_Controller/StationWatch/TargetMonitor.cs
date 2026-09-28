@@ -886,7 +886,12 @@ namespace WSJTX_Controller
             ReadyToStart = false;
             _rr73AwaitingOneMoreOpportunity = false;
             _engagedWhileWaiting = false;
-            _targetHeardThisPeriod = false;
+            // _targetHeardThisPeriod is deliberately KEPT (2026-09-26): it records a FACT about the
+            // current receive period -- the target was heard in it -- not stale readiness, and it is
+            // consumed only by the next period completion (see its own comment). Wiping it here let
+            // the Smart Start busy-yield's OWN transmit disable (DisableTx -> this) turn the very
+            // period the target was heard working another station into "not heard, 1 of 1", mark the
+            // busy target ready, and call straight back (live: W6TK, 3 s after "standing by").
             _lastCountedSlot = null;
         }
 

@@ -64,6 +64,30 @@ namespace WSJTX_Controller
         // (the text-parsed path never carries hash notation; NormalizeDecodedMessage already
         // resolved it upstream of the text FromWsjtxMessage parses).
         public bool FromWasHashed { get; set; }
+        // 2026-09-26: (part of) a multi-answer transmission (Nexus/EngineHost fact -- see
+        // DirectDecodeSemantics.MultiAnswer). Always false on the WsjtxMessage path.
+        public bool MultiAnswer { get; set; }
+
+        // 2026-09-26 (parser migration): how far into a standard QSO this message is, from the
+        // message KIND -- same scale as the old WsjtxMessage.Progress (CQ 1, reply 2, report 3,
+        // R-report 4, RRR 5, RR73/73 6, anything else 0), so CallQueueStore's "keep the more
+        // advanced message" rule is unchanged. A grid-less reply (blank g15) is still a reply.
+        public int Progress
+        {
+            get
+            {
+                switch (Kind)
+                {
+                    case "cq": case "directedCq": return 1;
+                    case "reply": return 2;
+                    case "report": return 3;
+                    case "rReport": return 4;
+                    case "rrr": return 5;
+                    case "rr73": case "73": return 6;
+                    default: return 0;
+                }
+            }
+        }
         public bool ToWasHashed { get; set; }
 
         private static string NullIfCq(string toCall) =>
@@ -186,6 +210,7 @@ namespace WSJTX_Controller
                 d.To = CanonicalizeIdentity(env.To, out bool toHashed);
                 d.FromWasHashed = fromHashed;
                 d.ToWasHashed = toHashed;
+                d.MultiAnswer = env.MultiAnswer;
                 d.CqTarget = string.IsNullOrEmpty(env.CqDirection) ? null : env.CqDirection;
                 d.IsDirectedCq = string.Equals(env.Kind, "directedCq", StringComparison.Ordinal);
                 d.AddressedToMe = env.AddressedToMe;

@@ -1,0 +1,316 @@
+diff --git a/src/message.rs b/src/message.rs
+index 50fd8463..55c44f67 100644
+--- a/src/message.rs
++++ b/src/message.rs
+@@ -403,6 +403,43 @@ pub fn parse_ack(s: &str) -> Option<(String, String, char)> {
+     None
+ }
+ 
++/// A slash-free call that `pack77_1` accepts in a two-word Type 1 message: WSJT-X's
++/// `chkcall.f90` test (base of at most 6 characters, a letter in position 1 or 2, a digit in
++/// position 2 or 3 followed by a 1-3 letter suffix, no leading `Q` except the QU1RK
++/// placeholder) and also [`is_std_call`], so it can ride the standard c28 field.
++fn is_plain_std_call(s: &str) -> bool {
++    let b = s.as_bytes();
++    if b.is_empty() || b.len() > 6 || !b.iter().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
++        return false;
++    }
++    let letter = |i: usize| b.get(i).is_some_and(|c| c.is_ascii_uppercase());
++    let digit = |i: usize| b.get(i).is_some_and(|c| c.is_ascii_digit());
++    if !letter(0) && !letter(1) {
++        return false;
++    }
++    if b[0] == b'Q' && !s.starts_with("QU1RK") {
++        return false;
++    }
++    let i1 = if digit(2) {
++        2
++    } else if digit(1) {
++        1
++    } else {
++        return false;
++    };
++    let suffix = &b[i1 + 1..];
++    (1..=3).contains(&suffix.len()) && suffix.iter().all(|c| c.is_ascii_uppercase()) && is_std_call(s)
++}
++
++/// Can `s` occupy a CALLSIGN FIELD of a standard message? [`looks_like_call`], plus -- when
++/// `leading` -- the three tokens WSJT-X lets stand in the first field instead of a call.
++/// Backported from upstream #303 (kd9taw/Nexus 0c68f705) in Jimmy Next's
++/// tempo-core-message.patch. `DE`/`CQ`/`QRZ` are exempt in the FIRST field only, exactly as
++/// `pack77_1` has it (packjt77.f90:1178-1179), which keeps the #303 shape ("KD9TAW DE EM73") out.
++fn is_call_field(s: &str, leading: bool) -> bool {
++    looks_like_call(s) || (leading && matches!(s, "DE" | "CQ" | "QRZ"))
++}
++
+ pub fn looks_like_call(s: &str) -> bool {
+     is_valid_hashed(s) || is_compound(s) || is_callsign(s)
+ }
+@@ -562,10 +599,10 @@ impl Msg {
+         // it LOOKS like a callsign and is NOT a standard one, therefore it can only have
+         // arrived as i3=4, therefore a bare "CQ" in front of it is a CQ.
+         //
+-        // The guard rails the old comment named are kept by construction rather than by
+-        // narrowness: "CQ W1AW" stays free text because W1AW IS standard (a standard call
+-        // would have carried its grid), and "CQ <...>" is still rejected because a bracketed
+-        // or punctuated token is not a callsign to `is_callsign`.
++        // "CQ <...>" is still rejected because a bracketed or punctuated token is not a
++        // callsign to `is_callsign`. (A STANDARD call is excluded from THIS branch; a grid-less
++        // standard CQ is a Type 1 message with a blank g15 -- see the branch below, Jimmy Next
++        // compat tempo-core-message.patch.)
+         if t.len() == 2 && t[0] == "CQ" && is_nonstandard_call(t[1]) {
+             return Msg::Cq {
+                 de: t[1].to_string(),
+@@ -593,7 +630,39 @@ impl Msg {
+                 grid: String::new(),
+             };
+         }
+-        if t.len() == 3 {
++        // Type 1 STANDARD message with a BLANK g15: "CQ <call>" / "<to> <de>". The QEX FT4/FT8
++        // paper's Table 1 defines g15 as "4-character grid, Report, RRR, RR73, 73, or blank",
++        // and `pack77_1` packs any two-word message whose words pass `chkcall` as Type 1
++        // (`if(nwords.eq.2) ... igrid4=MAXGRID4+1`) BEFORE free text is ever tried, so this text
++        // can only have arrived as that standard message — unpack77 renders it with no third
++        // word (`if(irpt.eq.1) msg=trim(call_1)//' '//trim(call_2)`). The grid stays unknown
++        // (empty); it is never invented. Both words must pass the packer's own plain-call test
++        // AND `is_std_call`, so free text ("NR5NN QRT", "4JF1EU WD8PFS") still falls through.
++        // Slashed calls are left to the i3=4 branches above, exactly as `pack77_1` refuses a
++        // two-word message whose second word carries a `/`.
++        if t.len() == 2 && is_plain_std_call(t[1]) {
++            if t[0] == "CQ" {
++                return Msg::Cq {
++                    de: t[1].to_string(),
++                    grid: String::new(),
++                    dir: String::new(),
++                };
++            }
++            if is_plain_std_call(t[0]) {
++                return Msg::Grid {
++                    to: t[0].to_string(),
++                    de: t[1].to_string(),
++                    grid: String::new(),
++                };
++            }
++        }
++        // BOTH CALLSIGN FIELDS, OR IT IS NOT A STANDARD MESSAGE (upstream #303, backported). This
++        // arm used to validate only the PAYLOAD token, so free text ending in a report/grid/
++        // signoff was typed as a message addressed to whoever the first word named ("KR4FQG AGN
++        // 73" -> a 73 from "AGN"), and the auto-sequencer acted on it ("KD9TAW DE EM73" left
++        // CallingCq and queued "<DE> KD9TAW -12"). `pack77_1` (packjt77.f90:1175-1182) refuses
++        // the same way: `chkcall` on w(1) AND w(2), DE/CQ/QRZ exempt first, a hash in either.
++        if t.len() == 3 && is_call_field(t[0], true) && is_call_field(t[1], false) {
+             let to = t[0].to_string();
+             let de = t[1].to_string();
+             let p = t[2];
+@@ -627,7 +696,11 @@ impl Msg {
+             }
+         }
+         // ARRL Field Day exchange: "<to> <de> [R] <class> <section>".
+-        if t.len() == 4 || t.len() == 5 {
++        // Same gate (upstream #303); the Field Day packer (packjt77.f90:983-986) exempts nothing.
++        if (t.len() == 4 || t.len() == 5)
++            && is_call_field(t[0], false)
++            && is_call_field(t[1], false)
++        {
+             let class_idx = if t.len() == 5 && t[2] == "R" {
+                 Some(3)
+             } else if t.len() == 4 {
+@@ -656,11 +729,10 @@ impl Msg {
+     /// construction (it rides the parse, never a substring scan), so a `DM73` grid or
+     /// a callsign containing 73 never classifies. `RRR` is excluded on purpose: it
+     /// rogers the report but promises a 73 still to come, so the frequency isn't
+-    /// freeing yet. HONEST LIMIT: the parse's three-token Bye73 arm does not verify
+-    /// the addressees are callsigns (inbox.rs documents the same trap), so free-text
+-    /// signoffs like "HPE CUAGN 73" count — correct for "the frequency is freeing",
+-    /// wrong for "identified station signed"; a consumer needing the latter gates on
+-    /// looks_like_call itself. Drives the Band Activity CQ+73 filter chip.
++    /// freeing yet. Drives the Band Activity CQ+73 filter chip. Since upstream #303
++    /// (backported in Jimmy Next's tempo-core-message.patch) the three-token arm requires
++    /// both callsign fields to be callsigns, so free-text goodbyes like "HPE CUAGN 73" no
++    /// longer count; a signoff between two real callsigns is unaffected.
+     pub fn is_signoff(&self) -> bool {
+         matches!(self, Msg::Rr73 { .. } | Msg::Bye73 { .. })
+     }
+@@ -785,12 +857,17 @@ mod fidelity_tests {
+     /// asserting directly rather than trusting the shape of the predicate.
+     #[test]
+     fn a_gridless_cq_still_refuses_what_it_always_refused() {
+-        // A STANDARD call with no grid is free text: a standard sender would have carried one.
+-        assert!(
+-            !matches!(Msg::parse("CQ W1AW"), Msg::Cq { .. }),
+-            "a grid-less STANDARD call stays free text"
++        // Jimmy Next compat (tempo-core-message.patch): a STANDARD call with no grid is a
++        // Type 1 CQ with a blank g15 (QEX Table 1; pack77_1's two-word case), not free text.
++        // The grid stays unknown.
++        assert_eq!(
++            Msg::parse("CQ W1AW"),
++            Msg::Cq { de: "W1AW".into(), grid: String::new(), dir: String::new() },
++            "a grid-less STANDARD call is a Type 1 CQ with a blank g15"
+         );
+-        assert!(!matches!(Msg::parse("CQ KD9TAW"), Msg::Cq { .. }));
++        assert!(matches!(Msg::parse("CQ KD9TAW"), Msg::Cq { .. }));
++        // ...but only when the word is a callsign at all.
++        assert!(matches!(Msg::parse("CQ TEST"), Msg::Other(_)));
+         // A hashed placeholder is not a callsign and never names a station.
+         assert!(!matches!(Msg::parse("CQ <...>"), Msg::Cq { .. }));
+         // Not a callsign at all.
+@@ -798,6 +875,105 @@ mod fidelity_tests {
+         assert!(!matches!(Msg::parse("CQ ?"), Msg::Cq { .. }));
+     }
+ 
++    /// Jimmy Next compat (tempo-core-message.patch): the blank-g15 standard forms reach the
++    /// real QSO sequencer as ordinary opening moves -- a report, never a completed QSO -- and
++    /// the missing grid stays unknown rather than being invented.
++    #[test]
++    fn a_gridless_standard_message_drives_the_sequencer_with_the_grid_unknown() {
++        use crate::qso::{Station, State};
++        let dec = |t: &str| modes::Decode {
++            message: t.into(),
++            sync: 1.0,
++            snr: -7,
++            dt: 0.0,
++            freq: 1500.0,
++            nap: 0,
++            qual: 1.0,
++            rv: None,
++            raw: None,
++            mode: None,
++        };
++        // A standard station answers our CQ with no grid -> we send the report.
++        let mut s = Station::calling_cq("KD9TAW", "EN61");
++        s.observe(&[dec("KD9TAW W1ABC")]);
++        assert_eq!(s.state, State::AwaitRoger);
++        assert_eq!(s.dxcall.as_deref(), Some("W1ABC"));
++        assert_eq!(s.dxgrid, None, "no grid was sent; none is invented");
++        assert_eq!(s.pending_text().as_deref(), Some("W1ABC KD9TAW -07"));
++
++        // We answer a grid-less standard CQ -> the ordinary standard opening (our grid).
++        let cq = Msg::parse("CQ N4NF");
++        let a = Station::start("KD9TAW", "EN61", "N4NF", Some((&cq, -7)), false, false);
++        assert_eq!(a.state, State::AwaitReport);
++        assert_eq!(a.pending_text().as_deref(), Some("N4NF KD9TAW EN61"));
++        assert_eq!(a.dxgrid, None);
++
++        // Upstream #303 (backported): free text naming us is NOT a reply from a station called
++        // "DE" -- the CQ run must not leave CallingCq or queue an over to a nonexistent call.
++        let mut c = Station::calling_cq("KD9TAW", "EN61");
++        c.observe(&[dec("KD9TAW DE EM73")]);
++        assert_eq!(c.state, State::CallingCq, "free text must not start a QSO");
++        assert_eq!(c.dxcall, None);
++    }
++
++    /// Upstream #303 (kd9taw/Nexus 0c68f705 + df2c9d75), BACKPORTED as part of Jimmy Next's
++    /// tempo-core-message.patch: a standard message needs BOTH callsign fields to be callsigns.
++    /// WSJT-X's `pack77_1` (packjt77.f90:1175-1182) `chkcall`s w(1) and w(2) and refuses unless
++    /// both pass, exempting DE/CQ/QRZ in the first slot and a hashed `<...>` in either; the Field
++    /// Day packer (983-986) exempts nothing. Jimmy-specific controls at the end: the multi-answer
++    /// part shapes EngineHost builds, and the engine's split halves, must stay standard.
++    #[test]
++    fn a_standard_message_needs_both_callsigns_to_be_callsigns() {
++        for text in [
++            "KR4FQG AGN 73",
++            "KR4FQG TNX 73",
++            "KR4FQG HI -07",
++            "KR4FQG DE EM73",
++            "KR4FQG SNR -12",
++            "KR4FQG OM RRR",
++        ] {
++            let m = Msg::parse(text);
++            assert!(
++                matches!(m, Msg::Other(_)),
++                "{text:?} is free text, not a message from a station called {:?}",
++                m.sender()
++            );
++            assert_eq!(m.addressee(), None, "{text:?} addresses nobody");
++        }
++        // Real traffic is untouched, one per arm the gate guards.
++        assert!(matches!(Msg::parse("KR4FQG W1ABC -07"), Msg::Report { .. }));
++        assert!(matches!(Msg::parse("KR4FQG W1ABC R-07"), Msg::RReport { .. }));
++        assert!(matches!(Msg::parse("KR4FQG W1ABC FN31"), Msg::Grid { .. }));
++        assert!(matches!(Msg::parse("KR4FQG W1ABC RR73"), Msg::Rr73 { .. }));
++        assert!(matches!(Msg::parse("KR4FQG W1ABC RRR"), Msg::Rrr { .. }));
++        assert!(matches!(Msg::parse("KR4FQG W1ABC 73"), Msg::Bye73 { .. }));
++        assert!(Msg::parse("A79AA K2DEF 73").is_signoff());
++        // Compound and i3=4 hashed calls are callsign fields.
++        assert!(matches!(Msg::parse("<W9XYZ> PJ4/K1ABC R-10"), Msg::RReport { .. }));
++        assert!(matches!(Msg::parse("PJ4/K1ABC <W9XYZ> -10"), Msg::Report { .. }));
++        // The UNRESOLVED hash too (follow-up df2c9d75): a station answering several callers
++        // hashes its call, and a receiver that has not learned it decodes `<...>`.
++        assert!(matches!(Msg::parse("<...> KD9TAW -12"), Msg::Report { .. }));
++        assert!(matches!(Msg::parse("KD9TAW <...> RR73"), Msg::Rr73 { .. }));
++        // ...but arbitrary brackets are not a hash.
++        assert!(matches!(Msg::parse("KD9TAW <HI> -12"), Msg::Other(_)));
++        // DE/CQ/QRZ may lead -- first slot only.
++        assert_eq!(Msg::parse("DE KD9TAW 73").sender(), Some("KD9TAW"));
++        assert_eq!(Msg::parse("QRZ W1ABC FN31").sender(), Some("W1ABC"));
++        assert!(matches!(Msg::parse("KD9TAW DE EM73"), Msg::Other(_)));
++        // Field Day: same gate, no exemption.
++        assert!(matches!(Msg::parse("W9XYZ K2DEF 3A WI"), Msg::FieldDay { .. }));
++        assert!(matches!(Msg::parse("W9XYZ K2DEF R 3A WI"), Msg::FieldDay { .. }));
++        assert!(matches!(Msg::parse("KR4FQG TNX 3A WI"), Msg::Other(_)));
++        assert!(matches!(Msg::parse("HPE OM R 3A WI"), Msg::Other(_)));
++        // JIMMY CONTROLS: EngineHost's multi-answer part texts and the engine's split /
++        // reattached halves (live 2026-09-25, K5MGY) stay standard messages.
++        assert!(matches!(Msg::parse("KR4LQH <K5MGY> RR73"), Msg::Rr73 { .. }));
++        assert!(matches!(Msg::parse("KD9BIE <K5MGY> -08"), Msg::Report { .. }));
++        assert!(matches!(Msg::parse("KD9BIE <...> -08"), Msg::Report { .. }));
++        assert!(matches!(Msg::parse("KR4LQH K5MGY RR73"), Msg::Rr73 { .. }));
++    }
++
+     /// The predicate on its own, because it is the thing that decides and it is easier to see
+     /// wrong here than through a parse.
+     #[test]
+@@ -1008,7 +1184,16 @@ mod fidelity_tests {
+         // Plain free text / a bare standard pair is NOT misread as an i3=4 call pair.
+         assert!(matches!(Msg::parse("NET TONIGHT"), Msg::Other(_)));
+         assert!(matches!(Msg::parse("HELLO ALL"), Msg::Other(_)));
+-        assert!(matches!(Msg::parse("W9XYZ K2DEF"), Msg::Other(_)));
++        // Jimmy Next compat (tempo-core-message.patch): a bare STANDARD pair is a Type 1
++        // message with a blank g15 ("calling <to>", grid unknown), not free text.
++        assert_eq!(
++            Msg::parse("W9XYZ K2DEF"),
++            Msg::Grid { to: "W9XYZ".into(), de: "K2DEF".into(), grid: String::new() }
++        );
++        // Two words that are not both standard calls stay free text (live-log shapes).
++        for s in ["4JF1EU WD8PFS", "NR5NN QRT", "KF8EJP QSY", "W2ERC RR73", "YANKS READ?"] {
++            assert!(matches!(Msg::parse(s), Msg::Other(_)), "{s} must be free text");
++        }
+         // Ham free-text SLASH shorthand must NOT read as a compound call pair.
+         for s in ["5/9 NJ2X", "W/L 20M", "S/N 10DB", "2X/3 W1AW", "I/O TEST"] {
+             assert!(
+@@ -1019,8 +1204,8 @@ mod fidelity_tests {
+         // Arbitrary bracketed tokens / both-hashed are not a valid i3=4 call pair.
+         assert!(matches!(Msg::parse("<X> <Y>"), Msg::Other(_)));
+         assert!(matches!(Msg::parse("<...> <...>"), Msg::Other(_)));
+-        // A grid-less plain CQ and "CQ <...>" stay free text (only a compound CQ is i3=4).
+-        assert!(matches!(Msg::parse("CQ W1AW"), Msg::Other(_)));
++        // "CQ <...>" stays free text. (A grid-less plain CQ is a Type 1 CQ with a blank g15 --
++        // see a_gridless_cq_still_refuses_what_it_always_refused.)
+         assert!(matches!(Msg::parse("CQ <...>"), Msg::Other(_)));
+         assert!(matches!(Msg::parse("CQ <DX>"), Msg::Other(_)));
+     }
+@@ -1086,16 +1271,14 @@ mod fidelity_tests {
+         // three-token Bye73 arm either.
+         assert!(!Msg::parse("K2DEF W9XYZ R73").is_signoff());
+         assert!(!Msg::parse("TNX FER QSO 73").is_signoff());
+-        // HONEST LIMIT, pinned deliberately: the parser's three-token arm matches on
+-        // the FINAL token alone and does not require the first two to be callsigns
+-        // (the trap inbox.rs:101-104 documents and defends against chunk-side).
+-        // So three-token free text ending in the bare 73 token IS a Bye73/signoff:
+-        // "HPE CUAGN 73" — and for this consumer that is the RIGHT call (a free-text
+-        // 73 is a signoff; the frequency is about to open). Any future consumer that
+-        // needs callsign-verified signoffs must gate on looks_like_call itself —
+-        // is_signoff() answers "does this message end a QSO", not "who ended it".
+-        assert!(Msg::parse("HPE CUAGN 73").is_signoff());
+-        assert!(Msg::parse("TNX QSO 73").is_signoff());
++        // INVERTED by upstream #303 (backported): three-token free text ending in 73 used to
++        // count as a signoff because the arm checked only the final token -- the same missing
++        // check that let "KR4FQG AGN 73" be typed as a message to KR4FQG and reach the
++        // sequencer. Both callsign fields must now be callsigns; that cost is upstream's
++        // deliberate choice, and a signoff between two real callsigns still counts.
++        assert!(!Msg::parse("HPE CUAGN 73").is_signoff());
++        assert!(!Msg::parse("TNX QSO 73").is_signoff());
++        assert!(Msg::parse("K2DEF W9XYZ 73").is_signoff());
+     }
+ 
+     #[test]

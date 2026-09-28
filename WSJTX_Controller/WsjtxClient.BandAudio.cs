@@ -657,11 +657,8 @@ namespace WSJTX_Controller
 
             if (!tuning) StartStatusTimer2(false);
 
-            // Operator-configurable (Options > Radio tab) -- 0.5% to 25% in 0.5% increments since
-            // 2026-08-30 (whole-percent before). Clamped defensively even though the NumericUpDown's
-            // own range should already keep it sane.
-            double step = Math.Max(0.5, Math.Min(25.0, ctrl.Radio.AudioStepPercent)) / 100.0;
-            double target = (double)_engineTxLevel + (up ? step : -step);
+            // Operator-configurable dB step (Options > Radio tab) -- see StepTxLevelDb.
+            double target = StepTxLevelDb((double)_engineTxLevel, ctrl.Radio.AudioStepDb, up);
 
             // sound:false on every announcement below, deliberately -- this whole method only ever
             // runs while transmitting or tuning (guard above), so EVERY announcement here fires
@@ -681,6 +678,25 @@ namespace WSJTX_Controller
                 StatusView.ShowMessage($"Audio level {applied * 100:0.0}%", false);
             });
             return true;
+        }
+
+        // Lowest level an F11/F12 step goes to: -45 dB, the bottom of WSJT-X's own Pwr slider.
+        // A dB step multiplies the level, so it could never climb back up from exactly 0 -- a
+        // step up from below this floor lands on it instead.
+        internal const double MinSteppedTxLevel = 0.005623413251903491;   // 10^(-45/20)
+
+        // 2026-09-26: F11/F12 step in dB (matching WSJT-X's Pwr slider), not a fixed linear
+        // percent -- the engine's tx_level is a linear 0.0-1.0 drive level, so each press
+        // multiplies it by 10^(+/-stepDb/20), the same size change at any level. Clamped to
+        // MinSteppedTxLevel..1.0 (a step down never raises a level already below the floor);
+        // stepDb clamped defensively to the Options range. Pure, so
+        // JimmyTests can check it without a live engine host.
+        internal static double StepTxLevelDb(double current, double stepDb, bool up)
+        {
+            stepDb = Math.Max(RadioSettings.AudioStepDbMin, Math.Min(RadioSettings.AudioStepDbMax, stepDb));
+            if (current < MinSteppedTxLevel) return up ? MinSteppedTxLevel : current;
+            double target = current * Math.Pow(10.0, (up ? stepDb : -stepDb) / 20.0);
+            return Math.Max(MinSteppedTxLevel, Math.Min(1.0, target));
         }
 
         // Save-side companion to ShouldRestoreTxLevel below: decides whether a just-CONFIRMED

@@ -748,6 +748,12 @@ fn parse_args() -> Args {
 ///                                          which have no live setter on Engine and are configured
 ///                                          via CLI args at startup only (--decode-flow-hz etc.,
 ///                                          see Args' own doc comments).
+///   SET_SPECIAL_OP none|hound            -- Jimmy's Hound toggle (traditional FT8 DXpedition
+///                                          Hound) through Nexus's own settings save -- see
+///                                          set_special_op. Responds "OK <resulting state>" or
+///                                          "ERR <message>" (Hound is refused outside FT8, and
+///                                          SET_TIER to a non-FT8 tier turns it off). SNAPSHOT
+///                                          carries the engine's actual state as `specialOp`.
 ///   SET_TUNING <0|1>                     -- calls Engine::set_tune(bool). Responds "OK". Jimmy's
 ///                                          own Tune hotkey -- Andy WM8Q's fork's "ToggleTuning"
 ///                                          UDP sub-command (NewTxMsgIdx=19) had no native-engine
@@ -798,6 +804,52 @@ fn parse_args() -> Args {
 /// response calls the same tier. Tier-confirmation redesign, 2026-09-15: no bare "OK" anymore --
 /// see this command's own doc comment above for why the caller can trust this immediately instead
 /// of polling SNAPSHOT afterward.
+/// Jimmy's Hound toggle (traditional FT8 DXpedition Hound), 2026-09-26. Goes through Nexus's
+/// OWN supported lifecycle -- the same settings save its Operate-header Hound button makes
+/// (`apply_settings` with only `special_op` changed) -- so every Hound rule stays Nexus's:
+/// the >1000 Hz first call, moving TX onto the Fox, the quiet finish on the Fox's RR73, and the
+/// in-QSO Fox-frame reattach. Nexus drops Hound at every launch (`with_settings`), so a
+/// restarted engine comes back with it off. `superhound` is not offered: Nexus has no SuperFox
+/// decoder and treats it as plain Hound (settings.rs `SpecialOp::SuperHound`).
+///
+/// FT8 ONLY. WSJT-X's DXpedition mode is FT8-only and Nexus declares `fox_hound` on FT8 alone,
+/// but its quiet-finish / Hound-offset rules read the setting whatever the tier -- so the tier
+/// check lives here, and [`set_tier_reconciling_special_op`] turns Hound off on leaving FT8.
+fn set_special_op(eng: &mut Engine, arg: &str) -> Result<&'static str, String> {
+    use tempo_app::settings::SpecialOp;
+    let want = match arg.trim() {
+        "none" => SpecialOp::None,
+        "hound" => SpecialOp::Hound,
+        other => return Err(format!("bad SET_SPECIAL_OP value: {other} (expected none|hound)")),
+    };
+    if want == SpecialOp::Hound && eng.tier() != tempo_app::dto::Tier::Ft8 {
+        return Err("Hound is FT8 only".to_string());
+    }
+    if eng.settings().special_op != want {
+        let mut s = eng.settings().clone();
+        s.special_op = want;
+        eng.apply_settings(s);
+    }
+    Ok(special_op_wire(eng))
+}
+
+/// The engine's ACTUAL special-operation state as Jimmy sees it: `"hound"` (incl. the retired
+/// `superhound` alias, which Nexus runs as Hound) or `"none"`.
+fn special_op_wire(eng: &Engine) -> &'static str {
+    match eng.settings().special_op {
+        tempo_app::settings::SpecialOp::None => "none",
+        _ => "hound",
+    }
+}
+
+/// `Engine::set_tier`, then Hound off if the new tier is not FT8 (see [`set_special_op`]).
+fn set_tier_reconciling_special_op(eng: &mut Engine, tier: tempo_app::dto::Tier) {
+    eng.set_tier(tier);
+    if eng.tier() != tempo_app::dto::Tier::Ft8 && special_op_wire(eng) != "none" {
+        let _ = set_special_op(eng, "none");
+    }
+}
+
 fn set_tier_wire_response(tier: tempo_app::dto::Tier, period_secs: f64) -> String {
     let tier_name = match serde_json::to_value(tier) {
         Ok(serde_json::Value::String(s)) => s,
@@ -984,7 +1036,12 @@ fn handle_control_connection(
             // Poisoned-lock tolerant, same reasoning as Nexus's own src-tauri: a panic
             // elsewhere while holding this lock must not also take the control channel's
             // ability to report state down with it.
-            let snap = engine.lock().unwrap_or_else(|e| e.into_inner()).snapshot();
+            // split_provenance is read under the SAME lock as the snapshot, so its flags line up
+            // with this snapshot's recent_decodes rows (built 1:1, in order, from last_decodes).
+            let (snap, special_op, split_provenance) = {
+                let eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                (eng.snapshot(), special_op_wire(&eng), eng.last_decodes_multiplexed().to_vec())
+            };
             // Independent audit finding, 2026-08-23 (EngineHost ownership / session identity):
             // sessionToken/pid are injected at the JSON level, AFTER AppSnapshot (a pinned
             // Nexus/tempo-app type) has already been serialized normally -- this never touches
@@ -1005,13 +1062,16 @@ fn handle_control_connection(
             // against `WsjtxMessage` (Stage 5); nothing acts on it until proven equal. See
             // EngineHost/src/decode_semantics.rs and C:\chat gpt\nexus plan.txt Section 7.
             let partner = snap.qso.as_ref().and_then(|q| q.dxcall.as_deref());
-            let decode_semantics: Vec<decode_semantics::DecodeSemantics> = snap
+            let mut decode_semantics: Vec<decode_semantics::DecodeSemantics> = snap
                 .recent_decodes
                 .iter()
                 .map(|row| {
                     decode_semantics::DecodeSemantics::from_decode(&row.message, &snap.mycall, partner)
                 })
                 .collect();
+            // Multi-answer halves the engine already split: from the engine's own record of the
+            // split (Jimmy compat patch), never reconstructed from matching measurements.
+            decode_semantics::DecodeSemantics::apply_split_provenance(&split_provenance, &mut decode_semantics);
             // Stage 10: the same envelope for the QSO's own "now sending" text, so Jimmy's
             // completion / TX-tracking path reads a typed kind instead of re-parsing
             // qso.txNow with WsjtxMessage. Same Msg::parse -- no Nexus patch. `None` when
@@ -1035,6 +1095,22 @@ fn handle_control_connection(
                         "qsoTxSemantics".to_string(),
                         serde_json::to_value(&qso_tx_semantics).unwrap_or(serde_json::Value::Null),
                     );
+                    // The engine's ACTUAL Hound state ("none" | "hound") -- Jimmy shows this, not
+                    // its own request, so an engine restart (Nexus drops Hound at launch) or a
+                    // tier switch away from FT8 is visible immediately. See set_special_op.
+                    obj.insert("specialOp".to_string(), serde_json::Value::String(special_op.to_string()));
+                    // Nexus's OWN base call of the engine's QSO partner (`message::base_call`:
+                    // "VA3LG/W2" -> "VA3LG", "KH8/W1AW" -> "W1AW"), so Jimmy can tell that the
+                    // station it started the contact with is the engine's partner under a
+                    // portable spelling, without re-implementing the rule (live 2026-09-26: a
+                    // directed "CQ POTA VA3LG" answered as "VA3LG/W2"; the engine completed it,
+                    // Jimmy never logged it).
+                    if let Some(dx) = partner {
+                        obj.insert(
+                            "qsoDxcallBase".to_string(),
+                            serde_json::Value::String(tempo_core::message::base_call(dx)),
+                        );
+                    }
                     // Nexus contesting foundation, phase 3: same injection pattern as
                     // sessionToken/pid above -- never touches the pinned AppSnapshot struct.
                     // Lets Jimmy confirm a contest session is active (and which durable instance
@@ -1179,7 +1255,7 @@ fn handle_control_connection(
                     // already authoritative. Mirrors Nexus's own Tauri `set_tier` command
                     // (src-tauri/src/lib.rs: `eng.set_tier(tier); Ok(eng.snapshot())`).
                     let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
-                    eng.set_tier(requested);
+                    set_tier_reconciling_special_op(&mut eng, requested);
                     let resulting_tier = eng.tier();
                     let period_secs = eng.active_slot_secs();
                     drop(eng);
@@ -1188,6 +1264,14 @@ fn handle_control_connection(
                 other => {
                     let _ = writeln!(stream, "ERR bad SET_TIER value: {other}");
                 }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_SPECIAL_OP ") {
+            // Jimmy's Hound toggle -- see set_special_op. Responds "OK none" / "OK hound" (the
+            // engine's resulting state) or "ERR <message>" (bad value, or Hound outside FT8).
+            let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            match set_special_op(&mut eng, v) {
+                Ok(state) => { let _ = writeln!(stream, "OK {state}"); }
+                Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
             }
         } else if let Some(v) = line.strip_prefix("SET_TUNING ") {
             engine.lock().unwrap_or_else(|e| e.into_inner()).set_tune(v.trim() == "1");
@@ -1917,6 +2001,23 @@ mod tests {
     #[test]
     fn reply_wire_response_ok_reports_ok() {
         assert_eq!(reply_wire_response(Ok(())), "OK");
+    }
+
+    // Hound (2026-09-26): FT8 only, through Nexus's own settings save, and turned off when the
+    // tier leaves FT8 -- so traditional Hound rules can never apply to an FT4 contact.
+    #[test]
+    fn hound_is_ft8_only_and_is_dropped_on_leaving_ft8() {
+        use tempo_app::dto::Tier;
+        let mut e = Engine::new("W9XYZ", "EN37", 0);
+        e.set_tier(Tier::Ft4);
+        assert!(set_special_op(&mut e, "hound").is_err(), "refused in FT4");
+        assert_eq!(special_op_wire(&e), "none");
+        set_tier_reconciling_special_op(&mut e, Tier::Ft8);
+        assert_eq!(set_special_op(&mut e, "hound"), Ok("hound"));
+        assert_eq!(special_op_wire(&e), "hound");
+        set_tier_reconciling_special_op(&mut e, Tier::Ft4);
+        assert_eq!(special_op_wire(&e), "none", "leaving FT8 turns Hound off");
+        assert!(set_special_op(&mut e, "superhound").is_err(), "SuperHound is not offered");
     }
 
     #[test]
