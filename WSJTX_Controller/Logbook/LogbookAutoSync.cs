@@ -135,7 +135,16 @@ namespace WSJTX_Controller
             // While Nexus keeps the log, only the confirmations download is merged (as Nexus's own
             // sync does): the own-records download restates every confirmed contact a second time,
             // and Nexus's merge put those second copies on other contacts of the same day.
-            if (NexusLogbook.Active) return ImportAndReport(db, adif1, "LOTW", "LogbookLastLoTWRefresh");
+            if (NexusLogbook.Active)
+            {
+                bool ok = ImportAndReport(db, adif1, "LOTW", "LogbookLastLoTWRefresh");
+                if (db is NexusLogbookService nexus)
+                {
+                    string received = await nexus.LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
+                    if (received != null) _logbookWindowStatus("Auto-sync: " + received);
+                }
+                return ok;
+            }
             string adif2 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: false).ConfigureAwait(true);
             // Independent audit finding 2, 2026-08-23 (CONFIRMED bug): matches
             // LogbookWindow.LoTWRefreshBtn_Click's own fix -- a failed unconfirmed-QSO fetch

@@ -18,10 +18,13 @@ namespace WSJTX_Controller
         // Downloads LoTW QSOs as ADIF text.
         // If since is not null, only QSLs confirmed on or after that date are returned.
         // Set confirmedOnly = true to include only LoTW-confirmed QSOs (recommended).
+        // ownFromQsoDate (with confirmedOnly = false): your own records from that QSO date on
+        // (qso_startdate), the request the Nexus desktop makes to see which uploads LoTW holds.
         public async Task<string> FetchReportAsync(
             string username, string password,
             DateTime? since = null,
-            bool confirmedOnly = true)
+            bool confirmedOnly = true,
+            DateTime? ownFromQsoDate = null)
         {
             LastError = null;
             if (TestModeGuard.IsTestMode)
@@ -64,6 +67,10 @@ namespace WSJTX_Controller
                 string sinceDate = since.HasValue ? since.Value.ToString("yyyy-MM-dd") : "1900-01-01";
                 query += "&qso_qsl=yes&qso_qslsince=" + Uri.EscapeDataString(sinceDate);
             }
+            else if (ownFromQsoDate.HasValue)
+            {
+                query += "&qso_qsl=no&qso_startdate=" + Uri.EscapeDataString(ownFromQsoDate.Value.ToString("yyyy-MM-dd"));
+            }
             else
             {
                 string sinceDate = since.HasValue ? since.Value.ToString("yyyy-MM-dd") : "1900-01-01";
@@ -99,7 +106,7 @@ namespace WSJTX_Controller
             }
 
             // Kept as received while Nexus keeps the log, for sync diagnosis (no password in it).
-            NexusSyncDiagnostics.Retain(confirmedOnly ? "lotw-qsl-yes" : "lotw-qsl-no", response);
+            NexusSyncDiagnostics.Retain(confirmedOnly ? "lotw-qsl-yes" : ownFromQsoDate.HasValue ? "lotw-own" : "lotw-qsl-no", response);
             return response;
         }
     }

@@ -388,6 +388,29 @@ static class JimmyTests
                     QrzRec("KCOUNT1", "20260901", "0010", null, "C") + QrzRec("KCOUNT2", "20260901", "0010", null, "C"), "QRZ");
                 Console.WriteLine($"  QRZ merge result: {res}");
                 Check("sync result counts both contacts that gained a QRZ confirmation (2)", res.NewlyConfirmed == 2 && res.Skipped == 0, true);
+
+                // LoTW "received" promotion (merge_lotw_own_echo). Per call: 0010 never uploaded,
+                // 0020 uploaded (pending), and LoTW's own records hold only 0020. KECHO3: one
+                // pending contact LoTW holds.
+                string echoLog = Path.Combine(work, "echo-log.adi");
+                File.WriteAllText(echoLog, "test\n<eoh>\n" + Rec("KECHORAW", "20260901", "0010", null, null) + Rec("KECHORAW", "20260901", "0020", null, null)
+                    + Rec("KECHOGRD", "20260901", "0010", null, null) + Rec("KECHOGRD", "20260901", "0020", null, null) + Rec("KECHO3", "20260902", "0100", null, null));
+                client.Import(echoLog);
+                string Hm(NexusQso q) => DateTimeOffset.FromUnixTimeSeconds((long)q.WhenUnix).UtcDateTime.ToString("HHmm");
+                foreach (var q in client.Rows().Rows.Where(q => q.Call.StartsWith("KECHO") && Hm(q) != "0010"))
+                    client.StampUpload(q.Id, "lotw", "pending", 1790000000);
+                string Own(string call, string date, string time) => Lotw + Rec(call, date, time, "N", null);
+                string rawOwn = Path.Combine(work, "own-raw.adi");
+                File.WriteAllText(rawOwn, Own("KECHORAW", "20260901", "0020"));
+                client.Merge("lotw-own", rawOwn);
+                int promoted = new NexusLogbookService().PromoteLotwReceived(Own("KECHOGRD", "20260901", "0020") + Rec("KECHO3", "20260902", "0100", "N", null), out var why);
+                var echo = client.Rows().Rows.Where(q => q.Call.StartsWith("KECHO")).ToList();
+                string St(string call, string hm) => echo.Single(q => q.Call == call && Hm(q) == hm).Upload?.Lotw?.Outcome ?? "none";
+                Console.WriteLine($"  LoTW received -- Nexus alone: 0010 {St("KECHORAW", "0010")}, 0020 {St("KECHORAW", "0020")}; " +
+                                  $"guarded: 0010 {St("KECHOGRD", "0010")}, 0020 {St("KECHOGRD", "0020")}; single: {St("KECHO3", "0100")}; promoted {promoted} {why}");
+                Check("LoTW received (guarded): a never-uploaded same-day contact is never marked received", St("KECHOGRD", "0010") == "none", true);
+                Check("LoTW received (guarded): the uploaded one is left pending rather than guessed", St("KECHOGRD", "0020") == "pending", true);
+                Check("LoTW received: a single pending contact LoTW holds is promoted to accepted", St("KECHO3", "0100") == "accepted" && promoted == 1, true);
             }
             finally { NexusLogbook.TestPortOverride = null; NexusLogbook.TestFolderOverride = null; NexusLogbook.Reset(); }
             client.Shutdown(token);

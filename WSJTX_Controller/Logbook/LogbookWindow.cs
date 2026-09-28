@@ -2162,6 +2162,11 @@ namespace WSJTX_Controller
                 if (NexusLogbook.Active)
                 {
                     await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true);
+                    if (_db is NexusLogbookService nexus)
+                    {
+                        string received = await nexus.LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
+                        if (received != null) SetStatus(SetStatus_Text + "  " + received);
+                    }
                     return;
                 }
                 SetStatus("Fetching LoTW unconfirmed QSOs…");

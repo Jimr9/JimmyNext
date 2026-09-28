@@ -500,6 +500,18 @@ pub fn log_merge(host: &LogHost, engine: &Mutex<Engine>, args: LogFileArgs) -> W
             (Ok(s), d) => Ok((summary_json(&s), d)),
             (Err(e), _) => Err(e),
         },
+        // LoTW's own-QSO report (qso_qsl=no): uploads LoTW holds promoted to "accepted" --
+        // Nexus's merge_lotw_own_echo, as the Nexus desktop's LoTW sync runs it.
+        "lotw-own" => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            match tempo_app::logwrite::merge_lotw_own_echo(engine, &text, now) {
+                (Ok(n), d) => Ok((serde_json::json!({ "promoted": n }), d)),
+                (Err(e), _) => Err(e),
+            }
+        }
         "qrz" => match tempo_app::logwrite::merge_qrz_report(engine, &text) {
             (Ok((added, s)), d) => {
                 let mut v = summary_json(&s);

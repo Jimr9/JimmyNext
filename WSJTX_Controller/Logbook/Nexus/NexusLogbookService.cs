@@ -429,6 +429,60 @@ namespace WSJTX_Controller
         public List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null) =>
             R(db => db.GetAdifFieldDicts(ids, sources), new List<Dictionary<string, string>>());
 
+        // ── LoTW "received": uploads LoTW holds promoted from pending to accepted ─────────────
+
+        // The QSO date of the oldest contact whose LoTW upload is still "pending", or null when
+        // none is -- the lower bound of the own-records request, as the Nexus desktop uses it.
+        public DateTime? OldestPendingLotwUpload()
+        {
+            var rows = Client.Rows();
+            if (rows.Error != null) return null;
+            var pending = rows.Rows.Where(q => q.Upload?.Lotw?.Outcome == "pending").Select(q => q.WhenUnix).ToList();
+            return pending.Count == 0 ? (DateTime?)null : DateTimeOffset.FromUnixTimeSeconds((long)pending.Min()).UtcDateTime.Date;
+        }
+
+        // LoTW's own-records download merged by Nexus's merge_lotw_own_echo, which pairs each row
+        // with a contact not yet award-confirmed (day, then log order) and marks its LoTW upload
+        // accepted. Through the pairing guard over exactly those contacts, so a row can never mark
+        // another contact of the same day -- one never uploaded would then never be sent. Returns
+        // the number promoted, or -1 with why.
+        public int PromoteLotwReceived(string ownReport, out string why)
+        {
+            why = null;
+            if (NexusLogbook.Outbox.Count > 0) NexusLogbook.Outbox.Replay(Client);
+            if (NexusLogbook.Outbox.Count > 0) { why = "contacts are still waiting to be saved"; return -1; }
+            var rows = Client.Rows();
+            if (rows.Error != null) { why = rows.Error; return -1; }
+            var prep = NexusReportPairing.Prepare(ownReport, rows.Rows.Where(q => !q.AwardConfirmed).ToList());
+            NexusSyncDiagnostics.WriteList("held-lotw-own",
+                "LoTW own-records rows not used to mark uploads received, because Nexus could not be sure to pair them with the right contact", prep.HeldDetails);
+            if (prep.Sent == 0) return 0;
+            string tmp = Path.Combine(Path.GetTempPath(), $"jimmy-nexus-lotw-own-{Guid.NewGuid():N}.adi");
+            File.WriteAllText(tmp, prep.Text, new UTF8Encoding(false));
+            try
+            {
+                var reply = Client.Merge("lotw-own", tmp);
+                if (reply.State != "saved") { why = $"{reply.State} {reply.Why}".Trim(); return -1; }
+                NexusLogbook.Refresh();
+                return reply.Detail is System.Text.Json.JsonElement d && d.TryGetProperty("promoted", out var p) ? p.GetInt32() : 0;
+            }
+            finally { try { File.Delete(tmp); } catch { } }
+        }
+
+        // The step a LoTW sync runs after merging confirmations while Nexus keeps the log.
+        // Best-effort, as in the Nexus desktop: it never fails the sync. Returns a short note for
+        // the status line, or null when there is nothing to say.
+        public async System.Threading.Tasks.Task<string> LotwReceivedStepAsync(string user, string pass)
+        {
+            var from = OldestPendingLotwUpload();
+            if (from == null) return null;
+            var lotw = new LoTWQsoClient();
+            string text = await lotw.FetchReportAsync(user, pass, null, confirmedOnly: false, ownFromQsoDate: from).ConfigureAwait(false);
+            if (text == null) return "LoTW received check skipped: " + lotw.LastError;
+            int n = PromoteLotwReceived(text, out var why);
+            return n < 0 ? "LoTW received status not updated: " + why : n > 0 ? $"LoTW has received {n:N0} upload(s)." : null;
+        }
+
         // Export while Nexus keeps the log: Nexus's own exporter writes the whole log (its full
         // records, the file other programs read), and the records Jimmy's selection names --
         // the same rows and sources, in the same order, as Jimmy's own export picks them from the
