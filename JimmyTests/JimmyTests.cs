@@ -63,6 +63,49 @@ static class JimmyTests
         }
     }
 
+    // Logbook migration mapping v1 (NexusMigration.FieldsFor): the few rules whose failure would
+    // silently change what a contact means once Nexus owns it.
+    static void NexusMigrationMappingTests()
+    {
+        Console.WriteLine("\n--- NexusMigrationMappingTests ---");
+        NexusMigration.JimmyRow Row(string source, params (string col, string val)[] cols)
+        {
+            var r = new NexusMigration.JimmyRow { Id = 7 };
+            r.Col["callsign"] = "W1AW"; r.Col["band"] = "20m"; r.Col["mode"] = "FT8";
+            r.Col["qso_date"] = "20260101"; r.Col["time_on"] = "2359"; r.Col["source"] = source;
+            foreach (var (c, v) in cols) r.Col[c] = v;
+            return r;
+        }
+        string Val(List<(string Tag, string Value)> f, string tag) => f.Where(x => x.Tag == tag).Select(x => x.Value).FirstOrDefault();
+
+        // A QRZ-only confirmation stays QRZ's: never a paper card (QSL_RCVD is award-grade in Nexus).
+        var qrzOnly = NexusMigration.FieldsFor(Row("QRZ", ("qrz_qsl_rcvd", "Y"), ("qrz_qsl_sent", "Y")));
+        CheckStr("QRZ confirmation -> APP_QRZLOG_STATUS", Val(qrzOnly, "APP_QRZLOG_STATUS"), "C");
+        Check("QRZ confirmation never written as QSL_RCVD", qrzOnly.Any(x => x.Tag == "QSL_RCVD"), false);
+        Check("QRZ 'sent' never written as QSL_SENT (a paper-card request in Nexus)", qrzOnly.Any(x => x.Tag == "QSL_SENT"), false);
+
+        // LoTW: the raw value survives for the rollback; upload is 'accepted' only with LoTW's own evidence.
+        var lotwN = NexusMigration.FieldsFor(Row("QRZ", ("lotw_qsl_rcvd", "N"), ("lotw_uploaded_at", "2026-01-02T00:00:00.0000000Z")));
+        CheckStr("LoTW 'N' kept raw", Val(lotwN, NexusMigration.LotwQslRcvdRawTag), "N");
+        CheckStr("LoTW upload without LoTW's evidence -> pending", Val(lotwN, "APP_TEMPO_UL_LOTW"), "pending|1767312000|");
+        var lotwSrc = NexusMigration.FieldsFor(Row("LOTW", ("lotw_uploaded_at", "2026-01-02T00:00:00.0000000Z")));
+        CheckStr("LoTW upload on a LoTW-reported contact -> accepted", Val(lotwSrc, "APP_TEMPO_UL_LOTW"), "accepted|1767312000|");
+
+        // Times: HHMM gains seconds; a time off before the time on is the next UTC day.
+        var times = NexusMigration.FieldsFor(Row("WSJTX", ("time_off", "0001")));
+        CheckStr("TIME_ON HHMM -> HHMM00", Val(times, "TIME_ON"), "235900");
+        CheckStr("QSO_DATE_OFF rolls past midnight", Val(times, "QSO_DATE_OFF"), "20260102");
+
+        // Extras: a column's value wins over a same-named extra; a repeated extra is written once.
+        var ex = Row("QRZ");
+        ex.Extras.Add(("CALL", "X1X"));
+        ex.Extras.Add(("QTH", "Paris"));
+        ex.Extras.Add(("QTH", "Lyon"));
+        var fx = NexusMigration.FieldsFor(ex);
+        Check("extra colliding with a column is not written", fx.Count(x => x.Tag == "CALL") == 1 && Val(fx, "CALL") == "W1AW", true);
+        Check("repeated extra written once", fx.Count(x => x.Tag == "QTH") == 1, true);
+    }
+
     static void Check(string label, bool actual, bool expected)
     {
         if (actual == expected)
@@ -254,6 +297,16 @@ static class JimmyTests
         {
             VerifyClubLogEquivalence();
             return;
+        }
+        // Logbook migration Phase 2: the full round trip on a COPY of a logbook, in a temp work
+        // folder, through a logbook-only engine host. Never touches a real data path.
+        //   --nexus-migration-dry-run <copy of logbook.db> <empty work folder> <engine exe> [port]
+        if (args.Length >= 4 && args[0] == "--nexus-migration-dry-run")
+        {
+            int port = args.Length >= 5 ? int.Parse(args[4]) : 58297;
+            var r = NexusMigrationDryRun.Run(args[1], args[2], args[3], port);
+            Console.WriteLine(r.Report);
+            Environment.Exit(r.ForwardClean && r.RoundTripClean && r.ChangesSurvive ? 0 : 1);
         }
         if (args.Length > 0 && args[0] == "--dxcc-shadow-dump")
         {
@@ -612,6 +665,7 @@ static class JimmyTests
         ContestingWindowCategoryNavigationTests();
         ContestingWindowStationInfoTests();
         OptionsStationOperatorContinentRelocationTests();
+        NexusMigrationMappingTests();
 
         Console.WriteLine();
         Console.WriteLine($"=== {passed} passed, {failed} failed, {skipped} skipped ===");

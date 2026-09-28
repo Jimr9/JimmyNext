@@ -321,6 +321,7 @@ mod contest_bridge;
 mod decode_semantics;
 mod external_data;
 mod live_feeds;
+mod logbook_host;
 
 use tempo_app::engine::Engine;
 use tempo_app::settings::Settings;
@@ -485,7 +486,29 @@ struct Args {
     /// not an inappropriate one. Empty (default) = Nexus's own stock table, matching every other
     /// startup field's "absent = stock behavior" convention.
     working_frequencies: Vec<tempo_app::settings::WorkingFreq>,
+    /// Logbook migration Phase 1 (`logbook_host.rs`): the folder of a Nexus-owned logbook this
+    /// process opens and answers LOG_* for. `None` (not passed) = no Nexus logbook at all --
+    /// Jimmy's own LogbookDb stays the only logbook, exactly as before. Phase 1 is exercised
+    /// only with temporary test folders.
+    log_dir: Option<std::path::PathBuf>,
+    /// `--no-radio`: a logbook-only start -- the control server and the logbook, and NO radio
+    /// loop (no audio device, no CAT, no PTT). For the migration/comparison tools and for Jimmy
+    /// with no radio configured (plan section 6.1). Only meaningful with --log-dir.
+    no_radio: bool,
 }
+
+/// Set by SHUTDOWN before it stops the radio loop. `run_radio` returns once it has unkeyed, and
+/// main() would then return and end the process while SHUTDOWN is still saving the logbook; with
+/// this set, main() waits instead, and SHUTDOWN ends the process itself when the save is done.
+static SHUTTING_DOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this process runs a radio loop at all (false under --no-radio): SHUTDOWN waits for a
+/// loop to unkey only when there is one.
+static RADIO_RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// SHUTDOWN's own last resort: main() waiting for a shutdown that never finishes (a stuck save)
+/// still ends the process after this, rather than hanging forever.
+const SHUTDOWN_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(150);
 
 /// Nexus contesting foundation, phase 3: where the contest bridge's own small sidecar files
 /// (session-instance identity, restored across a restart) live. Self-contained default -- no
@@ -530,6 +553,8 @@ fn parse_args() -> Args {
     let mut single_decode: Option<bool> = None;
     let mut dx_cluster_addr: Option<String> = None;
     let mut session_token = String::new();
+    let mut log_dir: Option<std::path::PathBuf> = None;
+    let mut no_radio = false;
     let mut tx_watchdog_min: u32 = 6; // Nexus's own Settings::default() -- see Args::tx_watchdog_min's own comment
     let mut working_frequencies: Vec<tempo_app::settings::WorkingFreq> = Vec::new(); // empty = Nexus's own stock table
 
@@ -610,6 +635,10 @@ fn parse_args() -> Args {
                 dx_cluster_addr = it.next().filter(|v| !v.trim().is_empty());
             }
             "--session-token" => session_token = it.next().unwrap_or(session_token),
+            "--no-radio" => no_radio = true,
+            "--log-dir" => {
+                log_dir = it.next().filter(|v| !v.trim().is_empty()).map(std::path::PathBuf::from);
+            }
             "--tx-watchdog-min" => {
                 if let Some(v) = it.next() {
                     tx_watchdog_min = v.parse().unwrap_or(tx_watchdog_min);
@@ -659,6 +688,8 @@ fn parse_args() -> Args {
         session_token,
         tx_watchdog_min,
         working_frequencies,
+        log_dir,
+        no_radio,
     }
 }
 
@@ -1017,6 +1048,7 @@ fn handle_control_connection(
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
     session_token: Arc<str>,
     contest_bridge_state: Arc<Mutex<contest_bridge::ContestBridge>>,
+    log_host: Option<Arc<logbook_host::LogHost>>,
 ) {
     use std::io::Write;
 
@@ -1497,6 +1529,111 @@ fn handle_control_connection(
         } else if line == "DX_SPOTS" {
             // Cache-only read of the DX-cluster/RBN telnet buffer -- always fast.
             let _ = writeln!(stream, "{}", live_feeds_cache.dx_spots_json());
+        } else if line == "LOG_STATUS" {
+            // Logbook migration Phase 1 (logbook_host.rs) -- the LOG_* family answers only when
+            // this process was launched with --log-dir; otherwise nothing about it exists.
+            match &log_host {
+                Some(host) => { let _ = writeln!(stream, "{}", logbook_host::status_json(host, &engine)); }
+                None => { let _ = writeln!(stream, "{{\"enabled\":false}}"); }
+            }
+        } else if let Some(json) = line.strip_prefix("LOG_QSO ") {
+            // Durable: answers only once the contact is on disk, or says it is not (up to
+            // logbook_host::DURABLE_WAIT). This connection's own thread waits; the engine lock is
+            // never held while it does.
+            match (&log_host, serde_json::from_str::<logbook_host::LogQsoArgs>(json)) {
+                (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOG_QSO args: {e}"); }
+                (Some(host), Ok(a)) => {
+                    let reply = logbook_host::log_qso(host, &engine, a);
+                    let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap_or_default());
+                }
+            }
+        } else if line == "LOG_ROWS" || line.starts_with("LOG_ROWS ") {
+            let arg = line.strip_prefix("LOG_ROWS").unwrap_or("").trim();
+            let parsed = if arg.is_empty() {
+                Ok(logbook_host::LogRowsArgs::default())
+            } else {
+                serde_json::from_str::<logbook_host::LogRowsArgs>(arg)
+            };
+            match (&log_host, parsed) {
+                (None, _) => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOG_ROWS args: {e}"); }
+                (Some(_), Ok(a)) => { let _ = writeln!(stream, "{}", logbook_host::rows_json(&engine, &a)); }
+            }
+        } else if let Some((name, json)) = ["LOG_EDIT ", "LOG_DELETE ", "LOG_IMPORT ", "LOG_MERGE ", "LOG_STAMP_UPLOAD "]
+            .iter()
+            .find_map(|p| line.strip_prefix(p).map(|rest| (p.trim(), rest)))
+        {
+            // The rest of the logbook's durable writes (logbook_host.rs): each answers only once
+            // its change is on disk, or says it is not.
+            let reply: Result<logbook_host::WriteReply, String> = match &log_host {
+                None => Err("logbook not enabled".into()),
+                Some(host) => match name {
+                    "LOG_EDIT" => serde_json::from_str(json).map(|a| logbook_host::log_edit(host, &engine, a)).map_err(|e| e.to_string()),
+                    "LOG_DELETE" => serde_json::from_str(json).map(|a| logbook_host::log_delete(host, &engine, a)).map_err(|e| e.to_string()),
+                    "LOG_IMPORT" => serde_json::from_str(json).map(|a| logbook_host::log_import(host, &engine, a)).map_err(|e| e.to_string()),
+                    "LOG_MERGE" => serde_json::from_str(json).map(|a| logbook_host::log_merge(host, &engine, a)).map_err(|e| e.to_string()),
+                    _ => serde_json::from_str(json).map(|a| logbook_host::log_stamp(host, &engine, a)).map_err(|e| e.to_string()),
+                },
+            };
+            match reply {
+                Ok(r) => { let _ = writeln!(stream, "{}", serde_json::to_string(&r).unwrap_or_default()); }
+                Err(e) => { let _ = writeln!(stream, "ERR {name}: {e}"); }
+            }
+        } else if line == "LOG_FLUSH" {
+            match &log_host {
+                None => { let _ = writeln!(stream, "ERR logbook not enabled"); }
+                Some(_) => {
+                    let reply = logbook_host::flush(&engine, logbook_host::DURABLE_WAIT);
+                    let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap_or_default());
+                }
+            }
+        } else if line == "SHUTDOWN" || line.starts_with("SHUTDOWN ") {
+            // Graceful exit (logbook migration plan 6.1; Jimmy starts using it in Phase 4), in the
+            // order Nexus's own quit uses (src-tauri quit.rs, `prepare_quit` + `stop_the_radio`):
+            // the transmitter comes off the air FIRST and a save never delays that; then no new
+            // log write is taken and every logbook change is put on disk; the answer says where
+            // they stand; THEN the process exits. Only this session's owner may ask -- the token
+            // Jimmy launched us with -- so a stray local client cannot end the session.
+            let token = line.strip_prefix("SHUTDOWN").unwrap_or("").trim();
+            if token != &*session_token {
+                let _ = writeln!(stream, "ERR session token mismatch");
+            } else {
+                use std::sync::atomic::Ordering;
+                SHUTTING_DOWN.store(true, Ordering::SeqCst);
+                engine.lock().unwrap_or_else(|e| e.into_inner()).halt_tx();
+                // Nexus's `stop_the_radio`: ask the radio loop to stop, and wait (bounded, 3 s --
+                // a step can be blocked in a CAT read for ~2.5 s) until it says it has UNKEYED,
+                // rather than a fixed sleep; then end any daemon a wedged loop never dropped.
+                let radio = RADIO_RUNNING.load(Ordering::SeqCst);
+                let unkeyed = if radio {
+                    tempo_audio::service::SHUTDOWN.store(true, Ordering::Relaxed);
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(3_000);
+                    while !tempo_audio::service::SHUTDOWN_DONE.load(Ordering::Relaxed)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    let done = tempo_audio::service::SHUTDOWN_DONE.load(Ordering::Relaxed);
+                    tempo_audio::rigctld_proc::kill_leftover_daemons();
+                    done
+                } else {
+                    true // no radio loop: nothing was ever keyed
+                };
+                let reply = match &log_host {
+                    Some(host) => {
+                        let mut v = serde_json::to_value(logbook_host::close(host, &engine, logbook_host::DURABLE_WAIT))
+                            .unwrap_or_default();
+                        v["unkeyed"] = serde_json::Value::Bool(unkeyed);
+                        v.to_string()
+                    }
+                    None => serde_json::json!({ "saved": true, "logbook": false, "unkeyed": unkeyed }).to_string(),
+                };
+                let _ = writeln!(stream, "{reply}");
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                std::process::exit(0);
+            }
         } else if let Some(json) = line.strip_prefix("EQSL_UPLOAD ") {
             // Credential-bearing, real network I/O (eQSL can take up to ~60s -- it builds the
             // file server-side). MUST NOT run inline: this accept loop is single-threaded, and
@@ -1632,6 +1769,7 @@ fn run_control_server(
     live_feeds_cache: Arc<live_feeds::LiveFeedsCache>,
     session_token: Arc<str>,
     contest_bridge_state: Arc<Mutex<contest_bridge::ContestBridge>>,
+    log_host: Option<Arc<logbook_host::LogHost>>,
 ) {
     for incoming in listener.incoming() {
         let stream = match incoming {
@@ -1643,8 +1781,9 @@ fn run_control_server(
         let live_feeds_cache = Arc::clone(&live_feeds_cache);
         let session_token = Arc::clone(&session_token);
         let contest_bridge_state = Arc::clone(&contest_bridge_state);
+        let log_host = log_host.clone();
         std::thread::spawn(move || {
-            handle_control_connection(stream, engine, external_cache, live_feeds_cache, session_token, contest_bridge_state);
+            handle_control_connection(stream, engine, external_cache, live_feeds_cache, session_token, contest_bridge_state, log_host);
         });
     }
 }
@@ -1836,7 +1975,36 @@ fn main() {
     if let Some(v) = args.ap_cq_only { settings.ap_cq_only = v; }
     if let Some(v) = args.single_decode { settings.single_decode = v; }
 
-    let engine = Arc::new(Mutex::new(Engine::with_settings(settings)));
+    // Logbook migration Phase 1: a Nexus-owned logbook ONLY when --log-dir was passed (see
+    // logbook_host.rs). Opened here, before the engine exists and so before its lock can be
+    // taken -- Nexus's own launch order (a first open converts log.adi, which takes seconds on a
+    // lifetime log). A store that cannot open leaves the session on log.adi, as Nexus does; a log
+    // that cannot be kept at all stops the launch.
+    let mut engine_value = Engine::with_settings(settings);
+    if args.log_dir.is_some() {
+        // Nexus's `launch_engine`: prove a logbook can be kept at all, then refuse every log
+        // change until the operator's store is attached (a change sent to the placeholder store
+        // would be lost with it; a debug build panics naming it).
+        if let Err(e) = tempo_app::station::can_keep_a_log() {
+            eprintln!("FATAL: jimmy-engine-host cannot keep a logbook: {e}");
+            std::process::exit(1);
+        }
+        engine_value.refuse_log_changes_until_attached();
+    }
+    let log_host: Option<Arc<logbook_host::LogHost>> = match args.log_dir.as_deref() {
+        None => None,
+        Some(dir) => {
+            let opened = logbook_host::open_store(dir);
+            match logbook_host::LogHost::adopt(&mut engine_value, dir, opened) {
+                Ok(host) => Some(Arc::new(host)),
+                Err(e) => {
+                    eprintln!("FATAL: jimmy-engine-host could not keep the logbook in {}: {e}", dir.display());
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+    let engine = Arc::new(Mutex::new(engine_value));
 
     // `Tier` (the FT8/FT4/TempoFast/... waveform selector) is separate from Settings'
     // "Digital" operating-mode category and is ONLY ever set by a live operator command in
@@ -1915,8 +2083,9 @@ fn main() {
         let control_live_feeds = live_feeds_cache.clone();
         let control_session_token = Arc::clone(&session_token);
         let control_contest_bridge = Arc::clone(&contest_bridge_state);
+        let control_log_host = log_host.clone();
         std::thread::spawn(move || {
-            run_control_server(control_listener, control_engine, control_cache, control_live_feeds, control_session_token, control_contest_bridge)
+            run_control_server(control_listener, control_engine, control_cache, control_live_feeds, control_session_token, control_contest_bridge, control_log_host)
         });
     }
 
@@ -1972,10 +2141,24 @@ fn main() {
     // ruled out the separate two-process device-listing race as the (sole) cause. Matching
     // Nexus's own calling convention exactly, including catch_unwind, rather than guessing
     // further at what else might differ.
+    if args.no_radio {
+        // Logbook-only start: no radio loop at all. The control server answers until SHUTDOWN
+        // ends the process.
+        log!("jimmy-engine-host: --no-radio: logbook and control server only");
+        drop(cfg);
+        wait_for_shutdown(None);
+    }
+    RADIO_RUNNING.store(true, std::sync::atomic::Ordering::SeqCst);
     let radio_handle = std::thread::spawn(move || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || run_radio(engine, cfg)))
     });
-    match radio_handle.join() {
+    let joined = radio_handle.join();
+    if SHUTTING_DOWN.load(std::sync::atomic::Ordering::SeqCst) {
+        // The radio loop stopped because SHUTDOWN asked it to; SHUTDOWN is saving the logbook and
+        // ends the process itself.
+        wait_for_shutdown(Some(SHUTDOWN_BACKSTOP));
+    }
+    match joined {
         Ok(Ok(Ok(()))) => log!("jimmy-engine-host: run_radio exited normally"),
         Ok(Ok(Err(e))) => {
             eprintln!("FATAL: run_radio failed: {e}");
@@ -1984,6 +2167,22 @@ fn main() {
         Ok(Err(_)) | Err(_) => {
             eprintln!("FATAL: run_radio panicked on its dedicated thread");
             std::process::exit(1);
+        }
+    }
+}
+
+/// Park main() while the control thread finishes a SHUTDOWN (which ends the process itself).
+/// `None` = until then (the logbook-only start); `Some(d)` = at most `d` after SHUTDOWN began,
+/// then exit anyway rather than hang.
+fn wait_for_shutdown(backstop: Option<std::time::Duration>) -> ! {
+    let started = std::time::Instant::now();
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if let Some(d) = backstop {
+            if started.elapsed() >= d {
+                eprintln!("jimmy-engine-host: SHUTDOWN did not finish in {} s; exiting", d.as_secs());
+                std::process::exit(2);
+            }
         }
     }
 }
