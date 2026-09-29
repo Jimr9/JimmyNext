@@ -659,13 +659,17 @@ namespace WSJTX_Controller
             DirectAtuCommand("ATU_STATUS", resp =>
             {
                 DebugOutput($"{Time()} [ATU] status at {elapsed:0.0}s: {resp ?? "(not sent)"}");
-                // "OK 0 AC110;" = no longer tuning. Ignored for the first 1.5 s, while the radio
-                // may not yet report the tune-up it just started.
-                if (_atuRunning && elapsed >= 1.5 && resp != null && resp.StartsWith("OK 0"))
+                // "OK <tuning> <tuner in> AC...;". Finished = not tuning, judged after the first
+                // 1.5 s (the radio may not yet report the tune-up it just started). Finished with
+                // the tuner still OUT means it never started (live 2026-09-29: AC000 was
+                // announced "Tuner done" though nothing tuned) -- said so, never "done".
+                string[] parts = resp?.Split(' ');
+                if (_atuRunning && elapsed >= 1.5 && parts != null && parts.Length >= 3 && parts[0] == "OK" && parts[1] == "0")
                 {
                     _atuRunning = false;
                     _atuPollTimer?.Stop();
-                    ctrl.WithHotkeyOrigin(_atuOrigin, () => StatusView.ShowMessage("Tuner done", false));
+                    string msg = parts[2] == "1" ? "Tuner done" : "The radio's tuner did not start";
+                    ctrl.WithHotkeyOrigin(_atuOrigin, () => StatusView.ShowMessage(msg, false));
                 }
             });
         }

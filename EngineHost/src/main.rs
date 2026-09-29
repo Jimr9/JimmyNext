@@ -1068,7 +1068,7 @@ fn read_one_control_line(
 /// Kenwood backend only for now. The transmit gates are Nexus's (Engine::atu_tune_gate) minus two:
 /// the "can't start over CAT" refusal this replaces, and the Enable-TX latch -- Jimmy disarms TX
 /// before a tune-up exactly as it does for Tune (Alt+T), and FT8/FT4 are never receive-only tiers.
-/// Replies "OK", "OK <1 tuning | 0 not> <radio's AC answer>" for ATU_STATUS, or "ERR <reason>".
+/// Replies "OK", "OK <tuning 1|0> <tuner in 1|0> <radio's AC answer>" for ATU_STATUS, or "ERR <reason>".
 fn kenwood_atu(engine: &Arc<Mutex<Engine>>, cmd: &str) -> String {
     const KENWOOD_BACKEND: u32 = 2;
     let port = {
@@ -1097,13 +1097,23 @@ fn kenwood_atu(engine: &Arc<Mutex<Engine>>, cmd: &str) -> String {
         return format!("ERR Unexpected tuner answer from the radio: {reply}");
     };
     if cmd == "ATU_STATUS" {
-        // "OK <tuning 1|0> <raw answer>": the third digit is 1 while a tune-up runs.
-        return format!("OK {} {reply}", digits[2]);
+        // "OK <tuning 1|0> <tuner in 1|0> <raw answer>": the third digit is 1 while a tune-up
+        // runs; the second says whether the tuner is in line at all.
+        return format!("OK {} {} {reply}", digits[2], digits[1]);
     }
     // The first digit (receive through the tuner) is the operator's own setting: keep it, and
     // change only TX-AT in (second digit) and start/stop (third).
     let rx_at = digits[0];
     let start = cmd == "ATU_START";
+    if start && digits[1] == '0' {
+        // Tuner switched OUT (through): the TS-590SG ignores a start then -- live 2026-09-29,
+        // "AC011;" left it at AC000 three times, until the radio's own AT key put it in. Put it
+        // in first, as that key does, then start.
+        if !rig.send_raw_set(&format!("AC{rx_at}10;")) {
+            return "ERR The radio control link is not reachable".to_string();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
     if !rig.send_raw_set(&format!("AC{rx_at}1{};", if start { '1' } else { '0' })) {
         return "ERR The radio control link is not reachable".to_string();
     }
