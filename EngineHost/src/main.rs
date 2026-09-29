@@ -1962,11 +1962,21 @@ struct ApplyRadioArgs {
 /// rebuild from launch arguments: `Engine::apply_settings` replaces the whole Settings, and
 /// everything changed live since launch (dial and band, decode depth, PSK Reporter, special
 /// operation, working frequencies) must survive a radio-settings save.
+/// 2026-09-29: Nexus's own name for the Hamlib model (rigmodels::rig_model_name), for
+/// Settings.rig_model_name -- which Nexus stamps on every contact it logs as ADIF MY_RIG
+/// (engine.rs log_qso_inner, #239), so it follows the active profile's radio and goes out with
+/// the contact (QRZ shows "My Rig"). Jimmy passed only the model NUMBER, so it was always empty
+/// and nothing was stamped. Unknown model -> empty -> nothing stamped, never a wrong name.
+fn rig_name(model: u32) -> String {
+    tempo_audio::rigmodels::rig_model_name(model).unwrap_or("").to_string()
+}
+
 fn with_radio_settings(current: &Settings, a: &ApplyRadioArgs) -> Settings {
     let mut s = current.clone();
     s.audio_in = a.audio_in.clone();
     s.audio_out = a.audio_out.clone();
     s.rig_model = a.rig_model;
+    s.rig_model_name = rig_name(a.rig_model);
     s.rig_conn = a.rig_conn.clone();
     s.serial_port = a.rig_port.clone();
     s.rig_addr = a.rig_addr.clone();
@@ -2070,6 +2080,7 @@ fn main() {
         dial_mhz: args.dial_freq as f64 / 1_000_000.0,
         ptt_method: args.ptt_method.clone(),
         rig_model: args.rig_model,
+        rig_model_name: rig_name(args.rig_model),
         serial_port: args.rig_port.clone(),
         baud: args.rig_baud,
         rig_conn: args.rig_conn.clone(),
@@ -2447,6 +2458,11 @@ mod tests {
         let next = with_radio_settings(eng.settings(), &radio_args());
         eng.apply_settings(next);
         assert_eq!(eng.settings().rig_model, 3073);
+        // The model's name follows it (Nexus stamps it on logged contacts as MY_RIG).
+        assert_eq!(eng.settings().rig_model_name, rig_name(3073));
+        assert!(!eng.settings().rig_model_name.is_empty());
+        assert_eq!(rig_name(2037), "Kenwood TS-590SG");
+        assert_eq!(rig_name(999_999), "", "an unknown model stamps nothing");
         assert_eq!(eng.settings().rigctld_port, 4540);
         assert!(eng.settings().disable_rfpower_probe);
         assert_eq!(eng.settings().dial_mhz, before_dial);
