@@ -20,7 +20,6 @@ namespace WSJTX_Controller
         private static readonly HttpClient _http =
             new HttpClient { Timeout = TimeSpan.FromMinutes(2) };
 
-        private const string RealtimeUrl = "https://clublog.org/realtime.php";
         private const string PutlogsUrl  = "https://clublog.org/putlogs.php";
         private const string GetAdifUrl  = "https://clublog.org/getadif.php";
 
@@ -91,50 +90,11 @@ namespace WSJTX_Controller
             return response ?? "";
         }
 
-        // Uploads exactly one QSO immediately, for the real-time-upload checkbox.
-        // Matches Club Log's own documented intended use of realtime.php ("QSOs
-        // entered at a normal rate, by a real operator") -- must never be looped
-        // over a backlog (see BatchUploadAsync for that case).
-        // apiKey is Jimmy's own app-wide Club Log key (ClubLogAppKey.cs) -- Club
-        // Log's own realtime.php documentation lists "api" as one of the POST
-        // form variables alongside email/password/callsign/adif, same as
-        // putlogs.php; previously omitted here, which likely explains persistent
-        // 403s independent of any IP-level block.
-        public async Task<bool> RealtimeUploadAsync(string email, string password, string callsign, string apiKey, string adifRecord)
-        {
-            LastError = null;
-            if (TestModeGuard.IsTestMode)
-            {
-                LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real Club Log traffic allowed.";
-                return false;
-            }
-            if (string.IsNullOrWhiteSpace(email) || string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(callsign))
-            {
-                LastError = "Club Log upload email, Application Password, or callsign is not configured.";
-                return false;
-            }
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                LastError = "Club Log application key is not available in this build.";
-                return false;
-            }
-
-            using (var content = new MultipartFormDataContent())
-            {
-                content.Add(new StringContent(email), "email");
-                content.Add(new StringContent(password), "password");
-                content.Add(new StringContent(callsign), "callsign");
-                content.Add(new StringContent(adifRecord), "adif");
-                content.Add(new StringContent(apiKey), "api");
-
-                return await PostAndCheck(RealtimeUrl, content, "Realtime upload").ConfigureAwait(false);
-            }
-        }
-
         // Uploads every pending QSO in one file, for the Alt+U batch/catch-up path
-        // (and for anyone who leaves the real-time checkbox off). Club Log's own
-        // guidance is that realtime.php must not be used to serially upload a
-        // backlog -- putlogs.php (this endpoint) is the one built for that.
+        // (and for anyone who leaves the real-time checkbox off; real-time sends go
+        // through Nexus). Club Log's own guidance is that realtime.php must not be
+        // used to serially upload a backlog -- putlogs.php (this endpoint) is the
+        // one built for that.
         // apiKey is Jimmy's own app-wide Club Log key (ClubLogAppKey.cs); confirmed
         // by a live test that the same key already used for country-data download
         // is also accepted here.

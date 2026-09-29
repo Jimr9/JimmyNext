@@ -5,10 +5,11 @@ using System.Text;
 
 namespace WSJTX_Controller
 {
-    // Logbook migration Phase 6 proof of the operator's two commands (NexusLogbookMigration) --
-    // run from JimmyTests only, where test mode puts Jimmy's data folder in an isolated temp folder
-    // (TestModeGuard / LookupManager.DataRoot), so the REAL commands run on a copy:
-    //   migrate -> a session on Nexus (a live contact, an edit) -> roll back -> check.
+    // Proof of the logbook move (NexusLogbookMigration) -- run from JimmyTests only, where test
+    // mode puts Jimmy's data folder in an isolated temp folder (TestModeGuard /
+    // LookupManager.DataRoot), so the REAL move runs on a copy:
+    //   a failed move changes nothing -> the move (carrying a queued contact) -> a session on
+    //   Nexus (a live contact, an edit) -> a new install.
     public static class NexusMigrationCommandTests
     {
         private static string Hash(string file)
@@ -41,29 +42,34 @@ namespace WSJTX_Controller
             NexusLogbookMigration.TestEngineExeOverride = engineExe;
             try
             {
-                // A leftover queue from an earlier Nexus session still holding a contact: the move
-                // must refuse, change nothing, and not even make a backup.
+                // A contact logged before the move waits in the outbox (the engine keeps no Nexus log
+                // until then). A move that fails puts everything back as it was.
                 Directory.CreateDirectory(folder);
-                var leftover = new NexusLogOutbox(Path.Combine(folder, "outbox.json"));
-                leftover.Add("left-behind", new NexusQso { Call = "ZZ5ZZZ", Band = "20m", Mode = "FT8", WhenUnix = 1_790_000_000, TimeKnown = true });
-                var (okPending, repPending) = NexusLogbookMigration.Migrate();
-                sb.AppendLine("  with a contact pending: " + repPending.Replace("\n", " | "));
-                Check("the move refuses while a contact is still pending, and changes nothing",
-                    !okPending && !File.Exists(NexusLogbook.ActiveMarker) &&
-                    Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.before-nexus-*.db").Length == 0 &&
-                    new NexusLogOutbox(Path.Combine(folder, "outbox.json")).Count == 1);
-                Directory.Delete(folder, true);
+                var queued = new NexusLogOutbox(Path.Combine(folder, "outbox.json"));
+                queued.Add("queued-before-move", new NexusQso { Call = "ZZ5ZZZ", Band = "20m", Mode = "FT8", WhenUnix = 1_790_000_000, TimeKnown = true });
+                NexusLogbookMigration.TestEngineExeOverride = Path.Combine(Environment.SystemDirectory, "where.exe");   // exits at once
+                var (okFail, repFail) = NexusLogbookMigration.Migrate();
+                sb.AppendLine("  failed move: " + repFail.Replace("\n", " | "));
+                Check("a failed move changes nothing and keeps the queued contact",
+                    !okFail && !NexusLogbook.Moved && new NexusLogOutbox(Path.Combine(folder, "outbox.json")).Count == 1 &&
+                    Directory.GetDirectories(workRoot, "NexusLog.failed-*").Length == 1);
+                NexusLogbookMigration.TestEngineExeOverride = engineExe;
 
                 string hashBefore = Hash(jimmyDb);
                 var (ok1, rep1) = NexusLogbookMigration.Migrate();
                 sb.AppendLine("  migrate: " + rep1.Replace("\n", " | "));
-                Check("migrate succeeded and switched", ok1 && File.Exists(NexusLogbook.ActiveMarker));
+                Check("migrate succeeded and switched", ok1 && NexusLogbook.Moved);
                 Check("a backup of the Jimmy logbook was made",
-                    Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.before-nexus-*.db").Length == 1);
-                Check("the Jimmy logbook file itself was not changed", NexusMigration.ReadJimmyRows(jimmyDb).Count == original.Count);
-                Check("a read projection is ready for the first start", Directory.GetFiles(NexusLogbook.ProjectionFolder, "p-*.db").Length == 1);
+                    Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.before-nexus-*.db").Length >= 1);
+                Check("the Jimmy logbook file itself was not changed", Hash(jimmyDb) == hashBefore);
+                var moved = NexusMigration.ReadJimmyRows(Directory.GetFiles(NexusLogbook.ProjectionFolder, "p-*.db").Single());
+                Check("the read copy holds every contact plus the one queued before the move",
+                    moved.Count == original.Count + 1 && moved.Any(x => x.C("callsign") == "ZZ5ZZZ") &&
+                    new NexusLogOutbox(NexusLogbook.OutboxPath).Count == 0, $"{moved.Count} rows");
+                var (okAgain, _) = NexusLogbookMigration.Migrate();
+                Check("a second move is refused", !okAgain);
 
-                // A session while Nexus owns the log.
+                // A session while Nexus keeps the log.
                 NexusLogbook.TestForceActive = true;
                 NexusLogbook.TestPortOverride = port;
                 string token = Guid.NewGuid().ToString("N");
@@ -78,43 +84,26 @@ namespace WSJTX_Controller
                     var r = original[10];
                     svc.UpdateQso((int)r.Id, r.C("callsign"), r.C("band"), r.C("mode"), r.C("qso_date"), r.C("time_on"), r.C("time_off"),
                         r.C("state"), r.C("country"), r.C("grid"), "CHANGED IN NEXUS", r.C("rst_sent"), r.C("rst_rcvd"), r.C("comment"));
+                    NexusLogbook.Refresh(force: true);
+                    var now = NexusMigration.ReadJimmyRows(NexusLogbook.ProjectionPath);
+                    Check("the session's contact and edit are in the log",
+                        now.Any(x => x.C("callsign") == "ZZ9ZZZ") && now.First(x => x.Id == r.Id).C("name") == "CHANGED IN NEXUS");
                     new NexusLogClient(port).Shutdown(token);
                 }
                 NexusLogbook.Reset();
+                NexusLogbook.TestForceActive = null;
                 NexusLogbook.TestPortOverride = null;
                 Check("Jimmy's own logbook file is untouched while Nexus keeps the log", Hash(jimmyDb) == hashBefore);
-                var backupFile = Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.before-nexus-*.db").Single();
-                Check("the backup holds the logbook as it was at the move", NexusMigration.ReadJimmyRows(backupFile).Count == original.Count);
 
-                var (ok2, rep2) = NexusLogbookMigration.Rollback();
-                sb.AppendLine("  rollback: " + rep2.Replace("\n", " | "));
-                NexusLogbook.TestForceActive = null;
-                var back = NexusMigration.ReadJimmyRows(jimmyDb);
-                Check("rollback succeeded and switched back", ok2 && !File.Exists(Path.Combine(folder, "ACTIVE")));
-                Check("the Jimmy logbook now holds the session's changes",
-                    back.Count == original.Count + 1 && back.Any(x => x.C("callsign") == "ZZ9ZZZ") &&
-                    back.First(x => x.Id == original[10].Id).C("name") == "CHANGED IN NEXUS", $"{back.Count} rows");
-                Check("everything else is as it was",
-                    NexusMigrationDryRun.CompareJimmy(original.Where(x => x.Id != original[10].Id).ToList(),
-                        back.Where(x => x.C("callsign") != "ZZ9ZZZ" && x.Id != original[10].Id).ToList()).Count == 0);
-                Check("the replaced Jimmy file and the Nexus folder were kept",
-                    Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.pre-rollback-*.db").Length == 1 &&
-                    Directory.GetDirectories(workRoot, "NexusLog.rolled-back-*").Length == 1);
-
-                // The automatic move at startup (2026-09-29): never after a manual move-back...
-                if (File.Exists(NexusLogbookMigration.AutoMoveRecord)) File.Delete(NexusLogbookMigration.AutoMoveRecord);
-                Check("the automatic move stays off after a manual move-back", !NexusLogbookMigration.AutoMoveAllowed());
-                // ...and a new install (no logbook at all) starts on an empty Nexus log, once.
+                // A new install (no logbook at all) starts on an empty Nexus log.
                 foreach (var f in Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook*")) File.Delete(f);
-                NexusLogbook.Reset();
+                if (File.Exists(NexusLogbookMigration.AutoMoveRecord)) File.Delete(NexusLogbookMigration.AutoMoveRecord);
                 NexusLogbook.TestFolderOverride = Path.Combine(workRoot, "NexusLogNew");
-                Check("a new install is moved automatically", NexusLogbookMigration.AutoMoveAllowed());
                 var (ok3, msg3) = NexusLogbookMigration.AutoMove();
                 sb.AppendLine("  automatic move, new install: " + msg3.Replace("\n", " | "));
-                Check("new install: an empty Nexus logbook with its read copy, switched on",
-                    ok3 && msg3 == "New logbook ready." && File.Exists(NexusLogbook.ActiveMarker) &&
+                Check("new install: an empty Nexus logbook with its read copy",
+                    ok3 && msg3 == "New logbook ready." && NexusLogbook.Moved &&
                     Directory.GetFiles(NexusLogbook.ProjectionFolder, "p-*.db").Length == 1);
-                Check("...and only once", !NexusLogbookMigration.AutoMoveAllowed());
             }
             finally
             {

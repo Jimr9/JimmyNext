@@ -9,49 +9,38 @@ using System.Windows.Forms;
 
 namespace WSJTX_Controller
 {
-    // Logbook migration Phase 6: the operator's two commands, run with Jimmy Next closed:
-    //   "Jimmy Next.exe" --nexus-logbook-migrate   Jimmy's logbook -> Nexus (Nexus becomes owner)
-    //   "Jimmy Next.exe" --nexus-logbook-rollback  Nexus's CURRENT log -> a fresh Jimmy logbook
-    // Both keep every old file (nothing is deleted), write a report, and show the result.
+    // Moves this install's Jimmy logbook into Nexus -- automatically at startup (AutoMove), or by
+    // "Jimmy Next.exe" --nexus-logbook-migrate with Jimmy Next closed. Keeps every old file
+    // (nothing is deleted), writes a report, and shows the result. Nexus keeps the log from then
+    // on (Phase 7, 2026-09-29: there is no move back).
     public static class NexusLogbookMigration
     {
         private const int Port = 58293; // a private port: never the operating engine's
 
-        public static void RunInteractive(bool migrate)
+        public static void RunInteractive()
         {
             string report;
             bool ok;
-            try { (ok, report) = migrate ? Migrate() : Rollback(); }
+            try { (ok, report) = Migrate(); }
             catch (Exception ex) { ok = false; report = "Stopped: " + ex.Message; }
-            MessageBox.Show(report, migrate ? "Jimmy Next - Move Logbook to Nexus" : "Jimmy Next - Move Logbook Back",
+            MessageBox.Show(report, "Jimmy Next - Move Logbook to Nexus",
                 MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
 
         // ── Automatic move at startup (operator decision 2026-09-29, from 2.0.78) ──────────────
-        // The first start of a Jimmy Next that keeps its logbook in Nexus moves the existing Jimmy
-        // logbook with the same checked Migrate() the command runs (fresh verified backup, every
-        // contact compared field by field both ways, switched only when clean). A new install
-        // with no logbook goes through the same path from an empty one, so its Nexus log and read
-        // copy are built by the same tested code. Once per install: recorded in AutoMoveRecord on
-        // success or on a failed check (never retried every start); a transient refusal (an engine
-        // host still running) retries at the next start. Never after a manual move-back (it leaves
-        // a NexusLog.rolled-back-* folder): that was the operator's choice.
+        // The first start of Jimmy Next moves the existing Jimmy logbook with the same checked
+        // Migrate() the command runs (fresh verified backup, every contact compared field by field
+        // both ways). A new install with no logbook goes through the same path from an empty one,
+        // so its Nexus log and read copy are built by the same tested code. Until the move has
+        // happened it is tried at every start (Nexus is the only log there is); meanwhile the
+        // engine does not open a Nexus log and a contact logged waits in the durable outbox, which
+        // the move carries into the new log. AutoMoveRecord keeps the last attempt's report.
         internal static string AutoMoveRecord => Path.Combine(LookupManager.DataRoot, "nexus-logbook-auto-move.txt");
 
         // What the automatic move did, for Jimmy to say once its window is up (null: nothing).
         internal static string AutoMoveMessage;
 
-        internal static bool AutoMoveNeeded() => !TestModeGuard.IsTestMode && AutoMoveAllowed();
-
-        // The once-per-install / never-after-a-move-back rules (JimmyTests checks them directly).
-        internal static bool AutoMoveAllowed()
-        {
-            if (NexusLogbook.Active || File.Exists(AutoMoveRecord)) return false;
-            string parent = Path.GetDirectoryName(NexusLogbook.Folder);
-            if (Directory.Exists(parent) && Directory.GetDirectories(parent, Path.GetFileName(NexusLogbook.Folder) + ".rolled-back-*").Length > 0)
-                return false;
-            return Preconditions() == null;
-        }
+        internal static bool AutoMoveNeeded() => !TestModeGuard.IsTestMode && !NexusLogbook.Moved;
 
         // Runs the move (callers show progress around it). Returns (moved, message to speak/show).
         internal static (bool ok, string message) AutoMove()
@@ -61,14 +50,17 @@ namespace WSJTX_Controller
             bool ok;
             string report;
             try { (ok, report) = Migrate(); }
-            catch (Exception ex) { ok = false; report = "Stopped: " + ex.Message; }   // no ACTIVE marker: Jimmy's logbook stays
+            catch (Exception ex) { ok = false; report = "Stopped: " + ex.Message; }
             File.WriteAllText(AutoMoveRecord, $"{DateTime.Now:u} {(ok ? "moved" : "not moved")}\n{report}\n", new UTF8Encoding(false));
             if (!ok)
-                return (false, "Your logbook was not moved to the new format and is unchanged; Jimmy Next keeps using it as before.\n\n" + report);
-            string contacts = File.ReadAllLines(NexusLogbook.ActiveMarker)
-                .FirstOrDefault(l => l.StartsWith("contacts ", StringComparison.Ordinal))?.Substring(9) ?? "0";
+                return (false, "Your logbook has not been moved to the new format yet; it is unchanged. Contacts you log now are kept " +
+                               "safely and added when it moves. Jimmy Next tries again the next time it starts.\n\n" + report);
+            var marker = File.ReadAllLines(NexusLogbook.ActiveMarker);
+            string contacts = marker.FirstOrDefault(l => l.StartsWith("contacts ", StringComparison.Ordinal))?.Substring(9) ?? "0";
+            string differences = marker.FirstOrDefault(l => l.StartsWith("differences ", StringComparison.Ordinal))?.Substring(12) ?? "0";
+            string diffText = differences == "0" ? "" : $", {differences} differences listed in the report";
             return (true, int.TryParse(contacts, out int n) && n > 0
-                ? $"Logbook moved to the new format, {n:N0} contacts checked."
+                ? $"Logbook moved to the new format, {n:N0} contacts checked{diffText}."
                 : "New logbook ready.");
         }
 
@@ -125,24 +117,11 @@ namespace WSJTX_Controller
 
         public static (bool ok, string report) Migrate()
         {
-            if (NexusLogbook.Active) return (false, "The logbook is already kept by Nexus.");
+            if (NexusLogbook.Moved) return (false, "The logbook is already kept by Nexus.");
             string pre = Preconditions();
             if (pre != null) return (false, pre);
             string jimmyDb = LogbookDb.JimmyDbPath;
             if (!File.Exists(jimmyDb)) return (false, "No Jimmy Next logbook was found at " + jimmyDb);
-
-            // Nothing may be pending: contacts queued (or duplicates held) by an earlier Nexus
-            // session that were never brought back would be left behind by a fresh move.
-            string folder = NexusLogbook.Folder;
-            string oldOutbox = Path.Combine(folder, "outbox.json");
-            if (File.Exists(oldOutbox))
-            {
-                var old = new NexusLogOutbox(oldOutbox);
-                if (old.Count > 0 || old.Refused.Count > 0)
-                    return (false, $"The move was NOT made: an earlier Nexus logbook folder still holds {old.Count} queued contact(s) " +
-                                   $"and {old.Refused.Count} held duplicate(s) that are not in your Jimmy logbook.\n\n{folder}\n\n" +
-                                   "Nothing was changed. Tell Claude before going further.");
-            }
 
             // A CURRENT backup, taken now through SQLite itself (includes anything still in the
             // write-ahead file), then checked: whole, and exactly the same contacts.
@@ -153,100 +132,90 @@ namespace WSJTX_Controller
             if (backupProblem != null)
                 return (false, "The move was NOT made: " + backupProblem + " Nothing was changed.");
 
-            if (Directory.Exists(folder)) Directory.Move(folder, folder + ".old-" + stamp);
+            // Anything already in the folder (contacts queued before the move, Jimmy's settings for
+            // the log) is set aside whole and put back if the move does not happen; the outbox and
+            // the settings travel into the new log.
+            string folder = NexusLogbook.Folder;
+            string setAside = folder + ".old-" + stamp;
+            bool hadFolder = Directory.Exists(folder);
+            if (hadFolder) Directory.Move(folder, setAside);
             Directory.CreateDirectory(folder);
+            if (hadFolder)
+                foreach (var name in new[] { "outbox.json", "jimmy-meta.json" })
+                    if (File.Exists(Path.Combine(setAside, name))) File.Copy(Path.Combine(setAside, name), Path.Combine(folder, name));
+            string NotMade(string why)
+            {
+                string failed = folder + ".failed-" + stamp;
+                Directory.Move(folder, failed);
+                if (hadFolder) Directory.Move(setAside, folder);
+                return $"The move was NOT made: {why} Your logbook is unchanged.\n\nReport: {failed}\\migration-report.txt";
+            }
+
             var sb = new StringBuilder();
             sb.AppendLine($"Jimmy Next logbook -> Nexus, {DateTime.Now:u}");
             sb.AppendLine("Backup of your logbook: " + backup);
-
             var original = NexusMigration.ReadJimmyRows(backup);
-            var written = NexusMigration.WriteAdif(backup, Path.Combine(folder, "log.adi"));
-            string token = Guid.NewGuid().ToString("N");
-            bool passed;
-            using (var engine = LogbookOnlyEngine.Start(EngineExe, folder, RealLocalAppData, Port, token))
+            bool complete;
+            int differences;
+            try
             {
-                var client = new NexusLogClient(Port);
-                var rows = client.Rows();
-                if (rows.Error != null) throw new InvalidOperationException("the new logbook could not be read: " + rows.Error);
-                var fwd = NexusMigration.Compare(original, rows.Rows);
-                string trip = Path.Combine(Path.GetTempPath(), $"jimmy-roundtrip-{stamp}.db");
-                NexusMigration.Rebuild(rows.Rows, trip);
-                var back = NexusMigrationDryRun.CompareJimmy(original, NexusMigration.ReadJimmyRows(trip));
-                try { File.Delete(trip); } catch { }
-                passed = fwd.Clean && back.Count == 0 && rows.Freshness == "current";
-                sb.AppendLine();
-                sb.AppendLine(NexusMigration.Report(fwd, written));
-                sb.AppendLine(back.Count == 0 ? "Rollback check: no differences." : $"Rollback check: {back.Count} difference(s).");
-                foreach (var d in back.Take(200)) sb.AppendLine("  " + d);
-                if (passed)
+                var written = NexusMigration.WriteAdif(backup, Path.Combine(folder, "log.adi"));
+                string token = Guid.NewGuid().ToString("N");
+                using (var engine = LogbookOnlyEngine.Start(EngineExe, folder, RealLocalAppData, Port, token))
                 {
-                    Directory.CreateDirectory(NexusLogbook.ProjectionFolder);
-                    NexusMigration.Rebuild(rows.Rows, Path.Combine(NexusLogbook.ProjectionFolder, $"p-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{rows.Revision}.db"));
+                    var client = new NexusLogClient(Port);
+                    var rows = client.Rows();
+                    if (rows.Error != null) throw new InvalidOperationException("the new logbook could not be read: " + rows.Error);
+                    var fwd = NexusMigration.Compare(original, rows.Rows);
+                    string trip = Path.Combine(Path.GetTempPath(), $"jimmy-roundtrip-{stamp}.db");
+                    NexusMigration.Rebuild(rows.Rows, trip);
+                    var back = NexusMigrationDryRun.CompareJimmy(original, NexusMigration.ReadJimmyRows(trip));
+                    try { File.Delete(trip); } catch { }
+                    // Every contact must be in the new log, read completely. A difference in a
+                    // field is reported and does not stop the move (operator decision 2026-09-29:
+                    // the backup and the report are kept).
+                    complete = fwd.Matched == original.Count && rows.Freshness == "current";
+                    differences = fwd.Differences.Count + back.Count;
+                    sb.AppendLine();
+                    sb.AppendLine(NexusMigration.Report(fwd, written));
+                    sb.AppendLine(back.Count == 0 ? "Round-trip check: no differences." : $"Round-trip check: {back.Count} difference(s).");
+                    foreach (var d in back.Take(200)) sb.AppendLine("  " + d);
+                    if (complete)
+                    {
+                        // Contacts queued before the move go in now; any not sent stay queued.
+                        var outbox = new NexusLogOutbox(Path.Combine(folder, "outbox.json"));
+                        if (outbox.Count > 0)
+                        {
+                            var replay = outbox.Replay(client);
+                            sb.AppendLine($"Contacts queued before the move: saved {replay.Saved}, already {replay.Already}, refused as duplicates {replay.Refused}" +
+                                          (replay.Stopped ? $", {outbox.Count} still queued ({replay.StopReason})" : ""));
+                            if (replay.Saved > 0) rows = client.Rows();
+                        }
+                        if (rows.Error == null)
+                        {
+                            Directory.CreateDirectory(NexusLogbook.ProjectionFolder);
+                            NexusMigration.Rebuild(rows.Rows, Path.Combine(NexusLogbook.ProjectionFolder, $"p-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{rows.Revision}.db"));
+                        }
+                    }
+                    sb.AppendLine("Engine: " + (client.Shutdown(token) ?? "(no reply)"));
                 }
-                sb.AppendLine("Engine: " + (client.Shutdown(token) ?? "(no reply)"));
+            }
+            catch (Exception ex)
+            {
+                sb.AppendLine("Stopped: " + ex.Message);
+                File.WriteAllText(Path.Combine(folder, "migration-report.txt"), sb.ToString(), new UTF8Encoding(false));
+                return (false, NotMade(ex.Message));
             }
             File.WriteAllText(Path.Combine(folder, "migration-report.txt"), sb.ToString(), new UTF8Encoding(false));
 
-            if (!passed)
-            {
-                Directory.Move(folder, folder + ".failed-" + stamp);
-                return (false, $"The move was NOT made: the check found differences. Your logbook is unchanged.\n\nReport: {folder}.failed-{stamp}\\migration-report.txt");
-            }
-            File.WriteAllText(NexusLogbook.ActiveMarker, $"migrated {DateTime.Now:u}\nbackup {backup}\ncontacts {original.Count}\n");
-            return (true, $"Done. Nexus now keeps your logbook ({original.Count:N0} contacts, checked field by field and back again).\n\n" +
+            if (!complete)
+                return (false, NotMade("not every contact could be read back from the new log."));
+            File.WriteAllText(NexusLogbook.ActiveMarker,
+                $"migrated {DateTime.Now:u}\nbackup {backup}\ncontacts {original.Count}\ndifferences {differences}\n");
+            string diffNote = differences == 0 ? "checked field by field and back again"
+                : $"{differences} difference(s) found, listed in the report";
+            return (true, $"Done. Nexus now keeps your logbook ({original.Count:N0} contacts, {diffNote}).\n\n" +
                           $"Backup of your old logbook: {backup}\nReport: {folder}\\migration-report.txt\n\nStart Jimmy Next normally.");
-        }
-
-        public static (bool ok, string report) Rollback()
-        {
-            if (!NexusLogbook.Active) return (false, "The logbook is not kept by Nexus; nothing to move back.");
-            string pre = Preconditions();
-            if (pre != null) return (false, pre);
-            string stamp = Stamp;
-            string folder = NexusLogbook.Folder;
-            string jimmyDb = LogbookDb.JimmyDbPath;
-            string rebuilt = Path.Combine(Path.GetDirectoryName(jimmyDb), $"logbook.from-nexus-{stamp}.db");
-            var sb = new StringBuilder();
-            sb.AppendLine($"Nexus logbook -> Jimmy Next, {DateTime.Now:u}");
-            string token = Guid.NewGuid().ToString("N");
-            int count;
-            List<NexusLogOutbox.RefusedEntry> refused;
-            using (var engine = LogbookOnlyEngine.Start(EngineExe, folder, RealLocalAppData, Port, token))
-            {
-                var client = new NexusLogClient(Port);
-                // Anything still queued goes in first, so the rollback carries it.
-                var outbox = new NexusLogOutbox(NexusLogbook.OutboxPath);
-                var replay = outbox.Replay(client);
-                sb.AppendLine($"Queued contacts sent first: saved {replay.Saved}, already {replay.Already}, refused as duplicates {replay.Refused}" +
-                              (replay.Stopped ? $", STOPPED ({replay.StopReason})" : ""));
-                if (replay.Stopped || outbox.Count > 0)
-                {
-                    client.Shutdown(token);
-                    return (false, "Moving back was stopped: queued contacts could not be sent to Nexus first. Nothing was changed.");
-                }
-                refused = outbox.Refused;
-                var rows = client.Rows();
-                if (rows.Error != null || rows.Freshness != "current")
-                {
-                    client.Shutdown(token);
-                    return (false, "Moving back was stopped: the Nexus logbook could not be read completely. Nothing was changed.");
-                }
-                NexusMigration.Rebuild(rows.Rows, rebuilt);
-                count = rows.Rows.Count;
-                sb.AppendLine("Engine: " + (client.Shutdown(token) ?? "(no reply)"));
-            }
-            // Swap in: the old Jimmy file is kept beside it, never deleted.
-            string kept = Path.Combine(Path.GetDirectoryName(jimmyDb), $"logbook.pre-rollback-{stamp}.db");
-            foreach (var ext in new[] { "", "-wal", "-shm" })
-                if (File.Exists(jimmyDb + ext)) File.Move(jimmyDb + ext, kept + ext);
-            File.Copy(rebuilt, jimmyDb);
-            File.Delete(NexusLogbook.ActiveMarker);
-            File.WriteAllText(Path.Combine(folder, "rollback-report.txt"), sb.ToString(), new UTF8Encoding(false));
-            Directory.Move(folder, folder + ".rolled-back-" + stamp);
-            string held = refused.Count == 0 ? "" :
-                $"\n\n{refused.Count} contact(s) Nexus refused as duplicates are NOT in the log; their details are in {folder}.rolled-back-{stamp}\\outbox.json.";
-            return (true, $"Done. Jimmy Next keeps your logbook again ({count:N0} contacts, including every edit, deletion, confirmation and upload made while Nexus kept it).\n\n" +
-                          $"The previous Jimmy logbook file was kept as {kept}.\nThe Nexus logbook folder was kept as {folder}.rolled-back-{stamp}.{held}");
         }
     }
 }

@@ -429,7 +429,6 @@ namespace WSJTX_Controller
             // when idle. PollAndReconcile itself is a no-op whenever no session is active.
             contestWorkflow = new ContestWorkflow(
                 new ContestClient(),
-                () => LogbookDb.DbPath,
                 () => NativeEngine.MyCall,
                 () => NativeEngine.MyGrid,
                 () => Station.OperatorCallsign);
@@ -1263,7 +1262,6 @@ namespace WSJTX_Controller
                 hamQthEnabled, hamQthUsername, hamQthPassword, hamQthCacheDays);
             wsjtxClient.lookupManager     = lookupManager;
             wsjtxClient.lotwBoostEnabled  = lotwBoostEnabled;
-            BackfillMissingStates();
             // Background shutdown / quiescence, 2026-08-23 (independent audit finding):
             // SafeBeginInvoke (see its own comment) instead of a raw BeginInvoke -- an in-flight
             // auto-lookup that completes after this form starts closing must not throw
@@ -3363,20 +3361,13 @@ namespace WSJTX_Controller
             useRR73CheckBox.ForeColor = Color.Black;
         }
 
-        // Ongoing safety-net repair (see LogbookDb.BackfillMissingStates) for QSOs logged
-        // with a blank state despite the callsign being derivable. Runs every startup, not
-        // just once -- the underlying query is a cheap indexed lookup (ix_state) that finds
-        // nothing to fix once existing gaps are resolved, so re-checking costs almost nothing
-        // but catches a fresh gap automatically if one ever reappears from a source this
-        // doesn't already cover. Offline only (FCC ULS/cached QRZ data via lookupManager.Build,
-        // then grid.dat) -- never a live query. Must run after lookupManager is initialized and
-        // before RefreshStillNeedCache() so the first cache build already reflects any
-        // corrected states.
-        // While Nexus keeps the log: the same kind of gap repair for a missing DXCC entity (and
-        // blank country / continent), from Club Log's offline data -- which is why it runs after
-        // RuleLibrary.ClubLog is set, not beside BackfillMissingStates. On a background task that
-        // first waits (bounded) for the engine that owns the log to answer, so startup never waits
-        // on it; Still Need is refreshed afterwards when anything was filled.
+        // Ongoing safety-net repairs, every startup: a missing DXCC entity (and blank country /
+        // continent) from Club Log's offline data -- which is why it runs after RuleLibrary.ClubLog
+        // is set -- and a blank state the callsign gives (offline only: FCC ULS / cached QRZ data
+        // via lookupManager.Build, then grid.dat; never a live query). Each finds nothing once the
+        // gaps are filled. On a background task that first waits (bounded) for the engine that
+        // keeps the log to answer, so startup never waits on it; Still Need is refreshed
+        // afterwards when anything was filled.
         private void BackfillMissingDxccWhenReady()
         {
             if (!NexusLogbook.Active) return;
@@ -3389,8 +3380,6 @@ namespace WSJTX_Controller
                     var nexus = new NexusLogbookService();
                     int n = nexus.BackfillMissingEntities();
                     if (n > 0) nexus.SetMeta("dxcc_backfill_last_fixed", $"{DateTime.UtcNow:o} ({n} rows)");
-                    // The state repair too (2026-09-28): BackfillMissingStates below runs before
-                    // this engine answers, so under Nexus it could never read the log.
                     int s = nexus.BackfillMissingStates(call => lookupManager?.Build(call)?.State);
                     if (s > 0) nexus.SetMeta("state_backfill_last_fixed", $"{DateTime.UtcNow:o} ({s} rows)");
                     if (n > 0 || s > 0)
@@ -3398,23 +3387,6 @@ namespace WSJTX_Controller
                 }
                 catch { /* best-effort repair -- must never affect operation */ }
             });
-        }
-
-        private void BackfillMissingStates()
-        {
-            if (NexusLogbook.Active) return;   // done once the engine answers: BackfillMissingDxccWhenReady
-            try
-            {
-                // Nexus contesting foundation, phase 2 (completed): ILogbookService, not
-                // LogbookDb -- BackfillMissingStates/SetMeta are both on the interface.
-                using (ILogbookService db = LogbookFactory.Open())
-                {
-                    int fixedCount = db.BackfillMissingStates(call => lookupManager?.Build(call)?.State);
-                    if (fixedCount > 0)
-                        db.SetMeta("state_backfill_last_fixed", $"{DateTime.UtcNow:o} ({fixedCount} rows)");
-                }
-            }
-            catch { /* best-effort repair -- must never block startup */ }
         }
 
         // Rebuilds WsjtxClient's live-tag cache from every Rule Definition currently checked
@@ -3597,7 +3569,6 @@ namespace WSJTX_Controller
             try
             {
                 _contestingWindow = new ContestingWindow(
-                    () => LogbookDb.DbPath,
                     () => NativeEngine.MyCall, () => NativeEngine.MyGrid,
                     () => Station.OperatorCallsign,
                     () => contestWorkflow, () => Station);

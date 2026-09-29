@@ -7319,9 +7319,7 @@ namespace WSJTX_Controller
         // model number ctrl.Radio.RigModel/LaunchBundled expect. Falls back to the text itself
         // for anything that doesn't match either pattern, so nothing ever silently disappears --
         // matches the plain-TextBox behavior this replaced.
-        // Public (not private) for the same reason HrdLogUploadClient.ClassifyResponse is
-        // public: JimmyTests has no InternalsVisibleTo, so only public static members are
-        // reachable from tests.
+        // Public (not private) so JimmyTests can reach it.
         public static string ExtractRigModelId(string display)
         {
             if (string.IsNullOrEmpty(display)) return display;

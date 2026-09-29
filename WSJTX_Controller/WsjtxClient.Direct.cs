@@ -1090,7 +1090,7 @@ namespace WSJTX_Controller
             {
                 foreach (var row in snap.RecentDecodes)
                 {
-                    if (row == null || string.IsNullOrEmpty(row.Message)) { continue; }
+                    if (row == null || row.Mine || string.IsNullOrEmpty(row.Message)) { continue; }
                     foreach (var e in snap.DecodeSemantics)
                     {
                         if (e != null && string.Equals(e.RawMessage, row.Message, StringComparison.Ordinal))
@@ -1101,7 +1101,7 @@ namespace WSJTX_Controller
             int nonEmptyDecodeRows = 0;
             if (snap.RecentDecodes != null)
                 foreach (var row in snap.RecentDecodes)
-                    if (row != null && !string.IsNullOrEmpty(row.Message)) nonEmptyDecodeRows++;
+                    if (row != null && !row.Mine && !string.IsNullOrEmpty(row.Message)) nonEmptyDecodeRows++;
 
             // A listening snapshot with no decodes is fine -- an empty decodeSemantics array
             // (or none at all) is the correct state then, NOT a violation.
@@ -2646,7 +2646,7 @@ namespace WSJTX_Controller
             // these decodes came from (Nexus alltxt: period start = (slot - 1) * period secs).
             // A period that began before the engine connection is only partly heard -- mark it
             // so CalcAvgTimeOffset gives it no clock verdict.
-            if (snap.Radio != null && snap.Radio.Slot > 0 && snap.RecentDecodes.Count > 0 && _directAudioStartUtc.HasValue)
+            if (snap.Radio != null && snap.Radio.Slot > 0 && snap.RecentDecodes.Exists(r => !r.Mine) && _directAudioStartUtc.HasValue)
             {
                 double periodSecs = PeriodSecondsForMode(mode);
                 DateTime periodStart = DateTimeOffset.FromUnixTimeMilliseconds(
@@ -2657,7 +2657,7 @@ namespace WSJTX_Controller
 
             foreach (var row in snap.RecentDecodes)
             {
-                if (string.IsNullOrEmpty(row.Message)) continue;
+                if (row.Mine || string.IsNullOrEmpty(row.Message)) continue;   // our own over, not a decode
                 // Per-slot "already processed this decode" guard -- deliberately keyed on the
                 // RAW engine text (before normalization), so two engine decodes that only
                 // differ by AP suffix / hash form are still treated as distinct arrivals here,
@@ -3608,7 +3608,7 @@ namespace WSJTX_Controller
                 if (trackForAbort) _directInFlightClient = client;
                 try
                 {
-                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, _directControlPort);
+                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, _directControlPort).ObserveFault();
                     if (!connectTask.Wait(1000) || !client.Connected) return null;
 
                     using (var stream = client.GetStream())
@@ -4387,6 +4387,11 @@ namespace WSJTX_Controller
 
     internal class DirectDecodeRow
     {
+        // True for OUR OWN transmitted message (DecodeRow.mine): Nexus adds each recent over to
+        // its decode feed so its own UI can show it, WSJT-X style. It was never received --
+        // Jimmy skips these rows (laptop report 2026-09-29: "VA7QI KB0UZT EN34" at SNR 0 kept
+        // appearing as a heard station every period after the call was cancelled).
+        public bool Mine { get; set; }
         public string From { get; set; }
         public int Snr { get; set; }
         public double DtSec { get; set; }

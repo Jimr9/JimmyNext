@@ -60,14 +60,11 @@ namespace WSJTX_Controller
         public string Pct => Total > 0 ? $"{100.0 * Confirmed / Total:0.0}%" : "—";
     }
 
-    // Nexus contesting foundation, phase 2: LogbookDb IS the (only, on this branch) ILogbookService
-    // implementation -- every method that interface declares, LogbookDb already had. This is
-    // deliberately implementation-by-inheritance, not a separate wrapper: existing construction
-    // call sites (`new LogbookDb(...)`) need no change at all to become usable wherever
-    // ILogbookService is expected. New code (the contest bridge, phase 3+) depends on
-    // ILogbookService; a future Nexus-backed implementation would be its own class satisfying
-    // the same interface, not a subclass of this one.
-    public class LogbookDb : IDisposable, ILogbookService
+    // The READ COPY: a Jimmy-format database rebuilt from Nexus's rows (NexusMigration.Rebuild).
+    // Read-only (ILogbookReader) -- Nexus keeps the log and every change goes through it
+    // (NexusLogbookService). The schema and its migrations stay, because Rebuild creates the copy
+    // through this class, and the old Jimmy logbook a first start moves in is opened with it.
+    public class LogbookDb : IDisposable, ILogbookReader
     {
         private SQLiteConnection _conn;
         private readonly object  _lock = new object();
@@ -258,7 +255,7 @@ namespace WSJTX_Controller
             }
 
             // v7: same per-QSO outbound upload tracking, extended to eQSL.cc (uploaded via
-            // EngineHost/Nexus's own transport -- see ExternalDataClient.UploadEqsl).
+            // EngineHost/Nexus's own transport).
             if (ver < 7)
             {
                 Exec("ALTER TABLE qso ADD COLUMN eqsl_uploaded_at TEXT DEFAULT '';");
@@ -442,7 +439,7 @@ namespace WSJTX_Controller
             }
         }
 
-        public void SetMeta(string key, string value)
+        private void SetMeta(string key, string value)
         {
             lock (_lock)
             {
@@ -455,347 +452,6 @@ namespace WSJTX_Controller
                     cmd.Parameters.AddWithValue("@v", value ?? "");
                     cmd.ExecuteNonQuery();
                 }
-            }
-        }
-
-        // One-time repair for QSOs already sitting in the database with a blank state
-        // despite the callsign being derivable -- found 2026-07-08: QRZ's own ADIF
-        // export sometimes omits STATE for a contact even though QRZ's own site already
-        // credits the state (several confirmed Alaska/Hawaii contacts had this gap).
-        // Only ever fills a currently-blank state; never touches a row that already has
-        // one. resolveState is expected to be offline/cache-backed (e.g. FCC ULS or an
-        // already-cached QRZ lookup) -- never a live network query, since this can touch
-        // many rows in one pass. Returns the number of rows updated.
-        public int BackfillMissingStates(Func<string, string> resolveState)
-        {
-            if (resolveState == null) return 0;
-
-            var candidates = new List<(long id, string callsign, string grid)>();
-            lock (_lock)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        "SELECT id, callsign, grid FROM qso WHERE (state='' OR state IS NULL) AND callsign != '';";
-                    using (var r = cmd.ExecuteReader())
-                    {
-                        while (r.Read())
-                            candidates.Add((r.GetInt64(0), r.GetString(1), r.IsDBNull(2) ? "" : r.GetString(2)));
-                    }
-                }
-            }
-
-            int updated = 0;
-            lock (_lock)
-            {
-                using (var tx = _conn.BeginTransaction())
-                {
-                    foreach (var (id, callsign, grid) in candidates)
-                    {
-                        string state = resolveState(callsign);
-                        if (string.IsNullOrEmpty(state) && !string.IsNullOrEmpty(grid))
-                            state = WsjtxClient.GridToUsState(grid);
-                        if (string.IsNullOrEmpty(state)) continue;
-
-                        using (var upd = _conn.CreateCommand())
-                        {
-                            upd.Transaction = tx;
-                            upd.CommandText = "UPDATE qso SET state=@s WHERE id=@id;";
-                            upd.Parameters.AddWithValue("@s", state);
-                            upd.Parameters.AddWithValue("@id", id);
-                            upd.ExecuteNonQuery();
-                        }
-                        updated++;
-                    }
-                    tx.Commit();
-                }
-            }
-            return updated;
-        }
-
-        // ── Upsert ───────────────────────────────────────────────────────────────
-
-        // Returns (isNew, isUpdated).
-        // Column indices within mutableCols (below) that represent a QSL actually being
-        // received -- the one kind of "updated" a ham actually cares about (it moves award
-        // progress). Everything else mutableCols tracks (state/country/grid/DXCC/etc.) is
-        // grouped as "corrected" instead -- a data-quality fix, not new award credit.
-        private static readonly int[] ConfirmColumnIndices = { 1, 3 }; // lotw_qsl_rcvd, qrz_qsl_rcvd
-
-        public (bool isNew, bool newlyConfirmed, bool corrected) Upsert(
-            string callsign, string band, string mode,
-            string qsoDate, string timeOn, string timeOff,
-            long freqHz, string rstSent, string rstRcvd,
-            string state, string country, int dxcc, int cqZone,
-            string grid, string name, string comment, string txPwr,
-            string operatorCall, string stationCall, string myGrid,
-            string lotwQslSent, string lotwQslRcvd,
-            string qrzQslSent, string qrzQslRcvd,
-            string source, string sourceQsoId, string dedupKey,
-            string continent, int ituZone, string county, string iota,
-            string sig, string sigInfo, string mySig, string mySigInfo,
-            string darcDok, string wpxPrefix,
-            string exchangeSent, string exchangeRcvd)
-        {
-            // Columns the ON CONFLICT clause below can modify. Compared before/after so
-            // "updated" only counts rows whose data actually changed, instead of every
-            // already-known QSO the source re-sends (which is nearly all of them).
-            // Appended at the END, not inserted earlier -- ConfirmColumnIndices (below) is a
-            // fixed pair of ordinal positions into this exact list (lotw_qsl_rcvd, qrz_qsl_rcvd),
-            // and appending here leaves every existing index untouched.
-            const string mutableCols =
-                "lotw_qsl_sent, lotw_qsl_rcvd, qrz_qsl_sent, qrz_qsl_rcvd, country, state, name, grid, " +
-                "dxcc, cq_zone, continent, itu_zone, county, iota, sig, sig_info, my_sig, my_sig_info, " +
-                "darc_dok, wpx_prefix, exchange_sent, exchange_rcvd, qrz_uploaded_at, clublog_uploaded_at, " +
-                "lotw_uploaded_at, hrdlog_uploaded_at, source";
-
-            lock (_lock)
-            {
-                bool existed;
-                object[] before = null;
-                using (var check = _conn.CreateCommand())
-                {
-                    check.CommandText = $"SELECT {mutableCols} FROM qso WHERE dedup_key=@k;";
-                    check.Parameters.AddWithValue("@k", dedupKey);
-                    using (var r = check.ExecuteReader())
-                    {
-                        existed = r.Read();
-                        if (existed)
-                        {
-                            before = new object[r.FieldCount];
-                            r.GetValues(before);
-                        }
-                    }
-                }
-
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = @"
-INSERT INTO qso (
-    callsign, band, mode, qso_date, time_on, time_off, freq_hz,
-    rst_sent, rst_rcvd, state, country, dxcc, cq_zone, grid,
-    name, comment, tx_pwr, operator_call, station_call, my_grid,
-    lotw_qsl_sent, lotw_qsl_rcvd, qrz_qsl_sent, qrz_qsl_rcvd,
-    source, source_qso_id, imported_at, dedup_key,
-    continent, itu_zone, county, iota, sig, sig_info, my_sig, my_sig_info,
-    darc_dok, wpx_prefix, exchange_sent, exchange_rcvd,
-    qrz_uploaded_at, clublog_uploaded_at, lotw_uploaded_at, hrdlog_uploaded_at
-) VALUES (
-    @callsign, @band, @mode, @qso_date, @time_on, @time_off, @freq_hz,
-    @rst_sent, @rst_rcvd, @state, @country, @dxcc, @cq_zone, @grid,
-    @name, @comment, @tx_pwr, @operator_call, @station_call, @my_grid,
-    @lotw_qsl_sent, @lotw_qsl_rcvd, @qrz_qsl_sent, @qrz_qsl_rcvd,
-    @source, @source_qso_id, @imported_at, @dedup_key,
-    @continent, @itu_zone, @county, @iota, @sig, @sig_info, @my_sig, @my_sig_info,
-    @darc_dok, @wpx_prefix, @exchange_sent, @exchange_rcvd,
-    CASE WHEN @source='QRZ'     THEN @imported_at ELSE '' END,
-    CASE WHEN @source='CLUBLOG' THEN @imported_at ELSE '' END,
-    CASE WHEN @source='LOTW'    THEN @imported_at ELSE '' END,
-    CASE WHEN @source='HRDLOG'  THEN @imported_at ELSE '' END
-)
-ON CONFLICT(dedup_key) DO UPDATE SET
-    -- Upgrade-only, never downgrade: 'source' only ever moves from the generic MANUAL
-    -- toward a real, specific origin (QRZ/LOTW/CLUBLOG/HRDLOG/WSJTX) the first time one
-    -- becomes known, and once it's a real value it is never overwritten again -- by a
-    -- later manual import, or by a download from a DIFFERENT real service. Confirmation
-    -- (lotw_qsl_rcvd/qrz_qsl_rcvd below) already tracks each service independently of this
-    -- column and is never affected by it; this only fixes the Source column / export
-    -- filter / Sync tab's per-service QSO-count tally, which read this column directly
-    -- (LogbookDb.TotalQsos/ConfirmedQsos with a source argument) and could otherwise
-    -- undercount a QSO that was manually imported before ever being downloaded from the
-    -- service that actually confirmed it.
-    source = CASE WHEN qso.source='MANUAL' AND excluded.source!='MANUAL' THEN excluded.source ELSE qso.source END,
-    lotw_qsl_sent = CASE WHEN excluded.source='LOTW' AND excluded.lotw_qsl_sent!='' THEN excluded.lotw_qsl_sent ELSE qso.lotw_qsl_sent END,
-    lotw_qsl_rcvd = CASE WHEN qso.lotw_qsl_rcvd='Y' THEN 'Y' WHEN excluded.source='LOTW' AND excluded.lotw_qsl_rcvd!='' THEN excluded.lotw_qsl_rcvd ELSE qso.lotw_qsl_rcvd END,
-    qrz_qsl_sent  = CASE WHEN excluded.source='QRZ'  AND excluded.qrz_qsl_sent !='' THEN excluded.qrz_qsl_sent  ELSE qso.qrz_qsl_sent  END,
-    qrz_qsl_rcvd  = CASE WHEN qso.qrz_qsl_rcvd='Y'  THEN 'Y' WHEN excluded.source='QRZ'  AND excluded.qrz_qsl_rcvd !='' THEN excluded.qrz_qsl_rcvd  ELSE qso.qrz_qsl_rcvd  END,
-    -- A download FROM a service proves that service already has the QSO, so it
-    -- must never be queued to be uploaded back to it (GetPendingUploads checks
-    -- exactly this column). Only ever fills in a blank -- an already-recorded
-    -- real upload time (from Jimmy's own successful upload) is never overwritten
-    -- or downgraded by a later download. A download from a DIFFERENT service
-    -- (e.g. LOTW) leaves both of these alone, since it says nothing about
-    -- whether QRZ/Club Log has this QSO.
-    qrz_uploaded_at      = CASE WHEN qso.qrz_uploaded_at      != '' THEN qso.qrz_uploaded_at      ELSE excluded.qrz_uploaded_at      END,
-    clublog_uploaded_at  = CASE WHEN qso.clublog_uploaded_at  != '' THEN qso.clublog_uploaded_at  ELSE excluded.clublog_uploaded_at  END,
-    lotw_uploaded_at     = CASE WHEN qso.lotw_uploaded_at     != '' THEN qso.lotw_uploaded_at     ELSE excluded.lotw_uploaded_at     END,
-    hrdlog_uploaded_at   = CASE WHEN qso.hrdlog_uploaded_at   != '' THEN qso.hrdlog_uploaded_at   ELSE excluded.hrdlog_uploaded_at   END,
-    -- country/dxcc/continent/cq_zone are the fields Jimmy itself guesses from its own
-    -- cached Club Log country data at live-logging time (EnrichWithClubLogGeoData), purely
-    -- so Awards/Still-Need tracking has something to show immediately -- Jimmy is never the
-    -- authoritative source for this metadata (see project logging philosophy). So unlike the
-    -- other blank-only-backfill columns below: a real download from QRZ/LoTW/Club Log always
-    -- overwrites Jimmy's own guess here, even if a (possibly wrong) guess is already present --
-    -- otherwise a wrong guess could never be corrected once written. A guess from Jimmy's own
-    -- live logging (source='WSJTX') or a manual import still only fills in if currently blank,
-    -- same as before.
-    country  = CASE WHEN excluded.source IN ('QRZ','LOTW','CLUBLOG') AND excluded.country !='' THEN excluded.country
-                    WHEN (qso.country ='' OR qso.country  IS NULL) AND excluded.country !='' THEN excluded.country  ELSE qso.country  END,
-    state    = CASE WHEN (qso.state   ='' OR qso.state    IS NULL) AND excluded.state   !='' THEN excluded.state    ELSE qso.state    END,
-    name     = CASE WHEN (qso.name    ='' OR qso.name     IS NULL) AND excluded.name    !='' THEN excluded.name     ELSE qso.name     END,
-    grid     = CASE WHEN (qso.grid    ='' OR qso.grid     IS NULL) AND excluded.grid    !='' THEN excluded.grid     ELSE qso.grid     END,
-    dxcc     = CASE WHEN excluded.source IN ('QRZ','LOTW','CLUBLOG') AND excluded.dxcc >0 THEN excluded.dxcc
-                    WHEN (qso.dxcc    =0  OR qso.dxcc     IS NULL) AND excluded.dxcc    >0   THEN excluded.dxcc     ELSE qso.dxcc     END,
-    cq_zone  = CASE WHEN excluded.source IN ('QRZ','LOTW','CLUBLOG') AND excluded.cq_zone >0 THEN excluded.cq_zone
-                    WHEN (qso.cq_zone =0  OR qso.cq_zone  IS NULL) AND excluded.cq_zone >0   THEN excluded.cq_zone  ELSE qso.cq_zone  END,
-    continent    = CASE WHEN excluded.source IN ('QRZ','LOTW','CLUBLOG') AND excluded.continent !='' THEN excluded.continent
-                         WHEN (qso.continent   ='' OR qso.continent    IS NULL) AND excluded.continent   !='' THEN excluded.continent   ELSE qso.continent    END,
-    itu_zone     = CASE WHEN (qso.itu_zone    =0  OR qso.itu_zone     IS NULL) AND excluded.itu_zone    >0   THEN excluded.itu_zone    ELSE qso.itu_zone     END,
-    county       = CASE WHEN (qso.county      ='' OR qso.county       IS NULL) AND excluded.county      !='' THEN excluded.county      ELSE qso.county       END,
-    iota         = CASE WHEN (qso.iota        ='' OR qso.iota         IS NULL) AND excluded.iota        !='' THEN excluded.iota         ELSE qso.iota         END,
-    sig          = CASE WHEN (qso.sig         ='' OR qso.sig          IS NULL) AND excluded.sig         !='' THEN excluded.sig          ELSE qso.sig          END,
-    sig_info     = CASE WHEN (qso.sig_info    ='' OR qso.sig_info     IS NULL) AND excluded.sig_info    !='' THEN excluded.sig_info     ELSE qso.sig_info     END,
-    my_sig       = CASE WHEN (qso.my_sig      ='' OR qso.my_sig       IS NULL) AND excluded.my_sig      !='' THEN excluded.my_sig       ELSE qso.my_sig       END,
-    my_sig_info  = CASE WHEN (qso.my_sig_info ='' OR qso.my_sig_info  IS NULL) AND excluded.my_sig_info !='' THEN excluded.my_sig_info  ELSE qso.my_sig_info  END,
-    darc_dok     = CASE WHEN (qso.darc_dok    ='' OR qso.darc_dok     IS NULL) AND excluded.darc_dok    !='' THEN excluded.darc_dok     ELSE qso.darc_dok     END,
-    wpx_prefix   = CASE WHEN (qso.wpx_prefix  ='' OR qso.wpx_prefix   IS NULL) AND excluded.wpx_prefix  !='' THEN excluded.wpx_prefix   ELSE qso.wpx_prefix   END,
-    exchange_sent = CASE WHEN (qso.exchange_sent ='' OR qso.exchange_sent IS NULL) AND excluded.exchange_sent !='' THEN excluded.exchange_sent ELSE qso.exchange_sent END,
-    exchange_rcvd = CASE WHEN (qso.exchange_rcvd ='' OR qso.exchange_rcvd IS NULL) AND excluded.exchange_rcvd !='' THEN excluded.exchange_rcvd ELSE qso.exchange_rcvd END;
-";
-                    cmd.Parameters.AddWithValue("@callsign",      callsign      ?? "");
-                    cmd.Parameters.AddWithValue("@band",          band          ?? "");
-                    cmd.Parameters.AddWithValue("@mode",          mode          ?? "");
-                    cmd.Parameters.AddWithValue("@qso_date",      qsoDate       ?? "");
-                    cmd.Parameters.AddWithValue("@time_on",       timeOn        ?? "");
-                    cmd.Parameters.AddWithValue("@time_off",      timeOff       ?? "");
-                    cmd.Parameters.AddWithValue("@freq_hz",       freqHz);
-                    cmd.Parameters.AddWithValue("@rst_sent",      rstSent       ?? "");
-                    cmd.Parameters.AddWithValue("@rst_rcvd",      rstRcvd       ?? "");
-                    cmd.Parameters.AddWithValue("@state",         state         ?? "");
-                    cmd.Parameters.AddWithValue("@country",       country       ?? "");
-                    cmd.Parameters.AddWithValue("@dxcc",          dxcc);
-                    cmd.Parameters.AddWithValue("@cq_zone",       cqZone);
-                    cmd.Parameters.AddWithValue("@grid",          grid          ?? "");
-                    cmd.Parameters.AddWithValue("@name",          name          ?? "");
-                    cmd.Parameters.AddWithValue("@comment",       comment       ?? "");
-                    cmd.Parameters.AddWithValue("@tx_pwr",        txPwr         ?? "");
-                    cmd.Parameters.AddWithValue("@operator_call", operatorCall  ?? "");
-                    cmd.Parameters.AddWithValue("@station_call",  stationCall   ?? "");
-                    cmd.Parameters.AddWithValue("@my_grid",       myGrid        ?? "");
-                    cmd.Parameters.AddWithValue("@lotw_qsl_sent", lotwQslSent   ?? "");
-                    cmd.Parameters.AddWithValue("@lotw_qsl_rcvd", lotwQslRcvd   ?? "");
-                    cmd.Parameters.AddWithValue("@qrz_qsl_sent",  qrzQslSent    ?? "");
-                    cmd.Parameters.AddWithValue("@qrz_qsl_rcvd",  qrzQslRcvd   ?? "");
-                    cmd.Parameters.AddWithValue("@source",         source        ?? "MANUAL");
-                    cmd.Parameters.AddWithValue("@source_qso_id",  sourceQsoId  ?? "");
-                    cmd.Parameters.AddWithValue("@imported_at",    DateTime.UtcNow.ToString("o"));
-                    cmd.Parameters.AddWithValue("@dedup_key",      dedupKey);
-                    cmd.Parameters.AddWithValue("@continent",      continent     ?? "");
-                    cmd.Parameters.AddWithValue("@itu_zone",       ituZone);
-                    cmd.Parameters.AddWithValue("@county",         county        ?? "");
-                    cmd.Parameters.AddWithValue("@iota",           iota          ?? "");
-                    cmd.Parameters.AddWithValue("@sig",            sig           ?? "");
-                    cmd.Parameters.AddWithValue("@sig_info",       sigInfo       ?? "");
-                    cmd.Parameters.AddWithValue("@my_sig",         mySig         ?? "");
-                    cmd.Parameters.AddWithValue("@my_sig_info",    mySigInfo     ?? "");
-                    cmd.Parameters.AddWithValue("@darc_dok",       darcDok       ?? "");
-                    cmd.Parameters.AddWithValue("@wpx_prefix",     wpxPrefix     ?? "");
-                    cmd.Parameters.AddWithValue("@exchange_sent",  exchangeSent  ?? "");
-                    cmd.Parameters.AddWithValue("@exchange_rcvd",  exchangeRcvd  ?? "");
-                    cmd.ExecuteNonQuery();
-                }
-
-                bool newlyConfirmed = false;
-                bool corrected = false;
-                if (existed)
-                {
-                    using (var check2 = _conn.CreateCommand())
-                    {
-                        check2.CommandText = $"SELECT {mutableCols} FROM qso WHERE dedup_key=@k;";
-                        check2.Parameters.AddWithValue("@k", dedupKey);
-                        using (var r = check2.ExecuteReader())
-                        {
-                            if (r.Read())
-                            {
-                                var after = new object[r.FieldCount];
-                                r.GetValues(after);
-                                for (int i = 0; i < before.Length; i++)
-                                {
-                                    if (Equals(before[i], after[i])) continue;
-                                    if (Array.IndexOf(ConfirmColumnIndices, i) >= 0) newlyConfirmed = true;
-                                    else corrected = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                return (!existed, newlyConfirmed, corrected);
-            }
-        }
-
-        // ── Import log ───────────────────────────────────────────────────────────
-
-        public int LogImportStart(string source)
-        {
-            lock (_lock)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        "INSERT INTO import_log(source, started_at) VALUES(@s,@t);" +
-                        "SELECT last_insert_rowid();";
-                    cmd.Parameters.AddWithValue("@s", source);
-                    cmd.Parameters.AddWithValue("@t", DateTime.UtcNow.ToString("o"));
-                    return Convert.ToInt32(cmd.ExecuteScalar());
-                }
-            }
-        }
-
-        public void LogImportFinish(int logId, int total, int newCount, int newlyConfirmed, int corrected, int skipped, string errorText)
-        {
-            lock (_lock)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        "UPDATE import_log SET finished_at=@f, total_qso=@t, new_qso=@n, " +
-                        "newly_confirmed_qso=@c, corrected_qso=@r, skipped_qso=@s, error_text=@e WHERE id=@id;";
-                    cmd.Parameters.AddWithValue("@f",  DateTime.UtcNow.ToString("o"));
-                    cmd.Parameters.AddWithValue("@t",  total);
-                    cmd.Parameters.AddWithValue("@n",  newCount);
-                    cmd.Parameters.AddWithValue("@c",  newlyConfirmed);
-                    cmd.Parameters.AddWithValue("@r",  corrected);
-                    cmd.Parameters.AddWithValue("@s",  skipped);
-                    cmd.Parameters.AddWithValue("@e",  errorText ?? "");
-                    cmd.Parameters.AddWithValue("@id", logId);
-                    cmd.ExecuteNonQuery();
-                }
-            }
-        }
-
-        public List<ImportLogEntry> GetImportHistory(int limit = 25)
-        {
-            lock (_lock)
-            {
-                var result = new List<ImportLogEntry>();
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText =
-                        "SELECT id, source, started_at, total_qso, new_qso, newly_confirmed_qso, corrected_qso, skipped_qso, error_text " +
-                        $"FROM import_log ORDER BY id DESC LIMIT {limit};";
-                    using (var r = cmd.ExecuteReader())
-                    {
-                        while (r.Read())
-                        {
-                            DateTime dt;
-                            DateTime.TryParse(r.IsDBNull(2) ? "" : r.GetString(2), out dt);
-                            result.Add(new ImportLogEntry
-                            {
-                                Id             = r.GetInt32(0),
-                                Source         = r.IsDBNull(1) ? "" : r.GetString(1),
-                                StartedAt      = dt,
-                                TotalQso       = r.IsDBNull(3) ? 0  : r.GetInt32(3),
-                                NewQso         = r.IsDBNull(4) ? 0  : r.GetInt32(4),
-                                NewlyConfirmed = r.IsDBNull(5) ? 0  : r.GetInt32(5),
-                                Corrected      = r.IsDBNull(6) ? 0  : r.GetInt32(6),
-                                SkippedQso     = r.IsDBNull(7) ? 0  : r.GetInt32(7),
-                                ErrorText      = r.IsDBNull(8) ? "" : r.GetString(8),
-                            });
-                        }
-                    }
-                }
-                return result;
             }
         }
 
@@ -858,21 +514,6 @@ ON CONFLICT(dedup_key) DO UPDATE SET
             }
         }
 
-        public void MarkUploaded(string dedupKey, string service, DateTime whenUtc)
-        {
-            string col = UploadColumn(service);
-            lock (_lock)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = $"UPDATE qso SET {col} = @w WHERE dedup_key = @k;";
-                    cmd.Parameters.AddWithValue("@w", whenUtc.ToString("o"));
-                    cmd.Parameters.AddWithValue("@k", dedupKey);
-                    cmd.ExecuteNonQuery();
-                }
-            }
-        }
-
         private static string UploadColumn(string service)
         {
             switch ((service ?? "").ToUpperInvariant())
@@ -884,97 +525,6 @@ ON CONFLICT(dedup_key) DO UPDATE SET
                 case "EQSL":    return "eqsl_uploaded_at";
                 default: throw new ArgumentException("Unknown upload service: " + service);
             }
-        }
-
-        public enum EqslReconcileOutcome { Matched, AlreadyConfirmed, Ambiguous, Unmatched }
-
-        // Conservative, deterministic, idempotent match against EXISTING qso rows -- unlike
-        // Upsert/AdifImporter.Import (which QRZ/LoTW/Club Log downloads use, and which CAN
-        // create a new row for a record Jimmy Next doesn't have yet), this method never
-        // creates a row and never guesses: an eQSL InBox "confirmation" is someone else's
-        // report about a QSO, not a request to add one, so ambiguous or absent matches are
-        // simply left alone (see EqslReconciler, the caller). Match key: callsign + band
-        // exactly, qso_date within +/-1 day (mirrors Nexus's own LoTW reconcile tolerance for
-        // midnight-boundary clock skew between the two operators' logs -- docs/manual/
-        // Logbook-and-Awards.md). If more than one row matches that window, mode (when the
-        // eQSL record carries one) narrows it; if still ambiguous, no row is touched.
-        // Never clears eqsl_qsl_rcvd once set -- monotonic, same as LoTW/QRZ confirmation.
-        public EqslReconcileOutcome TryMarkEqslConfirmed(string callsign, string band, string qsoDateAdif, string mode)
-        {
-            if (string.IsNullOrWhiteSpace(callsign) || string.IsNullOrWhiteSpace(band) || string.IsNullOrWhiteSpace(qsoDateAdif))
-                return EqslReconcileOutcome.Unmatched;
-
-            string call = callsign.Trim().ToUpperInvariant();
-            string bandNorm = band.Trim().ToLowerInvariant();
-            var dateWindow = DateWindow(qsoDateAdif);
-            if (dateWindow.Length == 0) return EqslReconcileOutcome.Unmatched;
-
-            lock (_lock)
-            {
-                var candidates = new List<(long id, string eqslRcvd)>();
-                using (var cmd = _conn.CreateCommand())
-                {
-                    string dateParams = string.Join(",", Enumerable.Range(0, dateWindow.Length).Select(i => $"@d{i}"));
-                    cmd.CommandText = $"SELECT id, eqsl_qsl_rcvd FROM qso WHERE callsign=@call AND band=@band AND qso_date IN ({dateParams});";
-                    cmd.Parameters.AddWithValue("@call", call);
-                    cmd.Parameters.AddWithValue("@band", bandNorm);
-                    for (int i = 0; i < dateWindow.Length; i++)
-                        cmd.Parameters.AddWithValue($"@d{i}", dateWindow[i]);
-                    using (var r = cmd.ExecuteReader())
-                        while (r.Read())
-                            candidates.Add((r.GetInt64(0), r.IsDBNull(1) ? "" : r.GetString(1)));
-                }
-
-                if (candidates.Count == 0) return EqslReconcileOutcome.Unmatched;
-
-                if (candidates.Count > 1 && !string.IsNullOrWhiteSpace(mode))
-                {
-                    var narrowed = new List<(long id, string eqslRcvd)>();
-                    using (var cmd = _conn.CreateCommand())
-                    {
-                        string dateParams = string.Join(",", Enumerable.Range(0, dateWindow.Length).Select(i => $"@d{i}"));
-                        cmd.CommandText = $"SELECT id, eqsl_qsl_rcvd FROM qso WHERE callsign=@call AND band=@band AND qso_date IN ({dateParams}) AND mode=@mode COLLATE NOCASE;";
-                        cmd.Parameters.AddWithValue("@call", call);
-                        cmd.Parameters.AddWithValue("@band", bandNorm);
-                        cmd.Parameters.AddWithValue("@mode", mode.Trim());
-                        for (int i = 0; i < dateWindow.Length; i++)
-                            cmd.Parameters.AddWithValue($"@d{i}", dateWindow[i]);
-                        using (var r = cmd.ExecuteReader())
-                            while (r.Read())
-                                narrowed.Add((r.GetInt64(0), r.IsDBNull(1) ? "" : r.GetString(1)));
-                    }
-                    if (narrowed.Count > 0) candidates = narrowed;
-                }
-
-                if (candidates.Count != 1) return EqslReconcileOutcome.Ambiguous;
-
-                var (id, eqslRcvd) = candidates[0];
-                if (eqslRcvd == "Y") return EqslReconcileOutcome.AlreadyConfirmed;
-
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = "UPDATE qso SET eqsl_qsl_rcvd='Y' WHERE id=@id;";
-                    cmd.Parameters.AddWithValue("@id", id);
-                    cmd.ExecuteNonQuery();
-                }
-                return EqslReconcileOutcome.Matched;
-            }
-        }
-
-        // qsoDateAdif is ADIF's YYYYMMDD. Returns [date-1, date, date+1] as YYYYMMDD strings
-        // for the +/-1 day match window, or an empty array if the date can't be parsed (caller
-        // treats that as Unmatched rather than matching everything).
-        private static string[] DateWindow(string qsoDateAdif)
-        {
-            if (!DateTime.TryParseExact(qsoDateAdif.Trim(), "yyyyMMdd",
-                System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d))
-                return Array.Empty<string>();
-            return new[]
-            {
-                d.AddDays(-1).ToString("yyyyMMdd"),
-                d.ToString("yyyyMMdd"),
-                d.AddDays(1).ToString("yyyyMMdd"),
-            };
         }
 
         public class UploadSyncStatus
@@ -1377,114 +927,6 @@ ON CONFLICT(dedup_key) DO UPDATE SET
             }
         }
 
-        // Updates the user-editable fields of one QSO. Recomputes dedup_key from the
-        // (possibly changed) callsign/band/mode/date/time -- if that now collides with
-        // another existing row's dedup_key, the UNIQUE constraint throws and the caller
-        // is expected to show that as a "duplicate" error rather than silently merge.
-        public bool UpdateQso(int id, string callsign, string band, string mode,
-            string qsoDate, string timeOn, string timeOff, string state, string country,
-            string grid, string name, string rstSent, string rstRcvd, string comment)
-        {
-            callsign = (callsign ?? "").Trim().ToUpperInvariant();
-            band     = (band     ?? "").Trim().ToLowerInvariant();
-            mode     = (mode     ?? "").Trim().ToUpperInvariant();
-            qsoDate  = (qsoDate  ?? "").Trim();
-            timeOn   = (timeOn   ?? "").Trim();
-            string dedupKey = AdifImporter.BuildDedupKey(callsign, band, mode, qsoDate, timeOn);
-
-            lock (_lock)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = @"
-UPDATE qso SET
-    callsign=@callsign, band=@band, mode=@mode, qso_date=@qso_date, time_on=@time_on,
-    time_off=@time_off, state=@state, country=@country, grid=@grid, name=@name,
-    rst_sent=@rst_sent, rst_rcvd=@rst_rcvd, comment=@comment, dedup_key=@dedup_key,
-    modified_at=@modified_at
-WHERE id=@id;";
-                    cmd.Parameters.AddWithValue("@modified_at", DateTime.UtcNow.ToString("o"));
-                    cmd.Parameters.AddWithValue("@callsign",  callsign);
-                    cmd.Parameters.AddWithValue("@band",      band);
-                    cmd.Parameters.AddWithValue("@mode",      mode);
-                    cmd.Parameters.AddWithValue("@qso_date",  qsoDate);
-                    cmd.Parameters.AddWithValue("@time_on",   timeOn);
-                    cmd.Parameters.AddWithValue("@time_off",  (timeOff ?? "").Trim());
-                    cmd.Parameters.AddWithValue("@state",     (state   ?? "").Trim().ToUpperInvariant());
-                    cmd.Parameters.AddWithValue("@country",   (country ?? "").Trim());
-                    cmd.Parameters.AddWithValue("@grid",      (grid    ?? "").Trim().ToUpperInvariant());
-                    cmd.Parameters.AddWithValue("@name",      (name    ?? "").Trim());
-                    cmd.Parameters.AddWithValue("@rst_sent",  (rstSent ?? "").Trim());
-                    cmd.Parameters.AddWithValue("@rst_rcvd",  (rstRcvd ?? "").Trim());
-                    cmd.Parameters.AddWithValue("@comment",   (comment ?? "").Trim());
-                    cmd.Parameters.AddWithValue("@dedup_key", dedupKey);
-                    cmd.Parameters.AddWithValue("@id", id);
-                    return cmd.ExecuteNonQuery() > 0;
-                }
-            }
-        }
-
-        // Deletes the given rows by id. Local-only -- never touches QRZ/Club Log/LoTW;
-        // those remain separate services a local delete has no effect on. Also purges any
-        // qso_extra_field rows for the same ids (no FK cascade is declared -- SQLite's own
-        // recommendation for a manually-managed child table like this one -- so this stays the
-        // one place responsible for not leaving orphans behind).
-        public int DeleteQsos(IEnumerable<int> ids)
-        {
-            var idList = ids?.Distinct().ToList() ?? new List<int>();
-            if (idList.Count == 0) return 0;
-            lock (_lock)
-            {
-                string placeholders = string.Join(",", idList.Select((_, i) => $"@id{i}"));
-                using (var extraCmd = _conn.CreateCommand())
-                {
-                    extraCmd.CommandText = $"DELETE FROM qso_extra_field WHERE qso_id IN ({placeholders});";
-                    for (int i = 0; i < idList.Count; i++)
-                        extraCmd.Parameters.AddWithValue($"@id{i}", idList[i]);
-                    extraCmd.ExecuteNonQuery();
-                }
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = $"DELETE FROM qso WHERE id IN ({placeholders});";
-                    for (int i = 0; i < idList.Count; i++)
-                        cmd.Parameters.AddWithValue($"@id{i}", idList[i]);
-                    return cmd.ExecuteNonQuery();
-                }
-            }
-        }
-
-        // Nexus contesting foundation, phase 2: the qso_extra_field round-trip (schema v10).
-        // Replaces (delete-then-insert) rather than merges -- a re-import/correction of the same
-        // qso row gets a fresh, correctly-ordered extras set rather than accumulating stale ones.
-        public void SaveExtraFields(long qsoId, List<(string Tag, string Value)> extras)
-        {
-            lock (_lock)
-            {
-                using (var del = _conn.CreateCommand())
-                {
-                    del.CommandText = "DELETE FROM qso_extra_field WHERE qso_id=@id;";
-                    del.Parameters.AddWithValue("@id", qsoId);
-                    del.ExecuteNonQuery();
-                }
-                if (extras == null || extras.Count == 0) return;
-                int ordinal = 0;
-                foreach (var (tag, value) in extras)
-                {
-                    using (var ins = _conn.CreateCommand())
-                    {
-                        ins.CommandText =
-                            "INSERT INTO qso_extra_field (qso_id, tag_name, tag_value, ordinal) " +
-                            "VALUES (@id, @tag, @val, @ord);";
-                        ins.Parameters.AddWithValue("@id", qsoId);
-                        ins.Parameters.AddWithValue("@tag", tag);
-                        ins.Parameters.AddWithValue("@val", value ?? "");
-                        ins.Parameters.AddWithValue("@ord", ordinal++);
-                        ins.ExecuteNonQuery();
-                    }
-                }
-            }
-        }
-
         // Returns extras in original file order (ordinal ascending) -- see AdifExtraFields.
         public List<(string Tag, string Value)> GetExtraFields(long qsoId)
         {
@@ -1516,26 +958,6 @@ WHERE id=@id;";
                     cmd.Parameters.AddWithValue("@k", dedupKey);
                     var result = cmd.ExecuteScalar();
                     return result == null || result == DBNull.Value ? (long?)null : Convert.ToInt64(result);
-                }
-            }
-        }
-
-        // Nexus contesting foundation, phase 4: stamps which contest/session a row belongs to.
-        // A separate follow-up call rather than two more Upsert parameters -- contest
-        // association only ever applies to NEXUS_CONTEST-sourced rows, a small subset of every
-        // upsert caller, and Upsert's signature is already large enough that a narrowly-scoped
-        // setter is the smaller, safer diff.
-        public void SetContestAssociation(long qsoId, string contestId, string contestSessionId)
-        {
-            lock (_lock)
-            {
-                using (var cmd = _conn.CreateCommand())
-                {
-                    cmd.CommandText = "UPDATE qso SET contest_id=@cid, contest_session_id=@csid WHERE id=@id;";
-                    cmd.Parameters.AddWithValue("@cid", contestId ?? "");
-                    cmd.Parameters.AddWithValue("@csid", contestSessionId ?? "");
-                    cmd.Parameters.AddWithValue("@id", qsoId);
-                    cmd.ExecuteNonQuery();
                 }
             }
         }
@@ -1745,46 +1167,6 @@ WHERE id=@id;";
                 }
             }
             return result;
-        }
-
-        // ── Batch operations (storage-neutral -- ILogbookService.RunBatch) ─────────
-
-        // Nexus contesting foundation, phase 2 (completed): the domain-level replacement for the
-        // old public BeginTransaction()/SQLiteTransaction pair AdifImporter.Import used to manage
-        // itself. SQLite transaction/chunking details stay entirely internal here -- callers
-        // (AdifImporter.Import, and any future bulk operation) get an atomic-per-chunk batch
-        // without ever seeing a SQLiteTransaction, so the storage-neutral interface never leaks
-        // that primitive. Same chunk size (500) and rollback-on-exception behavior as the code
-        // this replaces -- a pure refactor, not a behavior change.
-        public void RunBatch<T>(IEnumerable<T> items, Action<T> perItemAction)
-        {
-            int batchSize = 0;
-            SQLiteTransaction tx = _conn.BeginTransaction();
-            try
-            {
-                foreach (var item in items)
-                {
-                    perItemAction(item);
-                    batchSize++;
-                    if (batchSize >= 500)
-                    {
-                        tx.Commit();
-                        tx.Dispose();
-                        tx = _conn.BeginTransaction();
-                        batchSize = 0;
-                    }
-                }
-                tx.Commit();
-            }
-            catch
-            {
-                try { tx.Rollback(); } catch { }
-                throw;
-            }
-            finally
-            {
-                tx.Dispose();
-            }
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────────

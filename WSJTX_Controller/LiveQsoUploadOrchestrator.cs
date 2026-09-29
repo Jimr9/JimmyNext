@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 
@@ -25,8 +25,7 @@ namespace WSJTX_Controller
         public bool HrdLogUploadRealtime;
         public string HrdLogUploadCode;
         public string HrdLogUploadCallsign;
-        // eQSL.cc, uploaded via EngineHost/Nexus's own transport (propagation::live::eqsl) --
-        // see ExternalDataClient.UploadEqsl. Same shape as the others; no app-level credential,
+        // eQSL.cc, uploaded through Nexus (LOG_UPLOAD). Same shape as the others; no app-level credential,
         // the operator supplies their own eQSL.cc username/password (eQSL has no API-key model
         // the way QRZ/Club Log/HRDLog do).
         public bool EqslUploadEnabled;
@@ -114,23 +113,10 @@ namespace WSJTX_Controller
         // logging it to DebugOutput. See the false-branch below and the caller's own comment.
         public bool ImportLiveLoggedQso(string dxCall, Dictionary<string, string> fields, string adifRecord, string dedupKey)
         {
-            // Added 2026-08-10, real incident: capture the target database path HERE, on the
-            // calling thread, synchronously -- NOT inside the background task below. LogbookDb's
-            // parameterless constructor resolves its path lazily, at the moment it actually runs
-            // (Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH") ?? the real user data
-            // path -- see LogbookDb.DbPath). Task.Run below is fire-and-forget: nothing awaits
-            // it, so it can execute an arbitrary, unbounded time after this method returns.
-            // Confirmed live: a unit test that sets JIMMY_TEST_DB_PATH, calls this method, then
-            // restores the environment variable in its own `finally` block raced this background
-            // task and lost -- four synthetic test QSOs landed in the real production logbook.db
-            // instead of the test's own throwaway database, because the task didn't actually run
-            // until AFTER the test had already restored the real path. Resolving the path here
-            // and threading it through explicitly (LogbookDb's own dbPath-argument constructor,
-            // "used by automated tests" per its existing doc comment) makes correctness
-            // independent of how long the task takes to actually start -- the path is locked in
-            // at the moment the QSO was actually logged, which is also the semantically correct
-            // behavior for production use, not just a test workaround.
-            string dbPath = LogbookDb.DbPath;
+            // Nexus keeps the log (Phase 7): the contact is queued durably in Jimmy's outbox right
+            // here, on the calling thread -- never in the background task below, which runs an
+            // unbounded time later (2026-08-10: test contacts once landed in the real log that
+            // way). Test mode never reaches Nexus or any upload service (NexusLogbook.Active).
             bool nexus = NexusLogbook.Active;
 
             // Release-audit finding, 2026-08-20 (release blocker): the durable local database
@@ -157,7 +143,7 @@ namespace WSJTX_Controller
             // log -- same real outcome as before -- it just must not also crash Jimmy.
             try
             {
-                using (ILogbookService db = LogbookFactory.Open(dbPath))
+                using (ILogbookService db = LogbookFactory.Open())
                 {
                     // resolveUsState is the same lookupManager-backed callback every other US
                     // state lookup in the app already uses (queue display, raw decodes row, HRC
@@ -174,8 +160,7 @@ namespace WSJTX_Controller
             }
             catch (Exception ex)
             {
-                _debugLog($"ImportLiveLoggedQso local-DB write error for {dxCall}: {ex.Message}");
-                // Codex Audit 02 release blocker, 2026-08-21: a failed local write must not also
+                _debugLog($"ImportLiveLoggedQso local-DB write error for {dxCall}: {ex.Message}");                // Codex Audit 02 release blocker, 2026-08-21: a failed local write must not also
                 // attempt remote uploads -- dedupKey/MarkUploaded below would target a row that
                 // was never actually inserted, so a "successful" remote upload could leave the
                 // record present at QRZ/Club Log/etc. but permanently absent from Jimmy's own
@@ -212,9 +197,10 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    // Nexus owns the logbook: stamp uploads only once the contact has reached it.
-                    if (nexus) NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor("WSJTX", dedupKey), 90_000);
-                    using (ILogbookService db = LogbookFactory.Open(dbPath))
+                    // Uploads are stamped on the contact once it has reached Nexus. Test mode: none.
+                    if (!nexus) return;
+                    NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor("WSJTX", dedupKey), 90_000);
+                    using (var nx = new NexusLogbookService())
                     {
                         var creds = _credentials();
                         bool needQrz = creds.QrzUploadEnabled && creds.QrzUploadRealtime &&
@@ -241,10 +227,9 @@ namespace WSJTX_Controller
 
                         if (!needQrz && !needClubLog && !needHrdLog && !needEqsl) return;
 
-                        // Nexus keeps the log: each upload is Nexus's own transaction (its record,
-                        // transport, answer and per-QSO stamp) -- the same services, the same
-                        // conditions and the same Club Log breaker as below.
-                        if (nexus && db is NexusLogbookService nx)
+                        // Each upload is Nexus's own transaction (its record, transport, answer and
+                        // per-QSO stamp). Club Log's rules: on a real-time failure, stop automatic
+                        // sends and tell the user rather than retrying on every QSO.
                         {
                             if (needQrz && !nx.UploadThroughNexus(dedupKey, "QRZ", creds, out var qrzErr))
                                 _debugLog($"QRZ real-time upload failed for {dxCall}: {qrzErr}");
@@ -261,66 +246,6 @@ namespace WSJTX_Controller
                             return;
                         }
 
-                        if (needQrz)
-                        {
-                            var qrzClient = new QrzLogbookClient();
-                            bool ok = await qrzClient.InsertAsync(creds.QrzLogbookApiKey, adifRecord).ConfigureAwait(false);
-                            if (ok) db.MarkUploaded(dedupKey, "QRZ", DateTime.UtcNow);
-                            else _debugLog($"QRZ real-time upload failed for {dxCall}: {qrzClient.LastError}");
-                        }
-
-                        if (needClubLog)
-                        {
-                            var clClient = new ClubLogUploadClient();
-                            bool ok = await clClient.RealtimeUploadAsync(
-                                creds.ClubLogUploadEmail, creds.ClubLogUploadPassword, creds.ClubLogUploadCallsign,
-                                ClubLogAppKey.Resolve(), adifRecord).ConfigureAwait(false);
-                            if (ok)
-                            {
-                                db.MarkUploaded(dedupKey, "CLUBLOG", DateTime.UtcNow);
-                            }
-                            else
-                            {
-                                _debugLog($"Club Log real-time upload failed for {dxCall}: {clClient.LastError}");
-                                // Per Club Log's own integration rules: on any real-time failure,
-                                // stop sending further automatic requests and tell the user --
-                                // don't silently keep retrying on every subsequent QSO.
-                                _clubLogRealtimeBroken = true;
-                                _showStatus($"Club Log real-time upload error, automatic upload paused: {clClient.LastError}", true);
-                            }
-                        }
-
-                        if (needHrdLog)
-                        {
-                            var hrdClient = new HrdLogUploadClient();
-                            bool ok = await hrdClient.InsertAsync(
-                                creds.HrdLogUploadCallsign, creds.HrdLogUploadCode, adifRecord).ConfigureAwait(false);
-                            if (ok) db.MarkUploaded(dedupKey, "HRDLOG", DateTime.UtcNow);
-                            else _debugLog($"HRDLog.net real-time upload failed for {dxCall}: {hrdClient.LastError}");
-                        }
-
-                        if (needEqsl)
-                        {
-                            // ExternalDataClient's calls are synchronous (a bounded blocking TCP
-                            // round-trip to EngineHost, not an async HTTP call) -- already off the
-                            // UI thread here, so calling it directly is fine, same reasoning as
-                            // OtaSpotsWindow's own RefreshSpots().
-                            var eqslClient = new ExternalDataClient();
-                            string outcome = eqslClient.UploadEqsl(creds.EqslUsername, creds.EqslPassword, adifRecord, out string eqslError);
-                            if (eqslError != null)
-                            {
-                                _debugLog($"eQSL real-time upload failed for {dxCall}: {eqslError}");
-                            }
-                            else if (outcome == "rejected" || outcome == "authfail")
-                            {
-                                _debugLog($"eQSL real-time upload rejected for {dxCall}: {outcome}");
-                            }
-                            else
-                            {
-                                // "accepted"/"pending"/"duplicate" all mean eQSL has the record.
-                                db.MarkUploaded(dedupKey, "EQSL", DateTime.UtcNow);
-                            }
-                        }
                     }
                 }
                 catch (Exception ex)

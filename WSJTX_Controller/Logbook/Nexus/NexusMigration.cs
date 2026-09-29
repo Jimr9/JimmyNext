@@ -221,6 +221,9 @@ namespace WSJTX_Controller
             var written = new HashSet<string>(f.Select(x => x.Item1), StringComparer.OrdinalIgnoreCase);
             foreach (var (tag, value) in row.Extras)
             {
+                // A logbook that once came from Nexus carries Nexus's old record id; the new log
+                // gives every contact its own.
+                if (tag.Equals("APP_NEXUS_ID", StringComparison.OrdinalIgnoreCase)) continue;
                 // Only a tag this record already carries from a column collides. (An extra
                 // EQSL_QSL_RCVD=N beside an empty eQSL column is data, not a collision.)
                 if (written.Contains(tag))
@@ -322,7 +325,7 @@ namespace WSJTX_Controller
                 Diff(r, "power", PowerText(r.C("tx_pwr")), q.TxPower.HasValue ? PowerText(q.TxPower.Value.ToString(CultureInfo.InvariantCulture)) : "");
                 Diff(r, "operator", r.C("operator_call"), q.Operator);
                 Diff(r, "station call", r.C("station_call"), q.StationCallsign);
-                Diff(r, "my grid", r.C("my_grid"), q.MyGrid);
+                Diff(r, "my grid", r.C("my_grid").ToUpperInvariant(), (q.MyGrid ?? "").ToUpperInvariant());   // a locator's case carries no meaning
                 Diff(r, "LoTW confirmed", (r.C("lotw_qsl_rcvd") == "Y").ToString(), q.QslRcvd.Lotw.ToString());
                 Diff(r, "QRZ confirmed", (r.C("qrz_qsl_rcvd") == "Y").ToString(), q.QslRcvd.Qrz.ToString());
                 Diff(r, "paper card", "False", q.QslRcvd.Card.ToString());
@@ -342,7 +345,7 @@ namespace WSJTX_Controller
                 // Every extra Jimmy kept must still be there -- as an extra, or read into a field.
                 foreach (var (tag, value) in r.Extras.GroupBy(e => e.Tag, StringComparer.OrdinalIgnoreCase).Select(g => g.First()))
                 {
-                    if (ColumnTags.Contains(tag)) continue;
+                    if (ColumnTags.Contains(tag) || tag.Equals("APP_NEXUS_ID", StringComparison.OrdinalIgnoreCase)) continue;
                     string kept = q.ExtraValue(tag);
                     if (kept == value) continue;
                     string modeled = ModeledValue(q, tag);

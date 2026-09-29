@@ -178,7 +178,7 @@ namespace WSJTX_Controller
                 foreach (var c in new[] { "qrz_uploaded_at", "clublog_uploaded_at", "lotw_uploaded_at", "hrdlog_uploaded_at", "eqsl_uploaded_at" })
                     if (Instant(r.C(c)) != Instant(x.C(c)))
                         diffs.Add($"row {r.Id} {r.C("callsign")}: {c} '{r.C(c)}' -> '{x.C(c)}'");
-                var ea = new HashSet<string>(r.Extras.Select(e => e.Tag.ToUpperInvariant() + "=" + e.Value));
+                var ea = new HashSet<string>(r.Extras.Where(e => e.Tag != "APP_NEXUS_ID").Select(e => e.Tag.ToUpperInvariant() + "=" + e.Value));
                 var eb = new HashSet<string>(x.Extras.Where(e => e.Tag != "APP_NEXUS_ID").Select(e => e.Tag.ToUpperInvariant() + "=" + e.Value));
                 foreach (var e in ea.Except(eb)) diffs.Add($"row {r.Id} {r.C("callsign")}: extra lost {e}");
                 foreach (var e in eb.Except(ea)) diffs.Add($"row {r.Id} {r.C("callsign")}: extra added {e}");
@@ -190,9 +190,9 @@ namespace WSJTX_Controller
 
         // band: Jimmy stores lower case. state: Nexus stores STATE upper case (the forward report
         // lists each one under "Normalised by Nexus"); Jimmy's own WAS count already compares
-        // UPPER(TRIM(state)), so the meaning is the same.
+        // UPPER(TRIM(state)), so the meaning is the same. my_grid: a locator's case carries no meaning.
         private static string Norm(string col, string v) =>
-            col == "band" ? (v ?? "").ToLowerInvariant() : col == "state" ? (v ?? "").ToUpperInvariant() : (v ?? "");
+            col == "band" ? (v ?? "").ToLowerInvariant() : col == "state" || col == "my_grid" ? (v ?? "").ToUpperInvariant() : (v ?? "");
         private static string Hhmm(string t) => (t ?? "").Length >= 4 ? t.Substring(0, 4) : (t ?? "");
         private static string Power(string p) =>
             double.TryParse(p, NumberStyles.Float, CultureInfo.InvariantCulture, out var w) ? w.ToString("0.###", CultureInfo.InvariantCulture) : (p ?? "");

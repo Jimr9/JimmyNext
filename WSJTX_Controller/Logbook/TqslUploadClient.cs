@@ -18,7 +18,7 @@ namespace WSJTX_Controller
     //   tqsl -d -u -a compliant -x -l "<Station Location>" "<adif file>"
     // -d: suppress the QSO date-range dialog. -u: upload to LoTW instead of just saving the
     // signed file. -a compliant: skip already-uploaded/out-of-range QSOs, sign the rest (matches
-    // the "duplicate is not a failure" handling QrzLogbookClient/HrdLogUploadClient already use).
+    // the "duplicate is not a failure" handling the other upload services use).
     // -x: batch mode, terminate after running, status routed to stderr as a parseable
     // "Final Status: Description (Code)" last line.
     //

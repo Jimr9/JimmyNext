@@ -1377,11 +1377,6 @@ static class JimmyTests
         RuleEngineDynamicThresholdAndBasisTests();
         AdifRecordBuilderTests();
         AdifExporterTests();
-        LogbookDbEditLogTests();
-        LogbookDbAuthoritativeSourceOverrideTests();
-        LogbookDbNewlyConfirmedVsCorrectedTests();
-        LogbookDbDownloadMarksUploadedTests();
-        LogbookDbSourceUpgradeNeverDowngradeTests();
         Colonies13RosterRegressionTest();
         CallQueueRankerCategoryTierTests();
         CallQueueRankerSortMethodTests();
@@ -1402,7 +1397,6 @@ static class JimmyTests
         NativeEngineClientDescribeConfigProblemTests();
         NativeEngineClientTxWatchdogFormulaTests();
         OtaSpotAnnotatorTests();
-        EqslReconcileTests();
         LookupManagerPrimaryProviderTests();
         LookupManagerDisposeQuiescenceTests();
         LookupManagerOfflineClassificationTests();
@@ -1429,8 +1423,6 @@ static class JimmyTests
         AutoLoggedReportsAndQsoCompletedTokensTests();
         ClearStaleReceiveCycleSummaryTests();
         LogbookDbUploadSyncStatusTests();
-        QrzIsDuplicateReasonTests();
-        HrdLogClassifyResponseTests();
         RigctldClientListRigModelsTests();
         RigctldClientBoundedReadTests();
         OptionsDlgSystemDefaultDeviceLabelTests();
@@ -1446,7 +1438,6 @@ static class JimmyTests
         AdifImporterLiveLoggedStateFallbackTests();
         AdifImporterBackfillsMissingDxccTests();
         AdifImporterDetectSourceTests();
-        AdifImportMixedValidErrorRetainsValidRowsTests();
         DxSpotWatcherIsEvenPeriodTests();
         FccUlsProviderParseLineTests();
         FccUlsProviderShouldPreferNameTests();
@@ -1647,8 +1638,6 @@ static class JimmyTests
         LogbookSchemaV10MigrationTests();
         AdifParseWithOrderTests();
         AdifExtraFieldsRoundTripTests();
-        AdifImporterExtraFieldsIntegrationTests();
-        NexusContestIdempotencyIndexTests();
         ContestWorkflowIdempotentDeliveryTests();
         ContestWorkflowLostAckRedeliveryTests();
         ContestWorkflowReconnectReconciliationTests();
@@ -2334,92 +2323,6 @@ static class JimmyTests
         }
     }
 
-    // ── eQSL reconciliation: LogbookDb.TryMarkEqslConfirmed + EqslReconciler ───
-    // Conservative match-only reconciliation against EXISTING qso rows -- never creates a
-    // row, never guesses an ambiguous match, never clears eqsl_qsl_rcvd once set. No network:
-    // exercises the offline matching/parsing logic only (real eQSL transport is EngineHost's,
-    // untestable here -- same reasoning as every other network provider in this suite).
-    static void EqslReconcileTests()
-    {
-        Console.WriteLine("\n── eQSL reconciliation (TryMarkEqslConfirmed + EqslReconciler) ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_Eqsl_" + Guid.NewGuid().ToString("N") + ".db");
-        string tmpDb2 = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_Eqsl2_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, band: "20m", qsoDate: "20241201");
-                InsertQso(db, "OK7AN", "", dxcc: 503, zone: 15, band: "40m", qsoDate: "20241205");
-
-                Check("Exact call+band+date match -> Matched",
-                    db.TryMarkEqslConfirmed("W1AW", "20m", "20241201", null) == LogbookDb.EqslReconcileOutcome.Matched, true);
-                Check("Re-marking the same QSO -> AlreadyConfirmed (idempotent, no error)",
-                    db.TryMarkEqslConfirmed("W1AW", "20m", "20241201", null) == LogbookDb.EqslReconcileOutcome.AlreadyConfirmed, true);
-
-                // +/-1 day tolerance: the QSO is dated 20241205, an eQSL record dated one day
-                // either side must still match (midnight-boundary clock-skew tolerance).
-                Check("Date one day BEFORE the QSO date still matches (+/-1 day window)",
-                    db.TryMarkEqslConfirmed("OK7AN", "40m", "20241204", "FT8") == LogbookDb.EqslReconcileOutcome.Matched, true);
-
-                Check("Unknown callsign -> Unmatched (never invents a row)",
-                    db.TryMarkEqslConfirmed("ZZ1NOPE", "20m", "20241201", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
-                Check("Right callsign, wrong band -> Unmatched",
-                    db.TryMarkEqslConfirmed("W1AW", "40m", "20241201", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
-                Check("Date more than 1 day away -> Unmatched",
-                    db.TryMarkEqslConfirmed("W1AW", "20m", "20241210", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
-
-                // Ambiguity: two DISTINCT QSO rows (different time_on -> different dedup_key)
-                // sharing the same callsign+band+date, with no mode given to disambiguate --
-                // must be left alone, not guessed.
-                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, band: "15m", qsoDate: "20241215", timeOn: "1200");
-                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, band: "15m", qsoDate: "20241215", timeOn: "1800");
-                Check("Two equally-plausible candidates, no mode to disambiguate -> Ambiguous",
-                    db.TryMarkEqslConfirmed("W1AW", "15m", "20241215", null) == LogbookDb.EqslReconcileOutcome.Ambiguous, true);
-
-                // Unparseable date -> Unmatched, not an exception and not a wildcard match.
-                Check("Malformed QSO_DATE -> Unmatched, not an exception",
-                    db.TryMarkEqslConfirmed("W1AW", "20m", "not-a-date", null) == LogbookDb.EqslReconcileOutcome.Unmatched, true);
-            }
-
-            // End-to-end via EqslReconciler.Reconcile against a small synthetic ADIF InBox --
-            // proves the ADIF-record -> match-call shape works, including that a record
-            // WITHOUT EQSL_QSL_RCVD=Y (e.g. a pending/unconfirmed entry) is skipped, not treated
-            // as a confirmation. Own fresh database file -- the block above already left
-            // confirmations on tmpDb, which would make an absolute EqslConfirmedQsos() count
-            // here misleading.
-            using (var db = new LogbookDb(tmpDb2))
-            {
-                InsertQso(db, "N0CALL", "MO", dxcc: 291, zone: 4, band: "20m", qsoDate: "20241220");
-
-                string adif =
-                    "ADIF 3 Export from eQSL.cc\n<PROGRAMID:21>eQSL.cc DownloadInBox <ADIF_Ver:5>3.1.6 <EOH>\n" +
-                    "<CALL:6>N0CALL <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20241220 <EQSL_QSL_RCVD:1>Y <EOR>\n" +
-                    "<CALL:6>ZZ9NUL <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20241220 <EQSL_QSL_RCVD:1>N <EOR>\n";
-
-                var result = EqslReconciler.Reconcile(db, adif);
-                Check("Reconcile: confirmed record matches -> Matched == 1", result.Matched == 1, true);
-                Check("Reconcile: EQSL_QSL_RCVD != Y record is skipped, not counted as Unmatched",
-                    result.Skipped == 1, true);
-                Check("Reconcile: unconfirmed record does not touch the confirmed count",
-                    result.Unmatched == 0, true);
-                Check("Reconcile: eqsl_qsl_rcvd actually persisted",
-                    db.EqslConfirmedQsos() == 1, true);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  EqslReconcileTests threw: {ex.GetType().Name}: {ex.Message}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDb); } catch { }
-            try { File.Delete(tmpDb2); } catch { }
-        }
-    }
-
     // ── LookupManager: primary provider selection (QRZ vs HamQTH) ──────────────
     // Offline/cache-only -- no real QRZ/HamQTH network traffic. Proves the provider-selection
     // plumbing itself (PrimaryProvider resolution, CanAutoQueue/PrimaryNeedsLookup routing,
@@ -2597,10 +2500,6 @@ static class JimmyTests
         }
     }
 
-    // ── LogbookDb.GetUploadSyncStatus: pending count + last-upload time ────────
-    // Backs the Sync Status section on the My Log tab -- must correctly report
-    // "still pending" vs "already uploaded" per service, independently of the
-    // other service's upload column.
     static void LogbookDbUploadSyncStatusTests()
     {
         Console.WriteLine("\n── LogbookDb.GetUploadSyncStatus ──");
@@ -2610,61 +2509,25 @@ static class JimmyTests
         {
             using (var db = new LogbookDb(tmpDb))
             {
-                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5);
-                InsertQso(db, "W2AW", "NY", dxcc: 291, zone: 5);
-                string keyW1AW = AdifImporter.BuildDedupKey("W1AW", "20m", "FT8", "20241201", "1200");
-
-                // Neither QSO uploaded yet to either service.
-                var qrzBefore = db.GetUploadSyncStatus("QRZ");
-                Check("before any upload: QRZ pending count == 2",     qrzBefore.PendingCount == 2, true);
-                Check("before any upload: QRZ uploaded count == 0",    qrzBefore.UploadedCount == 0, true);
-                Check("before any upload: QRZ last upload time null",  qrzBefore.LastUploadUtc.HasValue, false);
-
                 var when = new DateTime(2026, 7, 1, 12, 0, 0, DateTimeKind.Utc);
-                db.MarkUploaded(keyW1AW, "QRZ", when);
+                // W1AW sent to QRZ, LoTW and HRDLog; W2AW sent nowhere.
+                SeedQso(db, new Dictionary<string, object>
+                {
+                    ["callsign"] = "W1AW", ["band"] = "20m", ["mode"] = "FT8", ["qso_date"] = "20241201", ["time_on"] = "1200",
+                    ["qrz_uploaded_at"] = when.ToString("o"), ["lotw_uploaded_at"] = when.ToString("o"), ["hrdlog_uploaded_at"] = when.ToString("o"),
+                });
+                InsertQso(db, "W2AW", "NY", dxcc: 291, zone: 5);
 
-                var qrzAfter = db.GetUploadSyncStatus("QRZ");
-                Check("after marking W1AW uploaded: QRZ pending count == 1", qrzAfter.PendingCount == 1, true);
-                Check("after marking W1AW uploaded: QRZ uploaded count == 1", qrzAfter.UploadedCount == 1, true);
-                Check("after marking W1AW uploaded: QRZ last upload time set",
-                      qrzAfter.LastUploadUtc.HasValue && qrzAfter.LastUploadUtc.Value == when, true);
-
-                // Club Log status must be unaffected by the QRZ-only mark.
-                var clubLogAfter = db.GetUploadSyncStatus("CLUBLOG");
-                Check("QRZ mark does not affect Club Log pending count", clubLogAfter.PendingCount == 2, true);
-                Check("QRZ mark does not affect Club Log uploaded count", clubLogAfter.UploadedCount == 0, true);
-                Check("QRZ mark does not affect Club Log last upload time",
-                      clubLogAfter.LastUploadUtc.HasValue, false);
-
-                // LOTW and HRDLOG: regression coverage for the 2026-08-07 fix -- both
-                // GetPendingUploads("LOTW")/("HRDLOG") and MarkUploaded(..., "LOTW"/"HRDLOG", ...)
-                // used to throw ArgumentException (UploadColumn had no case for either), silently
-                // caught by every real caller (TqslUploadClient, LiveQsoUploadOrchestrator,
-                // WsjtxClient.Uploads.cs's CatchUpHrdLog) -- so neither service's upload ever
-                // actually got recorded locally, even when the real upload itself succeeded.
-                var lotwBefore = db.GetUploadSyncStatus("LOTW");
-                Check("before any upload: LOTW pending count == 2", lotwBefore.PendingCount == 2, true);
-                var hrdLogBefore = db.GetUploadSyncStatus("HRDLOG");
-                Check("before any upload: HRDLOG pending count == 2", hrdLogBefore.PendingCount == 2, true);
-
-                db.MarkUploaded(keyW1AW, "LOTW", when);
-                var lotwAfter = db.GetUploadSyncStatus("LOTW");
-                Check("after marking W1AW uploaded: LOTW pending count == 1", lotwAfter.PendingCount == 1, true);
-                Check("after marking W1AW uploaded: LOTW uploaded count == 1", lotwAfter.UploadedCount == 1, true);
-
-                // LOTW mark must not affect HRDLOG, or either of QRZ/Club Log from above.
-                Check("LOTW mark does not affect HRDLOG pending count",
-                      db.GetUploadSyncStatus("HRDLOG").PendingCount == 2, true);
-                Check("LOTW mark does not affect QRZ pending count",
-                      db.GetUploadSyncStatus("QRZ").PendingCount == 1, true);
-                Check("LOTW mark does not affect Club Log pending count",
-                      db.GetUploadSyncStatus("CLUBLOG").PendingCount == 2, true);
-
-                db.MarkUploaded(keyW1AW, "HRDLOG", when);
-                var hrdLogAfter = db.GetUploadSyncStatus("HRDLOG");
-                Check("after marking W1AW uploaded: HRDLOG pending count == 1", hrdLogAfter.PendingCount == 1, true);
-                Check("after marking W1AW uploaded: HRDLOG uploaded count == 1", hrdLogAfter.UploadedCount == 1, true);
-
+                var qrz = db.GetUploadSyncStatus("QRZ");
+                Check("QRZ pending count == 1", qrz.PendingCount == 1, true);
+                Check("QRZ uploaded count == 1", qrz.UploadedCount == 1, true);
+                Check("QRZ last upload time", qrz.LastUploadUtc.HasValue && qrz.LastUploadUtc.Value == when, true);
+                var clubLog = db.GetUploadSyncStatus("CLUBLOG");
+                Check("Club Log counted separately: 2 pending, none uploaded",
+                      clubLog.PendingCount == 2 && clubLog.UploadedCount == 0 && !clubLog.LastUploadUtc.HasValue, true);
+                // LOTW and HRDLOG have their own columns (2026-08-07 fix: neither used to be recognised).
+                Check("LOTW pending count == 1", db.GetUploadSyncStatus("LOTW").PendingCount == 1, true);
+                Check("HRDLOG pending count == 1", db.GetUploadSyncStatus("HRDLOG").PendingCount == 1, true);
                 var lotwPending = db.GetPendingUploads("LOTW");
                 Check("LOTW GetPendingUploads returns the one still-pending QSO", lotwPending.Count == 1, true);
                 CheckStr("LOTW GetPendingUploads pending QSO is W2AW", lotwPending[0].Callsign, "W2AW");
@@ -3235,6 +3098,7 @@ static class JimmyTests
             "JimmyTest_DirectParity_" + Guid.NewGuid().ToString("N") + ".db");
         string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
         Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        string nexusDir = UseTestNexusLog();
         try
         {
             var ctrl = new Controller(); // never Show()/Run() -- Load event (real .ini, real engine spawn) never fires
@@ -3445,34 +3309,12 @@ static class JimmyTests
             Check("Direct mode: repeated polls with unchanged tx_now do not re-log the same QSO",
                   wc.logList.Count(c => c == qsoCall) == 1, true);
 
-            // Step 4: real incident, 2026-08-10 -- LogQso's actual database write happens on a
-            // fire-and-forget background Task.Run (LiveQsoUploadOrchestrator.ImportLiveLoggedQso),
-            // not synchronously on this thread. Before that method was fixed to capture its
-            // target path up front, the write raced this test's own env-var-based isolation: by
-            // the time the background task actually got scheduled, this test's `finally` block
-            // (below) could already have restored JIMMY_TEST_DB_PATH to its previous value,
-            // sending the write into the REAL production logbook.db instead of tmpDb. Confirmed
-            // live: four synthetic "N3XYZ" QSOs landed in the operator's actual logbook. This
-            // assertion is the regression guard for that fix -- it polls tmpDb (never the real
-            // path) for up to 2s waiting for the background write to land. If the path-capture
-            // fix in LiveQsoUploadOrchestrator/RunTqslUpload/RunUploadCatchUp is ever undone or a
-            // similar new Task.Run(...new LogbookDb()...) is added elsewhere, this either times
-            // out (write never reaches tmpDb) or the earlier in-memory checks above still pass
-            // while the real user's logbook silently gets contaminated again -- this is the one
-            // assertion that actually proves the write landed in the ISOLATED database, not just
-            // that logList (in-memory only) was updated.
-            bool foundInTmpDb = false;
-            var sw = System.Diagnostics.Stopwatch.StartNew();
-            while (sw.ElapsedMilliseconds < 2000)
-            {
-                using (var verifyDb = new LogbookDb(tmpDb))
-                {
-                    if (verifyDb.SearchQsos(qsoCall, null, null, null).Count > 0) { foundInTmpDb = true; break; }
-                }
-                System.Threading.Thread.Sleep(50);
-            }
-            Check("Direct mode: the background QSO write actually lands in the ISOLATED test database",
-                  foundInTmpDb, true);
+            // Step 4: real incident, 2026-08-10 -- a logged test contact once landed in the
+            // operator's REAL logbook (a background write resolved its target too late). Now the
+            // contact is queued in the durable outbox on the calling thread, and test mode never
+            // reaches Nexus (NexusLogbook.Port is 0): it must be in THIS test's own outbox, once.
+            Check("Direct mode: the QSO is queued in the ISOLATED test outbox, once",
+                  NexusLogbook.Outbox.Snapshot().Count(e => e.Qso.Call == qsoCall) == 1, true);
 
             // ── Scenario 5q (2026-09-26): a QUIET finish -- Nexus's Hound rule ends the QSO on
             //    the Fox's RR73 and sends NOTHING after it, so no 73/RR73 ever becomes tx_now.
@@ -3505,18 +3347,10 @@ static class JimmyTests
             Check("Quiet finish: engine 'done' with nothing to send logs the QSO exactly once",
                   wc.logList.Count(c => c == foxCall) == 1, true);
             Check("Quiet finish: ...and ends the contact", wc.callInProg == null, true);
-            // The logbook itself, not just the in-memory list: exactly ONE record despite the
-            // repeated "done" snapshots (same isolated tmpDb + background-write polling as Step 4).
-            int foxRows = 0;
-            var swq = System.Diagnostics.Stopwatch.StartNew();
-            while (swq.ElapsedMilliseconds < 2000 && foxRows == 0)
-            {
-                using (var verifyDb = new LogbookDb(tmpDb)) foxRows = verifyDb.SearchQsos(foxCall, null, null, null).Count;
-                if (foxRows == 0) System.Threading.Thread.Sleep(50);
-            }
-            System.Threading.Thread.Sleep(300);   // let any (wrong) second write land before counting
-            using (var verifyDb = new LogbookDb(tmpDb)) foxRows = verifyDb.SearchQsos(foxCall, null, null, null).Count;
-            Check("Quiet finish: exactly one logbook record written", foxRows == 1, true);
+            // The logbook itself, not just the in-memory list: exactly ONE contact queued despite
+            // the repeated "done" snapshots.
+            Check("Quiet finish: exactly one logbook record written",
+                  NexusLogbook.Outbox.Snapshot().Count(e => e.Qso.Call == foxCall) == 1, true);
 
             // ── Scenario 5p (2026-09-26, live): a directed "CQ POTA VA3LG" (WSJT-X cannot fit
             //    "/W2" into a directed CQ) answered as "VA3LG/W2". The engine completed it under
@@ -3583,6 +3417,7 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            EndTestNexusLog(nexusDir);
             try { File.Delete(tmpDb); } catch { }
         }
     }
@@ -3751,6 +3586,7 @@ static class JimmyTests
         string badDir = Path.Combine(Path.GetTempPath(), "JimmyTest_BadDb_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(badDir);   // a directory path can't be opened as a SQLite file -> write throws -> localWriteFailed
         string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        string nexusDir = UseTestNexusLog();
 
         const string myCall = "KB0UZT", myGrid = "FN42", dx = "K4YT";  // K4YT: domestic fixture
 
@@ -3840,7 +3676,7 @@ static class JimmyTests
             // LogbookDb); only the COMPLETION write below hits the bad path.
             var wcFail = MakeClient(logEarly: false);
             SeedMidQso(wcFail, (int)WsjtxClient.CallPriority.DEFAULT);
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", badDir);   // RequestLog's write now throws
+            BreakTestNexusLog(true);   // the logbook save now fails
             wcFail.TestApplyDirectSnapshot(myCall, myGrid, TxNowSnap(6000, $"{dx} {myCall} RR73"));
             Check("THE FIX (Finding 2): a failed local logbook write leaves the QSO unlogged",
                   wcFail.logList.Contains(dx), false);
@@ -3850,7 +3686,7 @@ static class JimmyTests
                   wcFail.TestLiveLogWriteFailedCall == dx, true);
 
             // disk clears; next poll (curTxMsg still the RR73) re-enters the branch and retries
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+            BreakTestNexusLog(false);
             wcFail.TestApplyDirectSnapshot(myCall, myGrid, TxNowSnap(6002, $"{dx} {myCall} RR73"));
             Check("THE FIX (Finding 2): the next poll retries the write and it succeeds",
                   wcFail.logList.Contains(dx), true);
@@ -3858,9 +3694,7 @@ static class JimmyTests
                   wcFail.callInProg == null, true);
             Check("THE FIX (Finding 2): the retry flag is cleared",
                   wcFail.TestLiveLogWriteFailedCall == null, true);
-            using (var db = new LogbookDb(goodDb))
-                Check("THE FIX (Finding 2): exactly one logbook row for the retried QSO (no duplicate)",
-                      db.SearchQsos(dx, null, null, null).Count == 1, true);
+            Check("THE FIX (Finding 2): exactly one logbook row for the retried QSO (no duplicate)", QueuedCount(dx) == 1, true);
         }
         catch (Exception ex)
         {
@@ -3870,6 +3704,7 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            EndTestNexusLog(nexusDir);
             try { File.Delete(goodDb); } catch { }
             try { Directory.Delete(badDir, true); } catch { }
         }
@@ -3891,6 +3726,7 @@ static class JimmyTests
 
         string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Rr73Race_" + Guid.NewGuid().ToString("N") + ".db");
         string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        string nexusDir = UseTestNexusLog();
         const string myCall = "KB0UZT", myGrid = "FN42", dx = "K4YT";
 
         WsjtxClient MakeClient()
@@ -3960,9 +3796,7 @@ static class JimmyTests
                   wc.logList.Contains(dx), true);
             Check("THE FIX: ...and only then is callInProg cleared",
                   wc.callInProg == null, true);
-            using (var db = new LogbookDb(goodDb))
-                Check("THE FIX: exactly one logbook row (CheckLateLog's later 73 can't double-log)",
-                      db.SearchQsos(dx, null, null, null).Count == 1, true);
+            Check("THE FIX: exactly one logbook row (CheckLateLog's later 73 can't double-log)", QueuedCount(dx) == 1, true);
 
             // ── Case 2: the roger genuinely never comes -> the hold is bounded, QSO tears down ──
             var wc2 = MakeClient();
@@ -3987,6 +3821,7 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            EndTestNexusLog(nexusDir);
             try { File.Delete(goodDb); } catch { }
         }
     }
@@ -4008,6 +3843,7 @@ static class JimmyTests
 
         string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Norm_" + Guid.NewGuid().ToString("N") + ".db");
         string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        string nexusDir = UseTestNexusLog();
         const string myCall = "KB0UZT", myGrid = "FN42";
 
         WsjtxClient MakeClient(bool logEarly = false)
@@ -4090,9 +3926,7 @@ static class JimmyTests
                       wc.logList.Contains(dx), true);
                 Check("1: THE FIX: callInProg is cleared (no wedge)",
                       wc.callInProg == null, true);
-                using (var db = new LogbookDb(goodDb))
-                    Check("1: THE FIX: exactly one logbook row (no double-log)",
-                          db.SearchQsos(dx, null, null, null).Count == 1, true);
+                Check("1: THE FIX: exactly one logbook row (no double-log)", QueuedCount(dx) == 1, true);
             }
 
             // ── 2. Incoming bracketed RRR / RR73 / 73 reach the shared sign-off path
@@ -4161,6 +3995,7 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            EndTestNexusLog(nexusDir);
             try { File.Delete(goodDb); } catch { }
         }
     }
@@ -4180,6 +4015,7 @@ static class JimmyTests
         string badDir = Path.Combine(Path.GetTempPath(), "JimmyTest_WrFailBad_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(badDir);   // a directory path can't be opened as a SQLite file -> write throws
         string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        string nexusDir = UseTestNexusLog();
         const string myCall = "KB0UZT", myGrid = "FN42", dx = "K4YT";
 
         (WsjtxClient wc, FakeNotificationDelivery notify) MakeClient()
@@ -4231,7 +4067,7 @@ static class JimmyTests
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
             var (wc, notify) = MakeClient();
             SeedMidQso(wc);
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", badDir);
+            BreakTestNexusLog(true);   // the logbook save now fails
 
             int cap = wc.TestMaxDirectWriteFailRetries;
             wc.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9000));
@@ -4268,22 +4104,20 @@ static class JimmyTests
                   wc.TestOrphanTxOvers >= 1, true);
 
             // ── Case 2: write recovers within the budget -> logs, no data lost ──
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+            BreakTestNexusLog(false);
             var (wc2, notify2) = MakeClient();
             SeedMidQso(wc2);
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", badDir);
+            BreakTestNexusLog(true);   // the logbook save now fails
             wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9500));
             Check("recovery: held after the first failure",
                   wc2.callInProg == dx && !wc2.logList.Contains(dx), true);
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", goodDb);
+            BreakTestNexusLog(false);
             wc2.TestApplyDirectSnapshot(myCall, myGrid, Rr73Snap(9501));
             Check("recovery: the disk clears within the budget -> QSO logs on the next poll",
                   wc2.logList.Contains(dx), true);
             Check("recovery: callInProg cleared, retry flag cleared",
                   wc2.callInProg == null && wc2.TestLiveLogWriteFailedCall == null, true);
-            using (var db = new LogbookDb(goodDb))
-                Check("recovery: exactly one logbook row",
-                      db.SearchQsos(dx, null, null, null).Count == 1, true);
+            Check("recovery: exactly one logbook row", QueuedCount(dx) == 1, true);
         }
         catch (Exception ex)
         {
@@ -4293,6 +4127,7 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            EndTestNexusLog(nexusDir);
             try { File.Delete(goodDb); } catch { }
             try { Directory.Delete(badDir, true); } catch { }
         }
@@ -5701,6 +5536,7 @@ static class JimmyTests
         Console.WriteLine("\n── Post-Stage-12 S3: completion via qsoTxSemantics + Qso.dxcall (W1AW/2 preserved both paths) ──");
         string goodDb = Path.Combine(Path.GetTempPath(), "JimmyTest_S3_" + Guid.NewGuid().ToString("N") + ".db");
         string prev = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        string nexusDir = UseTestNexusLog();
         const string myCall = "KB0UZT", myGrid = "FN42";
 
         WsjtxClient MakeClient()
@@ -5776,8 +5612,7 @@ static class JimmyTests
                 Check("1 (Nexus path): the hashed final RR73 completes + logs the QSO",
                       wc.logList.Contains(dx), true);
                 Check("1 (Nexus path): callInProg cleared (no wedge)", wc.callInProg == null, true);
-                using (var db = new LogbookDb(goodDb))
-                    Check("1 (Nexus path): exactly one logbook row", db.SearchQsos(dx, null, null, null).Count == 1, true);
+                Check("1 (Nexus path): exactly one logbook row", QueuedCount(dx) == 1, true);
             }
 
             // 2. Ordinary (non-hashed) partner via the Nexus path: report -> roger -> 73 -> logged.
@@ -5840,6 +5675,7 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+            EndTestNexusLog(nexusDir);
             try { File.Delete(goodDb); } catch { }
         }
     }
@@ -9323,60 +9159,6 @@ static class JimmyTests
               DxSpotWatcher.IsEvenPeriod(otherModeUtc, "WSPR"), true);
     }
 
-    // ── QrzLogbookClient.IsDuplicateReason ──────────────────────────────────────
-    // QRZ reports "already have this QSO" as RESULT=FAIL with a REASON mentioning
-    // "duplicate" rather than a distinct result code -- this must be recognized
-    // so a duplicate is marked handled instead of retried forever on every Alt+U.
-    static void QrzIsDuplicateReasonTests()
-    {
-        Console.WriteLine("\n── QrzLogbookClient.IsDuplicateReason ──");
-        Check("exact QRZ duplicate message recognized",
-              QrzLogbookClient.IsDuplicateReason("Unable to add QSO to database: duplicate"), true);
-        Check("case-insensitive match",
-              QrzLogbookClient.IsDuplicateReason("DUPLICATE QSO"), true);
-        Check("unrelated failure reason is not treated as duplicate",
-              QrzLogbookClient.IsDuplicateReason("Invalid API Key"), false);
-        Check("null reason is not a duplicate", QrzLogbookClient.IsDuplicateReason(null), false);
-        Check("empty reason is not a duplicate", QrzLogbookClient.IsDuplicateReason(""), false);
-        Check("whitespace-only reason is not a duplicate", QrzLogbookClient.IsDuplicateReason("   "), false);
-    }
-
-    // ── HrdLogUploadClient.ClassifyResponse ──────────────────────────────────────
-    // HRDLog.net's NewEntry.aspx reply format and these exact fixture bodies are ported
-    // directly from the open-source Nexus project's crates/tempo-core/src/hrdlog.rs unit
-    // tests, since Jimmy's own codebase has no other documentation of HRDLog's real XML shape.
-    static void HrdLogClassifyResponseTests()
-    {
-        Console.WriteLine("\n── HrdLogUploadClient.ClassifyResponse ──");
-
-        string ok = "<?xml version=\"1.0\" ?><HrdLog xmlns=\"http://xml.hrdlog.com\">" +
-                    "<NewEntry><insert>1</insert></NewEntry></HrdLog>";
-        Check("insert=1 is Ok", HrdLogUploadClient.ClassifyResponse(ok).Result == HrdLogUploadClient.HrdLogResult.Ok, true);
-
-        string dup = "<HrdLog><NewEntry><insert>0</insert></NewEntry></HrdLog>";
-        Check("insert=0 is Duplicate", HrdLogUploadClient.ClassifyResponse(dup).Result == HrdLogUploadClient.HrdLogResult.Duplicate, true);
-
-        string unknownUser = "<HrdLog><NewEntry><error>Unknown user</error></NewEntry></HrdLog>";
-        var unknownUserResult = HrdLogUploadClient.ClassifyResponse(unknownUser);
-        Check("'Unknown user' error is AuthFail", unknownUserResult.Result == HrdLogUploadClient.HrdLogResult.AuthFail, true);
-        Check("'Unknown user' error message preserved", unknownUserResult.Message == "Unknown user", true);
-
-        string invalidToken = "<HrdLog><NewEntry><error>Invalid token</error></NewEntry></HrdLog>";
-        Check("'Invalid token' error is AuthFail",
-              HrdLogUploadClient.ClassifyResponse(invalidToken).Result == HrdLogUploadClient.HrdLogResult.AuthFail, true);
-
-        string badAdif = "<HrdLog><NewEntry><error>A key should contain at least: Call, QSO_Date, " +
-                          "Time_On</error></NewEntry></HrdLog>";
-        var badAdifResult = HrdLogUploadClient.ClassifyResponse(badAdif);
-        Check("other error text is Rejected, not AuthFail", badAdifResult.Result == HrdLogUploadClient.HrdLogResult.Rejected, true);
-        Check("Rejected keeps the error message",
-              badAdifResult.Message != null && badAdifResult.Message.Contains("Call, QSO_Date"), true);
-
-        Check("unrecognized HTML body is Unknown (transient, not a bounce)",
-              HrdLogUploadClient.ClassifyResponse("<html>500 Internal Server Error</html>").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
-        Check("empty body is Unknown", HrdLogUploadClient.ClassifyResponse("").Result == HrdLogUploadClient.HrdLogResult.Unknown, true);
-    }
-
     // ── RigctldClient.ListRigModels ──────────────────────────────────────────────
     // Runs the actual bundled rigctl.exe --list and parses its fixed-column output --
     // regression coverage for the 2026-08-07 rig-model dropdown: a whitespace split would
@@ -9863,101 +9645,86 @@ static class JimmyTests
         Check("empty set -> false", UsGridStateMap.StateSetContains("MN", new HashSet<string>()), false);
     }
 
-    // ── AdifImporter.Import: live-logged QSO state resolution ──────────────────
-    // Regression guard for a live-logged QSO (LiveQsoUploadOrchestrator.ImportLiveLoggedQso,
-    // fed by WsjtxClient.RequestLog) never getting a usable US state when the QSO's own
-    // fields have no STATE key -- exactly the shape RequestLog builds (GRIDSQUARE only,
-    // no STATE). Previously that path passed resolveUsState=null, so a QSO worked with no
-    // grid square heard (e.g. a bare "CQ CALL" with no grid) left state permanently blank,
-    // and that station could never satisfy a State-grouped award (the WAS family) no matter
-    // how many times it was worked. The fix wires the same lookupManager-backed callback
-    // every other US-state lookup in the app already uses into that one call site.
+    // Live-logged QSO state fallback (2026-07-10): WsjtxClient.RequestLog's fields carry no
+    // STATE and often no grid, so a station worked with no grid heard would never count for a
+    // State-grouped award (the WAS family) unless the lookupManager-backed resolveUsState callback
+    // fills it. Checked on the contact as it is queued for Nexus.
     static void AdifImporterLiveLoggedStateFallbackTests()
     {
         Console.WriteLine("\n── AdifImporter.Import: live-logged QSO state fallback ──");
-
-        var def = new RuleDefinition
-        {
-            Id = "TEST_STATE_FALLBACK", Name = "Test", FormatVersion = 1, Enabled = true,
-            GroupBy = RuleGroupBy.State, Target = RuleTargetType.Count, Threshold = 1,
-            Confirmation = RuleConfirmation.None,
-        };
-
-        // Fields shaped exactly like WsjtxClient.RequestLog's liveFields: no STATE key,
-        // GRIDSQUARE blank -- the real-world case (a station worked with no grid heard).
-        Dictionary<string, string> LiveFieldsNoGrid(string call) => new Dictionary<string, string>
+        Dictionary<string, string> LiveFieldsNoGrid(string call, string time) => new Dictionary<string, string>
         {
             ["CALL"] = call, ["BAND"] = "80m", ["FREQ"] = "3.573", ["MODE"] = "FT8",
-            ["QSO_DATE"] = "20260710", ["TIME_ON"] = "104200", ["TIME_OFF"] = "104300",
+            ["QSO_DATE"] = "20260710", ["TIME_ON"] = time, ["TIME_OFF"] = time,
             ["RST_SENT"] = "-10", ["RST_RCVD"] = "-14", ["GRIDSQUARE"] = "",
             ["STATION_CALLSIGN"] = "KB0UZT", ["MY_GRIDSQUARE"] = "EN34",
         };
-
-        string tmpDbFixed = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_LiveStateFallback_Fixed_" + Guid.NewGuid().ToString("N") + ".db");
+        string dir = UseTestNexusLog();
         try
         {
-            using (var db = new LogbookDb(tmpDbFixed))
+            using (var svc = LogbookFactory.Open())
             {
-                AdifImporter.Import(db, new[] { LiveFieldsNoGrid("K5KPE") }, "WSJTX", null,
+                AdifImporter.Import(svc, new[] { LiveFieldsNoGrid("K5KPE", "104200") }, "WSJTX", null,
                     resolveUsState: call => call == "K5KPE" ? "AR" : null);
+                AdifImporter.Import(svc, new[] { LiveFieldsNoGrid("K5KPE", "104500") }, "WSJTX", null, null);
             }
-            var r = RuleEngine.Evaluate(def, tmpDbFixed, null);
+            var queued = NexusLogbook.Outbox.Snapshot();
             Check("resolveUsState callback wired in: no-grid QSO still gets a real state",
-                  r.WorkedItems != null && r.WorkedItems.Contains("AR"), true);
+                  queued.Any(e => e.Qso.State == "AR"), true);
+            Check("without the callback: no state is invented",
+                  queued.Count(e => string.IsNullOrEmpty(e.Qso.State)) == 1, true);
         }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  AdifImporterLiveLoggedStateFallbackTests (fixed) threw: {ex.GetType().Name}: {ex.Message}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDbFixed); } catch { }
-        }
-
-        // Documents the pre-fix behavior for contrast: with no resolveUsState callback and
-        // no grid, the QSO is logged but with no usable state at all (AddGroupByFilter
-        // excludes blank-state rows from grouping entirely), so it can never satisfy a
-        // State-grouped award regardless of how many times the station is worked.
-        string tmpDbBroken = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_LiveStateFallback_Broken_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDbBroken))
-            {
-                AdifImporter.Import(db, new[] { LiveFieldsNoGrid("K5KPE") }, "WSJTX", null, null);
-            }
-            var r = RuleEngine.Evaluate(def, tmpDbBroken, null);
-            Check("without the callback: no-grid QSO never resolves to any state",
-                  r.WorkedItems == null || r.WorkedItems.Count == 0, true);
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  AdifImporterLiveLoggedStateFallbackTests (broken) threw: {ex.GetType().Name}: {ex.Message}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDbBroken); } catch { }
-        }
+        finally { EndTestNexusLog(dir); }
     }
 
-    // ── T12 fix, 2026-08-23 (PARTIALLY CONFIRMED -- LoTW-only DXCC/awards, reported
-    // 2026-08-21): a raw import lacking DXCC/COUNTRY/CONT (real LoTW/Club Log exports
-    // sometimes omit them) now backfills them from the canonical offline Club Log entity data,
-    // instead of persisting dxcc=0 and being permanently invisible to DXCC-needed/worked-DXCC
-    // award logic (LogbookDb.LoadHrcCache's worked/confirmed DXCC sets are filtered dxcc>0) ──
+    // A Nexus log for a test: its own folder, and (when given) a stub engine's port. The
+    // logbook service in test mode never reaches a real engine (NexusLogbook.Port is 0).
+    static string UseTestNexusLog(int? port = null)
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "JimmyTest_NexusLog_" + Guid.NewGuid().ToString("N"));
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = dir;
+        NexusLogbook.TestPortOverride = port;
+        _testNexusDir = dir;
+        return dir;
+    }
+
+    static void EndTestNexusLog(string dir)
+    {
+        NexusLogbook.Reset();
+        NexusLogbook.TestFolderOverride = null;
+        NexusLogbook.TestPortOverride = null;
+        try { Directory.Delete(dir, true); } catch { }
+        if (_testNexusBlocker != null) { try { File.Delete(_testNexusBlocker); } catch { } _testNexusBlocker = null; }
+    }
+
+    // Makes the test's logbook saves fail (a real failure, as on a broken disk: its outbox
+    // folder is placed under a FILE, so it cannot be created), or puts the working folder back.
+    static string _testNexusDir, _testNexusBlocker;
+    static void BreakTestNexusLog(bool broken)
+    {
+        if (broken && _testNexusBlocker == null)
+        {
+            _testNexusBlocker = Path.Combine(Path.GetTempPath(), "JimmyTest_Blocker_" + Guid.NewGuid().ToString("N"));
+            File.WriteAllText(_testNexusBlocker, "blocks a directory from being created at this path");
+        }
+        NexusLogbook.TestFolderOverride = broken ? Path.Combine(_testNexusBlocker, "NexusLog") : _testNexusDir;
+    }
+
+    // How many contacts with this call the test's logbook holds (queued for Nexus).
+    static int QueuedCount(string call) => NexusLogbook.Outbox.Snapshot().Count(e => e.Qso.Call == call);
+
+    // ── T12 fix, 2026-08-23: a contact lacking DXCC/COUNTRY/CONT is filled from the offline
+    // Club Log entity data, instead of dxcc=0 leaving it invisible to every DXCC award. Checked
+    // on the contact as it is queued for Nexus. ──
     static void AdifImporterBackfillsMissingDxccTests()
     {
-        Console.WriteLine("\n── T12 fix: AdifImporter backfills missing DXCC/country/continent -- THE FIX ──");
+        Console.WriteLine("\n── T12 fix: AdifImporter backfills missing DXCC/country/continent ──");
         string tmpRoot = Path.Combine(Path.GetTempPath(), "JimmyTest_T12_ClubLog_" + Guid.NewGuid().ToString("N"));
         var prevClubLog = RuleLibrary.ClubLog;
-        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_T12_Db_" + Guid.NewGuid().ToString("N") + ".db");
+        string dir = UseTestNexusLog();
         try
         {
-            // Same offline fixture shape as RuleUniverseClubLogTests -- one representative
-            // prefix per entity, no network access.
             Directory.CreateDirectory(Path.Combine(tmpRoot, "ClubLog"));
             string xml =
                 "<clublog><entities>" +
@@ -9969,76 +9736,37 @@ static class JimmyTests
             provider.Load();
             RuleLibrary.ClubLog = provider;
 
-            // Raw fields shaped like a real LoTW-only export missing DXCC/COUNTRY/CONT entirely
-            // -- confirmed QSL, but no entity data of its own.
-            var lotwFieldsNoDxcc = new Dictionary<string, string>
+            Dictionary<string, string> Live(string call, string time) => new Dictionary<string, string>
             {
-                ["CALL"] = "K9ABC", ["BAND"] = "20m", ["FREQ"] = "14.074", ["MODE"] = "FT8",
-                ["QSO_DATE"] = "20260710", ["TIME_ON"] = "104200",
-                ["QSL_RCVD"] = "Y", // LoTW confirmation flag
+                ["CALL"] = call, ["BAND"] = "20m", ["FREQ"] = "14.074", ["MODE"] = "FT8",
+                ["QSO_DATE"] = "20260710", ["TIME_ON"] = time,
                 ["STATION_CALLSIGN"] = "KB0UZT", ["MY_GRIDSQUARE"] = "EN34",
             };
-
-            using (var db = new LogbookDb(tmpDb))
+            var withRealDxcc = Live("K9XYZ", "104500");
+            withRealDxcc["DXCC"] = "6"; withRealDxcc["COUNTRY"] = "ALASKA"; withRealDxcc["CONT"] = "NA";
+            using (var svc = LogbookFactory.Open())
             {
-                var result = AdifImporter.Import(db, new[] { lotwFieldsNoDxcc }, "LOTW");
-                Check("Import reports the record processed with no errors", result.Errors == "" && result.NewQsos == 1, true);
-
-                var rows = db.SearchQsos("K9ABC", null, null, null);
-                Check("THE FIX: the imported row's DXCC is backfilled (291, not left at 0)",
-                    rows.Count == 1 && rows[0].Dxcc == 291, true);
-                Check("THE FIX: country is backfilled",
-                    rows.Count == 1 && rows[0].Country == "UNITED STATES OF AMERICA", true);
-                Check("LoTW confirmation flag is preserved independently -- service-neutral, not LoTW-blocked",
-                    rows.Count == 1 && rows[0].LotwQslRcvd == "Y", true);
+                AdifImporter.Import(svc, new[] { Live("K9ABC", "104200") }, "WSJTX");
+                AdifImporter.Import(svc, new[] { withRealDxcc }, "WSJTX");
             }
-
-            // Continent isn't exposed via SearchQsos/QsoRecord -- verified indirectly through a
-            // Continent-grouped rule (evaluated against its own separate connection, after the
-            // import connection above has closed, matching AdifImporterLiveLoggedStateFallback
-            // Tests' own established pattern for verifying a backfilled field this way).
-            var continentRule = new RuleDefinition
-            {
-                Id = "TEST_T12_CONTINENT", Name = "Test", FormatVersion = 1, Enabled = true,
-                GroupBy = RuleGroupBy.Continent, Target = RuleTargetType.Count, Threshold = 1,
-                Confirmation = RuleConfirmation.None,
-            };
-            var continentResult = RuleEngine.Evaluate(continentRule, tmpDb, null);
-            Check("THE FIX: continent is backfilled (NA)",
-                continentResult.WorkedItems != null && continentResult.WorkedItems.Contains("NA"), true);
-
-            // A record that already carries real DXCC/country/continent data must not be
-            // overridden by the offline resolver -- backfill only fills genuinely missing fields.
-            var withRealDxcc = new Dictionary<string, string>
-            {
-                ["CALL"] = "K9XYZ", ["BAND"] = "20m", ["FREQ"] = "14.074", ["MODE"] = "FT8",
-                ["QSO_DATE"] = "20260711", ["TIME_ON"] = "104200",
-                ["DXCC"] = "6", ["COUNTRY"] = "ALASKA", ["CONT"] = "NA",
-                ["STATION_CALLSIGN"] = "KB0UZT", ["MY_GRIDSQUARE"] = "EN34",
-            };
-            string tmpDb2 = Path.Combine(Path.GetTempPath(), "JimmyTest_T12_Db2_" + Guid.NewGuid().ToString("N") + ".db");
-            try
-            {
-                using (var db2 = new LogbookDb(tmpDb2))
-                {
-                    AdifImporter.Import(db2, new[] { withRealDxcc }, "LOTW");
-                    var rows2 = db2.SearchQsos("K9XYZ", null, null, null);
-                    Check("A real source-supplied DXCC (6, Alaska) is never overridden by the K->291 fallback",
-                        rows2.Count == 1 && rows2[0].Dxcc == 6, true);
-                }
-            }
-            finally { try { File.Delete(tmpDb2); } catch { } }
+            var queued = NexusLogbook.Outbox.Snapshot();
+            var filled = queued.First(e => e.Qso.Call == "K9ABC").Qso;
+            Check("THE FIX: DXCC is filled (291, not left at 0)", filled.Dxcc == 291, true);
+            CheckStr("THE FIX: country is filled", filled.Country, "UNITED STATES OF AMERICA");
+            CheckStr("THE FIX: continent is filled", filled.ExtraValue("CONT"), "NA");
+            Check("A real DXCC (6, Alaska) is never overridden by the K->291 fallback",
+                queued.First(e => e.Qso.Call == "K9XYZ").Qso.Dxcc == 6, true);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"  FAIL  AdifImporterBackfillsMissingDxccTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            Console.WriteLine($"  FAIL  AdifImporterBackfillsMissingDxccTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
         finally
         {
             RuleLibrary.ClubLog = prevClubLog;
+            EndTestNexusLog(dir);
             try { Directory.Delete(tmpRoot, true); } catch { }
-            try { File.Delete(tmpDb); } catch { }
         }
     }
 
@@ -10103,76 +9831,6 @@ static class JimmyTests
         {
             Console.WriteLine($"  FAIL  AdifImporterDetectSourceTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
-        }
-    }
-
-    // ── Independent audit finding 3, 2026-08-23 (CONFIRMED bug): AdifImporter's ImportResult
-    // contract that BOTH LogbookWindow.RunImportFromText and LogbookAutoSync.ImportAndReport's
-    // checkpoint-write gating depend on -- valid records are retained even when ANOTHER record
-    // in the same batch genuinely errors, and Errors is populated exactly when a real per-record
-    // failure occurred (the condition each call site's own `if (... && string.IsNullOrWhiteSpace
-    // (result.Errors))` checkpoint guard now uses), not for an ordinary benign skip (a record
-    // Normalize() itself declines, e.g. missing QSO_DATE -- counted in Skipped, never Errors).
-    // Forces a real per-record exception via a throwing resolveUsState callback for one specific
-    // call (Normalize's own try/catch scope in AdifImporter.Import wraps that call) -- a clean,
-    // self-contained way to exercise the catch block without reaching into SQLite internals.
-    static void AdifImportMixedValidErrorRetainsValidRowsTests()
-    {
-        Console.WriteLine("\n── Finding 3: mixed valid/error import retains valid rows, reports Errors truthfully -- THE FIX ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_MixedImport_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            Dictionary<string, string> Rec(string call) => new Dictionary<string, string>
-            {
-                ["CALL"] = call, ["BAND"] = "20m", ["FREQ"] = "14.074", ["MODE"] = "FT8",
-                ["QSO_DATE"] = "20260710", ["TIME_ON"] = "104200",
-                ["STATION_CALLSIGN"] = "KB0UZT", ["MY_GRIDSQUARE"] = "EN34",
-            };
-            var benignSkip = new Dictionary<string, string> { ["CALL"] = "K9SKIP" }; // no QSO_DATE -- Normalize() returns null
-
-            using (var db = new LogbookDb(tmpDb))
-            {
-                var records = new[] { Rec("K9VALID1"), Rec("K9BOOM"), Rec("K9VALID2"), benignSkip };
-                var result = AdifImporter.Import(db, records, "QRZ", null,
-                    resolveUsState: call => call == "K9BOOM" ? throw new InvalidOperationException("simulated per-record failure") : null);
-
-                Check("THE FIX: a genuine per-record error is reported in Errors (checkpoint-gating condition would NOT advance)",
-                    !string.IsNullOrWhiteSpace(result.Errors), true);
-                Check("Both OTHER valid records still committed despite the one error", result.NewQsos == 2, true);
-                // Skipped counts BOTH the benign skip (Normalize() declining a record with no
-                // QSO_DATE) AND the genuine per-record error (Import's own catch block also
-                // increments Skipped alongside Errors) -- 2 total, not a bug, just Skipped's own
-                // established "did not land in the DB" meaning rather than a pure benign-only tally.
-                Check("Skipped totals both the benign skip and the erroring record",
-                    result.Skipped == 2, true);
-                Check("...total Processed accounts for all 4 records", result.Processed == 4, true);
-
-                Check("K9VALID1 actually landed in the DB", db.SearchQsos("K9VALID1", null, null, null).Count == 1, true);
-                Check("K9VALID2 actually landed in the DB", db.SearchQsos("K9VALID2", null, null, null).Count == 1, true);
-                Check("K9BOOM (the erroring record) did NOT land in the DB", db.SearchQsos("K9BOOM", null, null, null).Count == 0, true);
-            }
-
-            // Contrast: an all-valid batch must report Errors == "" (checkpoint-gating condition
-            // WOULD advance) -- the positive control for the assertions above.
-            string tmpDb2 = Path.Combine(Path.GetTempPath(), "JimmyTest_MixedImport2_" + Guid.NewGuid().ToString("N") + ".db");
-            try
-            {
-                using (var db2 = new LogbookDb(tmpDb2))
-                {
-                    var cleanResult = AdifImporter.Import(db2, new[] { Rec("K9CLEAN") }, "QRZ");
-                    Check("All-valid batch: Errors is empty", string.IsNullOrWhiteSpace(cleanResult.Errors), true);
-                }
-            }
-            finally { try { File.Delete(tmpDb2); } catch { } }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  AdifImportMixedValidErrorRetainsValidRowsTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDb); } catch { }
         }
     }
 
@@ -10299,6 +9957,24 @@ static class JimmyTests
               FccUlsProvider.LooksIncomplete(400_000, 1_580_000), true);
     }
 
+    // Seeds one row straight into a test read copy. LogbookDb is read-only (Nexus keeps the log
+    // and the read copy is rebuilt from it), so tests write their fixture rows with SQL.
+    static void SeedQso(LogbookDb db, Dictionary<string, object> cols)
+    {
+        var conn = (System.Data.SQLite.SQLiteConnection)typeof(LogbookDb)
+            .GetField("_conn", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(db);
+        if (!cols.ContainsKey("imported_at")) cols["imported_at"] = DateTime.UtcNow.ToString("o");
+        if (!cols.ContainsKey("dedup_key"))
+            cols["dedup_key"] = AdifImporter.BuildDedupKey((string)cols["callsign"], (string)cols["band"], (string)cols["mode"],
+                (string)cols["qso_date"], (string)cols["time_on"]);
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = $"INSERT OR REPLACE INTO qso ({string.Join(",", cols.Keys)}) VALUES ({string.Join(",", cols.Keys.Select(k => "@" + k))});";
+            foreach (var kv in cols) cmd.Parameters.AddWithValue("@" + kv.Key, kv.Value ?? "");
+            cmd.ExecuteNonQuery();
+        }
+    }
+
     // Insert a minimal QSO record into a test LogbookDb.
     // Each callsign produces a unique dedup key — no counter needed.
     // band/qsoDate/continent are optional so existing calls (fixed 20m,
@@ -10308,14 +9984,13 @@ static class JimmyTests
         string band = "20m", string qsoDate = "20241201", string continent = "",
         string timeOn = "1200")
     {
-        string key = AdifImporter.BuildDedupKey(call, band, "FT8", qsoDate, timeOn);
-        // Parameter order: ..., lotwQslSent, lotwQslRcvd, qrzQslSent, qrzQslRcvd, ...
-        db.Upsert(call, band, "FT8", qsoDate, timeOn, "1215",
-            14_074_000, "-10", "-05", state, "Test", dxcc, zone,
-            "", "", "", "", "", "", "",
-            "", lotwRcvd, "", qrzRcvd,
-            "MANUAL", "", key,
-            continent, 0, "", "", "", "", "", "", "", "", "", "");
+        SeedQso(db, new Dictionary<string, object>
+        {
+            ["callsign"] = call, ["band"] = band, ["mode"] = "FT8", ["qso_date"] = qsoDate, ["time_on"] = timeOn,
+            ["time_off"] = "1215", ["freq_hz"] = 14_074_000L, ["rst_sent"] = "-10", ["rst_rcvd"] = "-05",
+            ["state"] = state, ["country"] = "Test", ["dxcc"] = (long)dxcc, ["cq_zone"] = (long)zone,
+            ["lotw_qsl_rcvd"] = lotwRcvd, ["qrz_qsl_rcvd"] = qrzRcvd, ["source"] = "MANUAL", ["continent"] = continent,
+        });
     }
 
     // Verify that each AP-suffixed message, once stripped, classifies correctly.
@@ -10978,198 +10653,6 @@ static class JimmyTests
         }
     }
 
-    // ── LogbookDb.Upsert: a download FROM a service marks it as already-uploaded
-    // TO that same service ────────────────────────────────────────────────────
-    // A QSO downloaded from QRZ obviously doesn't need to be uploaded back to
-    // QRZ -- that's where it came from. Before this fix, qrz_uploaded_at/
-    // clublog_uploaded_at were never touched by a download import at all, so
-    // such a QSO stayed "pending" forever and got redundantly re-uploaded.
-    static void LogbookDbDownloadMarksUploadedTests()
-    {
-        Console.WriteLine("\n── LogbookDb.Upsert: download marks matching service uploaded ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_DownloadUploaded_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                void DoUpsert(string call, string key, string source)
-                {
-                    db.Upsert(call, "20m", "FT8", "20260706", "1200", "1215",
-                        14_074_000, "-10", "-05", "", "", 0, 0,
-                        "", "", "", "", "", "", "",
-                        "", "", "", "",
-                        source, "", key,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-                }
-
-                string keyA = AdifImporter.BuildDedupKey("W1AW", "20m", "FT8", "20260706", "1200");
-                DoUpsert("W1AW", keyA, "WSJTX");
-                Check("before any download: QRZ pending includes the WSJTX-logged QSO",
-                      db.GetUploadSyncStatus("QRZ").PendingCount == 1, true);
-                Check("before any download: CLUBLOG pending also includes it",
-                      db.GetUploadSyncStatus("CLUBLOG").PendingCount == 1, true);
-
-                // Downloading it back from QRZ must mark it uploaded-to-QRZ...
-                DoUpsert("W1AW", keyA, "QRZ");
-                Check("QRZ download marks the QSO as no longer pending for QRZ",
-                      db.GetUploadSyncStatus("QRZ").PendingCount == 0, true);
-                Check("...but does NOT affect Club Log's pending status",
-                      db.GetUploadSyncStatus("CLUBLOG").PendingCount == 1, true);
-
-                // A later Club Log download for the same QSO must independently mark
-                // Club Log too, without disturbing the already-set QRZ status.
-                DoUpsert("W1AW", keyA, "CLUBLOG");
-                Check("Club Log download marks the QSO as no longer pending for Club Log",
-                      db.GetUploadSyncStatus("CLUBLOG").PendingCount == 0, true);
-                Check("QRZ status remains uploaded after the Club Log download",
-                      db.GetUploadSyncStatus("QRZ").PendingCount == 0, true);
-
-                // A download from an unrelated service (LOTW) must not mark either.
-                string keyB = AdifImporter.BuildDedupKey("K1XYZ", "20m", "FT8", "20260706", "1201");
-                DoUpsert("K1XYZ", keyB, "WSJTX");
-                DoUpsert("K1XYZ", keyB, "LOTW");
-                Check("LoTW download does not mark QRZ as uploaded",
-                      db.GetUploadSyncStatus("QRZ").PendingCount == 1, true);
-                Check("LoTW download does not mark Club Log as uploaded",
-                      db.GetUploadSyncStatus("CLUBLOG").PendingCount == 1, true);
-
-            }
-
-            // Separate, single-row database for this check -- GetUploadSyncStatus's
-            // LastUploadUtc is a table-wide MAX(), which the multi-row db above would
-            // confuse this assertion with (an unrelated row's later real timestamp
-            // would win the MAX() over the specific value being checked here).
-            string tmpDb2 = Path.Combine(Path.GetTempPath(),
-                "JimmyTest_DownloadUploaded2_" + Guid.NewGuid().ToString("N") + ".db");
-            try
-            {
-                using (var db2 = new LogbookDb(tmpDb2))
-                {
-                    string keyC = AdifImporter.BuildDedupKey("K1XYZ", "20m", "FT8", "20260706", "1201");
-                    db2.Upsert("K1XYZ", "20m", "FT8", "20260706", "1200", "1215",
-                        14_074_000, "-10", "-05", "", "", 0, 0,
-                        "", "", "", "", "", "", "",
-                        "", "", "", "",
-                        "WSJTX", "", keyC,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-
-                    // A real prior upload (Jimmy's own successful Alt+U) must never be
-                    // downgraded/overwritten by a later download's import timestamp.
-                    var realUploadTime = new DateTime(2026, 7, 1, 9, 0, 0, DateTimeKind.Utc);
-                    db2.MarkUploaded(keyC, "QRZ", realUploadTime);
-                    db2.Upsert("K1XYZ", "20m", "FT8", "20260706", "1200", "1215",
-                        14_074_000, "-10", "-05", "", "", 0, 0,
-                        "", "", "", "", "", "", "",
-                        "", "", "", "",
-                        "QRZ", "", keyC,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-                    Check("a real prior upload timestamp is preserved, not overwritten by a later download",
-                          db2.GetUploadSyncStatus("QRZ").LastUploadUtc == realUploadTime, true);
-                }
-            }
-            finally
-            {
-                try { File.Delete(tmpDb2); } catch { }
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  LogbookDbDownloadMarksUploadedTests threw: {ex.GetType().Name}: {ex.Message}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDb); } catch { }
-        }
-    }
-
-    // ── LogbookDb.Upsert: source label upgrades but never downgrades -- THE FIX ────────
-    // A QSO's stored `source` used to freeze at whatever import created the row first
-    // (Upsert's ON CONFLICT clause never touched it) -- a plain/headerless ADIF imported
-    // before ever downloading from QRZ/LoTW left the row permanently labeled "MANUAL", even
-    // once genuinely confirmed by a real service. That never affected award-progress
-    // counting (LotwConfirmedQsos/QrzConfirmedQsos/RuleEngine's ConfirmationExpression all
-    // read the real lotw_qsl_rcvd/qrz_qsl_rcvd flags directly, never this column), but it did
-    // undercount LogbookDb.TotalQsos/ConfirmedQsos when called WITH a source filter -- the
-    // Sync tab's per-service "QSOs: N" tally specifically. Fixed: source now upgrades from
-    // MANUAL to a real, specific origin the first time one becomes known, and once it's a
-    // real value it is never overwritten again by anything -- a later manual re-import, or a
-    // download from a DIFFERENT real service.
-    static void LogbookDbSourceUpgradeNeverDowngradeTests()
-    {
-        Console.WriteLine("\n── LogbookDb.Upsert: source upgrades but never downgrades -- THE FIX ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_SourceUpgrade_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                void DoUpsert(string call, string key, string source)
-                {
-                    db.Upsert(call, "20m", "FT8", "20260706", "1200", "1215",
-                        14_074_000, "-10", "-05", "", "", 0, 0,
-                        "", "", "", "", "", "", "",
-                        "", "", "", "",
-                        source, "", key,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-                }
-                string SourceOf(string call) =>
-                    db.SearchQsos(call, null, null, null).Single().Source;
-
-                // Scenario 1: plain/headerless ADIF first (tagged MANUAL by AdifImporter.
-                // DetectSource), then a real QRZ download for the exact same QSO -- source
-                // must upgrade from MANUAL to QRZ.
-                string keyA = AdifImporter.BuildDedupKey("W1AW", "20m", "FT8", "20260706", "1200");
-                DoUpsert("W1AW", keyA, "MANUAL");
-                CheckStr("Fresh manual import: source is MANUAL", SourceOf("W1AW"), "MANUAL");
-                DoUpsert("W1AW", keyA, "QRZ");
-                CheckStr("THE FIX: a later QRZ download upgrades source MANUAL -> QRZ", SourceOf("W1AW"), "QRZ");
-
-                // Scenario 2: once real, NEVER downgraded by a later manual (re-)import --
-                // e.g. re-importing an old WSJT-X export of the same log after QRZ already
-                // confirmed it.
-                DoUpsert("W1AW", keyA, "MANUAL");
-                CheckStr("THE FIX: a later MANUAL import does NOT downgrade an already-real source",
-                    SourceOf("W1AW"), "QRZ");
-
-                // Scenario 3: once real, not swapped for a DIFFERENT real service either --
-                // the first real source known wins; LoTW confirming the same QSO later
-                // doesn't relabel it away from QRZ (per-service confirmation flags already
-                // track LoTW/QRZ independently regardless of this label -- see the class
-                // comment above).
-                DoUpsert("W1AW", keyA, "LOTW");
-                CheckStr("THE FIX: a different real source (LOTW) does not steal the label from QRZ",
-                    SourceOf("W1AW"), "QRZ");
-
-                // Scenario 4: the reverse order -- QRZ download FIRST, then a later plain
-                // manual import of the same QSO -- must never downgrade it either.
-                string keyB = AdifImporter.BuildDedupKey("K1XYZ", "20m", "FT8", "20260706", "1201");
-                DoUpsert("K1XYZ", keyB, "QRZ");
-                DoUpsert("K1XYZ", keyB, "MANUAL");
-                CheckStr("THE FIX: QRZ-first then a later MANUAL import still stays QRZ",
-                    SourceOf("K1XYZ"), "QRZ");
-
-                // Scenario 5: a QSO that's genuinely only ever seen manually stays MANUAL --
-                // this isn't a blanket "always overwrite," only an upgrade path.
-                string keyC = AdifImporter.BuildDedupKey("N3ABC", "20m", "FT8", "20260706", "1202");
-                DoUpsert("N3ABC", keyC, "MANUAL");
-                DoUpsert("N3ABC", keyC, "MANUAL");
-                CheckStr("A QSO only ever imported manually stays MANUAL (no false upgrade)",
-                    SourceOf("N3ABC"), "MANUAL");
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  LogbookDbSourceUpgradeNeverDowngradeTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDb); } catch { }
-        }
-    }
-
     // ── RuleEngine "Band(s) worked" column ─────────────────────────────────────
     // The Awards tab's "Band(s) worked" column (RuleResult.WorkedBands) must
     // list every band a station was worked on, low-to-high, regardless of the
@@ -11610,263 +11093,6 @@ static class JimmyTests
         Check("BuildFile: starts with the header", file.StartsWith(header), true);
         Check("BuildFile: contains one <eor> per record",
               file.Split(new[] { "<eor>" }, StringSplitOptions.None).Length - 1 == 2, true);
-    }
-
-    // ── LogbookDb: Edit Log tab support (search/edit/delete/export) ─────────────
-    // Local-only data hygiene tooling added after a real incident where fake
-    // replay-test QSOs (K4YT, W1ADIF, W9NEED, etc.) leaked into the production
-    // logbook and real QRZ/Club Log accounts -- this is what lets a user find and
-    // remove them without touching QRZ/Club Log/LoTW's own APIs.
-    static void LogbookDbEditLogTests()
-    {
-        Console.WriteLine("\n── LogbookDb: SearchQsos/GetQso/UpdateQso/DeleteQsos/GetAdifFieldDicts ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_EditLog_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                InsertQso(db, "K4YT",   "GA", dxcc: 291, zone: 4, band: "20m", qsoDate: "20260706");
-                InsertQso(db, "W1ADIF", "CT", dxcc: 291, zone: 5, band: "20m", qsoDate: "20260708");
-                InsertQso(db, "W9NEED", "IL", dxcc: 291, zone: 4, band: "40m", qsoDate: "20260710");
-
-                // ── SearchQsos filters ──────────────────────────────────────
-                var byCall = db.SearchQsos("K4YT", null, null, null);
-                Check("SearchQsos: callsign filter matches", byCall.Count == 1 && byCall[0].Callsign == "K4YT", true);
-
-                var byDateFrom = db.SearchQsos(null, null, "20260707", null);
-                Check("SearchQsos: date-from excludes the earlier K4YT row (2 remain)", byDateFrom.Count == 2, true);
-
-                var byDateRange = db.SearchQsos(null, null, "20260707", "20260709");
-                Check("SearchQsos: date range narrows to just W1ADIF",
-                      byDateRange.Count == 1 && byDateRange[0].Callsign == "W1ADIF", true);
-
-                var bySource = db.SearchQsos(null, "MANUAL", null, null);
-                Check("SearchQsos: source filter matches (InsertQso writes source=MANUAL)", bySource.Count == 3, true);
-
-                var all = db.SearchQsos(null, null, null, null);
-                Check("SearchQsos: no filters returns all 3", all.Count == 3, true);
-
-                // ── GetQso / UpdateQso ───────────────────────────────────────
-                int id = byCall[0].Id;
-                Check("SearchQsos: row id is populated (non-zero)", id != 0, true);
-
-                var fetched = db.GetQso(id);
-                Check("GetQso: fetches the right row", fetched != null && fetched.Callsign == "K4YT", true);
-
-                bool updated = db.UpdateQso(id, "K4YT", "20m", "FT8", "20260706", "1200", "1215",
-                    "FL", "Test", "EM63", "Test Name", "-10", "-05", "Fixed via editor");
-                Check("UpdateQso: reports a change", updated, true);
-
-                var afterUpdate = db.GetQso(id);
-                Check("UpdateQso: state updated",   afterUpdate.State   == "FL", true);
-                Check("UpdateQso: comment updated", afterUpdate.Comment == "Fixed via editor", true);
-
-                // Attempting to rename this row to collide with another row's identity
-                // (same callsign/band/mode/date/time) must throw, not silently merge --
-                // the caller shows this as a "duplicate" error rather than losing data.
-                bool threwOnCollision = false;
-                try
-                {
-                    db.UpdateQso(id, "W1ADIF", "20m", "FT8", "20260708", "1200", "1215",
-                        "FL", "Test", "", "", "", "", "");
-                }
-                catch (Exception) { threwOnCollision = true; }
-                Check("UpdateQso: colliding with another row's identity throws instead of silently merging",
-                      threwOnCollision, true);
-
-                // ── DeleteQsos ────────────────────────────────────────────────
-                var toDelete = db.SearchQsos("W1ADIF", null, null, null);
-                int deleted = db.DeleteQsos(new[] { toDelete[0].Id });
-                Check("DeleteQsos: reports 1 row deleted", deleted == 1, true);
-                Check("DeleteQsos: row actually gone", db.SearchQsos("W1ADIF", null, null, null).Count == 0, true);
-                Check("DeleteQsos: unrelated rows untouched", db.SearchQsos(null, null, null, null).Count == 2, true);
-                Check("DeleteQsos: empty id list is a safe no-op", db.DeleteQsos(new int[0]) == 0, true);
-
-                // ── GetAdifFieldDicts ─────────────────────────────────────────
-                var exportAll = db.GetAdifFieldDicts(null);
-                Check("GetAdifFieldDicts: exports every remaining row", exportAll.Count == 2, true);
-                Check("GetAdifFieldDicts: CALL field present",
-                      exportAll.Any(f => f.ContainsKey("CALL") && f["CALL"] == "K4YT"), true);
-                Check("GetAdifFieldDicts: zero-valued numeric fields omitted (no DXCC=0 noise)",
-                      exportAll.All(f => !f.ContainsKey("DXCC") || f["DXCC"] != "0"), true);
-
-                var idsLeft = db.SearchQsos(null, null, null, null).Select(q => q.Id).ToList();
-                var exportOne = db.GetAdifFieldDicts(new[] { idsLeft[0] });
-                Check("GetAdifFieldDicts: scoped id list exports exactly that count", exportOne.Count == 1, true);
-
-                var exportBySource = db.GetAdifFieldDicts(null, new[] { "MANUAL" });
-                Check("GetAdifFieldDicts: source filter matching all rows (source=MANUAL) exports both",
-                      exportBySource.Count == 2, true);
-
-                var exportByOtherSource = db.GetAdifFieldDicts(null, new[] { "QRZ" });
-                Check("GetAdifFieldDicts: source filter matching no rows exports none",
-                      exportByOtherSource.Count == 0, true);
-
-                var exportIdsAndSource = db.GetAdifFieldDicts(new[] { idsLeft[0] }, new[] { "MANUAL" });
-                Check("GetAdifFieldDicts: id list and source filter combine (AND, not OR)",
-                      exportIdsAndSource.Count == 1, true);
-            }
-        }
-        catch (Exception ex)
-        {
-            Check("LogbookDbEditLogTests: unexpected exception -- " + ex.Message, false, true);
-        }
-        finally
-        {
-            try { if (File.Exists(tmpDb)) File.Delete(tmpDb); } catch { }
-        }
-    }
-
-    // ── LogbookDb.Upsert: authoritative source overrides Jimmy's own guess ─────
-    // country/dxcc/continent/cq_zone are populated at live-logging time from
-    // Jimmy's own local Club Log cache (EnrichWithClubLogGeoData) -- a guess, not
-    // an authoritative fact. A later sync from QRZ/LoTW/Club Log must always be
-    // able to correct that guess, even if a (possibly wrong) value is already
-    // present. A second self-sourced (WSJTX) or MANUAL write must NOT clobber an
-    // already-synced authoritative value -- it only fills in if still blank.
-    // Uses SearchByCallsign (country/dxcc) as the read-back path since those are
-    // the only two of the four affected columns already exposed publicly; all
-    // four columns share the identical CASE WHEN shape, so this covers the logic.
-    static void LogbookDbAuthoritativeSourceOverrideTests()
-    {
-        Console.WriteLine("\n── LogbookDb.Upsert: authoritative source overrides guess ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_Upsert_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                string key = AdifImporter.BuildDedupKey("W1AW", "20m", "FT8", "20260706", "1200");
-                void DoUpsert(string source, string country, int dxcc)
-                {
-                    db.Upsert("W1AW", "20m", "FT8", "20260706", "1200", "1215",
-                        14_074_000, "-10", "-05", "", country, dxcc, 0,
-                        "", "", "", "", "", "", "",
-                        "", "", "", "",
-                        source, "", key,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-                }
-                (string country, int dxcc) Read()
-                {
-                    var rec = db.SearchByCallsign("W1AW").First();
-                    return (rec.Country, rec.Dxcc);
-                }
-
-                // Jimmy's own guess, written at live-logging time (source=WSJTX)
-                DoUpsert("WSJTX", "Wrong Guess", 1);
-                var afterGuess = Read();
-                Check("initial WSJTX guess stored", afterGuess.country == "Wrong Guess" && afterGuess.dxcc == 1, true);
-
-                // A second self-sourced write must NOT clobber the (still-a-guess) value --
-                // a different WSJTX guess must not overwrite the first (blank-only-backfill).
-                DoUpsert("WSJTX", "Another Guess", 2);
-                var afterSecondGuess = Read();
-                Check("second WSJTX write does not overwrite existing guess (blank-only-backfill)",
-                      afterSecondGuess.country == "Wrong Guess" && afterSecondGuess.dxcc == 1, true);
-
-                // QRZ sync arrives with the real data -- must overwrite the wrong guess
-                DoUpsert("QRZ", "United States", 291);
-                var afterQrz = Read();
-                Check("QRZ sync overwrites wrong guess: country", afterQrz.country == "United States", true);
-                Check("QRZ sync overwrites wrong guess: dxcc", afterQrz.dxcc == 291, true);
-
-                // A subsequent WSJTX/self-log re-send must NOT be able to clobber the
-                // now-authoritative QRZ value back to a guess.
-                DoUpsert("WSJTX", "Wrong Guess Again", 1);
-                var afterReguess = Read();
-                Check("WSJTX write after QRZ sync cannot overwrite authoritative value",
-                      afterReguess.country == "United States" && afterReguess.dxcc == 291, true);
-
-                // A later LoTW sync must still be able to override an existing (even if already
-                // authoritative-sourced) value -- authoritative sources always win over each other.
-                DoUpsert("LOTW", "United States Corrected", 291);
-                var afterLotw = Read();
-                Check("LOTW sync can overwrite a previously-QRZ-sourced value",
-                      afterLotw.country == "United States Corrected", true);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  LogbookDbAuthoritativeSourceOverrideTests threw: {ex.GetType().Name}: {ex.Message}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDb); } catch { }
-        }
-    }
-
-    // ── LogbookDb.Upsert: newly-confirmed vs corrected categorization ──────────
-    // A sync's "N updated" used to be a single opaque bucket. Confirming a QSL
-    // (moves award progress) and correcting a data-quality field (state/country/
-    // etc.) are independent signals -- a row can be neither, either, or both.
-    static void LogbookDbNewlyConfirmedVsCorrectedTests()
-    {
-        Console.WriteLine("\n── LogbookDb.Upsert: newly-confirmed vs corrected categorization ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_UpsertCategorize_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                string key = AdifImporter.BuildDedupKey("K1ABC", "20m", "FT8", "20260706", "1200");
-                (bool isNew, bool newlyConfirmed, bool corrected) DoUpsert(
-                    string state, string qrzQslRcvd, string source = "QRZ")
-                {
-                    return db.Upsert("K1ABC", "20m", "FT8", "20260706", "1200", "1215",
-                        14_074_000, "-10", "-05", state, "", 0, 0,
-                        "", "", "", "", "", "", "",
-                        "", "", "", qrzQslRcvd,
-                        source, "", key,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-                }
-
-                var first = DoUpsert("", "");
-                Check("first insert: isNew", first.isNew, true);
-                Check("first insert: not newlyConfirmed", first.newlyConfirmed, false);
-                Check("first insert: not corrected", first.corrected, false);
-
-                var noChange = DoUpsert("", "");
-                Check("re-upsert identical data: not new", noChange.isNew, false);
-                Check("re-upsert identical data: not newlyConfirmed", noChange.newlyConfirmed, false);
-                Check("re-upsert identical data: not corrected", noChange.corrected, false);
-
-                var confirmed = DoUpsert("", "Y");
-                Check("QRZ confirms QSL: not new", confirmed.isNew, false);
-                Check("QRZ confirms QSL: newlyConfirmed", confirmed.newlyConfirmed, true);
-                Check("QRZ confirms QSL: not corrected", confirmed.corrected, false);
-
-                var stateFixed = DoUpsert("CA", "Y");
-                Check("state corrected (already confirmed): not newlyConfirmed again", stateFixed.newlyConfirmed, false);
-                Check("state corrected (already confirmed): corrected", stateFixed.corrected, true);
-
-                string key2 = AdifImporter.BuildDedupKey("K2DEF", "20m", "FT8", "20260706", "1300");
-                db.Upsert("K2DEF", "20m", "FT8", "20260706", "1300", "1315",
-                    14_074_000, "-10", "-05", "", "", 0, 0,
-                    "", "", "", "", "", "", "",
-                    "", "", "", "",
-                    "QRZ", "", key2,
-                    "", 0, "", "", "", "", "", "", "", "", "", "");
-                var bothAtOnce = db.Upsert("K2DEF", "20m", "FT8", "20260706", "1300", "1315",
-                    14_074_000, "-10", "-05", "TX", "", 0, 0,
-                    "", "", "", "", "", "", "",
-                    "", "", "", "Y",
-                    "QRZ", "", key2,
-                    "", 0, "", "", "", "", "", "", "", "", "", "");
-                Check("confirmed + corrected in same sync: newlyConfirmed", bothAtOnce.newlyConfirmed, true);
-                Check("confirmed + corrected in same sync: corrected", bothAtOnce.corrected, true);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  LogbookDbNewlyConfirmedVsCorrectedTests threw: {ex.GetType().Name}: {ex.Message}");
-            failed++;
-        }
-        finally
-        {
-            try { File.Delete(tmpDb); } catch { }
-        }
     }
 
     // ── 13 Colonies bonus-station roster regression guard ──────────────────────
@@ -18092,7 +17318,7 @@ static class JimmyTests
                 TabOrderWalker.OnSTA(() =>
                 {
                     using (var cw = new ContestingWindow(
-                        () => ":memory:", () => "K5KPE", () => "EM48", () => "K5KPE",
+                        () => "K5KPE", () => "EM48", () => "K5KPE",
                         () => null, () => new StationSettings()))
                     {
                         cw.Show();
@@ -18145,21 +17371,21 @@ static class JimmyTests
         {
             TabOrderWalker.OnSTA(() =>
             {
-                using (var bothBlank = new ContestingWindow(() => ":memory:", () => "", () => "", () => "",
+                using (var bothBlank = new ContestingWindow(() => "", () => "", () => "",
                     () => null, () => new StationSettings()))
                 {
                     string msg = (string)requireMethod.Invoke(bothBlank, null);
                     Check("Both blank: names Station Callsign (checked before Grid)",
                         msg != null && msg.Contains("Station Callsign"), true);
                 }
-                using (var gridBlank = new ContestingWindow(() => ":memory:", () => "K5KPE", () => "", () => "K5KPE",
+                using (var gridBlank = new ContestingWindow(() => "K5KPE", () => "", () => "K5KPE",
                     () => null, () => new StationSettings()))
                 {
                     string msg = (string)requireMethod.Invoke(gridBlank, null);
                     Check("Station Callsign set, Grid blank: names Grid Locator",
                         msg != null && msg.Contains("Grid Locator"), true);
                 }
-                using (var bothSet = new ContestingWindow(() => ":memory:", () => "K5KPE", () => "EM48", () => "K5KPE",
+                using (var bothSet = new ContestingWindow(() => "K5KPE", () => "EM48", () => "K5KPE",
                     () => null, () => new StationSettings()))
                 {
                     string msg = (string)requireMethod.Invoke(bothSet, null);
@@ -19611,10 +18837,14 @@ static class JimmyTests
                 ""recentDecodes"": [
                     { ""from"": ""W1AW"", ""message"": ""CQ W1AW FN31"", ""snr"": -5, ""dtSec"": 0.1, ""freqHz"": 1500 },
                     { ""from"": ""K2ABC"", ""message"": ""K2ABC KB0UZT -10"", ""snr"": -10, ""dtSec"": 0.2, ""freqHz"": 1600 },
-                    { ""from"": ""VE3XYZ"", ""message"": ""CQ VE3XYZ FN25"", ""snr"": -3, ""dtSec"": 0.0, ""freqHz"": 1700 }
+                    { ""from"": ""VE3XYZ"", ""message"": ""CQ VE3XYZ FN25"", ""snr"": -3, ""dtSec"": 0.0, ""freqHz"": 1700 },
+                    { ""from"": ""KB0UZT"", ""message"": ""VA7QI KB0UZT EN34"", ""snr"": 0, ""dtSec"": 0.0, ""freqHz"": 2157, ""mine"": true }
                 ]
             }");
             wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ft8Snap);
+            // Nexus lists our own recent overs in the same feed ("mine" rows) -- never a decode.
+            Check("FT8: our own transmitted message (a 'mine' row) is not taken as a decode",
+                wc.TestRawDecodeHistory.Exists(d => d.Message == "VA7QI KB0UZT EN34"), false);
             Check("FT8: all 3 decodes from this period reached the raw decode history, none silently dropped",
                 wc.TestRawDecodeHistory.Count == 3, true);
             Check("FT8: a plain CQ made it through", wc.TestRawDecodeHistory.Exists(d => d.Message == "CQ W1AW FN31"), true);
@@ -20929,6 +20159,7 @@ static class JimmyTests
         string workingDbPath = Path.Combine(Path.GetTempPath(),
             "JimmyTest_ClaimRelease_" + Guid.NewGuid().ToString("N") + ".db");
         string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        string nexusDir = UseTestNexusLog();
         try
         {
             // WsjtxClient's own constructor opens a SEPARATE, persistent classification LogbookDb
@@ -20972,12 +20203,12 @@ static class JimmyTests
                 ""qso"": { ""state"": ""done"", ""txNow"": """ + qsoCall + " " + myCall + @" 73"" }
             }");
 
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", brokenDbPath);
+            BreakTestNexusLog(true);   // the logbook save now fails
             wc.TestApplyDirectSnapshot(myCall, myGrid, snap73);
             Check("First attempt (broken DB path) does not falsely add the call to today's logged list",
                 wc.logList.Contains(qsoCall), false);
 
-            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", workingDbPath);
+            BreakTestNexusLog(false);
             // Re-arm callInProg: SetCallInProg(null) already cleared it after the first attempt
             // above (see this test's own comment) -- this simulates whatever real trigger would
             // supply the same QSO to RequestLog again for a retry.
@@ -20994,6 +20225,7 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            EndTestNexusLog(nexusDir);
             try { File.Delete(workingDbPath); } catch { }
             try { File.Delete(blockerFile); } catch { }
         }
@@ -22725,13 +21957,11 @@ static class JimmyTests
     static void CrashLoggerTests()
     {
         Console.WriteLine("\n── CrashLogger.Log: writes exception details to log_crashes.txt ──");
-        // CrashLogger.Log's own internal Assembly.GetExecutingAssembly() resolves to
-        // wherever CrashLogger's IL actually lives (Jimmy Next.dll) regardless of who calls
-        // it -- using THIS test's own GetExecutingAssembly() here would resolve to
-        // JimmyTests.dll instead and silently check the wrong folder.
-        string logPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        // Test mode: the isolated test folder, never the real app folder's crash log.
+        string logPath = CrashLogger.LogPath();
+        string realLog = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             typeof(CrashLogger).Assembly.GetName().Name, "log_crashes.txt");
+        Check("test mode: the crash log is not the real one", !string.Equals(logPath, realLog, StringComparison.OrdinalIgnoreCase), true);
         long beforeLength = File.Exists(logPath) ? new FileInfo(logPath).Length : 0;
 
         Exception thrown;
@@ -26874,15 +26104,6 @@ static class JimmyTests
                 CheckStr("contest_id defaults to blank on an ordinary QSO", contestId, "");
                 CheckStr("contest_session_id defaults to blank on an ordinary QSO", contestSessionId, "");
                 CheckStr("modified_at defaults to blank until an edit happens", modifiedAt, "");
-
-                // UpdateQso (the operator-edit path) stamps modified_at.
-                // Signature: (id, callsign, band, mode, qsoDate, timeOn, timeOff, state,
-                // country, grid, name, rstSent, rstRcvd, comment)
-                db.UpdateQso((int)id, "K5KPE", "20m", "FT8",
-                    "20241201", "1200", "1215", "MO", "Test",
-                    "EM48", "", "-10", "-05", "");
-                var (_, _, _, modifiedAfterEdit) = QueryContestCols(tmpDb, "K5KPE");
-                Check("modified_at is stamped after UpdateQso", modifiedAfterEdit.Length > 0, true);
             }
 
             // Re-opening an already-migrated database must not throw and must stay at v10.
@@ -26976,109 +26197,6 @@ static class JimmyTests
         CheckStr("Deterministic round trip: identical fragment on a second run", fragment2, fragment);
     }
 
-    // End-to-end: AdifImporter.Import(db, AdifParser.ParseWithOrder(text), ...) actually stores
-    // the extras against the right qso row, in order, duplicates included -- not just the pure
-    // unit-level pieces above.
-    static void AdifImporterExtraFieldsIntegrationTests()
-    {
-        Console.WriteLine("\n── AdifImporter + LogbookDb: unknown ADIF fields round-trip through a real import ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_AdifExtrasIntegration_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                string adif =
-                    "<call:5>K5KPE<band:3>20m<mode:3>FT8<qso_date:8>20241201<time_on:4>1200" +
-                    "<rst_sent:3>-10<rst_rcvd:3>-05<my_sota_ref:10>W5O/AA-001<my_sota_ref:10>W5O/AA-002" +
-                    "<qslmsg:11>TNX FER QSO<eor>\r\n";
-
-                var result = AdifImporter.Import(db, AdifParser.ParseWithOrder(adif), "MANUAL");
-                Check("Import: 1 new QSO", result.NewQsos == 1, true);
-
-                var (id, _, _, _) = QueryContestCols(tmpDb, "K5KPE");
-                var extras = db.GetExtraFields(id);
-                Check("3 extra occurrences stored against the real qso row", extras.Count == 3, true);
-                CheckStr("Stored extra #1 in file order", extras[0].Value, "W5O/AA-001");
-                CheckStr("Stored extra #2 (duplicate tag) in file order", extras[1].Value, "W5O/AA-002");
-                CheckStr("Stored extra #3", extras[2].Value, "TNX FER QSO");
-
-                // Re-importing the same record (a correction/re-sync) replaces, not accumulates.
-                AdifImporter.Import(db, AdifParser.ParseWithOrder(adif), "MANUAL");
-                var extrasAfterReimport = db.GetExtraFields(id);
-                Check("Re-import replaces extras rather than duplicating them", extrasAfterReimport.Count == 3, true);
-            }
-        }
-        finally { try { File.Delete(tmpDb); } catch { } }
-    }
-
-    // ix_nexus_contest_source_qso: enforces uniqueness ONLY for source='NEXUS_CONTEST' rows with
-    // a non-empty source_qso_id -- must not block the many pre-existing MANUAL/blank-source_qso_id
-    // rows from coexisting, and must not merge/alter/touch any row from another source.
-    static void NexusContestIdempotencyIndexTests()
-    {
-        Console.WriteLine("\n── ix_nexus_contest_source_qso: Nexus-contest-only idempotency ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(),
-            "JimmyTest_NexusIdempotency_" + Guid.NewGuid().ToString("N") + ".db");
-        try
-        {
-            using (var db = new LogbookDb(tmpDb))
-            {
-                // Two ordinary MANUAL rows, both with blank source_qso_id -- must coexist freely;
-                // the partial index's WHERE clause must exclude them.
-                InsertQso(db, "W1AW", "CT", dxcc: 291, zone: 5, timeOn: "1200");
-                InsertQso(db, "K1ABC", "CT", dxcc: 291, zone: 5, timeOn: "1300");
-                var afterManual = QueryContestCols(tmpDb, "W1AW");
-                Check("Two blank-source_qso_id MANUAL rows both exist (partial index did not block them)",
-                    afterManual.id > 0, true);
-
-                // First NEXUS_CONTEST row with a real source_qso_id -- must succeed.
-                string key1 = AdifImporter.BuildDedupKey("N9XYZ", "20m", "FT8", "20260627", "1800");
-                db.Upsert("N9XYZ", "20m", "FT8", "20260627", "1800", "1815",
-                    14_074_000, "-05", "+02", "MO", "Test", 291, 4,
-                    "", "", "", "", "", "", "",
-                    "", "", "", "",
-                    "NEXUS_CONTEST", "sess-abc123:1", key1,
-                    "", 0, "", "", "", "", "", "", "", "", "", "");
-
-                // Second, DIFFERENT contact but the SAME (source, source_qso_id) pair -- the
-                // idempotent-delivery case a redelivered CONTEST_QSO_LOGGED notification hits.
-                // Must be rejected by the unique index, not silently duplicated.
-                string key2 = AdifImporter.BuildDedupKey("W9DEF", "20m", "FT8", "20260627", "1801");
-                bool threw = false;
-                try
-                {
-                    db.Upsert("W9DEF", "20m", "FT8", "20260627", "1801", "1816",
-                        14_074_000, "-05", "+02", "MO", "Test", 291, 4,
-                        "", "", "", "", "", "", "",
-                        "", "", "", "",
-                        "NEXUS_CONTEST", "sess-abc123:1", key2,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-                }
-                catch (System.Data.SQLite.SQLiteException) { threw = true; }
-                Check("Same (source, source_qso_id) pair for a NEXUS_CONTEST row is rejected",
-                    threw, true);
-
-                // A DIFFERENT sequence under the same session id must succeed -- the index keys
-                // on the whole (source, source_qso_id) string, not just the session prefix.
-                string key3 = AdifImporter.BuildDedupKey("VE3TST", "20m", "FT8", "20260627", "1802");
-                bool threw2 = false;
-                try
-                {
-                    db.Upsert("VE3TST", "20m", "FT8", "20260627", "1802", "1817",
-                        14_074_000, "-05", "+02", "ON", "Test", 1, 4,
-                        "", "", "", "", "", "", "",
-                        "", "", "", "",
-                        "NEXUS_CONTEST", "sess-abc123:2", key3,
-                        "", 0, "", "", "", "", "", "", "", "", "", "");
-                }
-                catch (System.Data.SQLite.SQLiteException) { threw2 = true; }
-                Check("A different sequence under the same session id is accepted", threw2, false);
-            }
-        }
-        finally { try { File.Delete(tmpDb); } catch { } }
-    }
-
     // ── Nexus contesting foundation, phase 4/9: ContestWorkflow reliability ────────────────────
 
     // Minimal CONTEST_QSOS_SINCE JSON for one completion, matching ContestCompletion's own
@@ -27102,15 +26220,39 @@ static class JimmyTests
             "}";
     }
 
-    static ContestWorkflow NewTestWorkflow(string dbPath, out System.Collections.Generic.List<string> seenCommands, Func<string, string> respond)
+    // The contest workflow writes through Nexus (NexusLogbookService.LogContestCompletion ->
+    // LOG_QSO). This stub answers LOG_QSO the way Nexus does: "saved" the first time a request id
+    // arrives, "already" after that -- so the tests prove Jimmy's side: the same request id on
+    // every redelivery, the ack only after the save, and the watermark resumed after a restart.
+    sealed class ContestLogStub
+    {
+        public readonly Dictionary<string, string> Saved = new Dictionary<string, string>(); // reqId -> contact JSON
+        public string Handle(string line)
+        {
+            if (!line.StartsWith("LOG_QSO ")) return null;
+            using (var doc = System.Text.Json.JsonDocument.Parse(line.Substring("LOG_QSO ".Length)))
+            {
+                string reqId = doc.RootElement.GetProperty("reqId").GetString();
+                lock (Saved)
+                {
+                    if (Saved.ContainsKey(reqId)) return "{\"state\":\"already\"}";
+                    Saved[reqId] = doc.RootElement.GetProperty("qso").GetRawText();
+                    return "{\"state\":\"saved\"}";
+                }
+            }
+        }
+        public int Count(string call) { lock (Saved) return Saved.Values.Count(j => j.Contains($"\"call\":\"{call}\"")); }
+    }
+
+    static ContestWorkflow NewTestWorkflow(ContestLogStub log, out System.Collections.Generic.List<string> seenCommands, Func<string, string> respond)
     {
         var seen = new System.Collections.Generic.List<string>();
         var seenLocal = seen;
-        var stub = new StubEngineHost(line => { lock (seenLocal) seenLocal.Add(line); return respond(line); });
+        var stub = new StubEngineHost(line => { lock (seenLocal) seenLocal.Add(line); return log.Handle(line) ?? respond(line); });
         ContestClient.TestControlPortOverride = stub.Port;
+        NexusLogbook.TestPortOverride = stub.Port;
         seenCommands = seen;
-        var client = new ContestClient();
-        var wf = new ContestWorkflow(client, () => dbPath, () => "K5KPE", () => "EM48", () => "K5KPE");
+        var wf = new ContestWorkflow(new ContestClient(), () => "K5KPE", () => "EM48", () => "K5KPE");
         wf.OnSessionEntered("test-sess-1", "arrlfd", "ARRL-FIELD-DAY");
         return wf;
     }
@@ -27118,97 +26260,74 @@ static class JimmyTests
     static void ContestWorkflowIdempotentDeliveryTests()
     {
         Console.WriteLine("\n── ContestWorkflow: idempotent delivery (redelivery of the same completion never duplicates) ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestIdempotent_" + Guid.NewGuid().ToString("N") + ".db");
+        string dir = UseTestNexusLog();
         try
         {
-            // Every CONTEST_QSOS_SINCE call (regardless of afterSeq) returns the SAME single
-            // completion -- simulates EngineHost never having learned the ack succeeded
-            // (a lost ack, or Jimmy calling ack but the packet never arriving).
+            // Every CONTEST_QSOS_SINCE call returns the SAME completion -- EngineHost never
+            // learned the ack succeeded.
+            var log = new ContestLogStub();
             string json = OneCompletionJson("test-sess-1", 1, "W1AW", "20m", 1_700_000_000, "2A", "MO");
-            var wf = NewTestWorkflow(tmpDb, out var seen, line =>
+            var wf = NewTestWorkflow(log, out var seen, line =>
                 line.StartsWith("CONTEST_QSOS_SINCE") ? json : "OK");
 
             int applied1 = wf.PollAndReconcile();
             int applied2 = wf.PollAndReconcile();
             int applied3 = wf.PollAndReconcile();
             Check("First poll applies the completion", applied1 == 1, true);
-            Check("Second poll (redelivered) still reports applying it (idempotent write, not skipped)", applied2 == 1, true);
-            Check("Third poll (redelivered again) still applies without error", applied3 == 1, true);
-
-            using (var db = new LogbookDb(tmpDb))
-            {
-                var rows = QueryAllWithCallsign(tmpDb, "W1AW");
-                Check("Exactly ONE row exists after three redeliveries of the same completion", rows == 1, true);
-            }
+            Check("Redelivered polls still apply it without error (Nexus answers 'already')", applied2 == 1 && applied3 == 1, true);
+            Check("Exactly ONE contact saved after three redeliveries of the same completion", log.Count("W1AW") == 1, true);
         }
-        finally { try { File.Delete(tmpDb); } catch { } }
-    }
-
-    static int QueryAllWithCallsign(string dbPath, string call)
-    {
-        using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={dbPath};"))
-        {
-            conn.Open();
-            using (var cmd = conn.CreateCommand())
-            {
-                cmd.CommandText = "SELECT COUNT(*) FROM qso WHERE callsign=@c;";
-                cmd.Parameters.AddWithValue("@c", call);
-                return Convert.ToInt32(cmd.ExecuteScalar());
-            }
-        }
+        finally { EndTestNexusLog(dir); }
     }
 
     static void ContestWorkflowLostAckRedeliveryTests()
     {
         Console.WriteLine("\n── ContestWorkflow: a lost CONTEST_QSO_ACK never causes a duplicate or a lost contact ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestLostAck_" + Guid.NewGuid().ToString("N") + ".db");
+        string dir = UseTestNexusLog();
         try
         {
+            var log = new ContestLogStub();
             int ackCount = 0;
+            bool ackBeforeSave = false;
             string json = OneCompletionJson("test-sess-1", 7, "K1ABC", "40m", 1_700_000_100, "1B", "EMA");
-            var wf = NewTestWorkflow(tmpDb, out var seen, line =>
+            var wf = NewTestWorkflow(log, out var seen, line =>
             {
                 if (line.StartsWith("CONTEST_QSO_ACK"))
                 {
                     ackCount++;
-                    // Simulate the ack itself being lost -- EngineHost never actually applies
-                    // it (the stub just doesn't change what QSOS_SINCE returns next).
-                    return "OK";
+                    if (log.Count("K1ABC") == 0) ackBeforeSave = true;
+                    return "OK";   // the ack is lost: what QSOS_SINCE returns never changes
                 }
                 return line.StartsWith("CONTEST_QSOS_SINCE") ? json : "OK";
             });
 
             wf.PollAndReconcile();
             wf.PollAndReconcile();
-            Check("Ack was sent both times (Jimmy's own commit succeeded both times)", ackCount == 2, true);
-            Check("Exactly one row despite the ack never taking effect on EngineHost's side",
-                QueryAllWithCallsign(tmpDb, "K1ABC") == 1, true);
+            Check("Ack was sent both times, never before the contact was saved", ackCount == 2 && !ackBeforeSave, true);
+            Check("Exactly one contact despite the ack never taking effect", log.Count("K1ABC") == 1, true);
         }
-        finally { try { File.Delete(tmpDb); } catch { } }
+        finally { EndTestNexusLog(dir); }
     }
 
     static void ContestWorkflowReconnectReconciliationTests()
     {
         Console.WriteLine("\n── ContestWorkflow: reconnect/restart reconciliation resumes from the persisted watermark ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestReconnect_" + Guid.NewGuid().ToString("N") + ".db");
+        string dir = UseTestNexusLog();
         try
         {
+            var log = new ContestLogStub();
             string json1 = OneCompletionJson("test-sess-1", 1, "W1AW", "20m", 1_700_000_000, "2A", "MO");
-            var wf1 = NewTestWorkflow(tmpDb, out var seen1, line =>
+            var wf1 = NewTestWorkflow(log, out var seen1, line =>
                 line.StartsWith("CONTEST_QSOS_SINCE") ? json1 : "OK");
             wf1.PollAndReconcile();
-            Check("Setup: first session logs its one contact", QueryAllWithCallsign(tmpDb, "W1AW") == 1, true);
+            Check("Setup: first session logs its one contact", log.Count("W1AW") == 1, true);
 
-            // Simulate a Jimmy restart: a BRAND NEW ContestWorkflow instance (no in-memory state
-            // carried over), same db path, same session-instance id (as if EngineHost restored
-            // it from its own sidecar and Jimmy reconnected to the same still-active session).
-            // Only a seq-2 completion is offered this time (representing "what's actually new").
-            var seenCommands2 = new System.Collections.Generic.List<string>();
+            // A Jimmy restart: a BRAND NEW ContestWorkflow (no in-memory state), the same
+            // still-active session. Only a seq-2 completion is offered this time.
             ulong[] lastAfterSeq = { ulong.MaxValue };
             string json2 = OneCompletionJson("test-sess-1", 2, "K1ABC", "40m", 1_700_000_200, "1B", "EMA");
-            var stub2 = new StubEngineHost(line =>
+            var wf2 = NewTestWorkflow(log, out var seen2, line =>
             {
-                lock (seenCommands2) seenCommands2.Add(line);
                 if (line.StartsWith("CONTEST_QSOS_SINCE "))
                 {
                     ulong.TryParse(line.Substring("CONTEST_QSOS_SINCE ".Length).Trim(), out lastAfterSeq[0]);
@@ -27216,79 +26335,70 @@ static class JimmyTests
                 }
                 return "OK";
             });
-            ContestClient.TestControlPortOverride = stub2.Port;
-            var wf2 = new ContestWorkflow(new ContestClient(), () => tmpDb, () => "K5KPE", () => "EM48", () => "K5KPE");
-            wf2.OnSessionEntered("test-sess-1", "arrlfd", "ARRL-FIELD-DAY");
             wf2.PollAndReconcile();
 
             Check("Reconnected workflow asked EngineHost for completions AFTER seq 1 (the persisted watermark), not from 0",
                 lastAfterSeq[0] == 1UL, true);
-            Check("The seq-1 contact from before the restart is still present (not lost)",
-                QueryAllWithCallsign(tmpDb, "W1AW") == 1, true);
-            Check("The seq-2 contact delivered after reconnect is applied",
-                QueryAllWithCallsign(tmpDb, "K1ABC") == 1, true);
+            Check("The seq-1 contact from before the restart is still there, once", log.Count("W1AW") == 1, true);
+            Check("The seq-2 contact delivered after reconnect is applied", log.Count("K1ABC") == 1, true);
         }
-        finally { try { File.Delete(tmpDb); } catch { } }
+        finally { EndTestNexusLog(dir); }
     }
 
     static void ContestWorkflowNormalApplicationTests()
     {
         Console.WriteLine("\n── ContestWorkflow: normal application sets contest association and exchange fields ──");
-        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestNormal_" + Guid.NewGuid().ToString("N") + ".db");
+        string dir = UseTestNexusLog();
         try
         {
+            var log = new ContestLogStub();
             string json = OneCompletionJson("test-sess-1", 42, "N9XYZ", "15m", 1_700_000_500, "3A", "STL");
-            var wf = NewTestWorkflow(tmpDb, out var seen, line =>
+            var wf = NewTestWorkflow(log, out var seen, line =>
                 line.StartsWith("CONTEST_QSOS_SINCE") ? json : "OK");
             int applied = wf.PollAndReconcile();
             Check("Applies exactly one completion", applied == 1, true);
 
-            using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={tmpDb};"))
-            {
-                conn.Open();
-                using (var cmd = conn.CreateCommand())
-                {
-                    cmd.CommandText = "SELECT source, contest_id, contest_session_id, exchange_sent, exchange_rcvd, station_call, operator_call FROM qso WHERE callsign='N9XYZ';";
-                    using (var r = cmd.ExecuteReader())
-                    {
-                        Check("Row exists", r.Read(), true);
-                        CheckStr("source is NEXUS_CONTEST", r.GetString(0), "NEXUS_CONTEST");
-                        CheckStr("contest_id is set", r.GetString(1), "ARRL-FIELD-DAY");
-                        CheckStr("contest_session_id is the session-instance id", r.GetString(2), "test-sess-1");
-                        CheckStr("exchange_sent is the space-joined sent field values", r.GetString(3), "3A STL");
-                        CheckStr("exchange_rcvd is the space-joined received field values", r.GetString(4), "1B CT");
-                        CheckStr("station_call is Jimmy's own station callsign", r.GetString(5), "K5KPE");
-                        CheckStr("operator_call defaults to station callsign when unset", r.GetString(6), "K5KPE");
-                    }
-                }
-            }
+            var q = System.Text.Json.JsonSerializer.Deserialize<NexusQso>(log.Saved.Values.Single(),
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            CheckStr("source is NEXUS_CONTEST", q.ExtraValue(NexusMigration.SourceTag), "NEXUS_CONTEST");
+            CheckStr("contest id is set", q.ExtraValue("CONTEST_ID"), "ARRL-FIELD-DAY");
+            CheckStr("contest session is the session-instance id", q.ExtraValue(NexusMigration.ContestSessionTag), "test-sess-1");
+            CheckStr("sent exchange is the space-joined sent field values", q.ExtraValue("STX_STRING"), "3A STL");
+            CheckStr("received exchange is the space-joined received field values", q.ExtraValue("SRX_STRING"), "1B CT");
+            CheckStr("station call is Jimmy's own station callsign", q.StationCallsign, "K5KPE");
+            CheckStr("operator defaults to station callsign when unset", q.Operator, "K5KPE");
         }
-        finally { try { File.Delete(tmpDb); } catch { } }
+        finally { EndTestNexusLog(dir); }
     }
 
     static void ContestWorkflowRebuildTests()
     {
         Console.WriteLine("\n── ContestWorkflow.RebuildScoreAndExport: Jimmy-initiated batched rebuild ──");
         string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_ContestRebuild_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        string dir = UseTestNexusLog();
         try
         {
-            // Seed two authoritative contacts the normal delivery path (phase 4) already proved
-            // correct, then exercise rebuild against them.
-            string json = "OK [" +
-                CompletionObjectJson("test-sess-1", 1, "W1AW", "20m", 1_700_000_000, "2A", "MO") + "," +
-                CompletionObjectJson("test-sess-1", 2, "K1ABC", "40m", 1_700_000_100, "2A", "MO") +
-                "]";
+            // Two contest contacts in the read copy the rebuild reads.
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+            using (var db = new LogbookDb(tmpDb))
+            {
+                foreach (var (call, band, time, seq) in new[] { ("W1AW", "20m", "1200", 1), ("K1ABC", "40m", "1201", 2) })
+                    SeedQso(db, new Dictionary<string, object>
+                    {
+                        ["callsign"] = call, ["band"] = band, ["mode"] = "FT8", ["qso_date"] = "20231114", ["time_on"] = time,
+                        ["source"] = "NEXUS_CONTEST", ["source_qso_id"] = $"test-sess-1:{seq}",
+                        ["contest_id"] = "ARRL-FIELD-DAY", ["contest_session_id"] = "test-sess-1",
+                    });
+            }
 
             var seenAppendBatches = new System.Collections.Generic.List<string>();
             int totalAppendCalls = 0;
             bool sawBegin = false, sawCommit = false;
             string rebuildToken = "rt-" + Guid.NewGuid().ToString("N").Substring(0, 8);
-
-            var stub = new StubEngineHost(line =>
+            var wf = NewTestWorkflow(new ContestLogStub(), out var seen, line =>
             {
-                if (line == "CONTEST_QSOS_SINCE 0") return json;
                 if (line.StartsWith("CONTEST_QSOS_SINCE")) return "OK []";
-                if (line == "CONTEST_QSO_ACK 1" || line == "CONTEST_QSO_ACK 2") return "OK";
                 if (line == "CONTEST_REBUILD_BEGIN")
                 {
                     sawBegin = true;
@@ -27297,16 +26407,12 @@ static class JimmyTests
                 if (line.StartsWith("CONTEST_REBUILD_APPEND "))
                 {
                     lock (seenAppendBatches) { seenAppendBatches.Add(line); totalAppendCalls++; }
-                    // Stand in for EngineHost's real scoring (already proven separately by
-                    // contest_bridge.rs's own Rust tests against genuine FieldDayLog logic) --
-                    // this stub only needs to prove JIMMY's own responsibility: that it re-reads
-                    // its current authoritative rows and sends the right batch every rebuild.
-                    // Count how many DISTINCT calls this stub has seen appended across every
-                    // batch since the LAST BEGIN, and report exactly that at commit time.
                     return "OK";
                 }
                 if (line.StartsWith("CONTEST_REBUILD_COMMIT "))
                 {
+                    // Stands in for EngineHost's real scoring (contest_bridge.rs's own tests):
+                    // reports how many distinct calls were appended since the last BEGIN.
                     sawCommit = true;
                     Check("Commit carries the exact token BEGIN returned", line.Trim() == $"CONTEST_REBUILD_COMMIT {rebuildToken}", true);
                     int callsSeen = seenAppendBatches
@@ -27318,33 +26424,29 @@ static class JimmyTests
                 }
                 return "OK";
             });
-            ContestClient.TestControlPortOverride = stub.Port;
-
-            var wf = new ContestWorkflow(new ContestClient(), () => tmpDb, () => "K5KPE", () => "EM48", () => "K5KPE");
-            wf.OnSessionEntered("test-sess-1", "arrlfd", "ARRL-FIELD-DAY");
-            wf.PollAndReconcile();
-            Check("Setup: two authoritative contacts logged before rebuild", QueryAllWithCallsign(tmpDb, "W1AW") + QueryAllWithCallsign(tmpDb, "K1ABC") == 2, true);
 
             var result = wf.RebuildScoreAndExport(out string error);
             Check("Rebuild succeeds", error == null, true);
             Check("Rebuild reports the 2 seeded contacts", result != null && result.QsoCount == 2, true);
-            Check("BEGIN was called", sawBegin, true);
-            Check("At least one APPEND batch was sent", totalAppendCalls >= 1, true);
-            Check("COMMIT was called", sawCommit, true);
+            Check("BEGIN, at least one APPEND batch, and COMMIT were sent", sawBegin && totalAppendCalls >= 1 && sawCommit, true);
 
-            // Rebuild always reflects Jimmy's CURRENT authoritative rows -- deleting one and
-            // rebuilding again must be reflected (proves rebuild re-reads from the DB each time,
-            // never caching a stale row set).
-            using (var db = new LogbookDb(tmpDb))
+            // A rebuild always reads the CURRENT rows: a contact removed from the log is gone
+            // from the next rebuild (never a cached row set).
+            using (var conn = new System.Data.SQLite.SQLiteConnection($"Data Source={tmpDb};"))
             {
-                var idToDelete = db.GetContestSessionRows("test-sess-1").First(r => r.Callsign == "K1ABC").Id;
-                db.DeleteQsos(new[] { (int)idToDelete });
+                conn.Open();
+                using (var cmd = conn.CreateCommand()) { cmd.CommandText = "DELETE FROM qso WHERE callsign='K1ABC';"; cmd.ExecuteNonQuery(); }
             }
             var result2 = wf.RebuildScoreAndExport(out string error2);
-            Check("Second rebuild after a Jimmy-side deletion succeeds", error2 == null, true);
+            Check("Second rebuild after a deletion succeeds", error2 == null, true);
             Check("Second rebuild reflects the deletion (only 1 contact now)", result2 != null && result2.QsoCount == 1, true);
         }
-        finally { try { File.Delete(tmpDb); } catch { } }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDbPath);
+            EndTestNexusLog(dir);
+            try { File.Delete(tmpDb); } catch { }
+        }
     }
 
 }

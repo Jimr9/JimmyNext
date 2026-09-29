@@ -127,6 +127,19 @@ namespace WSJTX_Controller
                                                        Confirmation = RuleConfirmation.Sources, ConfirmationSources = new List<string> { "CARD" } };
                     Check("no paper card appeared", RuleEngine.Evaluate(cardDef, NexusLogbook.ProjectionPath).Confirmed == 0);
 
+                    // ── The full contact editor (ContactEditDlg): every field it writes is kept,
+                    //    an upload can be marked not sent, and the LoTW confirmation survives ──
+                    var editor = (NexusLogbookService)svc;
+                    var full = editor.GetRecord((int)target.Id);
+                    full.Qth = "TEST QTH"; full.Notes = "test notes"; full.MyRig = "TEST RIG"; full.Dxcc = 1;
+                    full.Extra.RemoveAll(kv => kv.Count == 2 && kv[0] == "CNTY");   // one value per field, as the editor does
+                    full.Extra.Add(new List<string> { "CNTY", "MO,TEST" });
+                    editor.SaveRecord(full, new List<(string, bool)> { ("qrz", false) });
+                    var saved = NexusLogbook.Client.Rows().Rows.First(x => x.Id == full.Id);
+                    Check("full edit: QTH, notes, rig, county and DXCC kept; QRZ marked not sent; LoTW confirmation kept",
+                        saved.Qth == "TEST QTH" && saved.Notes == "test notes" && saved.MyRig == "TEST RIG" && saved.Dxcc == 1 &&
+                        saved.ExtraValue("CNTY") == "MO,TEST" && saved.Upload?.Qrz?.IsSent == false && saved.QslRcvd.Lotw);
+
                     // ── Manual add, and Nexus's own duplicate rule (D2) ─────────────────────
                     int beforeManual = svc.TotalQsos();
                     var add = svc.Upsert("ZZ8ZZZ", "40m", "FT8", "20260928", "130000", "130100", 7_075_500, "-05", "-07", "", "", 0, 0,
@@ -181,12 +194,12 @@ namespace WSJTX_Controller
                     svc.LogImportFinish(logId, 1, 0, 1, 0, 0, "");
                     Check("meta and import history kept", svc.GetMeta("k") == "v" && svc.GetImportHistory(5).First().NewlyConfirmed == 1);
 
-                    // ── Rollback from what Nexus holds now ──────────────────────────────────
+                    // ── A read copy rebuilt from what Nexus holds now ──────────────────────────────────
                     var rows = NexusLogbook.Client.Rows();
-                    string rb = Path.Combine(workRoot, "rollback.db");
+                    string rb = Path.Combine(workRoot, "rebuilt.db");
                     NexusMigration.Rebuild(rows.Rows, rb);
                     var back = NexusMigration.ReadJimmyRows(rb);
-                    Check("rollback carries every change (edit, delete, live, manual, contest, confirmation)",
+                    Check("the rebuilt read copy carries every change (edit, delete, live, manual, contest, confirmation)",
                         back.Count == original.Count - 1 + 3 &&
                         back.First(r => r.Id == editRow.Id).C("name") == "EDITED NAME" &&
                         back.All(r => r.Id != delRow.Id) &&

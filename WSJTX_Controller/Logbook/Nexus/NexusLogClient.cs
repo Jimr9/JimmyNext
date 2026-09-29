@@ -232,7 +232,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    var connect = client.ConnectAsync(System.Net.IPAddress.Loopback, _port);
+                    var connect = client.ConnectAsync(System.Net.IPAddress.Loopback, _port).ObserveFault();
                     if (!connect.Wait(3000) || !client.Connected) return null;
                     using (var stream = client.GetStream())
                     {

@@ -139,99 +139,9 @@ namespace WSJTX_Controller
             return response;
         }
 
-        // Inserts one QSO into the QRZ Logbook (upload). Deliberately never sends
-        // OPTION=REPLACE -- QRZ's own docs warn that flag can overwrite an already
-        // -confirmed QSO with the newly submitted (unconfirmed) data, so a plain
-        // INSERT is used; if QRZ already has this QSO, INSERT creates a second
-        // (duplicate) record rather than risking a bad overwrite. Never calls
-        // DELETE -- QRZ's own docs describe it as unrecoverable.
-        public async Task<bool> InsertAsync(string apiKey, string adifRecord)
-        {
-            LastError = null;
-            if (TestModeGuard.IsTestMode)
-            {
-                LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real QRZ traffic allowed.";
-                return false;
-            }
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                LastError = "QRZ Logbook API key is not configured.";
-                return false;
-            }
-
-            var form = new FormUrlEncodedContent(new[]
-            {
-                new KeyValuePair<string, string>("KEY",    apiKey.Trim()),
-                new KeyValuePair<string, string>("ACTION", "INSERT"),
-                new KeyValuePair<string, string>("ADIF",   adifRecord),
-            });
-
-            HttpResponseMessage resp;
-            string response;
-            try
-            {
-                resp = await _http.PostAsync(ApiUrl, form).ConfigureAwait(false);
-                response = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            }
-            catch (TaskCanceledException ex)
-            {
-                LastError = $"Timeout waiting for QRZ Logbook API ({ApiUrl}).";
-                LogFailure("Upload timeout", LastError, ex.ToString());
-                return false;
-            }
-            catch (HttpRequestException ex)
-            {
-                string category = ex.InnerException is SocketException ? "Network/DNS failure" : "HTTP request failure";
-                LastError = $"{category} contacting QRZ Logbook API ({ApiUrl}): {ex.Message}";
-                LogFailure("Upload " + category, LastError, ex.ToString());
-                return false;
-            }
-            catch (Exception ex)
-            {
-                LastError = $"Network error contacting QRZ Logbook API ({ApiUrl}): {ex.Message}";
-                LogFailure("Upload network error", LastError, ex.ToString());
-                return false;
-            }
-
-            if (!resp.IsSuccessStatusCode)
-            {
-                LastError = $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase} from QRZ Logbook API ({ApiUrl}).";
-                LogFailure("Upload HTTP error", LastError, response);
-                return false;
-            }
-
-            int resultIdx = response.IndexOf("RESULT=", StringComparison.OrdinalIgnoreCase);
-            string result = resultIdx >= 0 ? response.Substring(resultIdx + 7).Split('&')[0] : null;
-
-            // Treat REPLACE as success defensively even though Jimmy never requests
-            // it via OPTION=REPLACE -- it is not a failure state if QRZ ever returns it.
-            if (result != null && (result.Equals("OK", StringComparison.OrdinalIgnoreCase) ||
-                                    result.Equals("REPLACE", StringComparison.OrdinalIgnoreCase)))
-                return true;
-
-            int ri = response.IndexOf("REASON=", StringComparison.OrdinalIgnoreCase);
-            string reason = ri >= 0 ? WebUtility.UrlDecode(response.Substring(ri + 7).Split('&')[0]) : null;
-
-            // QRZ reports "already have this QSO" as RESULT=FAIL with a REASON
-            // mentioning "duplicate", rather than a distinct result code (unlike
-            // Club Log's clean "200 QSO Duplicate"). Treat it as handled, not
-            // failed -- QRZ already has the QSO, nothing more for Jimmy to do.
-            // Without this, a duplicate retries forever on every Alt+U catch-up,
-            // burning minutes and blocking Club Log's catch-up from ever running
-            // behind it (they share one sequential background task).
-            if (IsDuplicateReason(reason))
-                return true;
-
-            LastError = !string.IsNullOrWhiteSpace(reason)
-                ? $"QRZ API error ({result}): {reason}"
-                : $"QRZ API reported failure (RESULT={result ?? "none"}).";
-            LogFailure("Upload error", LastError, response);
-            return false;
-        }
-
         // Validates a Logbook API key with no side effects -- ACTION=STATUS just reports
-        // on the logbook the key belongs to, unlike FETCH/INSERT it never returns or
-        // submits any QSO data. Used by the Options dialog's "Test Login" button so a bad
+        // on the logbook the key belongs to, unlike FETCH it never returns any QSO
+        // data. Used by the Options dialog's "Test Login" button so a bad
         // key is caught immediately instead of only surfacing as an upload/download error.
         public async Task<bool> TestApiKeyAsync(string apiKey)
         {
@@ -300,12 +210,6 @@ namespace WSJTX_Controller
             LogFailure("Key test error", LastError, response);
             return false;
         }
-
-        // Extracted for testability (JimmyTests has no InternalsVisibleTo, so
-        // only public static members of a plain class are reachable from tests).
-        public static bool IsDuplicateReason(string reason) =>
-            !string.IsNullOrWhiteSpace(reason) &&
-            reason.IndexOf("duplicate", StringComparison.OrdinalIgnoreCase) >= 0;
 
         // Appends complete failure details (never the API key or session key) to a
         // dedicated log file, named to match the "log_*.txt" pattern so it is picked

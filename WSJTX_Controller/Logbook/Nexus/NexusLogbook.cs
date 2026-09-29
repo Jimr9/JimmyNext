@@ -9,12 +9,13 @@ namespace WSJTX_Controller
 {
     // Logbook migration Phases 5-6: the switch and the shared state for "Nexus owns the logbook".
     //
-    // ACTIVE only when a migration has run: the file NexusLog\ACTIVE exists in Jimmy Next's data
-    // folder (written by the migration command, removed by the rollback command). Never in test
-    // mode unless a test turns it on explicitly. When not active, nothing here runs and Jimmy's
-    // own LogbookDb is the logbook exactly as before.
+    // Phase 7 (2026-09-29): Nexus always keeps the log. The file NexusLog\ACTIVE now only records
+    // that this install's old Jimmy logbook has been moved in (Moved -- the automatic move at first
+    // start, NexusLogbookMigration.AutoMove). Test mode never touches Nexus unless a test turns it
+    // on (TestForceActive, with its own private engine port): tests read their own throwaway
+    // database (LogbookDb.DbPath) and a logged contact waits harmlessly in the test outbox.
     //
-    // When active:
+    // In use:
     //   - Nexus (inside jimmy-engine-host, launched with --log-dir NexusLog) owns storage and saves.
     //   - Writes go through LOG_* commands (NexusLogbookService). New contacts go through Jimmy's
     //     durable outbox, so a contact survives an engine that is restarting or down.
@@ -31,8 +32,11 @@ namespace WSJTX_Controller
 
         public static string Folder => TestFolderOverride ?? Path.Combine(LookupManager.DataRoot, "NexusLog");
         public static string ActiveMarker => Path.Combine(Folder, "ACTIVE");
-        public static bool Active => TestForceActive ?? (!TestModeGuard.IsTestMode && File.Exists(ActiveMarker));
-        public static int Port => TestPortOverride ?? NativeEngineClient.ControlPort;
+        public static bool Active => TestForceActive ?? !TestModeGuard.IsTestMode;
+        public static bool Moved => File.Exists(ActiveMarker);
+        // Test mode NEVER reaches the operating engine's port (a test contact must never land in a
+        // real log): only a test's own override, else port 0, which refuses at once.
+        public static int Port => TestPortOverride ?? (TestModeGuard.IsTestMode ? 0 : NativeEngineClient.ControlPort);
         public static string ProjectionFolder => Path.Combine(Folder, "projection");
         public static string OutboxPath => Path.Combine(Folder, "outbox.json");
         public static string MetaPath => Path.Combine(Folder, "jimmy-meta.json");
@@ -193,7 +197,7 @@ namespace WSJTX_Controller
         {
             lock (_lock)
             {
-                string path = ReadCachePath;
+                string path = LogbookDb.DbPath;   // the read copy; a test's own database in test mode
                 if (_reader == null || _readerPath != path)
                 {
                     _reader?.Dispose();
@@ -213,7 +217,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    if (Outbox.Count > 0)
+                    if (Outbox.Count > 0 && Moved)   // before the move, queued contacts wait for it
                     {
                         var r = Outbox.Replay(Client);
                         if (r.Saved + r.Already + r.Refused > 0)

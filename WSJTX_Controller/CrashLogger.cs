@@ -1,6 +1,5 @@
 using System;
 using System.IO;
-using System.Reflection;
 using System.Text;
 
 namespace WSJTX_Controller
@@ -58,12 +57,9 @@ namespace WSJTX_Controller
             }
         }
 
-        private static string LogPath()
-        {
-            string name = Assembly.GetExecutingAssembly().GetName().Name;
-            return Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                name, "log_crashes.txt");
-        }
+        // Beside the Data folder: the app's own folder in normal use; in test mode the isolated
+        // test folder (LookupManager.DataRoot), so a test's crash never lands in the real log.
+        internal static string LogPath() =>
+            Path.Combine(Path.GetDirectoryName(LookupManager.DataRoot), "log_crashes.txt");
     }
 }

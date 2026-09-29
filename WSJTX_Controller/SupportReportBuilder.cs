@@ -45,7 +45,9 @@ namespace WSJTX_Controller
                 string infoVer   = GetInfoVersion();
                 string safeVer   = infoVer.Replace("/", "-").Replace("\\", "-").Replace(":", "").Replace(" ", "_");
                 string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                string zipName   = $"Jimmy_{safeVer}_support_{timestamp}.zip";
+                // The program's own name ("Jimmy Next" -> "JimmyNext"), never a hard-coded "Jimmy".
+                string appName   = (Assembly.GetExecutingAssembly().GetName().Name ?? "Jimmy").Replace(" ", "");
+                string zipName   = $"{appName}_{safeVer}_support_{timestamp}.zip";
                 string outputDir = GetOutputDir();
                 string zipPath   = Path.Combine(outputDir, zipName);
 

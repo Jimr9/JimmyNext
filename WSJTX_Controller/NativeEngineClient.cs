@@ -326,8 +326,9 @@ namespace WSJTX_Controller
                 if (!string.IsNullOrWhiteSpace(sessionToken))
                     args += $" --session-token {sessionToken}";
                 _sessionToken = sessionToken ?? "";
-                // Logbook migration: while Nexus owns the logbook this engine host is its owner.
-                if (NexusLogbook.Active)
+                // This engine host keeps the Nexus log -- once this install's logbook has been moved
+                // in (until then a contact waits in the outbox; see NexusLogbookMigration.AutoMove).
+                if (NexusLogbook.Active && NexusLogbook.Moved)
                     args += $" --log-dir {EscapeCommandLineArg(NexusLogbook.Folder)}";
                 if (repeatLimit.HasValue)
                     args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
@@ -625,7 +626,7 @@ namespace WSJTX_Controller
             {
                 using (var client = new TcpClient())
                 {
-                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort).ObserveFault();
                     if (!connectTask.Wait(300) || !client.Connected) return null;
 
                     using (var stream = client.GetStream())
@@ -685,7 +686,7 @@ namespace WSJTX_Controller
             {
                 using (var client = new TcpClient())
                 {
-                    var connectTask = client.ConnectAsync(IPAddress.Loopback, controlPort);
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, controlPort).ObserveFault();
                     if (!connectTask.Wait(500) || !client.Connected) return false;
                     using (var stream = client.GetStream())
                     {
@@ -771,7 +772,7 @@ namespace WSJTX_Controller
             {
                 using (var client = new TcpClient())
                 {
-                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort).ObserveFault();
                     if (!connectTask.Wait(1000) || !client.Connected) return false;
                     using (var stream = client.GetStream())
                     {
@@ -803,7 +804,7 @@ namespace WSJTX_Controller
             {
                 using (var client = new TcpClient())
                 {
-                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort);
+                    var connectTask = client.ConnectAsync(IPAddress.Loopback, ControlPort).ObserveFault();
                     if (!connectTask.Wait(300) || !client.Connected) return false;
                     using (var stream = client.GetStream())
                     {

@@ -1255,27 +1255,25 @@ namespace WSJTX_Controller
         {
             if (_db == null || _editLv.SelectedItems.Count != 1) return;
             int id = (int)_editLv.SelectedItems[0].Tag;
-            var q = _db.GetQso(id);
-            if (q == null) { SetStatus("That QSO no longer exists — refreshing."); DoEditSearch(); return; }
+            var nexus = (NexusLogbookService)_db;
+            NexusQso q;
+            try { q = nexus.GetRecord(id); }
+            catch (Exception ex) { SetStatus(ex.Message); DoEditSearch(); return; }
 
-            string SubmitEdit(QsoRecord r)
+            string SaveEdit(NexusQso edited, List<(string Service, bool Sent)> uploadChanges)
             {
                 try
                 {
-                    bool ok = _db.UpdateQso(id, r.Callsign, r.Band, r.Mode, r.QsoDate, r.TimeOn, r.TimeOff,
-                        r.State, r.Country, r.Grid, r.Name, r.RstSent, r.RstRcvd, r.Comment);
-                    SetStatus(ok ? $"Updated {r.Callsign}." : "No changes were saved.");
+                    nexus.SaveRecord(edited, uploadChanges);
+                    SetStatus($"Updated {edited.Call}.");
                     DoEditSearch();
                     return null;
                 }
-                catch (Exception ex)
-                {
-                    return "Edit failed: " + ex.Message +
-                        " (a QSO with this callsign/band/mode/date/time may already exist)";
-                }
+                catch (Exception ex) { return "Edit failed: " + ex.Message; }
             }
 
-            using (var dlg = new EditQsoDlg(q, lookupCallsign: _lookupCallsign, onSubmit: SubmitEdit) { Owner = this })
+            // Every field the contact holds (ContactEditDlg's own comment has the rules).
+            using (var dlg = new ContactEditDlg(q, SaveEdit) { Owner = this })
             {
                 dlg.ShowDialog(this);
             }
@@ -1341,16 +1339,9 @@ namespace WSJTX_Controller
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
-                    if (_db is NexusLogbookService nexus)
-                    {
-                        // Nexus keeps the log: its own exporter writes the records.
-                        var (written, note) = nexus.ExportAdif(ids, sources, dlg.FileName);
-                        SetStatus($"Exported {written:N0} QSO(s) to {dlg.FileName}." + (note != null ? " " + note : ""));
-                        return;
-                    }
-                    var fields = _db.GetAdifFieldDicts(ids, sources);
-                    File.WriteAllText(dlg.FileName, AdifExporter.BuildFile(fields));
-                    SetStatus($"Exported {fields.Count:N0} QSO(s) to {dlg.FileName}.");
+                    // Nexus's own exporter writes the records.
+                    var (written, note) = ((NexusLogbookService)_db).ExportAdif(ids, sources, dlg.FileName);
+                    SetStatus($"Exported {written:N0} QSO(s) to {dlg.FileName}." + (note != null ? " " + note : ""));
                 }
                 catch (Exception ex) { SetStatus("Export error: " + ex.Message); }
             }
@@ -2153,39 +2144,10 @@ namespace WSJTX_Controller
                     return;
                 }
 
-                // While Nexus keeps the log, only the confirmations download is merged -- see
-                // LogbookAutoSync.SyncLotwAsync.
-                if (NexusLogbook.Active)
-                {
-                    await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true);
-                    if (_db is NexusLogbookService nexus)
-                    {
-                        string received = await nexus.LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
-                        if (received != null) SetStatus(SetStatus_Text + "  " + received);
-                    }
-                    return;
-                }
-                SetStatus("Fetching LoTW unconfirmed QSOs…");
-                string adif2 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: false).ConfigureAwait(true);
-                // Independent audit finding 2, 2026-08-23 (CONFIRMED bug, HIGH PRIORITY): this
-                // used to silently replace a null adif2 with "" and continue as if the complete
-                // two-part download had succeeded -- LoTWQsoClient.LastError was discarded, and
-                // the subsequent import still advanced LogbookLastLoTWRefresh, so a genuinely
-                // failed unconfirmed-QSO fetch was reported and checkpointed as a full success.
-                // Missing unconfirmed QSOs matter for worked-but-unconfirmed award state and
-                // duplicate/worked classification -- treated the same as adif1==null above:
-                // abort before import, log the real error, and leave the previous refresh
-                // timestamp unchanged so the next scheduled/manual run retries the whole sync
-                // rather than silently missing this half forever.
-                if (adif2 == null)
-                {
-                    string msg = "LoTW error (unconfirmed QSOs): " + (client.LastError ?? "Unknown error");
-                    LogSyncFailure("LOTW", msg);
-                    SetStatus(msg);
-                    return;
-                }
-
-                await RunImportFromText(adif1 + "\r\n" + adif2, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true);
+                // Only the confirmations download is merged -- see LogbookAutoSync.SyncLotwAsync.
+                await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true);
+                string received = await ((NexusLogbookService)_db).LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
+                if (received != null) SetStatus(SetStatus_Text + "  " + received);
             }
             catch (Exception ex)
             {

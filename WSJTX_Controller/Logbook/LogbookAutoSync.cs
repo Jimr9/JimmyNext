@@ -132,31 +132,13 @@ namespace WSJTX_Controller
                 _logbookWindowStatus("Auto-sync: LoTW error: " + (client.LastError ?? "Unknown error"));
                 return false;
             }
-            // While Nexus keeps the log, only the confirmations download is merged (as Nexus's own
-            // sync does): the own-records download restates every confirmed contact a second time,
-            // and Nexus's merge put those second copies on other contacts of the same day.
-            if (NexusLogbook.Active)
-            {
-                bool ok = ImportAndReport(db, adif1, "LOTW", "LogbookLastLoTWRefresh");
-                if (db is NexusLogbookService nexus)
-                {
-                    string received = await nexus.LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
-                    if (received != null) _logbookWindowStatus("Auto-sync: " + received);
-                }
-                return ok;
-            }
-            string adif2 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: false).ConfigureAwait(true);
-            // Independent audit finding 2, 2026-08-23 (CONFIRMED bug): matches
-            // LogbookWindow.LoTWRefreshBtn_Click's own fix -- a failed unconfirmed-QSO fetch
-            // must not be silently treated as a complete two-part success. Aborts before import
-            // (same as the adif1==null case above) so the checkpoint is not advanced and the
-            // next scheduled run retries the whole sync.
-            if (adif2 == null)
-            {
-                _logbookWindowStatus("Auto-sync: LoTW error (unconfirmed QSOs): " + (client.LastError ?? "Unknown error"));
-                return false;
-            }
-            return ImportAndReport(db, adif1 + "\r\n" + adif2, "LOTW", "LogbookLastLoTWRefresh");
+            // Only the confirmations download is merged (as Nexus's own sync does): the own-records
+            // download restates every confirmed contact a second time, and Nexus's merge put those
+            // second copies on other contacts of the same day.
+            bool ok = ImportAndReport(db, adif1, "LOTW", "LogbookLastLoTWRefresh");
+            string received = await ((NexusLogbookService)db).LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
+            if (received != null) _logbookWindowStatus("Auto-sync: " + received);
+            return ok;
         }
 
         private async Task<bool> SyncClubLogAsync(ILogbookService db)

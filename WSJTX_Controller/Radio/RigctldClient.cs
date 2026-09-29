@@ -320,9 +320,7 @@ namespace WSJTX_Controller
                     // under repeated connection failures (e.g. a persistently misconfigured
                     // port). Marking it observed here, regardless of how/when it actually
                     // finishes, closes that gap without needing a full cancellation-token rework.
-                    connectTask.ContinueWith(
-                        t => { var _ = t.Exception; },
-                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+                    connectTask.ObserveFault();
                     Close();
                     return false;
                 }

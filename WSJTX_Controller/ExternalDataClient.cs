@@ -252,18 +252,6 @@ namespace WSJTX_Controller
             }
         }
 
-        // Returns eQSL's wire-tagged outcome ("pending"/"accepted"/"duplicate"/"rejected"/
-        // "authfail") on success. Jimmy's own upload-tracking (LogbookDb.MarkUploaded) decides
-        // what each outcome means for local bookkeeping -- this client only relays the fact.
-        public string UploadEqsl(string username, string password, string recordAdif, out string error)
-        {
-            error = null;
-            var args = new { username, password, recordAdif };
-            string json = JsonSerializer.Serialize(args, JsonOptions);
-            string resp = SendCommand("EQSL_UPLOAD " + json, SlowTimeoutMs);
-            return ParseOkOrError(resp, out error);
-        }
-
         // Returns the raw ADIF InBox body (Jimmy's own AdifImporter reconciles it against the
         // local logbook, same dedup-by-dedup_key path every other ADIF import already uses --
         // EngineHost never touches Jimmy's database). sinceUnix is Jimmy's own last-synced
@@ -347,7 +335,7 @@ namespace WSJTX_Controller
                 // response" contract (WsjtxClient.Direct.cs).
                 try
                 {
-                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort);
+                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, NativeEngineClient.ControlPort).ObserveFault();
                     if (!connectTask.Wait(Math.Min(timeoutMs, 3000)) || !client.Connected) return null;
 
                     using (var stream = client.GetStream())

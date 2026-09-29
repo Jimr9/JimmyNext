@@ -64,7 +64,6 @@ namespace WSJTX_Controller
     public class ContestingWindow : Form
     {
         private readonly ContestClient _contestClient = new ContestClient();
-        private readonly Func<string> _dbPath;
         private readonly Func<string> _myCall;
         private readonly Func<string> _myGrid;
         private readonly Func<string> _operatorCall;
@@ -117,10 +116,9 @@ namespace WSJTX_Controller
         private Label _exportStatusLabel;
 
         public ContestingWindow(
-            Func<string> dbPath, Func<string> myCall, Func<string> myGrid, Func<string> operatorCall,
+            Func<string> myCall, Func<string> myGrid, Func<string> operatorCall,
             Func<ContestWorkflow> workflow, Func<StationSettings> station)
         {
-            _dbPath = dbPath;
             _myCall = myCall;
             _myGrid = myGrid;
             _operatorCall = operatorCall;
@@ -737,7 +735,7 @@ namespace WSJTX_Controller
             string contestTag = !string.IsNullOrWhiteSpace(_manualContestFreeTextBox.Text)
                 ? _manualContestFreeTextBox.Text.Trim()
                 : (knownEventId ?? "");
-            using (ILogbookService db = LogbookFactory.Open(_dbPath()))
+            using (ILogbookService db = LogbookFactory.Open())
             {
                 var now = DateTime.UtcNow;
                 string qsoDate = now.ToString("yyyyMMdd");

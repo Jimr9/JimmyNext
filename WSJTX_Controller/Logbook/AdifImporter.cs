@@ -82,15 +82,8 @@ namespace WSJTX_Controller
                 source, progressCallback, resolveUsState);
         }
 
-        // Nexus contesting foundation, phase 2: the AdifRawRecord form carries true file
-        // order/duplicates (via AdifParser.ParseWithOrder), so this overload also populates
-        // qso_extra_field for whatever the record's raw fields didn't map onto a modeled column.
-        //
-        // db is ILogbookService, not LogbookDb -- RunBatch is the storage-neutral bulk-import
-        // primitive that replaced this method's own direct BeginTransaction()/SQLiteTransaction
-        // management (phase 2, completed). LogbookDb still satisfies every caller here unchanged
-        // (it implements the interface directly), so this is a pure refactor, not a behavior
-        // change -- verified by the same test suite that covered the transaction-managing version.
+        // The AdifRawRecord form carries true file order/duplicates (AdifParser.ParseWithOrder);
+        // unmodeled fields travel to Nexus with the record.
         public static ImportResult Import(
             ILogbookService db,
             IEnumerable<AdifRawRecord> records,
@@ -98,9 +91,9 @@ namespace WSJTX_Controller
             Action<int> progressCallback = null,
             Func<string, string> resolveUsState = null)
         {
-            // Nexus owns the logbook: the records go to Nexus's own import / merge as one file,
-            // and Jimmy's own live-logged contact goes through the durable outbox.
-            if (db is NexusLogbookService nexus)
+            // Nexus keeps the log: the records go to Nexus's own import / merge as one file, and
+            // Jimmy's own live-logged contact goes through the durable outbox.
+            var nexus = (NexusLogbookService)db;
             {
                 var list = records.ToList();
                 // The T12 backfill, as Jimmy's own import applies it: DXCC / country / continent a
@@ -120,241 +113,9 @@ namespace WSJTX_Controller
                 string text = NexusLogbookService.ToAdifText(list, source);
                 return source == "LOTW" || source == "QRZ" ? nexus.MergeDownload(text, source) : nexus.ImportFile(text, source);
             }
-
-            var result = new ImportResult();
-            var errors = new StringBuilder();
-
-            db.RunBatch(records, raw =>
-            {
-                try
-                {
-                    var q = Normalize(raw.Fields, source, resolveUsState);
-                    if (q == null) { result.Skipped++; result.Processed++; return; }
-
-                    var (isNew, newlyConfirmed, corrected) = db.Upsert(
-                        q.callsign, q.band, q.mode, q.qsoDate, q.timeOn, q.timeOff,
-                        q.freqHz, q.rstSent, q.rstRcvd, q.state, q.country,
-                        q.dxcc, q.cqZone, q.grid, q.name, q.comment, q.txPwr,
-                        q.operatorCall, q.stationCall, q.myGrid,
-                        q.lotwQslSent, q.lotwQslRcvd, q.qrzQslSent, q.qrzQslRcvd,
-                        source, q.sourceQsoId, q.dedupKey,
-                        q.continent, q.ituZone, q.county, q.iota,
-                        q.sig, q.sigInfo, q.mySig, q.mySigInfo,
-                        q.darcDok, q.wpxPrefix, q.exchangeSent, q.exchangeRcvd);
-
-                    // Nexus contesting foundation, phase 2: preserve whatever this record's raw
-                    // fields didn't map onto a modeled column -- a real (if usually empty) row
-                    // lookup by dedup_key, not a guess, so extras always land on the correct qso
-                    // id even when Upsert corrected an existing row rather than inserting a new
-                    // one.
-                    if (raw.Ordered != null && raw.Ordered.Count > 0)
-                    {
-                        var extras = AdifExtraFields.ExtractUnmodeled(raw.Ordered);
-                        if (extras.Count > 0)
-                        {
-                            var qsoId = db.GetIdByDedupKey(q.dedupKey);
-                            if (qsoId.HasValue) db.SaveExtraFields(qsoId.Value, extras);
-                        }
-                    }
-
-                    if (isNew)
-                    {
-                        result.NewQsos++;
-                    }
-                    else
-                    {
-                        if (newlyConfirmed) result.NewlyConfirmed++;
-                        if (corrected)       result.Corrected++;
-                        if (!newlyConfirmed && !corrected) result.Skipped++;
-                    }
-
-                    result.Processed++;
-                    progressCallback?.Invoke(result.Processed);
-                }
-                catch (Exception ex)
-                {
-                    result.Processed++;
-                    result.Skipped++;
-                    if (errors.Length < 2000)
-                        errors.AppendLine(ex.Message);
-                }
-            });
-
-            result.Errors = errors.ToString().Trim();
-            return result;
         }
 
         // ── Normalization ─────────────────────────────────────────────────────────
-
-        private sealed class NormalizedQso
-        {
-            public string callsign, band, mode, qsoDate, timeOn, timeOff;
-            public long   freqHz;
-            public string rstSent, rstRcvd, state, country, grid, name, comment, txPwr;
-            public int    dxcc, cqZone;
-            public string operatorCall, stationCall, myGrid;
-            public string lotwQslSent, lotwQslRcvd, qrzQslSent, qrzQslRcvd;
-            public string sourceQsoId;
-            public string dedupKey;
-            // Fields used by the Rule Definitions (awards) engine.
-            public string continent, county, iota, sig, sigInfo, mySig, mySigInfo, darcDok, wpxPrefix;
-            public int    ituZone;
-            public string exchangeSent, exchangeRcvd;
-        }
-
-        private static NormalizedQso Normalize(Dictionary<string, string> f, string source,
-            Func<string, string> resolveUsState = null)
-        {
-            string call = GetField(f, "CALL");
-            if (string.IsNullOrWhiteSpace(call)) return null;
-            call = call.ToUpperInvariant().Trim();
-
-            string band = NormalizeBand(GetField(f, "BAND"), GetField(f, "FREQ"));
-            // Found live, 2026-08-26: LoTW's own ADIF export reports FT4 QSOs under the ADIF
-            // umbrella MODE "MFSK" with SUBMODE "FT4" (per the ADIF spec, SUBMODE exists
-            // specifically to narrow an umbrella MODE like this), while every other source here
-            // (QRZ, Club Log, Jimmy's own live logging) reports MODE="FT4" directly. Since
-            // dedup_key (BuildDedupKey below) includes mode as a literal string, "MFSK" vs
-            // "FT4" for the exact same real QSO never matched -- confirmed live: a QSO both QRZ
-            // and LoTW's website agree is genuinely LoTW-confirmed still showed as permanently
-            // "pending" locally, because LoTW's download inserted it as a SEPARATE mode=MFSK
-            // row instead of backfilling the existing mode=FT4 row's upload-confirmed flag.
-            // Preferring SUBMODE when present (the ADIF-spec-correct, more specific value)
-            // keeps mode consistent across every source instead of just working around MFSK
-            // specifically.
-            string mode = (GetField(f, "SUBMODE") ?? GetField(f, "MODE") ?? "").ToUpperInvariant().Trim();
-
-            string qsoDate = NormalizeDate(GetField(f, "QSO_DATE") ?? GetField(f, "QSO_DATE_OFF") ?? "");
-            string timeOn  = NormalizeTime(GetField(f, "TIME_ON")  ?? "");
-            string timeOff = NormalizeTime(GetField(f, "TIME_OFF") ?? "");
-
-            if (string.IsNullOrEmpty(qsoDate)) return null;
-
-            string dedupKey = BuildDedupKey(call, band, mode, qsoDate, timeOn);
-
-            long freqHz = 0;
-            double freqMhz;
-            if (double.TryParse(GetField(f, "FREQ"), System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out freqMhz))
-                freqHz = (long)(freqMhz * 1_000_000);
-
-            int dxcc = 0;
-            int.TryParse(GetField(f, "DXCC") ?? "", out dxcc);
-
-            int cqZone = 0;
-            int.TryParse(GetField(f, "CQZ") ?? GetField(f, "CQ_ZONE") ?? "", out cqZone);
-
-            string country = GetField(f, "COUNTRY") ?? "";
-            string continent = (GetField(f, "CONT") ?? "").ToUpperInvariant();
-
-            // T12 fix, 2026-08-23 (PARTIALLY CONFIRMED -- LoTW-only DXCC/awards, reported
-            // 2026-08-21): core confirmation logic (QSL flags below, HrcCache) was already
-            // service-neutral, but nothing backfilled a missing DXCC/country/continent when the
-            // SOURCE ADIF simply omitted them -- some real LoTW/Club Log exports do, while QRZ's
-            // own export more often already includes them, which plausibly explained "only QRZ
-            // data behaves correctly" without any service actually being required. Live
-            // classification and worked/confirmed DXCC sets are gated on dxcc>0 (LogbookDb.
-            // LoadHrcCache), so a real confirmed QSO with dxcc left at 0 was invisible to
-            // DXCC-needed/worked-DXCC award logic regardless of its QSL flags. Backfills ONLY
-            // fields the source record itself left blank/zero, from the same canonical offline
-            // Club Log prefix/entity data every live decode already classifies against
-            // (RuleLibrary.ClubLog, populated once at startup, Controller.cs) -- never overrides
-            // a real value the ADIF file actually supplied. RuleLibrary.ClubLog can be null in a
-            // narrow startup/test window before it's assigned; a missing/undeleted resolution
-            // simply leaves the field at its prior (possibly still zero/blank) value, same as
-            // before this fix existed.
-            FillEntityGaps(call, ref dxcc, ref country, ref continent);
-
-            // QSL field mapping differs by source.
-            // LoTW download: QSL_RCVD:Y means confirmed (LOTW_QSL_RCVD is a logging-software field, absent in LoTW's own export).
-            // QRZ download:  APP_QRZLOG_STATUS:C means confirmed on QRZ logbook; QSL_RCVD is physical paper cards only.
-            string lotwSent, lotwRcvd, qrzSent, qrzRcvd;
-            if (source == "LOTW")
-            {
-                lotwSent = QslVal(GetField(f, "QSL_SENT"));
-                lotwRcvd = QslVal(GetField(f, "QSL_RCVD"));
-                qrzSent  = "";
-                qrzRcvd  = "";
-            }
-            else if (source == "QRZ")
-            {
-                lotwSent = QslVal(GetField(f, "LOTW_QSL_SENT"));
-                lotwRcvd = QslVal(GetField(f, "LOTW_QSL_RCVD"));
-                string appStatus = GetField(f, "APP_QRZLOG_STATUS");
-                qrzRcvd  = string.Equals(appStatus, "C", StringComparison.OrdinalIgnoreCase) ? "Y" : "";
-                qrzSent  = QslVal(GetField(f, "QSL_SENT"));
-            }
-            else
-            {
-                lotwSent = QslVal(GetField(f, "LOTW_QSL_SENT"));
-                string lotwRcvdDirect = QslVal(GetField(f, "LOTW_QSL_RCVD"));
-                lotwRcvd = lotwRcvdDirect.Length > 0 ? lotwRcvdDirect : QslVal(GetField(f, "QSL_RCVD"));
-                string appStatus = GetField(f, "APP_QRZLOG_STATUS");
-                qrzRcvd  = string.Equals(appStatus, "C", StringComparison.OrdinalIgnoreCase) ? "Y" : "";
-                qrzSent  = QslVal(GetField(f, "QSL_SENT"));
-            }
-
-            string state = (GetField(f, "STATE") ?? "").ToUpperInvariant().Trim();
-            if (state.Length > 2) state = state.Substring(0, 2);
-
-            string grid = (GetField(f, "GRIDSQUARE") ?? GetField(f, "GRID") ?? "").ToUpperInvariant();
-
-            // Fallback for a blank STATE field only -- never overrides a real value from the
-            // file. Offline only (resolveUsState is expected to be cache/database-backed, e.g.
-            // FCC ULS or an already-cached QRZ lookup -- never a live network query, since a
-            // bulk import/backfill can touch many callsigns at once). Grid-derived is a last
-            // resort, same source used for live-decode display elsewhere in the app.
-            if (string.IsNullOrEmpty(state))
-            {
-                string resolved = ResolveMissingState(call, grid, resolveUsState);
-                if (!string.IsNullOrEmpty(resolved)) state = resolved;
-            }
-
-            int ituZone = 0;
-            int.TryParse(GetField(f, "ITUZ") ?? GetField(f, "ITU_ZONE") ?? "", out ituZone);
-
-            return new NormalizedQso
-            {
-                callsign     = call,
-                band         = band,
-                mode         = mode,
-                qsoDate      = qsoDate,
-                timeOn       = timeOn,
-                timeOff      = timeOff,
-                freqHz       = freqHz,
-                rstSent      = GetField(f, "RST_SENT") ?? "",
-                rstRcvd      = GetField(f, "RST_RCVD") ?? "",
-                state        = state,
-                country      = country,
-                dxcc         = dxcc,
-                cqZone       = cqZone,
-                grid         = grid,
-                name         = GetField(f, "NAME") ?? "",
-                comment      = GetField(f, "COMMENT") ?? GetField(f, "NOTES") ?? "",
-                txPwr        = GetField(f, "TX_PWR") ?? "",
-                operatorCall = (GetField(f, "OPERATOR") ?? "").ToUpperInvariant(),
-                stationCall  = (GetField(f, "STATION_CALLSIGN") ?? GetField(f, "MY_CALL") ?? "").ToUpperInvariant(),
-                myGrid       = (GetField(f, "MY_GRIDSQUARE") ?? GetField(f, "MY_GRID") ?? "").ToUpperInvariant(),
-                lotwQslSent  = lotwSent,
-                lotwQslRcvd  = lotwRcvd,
-                qrzQslSent   = qrzSent,
-                qrzQslRcvd   = qrzRcvd,
-                sourceQsoId  = GetField(f, "APP_QRZLOG_QSLDATE") ?? "",
-                dedupKey     = dedupKey,
-                continent    = continent,
-                ituZone      = ituZone,
-                county       = (GetField(f, "CNTY") ?? "").ToUpperInvariant(),
-                iota         = (GetField(f, "IOTA") ?? "").ToUpperInvariant(),
-                sig          = (GetField(f, "SIG") ?? "").ToUpperInvariant(),
-                sigInfo      = (GetField(f, "SIG_INFO") ?? "").ToUpperInvariant(),
-                mySig        = (GetField(f, "MY_SIG") ?? "").ToUpperInvariant(),
-                mySigInfo    = (GetField(f, "MY_SIG_INFO") ?? "").ToUpperInvariant(),
-                darcDok      = (GetField(f, "DARC_DOK") ?? "").ToUpperInvariant(),
-                wpxPrefix    = (GetField(f, "PFX") ?? "").ToUpperInvariant(),
-                exchangeSent = GetField(f, "STX_STRING") ?? "",
-                exchangeRcvd = GetField(f, "SRX_STRING") ?? "",
-            };
-        }
 
         // The T12 backfill (see its comment in the import above), as ONE rule shared by Jimmy's own
         // import and the Nexus paths: DXCC / country / continent a record left blank or zero, from
@@ -519,33 +280,6 @@ namespace WSJTX_Controller
                 }
             }
             return "";
-        }
-
-        private static string NormalizeDate(string d)
-        {
-            if (string.IsNullOrWhiteSpace(d)) return "";
-            d = d.Trim().Replace("-", "").Replace("/", "");
-            return d.Length >= 8 ? d.Substring(0, 8) : "";
-        }
-
-        private static string NormalizeTime(string t)
-        {
-            if (string.IsNullOrWhiteSpace(t)) return "";
-            t = t.Trim().Replace(":", "");
-            return t.Length >= 4 ? t.Substring(0, 4) : t;
-        }
-
-        private static string QslVal(string v)
-        {
-            if (string.IsNullOrWhiteSpace(v)) return "";
-            v = v.Trim().ToUpperInvariant();
-            return (v == "Y" || v == "N" || v == "R" || v == "Q" || v == "I") ? v : "";
-        }
-
-        private static string GetField(Dictionary<string, string> f, string key)
-        {
-            string v;
-            return f.TryGetValue(key, out v) ? (v ?? "").Trim() : null;
         }
     }
 }

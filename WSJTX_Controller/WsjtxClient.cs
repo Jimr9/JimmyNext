@@ -52,9 +52,8 @@ namespace WSJTX_Controller
         // (Controller.cs, right after `new WsjtxClient(...)`) -- capturing it here
         // would freeze in a still-null reference. By the time any decode actually
         // arrives, Controller's startup sequence has long since finished.
-        // Nexus contesting foundation, phase 2 (completed): ILogbookService, not LogbookDb --
-        // ClassificationEngine only needs HasWorkedBefore/HasWorkedDxcc, both on the interface.
-        private readonly ILogbookService _logbookDb = LogbookFactory.Open();
+        // ClassificationEngine only reads (HasWorkedBefore/HasWorkedDxcc).
+        private readonly ILogbookReader _logbookDb = LogbookFactory.Open();
         private ClassificationEngine _classificationEngine;
         private ClassificationEngine Classifier => _classificationEngine ?? (_classificationEngine = new ClassificationEngine(_logbookDb, lookupManager));
         // udpClient/ipAddress/multicast (the classic UDP receive-socket's own identity) and

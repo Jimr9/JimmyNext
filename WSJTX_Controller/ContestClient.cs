@@ -278,7 +278,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, TestControlPortOverride ?? NativeEngineClient.ControlPort);
+                    var connectTask = client.ConnectAsync(System.Net.IPAddress.Loopback, TestControlPortOverride ?? NativeEngineClient.ControlPort).ObserveFault();
                     if (!connectTask.Wait(Math.Min(timeoutMs, 3000)) || !client.Connected) return null;
 
                     using (var stream = client.GetStream())

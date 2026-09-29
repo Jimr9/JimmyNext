@@ -92,15 +92,11 @@ namespace WSJTX_Controller
         // RunUploadCatchUp -- TQSL itself can take several seconds to sign and upload.
         private void RunTqslUpload()
         {
-            // See LiveQsoUploadOrchestrator.ImportLiveLoggedQso's own comment (2026-08-10) for
-            // why this is captured here, synchronously, rather than letting the background task
-            // below resolve LogbookDb.DbPath lazily whenever it happens to actually run.
-            string dbPath = LogbookDb.DbPath;
             Task.Run(async () =>
             {
                 try
                 {
-                    using (ILogbookService db = LogbookFactory.Open(dbPath))
+                    using (ILogbookService db = LogbookFactory.Open())
                     {
                         var client = new TqslUploadClient();
                         bool ok = await client.UploadPendingAsync(ctrl.tqslStationLocation, db).ConfigureAwait(false);
@@ -164,15 +160,11 @@ namespace WSJTX_Controller
         // WSJT-X performs its upload asynchronously on its own too.
         private void RunUploadCatchUp()
         {
-            // See LiveQsoUploadOrchestrator.ImportLiveLoggedQso's own comment (2026-08-10) for
-            // why this is captured here, synchronously, rather than letting the background task
-            // below resolve LogbookDb.DbPath lazily whenever it happens to actually run.
-            string dbPath = LogbookDb.DbPath;
             Task.Run(async () =>
             {
                 try
                 {
-                    using (ILogbookService db = LogbookFactory.Open(dbPath))
+                    using (ILogbookService db = LogbookFactory.Open())
                     {
                         if (ctrl.qrzUploadEnabled && !string.IsNullOrWhiteSpace(ctrl.qrzLogbookApiKey))
                             await CatchUpQrz(db).ConfigureAwait(false);
@@ -213,30 +205,14 @@ namespace WSJTX_Controller
             ctrl.BeginInvoke(new Action(() =>
                 ctrl.ShowUploadStatus($"QRZ upload: starting, {pending.Count} pending QSO(s)...", false)));
 
-            var client = new QrzLogbookClient();
-            var nexus = db as NexusLogbookService;
+            var nexus = (NexusLogbookService)db;
             var creds = new LiveUploadCredentials { QrzLogbookApiKey = ctrl.qrzLogbookApiKey };
             int done = 0, succeeded = 0, failedCount = 0;
             DateTime lastStatusUpdate = DateTime.UtcNow;
             foreach (var q in pending)
             {
-                bool ok;
-                string error;
-                if (nexus != null)
-                {
-                    // Nexus keeps the log: Nexus's own QRZ transaction (record, send, answer, stamp).
-                    ok = nexus.UploadThroughNexus(q.DedupKey, "QRZ", creds, out error);
-                }
-                else
-                {
-                    string adifRecord = AdifRecordBuilder.Build(
-                        q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
-                        q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
-                        q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd);
-                    ok = await client.InsertAsync(ctrl.qrzLogbookApiKey, adifRecord).ConfigureAwait(false);
-                    if (ok) db.MarkUploaded(q.DedupKey, "QRZ", DateTime.UtcNow);
-                    error = client.LastError;
-                }
+                // Nexus's own QRZ transaction (record, send, answer, stamp).
+                bool ok = nexus.UploadThroughNexus(q.DedupKey, "QRZ", creds, out string error);
                 done++;
                 if (ok)
                 {
@@ -327,30 +303,14 @@ namespace WSJTX_Controller
             ctrl.BeginInvoke(new Action(() =>
                 ctrl.ShowUploadStatus($"HRDLog.net upload: starting, {pending.Count} pending QSO(s)...", false)));
 
-            var client = new HrdLogUploadClient();
-            var nexus = db as NexusLogbookService;
+            var nexus = (NexusLogbookService)db;
             var creds = new LiveUploadCredentials { HrdLogUploadCallsign = ctrl.hrdLogUploadCallsign, HrdLogUploadCode = ctrl.hrdLogUploadCode };
             int done = 0, succeeded = 0, failedCount = 0;
             DateTime lastStatusUpdate = DateTime.UtcNow;
             foreach (var q in pending)
             {
-                bool ok;
-                string hrdError = null;
-                if (nexus != null)
-                {
-                    // Nexus keeps the log: Nexus's HRDLog sender; the upload time kept on the contact.
-                    ok = nexus.UploadThroughNexus(q.DedupKey, "HRDLOG", creds, out hrdError);
-                }
-                else
-                {
-                    string adifRecord = AdifRecordBuilder.Build(
-                        q.Callsign, q.Band, q.FreqHz, q.Mode, q.QsoDate, q.TimeOn, q.TimeOff,
-                        q.RstSent, q.RstRcvd, q.Grid, q.Name, q.Comment, q.TxPwr,
-                        q.OperatorCall, q.StationCall, q.MyGrid, q.ExchangeSent, q.ExchangeRcvd);
-                    ok = await client.InsertAsync(ctrl.hrdLogUploadCallsign, ctrl.hrdLogUploadCode, adifRecord).ConfigureAwait(false);
-                    if (ok) db.MarkUploaded(q.DedupKey, "HRDLOG", DateTime.UtcNow);
-                    else hrdError = client.LastError;
-                }
+                // Nexus's HRDLog sender; the upload time is kept on the contact.
+                bool ok = nexus.UploadThroughNexus(q.DedupKey, "HRDLOG", creds, out string hrdError);
                 done++;
                 if (ok)
                 {

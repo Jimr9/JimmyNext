@@ -94,8 +94,12 @@ namespace WSJTX_Controller
             lock (_lock)
             {
                 if (_entries.Any(e => e.ReqId == reqId)) return;
-                _entries.Add(new Entry { ReqId = reqId, Qso = qso, QueuedUtc = DateTime.UtcNow });
-                Save();
+                var entry = new Entry { ReqId = reqId, Qso = qso, QueuedUtc = DateTime.UtcNow };
+                _entries.Add(entry);
+                // Queued only once it is on disk: a failed save takes it back out, so the caller's
+                // retry saves it for real instead of finding it "already queued" in memory only.
+                try { Save(); }
+                catch { _entries.Remove(entry); throw; }
             }
         }
 

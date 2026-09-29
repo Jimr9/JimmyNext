@@ -37,12 +37,11 @@ namespace WSJTX_Controller
     // previously read EnqueueDecodeMessage's wire-supplied fields directly.
     public class ClassificationEngine
     {
-        // Nexus contesting foundation, phase 2 (completed): ILogbookService, not LogbookDb --
-        // only HasWorkedBefore/HasWorkedDxcc are used here, both on the interface.
-        private readonly ILogbookService _logbookDb;
+        // Reads only: HasWorkedBefore/HasWorkedDxcc.
+        private readonly ILogbookReader _logbookDb;
         private readonly LookupManager _lookupManager;
 
-        public ClassificationEngine(ILogbookService logbookDb, LookupManager lookupManager)
+        public ClassificationEngine(ILogbookReader logbookDb, LookupManager lookupManager)
         {
             _logbookDb = logbookDb;
             _lookupManager = lookupManager;

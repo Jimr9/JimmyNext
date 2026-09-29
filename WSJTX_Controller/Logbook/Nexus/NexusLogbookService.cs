@@ -250,9 +250,6 @@ namespace WSJTX_Controller
             finally { try { File.Delete(tmp); } catch { } }
         }
 
-        public LogbookDb.EqslReconcileOutcome TryMarkEqslConfirmed(string callsign, string band, string qsoDateAdif, string mode) =>
-            throw new NotSupportedException("the eQSL inbox is merged as a whole through Nexus (EqslReconciler)");
-
         // ── Edits and deletes (by the projection row's Nexus id) ─────────────────────────────
 
         private static (NexusQso row, string error) NexusRowFor(long jimmyRowId)
@@ -292,6 +289,32 @@ namespace WSJTX_Controller
             if (reply.State != "saved") throw new InvalidOperationException(EditFailure(reply));
             NexusLogbook.Refresh();
             return true;
+        }
+
+        // Logbook Center's full contact editor (ContactEditDlg): the whole stored contact, and its
+        // save. The contact goes back in ONE edit -- Nexus keeps what the services said
+        // (confirmations, upload stamps) through it -- then each upload status the operator
+        // changed is stamped: "sent" as the service's own upload would stamp it, "not sent" as
+        // rejected, so the next catch-up sends it again.
+        public NexusQso GetRecord(int id)
+        {
+            var (row, error) = NexusRowFor(id);
+            if (row == null) throw new InvalidOperationException(error);
+            return row;
+        }
+
+        public void SaveRecord(NexusQso edited, IEnumerable<(string Service, bool Sent)> uploadChanges)
+        {
+            var reply = Client.Edit(edited.Id, edited.EditKey, edited);
+            if (reply.State != "saved") throw new InvalidOperationException(EditFailure(reply));
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            foreach (var (service, sent) in uploadChanges ?? Enumerable.Empty<(string, bool)>())
+            {
+                string outcome = !sent ? "rejected" : service == "lotw" ? "pending" : "accepted";
+                var stamp = Client.StampUpload(edited.Id, service, outcome, now);
+                if (stamp.State != "saved") throw new InvalidOperationException(EditFailure(stamp));
+            }
+            NexusLogbook.Refresh();
         }
 
         private static string EditFailure(NexusWriteReply r) =>
@@ -478,7 +501,6 @@ namespace WSJTX_Controller
         public void SetContestAssociation(long qsoId, string contestId, string contestSessionId) { /* written with the contact */ }
         public List<ContestSessionRow> GetContestSessionRows(string contestSessionId) =>
             R(db => db.GetContestSessionRows(contestSessionId), new List<ContestSessionRow>());
-        public void RunBatch<T>(IEnumerable<T> items, Action<T> perItemAction) { foreach (var i in items) perItemAction(i); }
         public bool HasWorkedBefore(string callsign, string band = null) => R(db => db.HasWorkedBefore(callsign, band), false);
         public bool HasWorkedDxcc(int dxcc, string band = null) => R(db => db.HasWorkedDxcc(dxcc, band), false);
         public int TotalQsos(string source = null) => R(db => db.TotalQsos(source), 0);

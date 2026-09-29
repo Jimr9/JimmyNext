@@ -21,7 +21,6 @@ namespace WSJTX_Controller
     public class ContestWorkflow
     {
         private readonly ContestClient _contestClient;
-        private readonly Func<string> _dbPath;
         private readonly Func<string> _myCall;
         private readonly Func<string> _myGrid;
         private readonly Func<string> _operatorCall;
@@ -33,14 +32,12 @@ namespace WSJTX_Controller
 
         public ContestWorkflow(
             ContestClient contestClient,
-            Func<string> dbPath,
             Func<string> myCall,
             Func<string> myGrid,
             Func<string> operatorCall,
             Action<string> debugLog = null)
         {
             _contestClient = contestClient;
-            _dbPath = dbPath;
             _myCall = myCall;
             _myGrid = myGrid;
             _operatorCall = operatorCall;
@@ -89,7 +86,7 @@ namespace WSJTX_Controller
         {
             if (_activeSessionInstanceId == null) return 0;
 
-            using (ILogbookService db = LogbookFactory.Open(_dbPath()))
+            using (ILogbookService db = LogbookFactory.Open())
             {
                 ulong watermark = LoadWatermark(db, _activeSessionInstanceId);
                 var completions = _contestClient.QsosSince(watermark, out string error);
@@ -131,9 +128,6 @@ namespace WSJTX_Controller
 
         private void ApplyCompletion(ILogbookService db, ContestCompletion c)
         {
-            var when = DateTimeOffset.FromUnixTimeSeconds((long)c.WhenUnix).UtcDateTime;
-            string qsoDate = when.ToString("yyyyMMdd");
-            string timeOn = when.ToString("HHmmss");
             string call = (c.Call ?? "").Trim().ToUpperInvariant();
             string band = (c.Band ?? "").Trim();
             string mode = (c.Mode ?? "").Trim().ToUpperInvariant();
@@ -141,7 +135,6 @@ namespace WSJTX_Controller
             string myGrid = (_myGrid() ?? "").Trim().ToUpperInvariant();
             string operatorCall = string.IsNullOrWhiteSpace(_operatorCall()) ? myCall : _operatorCall().Trim().ToUpperInvariant();
 
-            string dedupKey = AdifImporter.BuildDedupKey(call, band, mode, qsoDate, timeOn);
             string sourceQsoId = $"{c.SessionInstanceId}:{c.Seq}";
             // Field Day's own real-world exchange convention (e.g. "2A MO") -- space-joined
             // field VALUES in the order EngineHost sent them (the ruleset's own field order),
@@ -150,60 +143,22 @@ namespace WSJTX_Controller
             string exchangeSent = string.Join(" ", (c.SentFields ?? new List<List<string>>()).Select(f => f.Count > 1 ? f[1] : ""));
             string exchangeRcvd = string.Join(" ", (c.RcvdFields ?? new List<List<string>>()).Select(f => f.Count > 1 ? f[1] : ""));
 
-            if (db is NexusLogbookService nexus)
+            // The contact, its contest association and its structured received exchange in ONE
+            // durable write to Nexus -- it throws unless saved, so the caller never acknowledges
+            // an unsaved completion.
+            var q = new NexusQso
             {
-                // Nexus owns the logbook: the contact, its contest association and its structured
-                // received exchange in ONE durable write -- it throws unless saved, so the caller
-                // never acknowledges an unsaved completion.
-                var q = new NexusQso
+                Call = call, Band = band, Mode = mode, WhenUnix = c.WhenUnix, TimeKnown = true,
+                Operator = operatorCall, StationCallsign = myCall, MyGrid = myGrid,
+                Extra = new List<List<string>>
                 {
-                    Call = call, Band = band, Mode = mode, WhenUnix = c.WhenUnix, TimeKnown = true,
-                    Operator = operatorCall, StationCallsign = myCall, MyGrid = myGrid,
-                    Extra = new List<List<string>>
-                    {
-                        new List<string> { "STX_STRING", exchangeSent }, new List<string> { "SRX_STRING", exchangeRcvd },
-                        new List<string> { NexusMigration.SourceTag, "NEXUS_CONTEST" }, new List<string> { NexusMigration.SourceQsoIdTag, sourceQsoId },
-                    },
-                };
-                var pairs = (c.RcvdFields ?? new List<List<string>>()).Where(f => f.Count > 1).Select(f => (Tag: f[0], Value: f[1])).ToList();
-                nexus.LogContestCompletion(NexusLogbookService.RequestIdFor("NEXUS_CONTEST", sourceQsoId), q,
-                    _activeContestId ?? _activeEventId ?? "", c.SessionInstanceId, pairs);
-                return;
-            }
-
-            var (_, _, _) = db.Upsert(
-                call, band, mode, qsoDate, timeOn, timeOn,
-                freqHz: 0, rstSent: "", rstRcvd: "",
-                state: "", country: "", dxcc: 0, cqZone: 0,
-                grid: "", name: "", comment: "", txPwr: "",
-                operatorCall: operatorCall, stationCall: myCall, myGrid: myGrid,
-                lotwQslSent: "", lotwQslRcvd: "", qrzQslSent: "", qrzQslRcvd: "",
-                source: "NEXUS_CONTEST", sourceQsoId: sourceQsoId, dedupKey: dedupKey,
-                continent: "", ituZone: 0, county: "", iota: "",
-                sig: "", sigInfo: "", mySig: "", mySigInfo: "",
-                darcDok: "", wpxPrefix: "",
-                exchangeSent: exchangeSent, exchangeRcvd: exchangeRcvd);
-
-            var qsoId = db.GetIdByDedupKey(dedupKey);
-            if (qsoId.HasValue)
-            {
-                db.SetContestAssociation(qsoId.Value, _activeContestId ?? _activeEventId ?? "", c.SessionInstanceId);
-
-                // Nexus contesting foundation, phase 5: the STRUCTURED received-exchange field
-                // pairs (real ruleset keys, e.g. "CLASS"->"1B"), reusing the qso_extra_field
-                // round-trip primitive (phase 2) rather than a new schema column. exchange_rcvd
-                // above is the flattened display/ADIF-STX_STRING form; this is what
-                // CONTEST_REBUILD_APPEND actually needs to replay through Nexus's own
-                // FieldDayLog::log_fields_at, which requires real field keys, not just values.
-                // Safe to share the same table: a NEXUS_CONTEST row never goes through
-                // AdifImporter.Import (no ADIF text is ever parsed for it), so there is no
-                // competing "unknown ADIF field" use of this storage for these rows.
-                var rcvdPairs = (c.RcvdFields ?? new List<List<string>>())
-                    .Where(f => f.Count > 1)
-                    .Select(f => (Tag: f[0], Value: f[1]))
-                    .ToList();
-                if (rcvdPairs.Count > 0) db.SaveExtraFields(qsoId.Value, rcvdPairs);
-            }
+                    new List<string> { "STX_STRING", exchangeSent }, new List<string> { "SRX_STRING", exchangeRcvd },
+                    new List<string> { NexusMigration.SourceTag, "NEXUS_CONTEST" }, new List<string> { NexusMigration.SourceQsoIdTag, sourceQsoId },
+                },
+            };
+            var pairs = (c.RcvdFields ?? new List<List<string>>()).Where(f => f.Count > 1).Select(f => (Tag: f[0], Value: f[1])).ToList();
+            ((NexusLogbookService)db).LogContestCompletion(NexusLogbookService.RequestIdFor("NEXUS_CONTEST", sourceQsoId), q,
+                _activeContestId ?? _activeEventId ?? "", c.SessionInstanceId, pairs);
         }
 
         // Nexus contesting foundation, phase 5: Jimmy-initiated, batched rebuild of Nexus's
@@ -226,7 +181,7 @@ namespace WSJTX_Controller
             var begin = _contestClient.RebuildBegin(out error);
             if (begin == null) return null;
 
-            using (ILogbookService db = LogbookFactory.Open(_dbPath()))
+            using (ILogbookService db = LogbookFactory.Open())
             {
                 var rows = db.GetContestSessionRows(_activeSessionInstanceId);
 

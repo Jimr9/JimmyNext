@@ -4,13 +4,9 @@ using System.Windows.Forms;
 
 namespace WSJTX_Controller
 {
-    // Local-only edit dialog for a single QSO row on the Logbook window's Edit Log tab.
-    // Never contacts QRZ/Club Log/LoTW -- only ever writes to Jimmy's own logbook.db
-    // (see LogbookDb.UpdateQso). Field set is deliberately smaller than every column
-    // the database stores: this exposes the fields a user would realistically want to
-    // review or correct (callsign, band/mode/date/time, state/country/grid, name,
-    // RST, a free-form comment), not the award-engine bookkeeping fields (SIG, DARC_DOK,
-    // WPX prefix, etc.), which are left untouched by an edit.
+    // The Logbook window's "Add New QSO" dialog: the fields a quick manual entry needs
+    // (callsign, band/mode/date/time, state/country/grid, name, RST, a comment). Editing an
+    // existing contact uses ContactEditDlg, which shows every field.
     internal class EditQsoDlg : Form
     {
         private readonly TextBox _callTb, _bandTb, _dateTb, _timeOnTb, _timeOffTb;

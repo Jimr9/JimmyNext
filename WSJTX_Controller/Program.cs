@@ -158,12 +158,12 @@ namespace WSJTX_Controller
                 return;
             }
 
-            // Logbook migration (Phase 6): the operator's move / move-back commands. Here, after the
-            // single-instance check, so Jimmy Next itself can never be running while they work.
+            // The logbook move by command (the automatic one below does the same). Here, after the
+            // single-instance check, so Jimmy Next itself can never be running while it works.
             var cmdArgs = Environment.GetCommandLineArgs();
-            if (cmdArgs.Contains("--nexus-logbook-migrate") || cmdArgs.Contains("--nexus-logbook-rollback"))
+            if (cmdArgs.Contains("--nexus-logbook-migrate"))
             {
-                NexusLogbookMigration.RunInteractive(migrate: cmdArgs.Contains("--nexus-logbook-migrate"));
+                NexusLogbookMigration.RunInteractive();
                 return;
             }
             // Read-only LoTW/QRZ sync diagnosis on copies (optional: four saved download files).
@@ -177,8 +177,8 @@ namespace WSJTX_Controller
             {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                // Automatic logbook move (NexusLogbookMigration.AutoMove): once per install, before
-                // Jimmy starts its own engine.
+                // Automatic logbook move (NexusLogbookMigration.AutoMove): until it has happened,
+                // before Jimmy starts its own engine.
                 if (NexusLogbookMigration.AutoMoveNeeded()) RunAutoMoveWithProgress();
                 Application.Run(new Controller());
             }
