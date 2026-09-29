@@ -579,6 +579,21 @@ namespace WSJTX_Controller
         // the same rows and sources, in the same order, as Jimmy's own export picks them from the
         // read copy -- are kept exactly as Nexus wrote them. Returns (records written, a note for
         // the status line, or null).
+        // The export's ADIF header, as other loggers write one: the program, its version, and when.
+        internal static string AdifExportHeader()
+        {
+            var asm = System.Reflection.Assembly.GetExecutingAssembly();
+            string program = asm.GetName().Name ?? "Jimmy Next";
+            string version = (System.Reflection.CustomAttributeExtensions.GetCustomAttribute<System.Reflection.AssemblyInformationalVersionAttribute>(asm)?.InformationalVersion ?? "").Trim();
+            string F(string tag, string value) => $"<{tag}:{Encoding.UTF8.GetByteCount(value)}>{value}";
+            var sb = new StringBuilder($"{program} ADIF export\n");
+            sb.Append(F("ADIF_VER", "3.1.4")).Append('\n');
+            sb.Append(F("PROGRAMID", program)).Append('\n');
+            if (version.Length > 0) sb.Append(F("PROGRAMVERSION", version)).Append('\n');
+            sb.Append(F("CREATED_TIMESTAMP", DateTime.UtcNow.ToString("yyyyMMdd HHmmss", CultureInfo.InvariantCulture))).Append('\n');
+            return sb.Append("<EOH>").ToString();
+        }
+
         public (int Written, string Note) ExportAdif(IList<int> ids, IList<string> sources, string outPath)
         {
             var wanted = R(db => db.GetExtraFieldForExport("APP_NEXUS_ID", ids, sources), new List<string>());
@@ -589,7 +604,7 @@ namespace WSJTX_Controller
                 if (reply.State != "saved") throw new InvalidOperationException($"Nexus export: {reply.State} {reply.Why}".Trim());
                 string text = File.ReadAllText(tmp, Encoding.UTF8);
                 var m = System.Text.RegularExpressions.Regex.Match(text, "<eoh>", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-                string header = m.Success ? text.Substring(0, m.Index + m.Length) : "";
+                string header = AdifExportHeader();   // Nexus's file says "Nexus"; the export is Jimmy Next's
                 var byId = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var rec in System.Text.RegularExpressions.Regex.Split(m.Success ? text.Substring(m.Index + m.Length) : text, "<eor>",
                                                                                System.Text.RegularExpressions.RegexOptions.IgnoreCase))

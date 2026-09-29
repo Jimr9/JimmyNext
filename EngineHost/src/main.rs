@@ -1069,6 +1069,27 @@ fn read_one_control_line(
 /// the "can't start over CAT" refusal this replaces, and the Enable-TX latch -- Jimmy disarms TX
 /// before a tune-up exactly as it does for Tune (Alt+T), and FT8/FT4 are never receive-only tiers.
 /// Replies "OK", "OK <tuning 1|0> <tuner in 1|0> <radio's AC answer>" for ATU_STATUS, or "ERR <reason>".
+/// See GRID_STATES. Built once: 32,400 cells, a few hundred of them in the US.
+fn grid_states_json() -> &'static str {
+    static JSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    JSON.get_or_init(|| {
+        let mut map = serde_json::Map::new();
+        for f1 in b'A'..=b'R' {
+            for f2 in b'A'..=b'R' {
+                for d1 in b'0'..=b'9' {
+                    for d2 in b'0'..=b'9' {
+                        let grid = String::from_utf8(vec![f1, f2, d1, d2]).unwrap_or_default();
+                        if let Some(st) = propagation::state_for_grid(&grid) {
+                            map.insert(grid, serde_json::Value::String(st.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        serde_json::Value::Object(map).to_string()
+    })
+}
+
 fn kenwood_atu(engine: &Arc<Mutex<Engine>>, cmd: &str) -> String {
     const KENWOOD_BACKEND: u32 = 2;
     let port = {
@@ -1628,6 +1649,11 @@ fn handle_control_connection(
         } else if line == "OTA_SPOTS" {
             // Cache-only, always fast -- safe to handle inline on this accept loop like SNAPSHOT.
             let _ = writeln!(stream, "{}", external_cache.spots_json());
+        } else if line == "GRID_STATES" {
+            // Nexus's own grid -> US state table (propagation::state_for_grid), every US 4-char
+            // cell as {"DN43":"ID",...}, for Jimmy's logging: a heard grid that disagrees with the
+            // callsign's mailing-address state leaves STATE blank rather than wrong.
+            let _ = writeln!(stream, "{}", grid_states_json());
         } else if line == "SPACE_WX" {
             let _ = writeln!(stream, "{}", external_cache.space_wx_json());
         } else if line == "BAND_CONDITIONS" {

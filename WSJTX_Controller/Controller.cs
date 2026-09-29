@@ -381,6 +381,26 @@ namespace WSJTX_Controller
         private static string numericOnly = "[^0-9]";          //match if any alpha
 
 
+        // Loading a profile closes this window and opens a fresh one with the new profile in the same
+        // program (Program.Main), handing the running engine over (EngineHandoffOut) instead of
+        // restarting everything. The new window keeps it only when its own launch would say exactly
+        // the same (TryAdoptHandedOffEngine); radio and audio then change live, as in Options.
+        internal sealed class EngineHandoff
+        {
+            public NativeEngineClient Client;
+            public string SessionToken;
+        }
+        private EngineHandoff _engineHandoffIn;
+        internal EngineHandoff EngineHandoffOut { get; private set; }
+        internal bool ReopenForProfile { get; private set; }
+        private string _engineSessionToken;
+        private Action _logBecameReadyHandler;
+
+        internal Controller(EngineHandoff handoff) : this()
+        {
+            _engineHandoffIn = handoff;
+        }
+
         public Controller()
         {
             InitializeComponent();
@@ -1221,18 +1241,20 @@ namespace WSJTX_Controller
             dxSpotWatcher.Updated += () => SafeBeginInvoke(RenderSpotWatchList);
             _ = dxSpotWatcher.UpdateWatchList(wsjtxClient.spotWatchCalls); // fire-and-observe -- see UpdateWatchList's own comment
             spotWatchAgeTimer.Start();
+            wsjtxClient.usePskReporter = usePskReporter;   // before ApplyEngineMode: the launch reads it
             ApplyEngineMode();      // Phase 4g: always launches the native engine host
             // Logbook migration: while Nexus owns the logbook, keep its outbox sent and the read
             // projection current (no-op otherwise).
             NexusLogbook.StartWorker(msg => wsjtxClient?.DebugOutput(msg));
             if (NexusLogbook.Active)
             {
-                NexusLogbook.LogBecameReady += () => SafeBeginInvoke(() =>
+                _logBecameReadyHandler = () => SafeBeginInvoke(() =>
                 {
                     RefreshStillNeedCache();
                     RefreshLogbookWindowIfOpen();
                     if (_announcedLogbookLoading) { _announcedLogbookLoading = false; ShowMsg("Logbook ready", false); }
                 });
+                NexusLogbook.LogBecameReady += _logBecameReadyHandler;
                 if (!NexusLogbook.LogReady)
                 {
                     _announcedLogbookLoading = true;
@@ -2059,7 +2081,7 @@ namespace WSJTX_Controller
             int preSelect = names.FindIndex(n => string.Equals(n, activeDisplayName, StringComparison.OrdinalIgnoreCase));
             var decorated = names.Select((n, i) => i == preSelect ? n + " (active)" : n).ToList();
 
-            string chosenDecorated = PromptForChoice("Load Profile", "Choose a profile to load. Jimmy will restart.", decorated, preSelect < 0 ? 0 : preSelect);
+            string chosenDecorated = PromptForChoice("Load Profile", "Choose a profile to load. Jimmy will reload.", decorated, preSelect < 0 ? 0 : preSelect);
             if (chosenDecorated == null) return;
             int chosenIdx = decorated.IndexOf(chosenDecorated);
             string chosen = chosenIdx >= 0 ? names[chosenIdx] : chosenDecorated;
@@ -2080,7 +2102,7 @@ namespace WSJTX_Controller
                 ? "This session's changes to the current profile are saved first."
                 : "This session's changes to the current profile will be discarded.";
             var confirm = MessageBox.Show(this,
-                $"Loading '{chosen}' will restart Jimmy. {savePhrase} Continue?",
+                $"Loading '{chosen}' will reload Jimmy. {savePhrase} Continue?",
                 "Load Profile", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (confirm != DialogResult.Yes) return;
 
@@ -2107,7 +2129,7 @@ namespace WSJTX_Controller
                 wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} profile switch to '{chosen}': operator chose NOT to save current configuration first");
             }
 
-            RestartApplication();
+            SwitchProfileInPlace();
         }
 
         // internal (not private): called from OptionsDlg's Profiles tab button.
@@ -2157,53 +2179,15 @@ namespace WSJTX_Controller
             }
         }
 
-        // Single-instance guard (Program.cs's own Mutex + process-name check) would reject an
-        // immediate relaunch while this process is still shutting down. A FIXED delay (the
-        // original "timeout /t 2") is a guess that can be wrong -- real-world shutdown
-        // (SaveAllSettingsToIniFile, upload-wait, CloseComm tearing down EngineHost) took
-        // longer than 2 seconds at least once in practice, so the relaunch fired while the
-        // old process/Mutex was still alive, hit "already running", and gave up -- leaving
-        // NO instance running. Instead of guessing a longer number, the detached helper
-        // waits on THIS process's own PID via PowerShell's Wait-Process, which blocks exactly
-        // as long as shutdown actually takes (with a generous safety-net timeout in case the
-        // PID somehow never exits), then starts the new instance.
-        // Application.Exit() below routes through the normal Controller_FormClosing path (same
-        // as the existing Update-Check-then-restart flow, Controller.cs's own "Application.
-        // Exit()" call site), so the CURRENT profile's own settings are saved cleanly first.
-        private void RestartApplication()
+        // Closes this window and lets Program.Main open a fresh one with the profile just chosen,
+        // in the same program -- the running engine handed over rather than restarted. The normal
+        // FormClosing path runs (settings saved or not, as chosen; transmit halted in Closing()).
+        private void SwitchProfileInPlace()
         {
-            try
-            {
-                string exePath = Application.ExecutablePath;
-                int pid = System.Diagnostics.Process.GetCurrentProcess().Id;
-                string script =
-                    $"try {{ Wait-Process -Id {pid} -Timeout 30 -ErrorAction SilentlyContinue }} catch {{}}\n" +
-                    $"Start-Process -FilePath {PowerShellSingleQuoteLiteral(exePath)}\n";
-                string encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {encoded}",
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden,
-                };
-                System.Diagnostics.Process.Start(psi);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Could not restart automatically: {ex.Message}{nl}Please start Jimmy again manually.",
-                    "Restart Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            }
-            Application.Exit();
-        }
-
-        // Escapes a value for use inside a PowerShell single-quoted string literal (only ' needs
-        // doubling in that context) -- a different layer than NativeEngineClient's Win32
-        // command-line argv escaping, and not to be confused with it.
-        internal static string PowerShellSingleQuoteLiteral(string value)
-        {
-            return "'" + (value ?? string.Empty).Replace("'", "''") + "'";
+            ReopenForProfile = true;
+            if (!TestModeGuard.IsTestMode && nativeEngineClient != null && nativeEngineClient.Running && _engineSessionToken != null)
+                EngineHandoffOut = new EngineHandoff { Client = nativeEngineClient, SessionToken = _engineSessionToken };
+            Close();
         }
 
         private void Controller_FormClosing(object sender, FormClosingEventArgs e)
@@ -2598,8 +2582,13 @@ namespace WSJTX_Controller
             // still-unguarded NullReferenceException risk on the same failed-startup-then-close
             // path (found alongside Controller_FormClosing's own fix, 2026-08-19).
             wsjtxClient?.Closing();
-            nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path); last-resort backstop if the graceful halt above didn't confirm
+            if (EngineHandoffOut != null)
+                nativeEngineClient = null;   // handed to the next window (profile switch), still running -- see SwitchProfileInPlace
+            else
+                nativeEngineClient?.Dispose();   // also stops the native engine host this session launched (and force-releases PTT, if held -- run_radio's own SHUTDOWN handling / the process exit path); last-resort backstop if the graceful halt above didn't confirm
             nativeEngineClient = null;
+            if (_logBecameReadyHandler != null) NexusLogbook.LogBecameReady -= _logBecameReadyHandler;
+            NexusLogbook.StopWorker();   // its log output belongs to this window; a next window starts its own
             // Independent audit finding 9, 2026-08-23 (CONFIRMED bug, LOW/MEDIUM PRIORITY):
             // neither background service was ever disposed during shutdown -- both implement
             // IDisposable (a System.Timers.Timer inside LookupManager, a managed MQTT client
@@ -4254,6 +4243,7 @@ namespace WSJTX_Controller
             // related to the TestModeGuard.IsTestMode branch below at all -- kept exactly as
             // before, just no longer read by anything in the test-mode branch itself.
             int jimmyPort = wsjtxClient?.port > 0 ? wsjtxClient.port : 2237;
+            if (TryAdoptHandedOffEngine(jimmyPort)) return;
             // UDP-to-Direct test-harness migration, 2026-08-18: TestModeGuard.IsTestMode used to
             // force the classic WSJT-X UDP path here unconditionally (ConnectNativeEngine),
             // because JimmyReplay.py only spoke that standard protocol, not the Direct control
@@ -4328,6 +4318,7 @@ namespace WSJTX_Controller
             // itself is covered directly against the stub engine host in JimmyTests.cs instead of
             // through the replay harness.
             string sessionToken = TestModeGuard.IsTestMode ? null : Guid.NewGuid().ToString("N");
+            _engineSessionToken = sessionToken;
             wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid, sessionToken);
 
             nativeEngineClient?.Dispose();
@@ -4398,6 +4389,7 @@ namespace WSJTX_Controller
             // mutated by OptionsDlg's own SaveFrequenciesTab (also UI-thread, but not
             // necessarily this exact call).
             var workingFrequenciesSnapshot = WsjtxClient.BuildWorkingFrequencyEntries(Frequencies);
+            bool pskReporterSnapshot = wsjtx != null && wsjtx.usePskReporter;
 
             // Launch() (specifically Process.Start()) runs on a background thread -- Process.Start()
             // for a new, unsigned exe is well known to be able to block synchronously on real-time
@@ -4417,7 +4409,7 @@ namespace WSJTX_Controller
                 bool ok = client.Launch(myCall, myGrid, inDevice, jimmyPort, outDevice, radioSnapshot,
                     msg => wsjtx?.DebugOutput(msg),
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
-                    decodeSnapshot, wsjtx != null && wsjtx.usePskReporter,
+                    decodeSnapshot, pskReporterSnapshot,
                     dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
                     NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck);
                 if (!ok && nativeEngineClient == client)
@@ -4446,6 +4438,40 @@ namespace WSJTX_Controller
         // the way the Nexus desktop applies a settings save -- no engine restart, so no dropped
         // contact, no Direct reconnect, and the logbook host keeps running. False when there is
         // no running engine or it did not accept the change; the caller then restarts it as before.
+        // The engine a profile switch handed to this window (Program.Main), taken over only when this
+        // window's own launch would give it exactly the same command line, radio and audio aside --
+        // those then go to it live. Otherwise it is shut down and ApplyEngineMode launches afresh,
+        // exactly as before. Used once: the first ApplyEngineMode of a reopened window.
+        private bool TryAdoptHandedOffEngine(int jimmyPort)
+        {
+            var handoff = _engineHandoffIn;
+            _engineHandoffIn = null;
+            if (handoff == null) return false;
+            var client = handoff.Client;
+            string wanted = NativeEngineClient.BuildArgs(NativeEngine.MyCall, NativeEngine.MyGrid, NativeEngine.AudioInputDevice, jimmyPort,
+                NativeEngine.AudioOutputDevice, Radio, Decode, wsjtxClient != null && wsjtxClient.usePskReporter, dxClusterAddress, null,
+                (int)timeoutNumUpDown.Value, WsjtxClient.BuildWorkingFrequencyEntries(Frequencies),
+                NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, radioAndAudio: false);
+            if (TestModeGuard.IsTestMode || !client.Running || client.LaunchKey != wanted)
+            {
+                wsjtxClient?.DebugOutput("[NativeEngine] profile switch: engine settings differ -- restarting the engine");
+                client.Dispose();
+                return false;
+            }
+            nativeEngineClient = client;
+            _engineSessionToken = handoff.SessionToken;
+            client.Rebind(msg => wsjtxClient?.DebugOutput(msg), () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)));
+            wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid, handoff.SessionToken);
+            if (!TryApplyEngineSettingsLive())
+            {
+                // Not accepted: the normal path shuts this engine down and launches a new one.
+                wsjtxClient?.DebugOutput("[NativeEngine] profile switch: live settings not accepted -- restarting the engine");
+                return false;
+            }
+            wsjtxClient?.DebugOutput("[NativeEngine] profile switch: kept the running engine");
+            return true;
+        }
+
         public bool TryApplyEngineSettingsLive()
         {
             if (TestModeGuard.IsTestMode) return false;

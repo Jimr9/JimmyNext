@@ -180,7 +180,28 @@ namespace WSJTX_Controller
                 // Automatic logbook move (NexusLogbookMigration.AutoMove): until it has happened,
                 // before Jimmy starts its own engine.
                 if (NexusLogbookMigration.AutoMoveNeeded()) RunAutoMoveWithProgress();
-                Application.Run(new Controller());
+                // Loading a profile reopens the main window with that profile, handing the running
+                // engine to the new window (Controller.SwitchProfileInPlace) rather than restarting.
+                Controller.EngineHandoff handoff = null;
+                try
+                {
+                    while (true)
+                    {
+                        var given = handoff;
+                        var main = new Controller(given);
+                        Application.Run(main);
+                        handoff = main.ReopenForProfile ? main.EngineHandoffOut : null;
+                        // The engine handed to this window, unless it is being handed on again: stopped
+                        // here if the window never took it over (stopping one already stopped does nothing).
+                        if (given != null && !ReferenceEquals(handoff?.Client, given.Client))
+                            given.Client?.Dispose();
+                        if (!main.ReopenForProfile) break;
+                    }
+                }
+                finally
+                {
+                    handoff?.Client?.Dispose();   // never leave a handed-over engine running with no window
+                }
             }
             finally
             {

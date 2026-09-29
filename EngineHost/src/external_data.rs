@@ -44,6 +44,12 @@ const SOTA_SPOT_COUNT: u32 = 50;
 
 pub struct SharedCache {
     spots: RwLock<CachedSpots>,
+    // POTA park -> its POTA directory location ("US-ID", or "US-ID,US-WY" for a park in two),
+    // looked up once per park with Nexus's own propagation::live::pota::fetch_park -- a park does
+    // not move. "" = the directory knows no such park (not asked again). Jimmy logs an
+    // activator's STATE from it (laptop 2026-09-29: AF0EC, activating in Idaho, logged as MO,
+    // his mailing address).
+    park_locations: RwLock<std::collections::HashMap<String, String>>,
     space_wx: RwLock<CachedSpaceWx>,
     scales: RwLock<CachedScales>,
     // Resolved once at construction (mirrors LiveFeedsCache's own me_latlon derivation in
@@ -77,6 +83,7 @@ impl SharedCache {
     pub fn new(mygrid: &str) -> Arc<Self> {
         Arc::new(Self {
             spots: RwLock::new(CachedSpots::default()),
+            park_locations: RwLock::new(std::collections::HashMap::new()),
             space_wx: RwLock::new(CachedSpaceWx::default()),
             scales: RwLock::new(CachedScales::default()),
             me_latlon: maidenhead_to_latlon(mygrid.trim()),
@@ -135,11 +142,44 @@ impl SharedCache {
         // empty-but-successful fetch counts -- a genuinely quiet moment is still real data).
         // If BOTH feeds failed this cycle, keep whatever was cached before -- a transient outage
         // degrades to "a bit stale", never to an empty list that reads as "nothing spotted".
+        let parks: Vec<String> = merged
+            .iter()
+            .filter(|sp| sp.program == "POTA" && !sp.reference.is_empty())
+            .map(|sp| sp.reference.clone())
+            .collect();
         if any_succeeded {
             guard.spots = merged;
             guard.last_ok = Some(Instant::now());
         }
         guard.last_error = if errors.is_empty() { None } else { Some(errors.join("; ")) };
+        drop(guard);
+        self.look_up_park_locations(parks);
+    }
+
+    /// The location of parks not yet known, a few per refresh so a first start does not ask
+    /// the POTA directory about every active park at once. A failed lookup (network) is asked
+    /// again next time; "no such park" is remembered as "".
+    fn look_up_park_locations(&self, parks: Vec<String>) {
+        const PER_REFRESH: usize = 15;
+        let wanted: Vec<String> = {
+            let known = self.park_locations.read().unwrap_or_else(|e| e.into_inner());
+            let mut w: Vec<String> = parks.into_iter().filter(|r| !known.contains_key(r)).collect();
+            w.sort();
+            w.dedup();
+            w.truncate(PER_REFRESH);
+            w
+        };
+        for reference in wanted {
+            let location = match pota::fetch_park(&reference) {
+                Ok(park) => park.location,
+                Err(e) if e.starts_with("no park found") => String::new(),
+                Err(_) => continue,
+            };
+            self.park_locations
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(reference, location);
+        }
     }
 
     fn refresh_space_wx(&self) {
@@ -181,8 +221,17 @@ impl SharedCache {
     pub fn spots_json(&self) -> String {
         let guard = self.spots.read().unwrap_or_else(|e| e.into_inner());
         let age_secs = guard.last_ok.map(|t| t.elapsed().as_secs());
+        let parks = self.park_locations.read().unwrap_or_else(|e| e.into_inner());
+        let spots: Vec<SpotWire> = guard
+            .spots
+            .iter()
+            .map(|spot| SpotWire {
+                spot,
+                location: parks.get(&spot.reference).filter(|l| !l.is_empty()).map(String::as_str),
+            })
+            .collect();
         let payload = SpotsPayload {
-            spots: &guard.spots,
+            spots: &spots,
             age_secs,
             last_error: guard.last_error.as_deref(),
         };
@@ -242,9 +291,18 @@ fn now_unix() -> i64 {
 }
 
 
+/// One spot as Jimmy receives it: Nexus's OtaSpot plus the park's location, when known.
+#[derive(serde::Serialize)]
+struct SpotWire<'a> {
+    #[serde(flatten)]
+    spot: &'a OtaSpot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    location: Option<&'a str>,
+}
+
 #[derive(serde::Serialize)]
 struct SpotsPayload<'a> {
-    spots: &'a [OtaSpot],
+    spots: &'a [SpotWire<'a>],
     #[serde(rename = "ageSecs")]
     age_secs: Option<u64>,
     #[serde(rename = "lastError")]

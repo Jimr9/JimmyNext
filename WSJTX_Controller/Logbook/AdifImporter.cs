@@ -137,13 +137,12 @@ namespace WSJTX_Controller
 
         // Normalize's blank-STATE rule, shared with the Nexus paths: the offline callsign lookup
         // (FCC ULS / cached QRZ via resolveUsState), then the grid. Null when neither knows.
-        internal static string ResolveMissingState(string call, string grid, Func<string, string> resolveUsState)
-        {
-            string resolved = resolveUsState?.Invoke(call);
-            if (string.IsNullOrEmpty(resolved) && !string.IsNullOrEmpty(grid))
-                resolved = WsjtxClient.GridToUsState(grid);
-            return string.IsNullOrEmpty(resolved) ? null : resolved;
-        }
+        // The mailing-address state (callsign lookup) checked against the grid heard on the air,
+        // with Nexus's own grid table: blank rather than wrong when they disagree -- see
+        // StationLocation.ResolveState. (Until 2026-09-29 this used the lookup outright and fell
+        // back to WSJT-X's grid.dat, whose border squares are two-state values like "ID-WY".)
+        internal static string ResolveMissingState(string call, string grid, Func<string, string> resolveUsState) =>
+            StationLocation.ResolveState(resolveUsState?.Invoke(call), grid);
 
         // The same rules on an ADIF record handed to Nexus: fills DXCC / COUNTRY / CONT -- and,
         // 2026-09-28, STATE (live: KA1MXL logged on 80m with no state kept "WAS 80m Needed, RI")

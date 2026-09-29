@@ -1077,6 +1077,15 @@ namespace WSJTX_Controller
             RebuildEditLogColumns();
             _editLv.AccessibleName = "Edit Log results";
             _editLv.SelectedIndexChanged += (s, e) => UpdateEditLogButtons();
+            // Enter or Space on one contact opens it in the editor, like the Edit button.
+            _editLv.KeyDown += (s, e) =>
+            {
+                if ((e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) && !e.Control && !e.Alt && _editLv.SelectedItems.Count == 1)
+                {
+                    e.SuppressKeyPress = true;
+                    EditQsoBtn_Click(_editLv, EventArgs.Empty);
+                }
+            };
 
             _editLogPanel.Controls.Add(_editLv);
             _editLogPanel.Controls.Add(header);

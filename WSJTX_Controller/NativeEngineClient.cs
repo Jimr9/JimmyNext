@@ -36,6 +36,19 @@ namespace WSJTX_Controller
 
         public bool Running => _process != null && !_process.HasExited;
 
+        // See BuildArgs / Launch.
+        public string LaunchKey { get; private set; }
+
+        // Where this engine's output and an unexpected exit are reported. A profile switch hands the
+        // running engine to a new main window, which points these at itself (Rebind).
+        private Action<string> _debugOutput;
+        private Action _onUnexpectedExit;
+        public void Rebind(Action<string> debugOutput, Action onUnexpectedExit)
+        {
+            _debugOutput = debugOutput;
+            _onUnexpectedExit = onUnexpectedExit;
+        }
+
         // For ProcessAudioSessionVolume.cs -- finding the engine's own OS-level audio session
         // (Options > Decode Engine tab's per-device volume controls, added 2026-08-09) needs its
         // process ID. 0 when not running, matching Running's own null-safety.
@@ -251,6 +264,119 @@ namespace WSJTX_Controller
             return sb.ToString();
         }
 
+        // The engine host's command line. radioAndAudio: false leaves out the radio and audio
+        // devices (both applied live by APPLY_SETTINGS) and the session token -- the engine's
+        // LaunchKey.
+        internal static string BuildArgs(string mycall, string mygrid, string audioDevice, int jimmyPort,
+            string outputDevice, RadioSettings radio, DecodeSettings decode, bool pskreporter,
+            string dxClusterAddress, string sessionToken, int? repeatLimit,
+            List<WorkingFreqArg> workingFrequencies, int? tuneTimeoutSeconds, bool? clockCheck, bool radioAndAudio)
+        {
+            var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
+            if (radioAndAudio && !string.IsNullOrWhiteSpace(sessionToken))
+                args += $" --session-token {sessionToken}";
+            // This engine host keeps the Nexus log -- once this install's logbook has been moved
+            // in (until then a contact waits in the outbox; see NexusLogbookMigration.AutoMove).
+            if (NexusLogbook.Active && NexusLogbook.Moved)
+                args += $" --log-dir {EscapeCommandLineArg(NexusLogbook.Folder)}";
+            if (repeatLimit.HasValue)
+                args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
+            // Alt+T tune carrier auto-release (NativeEngineSettings.TuneTimeoutSeconds, ini only).
+            if (tuneTimeoutSeconds.HasValue)
+                args += $" --tune-timeout-secs {tuneTimeoutSeconds.Value}";
+            // Nexus's internet time check (NativeEngineSettings.ClockCheck, Options > General).
+            if (clockCheck.HasValue)
+                args += clockCheck.Value ? " --clock-check on" : " --clock-check off";
+            // Frequency-override authority split, 2026-08-24 -- see
+            // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
+            // empty (no band customized), matching every other startup arg's "absent =
+            // stock behavior" convention -- and unlike every other arg here, this one is
+            // JSON containing many literal '"' characters, so it needs real command-line
+            // escaping (EscapeCommandLineArg below), not the naive \"..\" wrapping the rest
+            // of this method uses for plain device/address strings.
+            if (workingFrequencies != null && workingFrequencies.Count > 0)
+            {
+                string wfJson = JsonSerializer.Serialize(workingFrequencies, WsjtxClient.DirectJsonOptions);
+                args += $" --working-frequencies {EscapeCommandLineArg(wfJson)}";
+            }
+            if (radioAndAudio && !string.IsNullOrWhiteSpace(audioDevice))
+                args += $" --device \"{audioDevice}\"";
+            if (radioAndAudio && !string.IsNullOrWhiteSpace(outputDevice))
+                args += $" --output-device \"{outputDevice}\"";
+
+            // Options > Decode tab -- independent of Radio.Mode (decoding works the same
+            // whether or not CAT is configured), so this is unconditional, unlike the
+            // rig-specific block below. Only decode.DecodeDepth also has a live control-port
+            // path (SET_DECODE_DEPTH) for mid-session changes; the other four are startup-
+            // CLI-arg-only (see DecodeSettings.cs's own comment on why).
+            if (decode != null)
+            {
+                args += $" --decode-depth {decode.DecodeDepth}";
+                args += $" --decode-flow-hz {decode.DecodeFLowHz}";
+                args += $" --decode-fhigh-hz {decode.DecodeFHighHz}";
+                args += $" --ap-decode {(decode.ApDecode ? "1" : "0")}";
+                args += $" --ap-cq-only {(decode.ApCqOnly ? "1" : "0")}";
+                args += $" --single-decode {(decode.SingleDecode ? "1" : "0")}";
+            }
+
+            // Independent of Radio.Mode -- spotting works whether or not CAT is configured,
+            // same reasoning as the decode block above. Root-caused live, 2026-08-11: this
+            // was never wired at all before, in either transport (see TogglePskReporter's
+            // own comment, WsjtxClient.Protocol.cs) -- the engine's own native PSK Reporter
+            // spotting ran unconditionally regardless of what this checkbox said.
+            if (pskreporter) args += " --pskreporter";
+
+            // DX Spots (Alt+G window): an OPTIONAL additional human DX-cluster telnet node
+            // (SSB/phone + human-typed spots). RBN's digital skimmer feed is always on and
+            // needs no CLI arg at all (EngineHost/src/live_feeds.rs wires it unconditionally,
+            // same "wired automatically" default official Nexus's own desktop app uses) --
+            // this arg only adds a second, operator-picked source on top of it, since there
+            // is no single universal default for a human cluster node (an independently-run
+            // federation of nodes) the way there is for RBN. Startup-CLI-arg-only, same
+            // reasoning as the decode block above -- changing it in Options requires the
+            // usual engine restart.
+            if (!string.IsNullOrWhiteSpace(dxClusterAddress))
+                args += $" --dx-cluster \"{dxClusterAddress.Trim()}\"";
+
+            if (radioAndAudio && radio != null && radio.Mode == RadioControlMode.HamlibRigctld)
+            {
+                // "network" here means "the RADIO is a network SDR" (Flex/SmartSDR via
+                // rigctld's own -r host:port) -- an axis Jimmy has no setting for today
+                // (only a serial COM port), NOT "rigctld itself runs elsewhere". That second
+                // idea -- radio.UseExternalRigctld -- doesn't need its own flag here: the
+                // engine's own open_cat() ALREADY auto-detects and shares any rigctld
+                // already listening on --rigctld-port (127.0.0.1 only) instead of spawning a
+                // second one, so pointing it at the SAME port Jimmy's own bundled/external
+                // rigctld already uses is sufficient either way. Known gap: this auto-share
+                // only checks loopback, so a genuinely remote (non-127.0.0.1) external
+                // rigctld host can't be shared with the engine this way -- the engine's own
+                // CAT/PTT would be receive-only in that specific configuration (2026-08-20:
+                // Jimmy no longer runs its own live RigctldClient session that could reach a
+                // remote host as a fallback; OptionsDlg's "Test connection" button still can,
+                // but only as a one-shot diagnostic, not a runtime path). Not a concern for a
+                // bundled/local rigctld, which is the common case this was tested against.
+                args += " --rig-conn serial";
+                if (!string.IsNullOrWhiteSpace(radio.RigModel))
+                    args += $" --rig-model {radio.RigModel}";
+                if (!radio.UseExternalRigctld && !string.IsNullOrWhiteSpace(radio.ComPort))
+                    args += $" --rig-port {radio.ComPort}";
+                if (!radio.UseExternalRigctld && !string.IsNullOrWhiteSpace(radio.BaudRate))
+                    args += $" --rig-baud {radio.BaudRate}";
+                PttMethod effectiveMethod = radio.PttEnabled ? radio.PttMethod : PttMethod.Vox;
+                args += $" --ptt-method {effectiveMethod.ToCliString()}";
+                args += $" --rigctld-port {radio.RigctldPort}";
+                if (radio.TxMode == RadioTxMode.Usb) args += " --plain-ssb-data-modes";
+                else if (radio.TxMode == RadioTxMode.None) args += " --dont-set-mode";
+                if (radio.PttDataSource) args += " --ptt-data-source";
+                if (!string.IsNullOrWhiteSpace(radio.PttSerialPort))
+                    args += $" --ptt-serial-port {radio.PttSerialPort}";
+                if (radio.SplitMode != RadioSplitMode.None)
+                    args += $" --split-mode {radio.SplitMode.ToString().ToLowerInvariant()}";
+            }
+
+            return args;
+        }
+
         // `onUnexpectedExit`: called (NOT marshalled to any particular thread -- Process.Exited
         // fires on a threadpool thread, so the caller must marshal to the UI thread itself if it
         // touches Windows Forms controls) if the engine host process exits on its own, outside
@@ -322,109 +448,14 @@ namespace WSJTX_Controller
                 // separate use case from Jimmy's own engine transport, confirmed via operator decision
                 // (2026-08-18) not to remove. Do not treat this as leftover dead code in a future pass
                 // without re-checking that decision first.
-                var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
-                if (!string.IsNullOrWhiteSpace(sessionToken))
-                    args += $" --session-token {sessionToken}";
+                var args = BuildArgs(mycall, mygrid, audioDevice, jimmyPort, outputDevice, radio, decode, pskreporter,
+                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: true);
                 _sessionToken = sessionToken ?? "";
-                // This engine host keeps the Nexus log -- once this install's logbook has been moved
-                // in (until then a contact waits in the outbox; see NexusLogbookMigration.AutoMove).
-                if (NexusLogbook.Active && NexusLogbook.Moved)
-                    args += $" --log-dir {EscapeCommandLineArg(NexusLogbook.Folder)}";
-                if (repeatLimit.HasValue)
-                    args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
-                // Alt+T tune carrier auto-release (NativeEngineSettings.TuneTimeoutSeconds, ini only).
-                if (tuneTimeoutSeconds.HasValue)
-                    args += $" --tune-timeout-secs {tuneTimeoutSeconds.Value}";
-                // Nexus's internet time check (NativeEngineSettings.ClockCheck, Options > General).
-                if (clockCheck.HasValue)
-                    args += clockCheck.Value ? " --clock-check on" : " --clock-check off";
-                // Frequency-override authority split, 2026-08-24 -- see
-                // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
-                // empty (no band customized), matching every other startup arg's "absent =
-                // stock behavior" convention -- and unlike every other arg here, this one is
-                // JSON containing many literal '"' characters, so it needs real command-line
-                // escaping (EscapeCommandLineArg below), not the naive \"..\" wrapping the rest
-                // of this method uses for plain device/address strings.
-                if (workingFrequencies != null && workingFrequencies.Count > 0)
-                {
-                    string wfJson = JsonSerializer.Serialize(workingFrequencies, WsjtxClient.DirectJsonOptions);
-                    args += $" --working-frequencies {EscapeCommandLineArg(wfJson)}";
-                }
-                if (!string.IsNullOrWhiteSpace(audioDevice))
-                    args += $" --device \"{audioDevice}\"";
-                if (!string.IsNullOrWhiteSpace(outputDevice))
-                    args += $" --output-device \"{outputDevice}\"";
-
-                // Options > Decode tab -- independent of Radio.Mode (decoding works the same
-                // whether or not CAT is configured), so this is unconditional, unlike the
-                // rig-specific block below. Only decode.DecodeDepth also has a live control-port
-                // path (SET_DECODE_DEPTH) for mid-session changes; the other four are startup-
-                // CLI-arg-only (see DecodeSettings.cs's own comment on why).
-                if (decode != null)
-                {
-                    args += $" --decode-depth {decode.DecodeDepth}";
-                    args += $" --decode-flow-hz {decode.DecodeFLowHz}";
-                    args += $" --decode-fhigh-hz {decode.DecodeFHighHz}";
-                    args += $" --ap-decode {(decode.ApDecode ? "1" : "0")}";
-                    args += $" --ap-cq-only {(decode.ApCqOnly ? "1" : "0")}";
-                    args += $" --single-decode {(decode.SingleDecode ? "1" : "0")}";
-                }
-
-                // Independent of Radio.Mode -- spotting works whether or not CAT is configured,
-                // same reasoning as the decode block above. Root-caused live, 2026-08-11: this
-                // was never wired at all before, in either transport (see TogglePskReporter's
-                // own comment, WsjtxClient.Protocol.cs) -- the engine's own native PSK Reporter
-                // spotting ran unconditionally regardless of what this checkbox said.
-                if (pskreporter) args += " --pskreporter";
-
-                // DX Spots (Alt+G window): an OPTIONAL additional human DX-cluster telnet node
-                // (SSB/phone + human-typed spots). RBN's digital skimmer feed is always on and
-                // needs no CLI arg at all (EngineHost/src/live_feeds.rs wires it unconditionally,
-                // same "wired automatically" default official Nexus's own desktop app uses) --
-                // this arg only adds a second, operator-picked source on top of it, since there
-                // is no single universal default for a human cluster node (an independently-run
-                // federation of nodes) the way there is for RBN. Startup-CLI-arg-only, same
-                // reasoning as the decode block above -- changing it in Options requires the
-                // usual engine restart.
-                if (!string.IsNullOrWhiteSpace(dxClusterAddress))
-                    args += $" --dx-cluster \"{dxClusterAddress.Trim()}\"";
-
-                if (radio != null && radio.Mode == RadioControlMode.HamlibRigctld)
-                {
-                    // "network" here means "the RADIO is a network SDR" (Flex/SmartSDR via
-                    // rigctld's own -r host:port) -- an axis Jimmy has no setting for today
-                    // (only a serial COM port), NOT "rigctld itself runs elsewhere". That second
-                    // idea -- radio.UseExternalRigctld -- doesn't need its own flag here: the
-                    // engine's own open_cat() ALREADY auto-detects and shares any rigctld
-                    // already listening on --rigctld-port (127.0.0.1 only) instead of spawning a
-                    // second one, so pointing it at the SAME port Jimmy's own bundled/external
-                    // rigctld already uses is sufficient either way. Known gap: this auto-share
-                    // only checks loopback, so a genuinely remote (non-127.0.0.1) external
-                    // rigctld host can't be shared with the engine this way -- the engine's own
-                    // CAT/PTT would be receive-only in that specific configuration (2026-08-20:
-                    // Jimmy no longer runs its own live RigctldClient session that could reach a
-                    // remote host as a fallback; OptionsDlg's "Test connection" button still can,
-                    // but only as a one-shot diagnostic, not a runtime path). Not a concern for a
-                    // bundled/local rigctld, which is the common case this was tested against.
-                    args += " --rig-conn serial";
-                    if (!string.IsNullOrWhiteSpace(radio.RigModel))
-                        args += $" --rig-model {radio.RigModel}";
-                    if (!radio.UseExternalRigctld && !string.IsNullOrWhiteSpace(radio.ComPort))
-                        args += $" --rig-port {radio.ComPort}";
-                    if (!radio.UseExternalRigctld && !string.IsNullOrWhiteSpace(radio.BaudRate))
-                        args += $" --rig-baud {radio.BaudRate}";
-                    PttMethod effectiveMethod = radio.PttEnabled ? radio.PttMethod : PttMethod.Vox;
-                    args += $" --ptt-method {effectiveMethod.ToCliString()}";
-                    args += $" --rigctld-port {radio.RigctldPort}";
-                    if (radio.TxMode == RadioTxMode.Usb) args += " --plain-ssb-data-modes";
-                    else if (radio.TxMode == RadioTxMode.None) args += " --dont-set-mode";
-                    if (radio.PttDataSource) args += " --ptt-data-source";
-                    if (!string.IsNullOrWhiteSpace(radio.PttSerialPort))
-                        args += $" --ptt-serial-port {radio.PttSerialPort}";
-                    if (radio.SplitMode != RadioSplitMode.None)
-                        args += $" --split-mode {radio.SplitMode.ToString().ToLowerInvariant()}";
-                }
-
+                // What this engine was started with, less what can change live (radio, audio, the
+                // session token): a new main window after a profile switch takes this engine over
+                // only when its own launch would say exactly the same (Controller.TryAdoptHandedOffEngine).
+                LaunchKey = BuildArgs(mycall, mygrid, audioDevice, jimmyPort, outputDevice, radio, decode, pskreporter,
+                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: false);
                 // 2.0.58 (item 13) -- record the bundled Hamlib/rigctld runtime version once per
                 // engine launch, so a hardware tester's diag log shows exactly which Hamlib the
                 // rig's CAT/meter behaviour was seen against. Diagnostic only.
@@ -462,11 +493,10 @@ namespace WSJTX_Controller
                 // RUST_BACKTRACE doesn't fix that by itself, but costs nothing and gives a real
                 // backtrace for free the next time a panic *does* get to print.
                 _process.StartInfo.EnvironmentVariables["RUST_BACKTRACE"] = "full";
-                if (debugOutput != null)
-                {
-                    _process.OutputDataReceived += (s, e) => { if (e.Data != null) debugOutput($"[NativeEngine] {e.Data}"); };
-                    _process.ErrorDataReceived += (s, e) => { if (e.Data != null) debugOutput($"[NativeEngine] {e.Data}"); };
-                }
+                _debugOutput = debugOutput;
+                _onUnexpectedExit = onUnexpectedExit;
+                _process.OutputDataReceived += (s, e) => { if (e.Data != null) _debugOutput?.Invoke($"[NativeEngine] {e.Data}"); };
+                _process.ErrorDataReceived += (s, e) => { if (e.Data != null) _debugOutput?.Invoke($"[NativeEngine] {e.Data}"); };
                 _stopping = false;
                 if (onUnexpectedExit != null)
                 {
@@ -491,8 +521,8 @@ namespace WSJTX_Controller
                         // shows as a large/negative code, e.g. 0xC0000005) vs a clean early exit.
                         int exitCode = -1;
                         try { exitCode = thisProcess.ExitCode; } catch { /* best-effort */ }
-                        debugOutput?.Invoke($"[NativeEngine] process exited unexpectedly, exit code: {exitCode} (0x{(uint)exitCode:X8})");
-                        onUnexpectedExit();
+                        _debugOutput?.Invoke($"[NativeEngine] process exited unexpectedly, exit code: {exitCode} (0x{(uint)exitCode:X8})");
+                        _onUnexpectedExit?.Invoke();
                     };
                 }
                 _process.Start();

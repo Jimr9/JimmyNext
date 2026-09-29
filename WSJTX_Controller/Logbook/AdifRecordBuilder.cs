@@ -14,7 +14,8 @@ namespace WSJTX_Controller
             string qsoDate, string timeOn, string timeOff,
             string rstSent, string rstRcvd, string grid, string name, string comment,
             string txPwr, string operatorCall, string stationCall, string myGrid,
-            string exchangeSent = "", string exchangeRcvd = "", string qsoDateOff = "")
+            string exchangeSent = "", string exchangeRcvd = "", string qsoDateOff = "",
+            string state = "", string sig = "", string sigInfo = "")
         {
             var sb = new StringBuilder();
             void F(string field, string val)
@@ -35,6 +36,7 @@ namespace WSJTX_Controller
             F("rst_sent", rstSent);
             F("rst_rcvd", rstRcvd);
             F("gridsquare", grid);
+            F("state", state);
             F("name", name);
             F("comment", comment);
             F("tx_pwr", txPwr);
@@ -43,6 +45,8 @@ namespace WSJTX_Controller
             F("my_gridsquare", myGrid);
             F("stx_string", exchangeSent);
             F("srx_string", exchangeRcvd);
+            F("sig", sig);
+            F("sig_info", sigInfo);
             sb.Append("<eor>\r\n");
             return sb.ToString();
         }

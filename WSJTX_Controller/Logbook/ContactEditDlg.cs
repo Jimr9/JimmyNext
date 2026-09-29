@@ -100,19 +100,20 @@ namespace WSJTX_Controller
             _country = Box(t, "Country", q.Country);
             _grid = Box(t, "Grid", q.Grid, upper: true);
             _iota = Box(t, "IOTA", q.Ota?.Iota, upper: true);
-            _theirProgram = Combo(t, "Their program", q.Ota?.TheirProgram, Programs);
-            _theirRef = Box(t, "Their reference", q.Ota?.TheirRef, upper: true);
+            _theirProgram = Combo(t, "Their park program", q.Ota?.TheirProgram, Programs);
+            _theirRef = Box(t, "Their park reference", q.Ota?.TheirRef, upper: true);
 
             t = Group("My station");
             _power = Box(t, "Power watts", q.TxPower.HasValue ? q.TxPower.Value.ToString("0.###", CultureInfo.InvariantCulture) : "");
             _myRig = Box(t, "My rig", q.MyRig);
             _myGrid = Box(t, "My grid", q.MyGrid, upper: true);
-            _myProgram = Combo(t, "My program", q.Ota?.MyProgram, Programs);
-            _myRef = Box(t, "My reference", q.Ota?.MyRef, upper: true);
+            _myProgram = Combo(t, "My park program", q.Ota?.MyProgram, Programs);
+            _myRef = Box(t, "My park reference", q.Ota?.MyRef, upper: true);
 
             t = Group("Remarks");
-            _comment = Box(t, "Comment", q.Comment, width: 420, span: 3);
-            _notes = Box(t, "Notes", q.Notes, width: 420, span: 3, lines: 3);
+            // Nexus sends COMMENT with every upload ("shared on the QSL"); NOTES never leave this computer.
+            _comment = Box(t, "Comment, shared", q.Comment, width: 420, span: 3);
+            _notes = Box(t, "Notes, private", q.Notes, width: 420, span: 3, lines: 3);
 
             t = Group("Protected");
             _allowProtected = new CheckBox { Text = "Allow editing protected fields", AutoSize = true, Checked = false };
@@ -252,16 +253,43 @@ namespace WSJTX_Controller
         private static string OtherFields(NexusQso q)
         {
             var lines = new List<string>();
-            if (!string.IsNullOrEmpty(q.PropMode)) lines.Add("PROP_MODE: " + q.PropMode);
-            if (!string.IsNullOrEmpty(q.SatName)) lines.Add("SAT_NAME: " + q.SatName);
-            if (q.FreqRxMhz.HasValue) lines.Add("FREQ_RX: " + q.FreqRxMhz.Value.ToString("0.000000", CultureInfo.InvariantCulture));
+            if (!string.IsNullOrEmpty(q.PropMode)) lines.Add(FieldName("PROP_MODE") + ": " + q.PropMode);
+            if (!string.IsNullOrEmpty(q.SatName)) lines.Add(FieldName("SAT_NAME") + ": " + q.SatName);
+            if (q.FreqRxMhz.HasValue) lines.Add(FieldName("FREQ_RX") + ": " + q.FreqRxMhz.Value.ToString("0.000000", CultureInfo.InvariantCulture));
             foreach (var kv in q.Extra)
             {
                 if (kv.Count != 2 || ShownTags.Contains(kv[0]) || kv[0].StartsWith("APP_JIMMY_", StringComparison.OrdinalIgnoreCase)) continue;
-                lines.Add(kv[0] + ": " + kv[1]);
+                lines.Add(FieldName(kv[0]) + ": " + kv[1]);
             }
             return string.Join(Environment.NewLine, lines);
         }
+
+        // Plain names for the standard ADIF fields; anything else keeps its ADIF tag.
+        private static readonly Dictionary<string, string> FieldNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["CONT"] = "Continent", ["PFX"] = "Prefix", ["PROP_MODE"] = "Propagation mode", ["SAT_NAME"] = "Satellite",
+            ["SAT_MODE"] = "Satellite mode", ["FREQ_RX"] = "Receive frequency", ["BAND_RX"] = "Receive band",
+            ["SUBMODE"] = "Submode", ["SIG"] = "Special activity", ["SIG_INFO"] = "Special activity reference",
+            ["MY_SIG"] = "My special activity", ["MY_SIG_INFO"] = "My special activity reference",
+            ["WWFF_REF"] = "WWFF reference", ["MY_WWFF_REF"] = "My WWFF reference", ["SOTA_REF"] = "SOTA reference",
+            ["MY_SOTA_REF"] = "My SOTA reference", ["POTA_REF"] = "POTA reference", ["MY_POTA_REF"] = "My POTA reference",
+            ["DARC_DOK"] = "DOK", ["STX_STRING"] = "Exchange sent", ["SRX_STRING"] = "Exchange received",
+            ["STX"] = "Serial sent", ["SRX"] = "Serial received", ["CONTEST_ID"] = "Contest", ["CLASS"] = "Class",
+            ["ARRL_SECT"] = "ARRL section", ["AGE"] = "Age", ["DISTANCE"] = "Distance", ["RX_PWR"] = "Their power",
+            ["ANT_AZ"] = "Antenna azimuth", ["ANT_EL"] = "Antenna elevation", ["MY_ANTENNA"] = "My antenna",
+            ["MY_CITY"] = "My city", ["MY_COUNTY"] = "My county", ["MY_STATE"] = "My state", ["MY_CNTY"] = "My county",
+            ["MY_COUNTRY"] = "My country", ["MY_DXCC"] = "My DXCC", ["MY_CQ_ZONE"] = "My CQ zone", ["MY_ITU_ZONE"] = "My ITU zone",
+            ["MY_NAME"] = "My name", ["EMAIL"] = "Email", ["WEB"] = "Web", ["ADDRESS"] = "Address",
+            ["QSL_VIA"] = "QSL via", ["QSL_SENT"] = "QSL sent", ["QSL_RCVD"] = "QSL received",
+            ["QSL_SENT_VIA"] = "QSL sent via", ["QSLSDATE"] = "QSL sent date", ["QSLRDATE"] = "QSL received date",
+            ["LOTW_QSL_SENT"] = "LoTW sent", ["LOTW_QSLSDATE"] = "LoTW sent date", ["LOTW_QSLRDATE"] = "LoTW received date",
+            ["EQSL_QSL_SENT"] = "eQSL sent", ["EQSL_QSLSDATE"] = "eQSL sent date", ["EQSL_QSLRDATE"] = "eQSL received date",
+            ["QRZCOM_QSO_UPLOAD_STATUS"] = "QRZ upload status", ["QRZCOM_QSO_UPLOAD_DATE"] = "QRZ upload date",
+            ["CLUBLOG_QSO_UPLOAD_STATUS"] = "Club Log upload status", ["CLUBLOG_QSO_UPLOAD_DATE"] = "Club Log upload date",
+            ["HRDLOG_QSO_UPLOAD_STATUS"] = "HRDLog upload status", ["GRIDSQUARE_EXT"] = "Grid extension",
+            ["VUCC_GRIDS"] = "VUCC grids", ["MY_VUCC_GRIDS"] = "My VUCC grids", ["APP_NEXUS_ID"] = "Nexus record ID",
+        };
+        private static string FieldName(string tag) => FieldNames.TryGetValue(tag, out var n) ? n : tag;
 
         // ── Save ─────────────────────────────────────────────────────────────────────────────
 

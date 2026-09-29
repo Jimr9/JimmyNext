@@ -1584,6 +1584,9 @@ static class JimmyTests
         ToggleTxFirstActuallyTogglesTests();
         OptimizeReducesOnlyUntilReportExchangedTests();
         RawDecodesIngestsEveryDecodeBothModesTests();
+        EngineLaunchKeyTests();
+        StationLocationTests();
+        RadioPowerAndExportHeaderTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
         ReportClockStatusTests();
@@ -1594,7 +1597,6 @@ static class JimmyTests
         BuildWorkingFrequencyEntriesTests();
         DirectSetWorkingFrequenciesSendsCorrectCommandTests();
         EscapeCommandLineArgRoundTripsThroughRealWindowsArgvTests();
-        PowerShellSingleQuoteLiteralRoundTripsThroughRealPowerShellTests();
         BeginnerModeOnlyAccessibilityTests();
         CrashLoggerTests();
         TargetMonitorClassificationTests();
@@ -7648,54 +7650,6 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  EscapeCommandLineArgRoundTripsThroughRealWindowsArgvTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
-            failed++;
-        }
-    }
-
-    // ── Controller.PowerShellSingleQuoteLiteral: real PowerShell round trip, 2026-08-24 --
-    // THE FIX (RestartApplication's relaunch used a fixed "timeout /t 2" delay that raced
-    // Program.cs's single-instance Mutex/process check when real shutdown took longer than 2s,
-    // leaving Jimmy Next not running at all -- replaced with a detached PowerShell helper that
-    // Wait-Process'es on the exiting PID before Start-Process'ing the new instance; this proves
-    // the exePath literal embedded in that script survives real PowerShell parsing even when
-    // the path contains a space or an embedded single quote) ──────────────────────────────────
-    static void PowerShellSingleQuoteLiteralRoundTripsThroughRealPowerShellTests()
-    {
-        Console.WriteLine("\n── Controller.PowerShellSingleQuoteLiteral: real PowerShell round trip -- THE FIX ──");
-        try
-        {
-            string[] payloads =
-            {
-                @"C:\Program Files\Jimmy Next\Jimmy Next.exe", // the real shape: AssemblyName has a space
-                "O'Brien's Path\\Jimmy.exe", // embedded single quotes
-                "plain.exe",
-                "",
-            };
-            foreach (string payload in payloads)
-            {
-                string literal = Controller.PowerShellSingleQuoteLiteral(payload);
-                string script = $"Write-Output {literal}\n";
-                string encoded = Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script));
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "powershell.exe",
-                    Arguments = $"-NoProfile -NonInteractive -EncodedCommand {encoded}",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    CreateNoWindow = true,
-                };
-                using (var p = System.Diagnostics.Process.Start(psi))
-                {
-                    string output = p.StandardOutput.ReadToEnd();
-                    p.WaitForExit(10000);
-                    string got = output.TrimEnd('\r', '\n');
-                    CheckStr($"Round-trips through real PowerShell for payload '{payload}'", got, payload);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"  FAIL  PowerShellSingleQuoteLiteralRoundTripsThroughRealPowerShellTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
             failed++;
         }
     }
@@ -18810,6 +18764,75 @@ static class JimmyTests
             failed++;
         }
     }
+
+    // Profile switch without a restart (Controller.TryAdoptHandedOffEngine): a new window keeps the
+    // running engine only when its launch key matches -- radio, audio devices and the session token
+    // left out (they change live, or belong to the session), everything else counted.
+    static void EngineLaunchKeyTests()
+    {
+        Console.WriteLine("\n── Engine launch key: what a profile switch may keep ──");
+        string Key(string call, string port, string input, string token) =>
+            NativeEngineClient.BuildArgs(call, "EN34", input, 2237, "Speakers", new RadioSettings { Mode = RadioControlMode.HamlibRigctld, RigModel = "2037", ComPort = port, BaudRate = "115200" },
+                null, true, null, token, 7, null, 60, false, radioAndAudio: false);
+        Check("a different radio port, audio device or session token keeps the engine",
+            Key("KB0UZT", "COM4", "Mic A", "t1") == Key("KB0UZT", "COM3", "Mic B", "t2"), true);
+        Check("a different callsign restarts it", Key("KB0UZT", "COM4", "Mic A", "t1") == Key("K5KPE", "COM4", "Mic A", "t1"), false);
+    }
+
+    // Where a worked station IS (StationLocation, 2026-09-29: AF0EC activating in Idaho, grid DN43,
+    // was logged as MO, his mailing address). Park location first; otherwise the mailing-address
+    // state only when the heard grid agrees -- blank rather than wrong.
+    static void StationLocationTests()
+    {
+        Console.WriteLine("\n── Station location: park state, and blank rather than wrong ──");
+        var grids = new Dictionary<string, string> { ["DN43"] = "ID", ["EM29"] = "MO" };
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        var spots = new[]
+        {
+            new OtaSpot { Program = "POTA", Reference = "US-1234", Activator = "AF0EC/P", FreqKhz = 14074, Location = "US-ID", SpotTimeUnix = now - 300 },
+            new OtaSpot { Program = "POTA", Reference = "US-0001", Activator = "K0TWO", FreqKhz = 14074, Location = "US-ID,US-WY", SpotTimeUnix = now - 300 },
+        };
+        try
+        {
+            StationLocation.SetForTest(grids, spots);
+            CheckStr("heard grid in another state than the mailing address -> blank", StationLocation.ResolveState("MO", "DN43"), null);
+            CheckStr("heard grid agrees -> that state", StationLocation.ResolveState("ID", "DN43ab"), "ID");
+            CheckStr("no mailing address -> the heard grid's state", StationLocation.ResolveState(null, "DN43"), "ID");
+            CheckStr("no grid heard -> the mailing address, as before", StationLocation.ResolveState("MO", ""), "MO");
+            CheckStr("grid outside the US -> blank", StationLocation.ResolveState("MO", "IO91"), null);
+
+            Check("activator spotted on this band (portable call) -> park found",
+                StationLocation.TryFindActivation("AF0EC", "20m", out string refs, out string st) && refs == "US-1234" && st == "ID", true);
+            Check("a park in two states -> park named, state left blank",
+                StationLocation.TryFindActivation("K0TWO", "20m", out string refs2, out string st2) && refs2 == "US-0001" && st2 == null, true);
+            Check("spotted on another band -> no activation", StationLocation.TryFindActivation("AF0EC", "40m", out _, out _), false);
+
+            StationLocation.SetForTest(null, spots);
+            CheckStr("grid heard before the engine sent its table -> blank, not a guess", StationLocation.ResolveState("MO", "DN43"), null);
+        }
+        finally { StationLocation.SetForTest(null, null); }
+    }
+
+
+    // Logged power = the radio's setting in watts, only for the exact setting it was read for; an
+    // export names Jimmy Next, its version and when (2026-09-29 operator requests).
+    static void RadioPowerAndExportHeaderTests()
+    {
+        Console.WriteLine("\n── Logged power and export header ──");
+        try
+        {
+            RadioPower.SetForTest(0.4, 40);
+            CheckStr("the setting the watts were read for -> 40", RadioPower.WattsText(0.4), "40");
+            CheckStr("the setting changed since -> blank, never a stale number", RadioPower.WattsText(0.25), "");
+            RadioPower.ResetForTest();
+            CheckStr("nothing known -> blank", RadioPower.WattsText(0.4), "");
+        }
+        finally { RadioPower.ResetForTest(); }
+        string header = NexusLogbookService.AdifExportHeader();
+        Check("export header: program Jimmy Next, a version, a creation time, <EOH>",
+            header.Contains("<PROGRAMID:10>Jimmy Next") && header.Contains("<PROGRAMVERSION:") && header.Contains("<CREATED_TIMESTAMP:15>") && header.EndsWith("<EOH>"), true);
+    }
+
 
     // ── Raw Decodes item 1, 2026-08-24 (operator request -- careful FT8/FT4 verification):
     // proves every decode EngineHost supplies in a real SNAPSHOT reaches TestRawDecodeHistory

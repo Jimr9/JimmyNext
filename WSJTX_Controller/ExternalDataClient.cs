@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net.Sockets;
 using System.Text;
@@ -21,6 +22,9 @@ namespace WSJTX_Controller
         public string Comment { get; set; }
         public string Grid { get; set; }
         public long? SpotTimeUnix { get; set; }
+        // The park's location in the POTA directory ("US-ID"; "US-ID,US-WY" for a park in two),
+        // added by Jimmy's engine (EngineHost external_data.rs); null until it has looked it up.
+        public string Location { get; set; }
     }
 
     public class OtaSpotsResult
@@ -202,6 +206,16 @@ namespace WSJTX_Controller
                 error = $"Could not parse OTA_SPOTS response: {ex.Message}";
                 return null;
             }
+        }
+
+        // Nexus's grid -> US state table from the engine (GRID_STATES): {"DN43":"ID",...}.
+        public Dictionary<string, string> GetGridStates(out string error)
+        {
+            error = null;
+            string json = SendCommand("GRID_STATES", FastTimeoutMs);
+            if (json == null || !json.StartsWith("{")) { error = json ?? "No response from engine host."; return null; }
+            try { return JsonSerializer.Deserialize<Dictionary<string, string>>(json); }
+            catch (Exception ex) { error = $"Could not parse GRID_STATES response: {ex.Message}"; return null; }
         }
 
         public SpaceWxResult GetSpaceWx(out string error)

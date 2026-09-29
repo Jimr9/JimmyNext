@@ -170,6 +170,8 @@ namespace WSJTX_Controller
 
         internal Dictionary<string, EnqueueDecodeMessage> callDict = new Dictionary<string, EnqueueDecodeMessage>();
         internal Queue<string> callQueue = new Queue<string>();
+        // The radio's RF power setting (0.0-1.0) from the last engine status -- see RadioPower.
+        private double? _lastRfPower;
         internal List<string> sentReportList = new List<string>();
         // 2026-09-26: the report value we actually TRANSMITTED to each call (dB), from the engine's
         // own outgoing message -- what the log's rst_sent must record. Kept in lockstep with
@@ -3015,11 +3017,15 @@ namespace WSJTX_Controller
             string operatorCall = string.IsNullOrWhiteSpace(ctrl.Station.OperatorCallsign)
                 ? myCall
                 : ctrl.Station.OperatorCallsign.Trim().ToUpperInvariant();
+            // A POTA activator spotted on this band: the park, and the state its park is in --
+            // where the station IS, not the licence's mailing address (StationLocation).
+            StationLocation.TryFindActivation(call, band, out string parkRefs, out string parkState);
             string adifRecord = AdifRecordBuilder.Build(
                 call, band, (long)(dialFrequency + txOffset), mode,
                 qsoDateOn, qsoTimeOn, qsoTimeOff, rstSent, rstRecd, grid,
-                name: "", comment: "", txPwr: "", operatorCall: operatorCall,
-                stationCall: myCall, myGrid: myGrid, qsoDateOff: qsoDateOff);
+                name: "", comment: "", txPwr: RadioPower.WattsText(_lastRfPower), operatorCall: operatorCall,
+                stationCall: myCall, myGrid: myGrid, qsoDateOff: qsoDateOff,
+                state: parkState ?? "", sig: parkRefs != null ? "POTA" : "", sigInfo: parkRefs ?? "");
 
             // Jimmy has every field needed to record this Jimmy-initiated QSO itself, so it does
             // so directly here rather than depending on any round trip back from the engine.
