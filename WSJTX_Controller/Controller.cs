@@ -2634,6 +2634,35 @@ namespace WSJTX_Controller
             finally { _activeHotkeyOrigin = prevOrigin; }
         }
 
+        // A message produced LATER on behalf of a hotkey (an engine confirmation, a meter reading)
+        // is tagged with the origin captured at the key press, for Notification History -- the
+        // same tag a synchronous message gets (operator report, 2026-09-29: F11/F12's level and
+        // Alt+T's "Tune started" showed no hotkey). The caller supplies the captured origin, so a
+        // stale "last key pressed" is never guessed.
+        internal string ActiveHotkeyOrigin => _activeHotkeyOrigin;
+
+        internal void WithHotkeyOrigin(string origin, Action action)
+        {
+            string prev = _activeHotkeyOrigin;
+            if (origin != null) _activeHotkeyOrigin = origin;
+            try { action(); }
+            finally { _activeHotkeyOrigin = prev; }
+        }
+
+        // F11/F12 held down: Windows key repeat (~30 a second) raced the drive level from 10% to
+        // 100% in about a second (live, 2026-09-29) -- a real overdrive risk. A REPEAT (lParam bit
+        // 30 set) steps at most every AudioRepeatStepMs; a separate press always steps at once.
+        internal const int AudioRepeatStepMs = 330;
+        private DateTime _lastAudioLevelStep = DateTime.MinValue;
+
+        private bool AudioLevelKey(ref Message msg, bool up)
+        {
+            bool repeat = ((long)msg.LParam & 0x40000000L) != 0;
+            if (repeat && (DateTime.UtcNow - _lastAudioLevelStep).TotalMilliseconds < AudioRepeatStepMs) return true;
+            _lastAudioLevelStep = DateTime.UtcNow;
+            return wsjtxClient.AudioLevel(up);
+        }
+
         // The configured hotkey label ("Alt+Z", "Ctrl+Shift+H") for keyData if it is bound to a
         // Jimmy command, else null. Only genuine configured hotkeys get an origin -- a plain
         // Delete/Escape/typing key does not fabricate one.
@@ -2991,6 +3020,11 @@ namespace WSJTX_Controller
                 return wsjtxClient.ToggleTuningProcess();
             }
 
+            if (keyData == hotkeyConfig[HotkeyAction.AntennaTuner] && hotkeyConfig[HotkeyAction.AntennaTuner] != Keys.None)
+            {
+                return wsjtxClient.ToggleAntennaTuner();
+            }
+
             if (keyData == hotkeyConfig[HotkeyAction.SortOrder])
             {
                 OpenSortOrderEditor();
@@ -3011,12 +3045,12 @@ namespace WSJTX_Controller
 
             if (keyData == hotkeyConfig[HotkeyAction.AudioUp])
             {
-                return wsjtxClient.AudioLevel(true);
+                return AudioLevelKey(ref msg, true);
             }
 
             if (keyData == hotkeyConfig[HotkeyAction.AudioDown])
             {
-                return wsjtxClient.AudioLevel(false);
+                return AudioLevelKey(ref msg, false);
             }
 
             return base.ProcessCmdKey(ref msg, keyData); // Let other keys be processed normally

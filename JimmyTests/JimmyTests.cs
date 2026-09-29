@@ -1549,6 +1549,7 @@ static class JimmyTests
         ClockSyncDirectPathStateHygieneTests();
         ClockSyncPartlyHeardFirstPeriodTests();
         ClockSyncNexusTimeServerTests();
+        TxMeterFeedbackTests();
         DirectTxHoldSafetyNetTests();
         DirectPollFailureNotificationTests();
         DirectCatHealthNotificationTests();
@@ -17038,6 +17039,41 @@ static class JimmyTests
         Publish(wg, ClockDecodesJson(0.1), @", ""clockGrossMs"": -90000");
         Publish(wg, ClockDecodesJson(0.1), @", ""clockGrossMs"": -90000");
         Check("clock too far off to correct -> warned", Clock(d3).SequenceEqual(new[] { "Computer clock is out of sync, offset -90.0 seconds." }), true);
+    }
+
+    // 2026-09-28: meter feedback while setting the drive (Options > Radio). Speech path only --
+    // the tone needs a real sound device.
+    static void TxMeterFeedbackTests()
+    {
+        Console.WriteLine("\n── Meter feedback: pitch, ALC buzz, spoken readings ──");
+        // Pitch follows ALC; one TS-590SG meter dot (about 0.17) must be an audible step.
+        Check("tone pitch: ALC 0 = 300 Hz, 1.0 = 600 Hz, capped at 2400 Hz; one dot at least 30 Hz up",
+            Math.Abs(TxMeterFeedback.ToneFrequency(0) - 300) < 0.01 && Math.Abs(TxMeterFeedback.ToneFrequency(1) - 600) < 0.01
+            && TxMeterFeedback.ToneFrequency(9) == 2400 && TxMeterFeedback.ToneFrequency(0.17) - TxMeterFeedback.ToneFrequency(0) >= 30, true);
+
+        var fb = new TxMeterFeedback();
+        var t = new DateTime(2026, 9, 28, 12, 0, 0, DateTimeKind.Utc);
+        string Poll(bool active, double? w, double? a, double secs, bool tuneStart = false) =>
+            fb.Update(TxMeterFeedbackMode.Speech, active, w, a, "", t.AddSeconds(secs), null, tuneStart);
+        Check("nothing is spoken unasked", Poll(true, 88, 1.5, 0) == null && Poll(true, 88, 1.5, 3) == null, true);
+
+        fb.RequestReading(t.AddSeconds(10));                        // an F11/F12 press at 10 s
+        Check("not before the new level can show on the meters", Poll(true, 88, 1.5, 10.3) == null, true);
+        CheckStr("then once, from meters taken after the wait (0.7 s)", Poll(true, 95, 1.9, 10.7), "95 watts, ALC 1.90");
+        Check("and not again", Poll(true, 95, 1.9, 11.7) == null, true);
+
+        fb.RequestReading(t.AddSeconds(20));
+        Check("waits for the second meter...", Poll(true, 70, null, 20.7) == null, true);
+        CheckStr("...then speaks the one it has", Poll(true, null, null, 21.7), "70 watts");
+
+        Poll(false, null, null, 30);                                // keying ends
+        CheckStr("a Tune start asks for one starting reading", Poll(true, 60, 1.2, 31, tuneStart: true) ?? Poll(true, 60, 1.2, 31.7), "60 watts, ALC 1.20");
+        Check("nothing when off", fb.Update(TxMeterFeedbackMode.Off, true, 90, 0.2, "", t.AddSeconds(40), null) == null, true);
+
+        fb.RequestReading(t.AddSeconds(50), "Audio level 17.8%");     // F11/F12 with spoken feedback
+        CheckStr("the level is spoken with its reading, as one announcement", Poll(true, 5, 0.33, 50.7), "5 watts, ALC 0.33, audio level 17.8%");
+        fb.RequestReading(t.AddSeconds(60), "Audio level 18.8%");
+        CheckStr("...and alone when no meter reading comes", Poll(true, null, null, 60.7) ?? Poll(true, null, null, 61.7), "Audio level 18.8%");
     }
 
     // ── Rx/Tx frequency control, 2026-08-27: Tx stays stable during an active contact ──

@@ -2037,6 +2037,16 @@ namespace WSJTX_Controller
             // clock-status hotkey (ReportClockStatus).
             _nexusClock = radio;
 
+            // Meter feedback (Options > Radio): the whole Tune, or a few seconds after an F11/F12
+            // press while transmitting (AudioLevel sets _meterFeedbackUntil).
+            string meterSpeech = MeterFeedback.Update(ctrl.Radio.TxMeterFeedback,
+                tuning || (transmitting && DateTime.UtcNow < _meterFeedbackUntil),
+                radio.TxPoW, radio.TxAlc, ctrl.NativeEngine.AudioOutputDevice, DateTime.UtcNow,
+                m => DebugOutput($"{Time()} [METER-FEEDBACK] {m}"),
+                startOfTune: tuning);
+            if (meterSpeech != null)
+                ctrl.WithHotkeyOrigin(_meterFeedbackOrigin, () => StatusView.ShowMessage(meterSpeech, false));
+
             // Direct-mode runaway-Tx backstop, 2026-08-28 (CONFIRMED live -- HB9TIH then NE5L),
             // revised 2026-08-31. After Jimmy logs a contact and clears callInProg on the engine's
             // RR73, the engine (Nexus State::Confirming) OWNS the legitimate closing exchange:
@@ -3272,6 +3282,16 @@ namespace WSJTX_Controller
         // Task.Run -- ToggleTuningProcess (WsjtxClient.BandAudio.cs) passes onComplete instead of
         // wrapping this call in its own Task.Run+BeginInvoke; the dispatcher already marshals
         // onComplete onto the UI thread.
+        // Alt+Shift+T: the radio's own antenna tuner (EngineHost ATU_START / ATU_STOP / ATU_STATUS,
+        // main.rs kenwood_atu). onReply gets the engine's raw reply, or null when it could not be
+        // sent. A start keys the radio, so it is a TX-arm command (purged by an emergency halt).
+        internal void DirectAtuCommand(string command, Action<string> onReply)
+        {
+            bool arm = command == "ATU_START";
+            if (arm && !DirectAuthorizedToArmTx(command)) { onReply?.Invoke(null); return; }
+            EnqueueDirectCommand(command, resp => onReply?.Invoke(resp), isTxArm: arm);
+        }
+
         public void DirectSetTuning(bool on, Action<bool> onComplete)
         {
             if (on && !DirectAuthorizedToArmTx("SET_TUNING 1")) { onComplete?.Invoke(false); return; }

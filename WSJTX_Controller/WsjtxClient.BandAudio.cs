@@ -530,8 +530,8 @@ namespace WSJTX_Controller
         // new SET_TUNING command, EngineHost/src/main.rs) -- Engine::set_tune already existed
         // (Nexus's own Tauri UI uses it) and already plays a continuous test carrier in small
         // 40ms chunks (tempo-audio/src/service.rs, TUNE_CHUNK_MS) rather than one pre-rendered
-        // slot buffer, so unlike a normal FT8/FT4 transmission, F11/F12 (SET_TX_LEVEL) DOES apply
-        // live during Tune -- the correct way to trim drive level down until the radio's ALC
+        // slot buffer. F11/F12 (SET_TX_LEVEL) applies live during Tune -- and, corrected
+        // 2026-09-28, during a normal transmission too (see AudioLevel) -- the correct way to trim drive level down until the radio's ALC
         // reads at/near zero, matching how Andy WM8Q's fork's own hotkeys worked. Optimistically
         // flips `tuning` immediately (same pattern as the original Tilly-era ToggleTuning) rather
         // than waiting for the next 1s Direct-mode poll to reconcile it via DirectApplyStatus --
@@ -568,6 +568,10 @@ namespace WSJTX_Controller
             // dispatcher (WsjtxClient.Direct.cs's own class comment) instead of this method opening
             // its own independent Task.Run -- the dispatcher already marshals onComplete onto the
             // UI thread, same as ctrl.BeginInvoke did here before.
+            // The hotkey that asked, captured now: the announcement comes after the engine confirms,
+            // and the Tune's starting meter reading carries the same tag.
+            string origin = ctrl.ActiveHotkeyOrigin;
+            if (newState) _meterFeedbackOrigin = origin;
             DirectSetTuning(newState, ok =>
             {
                 _tuningRequestInFlight = false;
@@ -579,14 +583,106 @@ namespace WSJTX_Controller
                     // always the only transport in production now (see
                     // NativeEngineSettings.cs's own comment), so a failure here means the
                     // engine process itself isn't reachable, not a mode choice.
-                    StatusView.ShowMessage("Tune needs the native engine, which isn't currently reachable.", true);
+                    ctrl.WithHotkeyOrigin(origin, () =>
+                        StatusView.ShowMessage("Tune needs the native engine, which isn't currently reachable.", true));
                     return;
                 }
                 tuning = newState;
                 if (!tuning) StartStatusTimer2(false);
-                StatusView.ShowMessage(tuning ? "Tune started" : "Tune stopped", false);
+                ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(tuning ? "Tune started" : "Tune stopped", false));
             });
             return true;
+        }
+
+        // Alt+Shift+T (operator request, 2026-09-29): run the radio's OWN automatic antenna tuner,
+        // like pressing its TUNE button -- not Alt+T's audio test tone. The radio keys itself for
+        // the tune-up; Jimmy never touches its power setting. EngineHost's kenwood_atu (main.rs)
+        // sends the command through Nexus's rigctld and says why it is Kenwood-only for now.
+        // Once started, the radio is asked about once a second whether it is still tuning (every
+        // answer is logged, [ATU]); "Tuner done" when it reports finished. Pressing again, or
+        // Escape (HaltTx), stops it; after AtuMaxSeconds Jimmy stops waiting and stops it.
+        internal const int AtuPollMs = 1000, AtuMaxSeconds = 30;
+        private bool _atuRunning, _atuRequestInFlight;
+        private DateTime _atuStartedUtc;
+        private string _atuOrigin;
+        private System.Windows.Forms.Timer _atuPollTimer;
+
+        public bool ToggleAntennaTuner()
+        {
+            string origin = ctrl.ActiveHotkeyOrigin;
+            if (_atuRunning) { StopAntennaTuner(origin, "Tuner stopped"); return true; }
+            if (_atuRequestInFlight) return true;
+            if (tuning)
+            {
+                StatusView.ShowMessage("Stop Tune before starting the antenna tuner", false);
+                return true;
+            }
+            // Same as Alt+T: a normal transmission must never race a tune-up.
+            if (txEnabled) HaltTx();
+            _atuRequestInFlight = true;
+            DirectAtuCommand("ATU_START", resp =>
+            {
+                _atuRequestInFlight = false;
+                DebugOutput($"{Time()} [ATU] start: {resp ?? "(not sent)"}");
+                string msg;
+                if (resp != null && resp.StartsWith("OK"))
+                {
+                    _atuRunning = true;
+                    _atuStartedUtc = DateTime.UtcNow;
+                    _atuOrigin = origin;
+                    if (_atuPollTimer == null)
+                    {
+                        _atuPollTimer = new System.Windows.Forms.Timer { Interval = AtuPollMs };
+                        _atuPollTimer.Tick += (s, e) => PollAntennaTuner();
+                    }
+                    _atuPollTimer.Start();
+                    msg = "Tuner started";
+                }
+                else if (resp != null && resp.StartsWith("ERR "))
+                    msg = resp.Substring(4);
+                else
+                    msg = "Antenna tuner needs the native engine, which isn't currently reachable.";
+                ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(msg, false));
+            });
+            return true;
+        }
+
+        private void PollAntennaTuner()
+        {
+            if (!_atuRunning) { _atuPollTimer?.Stop(); return; }
+            double elapsed = (DateTime.UtcNow - _atuStartedUtc).TotalSeconds;
+            if (elapsed > AtuMaxSeconds)
+            {
+                StopAntennaTuner(_atuOrigin, "Tuner stopped, no result after 30 seconds");
+                return;
+            }
+            DirectAtuCommand("ATU_STATUS", resp =>
+            {
+                DebugOutput($"{Time()} [ATU] status at {elapsed:0.0}s: {resp ?? "(not sent)"}");
+                // "OK 0 AC110;" = no longer tuning. Ignored for the first 1.5 s, while the radio
+                // may not yet report the tune-up it just started.
+                if (_atuRunning && elapsed >= 1.5 && resp != null && resp.StartsWith("OK 0"))
+                {
+                    _atuRunning = false;
+                    _atuPollTimer?.Stop();
+                    ctrl.WithHotkeyOrigin(_atuOrigin, () => StatusView.ShowMessage("Tuner done", false));
+                }
+            });
+        }
+
+        // Stops a running tune-up (second press, Escape, or the time limit).
+        private void StopAntennaTuner(string origin, string message)
+        {
+            _atuRunning = false;
+            _atuPollTimer?.Stop();
+            DirectAtuCommand("ATU_STOP", resp => DebugOutput($"{Time()} [ATU] stop: {resp ?? "(not sent)"}"));
+            if (message != null) ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(message, false));
+        }
+
+        // Escape / Alt+H: HaltTx also stops a running tune-up.
+        internal void StopAntennaTunerForHalt()
+        {
+            if (_atuRunning) StopAntennaTuner(null, "Tuner stopped");
         }
 
         // Self-sufficiency plan, Phase 1: the one and only F11/F12 redirect point (confirmed by
@@ -642,9 +738,9 @@ namespace WSJTX_Controller
             // matches Andy WM8Q's fork's original gate (`newTxMsgIdx == 20 && m_transmitting`
             // covered Tune too, since WSJT-X sets m_transmitting for a tune carrier as well).
             // Added the `tuning` half 2026-08-10, alongside wiring up Tune itself
-            // (ToggleTuningProcess) -- Tune is the ONLY state where this actually applies live
-            // (see ToggleTuningProcess's own comment); during a real FT8/FT4 transmission this
-            // still only takes effect on the next slot, same as before.
+            // (ToggleTuningProcess). Corrected 2026-09-28: the level applies LIVE in both -- Nexus
+            // scales every outgoing sample by the current level as it plays (tempo-audio
+            // device.rs set_tx_level / build_tx_stream), mid-over as well as during Tune.
             if (!transmitting && !tuning) return false;
             if (_txLevelChangeInFlight) return true;
             if (_engineTxLevel == null)
@@ -656,6 +752,7 @@ namespace WSJTX_Controller
             }
 
             if (!tuning) StartStatusTimer2(false);
+            _meterFeedbackUntil = DateTime.UtcNow.AddSeconds(MeterFeedbackAfterPressSeconds);
 
             // Operator-configurable dB step (Options > Radio tab) -- see StepTxLevelDb.
             double target = StepTxLevelDb((double)_engineTxLevel, ctrl.Radio.AudioStepDb, up);
@@ -668,14 +765,36 @@ namespace WSJTX_Controller
             // would mix straight into the live transmitted audio. Root-caused live, 2026-08-09. The
             // screen-reader announcement itself is unaffected (driven by ShowMsg's own SendKeys
             // nudge, independent of sound) -- only the audible beep goes.
+            // The hotkey that asked, captured now: the announcement comes after the engine confirms.
+            string origin = ctrl.ActiveHotkeyOrigin;
             DirectSetEngineTxLevel(target, (ok, applied) =>
             {
                 if (!ok)
                 {
-                    StatusView.ShowMessage("Audio level change not confirmed -- engine not responding.", false);
+                    ctrl.WithHotkeyOrigin(origin, () =>
+                        StatusView.ShowMessage("Audio level change not confirmed -- engine not responding.", false));
                     return;
                 }
-                StatusView.ShowMessage($"Audio level {applied * 100:0.0}%", false);
+                string levelText = $"Audio level {applied * 100:0.0}%";
+                // With spoken meter feedback on, the level is spoken WITH the power/ALC reading as
+                // one announcement ("5 watts, ALC 0.33, audio level 17.8%"); otherwise at once.
+                // The reading comes from meters taken after the engine applied the new level,
+                // fetched by an early snapshot rather than the next once-a-second poll.
+                bool combine = TxMeterFeedback.SpeechWanted(ctrl.Radio.TxMeterFeedback);
+                if (!combine)
+                    ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(levelText, false));
+                _meterFeedbackOrigin = origin;
+                MeterFeedback.RequestReading(DateTime.UtcNow, combine ? levelText : null);
+                if (ctrl.Radio.TxMeterFeedback != TxMeterFeedbackMode.Off)
+                {
+                    if (_meterPollTimer == null)
+                    {
+                        _meterPollTimer = new System.Windows.Forms.Timer { Interval = MeterFeedbackPollMs };
+                        _meterPollTimer.Tick += (s, e) => { _meterPollTimer.Stop(); RequestDirectPollNow(); };
+                    }
+                    _meterPollTimer.Stop();
+                    _meterPollTimer.Start();
+                }
             });
             return true;
         }

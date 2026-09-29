@@ -704,6 +704,16 @@ namespace WSJTX_Controller
         private const int ClockDtWindow = 16, ClockDtMinSamples = 5;
         private readonly List<double> _recentDt = new List<double>();
         private DirectRadioStatus _nexusClock;
+        // Meter feedback (TxMeterFeedback): wanted until this time after an F11/F12 press.
+        internal const double MeterFeedbackAfterPressSeconds = 6.0;
+        // A snapshot this long after a confirmed F11/F12 level change carries the new meters
+        // (Nexus refreshes each TX meter about every 0.6 s: TX_METER_POLL_MS 150 x 4 meters).
+        internal const int MeterFeedbackPollMs = 700;
+        private System.Windows.Forms.Timer _meterPollTimer;
+        // The hotkey (F11/F12, Alt+T) whose meter reading is pending, for Notification History.
+        private string _meterFeedbackOrigin;
+        private DateTime _meterFeedbackUntil = DateTime.MinValue;
+        internal readonly TxMeterFeedback MeterFeedback = new TxMeterFeedback();
         // Clock-sync notification, 2026-08-12: null = not yet evaluated this session (the
         // clock's actual condition is unknown, not assumed good) -- see CalcAvgTimeOffset
         // (WsjtxClient.BandAudio.cs) for the transition-detection logic this backs. Deliberately
@@ -3767,6 +3777,7 @@ namespace WSJTX_Controller
 
         public void HaltTx()
         {
+            StopAntennaTunerForHalt();
             StopDecodeTimers();
             tuning = false;
             // Direct-mode runaway-Tx backstop interaction, 2026-08-28 (tester report): an

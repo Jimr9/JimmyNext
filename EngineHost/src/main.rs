@@ -1058,6 +1058,68 @@ fn read_one_control_line(
 /// added: this is a loopback-only, single-operator, one-shot-per-command local control channel
 /// (Jimmy's own client already opens a fresh connection per command, matching the eQSL/HamQTH
 /// spawns' own established shape), not a public-facing service that needs DoS hardening.
+/// ATU_START / ATU_STOP / ATU_STATUS -- Jimmy's "Start antenna tuner" (Alt+Shift+T), 2026-09-29.
+/// Nexus's own ATU command (Engine::atu_tune) goes through Hamlib's `set_func TUNER`, which on the
+/// Kenwood backend can only switch the tuner IN, never start a tune-up -- so Nexus refuses it there
+/// (rigmodels::hamlib_atu_start_tune_reaches). The TS-590-family CAT command that does start one is
+/// `AC111;` (third digit: 1 start / 0 stop; `AC;` reads it back), sent as raw CAT through the SAME
+/// rigctld Nexus already runs, with Nexus's own client (Rig::rigctld, send_raw_set / send_raw) --
+/// never a second connection to the radio. That client never keys, so dropping it never unkeys.
+/// Kenwood backend only for now. The transmit gates are Nexus's (Engine::atu_tune_gate) minus two:
+/// the "can't start over CAT" refusal this replaces, and the Enable-TX latch -- Jimmy disarms TX
+/// before a tune-up exactly as it does for Tune (Alt+T), and FT8/FT4 are never receive-only tiers.
+/// Replies "OK", "OK <1 tuning | 0 not> <radio's AC answer>" for ATU_STATUS, or "ERR <reason>".
+fn kenwood_atu(engine: &Arc<Mutex<Engine>>, cmd: &str) -> String {
+    const KENWOOD_BACKEND: u32 = 2;
+    let port = {
+        let e = engine.lock().unwrap_or_else(|e| e.into_inner());
+        if e.settings().rig_model / 1000 != KENWOOD_BACKEND {
+            return "ERR Starting this radio's tuner from Jimmy works only with Kenwood radios so far".to_string();
+        }
+        if cmd == "ATU_START" {
+            if e.tuning() || e.on_air() {
+                return "ERR Still transmitting, stop first".to_string();
+            }
+            if !e.tx_allowed() {
+                return "ERR TX locked, this frequency is outside your license privileges".to_string();
+            }
+            if let Some(owner) = e.tx_owner() {
+                return format!("ERR {}", owner.busy_reason());
+            }
+        }
+        e.settings().rigctld_port
+    }; // engine lock released before any network I/O
+    let mut rig = tempo_audio::rig::Rig::rigctld(&format!("127.0.0.1:{port}"));
+    let Some(reply) = rig.send_raw("AC;") else {
+        return "ERR No answer from the radio".to_string();
+    };
+    let Some(digits) = kenwood_ac_digits(&reply) else {
+        return format!("ERR Unexpected tuner answer from the radio: {reply}");
+    };
+    if cmd == "ATU_STATUS" {
+        // "OK <tuning 1|0> <raw answer>": the third digit is 1 while a tune-up runs.
+        return format!("OK {} {reply}", digits[2]);
+    }
+    // The first digit (receive through the tuner) is the operator's own setting: keep it, and
+    // change only TX-AT in (second digit) and start/stop (third).
+    let rx_at = digits[0];
+    let start = cmd == "ATU_START";
+    if !rig.send_raw_set(&format!("AC{rx_at}1{};", if start { '1' } else { '0' })) {
+        return "ERR The radio control link is not reachable".to_string();
+    }
+    if start {
+        // Same stand-down Nexus does when a tune-up reaches the radio (#322).
+        engine.lock().unwrap_or_else(|e| e.into_inner()).note_atu_tune_started();
+    }
+    "OK".to_string()
+}
+
+/// The three digits of a Kenwood `AC` answer ("AC110;" -> ['1','1','0']), else None.
+fn kenwood_ac_digits(reply: &str) -> Option<[char; 3]> {
+    let d: Vec<char> = reply.trim().strip_prefix("AC")?.chars().take(3).collect();
+    (d.len() == 3 && d.iter().all(|c| c.is_ascii_digit())).then(|| [d[0], d[1], d[2]])
+}
+
 fn handle_control_connection(
     mut stream: std::net::TcpStream,
     engine: Arc<Mutex<Engine>>,
@@ -1331,6 +1393,8 @@ fn handle_control_connection(
         } else if let Some(v) = line.strip_prefix("SET_TUNING ") {
             engine.lock().unwrap_or_else(|e| e.into_inner()).set_tune(v.trim() == "1");
             let _ = writeln!(stream, "OK");
+        } else if line == "ATU_START" || line == "ATU_STOP" || line == "ATU_STATUS" {
+            let _ = writeln!(stream, "{}", kenwood_atu(&engine, line));
         } else if let Some(v) = line.strip_prefix("SET_TX_OFFSET ") {
             match parse_offset_arg("SET_TX_OFFSET", v) {
                 Ok(hz) => {

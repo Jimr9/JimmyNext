@@ -81,6 +81,7 @@ namespace WSJTX_Controller
             new Section("Radio and audio controls", new[]
             {
                 new Item(HotkeyAction.TuneMode,  "Toggle Tune mode to set the audio output level to the radio."),
+                new Item(HotkeyAction.AntennaTuner, "Start the radio's automatic antenna tuner, like its TUNE button; press again to stop (Kenwood radios)."),
                 new Item(HotkeyAction.AudioUp,   "Increase the audio output level to the radio (during tune or transmit)."),
                 new Item(HotkeyAction.AudioDown, "Decrease the audio output level to the radio (during tune or transmit)."),
                 new Item(HotkeyAction.PowerSwr,  "Quick check of output power and SWR (transmit) or audio input level (receive)."),

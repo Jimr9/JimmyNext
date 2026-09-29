@@ -1345,6 +1345,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown _radioAudioStepUpDown;
         private System.Windows.Forms.CheckBox _radioRememberTxLevelPerBandCheckBox;
         private System.Windows.Forms.CheckBox _radioExplainMeterReadingsCheckBox;
+        private System.Windows.Forms.ComboBox _radioMeterFeedbackCombo;
         private System.Windows.Forms.GroupBox _radioTxLevelGroupBox;
         private System.Windows.Forms.TextBox _radioConfirmedBandBox;
         private System.Windows.Forms.NumericUpDown _radioEngineTxLevelUpDown;
@@ -2110,12 +2111,37 @@ namespace WSJTX_Controller
             radioPanel.Controls.Add(_radioExplainMeterReadingsCheckBox);
             y += 32;
 
+            // Meter feedback while setting the drive with F11/F12 (TxMeterFeedback). Items in
+            // TxMeterFeedbackMode order. The tone plays on the PC speaker, never the radio's device.
+            radioPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "Meter feedback while tuning or pressing F11/F12:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            });
+            _radioMeterFeedbackCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left + 300, y),
+                Size = new System.Drawing.Size(140, 21),
+                Font = font,
+                TabIndex = 30,
+                AccessibleName = "Meter feedback",
+                AccessibleDescription = "While tuning, and for a few seconds after F11 or F12 while transmitting: a tone whose pitch rises as ALC rises, spoken power and ALC readings, both, or off.",
+            };
+            _radioMeterFeedbackCombo.Items.AddRange(new object[] { "Off", "Tone", "Speech", "Tone and speech" });
+            _radioMeterFeedbackCombo.SelectedIndex = (int)ctrl.Radio.TxMeterFeedback;
+            radioPanel.Controls.Add(_radioMeterFeedbackCombo);
+            y += 32;
+
             _radioTestButton = new System.Windows.Forms.Button
             {
                 Text = "Test connection",
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(120, 24),
-                TabIndex = 29,
+                TabIndex = 31,
                 Font = font,
                 AccessibleName = "Test radio connection",
             };
@@ -4615,6 +4641,8 @@ namespace WSJTX_Controller
             // Same live-read, no-restart-needed shape -- WsjtxClient.BandAudio.cs's ReportPowerSwr()
             // (Alt+Q) reads this directly off ctrl.Radio on each press.
             if (_radioExplainMeterReadingsCheckBox != null) ctrl.Radio.ExplainMeterReadings = _radioExplainMeterReadingsCheckBox.Checked;
+            if (_radioMeterFeedbackCombo != null && _radioMeterFeedbackCombo.SelectedIndex >= 0)
+                ctrl.Radio.TxMeterFeedback = (TxMeterFeedbackMode)_radioMeterFeedbackCombo.SelectedIndex;
 
             // Normalize case on entry: this call/grid flows straight into jimmy-engine-host's
             // --mycall (see DecodeMessage.IsCallTo's own comment on the 2026-08-07
@@ -5426,6 +5454,7 @@ namespace WSJTX_Controller
             HotkeyAction.DeleteAllCalls,
             HotkeyAction.TxPeriod,
             HotkeyAction.TuneMode,
+            HotkeyAction.AntennaTuner,
             HotkeyAction.AudioUp,
             HotkeyAction.AudioDown,
             HotkeyAction.PowerSwr,

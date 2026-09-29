@@ -169,6 +169,11 @@ namespace WSJTX_Controller
         // RememberTxLevelPerBand above.
         public bool ExplainMeterReadings { get; set; } = false;
 
+        // 2026-09-28 (operator request): live feedback from the radio's power and ALC meters
+        // while tuning (Alt+T), and for a few seconds after an F11/F12 press while transmitting
+        // -- a tone whose pitch follows ALC, spoken readings, both, or off (default). See TxMeterFeedback. Read live, no restart.
+        public TxMeterFeedbackMode TxMeterFeedback { get; set; } = TxMeterFeedbackMode.Off;
+
         public void LoadFromIni(IniFile ini)
         {
             if (Enum.TryParse(ini.Read("radioControlMode"), out RadioControlMode mode))
@@ -211,6 +216,8 @@ namespace WSJTX_Controller
                 LastTxLevel = lastTxLevel;
             RememberTxLevelPerBand = ini.Read("radioRememberTxLevelPerBand") == "True";
             ExplainMeterReadings = ini.Read("radioExplainMeterReadings") == "True";
+            if (Enum.TryParse(ini.Read("radioTxMeterFeedback"), out TxMeterFeedbackMode feedback))
+                TxMeterFeedback = feedback;
             TxLevelByBand.Clear();
             string txLevelByBand = ini.Read("radioTxLevelByBand");
             if (!string.IsNullOrEmpty(txLevelByBand))
@@ -253,6 +260,7 @@ namespace WSJTX_Controller
             SaveLastTxLevelToIni(ini);
             ini.Write("radioRememberTxLevelPerBand", RememberTxLevelPerBand.ToString());
             ini.Write("radioExplainMeterReadings", ExplainMeterReadings.ToString());
+            ini.Write("radioTxMeterFeedback", TxMeterFeedback.ToString());
             SaveTxLevelByBandToIni(ini);
         }
 

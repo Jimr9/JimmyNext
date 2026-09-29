@@ -20,6 +20,8 @@ namespace WSJTX_Controller
         DeleteAllCalls,
         TxPeriod,
         TuneMode,
+        // 2026-09-29: start the radio's own automatic antenna tuner (Kenwood so far).
+        AntennaTuner,
         AudioUp,
         AudioDown,
         PowerSwr,
@@ -103,6 +105,7 @@ namespace WSJTX_Controller
             [HotkeyAction.DeleteAllCalls]  = Keys.Alt | Keys.D,
             [HotkeyAction.TxPeriod]        = Keys.Alt | Keys.F,
             [HotkeyAction.TuneMode]        = Keys.Alt | Keys.T,
+            [HotkeyAction.AntennaTuner]    = Keys.Alt | Keys.Shift | Keys.T,
             [HotkeyAction.AudioUp]         = Keys.F12,
             [HotkeyAction.AudioDown]       = Keys.F11,
             [HotkeyAction.PowerSwr]        = Keys.Alt | Keys.Q,
@@ -191,6 +194,7 @@ namespace WSJTX_Controller
             [HotkeyAction.DeleteAllCalls]  = "Delete All Available Stations",
             [HotkeyAction.TxPeriod]        = "Toggle Transmit Period",
             [HotkeyAction.TuneMode]        = "Toggle Tune Mode",
+            [HotkeyAction.AntennaTuner]    = "Start Antenna Tuner",
             [HotkeyAction.AudioUp]         = "Audio Level Up",
             [HotkeyAction.AudioDown]       = "Audio Level Down",
             [HotkeyAction.PowerSwr]        = "Quick Power / SWR Check",
@@ -240,6 +244,7 @@ namespace WSJTX_Controller
         // Actions that may be left unassigned (Keys.None) without triggering a validation error.
         public static readonly HashSet<HotkeyAction> OptionalActions = new HashSet<HotkeyAction>
         {
+            HotkeyAction.AntennaTuner,
             HotkeyAction.AnalyzeSlot,
             HotkeyAction.ReportSlotAnalysis,
             HotkeyAction.NotificationHistory,
@@ -308,6 +313,8 @@ namespace WSJTX_Controller
             HotkeyAction.ToggleStationWatch, HotkeyAction.WorkWatchedStationNow,
             // 2026-09-26 -- same protection for Ctrl+Shift+D.
             HotkeyAction.ToggleHound,
+            // 2026-09-29 -- same protection for Alt+Shift+T.
+            HotkeyAction.AntennaTuner,
         };
 
         // Populated by LoadFromIni: newer actions that were left unassigned because this
