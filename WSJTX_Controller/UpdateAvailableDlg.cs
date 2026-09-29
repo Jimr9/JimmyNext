@@ -8,7 +8,7 @@ namespace WSJTX_Controller
     // Update offer (operator request, 2026-09-29): the startup update check used to show a bare
     // Yes/No message box with only the version. This shows the release notes too, in a
     // read-only box the screen reader can be tabbed into and read line by line, then
-    // "Yes, install" / "No". Focus starts in the notes; Escape = No, Enter on a button presses it.
+    // "Yes" / "No". Focus starts in the notes; Escape = No, Enter on a button presses it.
     internal sealed class UpdateAvailableDlg : Form
     {
         private readonly TextBox _notes;
@@ -45,8 +45,8 @@ namespace WSJTX_Controller
 
             var yes = new Button
             {
-                Text = "&Yes, install",
-                AccessibleName = "Yes, install the update",
+                Text = "&Yes",
+                AccessibleName = "Yes",
                 DialogResult = DialogResult.Yes,
                 Location = new Point(352, 358),
                 Size = new Size(100, 28),
@@ -55,7 +55,7 @@ namespace WSJTX_Controller
             var no = new Button
             {
                 Text = "&No",
-                AccessibleName = "No, not now",
+                AccessibleName = "No",
                 DialogResult = DialogResult.No,
                 Location = new Point(460, 358),
                 Size = new Size(88, 28),
