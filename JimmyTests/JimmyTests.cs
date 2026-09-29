@@ -17031,7 +17031,7 @@ static class JimmyTests
         Check("time server correcting the clock -> no warning", Clock(d2).Count == 0, true);
         wn.ReportClockStatus();
         CheckStr("hotkey: the offset Nexus corrects, its age and who keeps the clock", v2.LastShowMessageText,
-            "Clock 0.8 seconds fast, corrected by time server, checked 3 minutes ago, Dimension 4 is managing this clock");
+            "Clock 0.80 seconds fast, corrected by time server, checked 3 minutes ago, Dimension 4 is managing this clock");
 
         // Too far off for Nexus to correct: warned.
         var wg = NewClient(out var d3, out _);
@@ -19928,19 +19928,19 @@ static class JimmyTests
             PublishDt(0.1);
             wc.ReportClockStatus();
             CheckStr("Acceptable offset -> reports good, with the real measured offset",
-                fakeStatusView.LastShowMessageText, "Clock good, no time server, signals say +0.1 seconds");
+                fakeStatusView.LastShowMessageText, "Clock +0.1 seconds by signals, good, no time server");
 
             PublishDt(2.0);
             PublishDt(2.0);
             wc.ReportClockStatus();
             CheckStr("Unacceptable offset -> reports out of sync, with the real measured offset",
-                fakeStatusView.LastShowMessageText, "Clock out of sync, no time server, signals say +2.0 seconds, check clock time");
+                fakeStatusView.LastShowMessageText, "Clock +2.0 seconds by signals, out of sync, no time server, check clock time");
 
             PublishDt(0.1);
             PublishDt(0.1);
             wc.ReportClockStatus();
             CheckStr("Recovers -> reports good again, matching the automatic ClockSynced transition",
-                fakeStatusView.LastShowMessageText, "Clock good, no time server, signals say +0.1 seconds");
+                fakeStatusView.LastShowMessageText, "Clock +0.1 seconds by signals, good, no time server");
         }
         catch (Exception ex)
         {

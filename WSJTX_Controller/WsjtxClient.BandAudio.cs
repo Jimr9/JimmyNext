@@ -937,22 +937,22 @@ namespace WSJTX_Controller
             var inv = System.Globalization.CultureInfo.InvariantCulture;
             var c = _nexusClock;
             string owner = string.IsNullOrWhiteSpace(c?.ClockOwnerNote) ? "" : ", " + c.ClockOwnerNote.Trim();
+            // The offset leads every answer (operator request, 2026-09-28) so it is heard first.
+            string FastSlow(long ms) =>
+                $"{(Math.Abs(ms) / 1000.0).ToString("F2", inv)} seconds {(ms >= 0 ? "fast" : "slow")}";
             if (c?.ClockGrossMs != null)
-                return $"Clock off by {Math.Abs(c.ClockGrossMs.Value) / 1000.0:F0} seconds, too far to correct, set the computer clock{owner}";
+                return $"Clock {FastSlow(c.ClockGrossMs.Value)}, too far to correct, set the computer clock{owner}";
             if (c?.ClockOffsetMs != null)
             {
-                long ms = c.ClockOffsetMs.Value;
-                string off = Math.Abs(ms) < 50 ? "Clock on time"
-                    : $"Clock {(Math.Abs(ms) / 1000.0).ToString("F1", inv)} seconds {(ms > 0 ? "fast" : "slow")}, corrected by time server";
                 int age = c.ClockAgeSecs ?? 0;
                 string when = age < 60 ? "checked just now" : $"checked {age / 60} minute{(age / 60 == 1 ? "" : "s")} ago";
-                return $"{off}, {when}{owner}";
+                return $"Clock {FastSlow(c.ClockOffsetMs.Value)}, corrected by time server, {when}{owner}";
             }
             if (_recentDt.Count < ClockDtMinSamples) return "Clock not yet measured";
             string est = timeOffset.ToString("+0.0;-0.0;0.0", inv);
             return _clockWasAcceptable == false
-                ? $"Clock out of sync, no time server, signals say {est} seconds, check clock time"
-                : $"Clock good, no time server, signals say {est} seconds";
+                ? $"Clock {est} seconds by signals, out of sync, no time server, check clock time"
+                : $"Clock {est} seconds by signals, good, no time server";
         }
 
         private static double Median(List<double> values)
