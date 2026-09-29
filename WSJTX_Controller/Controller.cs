@@ -1517,13 +1517,10 @@ namespace WSJTX_Controller
 
         private void OfferUpdate(UpdateInfo info, string currentVersion)
         {
-            string releaseNote = info.Published.HasValue
-                ? $" (released {info.Published.Value.ToLocalTime():MMMM d, yyyy})"
-                : "";
-            var result = MessageBox.Show(this,
-                $"{friendlyName} {info.Version} is available{releaseNote}. You have {currentVersion}." +
-                $"{nl}{nl}Download and install it now? {friendlyName} will close to complete the install.",
-                "Update Available", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            // The release notes are shown with the offer (UpdateAvailableDlg), readable before choosing.
+            DialogResult result;
+            using (var dlg = new UpdateAvailableDlg(UpdateAvailableDlg.Summary(friendlyName, info, currentVersion), info.Notes))
+                result = dlg.ShowDialog(this);
 
             if (result != DialogResult.Yes) return;
 

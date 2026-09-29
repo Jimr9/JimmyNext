@@ -1550,6 +1550,7 @@ static class JimmyTests
         ClockSyncPartlyHeardFirstPeriodTests();
         ClockSyncNexusTimeServerTests();
         TxMeterFeedbackTests();
+        UpdateNotesPlainTextTests();
         DirectTxHoldSafetyNetTests();
         DirectPollFailureNotificationTests();
         DirectCatHealthNotificationTests();
@@ -17081,6 +17082,17 @@ static class JimmyTests
         CheckStr("the level is spoken with its reading, as one announcement", Poll(true, 5, 0.33, 50.7), "5 watts, ALC 0.33, audio level 17.8%");
         fb.RequestReading(t.AddSeconds(60), "Audio level 18.8%");
         CheckStr("...and alone when no meter reading comes", Poll(true, null, null, 60.7) ?? Poll(true, null, null, 61.7), "Audio level 18.8%");
+    }
+
+    // 2026-09-29: the update offer shows GitHub's release notes (Markdown) as plain text.
+    static void UpdateNotesPlainTextTests()
+    {
+        Console.WriteLine("\n── Update offer: release notes as plain text ──");
+        string md = "## What's new\n\n* **Meter feedback** while tuning\n* See [the site](https://blindsea.com/jimmy20)\n\n\n`Alt+Shift+T` starts the tuner";
+        CheckStr("headings, emphasis, code marks and link syntax removed; items read as '- '",
+            UpdateAvailableDlg.NotesAsPlainText(md),
+            "What's new\r\n\r\n- Meter feedback while tuning\r\n- See the site\r\n\r\nAlt+Shift+T starts the tuner");
+        CheckStr("no notes -> a plain sentence", UpdateAvailableDlg.NotesAsPlainText(""), "No release notes were published for this version.");
     }
 
     // ── Rx/Tx frequency control, 2026-08-27: Tx stays stable during an active contact ──

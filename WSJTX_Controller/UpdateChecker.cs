@@ -12,6 +12,9 @@ namespace WSJTX_Controller
         public DateTime? Published;
         public string   MsiName;
         public string   MsiUrl;
+        // The release notes as published on GitHub (the release "body", Markdown), shown
+        // as plain text in UpdateAvailableDlg. Empty when the release has none.
+        public string   Notes;
     }
 
     // Checks GitHub's "latest release" API for a Jimmy Next version newer than the one
@@ -38,7 +41,14 @@ namespace WSJTX_Controller
         // Returns null both when Jimmy is already up to date and when the check itself
         // failed (network down, GitHub rate limit, unparsable response) -- a startup
         // check must never nag or interrupt the user just because it couldn't complete.
-        public static async Task<UpdateInfo> CheckForNewerVersionAsync(string currentVersion)
+        public static Task<UpdateInfo> CheckForNewerVersionAsync(string currentVersion) =>
+            FetchLatestAsync(currentVersion, onlyIfNewer: true);
+
+        // The latest published release whatever the running version -- for
+        // "--preview-update-dialog" (Program.cs), which shows the update offer without installing.
+        public static Task<UpdateInfo> FetchLatestReleaseAsync() => FetchLatestAsync(null, onlyIfNewer: false);
+
+        private static async Task<UpdateInfo> FetchLatestAsync(string currentVersion, bool onlyIfNewer)
         {
             try
             {
@@ -49,9 +59,12 @@ namespace WSJTX_Controller
                 string tag = root.TryGetProperty("tag_name", out var tagEl) && tagEl.ValueKind == JsonValueKind.String
                     ? tagEl.GetString() : null;
                 int[] latest = ParseVersion(tag);
-                int[] current = ParseVersion(currentVersion);
-                if (latest == null || current == null) return null;
-                if (CompareVersions(current, latest) >= 0) return null;
+                if (latest == null) return null;
+                if (onlyIfNewer)
+                {
+                    int[] current = ParseVersion(currentVersion);
+                    if (current == null || CompareVersions(current, latest) >= 0) return null;
+                }
 
                 JsonElement? msiAsset = null;
                 if (root.TryGetProperty("assets", out var assetsEl) && assetsEl.ValueKind == JsonValueKind.Array)
@@ -82,6 +95,7 @@ namespace WSJTX_Controller
                     Published = published,
                     MsiName   = msi.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : "JimmyUpdate.msi",
                     MsiUrl    = msi.TryGetProperty("browser_download_url", out var u) && u.ValueKind == JsonValueKind.String ? u.GetString() : null,
+                    Notes     = root.TryGetProperty("body", out var b) && b.ValueKind == JsonValueKind.String ? b.GetString() : "",
                 };
             }
             catch

@@ -24,6 +24,26 @@ namespace WSJTX_Controller
         // while still needed.
         private static System.Threading.Mutex _singleInstanceMutex;
 
+        private static void PreviewUpdateDialog()
+        {
+            UpdateInfo info = Task.Run(UpdateChecker.FetchLatestReleaseAsync).GetAwaiter().GetResult();
+            if (info == null)
+            {
+                MessageBox.Show("Could not read the latest Jimmy Next release from GitHub.", "Update preview",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string current = System.Reflection.Assembly.GetExecutingAssembly()
+                .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+                .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "";
+            using (var dlg = new UpdateAvailableDlg("Preview. " + UpdateAvailableDlg.Summary("Jimmy Next", info, current), info.Notes))
+            {
+                if (dlg.ShowDialog() == DialogResult.Yes)
+                    MessageBox.Show("Preview only: nothing was downloaded or installed.", "Update preview",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+        }
+
         // A small window says what is happening while the logbook moves (it can take a minute on
         // a large log). Success is spoken by Jimmy once its own window is up (AutoMoveMessage); a
         // move that did not happen is shown here, because the operator needs to know.
@@ -107,6 +127,17 @@ namespace WSJTX_Controller
                 CrashLogger.Log("unobserved task", e.Exception);
                 e.SetObserved();
             };
+
+            // Test switch: the update offer (UpdateAvailableDlg) exactly as a user would see it, with
+            // the current GitHub release's notes -- installs nothing, touches no data, so it may run
+            // beside an open Jimmy Next (before the single-instance check).
+            if (Environment.GetCommandLineArgs().Contains("--preview-update-dialog"))
+            {
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                PreviewUpdateDialog();
+                return;
+            }
 
             if (System.Diagnostics.Process.GetProcessesByName(System.IO.Path.GetFileNameWithoutExtension(System.Reflection.Assembly.GetEntryAssembly().Location)).Count() > 1)
             {
