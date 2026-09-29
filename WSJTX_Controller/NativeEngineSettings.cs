@@ -60,9 +60,13 @@ namespace WSJTX_Controller
         public int TuneTimeoutSeconds { get; set; } = 60;
 
         // 2026-09-28: Nexus's internet time check (settings.clock_check) -- Options > General.
-        // On (Nexus's default): the engine measures the PC clock against time servers and
-        // corrects TX / decode timing by the offset. Off: no network time queries at all.
-        public bool ClockCheck { get; set; } = true;
+        // On: the engine measures the PC clock against time servers and corrects TX / decode
+        // timing by the offset. Off: no network time queries at all.
+        // DEFAULT OFF (operator decision 2026-09-29): with it on, Nexus may run an elevated
+        // Windows Time repair (clockdiag run_repair_elevated) and Windows shows an admin (UAC)
+        // prompt -- live on a laptop without Dimension 4. Jimmy cannot turn off only the repair
+        // without changing Nexus. A saved "clockCheck" setting still wins.
+        public bool ClockCheck { get; set; } = false;
 
         // UDP-to-Direct parity/cleanup pass, 2026-08-12: the "talk over classic WSJT-X UDP
         // instead of Direct" choice (UseDirectEngine) is retired as a production option -- UDP
