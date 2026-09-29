@@ -100,9 +100,25 @@ namespace WSJTX_Controller
                 Check("the replaced Jimmy file and the Nexus folder were kept",
                     Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook.pre-rollback-*.db").Length == 1 &&
                     Directory.GetDirectories(workRoot, "NexusLog.rolled-back-*").Length == 1);
+
+                // The automatic move at startup (2026-09-29): never after a manual move-back...
+                if (File.Exists(NexusLogbookMigration.AutoMoveRecord)) File.Delete(NexusLogbookMigration.AutoMoveRecord);
+                Check("the automatic move stays off after a manual move-back", !NexusLogbookMigration.AutoMoveAllowed());
+                // ...and a new install (no logbook at all) starts on an empty Nexus log, once.
+                foreach (var f in Directory.GetFiles(Path.GetDirectoryName(jimmyDb), "logbook*")) File.Delete(f);
+                NexusLogbook.Reset();
+                NexusLogbook.TestFolderOverride = Path.Combine(workRoot, "NexusLogNew");
+                Check("a new install is moved automatically", NexusLogbookMigration.AutoMoveAllowed());
+                var (ok3, msg3) = NexusLogbookMigration.AutoMove();
+                sb.AppendLine("  automatic move, new install: " + msg3.Replace("\n", " | "));
+                Check("new install: an empty Nexus logbook with its read copy, switched on",
+                    ok3 && msg3 == "New logbook ready." && File.Exists(NexusLogbook.ActiveMarker) &&
+                    Directory.GetFiles(NexusLogbook.ProjectionFolder, "p-*.db").Length == 1);
+                Check("...and only once", !NexusLogbookMigration.AutoMoveAllowed());
             }
             finally
             {
+                try { File.Delete(NexusLogbookMigration.AutoMoveRecord); } catch { }
                 // The isolated test data folder is SHARED with every other JimmyTests test and the
                 // replay harness: leave its Logbook folder empty, never a copy of a real log (other
                 // tests read it and would see those contacts as worked before).

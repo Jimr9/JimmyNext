@@ -1281,6 +1281,19 @@ namespace WSJTX_Controller
             try { RuleLibrary.Load(); } catch { }
             RefreshStillNeedCache();   // must run after RuleLibrary.Load() so the saved selection resolves
             BackfillMissingDxccWhenReady();
+            // The automatic logbook move at startup (Program.RunAutoMoveWithProgress) says what it
+            // did, a few seconds in so it follows the startup greeting instead of cutting it off.
+            if (NexusLogbookMigration.AutoMoveMessage != null)
+            {
+                var moveTimer = new System.Windows.Forms.Timer { Interval = 4000 };
+                moveTimer.Tick += (s, e) =>
+                {
+                    moveTimer.Stop();
+                    moveTimer.Dispose();
+                    ShowMsg(NexusLogbookMigration.AutoMoveMessage, false);
+                };
+                moveTimer.Start();
+            }
 
 
             mainLoopTimer.Interval = 10;           //actual is 11-12 msec (due to OS limitations)

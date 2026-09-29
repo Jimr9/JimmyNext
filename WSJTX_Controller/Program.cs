@@ -24,6 +24,42 @@ namespace WSJTX_Controller
         // while still needed.
         private static System.Threading.Mutex _singleInstanceMutex;
 
+        // A small window says what is happening while the logbook moves (it can take a minute on
+        // a large log). Success is spoken by Jimmy once its own window is up (AutoMoveMessage); a
+        // move that did not happen is shown here, because the operator needs to know.
+        private static void RunAutoMoveWithProgress()
+        {
+            const string text = "Moving your logbook to the new format. This can take a minute, please wait.";
+            var form = new Form
+            {
+                Text = "Jimmy Next",
+                Width = 480,
+                Height = 150,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterScreen,
+                ControlBox = false,
+                MinimizeBox = false,
+                MaximizeBox = false,
+            };
+            form.Controls.Add(new Label
+            {
+                Text = text,
+                AccessibleName = text,
+                Dock = DockStyle.Fill,
+                TextAlign = System.Drawing.ContentAlignment.MiddleCenter,
+            });
+            (bool ok, string message) result = (false, null);
+            form.Shown += async (s, e) =>
+            {
+                result = await Task.Run(NexusLogbookMigration.AutoMove);
+                form.Close();
+            };
+            Application.Run(form);
+            if (result.ok) NexusLogbookMigration.AutoMoveMessage = result.message;
+            else if (result.message != null)
+                MessageBox.Show(result.message, "Jimmy Next - Logbook", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
         /// <summary>
         /// The main entry point for the application.
         /// </summary>
@@ -110,6 +146,9 @@ namespace WSJTX_Controller
             {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                // Automatic logbook move (NexusLogbookMigration.AutoMove): once per install, before
+                // Jimmy starts its own engine.
+                if (NexusLogbookMigration.AutoMoveNeeded()) RunAutoMoveWithProgress();
                 Application.Run(new Controller());
             }
             finally

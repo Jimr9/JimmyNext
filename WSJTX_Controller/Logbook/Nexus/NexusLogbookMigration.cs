@@ -27,6 +27,51 @@ namespace WSJTX_Controller
                 MessageBoxButtons.OK, ok ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
         }
 
+        // ── Automatic move at startup (operator decision 2026-09-29, from 2.0.78) ──────────────
+        // The first start of a Jimmy Next that keeps its logbook in Nexus moves the existing Jimmy
+        // logbook with the same checked Migrate() the command runs (fresh verified backup, every
+        // contact compared field by field both ways, switched only when clean). A new install
+        // with no logbook goes through the same path from an empty one, so its Nexus log and read
+        // copy are built by the same tested code. Once per install: recorded in AutoMoveRecord on
+        // success or on a failed check (never retried every start); a transient refusal (an engine
+        // host still running) retries at the next start. Never after a manual move-back (it leaves
+        // a NexusLog.rolled-back-* folder): that was the operator's choice.
+        internal static string AutoMoveRecord => Path.Combine(LookupManager.DataRoot, "nexus-logbook-auto-move.txt");
+
+        // What the automatic move did, for Jimmy to say once its window is up (null: nothing).
+        internal static string AutoMoveMessage;
+
+        internal static bool AutoMoveNeeded() => !TestModeGuard.IsTestMode && AutoMoveAllowed();
+
+        // The once-per-install / never-after-a-move-back rules (JimmyTests checks them directly).
+        internal static bool AutoMoveAllowed()
+        {
+            if (NexusLogbook.Active || File.Exists(AutoMoveRecord)) return false;
+            string parent = Path.GetDirectoryName(NexusLogbook.Folder);
+            if (Directory.Exists(parent) && Directory.GetDirectories(parent, Path.GetFileName(NexusLogbook.Folder) + ".rolled-back-*").Length > 0)
+                return false;
+            return Preconditions() == null;
+        }
+
+        // Runs the move (callers show progress around it). Returns (moved, message to speak/show).
+        internal static (bool ok, string message) AutoMove()
+        {
+            if (!File.Exists(LogbookDb.JimmyDbPath))
+                using (new LogbookDb(LogbookDb.JimmyDbPath)) { }   // new install: an empty logbook to move
+            bool ok;
+            string report;
+            try { (ok, report) = Migrate(); }
+            catch (Exception ex) { ok = false; report = "Stopped: " + ex.Message; }   // no ACTIVE marker: Jimmy's logbook stays
+            File.WriteAllText(AutoMoveRecord, $"{DateTime.Now:u} {(ok ? "moved" : "not moved")}\n{report}\n", new UTF8Encoding(false));
+            if (!ok)
+                return (false, "Your logbook was not moved to the new format and is unchanged; Jimmy Next keeps using it as before.\n\n" + report);
+            string contacts = File.ReadAllLines(NexusLogbook.ActiveMarker)
+                .FirstOrDefault(l => l.StartsWith("contacts ", StringComparison.Ordinal))?.Substring(9) ?? "0";
+            return (true, int.TryParse(contacts, out int n) && n > 0
+                ? $"Logbook moved to the new format, {n:N0} contacts checked."
+                : "New logbook ready.");
+        }
+
         private static string Stamp => DateTime.Now.ToString("yyyyMMdd-HHmmss");
         internal static string TestEngineExeOverride; // JimmyTests only
         private static string EngineExe => TestEngineExeOverride ??
