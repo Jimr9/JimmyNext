@@ -147,6 +147,7 @@ namespace WSJTX_Controller
                     timeOffsets.Clear();
                     timeOffset = 0;
                     _timeOffsetsFromPartialPeriod = false;
+                    _recentDt.Clear();
                     _rawDecodeHistory.Clear();
                     if (ctrl.advShowRaw) ShowRawDecodes();
                     // The canonical trio -- a tier switch is a context reset just like a band

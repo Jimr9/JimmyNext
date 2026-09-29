@@ -456,8 +456,7 @@ namespace WSJTX_Controller
             int n = 0;
             foreach (var q in rows.Rows.Where(q => string.IsNullOrEmpty(q.State)))
             {
-                string state = resolveState(q.Call);
-                if (string.IsNullOrEmpty(state) && !string.IsNullOrEmpty(q.Grid)) state = WsjtxClient.GridToUsState(q.Grid);
+                string state = AdifImporter.ResolveMissingState(q.Call, q.Grid, resolveState);
                 if (string.IsNullOrEmpty(state) || state.Length > 2) continue;
                 q.State = state.ToUpperInvariant();
                 if (Client.Edit(q.Id, q.EditKey, q).State == "saved") n++;

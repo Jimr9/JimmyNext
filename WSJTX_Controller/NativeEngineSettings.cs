@@ -59,6 +59,11 @@ namespace WSJTX_Controller
         public const int MaxTuneTimeoutSeconds = 60;
         public int TuneTimeoutSeconds { get; set; } = 60;
 
+        // 2026-09-28: Nexus's internet time check (settings.clock_check) -- Options > General.
+        // On (Nexus's default): the engine measures the PC clock against time servers and
+        // corrects TX / decode timing by the offset. Off: no network time queries at all.
+        public bool ClockCheck { get; set; } = true;
+
         // UDP-to-Direct parity/cleanup pass, 2026-08-12: the "talk over classic WSJT-X UDP
         // instead of Direct" choice (UseDirectEngine) is retired as a production option -- UDP
         // mode never had a working way to tell jimmy-engine-host.exe to actually enable
@@ -95,6 +100,7 @@ namespace WSJTX_Controller
                 EngineAudioOutputAppLevel = outApp;
             if (int.TryParse(ini.Read("tuneTimeoutSeconds"), out int tune) && tune >= 1)
                 TuneTimeoutSeconds = System.Math.Min(tune, MaxTuneTimeoutSeconds);
+            if (ini.KeyExists("clockCheck")) ClockCheck = ini.Read("clockCheck") != "False";
         }
 
         public void SaveToIni(IniFile ini)
@@ -110,6 +116,7 @@ namespace WSJTX_Controller
             if (ini.KeyExists(RetiredInputAppLevelKey)) ini.DeleteKey(RetiredInputAppLevelKey);
             ini.Write("engineAudioOutputAppLevel", EngineAudioOutputAppLevel.ToString());
             ini.Write("tuneTimeoutSeconds", TuneTimeoutSeconds.ToString());
+            ini.Write("clockCheck", ClockCheck ? "True" : "False");
         }
     }
 }

@@ -278,7 +278,8 @@ namespace WSJTX_Controller
                             string dxClusterAddress = null, string sessionToken = null,
                             int? repeatLimit = null,
                             List<WorkingFreqArg> workingFrequencies = null,
-                            int? tuneTimeoutSeconds = null)
+                            int? tuneTimeoutSeconds = null,
+                            bool? clockCheck = null)
         {
             LastError = null;
             try
@@ -333,6 +334,9 @@ namespace WSJTX_Controller
                 // Alt+T tune carrier auto-release (NativeEngineSettings.TuneTimeoutSeconds, ini only).
                 if (tuneTimeoutSeconds.HasValue)
                     args += $" --tune-timeout-secs {tuneTimeoutSeconds.Value}";
+                // Nexus's internet time check (NativeEngineSettings.ClockCheck, Options > General).
+                if (clockCheck.HasValue)
+                    args += clockCheck.Value ? " --clock-check on" : " --clock-check off";
                 // Frequency-override authority split, 2026-08-24 -- see
                 // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
                 // empty (no band customized), matching every other startup arg's "absent =

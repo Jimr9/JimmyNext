@@ -53,7 +53,7 @@
          Jimmy.wxs: never copied into build/publish output either before or after
          the migration (ApplicationIcon embeds it into the exe resource directly;
          this is a separate loose-file reference). -->
-    <Icon Id="JimmyNextIcon" SourceFile="..\WSJTX_Controller\Properties\netfol.ico" />
+    <Icon Id="JimmyNextIcon" SourceFile="..\jimmy.ico" />
     <Property Id="ARPPRODUCTICON" Value="JimmyNextIcon" />
     <Property Id="ARPCONTACT" Value="KB0UZT" />
 
@@ -83,6 +83,7 @@
       <ComponentGroupRef Id="RuleDefinitionsComponents" />
       <ComponentGroupRef Id="RuleDefinitionsListsComponents" />
       <ComponentGroupRef Id="ResourcesComponents" />
+      <ComponentGroupRef Id="ResourcesSoundsComponents" />
       <ComponentGroupRef Id="ResourcesEngineHostComponents" />
       <ComponentGroupRef Id="ResourcesHamlibComponents" />
       <ComponentGroupRef Id="ResourcesEngineHostHamlibComponents" />
@@ -176,6 +177,7 @@
               <Directory Id="ResourcesEngineHostHamlibDir" Name="hamlib" />
             </Directory>
             <Directory Id="ResourcesHamlibDir" Name="hamlib" />
+            <Directory Id="ResourcesSoundsDir" Name="Sounds" />
           </Directory>
         </Directory>
       </Directory>
@@ -188,7 +190,7 @@
   <!-- ── Harvested publish output ───────────────────────────────────────────
        Recursively harvests every file under PublishOutputNext\ (the self-
        contained win-x64 publish: "Jimmy Next.exe"/.dll, the .NET 10 runtime,
-       SQLite.Interop.dll, MQTTnet*.dll, clublog_key.txt, Resources\*.wav, and
+       SQLite.Interop.dll, MQTTnet*.dll, clublog_key.txt, Resources\Sounds\*.wav, and
        the satellite-resource culture subfolders), preserving directory
        structure under INSTALLFOLDER automatically. RuleDefinitions\ is
        excluded here and harvested separately below (see the Directory
@@ -214,6 +216,11 @@
          comment). -->
     <ComponentGroup Id="ResourcesComponents" Directory="ResourcesDir">
       <Files Include="PublishOutputNext\Resources\*" />
+    </ComponentGroup>
+
+    <!-- Notification sounds: every .wav in Resources\Sounds\ (2026-09-28). -->
+    <ComponentGroup Id="ResourcesSoundsComponents" Directory="ResourcesSoundsDir">
+      <Files Include="PublishOutputNext\Resources\Sounds\*" />
     </ComponentGroup>
 
     <ComponentGroup Id="ResourcesEngineHostComponents" Directory="ResourcesEngineHostDir">

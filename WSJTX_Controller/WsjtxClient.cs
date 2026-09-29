@@ -696,6 +696,14 @@ namespace WSJTX_Controller
         // nothing about the computer's clock and gets no clock verdict.
         private DateTime? _directAudioStartUtc;
         private bool _timeOffsetsFromPartialPeriod;
+        // 2026-09-28: the clock check follows Nexus. With a time-server measurement Nexus is
+        // already correcting TX / decode timing, so only a clock too far off to correct
+        // (ClockGrossMs) is a problem. Without one, the signal estimate is Nexus's own rule
+        // (engine.rs time_sync_ok): the MEDIAN DT of the last 16 decodes -- one station with a
+        // bad clock on a quiet band (live: AF6I alone, DT 2.0) can no longer raise the alarm.
+        private const int ClockDtWindow = 16, ClockDtMinSamples = 5;
+        private readonly List<double> _recentDt = new List<double>();
+        private DirectRadioStatus _nexusClock;
         // Clock-sync notification, 2026-08-12: null = not yet evaluated this session (the
         // clock's actual condition is unknown, not assumed good) -- see CalcAvgTimeOffset
         // (WsjtxClient.BandAudio.cs) for the transition-detection logic this backs. Deliberately

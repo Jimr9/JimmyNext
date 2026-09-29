@@ -969,10 +969,19 @@ static class JimmyTests
                 Check("repair: its country (already set) and everything else unchanged", Snap(Row("Z62NS")) == before, true);
                 Check("repair again: nothing left to fill", new NexusLogbookService().BackfillMissingEntities() == 0, true);
 
+                // 2026-09-28: a US contact stored without a state (KA1MXL on 80m stayed "WAS Needed").
+                string seedState = Path.Combine(work, "seed-state.adi");
+                File.WriteAllText(seedState, "test\n<eoh>\n" + F("CALL", "W1AW") + F("BAND", "80m") + F("MODE", "FT8") + F("QSO_DATE", "20260928") +
+                    F("TIME_ON", "220000") + F("GRIDSQUARE", "FN31") + " <eor>\n");
+                client.Import(seedState);
+                new NexusLogbookService().BackfillMissingStates(call => call == "W1AW" ? "CT" : null);
+                Check("state repair: W1AW gets its state from the callsign lookup", Row("W1AW").State == "CT", true);
+
                 // The live path: Jimmy's own record for a completed QSO (no DXCC in it), into Nexus.
                 string liveAdif = AdifRecordBuilder.Build("K1ABC", "20m", 14_075_500, "FT8", "20260928", "210000", "210100",
                     "-10", "-12", "FN42", "", "", "", "KB0UZT", "KB0UZT", "EN34");
-                AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(liveAdif), "WSJTX");
+                AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(liveAdif), "WSJTX", null,
+                    call => call == "K1ABC" ? "MA" : null);
                 NexusQso live = null;
                 for (int i = 0; i < 100 && live == null; i++)
                 {
@@ -982,6 +991,7 @@ static class JimmyTests
                 Console.WriteLine($"  live: dxcc {live?.Dxcc}, CONT {live?.ExtraValue("CONT")}, country '{live?.Country}'");
                 Check("live-logged contact arrives with DXCC 291, continent NA and Club Log's country",
                     live != null && live.Dxcc == 291 && live.ExtraValue("CONT") == "NA" && live.Country == "UNITED STATES OF AMERICA", true);
+                Check("live-logged contact arrives with its state", live?.State == "MA", true);
                 client.Shutdown(token);
             }
         }
@@ -1362,6 +1372,7 @@ static class JimmyTests
         RuleEngineWorkedBandsTests();
         RuleEngineCountTargetStillNeededTests();
         RuleLoaderShippedAwardsParseTests();
+        RuleLoaderAddsNewStockAwardsTests();
         RuleLoaderBasisAndDynamicThresholdTests();
         RuleEngineDynamicThresholdAndBasisTests();
         AdifRecordBuilderTests();
@@ -1537,6 +1548,7 @@ static class JimmyTests
         ClockSyncNotificationTests();
         ClockSyncDirectPathStateHygieneTests();
         ClockSyncPartlyHeardFirstPeriodTests();
+        ClockSyncNexusTimeServerTests();
         DirectTxHoldSafetyNetTests();
         DirectPollFailureNotificationTests();
         DirectCatHealthNotificationTests();
@@ -11262,6 +11274,37 @@ static class JimmyTests
     // alongside the new DXCC_80M/40M/20M/15M/10M.ini per-band awards (mirroring the
     // existing WAS_*M.ini pattern), but general on purpose so it guards every future
     // addition too.
+    // 2026-09-28: a stock award added in a later release (WAS_30M) reaches an existing awards
+    // folder once; an award the operator then deletes stays deleted; their edits are kept.
+    static void RuleLoaderAddsNewStockAwardsTests()
+    {
+        Console.WriteLine("\n── RuleLoader: new stock awards reach an existing install ──");
+        string root = Path.Combine(Path.GetTempPath(), "jimmy-stock-awards-" + Guid.NewGuid().ToString("N"));
+        string shipped = Path.Combine(root, "shipped"), mine = Path.Combine(root, "mine");
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(shipped, "Lists"));
+            Directory.CreateDirectory(mine);
+            File.WriteAllText(Path.Combine(shipped, "WAS_20M.ini"), "stock 20");
+            File.WriteAllText(Path.Combine(shipped, "WAS_30M.ini"), "stock 30");
+            File.WriteAllText(Path.Combine(shipped, "Lists", "states.txt"), "list");
+            File.WriteAllText(Path.Combine(mine, "WAS_20M.ini"), "operator edited 20");
+
+            RuleLoader.AddNewStockAwards(shipped, mine);
+            Check("a new stock award is added to an existing folder", File.ReadAllText(Path.Combine(mine, "WAS_30M.ini")) == "stock 30", true);
+            Check("an existing award file is never overwritten", File.ReadAllText(Path.Combine(mine, "WAS_20M.ini")) == "operator edited 20", true);
+            Check("a missing Lists file is added", File.Exists(Path.Combine(mine, "Lists", "states.txt")), true);
+
+            File.Delete(Path.Combine(mine, "WAS_30M.ini"));
+            RuleLoader.AddNewStockAwards(shipped, mine);
+            Check("an award the operator deleted stays deleted", File.Exists(Path.Combine(mine, "WAS_30M.ini")), false);
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
     static void RuleLoaderShippedAwardsParseTests()
     {
         Console.WriteLine("\n── RuleLoader: shipped RuleDefinitions all parse ──");
@@ -16651,6 +16694,15 @@ static class JimmyTests
     // between "data collected" and "period finalized", exactly like the real engine. Each
     // section below publishes its target DT twice in a row to settle fully through that lag
     // before asserting.
+    // The clock check judges the median DT of the last 16 decodes (Nexus's rule), so each test
+    // "period" carries a full window: 16 stations at one DT.
+    static string ClockDecodesJson(double dt)
+    {
+        string d = dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
+        return "[" + string.Join(",", Enumerable.Range(0, 16).Select(i =>
+            $"{{ \"from\": \"W1A{(char)('A' + i)}\", \"snr\": -5, \"dtSec\": {d}, \"freqHz\": {1000 + 50 * i}.0, \"message\": \"CQ W1A{(char)('A' + i)} FN31\" }}")) + "]";
+    }
+
     static void ClockSyncNotificationTests()
     {
         Console.WriteLine("\n── Clock-sync notification (ClockOutOfSync / ClockSynced) ──");
@@ -16686,9 +16738,7 @@ static class JimmyTests
                 ""mycall"": """ + myCall + @""",
                 ""mygrid"": """ + myGrid + @""",
                 ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (slot++) + @" },
-                ""recentDecodes"": [
-                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
-                ]
+                ""recentDecodes"": " + ClockDecodesJson(dt) + @"
             }");
             wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
         }
@@ -16755,9 +16805,7 @@ static class JimmyTests
                 ""mycall"": """ + myCall + @""",
                 ""mygrid"": """ + myGrid + @""",
                 ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (bSlot++) + @" },
-                ""recentDecodes"": [
-                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
-                ]
+                ""recentDecodes"": " + ClockDecodesJson(dt) + @"
             }");
             boundaryWc.TestApplyDirectSnapshot(myCall, myGrid, snap);
         }
@@ -16789,9 +16837,7 @@ static class JimmyTests
                 ""mycall"": """ + myCall + @""",
                 ""mygrid"": """ + myGrid + @""",
                 ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (ft4Slot++) + @" },
-                ""recentDecodes"": [
-                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
-                ]
+                ""recentDecodes"": " + ClockDecodesJson(dt) + @"
             }");
             ft4Wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
         }
@@ -16848,9 +16894,7 @@ static class JimmyTests
                 ""mycall"": """ + myCall + @""",
                 ""mygrid"": """ + myGrid + @""",
                 ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (slot++) + @" },
-                ""recentDecodes"": [
-                    { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
-                ]
+                ""recentDecodes"": " + ClockDecodesJson(dt) + @"
             }");
             wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
         }
@@ -16929,7 +16973,7 @@ static class JimmyTests
         {
             var snap = ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
                 ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
-                ""recentDecodes"": [ { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" } ] }");
+                ""recentDecodes"": " + ClockDecodesJson(dt) + @" }");
             wc.TestApplyDirectSnapshot("KB0UZT", "FN42", snap);
         }
         Publish(k + 1, -2.2);   // the partly heard period
@@ -16938,6 +16982,62 @@ static class JimmyTests
         Publish(k + 3, 2.0);
         Check("a bad clock in the first full period is still announced",
             delivery.AnnounceCount == 1 && delivery.LastText == "Computer clock is out of sync, offset 2.0 seconds.", true);
+    }
+
+    // 2026-09-28: the clock check follows Nexus's time-server measurement, and without one
+    // judges the median of the last 16 decodes -- live, AF6I alone (DT 2.0) on a dead band
+    // raised "Computer clock is out of sync, offset 2.0 seconds".
+    static void ClockSyncNexusTimeServerTests()
+    {
+        Console.WriteLine("\n── Clock-sync: Nexus time server, and one odd station on a quiet band ──");
+        WsjtxClient NewClient(out FakeNotificationDelivery delivery, out FakeStatusView view)
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var w = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            delivery = new FakeNotificationDelivery();
+            w.Notify = NewTestNotificationCenter(new NotificationSettings(), delivery);
+            view = new FakeStatusView();
+            w.StatusView = view;
+            return w;
+        }
+        // Only clock announcements count (a new client also speaks its startup greeting).
+        List<string> Clock(FakeNotificationDelivery d) => d.AllText.Where(t => t.Contains("clock", StringComparison.OrdinalIgnoreCase)).ToList();
+        ulong slot = 12000;
+        void Publish(WsjtxClient w, string decodesJson, string clockJson = "")
+        {
+            var snap = ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (slot++) + clockJson + @" },
+                ""recentDecodes"": " + decodesJson + " }");
+            w.TestApplyDirectSnapshot("KB0UZT", "FN42", snap);
+        }
+
+        // One station with a bad clock on a quiet band: no alarm.
+        var wc = NewClient(out var d1, out _);
+        Publish(wc, ClockDecodesJson(0.1));
+        Publish(wc, @"[ { ""from"": ""AF6I"", ""snr"": -19, ""dtSec"": 2.0, ""freqHz"": 1376.0, ""message"": ""CQ AF6I DM12"" } ]");
+        Publish(wc, "[]");
+        Check("one station 2.0 s off among recent good decodes -> no clock warning", Clock(d1).Count == 0, true);
+
+        // Nexus is correcting the clock: signals that look off are not a warning.
+        string steering = @", ""clockOffsetMs"": 800, ""clockAgeSecs"": 180, ""clockServers"": 3, ""clockOwnerNote"": ""Dimension 4 is managing this clock""";
+        var wn = NewClient(out var d2, out var v2);
+        Publish(wn, ClockDecodesJson(2.0), steering);
+        Publish(wn, ClockDecodesJson(2.0), steering);
+        Publish(wn, ClockDecodesJson(2.0), steering);
+        Check("time server correcting the clock -> no warning", Clock(d2).Count == 0, true);
+        wn.ReportClockStatus();
+        CheckStr("hotkey: the offset Nexus corrects, its age and who keeps the clock", v2.LastShowMessageText,
+            "Clock 0.8 seconds fast, corrected by time server, checked 3 minutes ago, Dimension 4 is managing this clock");
+
+        // Too far off for Nexus to correct: warned.
+        var wg = NewClient(out var d3, out _);
+        Publish(wg, ClockDecodesJson(0.1), @", ""clockGrossMs"": -90000");
+        Publish(wg, ClockDecodesJson(0.1), @", ""clockGrossMs"": -90000");
+        Check("clock too far off to correct -> warned", Clock(d3).SequenceEqual(new[] { "Computer clock is out of sync, offset -90.0 seconds." }), true);
     }
 
     // ── Rx/Tx frequency control, 2026-08-27: Tx stays stable during an active contact ──
@@ -19814,35 +19914,33 @@ static class JimmyTests
                     ""mycall"": """ + myCall + @""",
                     ""mygrid"": """ + myGrid + @""",
                     ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (slot++) + @" },
-                    ""recentDecodes"": [
-                        { ""from"": ""W1AW"", ""snr"": -5, ""dtSec"": " + dt.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + @", ""freqHz"": 1500.0, ""message"": ""CQ W1AW FN31"" }
-                    ]
+                    ""recentDecodes"": " + ClockDecodesJson(dt) + @"
                 }");
                 wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
             }
 
             wc.ReportClockStatus();
             CheckStr("Before any period has completed: reports 'not yet measured', not a misleading 'good'",
-                fakeStatusView.LastShowMessageText, "Clock sync not yet measured");
+                fakeStatusView.LastShowMessageText, "Clock not yet measured");
 
             PublishDt(0.1);
             PublishDt(0.1);
             PublishDt(0.1);
             wc.ReportClockStatus();
             CheckStr("Acceptable offset -> reports good, with the real measured offset",
-                fakeStatusView.LastShowMessageText, "Clock sync good, offset 0.1 seconds");
+                fakeStatusView.LastShowMessageText, "Clock good, no time server, signals say +0.1 seconds");
 
             PublishDt(2.0);
             PublishDt(2.0);
             wc.ReportClockStatus();
             CheckStr("Unacceptable offset -> reports out of sync, with the real measured offset",
-                fakeStatusView.LastShowMessageText, "Clock out of sync, offset 2.0 seconds, check clock time");
+                fakeStatusView.LastShowMessageText, "Clock out of sync, no time server, signals say +2.0 seconds, check clock time");
 
             PublishDt(0.1);
             PublishDt(0.1);
             wc.ReportClockStatus();
             CheckStr("Recovers -> reports good again, matching the automatic ClockSynced transition",
-                fakeStatusView.LastShowMessageText, "Clock sync good, offset 0.1 seconds");
+                fakeStatusView.LastShowMessageText, "Clock good, no time server, signals say +0.1 seconds");
         }
         catch (Exception ex)
         {

@@ -50,11 +50,15 @@ namespace WSJTX_Controller
             SND_RESOURCE = 0x00040004
         }
 
-        // Filenames present in Resources/, refreshed at startup and whenever Options
-        // closes -- kept in memory so every sound lookup is a HashSet check, not a disk
-        // hit, even when trying several drop-in-file candidates per alert.
-        private HashSet<string> _resourceFileNames;
-        private string _resourceDir;
+        // Sound files by name -> full path, refreshed at startup and whenever Options closes --
+        // kept in memory so every sound lookup is a dictionary check, not a disk hit, even when
+        // trying several drop-in-file candidates per alert. 2026-09-28: shipped sounds live in
+        // Resources\Sounds\ (SoundsFolder); files already dropped straight into Resources\ by
+        // an earlier version still resolve, Sounds\ winning on a name clash.
+        private Dictionary<string, string> _soundFiles;
+
+        public static string SoundsFolder =>
+            Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "Resources", "Sounds");
 
         public NotificationSounds(Func<bool> soundsEnabled)
         {
@@ -66,44 +70,41 @@ namespace WSJTX_Controller
 
         public void RefreshResourceFileCache()
         {
+            var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                _resourceDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "Resources");
-                _resourceFileNames = Directory.Exists(_resourceDir)
-                    ? new HashSet<string>(Directory.GetFiles(_resourceDir).Select(Path.GetFileName), StringComparer.OrdinalIgnoreCase)
-                    : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string dir in new[] { SoundsFolder, Path.GetDirectoryName(SoundsFolder) })
+                    if (Directory.Exists(dir))
+                        foreach (string f in Directory.GetFiles(dir))
+                            if (!files.ContainsKey(Path.GetFileName(f))) files[Path.GetFileName(f)] = f;
             }
-            catch
-            {
-                _resourceDir = null;
-                _resourceFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            }
+            catch { }
+            _soundFiles = files;
         }
 
         // Tries, in order: a callsign-specific file (e.g. KG4CCG.wav), a rule/category-key
         // -specific file (e.g. WAS.wav, NEW_COUNTRY.wav), then the file configured in
-        // Options -- the only behavior that existed before this. All three live in the same
-        // Resources folder already used for configured sounds; no new folder, no new
-        // Options UI needed for the first two.
+        // Options -- the only behavior that existed before this. All three are looked up in the
+        // sound folders above; no Options UI needed for the first two.
         private string ResolveSoundPath(string name, string callsign, string key)
         {
-            if (_resourceFileNames == null) RefreshResourceFileCache();
+            var files = _soundFiles;
+            if (files == null) { RefreshResourceFileCache(); files = _soundFiles; }
 
-            if (!string.IsNullOrEmpty(callsign))
-            {
-                string candidate = SanitizeSoundFileName(callsign) + ".wav";
-                if (_resourceFileNames.Contains(candidate)) return Path.Combine(_resourceDir, candidate);
-            }
-            if (!string.IsNullOrEmpty(key))
-            {
-                string candidate = SanitizeSoundFileName(key) + ".wav";
-                if (_resourceFileNames.Contains(candidate)) return Path.Combine(_resourceDir, candidate);
-            }
+            if (!string.IsNullOrEmpty(callsign)
+                && files.TryGetValue(SanitizeSoundFileName(callsign) + ".wav", out string byCall)) return byCall;
+            if (!string.IsNullOrEmpty(key)
+                && files.TryGetValue(SanitizeSoundFileName(key) + ".wav", out string byKey)) return byKey;
 
             if (string.IsNullOrEmpty(name)) return null;
             if (Path.IsPathRooted(name))
-                return File.Exists(name) ? name : null;
-            return _resourceFileNames.Contains(name) ? Path.Combine(_resourceDir, name) : null;
+            {
+                if (File.Exists(name)) return name;
+                // A full path picked with Assign that no longer exists (e.g. a shipped sound that
+                // moved into Resources\Sounds\) still finds the file by its name.
+                name = Path.GetFileName(name);
+            }
+            return files.TryGetValue(name, out string byName) ? byName : null;
         }
 
         private static string SanitizeSoundFileName(string s)

@@ -108,7 +108,7 @@ namespace WSJTX_Controller
                 // imports that add contacts. (The LoTW / QRZ / eQSL downloads merge confirmations;
                 // the contacts QRZ adds carry their own DXCC.)
                 if (source != "LOTW" && source != "QRZ" && source != "EQSL")
-                    foreach (var r in list) FillEntityGaps(r);
+                    foreach (var r in list) FillEntityGaps(r, resolveUsState);
                 if (source == "WSJTX" && list.Count == 1)
                 {
                     var f = list[0].Fields;
@@ -306,9 +306,7 @@ namespace WSJTX_Controller
             // resort, same source used for live-decode display elsewhere in the app.
             if (string.IsNullOrEmpty(state))
             {
-                string resolved = resolveUsState?.Invoke(call);
-                if (string.IsNullOrEmpty(resolved) && !string.IsNullOrEmpty(grid))
-                    resolved = WsjtxClient.GridToUsState(grid);
+                string resolved = ResolveMissingState(call, grid, resolveUsState);
                 if (!string.IsNullOrEmpty(resolved)) state = resolved;
             }
 
@@ -376,9 +374,20 @@ namespace WSJTX_Controller
             }
         }
 
-        // The same rule on an ADIF record handed to Nexus: fills DXCC / COUNTRY / CONT the record
-        // left blank, in its fields and (when it keeps file order) its ordered field list.
-        internal static void FillEntityGaps(AdifRawRecord r)
+        // Normalize's blank-STATE rule, shared with the Nexus paths: the offline callsign lookup
+        // (FCC ULS / cached QRZ via resolveUsState), then the grid. Null when neither knows.
+        internal static string ResolveMissingState(string call, string grid, Func<string, string> resolveUsState)
+        {
+            string resolved = resolveUsState?.Invoke(call);
+            if (string.IsNullOrEmpty(resolved) && !string.IsNullOrEmpty(grid))
+                resolved = WsjtxClient.GridToUsState(grid);
+            return string.IsNullOrEmpty(resolved) ? null : resolved;
+        }
+
+        // The same rules on an ADIF record handed to Nexus: fills DXCC / COUNTRY / CONT -- and,
+        // 2026-09-28, STATE (live: KA1MXL logged on 80m with no state kept "WAS 80m Needed, RI")
+        // -- the record left blank, in its fields and (when it keeps file order) its ordered list.
+        internal static void FillEntityGaps(AdifRawRecord r, Func<string, string> resolveUsState = null)
         {
             var f = r.Fields;
             string call = f.TryGetValue("CALL", out var c) ? c : "";
@@ -399,6 +408,12 @@ namespace WSJTX_Controller
             if (dxcc != dxcc0 && dxcc > 0) Set("DXCC", dxcc.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (country != country0 && !string.IsNullOrEmpty(country)) Set("COUNTRY", country);
             if (continent != continent0 && !string.IsNullOrEmpty(continent)) Set("CONT", continent.ToUpperInvariant());
+            if (string.IsNullOrEmpty(f.TryGetValue("STATE", out var st) ? st : null))
+            {
+                string grid = f.TryGetValue("GRIDSQUARE", out var g) ? g : (f.TryGetValue("GRID", out var g2) ? g2 : "");
+                string state = ResolveMissingState(call, grid, resolveUsState);
+                if (state != null && state.Length <= 2) Set("STATE", state.ToUpperInvariant());
+            }
         }
 
         public static string BuildDedupKey(string call, string band, string mode, string qsoDate, string timeOn)

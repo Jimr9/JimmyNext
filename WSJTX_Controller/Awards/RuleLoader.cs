@@ -92,11 +92,61 @@ namespace WSJTX_Controller
         // AppData folder exists, it's the user's to manage -- never overwritten.
         private static void SeedIfMissing()
         {
-            if (Directory.Exists(RulesFolder)) return;
+            if (Directory.Exists(RulesFolder))
+            {
+                AddNewStockAwards();
+                return;
+            }
 
             Directory.CreateDirectory(RulesFolder);
             Directory.CreateDirectory(ListsFolder);
             if (Directory.Exists(ShippedRulesFolder)) CopyDirectory(ShippedRulesFolder, RulesFolder);
+            AddNewStockAwards();
+        }
+
+        // 2026-09-28 (operator: "it is a stock award, it ships"): a stock award added in a later
+        // release (e.g. WAS_30M) reaches an existing install too. Each shipped award file is
+        // copied in once, if missing, and its name recorded -- so an award the operator later
+        // deletes stays deleted. Missing Lists files (universe data, not a choice) are copied
+        // whenever absent. Existing files are never overwritten.
+        internal const string StockAwardsAddedFile = "stock-awards-added.txt";
+
+        internal static void AddNewStockAwards() => AddNewStockAwards(ShippedRulesFolder, RulesFolder);
+
+        internal static void AddNewStockAwards(string shippedFolder, string rulesFolder)
+        {
+            try
+            {
+                if (!Directory.Exists(shippedFolder)) return;
+                string shippedLists = Path.Combine(shippedFolder, "Lists"), lists = Path.Combine(rulesFolder, "Lists");
+                string recordPath = Path.Combine(rulesFolder, StockAwardsAddedFile);
+                var added = new HashSet<string>(
+                    File.Exists(recordPath) ? File.ReadAllLines(recordPath).Where(l => l.Trim().Length > 0).Select(l => l.Trim()) : Enumerable.Empty<string>(),
+                    StringComparer.OrdinalIgnoreCase);
+                var newlyRecorded = new List<string>();
+                foreach (var shipped in Directory.GetFiles(shippedFolder, "*.ini"))
+                {
+                    string name = Path.GetFileName(shipped);
+                    if (added.Contains(name)) continue;
+                    string target = Path.Combine(rulesFolder, name);
+                    if (!File.Exists(target)) File.Copy(shipped, target, overwrite: false);
+                    newlyRecorded.Add(name);
+                }
+                if (Directory.Exists(shippedLists))
+                {
+                    Directory.CreateDirectory(lists);
+                    foreach (var list in Directory.GetFiles(shippedLists))
+                    {
+                        string target = Path.Combine(lists, Path.GetFileName(list));
+                        if (!File.Exists(target)) File.Copy(list, target, overwrite: false);
+                    }
+                }
+                if (newlyRecorded.Count > 0) File.AppendAllLines(recordPath, newlyRecorded);
+            }
+            catch (Exception ex)
+            {
+                LogErrors(new List<string> { "Adding new stock awards failed: " + ex.Message });
+            }
         }
 
         private static void CopyDirectory(string sourceDir, string destDir)

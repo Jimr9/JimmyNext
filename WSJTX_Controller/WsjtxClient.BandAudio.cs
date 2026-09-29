@@ -921,64 +921,94 @@ namespace WSJTX_Controller
             ctrl.bandComboBox.SelectedIndex = idx;
         }
 
-        // Item 4, 2026-08-24 (operator request): on-demand clock sync status hotkey. Deliberately
-        // reads the SAME timeOffset/_clockWasAcceptable state CalcAvgTimeOffset (below) already
-        // maintains for the automatic ClockOutOfSync/ClockSynced notifications, rather than
-        // computing anything fresh -- guarantees this always agrees with whatever the automatic
-        // notification would say, and needs no engine round trip (unlike ReportPowerSwr's own
-        // on-demand SNAPSHOT query above, timeOffset is already tracked locally every period).
+        // Item 4, 2026-08-24 (operator request): on-demand clock sync status hotkey. Reads the
+        // same state CalcAvgTimeOffset (below) keeps for the automatic ClockOutOfSync/ClockSynced
+        // notifications, so it always agrees with them; no engine round trip. 2026-09-28: says
+        // what Nexus's time-server check knows first -- the offset it is correcting, how long
+        // ago it was measured and who keeps the clock -- and the signal estimate only without it.
         public bool ReportClockStatus()
         {
-            string offsetStr = timeOffset.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
-            string msg;
-            if (_clockWasAcceptable == null)
-                msg = "Clock sync not yet measured";
-            else if (_clockWasAcceptable == true)
-                msg = $"Clock sync good, offset {offsetStr} seconds";
-            else
-                msg = $"Clock out of sync, offset {offsetStr} seconds, check clock time";
-            StatusView.ShowMessage(msg, false);
+            StatusView.ShowMessage(ClockStatusText(), false);
             return true;
         }
 
+        internal string ClockStatusText()
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            var c = _nexusClock;
+            string owner = string.IsNullOrWhiteSpace(c?.ClockOwnerNote) ? "" : ", " + c.ClockOwnerNote.Trim();
+            if (c?.ClockGrossMs != null)
+                return $"Clock off by {Math.Abs(c.ClockGrossMs.Value) / 1000.0:F0} seconds, too far to correct, set the computer clock{owner}";
+            if (c?.ClockOffsetMs != null)
+            {
+                long ms = c.ClockOffsetMs.Value;
+                string off = Math.Abs(ms) < 50 ? "Clock on time"
+                    : $"Clock {(Math.Abs(ms) / 1000.0).ToString("F1", inv)} seconds {(ms > 0 ? "fast" : "slow")}, corrected by time server";
+                int age = c.ClockAgeSecs ?? 0;
+                string when = age < 60 ? "checked just now" : $"checked {age / 60} minute{(age / 60 == 1 ? "" : "s")} ago";
+                return $"{off}, {when}{owner}";
+            }
+            if (_recentDt.Count < ClockDtMinSamples) return "Clock not yet measured";
+            string est = timeOffset.ToString("+0.0;-0.0;0.0", inv);
+            return _clockWasAcceptable == false
+                ? $"Clock out of sync, no time server, signals say {est} seconds, check clock time"
+                : $"Clock good, no time server, signals say {est} seconds";
+        }
+
+        private static double Median(List<double> values)
+        {
+            var v = values.OrderBy(x => x).ToList();
+            int mid = v.Count / 2;
+            return v.Count % 2 == 0 ? (v[mid - 1] + v[mid]) / 2.0 : v[mid];
+        }
+
+        // Called at each real period boundary (DirectApplyDecodes) with that period's decode DTs
+        // in timeOffsets. Clock-sync notification, 2026-08-12: transition-gated --
+        // _clockWasAcceptable only ever changes here, so a clock that STAYS bad publishes once,
+        // not once per period (ClockOutOfSyncEvent/ClockSyncedEvent's dedup keys are a second,
+        // independent backstop). 2026-09-28: judged as Nexus judges it (see _recentDt).
         private void CalcAvgTimeOffset(bool clear)
         {
-            timeOffset = 0;
-
-            if (timeOffsets.Count == 0) return;
-
-            foreach (double offset in timeOffsets)
+            if (!clear) return;
+            if (_timeOffsetsFromPartialPeriod)
             {
-                timeOffset += offset;
-            }
-            timeOffset /= timeOffsets.Count;
-
-            DebugOutput($"{Time()} CalcAvgTimeOffset, timeOffset:{timeOffset:F2} clear:{clear}");
-            if (clear) timeOffsets.Clear();
-
-            // Clock-sync notification, 2026-08-12: only evaluated on the authoritative
-            // end-of-period average (clear:true) -- the two other call sites (WsjtxClient.
-            // Protocol.cs, mid-cycle interim recalculations with clear:false) see a less
-            // stable, still-accumulating average and must never trigger a transition off of
-            // it. Transition-gated by design: _clockWasAcceptable only ever changes here, so a
-            // clock that STAYS bad for many periods in a row publishes exactly once, not once
-            // per period -- see ClockOutOfSyncEvent/ClockSyncedEvent's own dedup-key comments
-            // for the second, independent backstop against exactly that kind of repeat.
-            if (clear && _timeOffsetsFromPartialPeriod)
-            {
-                // Audio began mid-period (see _directAudioStartUtc): no verdict either way.
+                // Audio began mid-period (see _directAudioStartUtc): its DTs are not evidence.
                 _timeOffsetsFromPartialPeriod = false;
-                DebugOutput($"{Time()} CalcAvgTimeOffset: partly heard first period, no clock verdict");
+                timeOffsets.Clear();
+                DebugOutput($"{Time()} CalcAvgTimeOffset: partly heard first period, not counted");
+                return;
             }
-            else if (clear)
+            _recentDt.AddRange(timeOffsets);
+            timeOffsets.Clear();
+            if (_recentDt.Count > ClockDtWindow) _recentDt.RemoveRange(0, _recentDt.Count - ClockDtWindow);
+            if (_recentDt.Count > 0) timeOffset = Median(_recentDt);
+
+            var c = _nexusClock;
+            bool acceptable;
+            double reported;
+            if (c?.ClockGrossMs != null)
             {
-                bool acceptable = Math.Abs(timeOffset) <= maxTimeOffset;
-                if (_clockWasAcceptable == false && acceptable)
-                    Notify?.Publish(new ClockSyncedEvent(mode));
-                else if (_clockWasAcceptable != false && !acceptable)
-                    Notify?.Publish(new ClockOutOfSyncEvent(timeOffset, mode));
-                _clockWasAcceptable = acceptable;
+                acceptable = false;                       // too far off for Nexus to correct
+                reported = c.ClockGrossMs.Value / 1000.0;
             }
+            else if (c?.ClockOffsetMs != null)
+            {
+                acceptable = true;                        // Nexus is correcting it
+                reported = c.ClockOffsetMs.Value / 1000.0;
+            }
+            else if (_recentDt.Count >= ClockDtMinSamples)
+            {
+                acceptable = Math.Abs(timeOffset) <= maxTimeOffset;
+                reported = timeOffset;
+            }
+            else return;                                  // too few decodes to say anything
+
+            DebugOutput($"{Time()} CalcAvgTimeOffset, medianDt:{timeOffset:F2} n:{_recentDt.Count} nexusOffsetMs:{c?.ClockOffsetMs} grossMs:{c?.ClockGrossMs} acceptable:{acceptable}");
+            if (_clockWasAcceptable == false && acceptable)
+                Notify?.Publish(new ClockSyncedEvent(mode));
+            else if (_clockWasAcceptable != false && !acceptable)
+                Notify?.Publish(new ClockOutOfSyncEvent(reported, mode));
+            _clockWasAcceptable = acceptable;
         }
     }
 }

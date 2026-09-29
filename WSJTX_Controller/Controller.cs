@@ -1147,7 +1147,13 @@ namespace WSJTX_Controller
             // Migration (Phase 1): if this config pre-dates Call Filters and the operator had
             // replyDxCheckBox or replyLocalCheckBox enabled, ordinary CQ calls were being admitted.
             // Add DEFAULT to callingEnabled so that admission behaviour is preserved after upgrade.
-            if (!wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.DEFAULT)
+            //
+            // 2026-09-28: each of these three migrations used to run on EVERY load, so a filter
+            // the operator unchecked came straight back at the next start (live: "Still Need
+            // (worked, unconfirmed)" re-checked every time). Each now runs once per ini,
+            // recorded by its own key (RunCallingMigrationOnce).
+            if (RunCallingMigrationOnce("callingMigratedDefault")
+                && !wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.DEFAULT)
                 && (replyDxCheckBox.Checked || replyLocalCheckBox.Checked))
             {
                 wsjtxClient.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.DEFAULT);
@@ -1158,7 +1164,8 @@ namespace WSJTX_Controller
             // callingPriorities list, so Still Need live tagging would be silently disabled
             // for existing installs (ParseCallingPriorities only fills in the new default for
             // configs with no saved list at all). Add it once, same tier as WAS/DXCC/ZONE.
-            if (!string.IsNullOrWhiteSpace(callingPrioritiesStr)
+            if (RunCallingMigrationOnce("callingMigratedStillNeeded")
+                && !string.IsNullOrWhiteSpace(callingPrioritiesStr)
                 && !wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.STILL_NEEDED))
             {
                 wsjtxClient.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_NEEDED);
@@ -1172,7 +1179,8 @@ namespace WSJTX_Controller
             // never removed, see CallCategory's own comment), but DeriveCategory never assigns
             // them any more, so Alt+N would silently lose the ability to call a worked-but-
             // unconfirmed station unless STILL_UNCONFIRMED takes their place here once.
-            if (!string.IsNullOrWhiteSpace(callingPrioritiesStr)
+            if (RunCallingMigrationOnce("callingMigratedStillUnconfirmed")
+                && !string.IsNullOrWhiteSpace(callingPrioritiesStr)
                 && !wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.STILL_UNCONFIRMED))
             {
                 wsjtxClient.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);
@@ -3336,11 +3344,13 @@ namespace WSJTX_Controller
                         System.Threading.Thread.Sleep(1000);
                     var nexus = new NexusLogbookService();
                     int n = nexus.BackfillMissingEntities();
-                    if (n > 0)
-                    {
-                        nexus.SetMeta("dxcc_backfill_last_fixed", $"{DateTime.UtcNow:o} ({n} rows)");
+                    if (n > 0) nexus.SetMeta("dxcc_backfill_last_fixed", $"{DateTime.UtcNow:o} ({n} rows)");
+                    // The state repair too (2026-09-28): BackfillMissingStates below runs before
+                    // this engine answers, so under Nexus it could never read the log.
+                    int s = nexus.BackfillMissingStates(call => lookupManager?.Build(call)?.State);
+                    if (s > 0) nexus.SetMeta("state_backfill_last_fixed", $"{DateTime.UtcNow:o} ({s} rows)");
+                    if (n > 0 || s > 0)
                         SafeBeginInvoke(() => { RefreshStillNeedCache(); RefreshLogbookWindowIfOpen(); });
-                    }
                 }
                 catch { /* best-effort repair -- must never affect operation */ }
             });
@@ -3348,6 +3358,7 @@ namespace WSJTX_Controller
 
         private void BackfillMissingStates()
         {
+            if (NexusLogbook.Active) return;   // done once the engine answers: BackfillMissingDxccWhenReady
             try
             {
                 // Nexus contesting foundation, phase 2 (completed): ILogbookService, not
@@ -4393,7 +4404,7 @@ namespace WSJTX_Controller
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, wsjtx != null && wsjtx.usePskReporter,
                     dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
-                    NativeEngine.TuneTimeoutSeconds);
+                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-
@@ -5628,6 +5639,15 @@ namespace WSJTX_Controller
                 result[cat] = tier;
             }
             return result;
+        }
+
+        // True exactly once per ini for the given migration key (then records it), so a
+        // Call Filters migration never undoes the operator's later choice on a later start.
+        private bool RunCallingMigrationOnce(string key)
+        {
+            if (iniFile.KeyExists(key)) return false;
+            iniFile.Write(key, "True");
+            return true;
         }
 
         // Serialize callingEnabled to a comma-separated string preserving list order.

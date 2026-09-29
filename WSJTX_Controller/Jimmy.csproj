@@ -13,7 +13,8 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <RootNamespace>WSJTX_Controller</RootNamespace>
     <AssemblyName>Jimmy</AssemblyName>
-    <ApplicationIcon>netfol.ico</ApplicationIcon>
+    <!-- 2026-09-28: the Jimmy antenna icon (repo root jimmy.ico) replaces the stock globe. -->
+    <ApplicationIcon>..\jimmy.ico</ApplicationIcon>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <Nullable>disable</Nullable>
     <ImplicitUsings>disable</ImplicitUsings>
@@ -45,25 +46,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="Resources\Blip.wav">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Resources\Chime.wav">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Resources\Dive.wav">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Resources\Echo.wav">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Resources\Trumpet.wav">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Resources\BeepBeep.wav">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="Resources\DingDing.wav">
+    <!-- Notification sounds: every .wav dropped in Resources\Sounds\ ships (JimmyNext.wxs
+         harvests that folder); no per-file entry needed. -->
+    <None Include="Resources\Sounds\*.wav">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

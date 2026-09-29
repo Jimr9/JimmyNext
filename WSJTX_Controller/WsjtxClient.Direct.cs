@@ -839,6 +839,8 @@ namespace WSJTX_Controller
             _clockWasAcceptable = null;
             _directAudioStartUtc = DateTime.UtcNow;
             _timeOffsetsFromPartialPeriod = false;
+            _recentDt.Clear();
+            _nexusClock = null;
             opMode = OpModes.ACTIVE;
             // jimmy-engine-host itself always starts a fresh session hardcoded to Tier::Ft8
             // (main.rs's own startup set_tier call) -- match that here so this tracked value
@@ -2030,6 +2032,10 @@ namespace WSJTX_Controller
             // this, the class-level `tuning` field (AudioLevel()'s own guard, Alt+T's status
             // text) never learned a real Tune (SET_TUNING) was underway in Direct mode.
             tuning = radio.Tuning;
+
+            // Nexus's time-server clock report, for the clock check (CalcAvgTimeOffset) and the
+            // clock-status hotkey (ReportClockStatus).
+            _nexusClock = radio;
 
             // Direct-mode runaway-Tx backstop, 2026-08-28 (CONFIRMED live -- HB9TIH then NE5L),
             // revised 2026-08-31. After Jimmy logs a contact and clears callInProg on the engine's
@@ -3877,6 +3883,7 @@ namespace WSJTX_Controller
         {
             timeOffsets.Clear();
             timeOffset = 0;
+            _recentDt.Clear();
             _rawDecodeHistory.Clear();
         }
 
@@ -4271,6 +4278,16 @@ namespace WSJTX_Controller
         // (see AudioLevel's own comment); this lets Jimmy Native match that once ToggleTuningProcess
         // actually starts a tune (SET_TUNING, added 2026-08-10).
         public bool Tuning { get; set; }
+        // Nexus's internet time check (tempo-app/src/dto.rs RadioStatus.clock_*), 2026-09-28.
+        // ClockOffsetMs: PC clock minus UTC (positive = fast) that Nexus is ALREADY correcting
+        // TX and decode timing by; null when the check is off or has no measurement.
+        // ClockGrossMs: a measurement over 60 s Nexus refused to correct -- the operator must
+        // fix the clock. ClockOwnerNote: who keeps this machine's clock, one line.
+        public long? ClockOffsetMs { get; set; }
+        public int? ClockAgeSecs { get; set; }
+        public int? ClockServers { get; set; }
+        public long? ClockGrossMs { get; set; }
+        public string ClockOwnerNote { get; set; }
         // RX input audio level (0.0-1.0 RMS, tempo-app/src/dto.rs: RadioStatus.rx_level) -- the
         // real modern equivalent of Andy WM8Q's fork's "Audio in: X dB" (WSJT-X's own m_px),
         // which Alt+Q reported while receiving. Not an S-meter/CAT reading -- purely the

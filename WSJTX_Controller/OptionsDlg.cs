@@ -43,6 +43,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox advShowRawCheckBox;
         private System.Windows.Forms.NumericUpDown rawMaxRowsNumeric;
         private System.Windows.Forms.NumericUpDown _maxQueuedCallsNumeric;
+        private System.Windows.Forms.CheckBox _clockCheckCheckBox;
         private System.Windows.Forms.NumericUpDown _maxCallQueueAgeNumeric;
         private System.Windows.Forms.CheckBox rawShowCqCheckBox;
         private System.Windows.Forms.CheckBox rawShowDirectedCheckBox;
@@ -492,6 +493,21 @@ namespace WSJTX_Controller
             };
             generalPanel.Controls.Add(spaceCallsignsAndGridsCheckBox);
 
+            // 2026-09-28: Nexus's own internet time check (Settings.clock_check). On: Nexus
+            // measures the PC clock against time servers and corrects TX / decode timing by it.
+            // Launch-time only, so a change restarts the engine (SaveGeneralClockCheck).
+            _clockCheckCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Check clock with internet time servers",
+                AccessibleName = "Check clock with internet time servers",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(10, 193),
+                TabIndex       = 7,
+                Checked        = ctrl.NativeEngine.ClockCheck,
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_clockCheckCheckBox);
+
             // "Announce important notifications when focus is elsewhere" moved to
             // Options > Notifications > Global speech behaviour (2026-09-04) so all automatic-
             // speech behaviour is configured in one place. Same Controller setting / INI key.
@@ -703,6 +719,14 @@ namespace WSJTX_Controller
             // Moved here from SaveAdvancedUiTab, 2026-08-21 -- see BuildGeneralTab's own comment.
             int maxQueued = (int)(_maxQueuedCallsNumeric?.Value ?? 5);
             ctrl.maxQueuedCallsBase = Math.Max(4, Math.Min(100, maxQueued));
+
+            // Internet time check: a launch argument of the engine, so a change restarts it.
+            bool clockCheck = _clockCheckCheckBox?.Checked ?? ctrl.NativeEngine.ClockCheck;
+            if (clockCheck != ctrl.NativeEngine.ClockCheck)
+            {
+                ctrl.NativeEngine.ClockCheck = clockCheck;
+                ctrl.ApplyEngineMode();
+            }
 
             ctrl.alwaysOnTop = udpOnTopCheckBox.Checked;
             wsjtxClient.LogModeChanged(udpDiagLogCheckBox.Checked);
@@ -4836,6 +4860,9 @@ namespace WSJTX_Controller
                 dlg.Filter = "WAV files (*.wav)|*.wav|All files (*.*)|*.*";
                 dlg.FilterIndex = 1;
                 dlg.CheckFileExists = true;
+                // Start in the shipped sounds folder unless the current sound is a file elsewhere.
+                if (System.IO.Directory.Exists(NotificationSounds.SoundsFolder))
+                    dlg.InitialDirectory = NotificationSounds.SoundsFolder;
                 if (!string.IsNullOrEmpty(item.FilePath))
                 {
                     try
