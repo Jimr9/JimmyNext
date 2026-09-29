@@ -308,9 +308,10 @@ namespace WSJTX_Controller
                 return exceptionEntity;
 
             ClubLogEntity expiredPrefixFallback = null;
-            for (int len = call.Length; len >= 1; len--)
+            string loc = LocationCall(call);
+            for (int len = loc.Length; len >= 1; len--)
             {
-                string candidate = call.Substring(0, len);
+                string candidate = loc.Substring(0, len);
 
                 if (_prefixToAdif.TryGetValue(candidate, out var prefixEntry) &&
                     _entitiesByAdif.TryGetValue(prefixEntry.Adif, out ClubLogEntity prefixEntity) &&
@@ -351,17 +352,34 @@ namespace WSJTX_Controller
             (string MainPrefix, int? Zone) exc;
             if (_bigCtyExceptions.TryGetValue(call, out exc)) return exc;
 
-            int slash = call.IndexOf('/');
-            string noSuffix = slash >= 0 ? call.Substring(0, slash) : call;
-            string kg4 = ResolveKg4Prefix(noSuffix);
+            string loc = LocationCall(call);
+            string kg4 = ResolveKg4Prefix(loc);
             if (kg4 != null) return (kg4, null);
 
-            for (int len = call.Length; len >= 1; len--)
+            for (int len = loc.Length; len >= 1; len--)
             {
                 (string MainPrefix, int? Zone) pfx;
-                if (_bigCtyPrefixes.TryGetValue(call.Substring(0, len), out pfx)) return pfx;
+                if (_bigCtyPrefixes.TryGetValue(loc.Substring(0, len), out pfx)) return pfx;
             }
             return (null, null);
+        }
+
+        // 2026-09-29 (live: N7NU/VP9 read as USA; G4ABC/W2 would read as England): the side of a
+        // portable call that says where the station IS, by Nexus's own rule (propagation/src/
+        // dxcc.rs base_call) -- applied here to Jimmy's Club Log DXCC data, which stays the
+        // source because Nexus's cty.dat list also holds non-DXCC entities (it reads IT9 as
+        // Sicily). A plain operating suffix (/P /M /MM /AM /A /QRP /QRPP, or a single digit)
+        // keeps the home call; otherwise the shorter side is the location: G4ABC/W2 -> W2,
+        // N7NU/VP9 -> VP9, KH8/N0CALL -> KH8. Exact-call exceptions are matched on the FULL call
+        // before this (Club Log lists some specific portable calls). Input already upper-case.
+        internal static string LocationCall(string call)
+        {
+            int slash = call.IndexOf('/');
+            if (slash < 0) return call;
+            string a = call.Substring(0, slash), b = call.Substring(slash + 1);
+            bool operatingSuffix = b == "P" || b == "M" || b == "MM" || b == "AM" || b == "A" || b == "QRP" || b == "QRPP"
+                || (b.Length == 1 && b[0] >= '0' && b[0] <= '9');
+            return operatingSuffix || a.Length <= b.Length ? a : b;
         }
 
         // KG4 is the one DXCC prefix genuinely split by callsign *format* rather

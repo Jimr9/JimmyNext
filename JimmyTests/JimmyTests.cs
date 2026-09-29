@@ -10683,6 +10683,13 @@ static class JimmyTests
             Check("Fixture: 3 entities loaded",      provider.EntityCount == 3,     true);
             Check("Fixture: Big CTY aliases loaded", provider.BigCtyAliasCount > 0, true);
 
+            // 2026-09-29: a portable call counts where the station IS (live: N7NU/VP9 read as USA).
+            Check("LU1ABC/W2 (visitor in the USA): USA",       provider.FindByCallsign("LU1ABC/W2")?.Adif == 291, true);
+            Check("K1ABC/LU (visitor in Argentina): Argentina", provider.FindByCallsign("K1ABC/LU")?.Adif == 100, true);
+            Check("LU/K1ABC (prefix form): Argentina",         provider.FindByCallsign("LU/K1ABC")?.Adif == 100, true);
+            Check("LU1ABC/P and LU1ABC/7 stay home: Argentina",
+                provider.FindByCallsign("LU1ABC/P")?.Adif == 100 && provider.FindByCallsign("LU1ABC/7")?.Adif == 100, true);
+
             // Ordinary 3-letter-suffix KG4 call, no exception -- must resolve to USA,
             // not Guantanamo Bay (this is the exact real-world KG4JOK bug).
             var kg4jok = provider.FindByCallsign("KG4JOK");
