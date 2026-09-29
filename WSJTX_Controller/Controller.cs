@@ -1519,7 +1519,7 @@ namespace WSJTX_Controller
         {
             // The release notes are shown with the offer (UpdateAvailableDlg), readable before choosing.
             DialogResult result;
-            using (var dlg = new UpdateAvailableDlg(UpdateAvailableDlg.Summary(friendlyName, info, currentVersion), info.Notes))
+            using (var dlg = new UpdateAvailableDlg(info.Version, UpdateAvailableDlg.Summary(friendlyName, info, currentVersion), info.Notes))
                 result = dlg.ShowDialog(this);
 
             if (result != DialogResult.Yes) return;

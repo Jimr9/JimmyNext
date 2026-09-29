@@ -36,7 +36,7 @@ namespace WSJTX_Controller
             string current = System.Reflection.Assembly.GetExecutingAssembly()
                 .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
                 .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion ?? "";
-            using (var dlg = new UpdateAvailableDlg("Preview. " + UpdateAvailableDlg.Summary("Jimmy Next", info, current), info.Notes))
+            using (var dlg = new UpdateAvailableDlg(info.Version, "Preview. " + UpdateAvailableDlg.Summary("Jimmy Next", info, current), info.Notes))
             {
                 if (dlg.ShowDialog() == DialogResult.Yes)
                     MessageBox.Show("Preview only: nothing was downloaded or installed.", "Update preview",

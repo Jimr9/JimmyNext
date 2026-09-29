@@ -13,10 +13,10 @@ namespace WSJTX_Controller
     {
         private readonly TextBox _notes;
 
-        internal UpdateAvailableDlg(string summary, string releaseNotes)
+        internal UpdateAvailableDlg(string version, string summary, string releaseNotes)
         {
             var font = new Font("Microsoft Sans Serif", 9F);
-            Text = "Update Available";
+            Text = $"Update to version {version}";
             Font = font;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             StartPosition = FormStartPosition.CenterParent;
@@ -25,27 +25,21 @@ namespace WSJTX_Controller
             ShowInTaskbar = false;
             ClientSize = new Size(560, 400);
 
-            var summaryLabel = new Label
-            {
-                Text = summary,
-                Location = new Point(12, 10),
-                Size = new Size(536, 40),
-                TabStop = false,
-            };
-            Controls.Add(summaryLabel);
-
-            Controls.Add(new Label { Text = "What's new:", Location = new Point(12, 54), AutoSize = true, TabStop = false });
+            Controls.Add(new Label { Text = "Update details:", Location = new Point(12, 12), AutoSize = true, TabStop = false });
             _notes = new TextBox
             {
                 Multiline = true,
                 ReadOnly = true,
                 ScrollBars = ScrollBars.Vertical,
                 WordWrap = true,
-                Location = new Point(12, 74),
-                Size = new Size(536, 270),
+                Location = new Point(12, 32),
+                Size = new Size(536, 312),
                 TabIndex = 0,
-                AccessibleName = "What's new",
-                Text = NotesAsPlainText(releaseNotes),
+                // The version line leads the box, and there is no separate label for it: a label
+                // is skipped by a screen reader tabbing through (operator report, 2026-09-29), and
+                // shown beside the box it only repeated the box's first line for sighted users.
+                AccessibleName = "Update details",
+                Text = summary + "\r\n\r\nWhat's new:\r\n" + NotesAsPlainText(releaseNotes),
             };
             Controls.Add(_notes);
 
@@ -77,7 +71,7 @@ namespace WSJTX_Controller
         {
             string released = info.Published.HasValue ? $" (released {info.Published.Value.ToLocalTime():MMMM d, yyyy})" : "";
             return $"{product} {info.Version} is available{released}. You have {currentVersion}. " +
-                   $"Install it now? {product} will close to complete the install.";
+                   $"{product} will close to complete the install.";
         }
 
         protected override void OnShown(EventArgs e)
