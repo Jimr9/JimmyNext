@@ -170,8 +170,17 @@ namespace WSJTX_Controller
 
         internal Dictionary<string, EnqueueDecodeMessage> callDict = new Dictionary<string, EnqueueDecodeMessage>();
         internal Queue<string> callQueue = new Queue<string>();
-        // The radio's RF power setting (0.0-1.0) from the last engine status -- see RadioPower.
-        private double? _lastRfPower;
+        private readonly WinFormsNowBatchScheduler _nowBatchScheduler = new WinFormsNowBatchScheduler();
+
+        // After the main window has closed: nothing of this client may run on. A profile switch
+        // (Controller.SwitchProfileInPlace) keeps the program going for a new window, so a timer
+        // left ticking here would reach a closed window -- stop and dispose them all, and cancel
+        // pending speech.
+        internal void StopTimersForClose()
+        {
+            Controller.StopAllTimers(this);
+            _nowBatchScheduler.Dispose();
+        }
         internal List<string> sentReportList = new List<string>();
         // 2026-09-26: the report value we actually TRANSMITTED to each call (dB), from the engine's
         // own outgoing message -- what the log's rst_sent must record. Kept in lockstep with
@@ -985,7 +994,7 @@ namespace WSJTX_Controller
                 // Notification-joining support (2026-09-11): explicit real scheduler/clock,
                 // owned for this WsjtxClient's lifetime (Timer.Tick fires on the UI thread, same
                 // guarantee _directPollTimer already relies on -- see NowBatchScheduling.cs).
-                scheduler: new WinFormsNowBatchScheduler(), clock: new SystemMonotonicClock(),
+                scheduler: _nowBatchScheduler, clock: new SystemMonotonicClock(),
                 // Batch lifecycle diagnostics (2026-09-11) -- routed through the same diagnostic
                 // log every other [ANNOUNCE]/[DIRECT]/[SMART] tag already uses.
                 logDiagnostic: text => DebugOutput(text));
@@ -3023,7 +3032,7 @@ namespace WSJTX_Controller
             string adifRecord = AdifRecordBuilder.Build(
                 call, band, (long)(dialFrequency + txOffset), mode,
                 qsoDateOn, qsoTimeOn, qsoTimeOff, rstSent, rstRecd, grid,
-                name: "", comment: "", txPwr: RadioPower.WattsText(_lastRfPower), operatorCall: operatorCall,
+                name: "", comment: "", txPwr: RadioPower.WattsText(), operatorCall: operatorCall,
                 stationCall: myCall, myGrid: myGrid, qsoDateOff: qsoDateOff,
                 state: parkState ?? "", sig: parkRefs != null ? "POTA" : "", sigInfo: parkRefs ?? "");
 

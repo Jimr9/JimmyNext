@@ -53,12 +53,30 @@ namespace WSJTX_Controller
 
         public bool IsBatching => _pendingOps != null;
 
+        // ===== Shared settings, 2026-09-29 (see SharedSettings) =====
+        // A profile's ini with Shared.ini attached: SharedSettings' keys are read from and
+        // written to the shared file unless this profile has its own for that group. A batch on
+        // this file batches the shared file with it.
+        private IniFile _shared;
+        private bool _sharedBatchOwned;
+        internal IniFile Shared => _shared;
+        internal void AttachShared(IniFile shared) => _shared = shared;
+
+        private IniFile Route(string key, string section)
+        {
+            if (_shared == null || section != null) return this;
+            string group = SharedSettings.GroupOf(key);
+            if (group == null || ReadOwn(SharedSettings.ProfileOnlyKey(group)) == "True") return this;
+            return _shared;
+        }
+
         public void BeginBatch()
         {
             if (_pendingOps != null)
                 throw new InvalidOperationException(
                     $"IniFile.BeginBatch: a batch is already in progress for '{Path}' -- nested/overlapping batches are not supported.");
             _pendingOps = new List<PendingOp>();
+            if (_shared != null && !_shared.IsBatching) { _shared.BeginBatch(); _sharedBatchOwned = true; }
         }
 
         // Applies every queued Write/DeleteKey/DeleteSection since BeginBatch() as ONE atomic
@@ -73,8 +91,16 @@ namespace WSJTX_Controller
                 throw new InvalidOperationException($"IniFile.CommitBatch: no batch is in progress for '{Path}'.");
             var ops = _pendingOps;
             _pendingOps = null;
-            if (ops.Count == 0) return; // nothing queued -- don't touch disk at all
-            ApplyOpsAtomically(ops);
+            try
+            {
+                if (ops.Count > 0) ApplyOpsAtomically(ops); // nothing queued -- don't touch disk at all
+            }
+            catch
+            {
+                if (_sharedBatchOwned) { _sharedBatchOwned = false; _shared.AbortBatch(); }
+                throw;
+            }
+            if (_sharedBatchOwned) { _sharedBatchOwned = false; _shared.CommitBatch(); }
         }
 
         // Discards every queued write since BeginBatch() without touching disk. Used when the
@@ -82,6 +108,7 @@ namespace WSJTX_Controller
         public void AbortBatch()
         {
             _pendingOps = null;
+            if (_sharedBatchOwned) { _sharedBatchOwned = false; _shared.AbortBatch(); }
         }
 
         // Exception-safe scope: using (var batch = ini.BeginBatchScope()) { ...writes...;
@@ -117,6 +144,13 @@ namespace WSJTX_Controller
         }
 
         public string Read(string Key, string Section = null)
+        {
+            var target = Route(Key, Section);
+            return target == this ? ReadOwn(Key, Section) : target.Read(Key);
+        }
+
+        // This file only, never the shared one.
+        internal string ReadOwn(string Key, string Section = null)
         {
             string section = Section ?? EXE;
             if (_pendingOps != null && TryGetPendingValue(section, Key, out string pending))
@@ -154,6 +188,14 @@ namespace WSJTX_Controller
         }
 
         public void Write(string Key, string Value, string Section = null)
+        {
+            var target = Route(Key, Section);
+            if (target == this) WriteOwn(Key, Value, Section);
+            else target.Write(Key, Value);
+        }
+
+        // This file only, never the shared one.
+        internal void WriteOwn(string Key, string Value, string Section = null)
         {
             string section = Section ?? EXE;
             if (_pendingOps != null)

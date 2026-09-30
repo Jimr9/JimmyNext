@@ -1587,6 +1587,7 @@ static class JimmyTests
         EngineLaunchKeyTests();
         StationLocationTests();
         RadioPowerAndExportHeaderTests();
+        SharedSettingsTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
         ReportClockStatusTests();
@@ -18816,18 +18817,70 @@ static class JimmyTests
 
     // Logged power = the radio's setting in watts, only for the exact setting it was read for; an
     // export names Jimmy Next, its version and when (2026-09-29 operator requests).
+    // Shared call, grid and logins (2026-09-29): the one-time move-over and the routing.
+    static void SharedSettingsTests()
+    {
+        Console.WriteLine("\n── Shared settings ──");
+        string dir = Path.Combine(Path.GetTempPath(), "JimmySharedTest_" + Guid.NewGuid().ToString("N"));
+        string profiles = Path.Combine(dir, "Profiles");
+        Directory.CreateDirectory(profiles);
+        try
+        {
+            string basePath = Path.Combine(dir, "Jimmy Next.ini"), same = Path.Combine(profiles, "same.ini"), other = Path.Combine(profiles, "other.ini");
+            foreach (var (f, call) in new[] { (basePath, "KB0AAA"), (same, "KB0AAA"), (other, "W1AW") })
+            {
+                var ini = new IniFile(f);
+                ini.Write("nativeEngineMyCall", call);
+                ini.Write("eqslPassword", CredentialProtector.Protect("secret"));
+                ini.Write("rigModel", "2037");
+            }
+            SharedSettings.MigrateOnce(dir, basePath, profiles, basePath);
+            var shared = new IniFile(Path.Combine(dir, SharedSettings.FileName));
+            CheckStr("move-over: the active profile's call becomes shared", shared.Read("nativeEngineMyCall"), "KB0AAA");
+            CheckStr("move-over: a matching profile drops its copy", new IniFile(same).ReadOwn("nativeEngineMyCall"), "");
+            CheckStr("move-over: an equal password (different encryption) counts as matching", new IniFile(same).ReadOwn("eqslPassword"), "");
+            CheckStr("move-over: a different call is kept as this profile only", new IniFile(other).ReadOwn("profileOnly_Station") + " " + new IniFile(other).ReadOwn("nativeEngineMyCall"), "True W1AW");
+            Check("move-over: backup made", Directory.GetDirectories(dir, "Profiles-backup-before-shared-*").Length == 1, true);
+
+            var p1 = new IniFile(same); p1.AttachShared(shared);
+            var p2 = new IniFile(other); p2.AttachShared(shared);
+            p1.Write("nativeEngineMyCall", "K0NEW");
+            CheckStr("a shared change reaches every profile using it", shared.Read("nativeEngineMyCall") + " " + p1.ReadOwn("nativeEngineMyCall"), "K0NEW ");
+            CheckStr("...but not one with its own", p2.Read("nativeEngineMyCall"), "W1AW");
+            CheckStr("other settings stay in the profile", p1.ReadOwn("rigModel"), "2037");
+
+            SharedSettings.SetProfileOnly(p1, "Station", true);
+            p1.Write("nativeEngineMyCall", "K0PORT");
+            CheckStr("this profile only: saved in the profile, shared untouched", p1.Read("nativeEngineMyCall") + " " + shared.Read("nativeEngineMyCall"), "K0PORT K0NEW");
+            SharedSettings.SetProfileOnly(p1, "Station", false);
+            CheckStr("unticked: the shared value applies again", p1.Read("nativeEngineMyCall") + " " + p1.ReadOwn("nativeEngineMyCall"), "K0NEW ");
+
+            using (var batch = p1.BeginBatchScope()) p1.Write("nativeEngineMyCall", "K0ABORT");
+            CheckStr("an abandoned save leaves the shared file alone", shared.Read("nativeEngineMyCall"), "K0NEW");
+            using (var batch = p1.BeginBatchScope()) { p1.Write("nativeEngineMyCall", "K0SAVED"); batch.Commit(); }
+            CheckStr("a batched save reaches the shared file", new IniFile(Path.Combine(dir, SharedSettings.FileName)).Read("nativeEngineMyCall"), "K0SAVED");
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
     static void RadioPowerAndExportHeaderTests()
     {
         Console.WriteLine("\n── Logged power and export header ──");
         try
         {
-            RadioPower.SetForTest(0.4, 40);
-            CheckStr("the setting the watts were read for -> 40", RadioPower.WattsText(0.4), "40");
-            CheckStr("the setting changed since -> blank, never a stale number", RadioPower.WattsText(0.25), "");
+            RadioPower.SetForTest(40, DateTime.UtcNow);
+            CheckStr("a recent reading of the radio's setting -> 40", RadioPower.WattsText(), "40");
+            RadioPower.SetForTest(40, DateTime.UtcNow.AddMinutes(-10));
+            CheckStr("an old reading -> blank, never a stale number", RadioPower.WattsText(), "");
             RadioPower.ResetForTest();
-            CheckStr("nothing known -> blank", RadioPower.WattsText(0.4), "");
+            CheckStr("nothing read -> blank", RadioPower.WattsText(), "");
         }
         finally { RadioPower.ResetForTest(); }
+        Check("Kenwood PC; reply PC100; -> 100 W", RadioPower.ParseKenwoodPc("PC100;") == 100, true);
+        Check("Kenwood PC; reply PC005; -> 5 W", RadioPower.ParseKenwoodPc("PC005;") == 5, true);
+        Check("an error reply -> unknown", RadioPower.ParseKenwoodPc("RPRT -1").HasValue, false);
+        Check("TS-590SG (2037) is Kenwood-family, X6100 (3087) is not",
+            RadioPower.IsKenwoodFamily("2037") && !RadioPower.IsKenwoodFamily("3087"), true);
         string header = NexusLogbookService.AdifExportHeader();
         Check("export header: program Jimmy Next, a version, a creation time, <EOH>",
             header.Contains("<PROGRAMID:10>Jimmy Next") && header.Contains("<PROGRAMVERSION:") && header.Contains("<CREATED_TIMESTAMP:15>") && header.EndsWith("<EOH>"), true);

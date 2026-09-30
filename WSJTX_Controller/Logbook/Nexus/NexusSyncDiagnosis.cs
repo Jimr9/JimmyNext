@@ -90,7 +90,7 @@ namespace WSJTX_Controller
         // The same requests a sync makes, with the saved credentials -- downloads only, nothing merged.
         private static (Reports, string) Download()
         {
-            var ini = new IniFile(Controller.ActiveIniFilePath());
+            var ini = Controller.OpenActiveIni();
             string user = ini.Read("lotwLogbookUser") ?? "";
             string pass = CredentialProtector.Unprotect(ini.Read("lotwLogbookPass") ?? "");
             string qrzKey = CredentialProtector.Unprotect(ini.Read("qrzLogbookApiKey") ?? "");

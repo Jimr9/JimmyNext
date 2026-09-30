@@ -72,6 +72,10 @@ namespace WSJTX_Controller
                         string redacted = RedactIni(iniPath);
                         AddTextEntry(zip, "jimmy_settings_redacted.ini", redacted);
                     }
+                    // Shared settings (call, grid, logins) every profile uses unless it has its own.
+                    string sharedIniPath = Controller.SharedIniFilePath();
+                    if (File.Exists(sharedIniPath))
+                        AddTextEntry(zip, "jimmy_settings_shared_redacted.ini", RedactIni(sharedIniPath));
 
                     // Nexus contesting foundation: the profile's companion contest ini (saved
                     // per-contest entry defaults -- class, section, run style) beside the main

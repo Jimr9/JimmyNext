@@ -767,6 +767,7 @@ namespace WSJTX_Controller
             // setting -- see IniFile.BeginBatchScope's own comment.
             using (var batch = ctrl.BeginSettingsBatch())
             {
+            ApplyProfileOnlyChoices(); // first: decides where the call, grid and logins below are saved
             ApplyGeneralSettings();
             SaveTransmitTab();
             SaveHotkeysTab();
@@ -2718,6 +2719,55 @@ namespace WSJTX_Controller
             };
             openContestingBtn.Click += (s, e) => ctrl.OpenContestingWindow();
             stationOperatorPanel.Controls.Add(openContestingBtn);
+
+            AddProfileOnlyCheckBox("Station", _engineMyCallTextBox, _engineMyCallTextBox.Left, font, _engineMyCallTextBox, _engineMyGridTextBox);
+        }
+
+        // "This profile only" (shared settings, 2026-09-29 -- see SharedSettings): one per group,
+        // right under the group's fields, the controls below moving down to make room and the
+        // tab order following it. Unchecked, the group's fields show and save the values every
+        // profile shares; unticking shows the shared values again. Applied on OK, before any
+        // setting is saved (ApplyProfileOnlyChoices). `fields` are in SharedSettings.KeysOf order.
+        private readonly Dictionary<string, System.Windows.Forms.CheckBox> _profileOnlyCbs =
+            new Dictionary<string, System.Windows.Forms.CheckBox>();
+
+        private void AddProfileOnlyCheckBox(string group, System.Windows.Forms.Control after, int x,
+            System.Drawing.Font font, params System.Windows.Forms.TextBox[] fields)
+        {
+            var ini = ctrl.SettingsIni;
+            var container = after.Parent;
+            if (ini?.Shared == null || container == null) return;
+            string[] keys = SharedSettings.KeysOf(group);
+            int top = after.Bottom + 4;
+            foreach (System.Windows.Forms.Control c in container.Controls)
+            {
+                if (c.Top >= top) c.Top += 24;
+                if (c.TabIndex > after.TabIndex) c.TabIndex++;
+            }
+            var cb = new System.Windows.Forms.CheckBox
+            {
+                Text           = "This profile only",
+                AccessibleName = "This profile only",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(x, top),
+                TabIndex       = after.TabIndex + 1,
+                Font           = font,
+                Checked        = SharedSettings.IsProfileOnly(ini, group),
+            };
+            cb.CheckedChanged += (s, e) =>
+            {
+                if (cb.Checked) return;
+                for (int i = 0; i < fields.Length && i < keys.Length; i++)
+                    fields[i].Text = SharedSettings.SharedPlain(ini, keys[i]);
+            };
+            container.Controls.Add(cb);
+            _profileOnlyCbs[group] = cb;
+        }
+
+        private void ApplyProfileOnlyChoices()
+        {
+            foreach (var kv in _profileOnlyCbs)
+                SharedSettings.SetProfileOnly(ctrl.SettingsIni, kv.Key, kv.Value.Checked);
         }
 
         // Mirrors SaveRadioTab's own MyCall/MyGrid normalization (trim/uppercase, callsign- and
@@ -6160,6 +6210,11 @@ namespace WSJTX_Controller
                 "Uploads QSOs to your eQSL.cc account using your normal eQSL.cc login and password.",
                 10, 116, cw, font));
 
+            AddProfileOnlyCheckBox("QrzLogbook", _qrzLogbookApiKeyTb, 10, font, _qrzLogbookApiKeyTb);
+            AddProfileOnlyCheckBox("Lotw", _lotwLogbookPassTb, 10, font, _lotwLogbookUserTb, _lotwLogbookPassTb);
+            AddProfileOnlyCheckBox("ClubLog", _clubLogUploadCallsignTb, 10, font, _clubLogUploadEmailTb, _clubLogUploadPasswordTb, _clubLogUploadCallsignTb);
+            AddProfileOnlyCheckBox("HrdLog", _hrdLogUploadCodeTb, 10, font, _hrdLogUploadCallsignTb, _hrdLogUploadCodeTb);
+            AddProfileOnlyCheckBox("Eqsl", _eqslPasswordTb, 10, font, _eqslUsernameTb, _eqslPasswordTb);
             WireServiceList(serviceList, detailHost, panels);
         }
 
@@ -6606,6 +6661,8 @@ namespace WSJTX_Controller
                 "automatic provider, or leave QRZ selected and enable HamQTH here just to supplement it.",
                 10, y, cw, font));
 
+            AddProfileOnlyCheckBox("QrzLookup", _qrzPasswordTb, 10, font, _qrzUsernameTb, _qrzPasswordTb);
+            AddProfileOnlyCheckBox("HamQth", _hamQthPasswordTb, 10, font, _hamQthUsernameTb, _hamQthPasswordTb);
             WireServiceList(serviceList, detailHost, panels);
         }
 
@@ -7421,9 +7478,10 @@ namespace WSJTX_Controller
                 AutoSize       = true,
                 Location       = new System.Drawing.Point(8, 122),
                 TabIndex       = 1,
-                Checked        = true,
+                Checked        = Controller.ProfileSaveFirst,
                 Font           = font,
             };
+            saveFirstCheckBox.CheckedChanged += (s, e) => Controller.ProfileSaveFirst = saveFirstCheckBox.Checked;
             profilesPanel.Controls.Add(saveFirstCheckBox);
 
             var loadButton = new System.Windows.Forms.Button

@@ -9,27 +9,37 @@ using System.Threading.Tasks;
 namespace WSJTX_Controller
 {
     // The power the radio is SET to, in watts, for the TX_PWR a contact is logged with -- as QLog
-    // and other loggers record it (operator request 2026-09-29). The engine reports the setting as
-    // a fraction of full power; Hamlib's own power2mW turns that into watts for this radio model
-    // (a 10 W X6100 at 50% is 5 W, a 100 W TS-590 at 40% is 40 W). Asked of the rigctld the engine
-    // already runs -- a separate client, which rigctld serves in turn; power2mW is Hamlib's own
-    // arithmetic from the radio's published range, not a command to the radio. Asked again only
-    // when the setting changes. Unknown (radio does not report it, no rigctld): logged blank.
+    // and other loggers record it (operator request 2026-09-29).
+    //
+    // READ ONLY, and read by Jimmy itself: the engine keeps its RFPOWER never-touch patch (no
+    // power WRITE can reach the radio, and Nexus's own RFPOWER read stays off). Asked of the
+    // rigctld the engine runs -- a separate client, which rigctld serves in turn. Once when the
+    // radio is first seen, then once a minute to follow a knob change.
+    //
+    //  - Kenwood-family radios (Hamlib models 2xxx): the radio's own `PC;` query, sent raw
+    //    (`w PC;`, the same route as the tuner start's `AC;`); the answer is the setting in watts
+    //    ("PC100;"). NEVER Hamlib's `l RFPOWER` there: on a fresh rigctld its Kenwood backend runs
+    //    a power calibration sweep that leaves the radio at 5 W (Hamlib/Hamlib#1595; confirmed
+    //    on a TS-590SG with Hamlib 4.7.1 on 2026-08-20 and again 2026-09-29; Nexus issue #381
+    //    is the same symptom on a TS-590S).
+    //  - Other radios: Hamlib's `l RFPOWER` (the setting, 0.0-1.0) and `\power2mW` for the model
+    //    (a 10 W X6100 at 50% is 5 W).
     internal static class RadioPower
     {
-        private sealed class Reading { public double Fraction; public int Watts; }
+        private sealed class Reading { public int Watts; public DateTime AtUtc; }
         private static volatile Reading _last;
         private static int _busy;
         private static DateTime _lastAskUtc = DateTime.MinValue;
+        private static readonly TimeSpan AskEvery = TimeSpan.FromSeconds(60);
+        private static readonly TimeSpan GoodFor = TimeSpan.FromMinutes(3);
 
-        // Called with every engine status: the current setting (0.0-1.0) and dial.
-        internal static void Observe(double? rfPower, double dialMhz, RadioSettings radio, Action<string> debug)
+        // Called with every engine status.
+        internal static void Poll(double dialMhz, RadioSettings radio, Action<string> debug)
         {
-            if (TestModeGuard.IsTestMode || rfPower == null || rfPower <= 0 || dialMhz <= 0) return;
+            if (TestModeGuard.IsTestMode || dialMhz <= 0) return;
             if (radio == null || radio.Mode != RadioControlMode.HamlibRigctld) return;
-            double fraction = Math.Round(rfPower.Value, 3);
-            if (_last != null && _last.Fraction == fraction) return;
-            if (DateTime.UtcNow - _lastAskUtc < TimeSpan.FromSeconds(5)) return;   // while a knob is turning
+            bool kenwood = IsKenwoodFamily(radio.RigModel);
+            if (DateTime.UtcNow - _lastAskUtc < AskEvery) return;
             if (Interlocked.Exchange(ref _busy, 1) == 1) return;
             _lastAskUtc = DateTime.UtcNow;
             string host = radio.UseExternalRigctld && !string.IsNullOrWhiteSpace(radio.RigctldHost) ? radio.RigctldHost.Trim() : "127.0.0.1";
@@ -39,46 +49,88 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    int? watts = AskWatts(host, port, fraction, hz, out string reply);
-                    debug?.Invoke($"[POWER] setting {fraction:0.###} -> {(watts.HasValue ? watts + " W" : "unknown")} (rigctld: {reply})");
-                    if (watts.HasValue) _last = new Reading { Fraction = fraction, Watts = watts.Value };
+                    int? watts = kenwood ? AskKenwoodWatts(host, port, out string detail) : AskWatts(host, port, hz, out detail);
+                    debug?.Invoke($"[POWER] {(watts.HasValue ? watts + " W" : "unknown")} ({detail})");
+                    if (watts.HasValue) _last = new Reading { Watts = watts.Value, AtUtc = DateTime.UtcNow };
                 }
                 catch (Exception ex) { debug?.Invoke("[POWER] " + ex.Message); }
                 finally { Interlocked.Exchange(ref _busy, 0); }
             }).ObserveFault();
         }
 
-        // The watts for this setting, or "" when not known for exactly this setting.
-        internal static string WattsText(double? rfPower)
+        // The radio's set power in watts, or "" when not read recently.
+        internal static string WattsText()
         {
             var last = _last;
-            if (rfPower == null || last == null || last.Fraction != Math.Round(rfPower.Value, 3)) return "";
+            if (last == null || DateTime.UtcNow - last.AtUtc > GoodFor) return "";
             return last.Watts.ToString(CultureInfo.InvariantCulture);
         }
 
-        internal static void SetForTest(double fraction, int watts) => _last = new Reading { Fraction = fraction, Watts = watts };
+        internal static void SetForTest(int watts, DateTime atUtc) => _last = new Reading { Watts = watts, AtUtc = atUtc };
         internal static void ResetForTest() => _last = null;
 
-        // rigctld's "\power2mW <fraction> <frequency Hz> <mode>": milliwatts on the first line.
-        private static int? AskWatts(string host, int port, double fraction, long hz, out string reply)
+        // Hamlib's Kenwood backend: model numbers 2000-2999.
+        internal static bool IsKenwoodFamily(string rigModel) =>
+            int.TryParse((rigModel ?? "").Trim(), out int m) && m / 1000 == 2;
+
+        // "PC100;" -> 100 (watts); null for anything else.
+        internal static int? ParseKenwoodPc(string reply)
         {
-            reply = "";
+            string r = (reply ?? "").Trim().TrimEnd('\0', ';');
+            if (!r.StartsWith("PC", StringComparison.Ordinal)) return null;
+            return int.TryParse(r.Substring(2), NumberStyles.None, CultureInfo.InvariantCulture, out int w) && w > 0 && w <= 2000 ? w : (int?)null;
+        }
+
+        // The Kenwood radio's own power query, raw through rigctld: `w PC;` -> "PC100;".
+        private static int? AskKenwoodWatts(string host, int port, out string detail)
+        {
+            detail = "";
             using (var client = new TcpClient())
             {
                 var connect = client.ConnectAsync(host, port).ObserveFault();
-                if (!connect.Wait(1000) || !client.Connected) { reply = "no connection"; return null; }
+                if (!connect.Wait(1000) || !client.Connected) { detail = "no rigctld connection"; return null; }
                 using (var stream = client.GetStream())
+                using (var reader = new StreamReader(stream, Encoding.ASCII))
                 {
                     stream.ReadTimeout = 2000;
                     stream.WriteTimeout = 1000;
-                    byte[] cmd = Encoding.ASCII.GetBytes($"\\power2mW {fraction.ToString("0.###", CultureInfo.InvariantCulture)} {hz} USB\n");
-                    stream.Write(cmd, 0, cmd.Length);
-                    using (var reader = new StreamReader(stream, Encoding.ASCII))
-                        reply = (reader.ReadLine() ?? "").Trim();
+                    byte[] b = Encoding.ASCII.GetBytes("w PC;\n");
+                    stream.Write(b, 0, b.Length);
+                    string reply = (reader.ReadLine() ?? "").Trim();
+                    detail = $"Kenwood PC; answered {reply}";
+                    return ParseKenwoodPc(reply);
                 }
             }
-            if (!double.TryParse(reply, NumberStyles.Float, CultureInfo.InvariantCulture, out double mw) || mw <= 0) return null;
-            return (int)Math.Round(mw / 1000.0);
+        }
+
+        // `l RFPOWER` (the setting as a fraction), then `\power2mW <fraction> <Hz> USB` (milliwatts).
+        private static int? AskWatts(string host, int port, long hz, out string detail)
+        {
+            detail = "";
+            using (var client = new TcpClient())
+            {
+                var connect = client.ConnectAsync(host, port).ObserveFault();
+                if (!connect.Wait(1000) || !client.Connected) { detail = "no rigctld connection"; return null; }
+                using (var stream = client.GetStream())
+                using (var reader = new StreamReader(stream, Encoding.ASCII))
+                {
+                    stream.ReadTimeout = 2000;
+                    stream.WriteTimeout = 1000;
+                    string Ask(string cmd)
+                    {
+                        byte[] b = Encoding.ASCII.GetBytes(cmd + "\n");
+                        stream.Write(b, 0, b.Length);
+                        return (reader.ReadLine() ?? "").Trim();
+                    }
+                    string level = Ask("l RFPOWER");
+                    if (!double.TryParse(level, NumberStyles.Float, CultureInfo.InvariantCulture, out double fraction) || fraction <= 0 || fraction > 1)
+                    { detail = $"setting: {level}"; return null; }
+                    string mw = Ask($"\\power2mW {fraction.ToString("0.###", CultureInfo.InvariantCulture)} {hz} USB");
+                    detail = $"setting {fraction:0.###}, power2mW {mw}";
+                    if (!double.TryParse(mw, NumberStyles.Float, CultureInfo.InvariantCulture, out double milliwatts) || milliwatts <= 0) return null;
+                    return (int)Math.Round(milliwatts / 1000.0);
+                }
+            }
         }
     }
 }

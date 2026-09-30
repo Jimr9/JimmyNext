@@ -1280,8 +1280,7 @@ namespace WSJTX_Controller
         private void DirectApplyStatus(DirectSnapshot snap)
         {
             StationLocation.RefreshIfDue();   // POTA spots and Nexus's grid table, once a minute, off this thread
-            _lastRfPower = snap.Radio?.RfPower;
-            RadioPower.Observe(_lastRfPower, snap.Radio?.DialMhz ?? 0, ctrl.Radio, msg => DebugOutput(msg));
+            RadioPower.Poll(snap.Radio?.DialMhz ?? 0, ctrl.Radio, msg => DebugOutput(msg));
             _completedThisPollTick.Clear();
             // Per-poll: true only for the tick DirectApplyStatus sets _finishingCall, so the
             // DX-signoff-decode clear in DirectApplyDecodes (same tick, runs right after) does

@@ -345,6 +345,8 @@ namespace WSJTX_Controller
         private HelpDlg helpDlg = null;
         private Control _helpReturnFocus = null;
         private IniFile iniFile = null;
+        // Options' "This profile only" checkboxes (SharedSettings) read and set this profile's choices.
+        internal IniFile SettingsIni => iniFile;
         public HotkeyConfig hotkeyConfig;
         private int minSkipCount = 1;
         private const int maxSkipCount = 20;
@@ -565,6 +567,9 @@ namespace WSJTX_Controller
                     {
                         if (!Directory.Exists(path)) Directory.CreateDirectory(path);
                         if (File.Exists(realPathFileNameExt)) File.Copy(realPathFileNameExt, pathFileNameExt);
+                        // Shared settings: the seed copies the shared file with its profile.
+                        string realShared = Path.Combine(realAppDataPath, SharedSettings.FileName);
+                        if (File.Exists(realShared)) File.Copy(realShared, Path.Combine(path, SharedSettings.FileName));
                     }
                 }
                 catch
@@ -588,7 +593,10 @@ namespace WSJTX_Controller
             // lost settings. Skipped in test mode -- replay tests stay on their own isolated
             // copy, unaffected by whatever profile the operator's real install has selected.
             if (!TestModeGuard.IsTestMode)
+            {
                 pathFileNameExt = ResolveActiveIniPath(realPathFileNameExt, ProfilesDirectory());
+                MigrateToSharedSettings(pathFileNameExt);
+            }
             // Production-safety isolation (urgent fix, 2026-08-13): Properties.Settings.Default
             // is the legacy .NET user.config-backed settings store, predating the .ini file
             // system below. Its on-disk path is derived from assembly Product/Company identity
@@ -608,6 +616,7 @@ namespace WSJTX_Controller
             {
                 if (!Directory.Exists(path)) Directory.CreateDirectory(path);
                 iniFile = new IniFile(pathFileNameExt);
+                AttachSharedSettings(iniFile, path);
                 hotkeyConfig.LoadFromIni(iniFile);
                 RefreshHotkeyAccessibleNames();
                 // Parse optional row-order settings from INI (INI-only settings). Stored in
@@ -1926,6 +1935,52 @@ namespace WSJTX_Controller
             return realPathFileNameExt;
         }
 
+        // Options > Profiles "Save current configuration first": kept as the operator last set it
+        // (2026-09-29), in the base ini beside activeProfile -- not in a profile, since it decides
+        // whether the profile gets saved. Checked until first changed.
+        internal static bool ProfileSaveFirst
+        {
+            get => SafeReadBaseIniKey("profileSaveFirst") != "False";
+            set
+            {
+                if (TestModeGuard.IsTestMode) return;
+                try
+                {
+                    string dir = ProfilesAppDataPath();
+                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    new IniFile(BaseIniFilePath()).Write("profileSaveFirst", value ? "True" : "False");
+                }
+                catch { }
+            }
+        }
+
+        // Shared settings (SharedSettings), 2026-09-29: the one-time move-over. If it fails part
+        // way, Shared.ini is removed so nothing is attached and the next start tries again from
+        // the profiles, which the move-over only changes after the shared values are written.
+        private static void MigrateToSharedSettings(string activeIniPath)
+        {
+            string sharedPath = Path.Combine(ProfilesAppDataPath(), SharedSettings.FileName);
+            try { SharedSettings.MigrateOnce(ProfilesAppDataPath(), BaseIniFilePath(), ProfilesDirectory(), activeIniPath); }
+            catch { try { File.Delete(sharedPath); } catch { } }
+        }
+
+        // Attaches Shared.ini from `dir` (the settings folder, or the test copy's) when it exists.
+        internal static void AttachSharedSettings(IniFile ini, string dir)
+        {
+            string sharedPath = Path.Combine(dir, SharedSettings.FileName);
+            if (ini != null && File.Exists(sharedPath)) ini.AttachShared(new IniFile(sharedPath));
+        }
+
+        internal static string SharedIniFilePath() => Path.Combine(ProfilesAppDataPath(), SharedSettings.FileName);
+
+        // The active profile's settings as the running program sees them, shared ones included.
+        internal static IniFile OpenActiveIni()
+        {
+            var ini = new IniFile(ActiveIniFilePath());
+            if (!TestModeGuard.IsTestMode) AttachSharedSettings(ini, ProfilesAppDataPath());
+            return ini;
+        }
+
         private static string SafeReadBaseIniKey(string key)
         {
             try
@@ -2608,9 +2663,31 @@ namespace WSJTX_Controller
             if (wsjtxClient != null) wsjtxClient.lookupManager = null;   // same object -- clear the mirrored reference too
         }
 
+        // Last, after FormClosing and everything it closed (Options can restart a timer as it
+        // closes): stop and dispose every timer this window and its client own. A profile switch
+        // keeps the program running for a new window, so one left ticking would reach this closed
+        // window (2026-09-29, ObjectDisposedException from initialConnFaultTimer). Harmless on exit.
         private void Controller_FormClosed(object sender, FormClosedEventArgs e)
         {
+            StopAllTimers(this);
+            wsjtxClient?.StopTimersForClose();
+        }
 
+        // Every System.Windows.Forms.Timer field of this object, found by type so a timer added
+        // later is never missed.
+        internal static void StopAllTimers(object owner)
+        {
+            if (owner == null) return;
+            const System.Reflection.BindingFlags flags =
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+            foreach (var field in owner.GetType().GetFields(flags))
+            {
+                if (!typeof(System.Windows.Forms.Timer).IsAssignableFrom(field.FieldType)) continue;
+                if (field.GetValue(owner) is System.Windows.Forms.Timer timer)
+                {
+                    try { timer.Stop(); timer.Dispose(); } catch { }
+                }
+            }
         }
 
 #if DEBUG

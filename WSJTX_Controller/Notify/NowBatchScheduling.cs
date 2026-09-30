@@ -51,10 +51,16 @@ namespace WSJTX_Controller
             public bool Fired;
         }
 
+        // Pending schedules, so Dispose can cancel them: a profile switch closes the main window
+        // but not the program, and a pending batch must not speak through the closed window.
+        private readonly System.Collections.Generic.HashSet<Entry> _live = new System.Collections.Generic.HashSet<Entry>();
+        private bool _disposed;
+
         public object Schedule(int delayMs, Action callback)
         {
             if (callback == null) throw new ArgumentNullException(nameof(callback));
             var entry = new Entry();
+            if (_disposed) { entry.Fired = true; return entry; }
             entry.Timer.Interval = Math.Max(1, delayMs);
             entry.Timer.Tick += (s, e) =>
             {
@@ -62,8 +68,10 @@ namespace WSJTX_Controller
                 entry.Fired = true;
                 entry.Timer.Stop();
                 entry.Timer.Dispose();
+                _live.Remove(entry);
                 callback();
             };
+            _live.Add(entry);
             entry.Timer.Start();
             return entry;
         }
@@ -74,13 +82,14 @@ namespace WSJTX_Controller
             entry.Fired = true;
             entry.Timer.Stop();
             entry.Timer.Dispose();
+            _live.Remove(entry);
         }
 
-        // No per-instance state to dispose (every Entry disposes its own Timer when it fires or
-        // is cancelled); implements IDisposable only so a caller holding this for the life of the
-        // application has something symmetrical to call on shutdown if it ever tracks live tokens
-        // itself. Present tense: nothing currently needs it, kept for parity with other
-        // Timer-owning helpers in this codebase.
-        public void Dispose() { }
+        // Cancels every pending schedule; later ones do nothing.
+        public void Dispose()
+        {
+            _disposed = true;
+            foreach (var entry in new System.Collections.Generic.List<Entry>(_live)) Cancel(entry);
+        }
     }
 }
