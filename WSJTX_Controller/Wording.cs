@@ -10,10 +10,9 @@ namespace WSJTX_Controller
     // -- the receive side names, shared with the list titles, and the station tags in the lists --
     // live in Wording.txt in the
     // settings folder, read once at startup, so the operator changes a word without a code change.
-    // A missing file, missing entry or unreadable line means the built-in wording. Not public
-    // (operator, 2026-10-01): Jimmy Next never creates the file -- the operator, or someone they
-    // tell, creates an empty Wording.txt and the next start fills it with every entry commented
-    // out ("# key = words"); remove the '#' to change one. {Name} placeholders are filled in by
+    // A missing entry or unreadable line means the built-in wording. Start writes the file (or
+    // fills an empty one) with every entry commented out ("# key = words"); remove the '#' to
+    // change one. Not public (operator, 2026-10-01): never in the release notes, website or help. {Name} placeholders are filled in by
     // Jimmy. Never read in test mode.
     internal static class Wording
     {
@@ -224,21 +223,15 @@ namespace WSJTX_Controller
             return s;
         }
 
-        // Startup: read the file if there is one (none: the built-in wording, and no file is
-        // made). An empty file is filled with every entry, commented out. Returns a line for the
-        // debug log, or null.
+        // Startup: read the file, or write it (all commented out) when there is none or it is
+        // empty. Returns a line for the debug log, or null.
         internal static string Load(string folder)
         {
             if (TestModeGuard.IsTestMode) return null;
             string path = Path.Combine(folder, FileName);
             try
             {
-                if (!File.Exists(path))
-                {
-                    _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                    return null;
-                }
-                if (new FileInfo(path).Length == 0)
+                if (!File.Exists(path) || new FileInfo(path).Length == 0)
                 {
                     File.WriteAllText(path, Template(), new UTF8Encoding(false));
                     _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
