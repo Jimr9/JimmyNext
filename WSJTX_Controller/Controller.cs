@@ -1165,7 +1165,7 @@ namespace WSJTX_Controller
             {
                 wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {_sharedSettingsReport}");
                 if (_sharedSettingsFailed)
-                    BeginInvoke(new Action(() => wsjtxClient?.StatusView?.ShowMessage("Shared settings could not be saved, see the crash log", false)));
+                    BeginInvoke(new Action(() => wsjtxClient?.StatusView?.ShowMessage(Wording.Get("Msg.SharedSettingsNotSaved"), false)));
                 _sharedSettingsReport = null;
                 _sharedSettingsFailed = false;
             }
@@ -1283,13 +1283,13 @@ namespace WSJTX_Controller
                 {
                     RefreshStillNeedCache();
                     RefreshLogbookWindowIfOpen();
-                    if (_announcedLogbookLoading) { _announcedLogbookLoading = false; ShowMsg("Logbook ready", false); }
+                    if (_announcedLogbookLoading) { _announcedLogbookLoading = false; ShowMsg(Wording.Get("Msg.LogbookReady"), false); }
                 });
                 NexusLogbook.LogBecameReady += _logBecameReadyHandler;
                 if (!NexusLogbook.LogReady)
                 {
                     _announcedLogbookLoading = true;
-                    ShowMsg("Logbook loading; new-station alerts paused", false);
+                    ShowMsg(Wording.Get("Msg.LogbookLoading"), false);
                 }
             }
             wsjtxClient.rawPriorityTags = rawPriorityTags;
@@ -1531,7 +1531,7 @@ namespace WSJTX_Controller
                 var names = hotkeyConfig.UnassignedDueToConflict
                     .Select(a => HotkeyConfig.DisplayNames.TryGetValue(a, out var n) ? n : a.ToString());
                 this.BeginInvoke(new Action(() => ShowMsg(
-                    $"New shortcut(s) left unassigned because your custom keys already use them: {string.Join(", ", names)}. Set them in Options, Hotkeys.",
+                    Wording.Fill("Msg.HotkeysUnassigned", ("Names", string.Join(", ", names))),
                     false)));
             }
         }
@@ -2148,7 +2148,7 @@ namespace WSJTX_Controller
                 if (!string.IsNullOrEmpty(srcContestIni) && File.Exists(srcContestIni))
                     File.Copy(srcContestIni, destContestIni, overwrite: true);
 
-                ShowMsg($"Profile '{name}' saved.", false);
+                ShowMsg(Wording.Fill("Msg.ProfileSaved", ("Profile", name)), false);
             }
             catch (Exception ex)
             {
@@ -2260,7 +2260,7 @@ namespace WSJTX_Controller
                 if (!string.IsNullOrEmpty(chosenContestIni) && File.Exists(chosenContestIni))
                     File.Delete(chosenContestIni);
 
-                ShowMsg($"Profile '{chosen}' deleted.", false);
+                ShowMsg(Wording.Fill("Msg.ProfileDeleted", ("Profile", chosen)), false);
             }
             catch (Exception ex)
             {
@@ -2948,9 +2948,9 @@ namespace WSJTX_Controller
                     wsjtxClient.AbortContact();
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
-                    if (hadSomethingToHalt) ShowMsg("Tx halted", true);
+                    if (hadSomethingToHalt) ShowMsg(Wording.Get("Msg.TxHalted"), true);
                     else if (smartStartWasActive)
-                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Mode stopped" : $"Smart Mode stopped, {smartStartTarget}", true);
+                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? Wording.Get("Msg.SmartModeStopped") : Wording.Fill("Msg.SmartModeStoppedFor", ("Call", smartStartTarget)), true);
                 }
                 BeginInvoke((Action)(() => RestoreFocus(focused)));
                 return true;
@@ -3028,7 +3028,7 @@ namespace WSJTX_Controller
                             wsjtxClient.StartSlotAnalysis(true);
                         else
                         {
-                            ShowMsg("Transmit slot analysis skipped.", true);
+                            ShowMsg(Wording.Get("Msg.SlotAnalysisSkipped"), true);
                             cqModeButton_Click(null, null);
                         }
                     }
@@ -3929,7 +3929,7 @@ namespace WSJTX_Controller
                     ClubLogRefreshDays     = clubLogLogbookRefreshDays,
                 };
                 try { await sync.RunDueSyncsAsync(); }
-                catch (Exception ex) { ShowMsg("Logbook auto-sync error: " + ex.Message, false); }
+                catch (Exception ex) { ShowMsg(Wording.Fill("Msg.LogbookSyncError", ("Error", ex.Message)), false); }
             };
             logbookAutoSyncTimer.Start();
         }
@@ -4673,7 +4673,7 @@ namespace WSJTX_Controller
                 return;
             }
 
-            ShowMessage($"Native engine host stopped unexpectedly -- restarting ({attemptNumber}/{MaxNativeEngineAutoRestartsPerWindow})...", true);
+            ShowMessage(Wording.Fill("Msg.EngineRestarting", ("Attempt", attemptNumber.ToString()), ("Max", MaxNativeEngineAutoRestartsPerWindow.ToString())), true);
             var restartTimer = new System.Windows.Forms.Timer { Interval = 2000 };
             restartTimer.Tick += (s, e) =>
             {
@@ -5367,7 +5367,7 @@ namespace WSJTX_Controller
         {
             if (formLoaded && listenModeButton.Checked && !replyDxCheckBox.Checked && !replyLocalCheckBox.Checked && !replyDirCqCheckBox.Checked)
             {
-                ShowMsg($"Select calls manually (alt/dbl-click)", true);
+                ShowMsg(Wording.Get("Msg.SelectCallsManually"), true);
             }
         }
 
@@ -5549,9 +5549,9 @@ namespace WSJTX_Controller
                     wsjtxClient.AbortContact();         // unconditional: works in both CQ and Listen mode
                     wsjtxClient.ResetTxToCq();
                     listenModeButton_Click(null, null);
-                    if (hadSomethingToHalt) ShowMsg("Tx halted", true);
+                    if (hadSomethingToHalt) ShowMsg(Wording.Get("Msg.TxHalted"), true);
                     else if (smartStartWasActive)
-                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Mode stopped" : $"Smart Mode stopped, {smartStartTarget}", true);
+                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? Wording.Get("Msg.SmartModeStopped") : Wording.Fill("Msg.SmartModeStoppedFor", ("Call", smartStartTarget)), true);
                 }
                 BeginInvoke((Action)(() =>
                     BeginInvoke((Action)(() => RestoreFocus(focused)))
@@ -6436,12 +6436,12 @@ namespace WSJTX_Controller
                 _lastManualCall = callsign;
                 bool started = wsjtxClient.ManualEnqueueCall(callsign);
                 if (started)
-                    ShowMsg($"Manual call started for {callsign}", false);
+                    ShowMsg(Wording.Fill("Msg.ManualCallStarted", ("Call", callsign)), false);
                 else
                     // Found live, 2026-08-10: this used to be a silent no-op on failure -- the
                     // operator got zero feedback that anything went wrong, indistinguishable
                     // from Jimmy simply doing nothing.
-                    ShowMsg($"Manual call to {callsign} could not be started -- no connection to the radio engine.", true);
+                    ShowMsg(Wording.Fill("Msg.ManualCallFailed", ("Call", callsign)), true);
             }
         }
 

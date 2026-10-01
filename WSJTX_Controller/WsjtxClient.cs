@@ -1371,7 +1371,7 @@ namespace WSJTX_Controller
             if (resumeSmartStart)
                 ResumeSmartStartAfterHandoffYield(partner, carriedCallCount);
             else
-                StatusView.ShowMessage($"{partner} is working {other}; stopped calling", true);
+                StatusView.ShowMessage(Wording.Fill("Msg.PartnerWorkingOther", ("Call", partner), ("Other", other)), true);
         }
 
         public bool EnableMode()              //cq/listen mode selected
@@ -1803,7 +1803,7 @@ namespace WSJTX_Controller
             }
             string rxText = rxOffset > 0 ? $"{rxOffset}" : "unknown";
             string txText = txOffset > 0 ? $"{txOffset}" : "unknown";
-            StatusView.ShowMessage($"Receive {rxText} hertz, transmit {txText} hertz, {modeText}", false);
+            StatusView.ShowMessage(Wording.Fill("Msg.Frequencies", ("Rx", rxText), ("Tx", txText), ("Mode", modeText)), false);
             return true;
         }
         // ------------------------------------------------------------------------------------
@@ -2206,7 +2206,7 @@ namespace WSJTX_Controller
                 DebugOutput($"{spacer}prevTo:{prevTo} maxTo:{maxTo}");
                 if (!(idSem.Is73 || idSem.IsRr73) && !idSem.IsRrr && prevTo >= maxTo)        //trouble finishing signal report(s)
                 {
-                    StatusView.ShowMessage($"Blocking {deCall} temporarily...", false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.BlockingTemporarily", ("Call", deCall)), false);
                     DebugOutput($"{spacer}ignoring call, prevTo:{prevTo} restartQueue:{restartQueue}");
                     tmpBlock = true;
                 }
@@ -2224,7 +2224,7 @@ namespace WSJTX_Controller
 
                 if (IsBlocked(deCall) || tmpBlock)
                 {
-                    StatusView.ShowMessage($"{deCall} is blocked)", false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.IsBlocked", ("Call", deCall)), false);
                     if (debugDetail) DebugOutput($"{spacer}{deCall} ignored, blocked");
                     return;
                 }
@@ -2255,7 +2255,7 @@ namespace WSJTX_Controller
                     && !(idSem.Is73 || idSem.IsRr73)
                     )
                 {
-                    StatusView.ShowMessage($"{deCall} ignored (not DX)", false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.IgnoredNotDx", ("Call", deCall)), false);
                     DebugOutput($"{spacer}{deCall} ignored, DX only");
                     return;
                 }
@@ -3170,7 +3170,7 @@ namespace WSJTX_Controller
             ClearAudioOffsets();
             pendingCqAfterAnalysis = pendingCq;
             _manualAnalysisRequested = true;
-            StatusView.ShowMessage("Analyzing transmit slot...", false);
+            StatusView.ShowMessage(Wording.Get("Msg.AnalyzingSlot"), false);
 
             // 2.0.58: the watchdog now runs for a STANDALONE Alt+Z analysis too, not only a
             // pending-CQ one. Without it, an explicit Alt+Z on a quiet band (one period with no
@@ -3218,7 +3218,7 @@ namespace WSJTX_Controller
                 _manualAnalysisRequested = false;
                 if (wasPendingCq)
                 {
-                    StatusView.ShowMessage(result.Describe() + " Starting CQ anyway.", false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.SlotStartingAnyway", ("Result", result.Describe())), false);
                     ctrl.cqModeButton_Click(null, null);
                 }
                 else
@@ -3229,7 +3229,7 @@ namespace WSJTX_Controller
             }
             else
             {
-                StatusView.ShowMessage($"Still analyzing transmit slot... ({_slotAnalysisElapsedSeconds}s)", false);
+                StatusView.ShowMessage(Wording.Fill("Msg.StillAnalyzingSlot", ("Seconds", _slotAnalysisElapsedSeconds.ToString())), false);
             }
         }
 
@@ -3257,7 +3257,7 @@ namespace WSJTX_Controller
         {
             StatusView.ShowMessage(
                 _lastSlotAnalysis == null
-                    ? "No transmit-slot analysis has been done yet. Use Analyze Transmit Slot to run one."
+                    ? Wording.Get("Msg.SlotAnalysisNone")
                     : _lastSlotAnalysis.Describe(),
                 false);
         }
@@ -3429,7 +3429,7 @@ namespace WSJTX_Controller
             if (idx < 0)
             {
                 DebugOutput($"{spacer}NextCall aborted: selected call no longer in queue");
-                StatusView.ShowMessage(expectedCall != null ? $"{expectedCall} no longer available" : "No call selected", false);
+                StatusView.ShowMessage(expectedCall != null ? Wording.Fill("Msg.NoLongerAvailable", ("Call", expectedCall)) : Wording.Get("Msg.NoCallSelected"), false);
                 return;
             }
 
@@ -3526,8 +3526,7 @@ namespace WSJTX_Controller
                     ClearCallTimeout(call);
 
                     UpdateDebug();
-                    string n = cqPaused ? " next" : "";
-                    if (!confirm) StatusView.ShowMessage($"Replying{n} to {call}", ctrl.soundEnabled_CallAdded);
+                    if (!confirm) StatusView.ShowMessage(Wording.Fill(cqPaused ? "Msg.ReplyingNext" : "Msg.Replying", ("Call", call)), ctrl.soundEnabled_CallAdded);
                     return;
                 }
                 return;

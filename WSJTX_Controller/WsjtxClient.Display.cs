@@ -705,7 +705,7 @@ namespace WSJTX_Controller
             // Not in queue — do not transmit.  The call was deliberately excluded
             // by queue filters (already logged, blocked, origin filter, wrong period,
             // etc.).  Bypassing those filters via ReplyTo would be unsafe.
-            StatusView.ShowMessage($"{deCall} not in call queue", false);
+            StatusView.ShowMessage(Wording.Fill("Msg.NotInQueue", ("Call", deCall)), false);
         }
 
         // Like GetRawDecodeCallOrText, but returns null (rather than falling back to

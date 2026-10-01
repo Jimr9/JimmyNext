@@ -371,7 +371,7 @@ namespace WSJTX_Controller
                 }
                 if (radio == null)
                 {
-                    StatusView.ShowMessage("Power/SWR: engine host unreachable.", false);
+                    StatusView.ShowMessage(Wording.Get("Msg.MeterEngineUnreachable"), false);
                     return;
                 }
 
@@ -433,14 +433,14 @@ namespace WSJTX_Controller
                     else if (radio.CatOk == false)
                     {
                         // General CAT failure -- the rig isn't answering at all.
-                        StatusView.ShowMessage("Radio: CAT link is down, no meter data.", false);
+                        StatusView.ShowMessage(Wording.Get("Msg.MeterCatDown"), false);
                     }
                     else
                     {
                         // CAT is up (or health not reported), but this rig/backend supplied no
                         // transmit meter values. The TS-590SG, for example, multiplexes PWR/SWR/
                         // ALC onto one CAT meter register that can read back inactive.
-                        StatusView.ShowMessage("Radio: CAT connected, but this rig or backend reported no transmit meter data.", false);
+                        StatusView.ShowMessage(Wording.Get("Msg.MeterNoData"), false);
                     }
                     return;
                 }
@@ -449,7 +449,7 @@ namespace WSJTX_Controller
                 // own top comment for why this differs from power/SWR above).
                 if (!explain)
                 {
-                    StatusView.ShowMessage($"Audio in: {RxLevelToDb(radio.RxLevel):0} dB", false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.AudioIn", ("Level", RxLevelToDb(radio.RxLevel).ToString("0"))), false);
                     return;
                 }
                 double audioInDb = RxLevelToDb(radio.RxLevel);
@@ -584,12 +584,12 @@ namespace WSJTX_Controller
                     // NativeEngineSettings.cs's own comment), so a failure here means the
                     // engine process itself isn't reachable, not a mode choice.
                     ctrl.WithHotkeyOrigin(origin, () =>
-                        StatusView.ShowMessage("Tune needs the native engine, which isn't currently reachable.", true));
+                        StatusView.ShowMessage(Wording.Get("Msg.TuneNeedsEngine"), true));
                     return;
                 }
                 tuning = newState;
                 if (!tuning) StartStatusTimer2(false);
-                ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(tuning ? "Tune started" : "Tune stopped", false));
+                ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(Wording.Get(tuning ? "Msg.TuneStarted" : "Msg.TuneStopped"), false));
             });
             return true;
         }
@@ -626,12 +626,12 @@ namespace WSJTX_Controller
             if (_atuTxWatch) { ReturnRadioToReceive(origin); return true; }
             if (_atuRunning || _atuRequestInFlight || _atuReceiveInFlight)
             {
-                StatusView.ShowMessage("Tuner still working", false);
+                StatusView.ShowMessage(Wording.Get("Msg.TunerStillWorking"), false);
                 return true;
             }
             if (tuning)
             {
-                StatusView.ShowMessage("Stop Tune before starting the antenna tuner", false);
+                StatusView.ShowMessage(Wording.Get("Msg.TunerStopTuneFirst"), false);
                 return true;
             }
             // Same as Alt+T: a normal transmission must never race a tune-up.
@@ -656,14 +656,14 @@ namespace WSJTX_Controller
                         _atuPollTimer.Tick += (s, e) => PollAntennaTuner();
                     }
                     _atuPollTimer.Start();
-                    msg = "Tuner started";
+                    msg = Wording.Get("Msg.TunerStarted");
                 }
                 else if (resp == null && _atuCancelRequested)
-                    msg = "Tuner not started";
+                    msg = Wording.Get("Msg.TunerNotStarted");
                 else if (resp != null && resp.StartsWith("ERR "))
                     msg = resp.Substring(4);
                 else
-                    msg = "Antenna tuner needs the native engine, which isn't currently reachable.";
+                    msg = Wording.Get("Msg.TunerNeedsEngine");
                 ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(msg, false));
             });
             return true;
@@ -676,7 +676,7 @@ namespace WSJTX_Controller
             double elapsed = (DateTime.UtcNow - _atuStartedUtc).TotalSeconds;
             if (_atuRunning && elapsed > AtuMaxSeconds)
             {
-                EndAntennaTunerWatch($"No tuner result after {AtuMaxSeconds} seconds, check the radio");
+                EndAntennaTunerWatch(Wording.Fill("Msg.TunerNoResult", ("Seconds", AtuMaxSeconds.ToString())));
                 return;
             }
             if (_atuTxWatch && (DateTime.UtcNow - _atuTxSinceUtc).TotalSeconds >= AtuReceiveAfterSeconds)
@@ -695,7 +695,7 @@ namespace WSJTX_Controller
                 if (parts == null || parts.Length < 4 || parts[0] != "OK" || _atuReceiveInFlight) return;
                 if (_atuTxWatch)
                 {
-                    if (parts[3] == "0") EndAntennaTunerWatch("Radio back to receive");
+                    if (parts[3] == "0") EndAntennaTunerWatch(Wording.Get("Msg.RadioBackToReceive"));
                     return;
                 }
                 if (!_atuRunning || elapsed < 1.5 || parts[1] != "0") return;
@@ -717,9 +717,9 @@ namespace WSJTX_Controller
         // "1"/"0"/"?". Null = transmit state not known yet, keep asking.
         internal static string AtuFinishedMessage(string tunerIn, string transmitting)
         {
-            if (tunerIn != "1") return "The radio's tuner did not start";
-            if (transmitting == "0") return "Tuner finished";
-            if (transmitting == "1") return "Tuner finished, radio still transmitting";
+            if (tunerIn != "1") return Wording.Get("Msg.TunerDidNotStart");
+            if (transmitting == "0") return Wording.Get("Msg.TunerFinished");
+            if (transmitting == "1") return Wording.Get("Msg.TunerFinishedTransmitting");
             return null;
         }
 
@@ -751,9 +751,9 @@ namespace WSJTX_Controller
                     _atuPollTimer?.Start();
                     return;
                 }
-                EndAntennaTunerWatch(resp == "OK receive" ? "Radio back to receive"
+                EndAntennaTunerWatch(resp == "OK receive" ? Wording.Get("Msg.RadioBackToReceive")
                     : resp != null && resp.StartsWith("ERR ") ? resp.Substring(4)
-                    : "Could not return the radio to receive, check the radio");
+                    : Wording.Get("Msg.RadioNotBackToReceive"));
             });
         }
 
@@ -828,7 +828,7 @@ namespace WSJTX_Controller
             {
                 // No engine-confirmed level to step from -- engine host not reachable, or no
                 // snapshot has arrived yet this session. Report honestly rather than guess.
-                StatusView.ShowMessage("Audio level: engine not available.", false);
+                StatusView.ShowMessage(Wording.Get("Msg.AudioLevelNoEngine"), false);
                 return true;
             }
 
@@ -853,7 +853,7 @@ namespace WSJTX_Controller
                 if (!ok)
                 {
                     ctrl.WithHotkeyOrigin(origin, () =>
-                        StatusView.ShowMessage("Audio level change not confirmed -- engine not responding.", false));
+                        StatusView.ShowMessage(Wording.Get("Msg.AudioLevelNotConfirmed"), false));
                     return;
                 }
                 string levelText = $"Audio level {applied * 100:0.0}%";
@@ -1059,7 +1059,7 @@ namespace WSJTX_Controller
                 // can read it back later without re-running.
                 RecordSlotAnalysisFromCurrentOffsets(SlotAnalysisState.Complete);
                 StatusView.ShowMessage(
-                    $"Transmit slot analysis complete. Even period: {evenOffset} Hz, odd period: {oddOffset} Hz.",
+                    Wording.Fill("Msg.SlotAnalysisComplete", ("Even", evenOffset.ToString()), ("Odd", oddOffset.ToString())),
                     true);
                 if (pendingCqAfterAnalysis)
                 {

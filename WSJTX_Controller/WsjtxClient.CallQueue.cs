@@ -434,11 +434,11 @@ namespace WSJTX_Controller
             {
                 ctrl.ExceptTextBoxAdd(call);       //callqueue updated by BlockedTextChanged()
                 DebugOutput($"{spacer}added  {call} to blocked call list");
-                StatusView.ShowMessage($"{call} is now blocked", ctrl.soundEnabled_CallAdded);
+                StatusView.ShowMessage(Wording.Fill("Msg.Blocked", ("Call", call)), ctrl.soundEnabled_CallAdded);
             }
             else
             {
-                StatusView.ShowMessage($"{call} already blocked", ctrl.soundEnabled_CallAdded);
+                StatusView.ShowMessage(Wording.Fill("Msg.AlreadyBlocked", ("Call", call)), ctrl.soundEnabled_CallAdded);
             }
         }
 

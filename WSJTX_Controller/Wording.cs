@@ -51,7 +51,82 @@ namespace WSJTX_Controller
             ("Tag.Manual",            "Manual",                    "raw decodes tag: a station you picked"),
             ("Tag.DirCq",             "Dir CQ",                    "raw decodes tag: a directed CQ you want"),
             ("Tag.FoxHound",          "Possible F/H",              "raw decodes tag: possibly a Fox/Hound station"),
+            ("Msg.TxHalted", "Tx halted", "Escape / Alt+H stopped transmitting"),
+            ("Msg.SmartModeStopped", "Smart Mode stopped", "Escape / Alt+H stopped Smart Mode"),
+            ("Msg.SmartModeStoppedFor", "Smart Mode stopped, {Call}", "Escape / Alt+H stopped Smart Mode for a station"),
+            ("Msg.SmartModeOff", "Smart Mode is off.", "Smart Mode status hotkey: the option is off"),
+            ("Msg.SmartModeNoTarget", "Smart Mode is on, no target.", "Smart Mode status hotkey: nothing armed"),
+            ("Msg.SmartModeStatusUnavailable", "Smart Mode status unavailable.", "Smart Mode status hotkey: no answer"),
+            ("Msg.SmartModeNotHeard", "{Call} not heard after {Count} calls; Smart Mode stopped", "Smart Mode gave up: the station was not heard"),
+            ("Msg.SmartModeTimeLimit", "Smart Mode time limit reached after {Minutes} {MinuteWord} calling {Call}, no contact completed", "Smart Mode gave up: its time limit"),
+            ("Msg.MinuteOne", "minute", "the word for one minute"),
+            ("Msg.MinuteMany", "minutes", "the word for several minutes"),
+            ("Msg.RepeatLimit", "Repeat limit reached after {Count} calls to {Call}, no contact completed", "the repeat limit stopped calling"),
+            ("Msg.PartnerWorkingOther", "{Call} is working {Other}; stopped calling", "Smart Mode: the station is working someone else"),
+            ("Msg.Replying", "Replying to {Call}", "Jimmy is answering a station"),
+            ("Msg.ReplyingNext", "Replying next to {Call}", "Jimmy will answer a station next"),
+            ("Msg.NoLongerAvailable", "{Call} no longer available", "the chosen station is gone"),
+            ("Msg.NoCallSelected", "No call selected", "nothing chosen to answer"),
+            ("Msg.NotInQueue", "{Call} not in call queue", "the station is not in the list"),
+            ("Msg.SelectCallsManually", "Select calls manually (alt/dbl-click)", "automatic calling is off"),
+            ("Msg.ManualCallStarted", "Manual call started for {Call}", "a manual call began"),
+            ("Msg.ManualCallFailed", "Manual call to {Call} could not be started -- no connection to the radio engine.", "a manual call could not begin"),
+            ("Msg.Blocked", "{Call} is now blocked", "a station was blocked"),
+            ("Msg.AlreadyBlocked", "{Call} already blocked", "the station was already blocked"),
+            ("Msg.BlockingTemporarily", "Blocking {Call} temporarily...", "a station is blocked for a while"),
+            ("Msg.IsBlocked", "{Call} is blocked", "the station is blocked"),
+            ("Msg.IgnoredNotDx", "{Call} ignored (not DX)", "a station was skipped: not DX"),
+            ("Msg.Frequencies", "Receive {Rx} hertz, transmit {Tx} hertz, {Mode}", "the receive/transmit offsets report"),
+            ("Msg.BandChanged", "Band changed to {Band}", "the band changed"),
+            ("Msg.TuneStarted", "Tune started", "Alt+T tune carrier on"),
+            ("Msg.TuneStopped", "Tune stopped", "Alt+T tune carrier off"),
+            ("Msg.TuneNeedsEngine", "Tune needs the native engine, which isn't currently reachable.", "Alt+T without the engine"),
+            ("Msg.TunerStarted", "Tuner started", "Alt+Shift+T: the radio's tuner started"),
+            ("Msg.TunerNotStarted", "Tuner not started", "Alt+Shift+T cancelled before it reached the radio"),
+            ("Msg.TunerNeedsEngine", "Antenna tuner needs the native engine, which isn't currently reachable.", "Alt+Shift+T without the engine"),
+            ("Msg.TunerStillWorking", "Tuner still working", "Alt+Shift+T pressed during a tune-up"),
+            ("Msg.TunerStopTuneFirst", "Stop Tune before starting the antenna tuner", "Alt+Shift+T while Alt+T tune is on"),
+            ("Msg.TunerFinished", "Tuner finished", "the tune-up ended, radio receiving"),
+            ("Msg.TunerFinishedTransmitting", "Tuner finished, radio still transmitting", "the tune-up ended, radio still transmitting"),
+            ("Msg.TunerDidNotStart", "The radio's tuner did not start", "the radio never switched its tuner in"),
+            ("Msg.TunerNoResult", "No tuner result after {Seconds} seconds, check the radio", "the tune-up took too long"),
+            ("Msg.RadioBackToReceive", "Radio back to receive", "the radio returned to receive after a tune-up"),
+            ("Msg.RadioNotBackToReceive", "Could not return the radio to receive, check the radio", "the radio could not be returned to receive"),
+            ("Msg.AudioIn", "Audio in: {Level} dB", "receive audio level report"),
+            ("Msg.AudioLevelNoEngine", "Audio level: engine not available.", "audio level without the engine"),
+            ("Msg.AudioLevelNotConfirmed", "Audio level change not confirmed -- engine not responding.", "audio level change not confirmed"),
+            ("Msg.MeterEngineUnreachable", "Power/SWR: engine host unreachable.", "power/SWR report without the engine"),
+            ("Msg.MeterCatDown", "Radio: CAT link is down, no meter data.", "power/SWR report, CAT down"),
+            ("Msg.MeterNoData", "Radio: CAT connected, but this rig or backend reported no transmit meter data.", "power/SWR report, no data"),
+            ("Msg.HoundNoEngine", "Hound: engine not connected.", "Hound without the engine"),
+            ("Msg.HoundFt8Only", "Hound is FT8 only.", "Hound in FT4"),
+            ("Msg.HoundNotChanged", "Hound not changed: {Reason}", "Hound change refused"),
+            ("Msg.HoundOn", "Hound on", "Hound turned on"),
+            ("Msg.HoundOff", "Hound off", "Hound turned off"),
+            ("Msg.AnalyzingSlot", "Analyzing transmit slot...", "slot analysis started"),
+            ("Msg.StillAnalyzingSlot", "Still analyzing transmit slot... ({Seconds}s)", "slot analysis still running"),
+            ("Msg.SlotStartingAnyway", "{Result} Starting CQ anyway.", "slot analysis done, CQ starts"),
+            ("Msg.SlotAnalysisComplete", "Transmit slot analysis complete. Even period: {Even} Hz, odd period: {Odd} Hz.", "slot analysis result"),
+            ("Msg.SlotAnalysisNone", "No transmit-slot analysis has been done yet. Use Analyze Transmit Slot to run one.", "slot analysis report, none yet"),
+            ("Msg.SlotAnalysisSkipped", "Transmit slot analysis skipped.", "slot analysis skipped"),
+            ("Msg.WatchNoStation", "No station selected to watch", "Station Watch with nothing chosen"),
+            ("Msg.WatchNotActive", "Station Watch is not active", "Station Watch status: off"),
+            ("Msg.WatchWaiting", "Waiting for another decode from {Call}", "Station Watch waiting"),
+            ("Msg.LogbookReady", "Logbook ready", "the logbook finished loading"),
+            ("Msg.LogbookLoading", "Logbook loading; new-station alerts paused", "the logbook is loading"),
+            ("Msg.LogbookSyncError", "Logbook auto-sync error: {Error}", "logbook auto-sync failed"),
+            ("Msg.ProfileSaved", "Profile '{Profile}' saved.", "a profile was saved"),
+            ("Msg.ProfileDeleted", "Profile '{Profile}' deleted.", "a profile was deleted"),
+            ("Msg.SharedSettingsNotSaved", "Shared settings could not be saved, see the crash log", "the shared settings move-over failed"),
+            ("Msg.EngineRestarting", "Native engine host stopped unexpectedly -- restarting ({Attempt}/{Max})...", "the engine stopped and is restarting"),
+            ("Msg.HotkeysUnassigned", "New shortcut(s) left unassigned because your custom keys already use them: {Names}. Set them in Options, Hotkeys.", "new hotkeys clashed with yours"),
         };
+
+        // The file's sections, by key prefix: grouping only -- a key means the same in any section.
+        internal static string SectionOf(string key) =>
+            key.StartsWith("Msg.") || key.StartsWith("Summary.") ? "NOTIFICATIONS"
+            : key.StartsWith("Tag.") ? "TAGS"
+            : "LISTS";
 
         private static Dictionary<string, string> _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -93,11 +168,16 @@ namespace WSJTX_Controller
                 if (missing.Count > 0)
                 {
                     var sb = new StringBuilder();
-                    foreach (var (key, def, note) in missing)
+                    foreach (var group in missing.GroupBy(m => SectionOf(m.Key)))
                     {
                         sb.AppendLine();
-                        sb.AppendLine("# " + note);
-                        sb.AppendLine("# " + key + " = " + def);
+                        sb.AppendLine("[" + group.Key + "]");
+                        foreach (var (key, def, note) in group)
+                        {
+                            sb.AppendLine();
+                            sb.AppendLine("# " + note);
+                            sb.AppendLine("# " + key + " = " + def);
+                        }
                     }
                     File.AppendAllText(path, sb.ToString(), new UTF8Encoding(false));
                 }
@@ -117,7 +197,7 @@ namespace WSJTX_Controller
             foreach (string raw in lines ?? Enumerable.Empty<string>())
             {
                 string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith("#")) continue;
+                if (line.Length == 0 || line.StartsWith("#") || line.StartsWith("[")) continue;
                 int eq = line.IndexOf('=');
                 if (eq <= 0) continue;
                 string key = line.Substring(0, eq).Trim();
@@ -136,11 +216,17 @@ namespace WSJTX_Controller
             sb.AppendLine("# Jimmy Next wording. Remove the '#' in front of a line and change the words after '='.");
             sb.AppendLine("# Read when Jimmy Next starts. A line left with '#' keeps the built-in wording.");
             sb.AppendLine("# Words in {braces} are filled in by Jimmy Next; keep them.");
-            foreach (var (key, def, note) in Known)
+            sb.AppendLine("# [SECTIONS] only group the lines; an entry means the same in any section.");
+            foreach (var group in Known.GroupBy(k => SectionOf(k.Key)))
             {
                 sb.AppendLine();
-                sb.AppendLine("# " + note);
-                sb.AppendLine("# " + key + " = " + def);
+                sb.AppendLine("[" + group.Key + "]");
+                foreach (var (key, def, note) in group)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("# " + note);
+                    sb.AppendLine("# " + key + " = " + def);
+                }
             }
             return sb.ToString();
         }
