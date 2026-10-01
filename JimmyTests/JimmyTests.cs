@@ -19009,6 +19009,12 @@ static class JimmyTests
             Wording.SetForTest(null);
             CheckStr("a message with its call filled in", Wording.Fill("Msg.Replying", ("Call", "K1ABC")), "Replying to K1ABC");
             Check("every entry name is unique", Wording.Known.Select(k => k.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count() == Wording.Known.Length, true);
+            Wording.SetForTest(Wording.Parse(new[] { "Status.KeySeparator = \" \"" }));
+            CheckStr("words in quotes keep their spaces (a key read as Alt E)",
+                HotkeyConfig.FormatKeysForHelp(System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.E, Wording.Get("Status.KeySeparator")), "Alt E");
+            Wording.SetForTest(null);
+            CheckStr("built-in key separator: Alt, E",
+                HotkeyConfig.FormatKeysForHelp(System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.E, Wording.Get("Status.KeySeparator")), "Alt, E");
         }
         finally { Wording.SetForTest(null); }
     }

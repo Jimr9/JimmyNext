@@ -25,7 +25,7 @@ namespace WSJTX_Controller
         {
             var hk = ctrl.hotkeyConfig;   // not loaded yet: the built-in defaults
             Keys keys = hk != null ? hk[action] : (HotkeyConfig.Defaults.TryGetValue(action, out Keys d) ? d : Keys.None);
-            return HotkeyConfig.FormatKeysForHelp(keys);
+            return HotkeyConfig.FormatKeysForHelp(keys, Wording.Get("Status.KeySeparator"));
         }
 
         private string ListOrNextHint()

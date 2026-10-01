@@ -416,7 +416,11 @@ namespace WSJTX_Controller
         }
 
         // "Alt, Page Up" format — screen-reader-friendly, used in the help dialog
-        public static string FormatKeysForHelp(Keys keys)
+        public static string FormatKeysForHelp(Keys keys) => FormatKeysForHelp(keys, ", ");
+
+        // separator: between the parts ("Alt, E"); the spoken status hints take it from the
+        // wording file (Status.KeySeparator), the help list always uses ", ".
+        public static string FormatKeysForHelp(Keys keys, string separator)
         {
             if (keys == Keys.None) return "";
             var parts = new List<string>();
@@ -425,7 +429,7 @@ namespace WSJTX_Controller
             if ((keys & Keys.Shift)   != 0) parts.Add("Shift");
             string name = GetKeyNameForHelp(keys & Keys.KeyCode);
             parts.Add(name);
-            return string.Join(", ", parts);
+            return string.Join(separator ?? ", ", parts);
         }
 
         private static string GetKeyName(Keys keyCode)

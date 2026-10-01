@@ -156,6 +156,7 @@ namespace WSJTX_Controller
             ("Status.ListHint", "{Key} for list", "list hint; {Key} is your Focus Available Stations List hotkey"),
             ("Status.NextHint", "{Key} for next", "next hint; {Key} is your Skip to Next Call hotkey"),
             ("Status.ListOrNext", "{List} or {Next}", "both hints together"),
+            ("Status.KeySeparator", ", ", "between the parts of a key in those hints (Alt, E); in quotes so the spaces count -- \" \" says Alt E"),
             ("Status.SettingUp", "Setting up Jimmy Next.", "starting up while setup is open"),
             ("Status.SetupNeeded", "To begin operating, set in Options: {List}.", "setup not finished; {List} is the parts below still missing"),
             ("Status.SetupCallGrid", "your callsign and grid on the Station & Operator page", "missing part: callsign and grid"),
@@ -259,7 +260,7 @@ namespace WSJTX_Controller
                         {
                             sb.AppendLine();
                             sb.AppendLine("# " + note);
-                            sb.AppendLine("# " + key + " = " + def);
+                            sb.AppendLine("# " + key + " = " + Shown(def));
                         }
                     }
                     File.AppendAllText(path, sb.ToString(), new UTF8Encoding(false));
@@ -285,6 +286,9 @@ namespace WSJTX_Controller
                 if (eq <= 0) continue;
                 string key = line.Substring(0, eq).Trim();
                 string words = line.Substring(eq + 1).Trim();
+                // "words in quotes" are kept exactly, spaces included (e.g. a separator " ").
+                if (words.Length >= 2 && words[0] == '"' && words[words.Length - 1] == '"')
+                    words = words.Substring(1, words.Length - 2);
                 if (words.Length > 0 && Known.Any(k => k.Key.Equals(key, StringComparison.OrdinalIgnoreCase))) d[key] = words;
             }
             return d;
@@ -308,10 +312,13 @@ namespace WSJTX_Controller
                 {
                     sb.AppendLine();
                     sb.AppendLine("# " + note);
-                    sb.AppendLine("# " + key + " = " + def);
+                    sb.AppendLine("# " + key + " = " + Shown(def));
                 }
             }
             return sb.ToString();
         }
+
+        // Built-in words as the file shows them: in quotes when spaces at either end matter.
+        private static string Shown(string def) => def != def.Trim() ? "\"" + def + "\"" : def;
     }
 }
