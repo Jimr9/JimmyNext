@@ -100,9 +100,9 @@ namespace WSJTX_Controller
                 if (File.Exists(NexusLogbookMigration.AutoMoveRecord)) File.Delete(NexusLogbookMigration.AutoMoveRecord);
                 NexusLogbook.TestFolderOverride = Path.Combine(workRoot, "NexusLogNew");
                 var (ok3, msg3) = NexusLogbookMigration.AutoMove();
-                sb.AppendLine("  automatic move, new install: " + msg3.Replace("\n", " | "));
+                sb.AppendLine("  automatic move, new install: " + (msg3 ?? "(nothing said)"));
                 Check("new install: an empty Nexus logbook with its read copy",
-                    ok3 && msg3 == "New logbook ready." && NexusLogbook.Moved &&
+                    ok3 && msg3 == null && NexusLogbook.Moved &&
                     Directory.GetFiles(NexusLogbook.ProjectionFolder, "p-*.db").Length == 1);
             }
             finally

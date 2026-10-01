@@ -188,6 +188,8 @@ namespace WSJTX_Controller
         public bool   soundEnabled_NewGrid        = false;
         public string soundFile_NewGrid           = "";
         public bool   soundEnabled_NewGridOnBand  = false;
+        // One New DXCC / New grid sound per receive period (2026-10-01): off = every station.
+        public bool   soundNewOncePerPeriod       = false;
         public string soundFile_NewGridOnBand     = "";
         public bool   soundEnabled_AlwaysWanted   = false;
         public string soundFile_AlwaysWanted      = "";
@@ -985,6 +987,7 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("soundEnabled_NewGrid"))       soundEnabled_NewGrid       = iniFile.Read("soundEnabled_NewGrid") == "True";
                 if (iniFile.KeyExists("soundFile_NewGrid"))          soundFile_NewGrid          = iniFile.Read("soundFile_NewGrid");
                 if (iniFile.KeyExists("soundEnabled_NewGridOnBand")) soundEnabled_NewGridOnBand = iniFile.Read("soundEnabled_NewGridOnBand") == "True";
+                soundNewOncePerPeriod = iniFile.Read("soundNewOncePerPeriod") == "True";
                 if (iniFile.KeyExists("soundFile_NewGridOnBand"))    soundFile_NewGridOnBand    = iniFile.Read("soundFile_NewGridOnBand");
                 if (iniFile.KeyExists("soundEnabled_AlwaysWanted"))  soundEnabled_AlwaysWanted  = iniFile.Read("soundEnabled_AlwaysWanted") == "True";
                 if (iniFile.KeyExists("soundFile_AlwaysWanted"))     soundFile_AlwaysWanted     = iniFile.Read("soundFile_AlwaysWanted");
@@ -1469,6 +1472,14 @@ namespace WSJTX_Controller
             ApplyAdvancedLayout();
             ApplyListAppearance();
 
+            // Setup (2026-10-01): while the callsign, grid, radio or its audio devices are
+            // missing, open Options as setup once the window is up.
+            if (!TestModeGuard.IsTestMode && !SetupComplete)
+            {
+                _setupPending = true;
+                BeginInvoke(new Action(OpenSetup));
+            }
+
             // Deferred via BeginInvoke rather than run here directly: Form_Load fires before
             // Windows has necessarily finished activating/showing the window, so SendKeys.Send
             // (which targets whatever window currently has real OS-level keyboard focus) can
@@ -1779,6 +1790,7 @@ namespace WSJTX_Controller
                 iniFile.Write("soundEnabled_NewGrid",       soundEnabled_NewGrid.ToString());
                 iniFile.Write("soundFile_NewGrid",          soundFile_NewGrid ?? "");
                 iniFile.Write("soundEnabled_NewGridOnBand", soundEnabled_NewGridOnBand.ToString());
+                iniFile.Write("soundNewOncePerPeriod",      soundNewOncePerPeriod.ToString());
                 iniFile.Write("soundFile_NewGridOnBand",    soundFile_NewGridOnBand ?? "");
                 iniFile.Write("soundEnabled_AlwaysWanted",  soundEnabled_AlwaysWanted.ToString());
                 iniFile.Write("soundFile_AlwaysWanted",     soundFile_AlwaysWanted  ?? "");
@@ -2538,6 +2550,7 @@ namespace WSJTX_Controller
             iniFile.Write("soundEnabled_NewGrid",       soundEnabled_NewGrid.ToString());
             iniFile.Write("soundFile_NewGrid",          soundFile_NewGrid ?? "");
             iniFile.Write("soundEnabled_NewGridOnBand", soundEnabled_NewGridOnBand.ToString());
+            iniFile.Write("soundNewOncePerPeriod",      soundNewOncePerPeriod.ToString());
             iniFile.Write("soundFile_NewGridOnBand",    soundFile_NewGridOnBand ?? "");
             iniFile.Write("soundEnabled_AlwaysWanted",  soundEnabled_AlwaysWanted.ToString());
             iniFile.Write("soundFile_AlwaysWanted",     soundFile_AlwaysWanted  ?? "");
@@ -3748,6 +3761,7 @@ namespace WSJTX_Controller
         {
             guideTimer.Stop();
             optionsDlg = new OptionsDlg(wsjtxClient, this);
+            if (_openOptionsInSetupMode) { _openOptionsInSetupMode = false; optionsDlg.EnterSetupMode(); }
             // No Owner -- see the matching comment on _logbookWindow's Show() call; an owned
             // window always stays in front of its owner at the Win32 level, which breaks
             // Alt+Tab back to the main window. Controller_FormClosing already closes this
@@ -3757,12 +3771,15 @@ namespace WSJTX_Controller
 
         public void OptionsDlgClosed()
         {
+            bool closedSetup = optionsDlg?.InSetupMode ?? false;
             initialConnFaultTimer.Start();
             TopMost = alwaysOnTop;
             wsjtxClient.suspendComm   = false;
             wsjtxClient.lotwBoostEnabled = lotwBoostEnabled;
             wsjtxClient.Sounds.RefreshResourceFileCache();
             optionsDlg = null;
+            if (closedSetup) _setupPending = false;
+            if (closedSetup && !SetupComplete) ShowMsg(SetupMessage(), true);
             lookupManager?.Initialize(
                 useLookupData,
                 qrzEnabled, qrzUsername, qrzPassword, qrzCacheDays,
@@ -4437,7 +4454,15 @@ namespace WSJTX_Controller
             // through the replay harness.
             string sessionToken = TestModeGuard.IsTestMode ? null : Guid.NewGuid().ToString("N");
             _engineSessionToken = sessionToken;
-            wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid, sessionToken);
+            // Ready to operate (2026-10-01, operator): callsign, grid AND a radio with both its
+            // audio devices (RadioSetUp). Until then nothing touches a sound card -- no radio loop,
+            // no Windows volume changes, no radio status polling -- and the engine, when the
+            // callsign and grid let it start at all, keeps the logbook only (--no-radio), so the
+            // log, imports, uploads and lookups all work. Test mode keeps its own fake engine.
+            bool radioReady = RadioSetUp;
+            string configProblem = NativeEngineClient.DescribeConfigProblem(NativeEngine.MyCall, NativeEngine.MyGrid);
+            if (TestModeGuard.IsTestMode || (configProblem == null && radioReady))
+                wsjtxClient?.ConnectDirectEngine(NativeEngine.MyCall, NativeEngine.MyGrid, sessionToken);
 
             nativeEngineClient?.Dispose();
             nativeEngineClient = null;
@@ -4451,7 +4476,9 @@ namespace WSJTX_Controller
             // routes back through here), and the operator changing either selected audio device
             // (OptionsDlg.SaveRadioTab's engineIdentityChanged calls ApplyEngineMode()) -- so one
             // call site here covers all three without separate wiring at each trigger.
-            ApplyRadioMasterAudioLevels();
+            // 2026-10-01: only once the radio and its audio devices are set up (RadioSetUp) --
+            // never Windows' default device.
+            if (radioReady) ApplyRadioMasterAudioLevels();
 
             // 2026-08-19 fresh-install usability fix (release blocker): a genuine "not
             // configured yet" state, checked and handled BEFORE ever attempting Launch() --
@@ -4470,12 +4497,18 @@ namespace WSJTX_Controller
             // The moment My Call/My Grid are saved as valid, OptionsDlg's own engineIdentityChanged
             // check already calls ApplyEngineMode() again (no restart needed) -- this re-evaluates
             // the same check and proceeds to Launch() normally below.
-            string configProblem = NativeEngineClient.DescribeConfigProblem(NativeEngine.MyCall, NativeEngine.MyGrid);
-            if (configProblem != null)
+            if (configProblem != null || !radioReady)
             {
-                ShowMsg(configProblem, true);
-                return;
+                // Not while Jimmy Next is starting (setup is about to open) or while setup is open:
+                // give the operator the chance to set it up first. OptionsDlgClosed says it once
+                // if setup closes with something still missing (operator, 2026-10-01).
+                if (formLoaded && !(optionsDlg?.InSetupMode ?? false)) ShowMsg(SetupMessage(), true);
+                // No callsign/grid: no engine at all (Nexus stamps the log with the station's own
+                // callsign -- never a stand-in). No radio yet: the logbook-only engine, once the
+                // log has moved to Nexus.
+                if (configProblem != null || !(NexusLogbook.Active && NexusLogbook.Moved)) return;
             }
+            bool logbookOnly = !radioReady;
 
             // Self-sufficiency plan Phase 5: no control-channel listener to stand up anymore --
             // the native engine host builds its own Rig directly (from the CLI args
@@ -4529,7 +4562,7 @@ namespace WSJTX_Controller
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, pskReporterSnapshot,
                     dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
-                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck);
+                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-
@@ -4569,7 +4602,7 @@ namespace WSJTX_Controller
             string wanted = NativeEngineClient.BuildArgs(NativeEngine.MyCall, NativeEngine.MyGrid, NativeEngine.AudioInputDevice, jimmyPort,
                 NativeEngine.AudioOutputDevice, Radio, Decode, wsjtxClient != null && wsjtxClient.usePskReporter, dxClusterAddress, null,
                 (int)timeoutNumUpDown.Value, WsjtxClient.BuildWorkingFrequencyEntries(Frequencies),
-                NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, radioAndAudio: false);
+                NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, radioAndAudio: false, logbookOnly: !RadioSetUp);
             if (TestModeGuard.IsTestMode || !client.Running || client.LaunchKey != wanted)
             {
                 wsjtxClient?.DebugOutput("[NativeEngine] profile switch: engine settings differ -- restarting the engine");
@@ -4590,9 +4623,57 @@ namespace WSJTX_Controller
             return true;
         }
 
+        // Ready to operate, radio half (2026-10-01): a Hamlib radio model, its COM port (or an
+        // external rigctld address), and BOTH audio devices chosen -- never Windows' default.
+        internal bool RadioSetUp => RadioConnectionSetUp && RadioAudioSetUp;
+
+        internal bool SetupComplete =>
+            NativeEngineClient.DescribeConfigProblem(NativeEngine.MyCall, NativeEngine.MyGrid) == null && RadioSetUp;
+
+        // The one setup message: exactly what is still missing, and the Options page for each
+        // (setup also reopens at every start until all of it is set).
+        internal bool RadioConnectionSetUp =>
+            Radio.Mode == RadioControlMode.HamlibRigctld
+            && !string.IsNullOrWhiteSpace(Radio.RigModel)
+            && (Radio.UseExternalRigctld ? !string.IsNullOrWhiteSpace(Radio.RigctldHost) : !string.IsNullOrWhiteSpace(Radio.ComPort));
+        internal bool RadioAudioSetUp =>
+            !string.IsNullOrWhiteSpace(NativeEngine.AudioInputDevice) && !string.IsNullOrWhiteSpace(NativeEngine.AudioOutputDevice);
+
+        internal string SetupMessage()
+        {
+            var parts = new List<string>();
+            if (NativeEngineClient.DescribeConfigProblem(NativeEngine.MyCall, NativeEngine.MyGrid) != null)
+                parts.Add("your callsign and grid on the Station & Operator page");
+            if (!RadioConnectionSetUp) parts.Add("your radio on the Radio page");
+            if (!RadioAudioSetUp) parts.Add("your radio's audio devices on the Decode Engine page");
+            if (parts.Count == 0) return null;
+            string list = parts.Count == 1 ? parts[0]
+                : string.Join(", ", parts.Take(parts.Count - 1)) + ", and " + parts[parts.Count - 1];
+            return $"To begin operating, set in Options: {list}.";
+        }
+
+        // Options as setup (OptionsDlg.EnterSetupMode): Station & Operator, Radio, Decode Engine,
+        // with Back / Next / Finish. Opened at start while setup is incomplete.
+        private bool _openOptionsInSetupMode;
+        // From start until setup closes: the status line says only "Setting up Jimmy Next." -- a
+        // screen reader reads it as the main window takes focus, before setup opens.
+        private bool _setupPending;
+        // Also the whole of loading: the status line is first drawn then, before the end of load
+        // decides to open setup (it always does while setup is incomplete).
+        internal bool SetupInProgress => !formLoaded || _setupPending || (optionsDlg?.InSetupMode ?? false);
+        internal void OpenSetup()
+        {
+            if (optionsDlg != null) { optionsDlg.BringToFront(); return; }
+            _openOptionsInSetupMode = true;
+            optionsButton_Click(null, EventArgs.Empty);
+        }
+
         public bool TryApplyEngineSettingsLive()
         {
             if (TestModeGuard.IsTestMode) return false;
+            // Not set up (an audio device cleared, say): never hand a running engine an empty
+            // device -- Windows' default. The caller restarts it, logbook-only (2026-10-01).
+            if (!RadioSetUp) return false;
             var client = nativeEngineClient;
             if (client == null || !client.Running) return false;
             if (!client.ApplySettingsLive(Radio, NativeEngine.AudioInputDevice, NativeEngine.AudioOutputDevice))

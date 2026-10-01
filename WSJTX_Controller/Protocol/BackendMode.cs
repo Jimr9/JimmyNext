@@ -4,9 +4,12 @@ namespace WSJTX_Controller
     // radio state comes from the native engine's own StatusMessage broadcasts (receive-only --
     // no separate CAT link); HamlibRigctld means Jimmy/the native engine opens a real serial CAT
     // connection via Hamlib's rigctld. RadioSettings.Mode is the live, user-facing setting.
+    //
+    // 2026-10-01: the WsjtxCat value ("Receive Only") is removed -- with no CAT connection there is
+    // no radio. A profile that saved it parses as nothing and keeps the default, HamlibRigctld;
+    // whether the radio is ready is Controller.RadioSetUp.
     public enum RadioControlMode
     {
-        WsjtxCat,
         HamlibRigctld,
     }
 

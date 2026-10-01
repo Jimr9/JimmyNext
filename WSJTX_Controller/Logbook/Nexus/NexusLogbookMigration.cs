@@ -59,9 +59,11 @@ namespace WSJTX_Controller
             string contacts = marker.FirstOrDefault(l => l.StartsWith("contacts ", StringComparison.Ordinal))?.Substring(9) ?? "0";
             string differences = marker.FirstOrDefault(l => l.StartsWith("differences ", StringComparison.Ordinal))?.Substring(12) ?? "0";
             string diffText = differences == "0" ? "" : $", {differences} differences listed in the report";
+            // A new install has nothing to move: say nothing (2026-10-01 -- "New logbook ready" was
+            // heard on a first start where the operator had entered nothing at all).
             return (true, int.TryParse(contacts, out int n) && n > 0
                 ? $"Logbook moved to the new format, {n:N0} contacts checked{diffText}."
-                : "New logbook ready.");
+                : null);
         }
 
         private static string Stamp => DateTime.Now.ToString("yyyyMMdd-HHmmss");

@@ -39,6 +39,10 @@ namespace WSJTX_Controller
         // See BuildArgs / Launch.
         public string LaunchKey { get; private set; }
 
+        // Started with --no-radio (radio not set up yet): the logbook only. Radio and audio
+        // settings cannot be applied to it live -- the full engine is started instead.
+        public bool LogbookOnly { get; private set; }
+
         // Where this engine's output and an unexpected exit are reported. A profile switch hands the
         // running engine to a new main window, which points these at itself (Rebind).
         private Action<string> _debugOutput;
@@ -270,7 +274,8 @@ namespace WSJTX_Controller
         internal static string BuildArgs(string mycall, string mygrid, string audioDevice, int jimmyPort,
             string outputDevice, RadioSettings radio, DecodeSettings decode, bool pskreporter,
             string dxClusterAddress, string sessionToken, int? repeatLimit,
-            List<WorkingFreqArg> workingFrequencies, int? tuneTimeoutSeconds, bool? clockCheck, bool radioAndAudio)
+            List<WorkingFreqArg> workingFrequencies, int? tuneTimeoutSeconds, bool? clockCheck, bool radioAndAudio,
+            bool logbookOnly = false)
         {
             var args = $"--mycall {mycall} --mygrid {mygrid} --jimmy-addr 127.0.0.1:{jimmyPort} --control-port {ControlPort}";
             if (radioAndAudio && !string.IsNullOrWhiteSpace(sessionToken))
@@ -279,6 +284,10 @@ namespace WSJTX_Controller
             // in (until then a contact waits in the outbox; see NexusLogbookMigration.AutoMove).
             if (NexusLogbook.Active && NexusLogbook.Moved)
                 args += $" --log-dir {EscapeCommandLineArg(NexusLogbook.Folder)}";
+            // Radio not set up yet (Controller.RadioSetUp, 2026-10-01): the logbook and the control
+            // server only -- no radio loop, so no audio device (not even Windows' default), no CAT
+            // and no PTT. The radio and audio arguments below are left out.
+            if (logbookOnly) { args += " --no-radio"; radioAndAudio = false; }
             if (repeatLimit.HasValue)
                 args += $" --tx-watchdog-min {ComputeAutomaticTxWatchdogMinutes(repeatLimit.Value)}";
             // Alt+T tune carrier auto-release (NativeEngineSettings.TuneTimeoutSeconds, ini only).
@@ -405,7 +414,8 @@ namespace WSJTX_Controller
                             int? repeatLimit = null,
                             List<WorkingFreqArg> workingFrequencies = null,
                             int? tuneTimeoutSeconds = null,
-                            bool? clockCheck = null)
+                            bool? clockCheck = null,
+                            bool logbookOnly = false)
         {
             LastError = null;
             try
@@ -449,13 +459,14 @@ namespace WSJTX_Controller
                 // (2026-08-18) not to remove. Do not treat this as leftover dead code in a future pass
                 // without re-checking that decision first.
                 var args = BuildArgs(mycall, mygrid, audioDevice, jimmyPort, outputDevice, radio, decode, pskreporter,
-                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: true);
+                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: true, logbookOnly: logbookOnly);
                 _sessionToken = sessionToken ?? "";
+                LogbookOnly = logbookOnly;
                 // What this engine was started with, less what can change live (radio, audio, the
                 // session token): a new main window after a profile switch takes this engine over
                 // only when its own launch would say exactly the same (Controller.TryAdoptHandedOffEngine).
                 LaunchKey = BuildArgs(mycall, mygrid, audioDevice, jimmyPort, outputDevice, radio, decode, pskreporter,
-                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: false);
+                    dxClusterAddress, sessionToken, repeatLimit, workingFrequencies, tuneTimeoutSeconds, clockCheck, radioAndAudio: false, logbookOnly: logbookOnly);
                 // 2.0.58 (item 13) -- record the bundled Hamlib/rigctld runtime version once per
                 // engine launch, so a hardware tester's diag log shows exactly which Hamlib the
                 // rig's CAT/meter behaviour was seen against. Diagnostic only.
@@ -796,7 +807,7 @@ namespace WSJTX_Controller
 
         // Sends APPLY_SETTINGS to this running engine. True only on its "OK".
         public bool ApplySettingsLive(RadioSettings radio, string audioIn, string audioOut) =>
-            SendControlLine("APPLY_SETTINGS " + BuildApplySettingsJson(radio, audioIn, audioOut));
+            !LogbookOnly && SendControlLine("APPLY_SETTINGS " + BuildApplySettingsJson(radio, audioIn, audioOut));
 
         // Nexus's internet time check on the running engine. True only on its "OK".
         public bool SetClockCheckLive(bool on) => SendControlLine("SET_CLOCK_CHECK " + (on ? "on" : "off"));

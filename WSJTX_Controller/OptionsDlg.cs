@@ -34,7 +34,7 @@ namespace WSJTX_Controller
         // constants that used to live here (AdvUiTabIndex/WantedCallsTabIndex/SpotWatchTabIndex/
         // SoundsTabIndex) were already dead code before this change -- nothing ever read them --
         // so they're not being carried forward.
-        private const int HotkeysCategoryIndex = 4;
+        private const int HotkeysCategoryIndex = 3;   // 2026-10-01: Basic (was 0) is now setup's last step
 
         // Advanced UI tab — controls created dynamically in BuildAdvancedUiTab()
         private System.Windows.Forms.CheckBox advCallLayoutCheckBox;
@@ -300,12 +300,13 @@ namespace WSJTX_Controller
             ReparentControlsToDialog();
 
             // Order must match _categoryListBox.Items (OptionsDlg.Designer.cs) and
-            // HotkeysCategoryIndex above -- basicPanel first, so the very first item is
-            // already visible before subtitleLabel.Focus() below. profilesPanel is appended
+            // HotkeysCategoryIndex above -- generalPanel first (Basic left the list 2026-10-01). profilesPanel is appended
             // last, matching "Profiles" being appended last in the Designer's own item list --
             // every other category keeps its existing index unchanged.
-            var categoryPanels = new List<Control> {
-                basicPanel, generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
+            // 2026-10-01: basicPanel is no longer an Options page -- it is setup's "Operating" step
+            // (EnterSetupMode), every choice on it also set elsewhere.
+            var categoryPanels = _categoryPanels = new List<Control> {
+                generalPanel, receiveReplyPanel, transmitPanel, hotkeysPanel,
                 advUiPanel, wantedCallsPanel, spotWatchPanel, soundsPanel, radioPanel,
                 decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
                 appearancePanel, stationOperatorPanel, profilesPanel
@@ -759,9 +760,278 @@ namespace WSJTX_Controller
 
         // ===== OK / CANCEL =====
 
+        // ── Setup (2026-10-01, operator): Options as an installer -- Station & Operator, Radio,
+        // Decode Engine -- with Back / Next / Finish. The same pages, fields and save as Options;
+        // Finish is OK. Opened by Controller.OpenSetup while the callsign, grid, radio or its
+        // audio devices are missing. The step line takes focus on every step, so the screen
+        // reader says where you are; Tab goes on into the page. Enter is Next, then Finish. ──
+        private List<Control> _categoryPanels;
+        internal bool InSetupMode { get; private set; }
+        private System.Windows.Forms.GroupBox[] _setupStepGroups;
+        private System.Windows.Forms.Button _setupBackButton, _setupNextButton;
+        private int _setupStep;
+        private (Control Panel, string Title, string Hint)[] _setupSteps;
+
+        internal void EnterSetupMode()
+        {
+            // The pages' controls are built in OptionsDlg_Load (when the window first shows), so the
+            // setup pages are assembled right after it -- this handler is added after Designer's own.
+            InSetupMode = true;
+            Load += (s, e) => BuildSetupSteps();
+            Text = "Jimmy Next setup";
+            _categoryListBox.Visible = false;
+            _categoryListBox.TabStop = false;
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            _setupBackButton = new System.Windows.Forms.Button
+            {
+                Text = "&Back", Location = new System.Drawing.Point(okButton.Left - 210, okButton.Top),
+                Size = okButton.Size, Font = okButton.Font, AccessibleName = "Back",
+            };
+            _setupNextButton = new System.Windows.Forms.Button
+            {
+                Text = "&Next", Location = new System.Drawing.Point(okButton.Left - 105, okButton.Top),
+                Size = okButton.Size, Font = okButton.Font, AccessibleName = "Next",
+            };
+            _setupBackButton.Click += (s, e) => ShowSetupStep(_setupStep - 1);
+            _setupNextButton.Click += (s, e) => ShowSetupStep(_setupStep + 1);
+            Controls.Add(_setupBackButton);
+            Controls.Add(_setupNextButton);
+            okButton.Text = "&Finish";
+            okButton.AccessibleName = "Finish";
+            Shown += (s, e) => ShowSetupStep(0);
+        }
+
+        // The old Basic page as setup's last step, in the style of the newer pages: one line saying
+        // what it is, then each question as a labelled group of plain checkboxes. The SAME controls
+        // and click handlers as before -- every choice works exactly as it did. The empty "Reply to
+        // new calls" box and the two guide lines are gone.
+        private bool _plainOperatingChecks;
+
+        private void BuildOperatingStep()
+        {
+            _plainOperatingChecks = true;
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            foreach (Control old in new Control[] { subtitleLabel, label9, filterGroupBox, modeLabel, label12, label2, label4, label5 })
+                basicPanel.Controls.Remove(old);
+            int y = 8, tab = 0;
+            basicPanel.Controls.Add(new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true, Multiline = true, BorderStyle = System.Windows.Forms.BorderStyle.None,
+                BackColor = basicPanel.BackColor, ForeColor = System.Drawing.SystemColors.ControlText,
+                Location = new System.Drawing.Point(10, y), Size = new System.Drawing.Size(600, 32), TabStop = false, Font = font,
+                Text = "How you want to operate. Each can be changed later from the main window or the Call CQ and " +
+                       "Receive / Auto Reply options.",
+            });
+            y += 40;
+            void Group(string title, (CheckBox Box, string Text) a, (CheckBox Box, string Text) b)
+            {
+                var g = new System.Windows.Forms.GroupBox
+                {
+                    Text = title, Location = new System.Drawing.Point(10, y), Size = new System.Drawing.Size(600, 48),
+                    Font = font, TabIndex = tab++,
+                };
+                int x = 12, i = 0;
+                foreach (var (box, text) in new[] { a, b })
+                {
+                    basicPanel.Controls.Remove(box);
+                    box.Appearance = System.Windows.Forms.Appearance.Normal;
+                    box.FlatStyle = System.Windows.Forms.FlatStyle.Standard;
+                    box.ForeColor = System.Drawing.SystemColors.ControlText;
+                    box.BackColor = System.Drawing.Color.Transparent;
+                    box.UseVisualStyleBackColor = true;
+                    box.AutoSize = true;
+                    box.Text = text;
+                    box.AccessibleName = text;
+                    box.Font = font;
+                    box.Location = new System.Drawing.Point(x, 20);
+                    box.TabIndex = i++;
+                    g.Controls.Add(box);
+                    x += 260;
+                }
+                basicPanel.Controls.Add(g);
+                y += 56;
+            }
+            Group("Operating mode",           (callCqButton, "Call CQ"),           (listenButton, "Listen for calls"));
+            Group("When calling CQ",          (cqButton, "CQ"),                    (cqDxButton, "CQ DX"));
+            Group("Also reply to",            (dxButton, "DX stations"),          (nonDxButton, "Stations on my continent"));
+            Group("Parks on the Air",         (potaButton, "Activator"),           (hunterButton, "Hunter"));
+            Group("Reply order",              (allButton, "In the order received"), (recentButton, "Most recent first"));
+            UpdateAllButtons();
+        }
+
+        // A first setup asks only what it needs (operator, 2026-10-01): its own clean pages, each
+        // holding just the controls a first setup needs -- the SAME control objects moved over from
+        // their Options pages, so the same save code reads them on Finish. Everything else stays on
+        // its Options page. (Hiding controls inside the Options pages did not hold: a page not yet
+        // on screen reports every control invisible, and the Radio page re-shows controls to match
+        // its own settings.)
+        private System.Windows.Forms.Panel NewSetupPage() => new System.Windows.Forms.Panel
+        {
+            Dock = System.Windows.Forms.DockStyle.Fill, AutoScroll = true, BackColor = radioPanel.BackColor,
+        };
+
+        // Moves `control` onto `page` at the next row, with a label above it when `label` is given.
+        private int SetupRow(System.Windows.Forms.Panel page, int y, string label, Control control, ref int tab)
+        {
+            if (control == null) return y;
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            if (label != null)
+            {
+                page.Controls.Add(new System.Windows.Forms.Label
+                {
+                    Text = label, AutoSize = true, Location = new System.Drawing.Point(12, y), Font = font, TabStop = false,
+                });
+                y += 18;
+            }
+            control.Parent?.Controls.Remove(control);
+            control.Location = new System.Drawing.Point(12, y);
+            control.Visible = true;
+            control.TabIndex = tab++;
+            page.Controls.Add(control);
+            return y + control.Height + 12;
+        }
+
+        // Every Station & Operator field (operator, 2026-10-01) -- not the "This profile only"
+        // boxes or Open Contesting -- two to a row, in Tab order left then right.
+        private Control BuildSetupStationPage()
+        {
+            var page = NewSetupPage(); int y = 12, tab = 0;
+            var font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F);
+            void Pair(string l1, Control c1, string l2, Control c2)
+            {
+                int bottom = y;
+                foreach (var (label, control, x) in new[] { (l1, c1, 12), (l2, c2, 330) })
+                {
+                    if (control == null) continue;
+                    page.Controls.Add(new System.Windows.Forms.Label
+                    {
+                        Text = label, AutoSize = true, Location = new System.Drawing.Point(x, y), Font = font, TabStop = false,
+                    });
+                    control.Parent?.Controls.Remove(control);
+                    control.Location = new System.Drawing.Point(x, y + 18);
+                    control.Visible = true;
+                    control.TabIndex = tab++;
+                    page.Controls.Add(control);
+                    bottom = Math.Max(bottom, y + 18 + control.Height);
+                }
+                y = bottom + 12;
+            }
+            Pair("Station callsign:", _engineMyCallTextBox, "Grid locator:", _engineMyGridTextBox);
+            Pair("Operator callsign:", _stationOperatorCallTextBox, "Operator name:", _stationOperatorNameTextBox);
+            Pair("Contest-log email:", _stationContestEmailTextBox, "My continent:", _myContinentCombo);
+            Pair("State/Province:", _stationQthStateTextBox, "County:", _stationCountyTextBox);
+            Pair("ARRL/RAC section:", _stationArrlSectionTextBox, "CQ zone:", _stationCqZoneTextBox);
+            Pair("ITU zone:", _stationItuZoneTextBox, null, null);
+            // The operator callsign starts as the station callsign, filled as you leave it.
+            if (_engineMyCallTextBox != null && _stationOperatorCallTextBox != null)
+                _engineMyCallTextBox.Leave += (s, e) =>
+                {
+                    if (string.IsNullOrWhiteSpace(_stationOperatorCallTextBox.Text))
+                        _stationOperatorCallTextBox.Text = _engineMyCallTextBox.Text.Trim().ToUpperInvariant();
+                };
+            return page;
+        }
+
+        private Control BuildSetupRadioPage()
+        {
+            var page = NewSetupPage(); int y = 12, tab = 0;
+            y = SetupRow(page, y, "Rig model:", _radioRigModelCombo, ref tab);
+            y = SetupRow(page, y, "COM port:", _radioComPortTextBox, ref tab);
+            y = SetupRow(page, y, "Baud rate (blank = Hamlib's default for this rig):", _radioBaudRateTextBox, ref tab);
+            y = SetupRow(page, y, null, _radioPttEnabledCheckBox, ref tab);
+            y = SetupRow(page, y, "PTT method:", _radioPttMethodCombo, ref tab);
+            y = SetupRow(page, y, "PTT port (blank = same as CAT):", _radioPttSerialPortCombo, ref tab);
+            y = SetupRow(page, y, null, _radioModeGroupBox, ref tab);
+            y = SetupRow(page, y, null, _radioPttDataSourceCheckBox, ref tab);
+            y = SetupRow(page, y, null, _radioHaltTxOnHighSwrCheckBox, ref tab);
+            y = SetupRow(page, y, "SWR halt threshold:", _radioSwrHaltThresholdUpDown, ref tab);
+            y = SetupRow(page, y, null, _radioTestButton, ref tab);
+            return page;
+        }
+
+        private Control BuildSetupAudioPage()
+        {
+            var page = NewSetupPage(); int y = 12, tab = 0;
+            y = SetupRow(page, y, "Audio input device (from the radio):", _engineAudioDeviceCombo, ref tab);
+            y = SetupRow(page, y, "Audio output device (to the radio):", _engineAudioOutputDeviceCombo, ref tab);
+            return page;
+        }
+
+        internal void BuildSetupSteps()
+        {
+            if (_setupSteps != null) return;
+            _setupSteps = new (Control, string, string)[]
+            {
+                (BuildSetupStationPage(), "Station", "Enter your callsign and grid."),
+                (BuildSetupRadioPage(),   "Radio",   "Choose your radio model and its COM port."),
+                (BuildSetupAudioPage(),   "Audio",   "Choose your radio's audio input and output devices."),
+                (basicPanel,              "Operating", "How you want to operate."),
+            };
+            BuildOperatingStep();
+            // The first step's title before the window shows, so it is announced once.
+            Text = $"Jimmy Next setup, step 1 of {_setupSteps.Length}: {_setupSteps[0].Title}";
+            // Each page inside a group titled with its step: focus lands on the page's first
+            // field and the screen reader announces the group as it enters -- "Step 1 of 4:
+            // Station. Enter your callsign and grid. group, Station callsign edit".
+            _setupStepGroups = new System.Windows.Forms.GroupBox[_setupSteps.Length];
+            for (int i = 0; i < _setupSteps.Length; i++)
+            {
+                var (page, title, hint) = _setupSteps[i];
+                var g = new System.Windows.Forms.GroupBox
+                {
+                    Text = $"Step {i + 1} of {_setupSteps.Length}: {title}. {hint}",
+                    Dock = System.Windows.Forms.DockStyle.Fill,
+                    Font = new System.Drawing.Font("Microsoft Sans Serif", 8.25F),
+                };
+                page.Parent?.Controls.Remove(page);
+                page.Dock = System.Windows.Forms.DockStyle.Fill;
+                g.Controls.Add(page);
+                _setupStepGroups[i] = g;
+            }
+        }
+
+        // The first control on a page that takes focus, in Tab order.
+        private static Control FirstField(Control root)
+        {
+            foreach (Control c in System.Linq.Enumerable.OrderBy(System.Linq.Enumerable.Cast<Control>(root.Controls), x => x.TabIndex))
+            {
+                if (c.Visible && c.Enabled && c.TabStop && !(c is System.Windows.Forms.Label) && !(c is System.Windows.Forms.GroupBox)
+                    && !(c is System.Windows.Forms.Panel) && !(c is System.Windows.Forms.TextBox tb && tb.ReadOnly))
+                    return c;
+                var inner = FirstField(c);
+                if (inner != null) return inner;
+            }
+            return null;
+        }
+
+        private void ShowSetupStep(int step)
+        {
+            if (_setupSteps == null || step < 0 || step >= _setupSteps.Length) return;
+            _setupStep = step;
+            var (panel, title, hint) = _setupSteps[step];
+            // The step's group, straight into the page area (Operating is not in the Options list).
+            _categoryDetailHost.Controls.Clear();
+            _categoryDetailHost.Controls.Add(_setupStepGroups[step]);
+            bool last = step == _setupSteps.Length - 1;
+            _setupBackButton.Enabled = step > 0;
+            _setupNextButton.Visible = !last;
+            okButton.Visible = last;
+            AcceptButton = last ? (System.Windows.Forms.IButtonControl)okButton : _setupNextButton;
+            // Only when it changes: setting the same title again makes the screen reader say it again.
+            string stepTitle = $"Jimmy Next setup, step {step + 1} of {_setupSteps.Length}: {title}";
+            if (Text != stepTitle) Text = stepTitle;
+            var first = FirstField(_setupStepGroups[step]);
+            if (first != null) BeginInvoke(new Action(() => first.Focus()));
+        }
+
         private void okButton_Click(object sender, EventArgs e)
         {
             if (!ValidateHotkeys()) return;
+            // Setup's Finish: an empty Operator callsign starts as the Station callsign (the
+            // Station & Operator page in Options keeps them separate for a guest operator).
+            if (InSetupMode && _stationOperatorCallTextBox != null && _engineMyCallTextBox != null
+                && string.IsNullOrWhiteSpace(_stationOperatorCallTextBox.Text))
+                _stationOperatorCallTextBox.Text = _engineMyCallTextBox.Text.Trim().ToUpperInvariant();
             // Perf, 2026-09-23: every Save*Tab() below (plus SaveOptionsRelatedSettings and
             // whatever they call, e.g. SetAndPersistMyContinent/SaveHotkeyConfig) writes straight
             // to the active ini. Batched into one atomic save instead of one disk write per
@@ -1244,8 +1514,6 @@ namespace WSJTX_Controller
 
         // ===== RADIO TAB (self-sufficiency plan, Phase 1) =====
 
-        private System.Windows.Forms.RadioButton _radioWsjtxCatRb;
-        private System.Windows.Forms.RadioButton _radioHamlibRb;
         private System.Windows.Forms.ComboBox _radioRigModelCombo;
         private System.Windows.Forms.ComboBox _radioComPortTextBox;
         private System.Windows.Forms.ComboBox _radioBaudRateTextBox;
@@ -1276,8 +1544,10 @@ namespace WSJTX_Controller
         // previously a blank item with no accessible name to announce. internal (not private):
         // JimmyTests exercises the translation helpers directly.
         internal const string SystemDefaultDeviceLabel = "System default";
+        // 2026-10-01: an empty setting now shows an empty box -- "System default" (Windows'
+        // default device) is no longer offered; a saved "System default" text still stores "".
         internal static string ToDisplayDeviceName(string stored) =>
-            string.IsNullOrEmpty(stored) ? SystemDefaultDeviceLabel : stored;
+            string.IsNullOrEmpty(stored) ? "" : stored;
         internal static string ToStoredDeviceName(string display) =>
             display == SystemDefaultDeviceLabel ? "" : display;
 
@@ -1506,44 +1776,18 @@ namespace WSJTX_Controller
                 // was intentionally retired (front-panel RF output power is authoritative; Jimmy
                 // never polls or sets it). Now describes only what Hamlib rigctld actually adds:
                 // CAT frequency tracking, a real S-meter, and SWR.
-                Text           = "Choose where frequency, S-meter, and SWR readings come from. Receive Only reports " +
-                                 "whatever the native engine itself broadcasts, no separate radio connection. Hamlib " +
-                                 "rigctld adds real CAT frequency tracking and an S-meter, and connects to the radio " +
-                                 "directly. RF output power is always controlled from the radio's own front panel, " +
-                                 "never by Jimmy.",
+                Text           = "Jimmy Next controls your radio through Hamlib rigctld: frequency tracking, the " +
+                                 "S-meter, SWR and PTT. Choose your radio model and its COM port. RF output power is " +
+                                 "always controlled from the radio's own front panel, never by Jimmy.",
                 TabStop        = false,
                 Font           = font,
             };
             radioPanel.Controls.Add(instrBox);
             y += 56;
 
-            _radioWsjtxCatRb = new System.Windows.Forms.RadioButton
-            {
-                Text = "Receive Only (no separate CAT connection)",
-                Checked = ctrl.Radio.Mode == RadioControlMode.WsjtxCat,
-                Location = new System.Drawing.Point(left, y),
-                AutoSize = true,
-                TabIndex = 0,
-                Font = font,
-                AccessibleName = "Receive Only",
-            };
-            radioPanel.Controls.Add(_radioWsjtxCatRb);
-            y += 24;
-
-            _radioHamlibRb = new System.Windows.Forms.RadioButton
-            {
-                // T9 fix, 2026-08-23 (CONFIRMED bug): "power" removed -- see instrBox's own
-                // comment above.
-                Text = "Use Hamlib rigctld (frequency, S-meter, SWR; optional PTT)",
-                Checked = ctrl.Radio.Mode == RadioControlMode.HamlibRigctld,
-                Location = new System.Drawing.Point(left, y),
-                AutoSize = true,
-                TabIndex = 1,
-                Font = font,
-                AccessibleName = "Use Hamlib rigctld",
-            };
-            radioPanel.Controls.Add(_radioHamlibRb);
-            y += 32;
+            // 2026-10-01: the Receive Only / Hamlib choice is gone -- Hamlib rigctld is the only way
+            // Jimmy Next controls a radio (with no CAT connection there is no radio).
+            y += 8;
 
             var rigModelLabel = new System.Windows.Forms.Label
             {
@@ -2388,7 +2632,7 @@ namespace WSJTX_Controller
             // "3 items" / missing "x of y" position confusion for what the operator saw as 2
             // real devices -- every item now has a real name to announce, whatever the platform's
             // own item-count/position behavior otherwise does.
-            _engineAudioDeviceCombo.Items.Add(SystemDefaultDeviceLabel);
+            // 2026-10-01: no "System default" -- the radio's own device, chosen explicitly.
             bool engineSessionActive = ctrl.nativeEngineClient != null && ctrl.nativeEngineClient.Running;
             foreach (var dev in NativeEngineClient.ListAudioDevices(engineSessionActive))
                 _engineAudioDeviceCombo.Items.Add(dev);
@@ -2451,7 +2695,7 @@ namespace WSJTX_Controller
                 AccessibleName = "Audio output device",
             };
             // T13 fix, 2026-08-23: see the input combo's own comment above.
-            _engineAudioOutputDeviceCombo.Items.Add(SystemDefaultDeviceLabel);
+            // 2026-10-01: no "System default" -- the radio's own device, chosen explicitly.
             foreach (var dev in NativeEngineClient.ListOutputAudioDevices(engineSessionActive))
                 _engineAudioOutputDeviceCombo.Items.Add(dev);
             _engineAudioOutputDeviceCombo.Text = ToDisplayDeviceName(ctrl.NativeEngine.AudioOutputDevice);
@@ -4620,7 +4864,7 @@ namespace WSJTX_Controller
 
         private void SaveRadioTab()
         {
-            if (_radioWsjtxCatRb == null) return;
+            if (_radioRigModelCombo == null) return;
 
             // Snapshot everything ApplyEngineMode() actually cares about, from BEFORE this
             // save's writes below -- confirmed live, 2026-08-07: it used to run unconditionally
@@ -4650,7 +4894,7 @@ namespace WSJTX_Controller
             RadioSplitMode wasSplitMode = r.SplitMode;
             string wasPttSerialPort = r.PttSerialPort;
 
-            ctrl.Radio.Mode = _radioHamlibRb.Checked ? RadioControlMode.HamlibRigctld : RadioControlMode.WsjtxCat;
+            ctrl.Radio.Mode = RadioControlMode.HamlibRigctld;   // the only radio mode (2026-10-01)
             ctrl.Radio.RigModel = ExtractRigModelId(_radioRigModelCombo.Text.Trim());
             ctrl.Radio.ComPort = _radioComPortTextBox.Text.Trim();
             ctrl.Radio.BaudRate = _radioBaudRateTextBox.Text.Trim();
@@ -4966,6 +5210,16 @@ namespace WSJTX_Controller
             };
             soundsPanel.Controls.Add(regionsBtn);
 
+            // One sound per receive period for the four new-station sounds (2026-10-01).
+            _soundNewOncePerPeriodCb = new System.Windows.Forms.CheckBox
+            {
+                Text = "One new DXCC / new grid sound per receive period", AutoSize = true,
+                Location = new System.Drawing.Point(320, 226), TabIndex = tabIdx++, Font = font,
+                AccessibleName = "One new DXCC or new grid sound per receive period",
+                Checked = ctrl.soundNewOncePerPeriod,
+            };
+            soundsPanel.Controls.Add(_soundNewOncePerPeriodCb);
+
             _soundsListBox.SelectedIndexChanged += (s, e) => RefreshSelectedSoundFileDisplay();
             if (_soundsListBox.Items.Count > 0) _soundsListBox.SelectedIndex = 0;
             RefreshSelectedSoundFileDisplay();
@@ -5018,6 +5272,7 @@ namespace WSJTX_Controller
         }
 
         private AlertRegions _alertRegionsDraft = new AlertRegions();
+        private System.Windows.Forms.CheckBox _soundNewOncePerPeriodCb;
         private System.Windows.Forms.TextBox _alertRegionsSummary;
 
         private string CountryNameOf(int adif) =>
@@ -5026,6 +5281,7 @@ namespace WSJTX_Controller
         private void SaveSoundsTab()
         {
             ctrl.alertRegions = _alertRegionsDraft.Format();
+            if (_soundNewOncePerPeriodCb != null) ctrl.soundNewOncePerPeriod = _soundNewOncePerPeriodCb.Checked;
             if (_soundsListBox == null) return;
             if (_soundsEnabledCb != null) ctrl.soundsEnabled = _soundsEnabledCb.Checked;
             // Fix, 2026-09-14: reads the CheckedListBox's own items/checked-state directly --
@@ -5430,6 +5686,8 @@ namespace WSJTX_Controller
 
         private void SetState(CheckBox button, bool selected, bool enabled)
         {
+            // Setup's Operating step shows these as plain checkboxes: checked or not, no colours.
+            if (_plainOperatingChecks) { button.Checked = selected; return; }
             if (selected) HighLight(button, enabled);
             else Normal(button, enabled);
         }

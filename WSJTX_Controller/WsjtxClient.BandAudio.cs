@@ -248,11 +248,6 @@ namespace WSJTX_Controller
         private void RetuneBand(int targetIdx, uint freqHz, string caller, string sideband = "USB", string detail = null)
         {
             DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst} sideband:{sideband}");
-            if (ctrl.Radio.Mode != RadioControlMode.HamlibRigctld)
-            {
-                StatusView.ShowMessage("Band change needs Hamlib rigctld -- not available under WSJT-X CAT radio mode.", true);
-                return;
-            }
 
             _pendingBandIdx = targetIdx;
             string bandLabel = $"{bands[targetIdx]}m";
