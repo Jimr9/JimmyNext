@@ -102,6 +102,9 @@ namespace WSJTX_Controller
 
             if (!_wc.IsAlertCooledDown(_wc._awardAlertTimes, call, WsjtxClient.AwardAlertCooldownSecs)) return;
             _wc._awardAlertTimes[call] = DateTime.UtcNow;
+            // "One sound of each kind per receive period" covers the award sound too.
+            if (_wc.ctrl.soundEnabled_AwardNeeded && !string.IsNullOrEmpty(_wc.ctrl.soundFile_AwardNeeded)
+                && _wc.SoundedThisPeriod("AWARD_NEEDED", d)) return;
             _wc.Sounds.PlaySoundEvent(_wc.ctrl.soundEnabled_AwardNeeded, _wc.ctrl.soundFile_AwardNeeded, call, matchedRuleId);
 
             // Removed 2026-08-10: this used to also Notify.Publish(AwardsNeededEvent(...)) here,

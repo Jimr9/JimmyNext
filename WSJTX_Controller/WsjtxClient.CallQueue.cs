@@ -165,7 +165,9 @@ namespace WSJTX_Controller
                 // regardless of whether the call will be admitted to the transmit queue.
                 if (ctrl.wantedCallAnywhereEnabled && wantedCalls.Count > 0
                     && wantedCalls.Contains(deCall)
-                    && IsAlertCooledDown(_wantedAnywhereAlertTimes, deCall, WantedAnywhereAlertCooldownSecs))
+                    && IsAlertCooledDown(_wantedAnywhereAlertTimes, deCall, WantedAnywhereAlertCooldownSecs)
+                    && !(ctrl.soundEnabled_WantedAnywhere && !string.IsNullOrEmpty(ctrl.soundFile_WantedAnywhere)
+                         && SoundedThisPeriod("WANTED_ANYWHERE", emsg)))
                 {
                     Sounds.PlaySoundEvent(ctrl.soundEnabled_WantedAnywhere, ctrl.soundFile_WantedAnywhere);
                     _wantedAnywhereAlertTimes[deCall] = DateTime.UtcNow;

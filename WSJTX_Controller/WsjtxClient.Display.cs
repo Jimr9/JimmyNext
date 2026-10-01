@@ -58,25 +58,23 @@ namespace WSJTX_Controller
             switch (msg.Category)
             {
                 case CallCategory.TO_MYCALL:
-                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_CallingMe, ctrl.soundFile_CallingMe, call, "CALLING_ME");
+                    return PlayKindOnce("CALLING_ME", msg, ctrl.soundEnabled_CallingMe, ctrl.soundFile_CallingMe, call);
                 case CallCategory.NEW_COUNTRY:
-                    if (SoundedThisPeriod("NEW_COUNTRY", msg)) return true;
-                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewDxcc, ctrl.soundFile_NewDxcc, call, "NEW_COUNTRY");
+                    return PlayKindOnce("NEW_COUNTRY", msg, ctrl.soundEnabled_NewDxcc, ctrl.soundFile_NewDxcc, call);
                 case CallCategory.NEW_COUNTRY_ON_BAND:
-                    if (SoundedThisPeriod("NEW_COUNTRY_ON_BAND", msg)) return true;
-                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewDxccOnBand, ctrl.soundFile_NewDxccOnBand, call, "NEW_COUNTRY_ON_BAND");
+                    return PlayKindOnce("NEW_COUNTRY_ON_BAND", msg, ctrl.soundEnabled_NewDxccOnBand, ctrl.soundFile_NewDxccOnBand, call);
                 case CallCategory.ALWAYS_WANTED:
-                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_AlwaysWanted, ctrl.soundFile_AlwaysWanted, call, "ALWAYS_WANTED");
+                    return PlayKindOnce("ALWAYS_WANTED", msg, ctrl.soundEnabled_AlwaysWanted, ctrl.soundFile_AlwaysWanted, call);
                 case CallCategory.WANTED_CQ:
                     if (IsPotaCall(msg) && ctrl.soundEnabled_Pota && !string.IsNullOrEmpty(ctrl.soundFile_Pota))
-                        return Sounds.PlaySoundEvent(ctrl.soundEnabled_Pota, ctrl.soundFile_Pota, call, "POTA");
+                        return PlayKindOnce("POTA", msg, ctrl.soundEnabled_Pota, ctrl.soundFile_Pota, call);
                     if (_awardTagger.IsSotaCall(msg) && ctrl.soundEnabled_Sota && !string.IsNullOrEmpty(ctrl.soundFile_Sota))
-                        return Sounds.PlaySoundEvent(ctrl.soundEnabled_Sota, ctrl.soundFile_Sota, call, "SOTA");
-                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_DirectedCq, ctrl.soundFile_DirectedCq, call, "DIRECTED_CQ");
+                        return PlayKindOnce("SOTA", msg, ctrl.soundEnabled_Sota, ctrl.soundFile_Sota, call);
+                    return PlayKindOnce("DIRECTED_CQ", msg, ctrl.soundEnabled_DirectedCq, ctrl.soundFile_DirectedCq, call);
                 case CallCategory.POTA:
-                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_Pota, ctrl.soundFile_Pota, call, "POTA");
+                    return PlayKindOnce("POTA", msg, ctrl.soundEnabled_Pota, ctrl.soundFile_Pota, call);
                 case CallCategory.SOTA:
-                    return Sounds.PlaySoundEvent(ctrl.soundEnabled_Sota, ctrl.soundFile_Sota, call, "SOTA");
+                    return PlayKindOnce("SOTA", msg, ctrl.soundEnabled_Sota, ctrl.soundFile_Sota, call);
                 case CallCategory.STILL_NEEDED:
                     // The award-match sound is handled uniformly by CheckAwardAlert, which
                     // runs independently of Category/admission for every decode -- returning
@@ -92,17 +90,27 @@ namespace WSJTX_Controller
         {
             var c = msg.EffectiveClassification();
             if (c.IsNewGrid && ctrl.soundEnabled_NewGrid && !string.IsNullOrEmpty(ctrl.soundFile_NewGrid))
-                return SoundedThisPeriod("NEW_GRID", msg) || Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGrid, ctrl.soundFile_NewGrid, call, "NEW_GRID");
+                return PlayKindOnce("NEW_GRID", msg, ctrl.soundEnabled_NewGrid, ctrl.soundFile_NewGrid, call);
             if (c.IsNewGridOnBand && ctrl.soundEnabled_NewGridOnBand && !string.IsNullOrEmpty(ctrl.soundFile_NewGridOnBand))
-                return SoundedThisPeriod("NEW_GRID_ON_BAND", msg) || Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGridOnBand, ctrl.soundFile_NewGridOnBand, call, "NEW_GRID_ON_BAND");
+                return PlayKindOnce("NEW_GRID_ON_BAND", msg, ctrl.soundEnabled_NewGridOnBand, ctrl.soundFile_NewGridOnBand, call);
             return false;
         }
 
-        // "One new DXCC / new grid sound per receive period" (Options > Sounds, 2026-10-01): with
-        // it on, each of the four new-station sounds plays at most once per receive period,
-        // however many stations that period found -- a station that drops off the list and
-        // returns is new again, and its period gets its one sound. True = already sounded this
-        // period: stay quiet (and the caller skips the generic "Call added" too).
+        // "One sound of each kind per receive period" (Options > Sounds, 2026-10-01; widened from
+        // the four new-station sounds to every station sound the same day, operator: "5 POTA play
+        // the POTA sound once, not 5 times; unchecked, 5 times -- people want both"): each KIND of
+        // sound plays at most once per receive period, however many stations that period found;
+        // two different kinds still each play. A station that drops off the list and returns is
+        // new again, and its period gets its one sound. True = already sounded this period: stay
+        // quiet (and the caller skips the generic "Call added" too).
+        internal bool PlayKindOnce(string soundKey, EnqueueDecodeMessage msg, bool enabled, string file, string call)
+        {
+            // A kind that is off (or has no file) never claims the period -- the caller's
+            // fallbacks behave exactly as before.
+            if (!enabled || string.IsNullOrEmpty(file)) return Sounds.PlaySoundEvent(enabled, file, call, soundKey);
+            return SoundedThisPeriod(soundKey, msg) || Sounds.PlaySoundEvent(enabled, file, call, soundKey);
+        }
+
         private readonly Dictionary<string, long> _newSoundLastPeriod = new Dictionary<string, long>();
 
         internal bool SoundedThisPeriod(string soundKey, EnqueueDecodeMessage msg)

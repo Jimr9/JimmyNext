@@ -188,7 +188,8 @@ namespace WSJTX_Controller
                 if (_wc.ctrl.soundEnabled_OppositePeriod
                     && msg.Category != WsjtxClient.CallCategory.DEFAULT
                     && _wc.IsEvenCall(msg) == _wc.txFirst   // call is on our TX period, not our listen period
-                    && _wc.IsAlertCooledDown(_wc._oppositePeriodAlertTimes, call, WsjtxClient.OppositePeriodAlertCooldownSecs))
+                    && _wc.IsAlertCooledDown(_wc._oppositePeriodAlertTimes, call, WsjtxClient.OppositePeriodAlertCooldownSecs)
+                    && !(!string.IsNullOrEmpty(_wc.ctrl.soundFile_OppositePeriod) && _wc.SoundedThisPeriod("OPPOSITE_PERIOD", msg)))
                 {
                     _wc.Sounds.PlaySoundEvent(_wc.ctrl.soundEnabled_OppositePeriod, _wc.ctrl.soundFile_OppositePeriod);
                     _wc._oppositePeriodAlertTimes[call] = DateTime.UtcNow;

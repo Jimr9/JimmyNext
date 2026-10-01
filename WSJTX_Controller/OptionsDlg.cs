@@ -5223,12 +5223,12 @@ namespace WSJTX_Controller
             };
             soundsPanel.Controls.Add(regionsBtn);
 
-            // One sound per receive period for the four new-station sounds (2026-10-01).
+            // Each kind of station sound at most once per receive period (2026-10-01).
             _soundNewOncePerPeriodCb = new System.Windows.Forms.CheckBox
             {
-                Text = "One new DXCC / new grid sound per receive period", AutoSize = true,
+                Text = "One sound of each kind per receive period", AutoSize = true,
                 Location = new System.Drawing.Point(320, 226), TabIndex = tabIdx++, Font = font,
-                AccessibleName = "One new DXCC or new grid sound per receive period",
+                AccessibleName = "One sound of each kind per receive period",
                 Checked = ctrl.soundNewOncePerPeriod,
             };
             soundsPanel.Controls.Add(_soundNewOncePerPeriodCb);

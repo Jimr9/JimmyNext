@@ -4168,6 +4168,8 @@ namespace WSJTX_Controller
         // what lets a later empty summary render tell "the box still shows exactly what I last
         // wrote" from "something newer has replaced it" -- see ShouldClearStaleReceiveCycleSummary.
         private string _lastReceiveCycleSummaryText;
+        // Speech experiment: the routine line as last written to the box (see RenderStatusVisible).
+        private string _lastRoutineShownText;
 
         // Item 1/2 split, 2026-09-03: this is now VISIBLE + HISTORY only -- it never nudges the
         // screen reader. WsjtxClient.ShowStatus() calls this every time (so the on-screen status
@@ -4205,8 +4207,16 @@ namespace WSJTX_Controller
             {
                 this.statusText.ForeColor = foreColor;
                 this.statusText.BackColor = backColor;
-                // Speech experiment: the line holds what was last spoken (CoordinatedSpeak sets it).
+                // Speech experiment: new routine news shows the moment it happens (the operator
+                // hears a sound and reads it), but an UNCHANGED routine line no longer re-writes the
+                // box every render -- that wiped a message just heard. A spoken (joined) utterance
+                // still replaces it (CoordinatedSpeak), so reading back matches what was heard.
                 if (!queueSpeechExperiment) this.statusText.Text = statusText;
+                else if (statusText != _lastRoutineShownText)
+                {
+                    this.statusText.Text = statusText;
+                    _lastRoutineShownText = statusText;
+                }
                 this.statusText.SelectionStart = 0;
                 this.statusText.SelectionLength = 0;
                 _lastReceiveCycleSummaryText = isReceiveCycleSummaryRender ? statusText : null;
