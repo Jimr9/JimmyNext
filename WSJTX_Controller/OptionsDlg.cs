@@ -7834,6 +7834,33 @@ namespace WSJTX_Controller
             };
             deleteButton.Click += (s, e) => ctrl.DeleteProfile_Click();
             profilesPanel.Controls.Add(deleteButton);
+
+            // Customization package (CustomizationPackage, 2026-10-01): wording, notifications,
+            // sounds and optionally hotkeys and list display, to and from one file -- never radio,
+            // audio, station, logins or windows.
+            var exportButton = new System.Windows.Forms.Button
+            {
+                Text = "Export Customizations...",
+                AccessibleName = "Export customizations",
+                Location = new System.Drawing.Point(8, 222),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 4,
+                Font = font,
+            };
+            exportButton.Click += (s, e) => ctrl.ExportCustomizations_Click();
+            profilesPanel.Controls.Add(exportButton);
+
+            var importButton = new System.Windows.Forms.Button
+            {
+                Text = "Import Customizations...",
+                AccessibleName = "Import customizations",
+                Location = new System.Drawing.Point(8, 256),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 5,
+                Font = font,
+            };
+            importButton.Click += (s, e) => ctrl.ImportCustomizations_Click();
+            profilesPanel.Controls.Add(importButton);
         }
 
         // Tests QRZ.com login (username/password) as before, and -- if a Logbook API key

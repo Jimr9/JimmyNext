@@ -31,6 +31,10 @@
 - Switching profiles no longer restarts the engine when only the radio, audio or internet time
   check differ. A crash when switching profiles is fixed.
 - "Save current configuration first" keeps the choice you made.
+- **Export and Import Customizations** (Options, Profiles): share your notifications and sounds
+  -- and, if you choose, hotkeys and list display -- with another operator as one file. Your own
+  sound files go inside it. Radio, audio, station, logins and windows are never included. Import
+  asks what to bring in, backs up your profile first, and reloads.
 
 ## Smart Mode
 

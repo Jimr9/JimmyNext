@@ -1592,6 +1592,7 @@ static class JimmyTests
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
         WordingFileTests();
+        CustomizationPackageTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
         ReportClockStatusTests();
@@ -18953,6 +18954,77 @@ static class JimmyTests
             Check("every entry name is unique", Wording.Known.Select(k => k.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count() == Wording.Known.Length, true);
         }
         finally { Wording.SetForTest(null); }
+    }
+
+    // Customization package (2026-10-01): settings safety -- only the allowed parts travel, a
+    // hand-edited package can't bring in anything else, and import replaces only what was chosen.
+    static void CustomizationPackageTests()
+    {
+        Console.WriteLine("\n── Customization package ──");
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy_custpkg_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string mySound = Path.Combine(dir, "mine.wav");
+            File.WriteAllBytes(mySound, new byte[] { 1, 2, 3 });
+            var src = new IniFile(Path.Combine(dir, "sender.ini"));
+            src.Write("notifyTemplate_CallingMe", "{Call} calls");
+            src.Write("soundFile_Logged", mySound);
+            src.Write("rawShowGrid", "False");
+            src.Write("qrzPassword", "secret");
+            src.Write("radioComPort", "COM7");
+            src.Write("nativeEngineAudioDevice", "Speakers");
+            src.Write("windowPosX", "40");
+            src.Write("EnableTx", "123", "Hotkeys");
+            string wording = Path.Combine(dir, "Wording.txt");
+            File.WriteAllText(wording, "Side.RX1 = RX even");
+
+            var parts = CustomizationParts.Wording | CustomizationParts.Notifications | CustomizationParts.Sounds;
+            var pkg = CustomizationPackage.FromProfile(src.FilePath, wording, parts, Path.Combine(dir, "install", "Resources", "Sounds"));
+            string zip = Path.Combine(dir, "out.zip");
+            pkg.Save(zip);
+            var back = CustomizationPackage.Load(zip);
+            Check("export: logins, radio, audio, window, unchosen hotkeys and list display stay home",
+                !back.Settings.ContainsKey("qrzPassword") && !back.Settings.ContainsKey("radioComPort") && !back.Settings.ContainsKey("nativeEngineAudioDevice")
+                && !back.Settings.ContainsKey("windowPosX") && back.Hotkeys.Count == 0 && !back.Settings.ContainsKey("rawShowGrid"), true);
+            Check("export: notifications, wording and my own sound file travel",
+                back.Settings.ContainsKey("notifyTemplate_CallingMe") && back.WordingText == "Side.RX1 = RX even"
+                && back.Settings["soundFile_Logged"] == "mine.wav" && back.SoundFiles.ContainsKey("mine.wav"), true);
+
+            // A hand-edited package: forbidden keys are dropped on the way in.
+            string evil = Path.Combine(dir, "evil.zip");
+            using (var z = System.IO.Compression.ZipFile.Open(evil, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                void Add(string n, string t) { using (var w = new StreamWriter(z.CreateEntry(n).Open())) w.Write(t); }
+                Add("Jimmy Next customizations.txt", "format=1\r\nparts=Notifications, Sounds\r\n");
+                Add("settings.ini", "[Settings]\r\nnotifyEnabled_X=False\r\nradioComPort=COM9\r\nqrzPassword=x\r\nsoundFile_Logged=..\\..\\evil.wav\r\n");
+                Add("Sounds/../../evil.exe", "x");
+            }
+            var bad = CustomizationPackage.Load(evil);
+            Check("import: a hand-edited file can't bring in radio or login settings, or a non-sound file",
+                !bad.Settings.ContainsKey("radioComPort") && !bad.Settings.ContainsKey("qrzPassword") && bad.SoundFiles.Count == 0
+                && bad.Settings.ContainsKey("notifyEnabled_X"), true);
+
+            // Apply to a receiver: only the chosen parts change, the rest is untouched, backup first.
+            var dst = new IniFile(Path.Combine(dir, "receiver.ini"));
+            dst.Write("notifyTemplate_Old", "old");
+            dst.Write("radioComPort", "COM3");
+            dst.Write("soundFile_Logged", "echo.wav");
+            dst.Write("rawShowGrid", "True");
+            string data = Path.Combine(dir, "data");
+            Directory.CreateDirectory(data);
+            string backup = CustomizationPackage.Backup(dst.FilePath, Path.Combine(data, "Wording.txt"), Path.Combine(data, "Backups"));
+            back.ApplyTo(dst, CustomizationParts.Notifications | CustomizationParts.Sounds, data);
+            var after = new IniFile(dst.FilePath);
+            Check("import: the chosen parts replace mine, everything else is untouched",
+                after.Read("notifyTemplate_CallingMe") == "{Call} calls" && string.IsNullOrEmpty(after.Read("notifyTemplate_Old"))
+                && after.Read("radioComPort") == "COM3" && after.Read("rawShowGrid") == "True"
+                && !File.Exists(Path.Combine(data, "Wording.txt")), true);
+            Check("import: my own sound lands in the data folder and is used from there; backup made",
+                after.Read("soundFile_Logged") == Path.Combine(data, "Sounds", "mine.wav") && File.Exists(Path.Combine(data, "Sounds", "mine.wav"))
+                && File.Exists(Path.Combine(backup, "receiver.ini")), true);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
     // TIME_ON is when the station was handed to the contact (2026-09-30, WB8JUI: answered at

@@ -2281,6 +2281,150 @@ namespace WSJTX_Controller
             }
         }
 
+        // Customization package (CustomizationPackage): Options > Profiles' Export button. Writes
+        // the chosen parts of the active profile, plus the wording file, to one zip file.
+        internal void ExportCustomizations_Click()
+        {
+            // Wording is offered only when the wording file changes something: it is not public.
+            var all = (Wording.HasOverrides ? CustomizationParts.Wording : CustomizationParts.None)
+                    | CustomizationParts.Notifications | CustomizationParts.Sounds
+                    | CustomizationParts.Hotkeys | CustomizationParts.ListDisplay;
+            var parts = PromptForParts("Export Customizations",
+                "Choose what to export. Radio, audio, station, logins and windows are never included.",
+                all, CustomizationParts.Wording | CustomizationParts.Notifications | CustomizationParts.Sounds);
+            if (parts == CustomizationParts.None) return;
+
+            using (var sfd = new SaveFileDialog
+            {
+                Title = "Export customizations",
+                Filter = CustomizationPackage.FileFilter,
+                FileName = CustomizationPackage.DefaultFileName,
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                OverwritePrompt = true,
+            })
+            {
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    SaveAllSettingsToIniFile();   // export what is in effect now, as Save Profile As does
+                    if (iniFile == null) throw new InvalidOperationException("no active settings file");
+                    var pkg = CustomizationPackage.FromProfile(iniFile.FilePath,
+                        Path.Combine(ProfilesAppDataPath(), Wording.FileName), parts, NotificationSounds.SoundsFolder);
+                    pkg.Save(sfd.FileName);
+                    ShowMsg(Wording.Fill("Msg.CustomizationsExported", ("Parts", CustomizationPackage.Describe(parts))), false);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"Could not export customizations: {ex.Message}", "Export Customizations",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        // Options > Profiles' Import button. Reads a package, lets the operator choose which of its
+        // parts to take, backs up the active profile and wording file, applies the parts to the
+        // active profile and reloads it (the radio and audio settings are never touched).
+        internal void ImportCustomizations_Click()
+        {
+            string file;
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "Import customizations",
+                Filter = CustomizationPackage.FileFilter,
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            })
+            {
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+                file = ofd.FileName;
+            }
+
+            CustomizationPackage pkg;
+            try { pkg = CustomizationPackage.Load(file); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not import that file: {ex.Message}.", "Import Customizations",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            var parts = PromptForParts("Import Customizations", "Choose what to import into the current profile.",
+                pkg.Parts, pkg.Parts & ~(CustomizationParts.Hotkeys | CustomizationParts.ListDisplay));
+            if (parts == CustomizationParts.None) return;
+
+            string profile = ActiveProfileDisplayName();
+            var confirm = MessageBox.Show(this,
+                $"Import {CustomizationPackage.Describe(parts)} into profile '{profile}'? Your current settings are backed up first, and Jimmy Next reloads.",
+                "Import Customizations", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (confirm != DialogResult.Yes) return;
+
+            try
+            {
+                SaveAllSettingsToIniFile();   // this session's changes are kept, and in the backup
+                if (iniFile == null) throw new InvalidOperationException("no active settings file");
+                string dataFolder = ProfilesAppDataPath();
+                string backup = CustomizationPackage.Backup(iniFile.FilePath, Path.Combine(dataFolder, Wording.FileName),
+                    Path.Combine(dataFolder, "Backups"));
+                pkg.ApplyTo(iniFile, parts, dataFolder);
+                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} customizations imported ({CustomizationPackage.Describe(parts)}) from '{file}' into '{profile}'; backup: {backup}");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not import customizations: {ex.Message}", "Import Customizations",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            // The imported settings are on disk; closing must not write this window's older copy
+            // over them. Reloading picks them up (engine handed over, as a profile switch does).
+            _suppressSettingsSaveOnExit = true;
+            SwitchProfileInPlace();
+        }
+
+        // One checkbox per available part, the defaults checked; returns the parts left checked
+        // (None on Cancel or none checked).
+        private CustomizationParts PromptForParts(string title, string prompt, CustomizationParts available, CustomizationParts defaults)
+        {
+            var order = new[] { CustomizationParts.Wording, CustomizationParts.Notifications, CustomizationParts.Sounds,
+                                CustomizationParts.Hotkeys, CustomizationParts.ListDisplay };
+            var shown = order.Where(p => available.HasFlag(p)).ToList();
+            using (var dlg = new Form
+            {
+                Text = title,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false,
+                MaximizeBox = false,
+                ShowInTaskbar = false,
+                ClientSize = new Size(360, 90 + shown.Count * 26),
+            })
+            {
+                var label = new Label { Text = prompt, Location = new Point(10, 10), Size = new Size(340, 32) };
+                dlg.Controls.Add(label);
+                var boxes = new List<(CheckBox Box, CustomizationParts Part)>();
+                int y = 46;
+                foreach (var p in shown)
+                {
+                    string name = CustomizationPackage.Describe(p);
+                    name = char.ToUpper(name[0]) + name.Substring(1);
+                    var cb = new CheckBox { Text = name, AccessibleName = name, Checked = defaults.HasFlag(p), Location = new Point(14, y), AutoSize = true };
+                    dlg.Controls.Add(cb);
+                    boxes.Add((cb, p));
+                    y += 26;
+                }
+                var okButton = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(190, y + 6), Width = 75 };
+                var cancelButton = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(275, y + 6), Width = 75 };
+                dlg.Controls.Add(okButton);
+                dlg.Controls.Add(cancelButton);
+                dlg.AcceptButton = okButton;
+                dlg.CancelButton = cancelButton;
+                if (boxes.Count > 0) dlg.ActiveControl = boxes[0].Box;
+                if (dlg.ShowDialog(this) != DialogResult.OK) return CustomizationParts.None;
+                var chosen = CustomizationParts.None;
+                foreach (var (box, part) in boxes) if (box.Checked) chosen |= part;
+                return chosen;
+            }
+        }
+
         // Closes this window and lets Program.Main open a fresh one with the profile just chosen,
         // in the same program -- the running engine handed over rather than restarted. The normal
         // FormClosing path runs (settings saved or not, as chosen; transmit halted in Closing()).

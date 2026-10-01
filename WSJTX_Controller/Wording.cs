@@ -117,6 +117,7 @@ namespace WSJTX_Controller
             ("Msg.LogbookSyncError", "Logbook auto-sync error: {Error}", "logbook auto-sync failed"),
             ("Msg.ProfileSaved", "Profile '{Profile}' saved.", "a profile was saved"),
             ("Msg.ProfileDeleted", "Profile '{Profile}' deleted.", "a profile was deleted"),
+            ("Msg.CustomizationsExported", "Exported {Parts}.", "customizations were exported"),
             ("Msg.SharedSettingsNotSaved", "Shared settings could not be saved, see the crash log", "the shared settings move-over failed"),
             ("Msg.EngineRestarting", "Native engine host stopped unexpectedly -- restarting ({Attempt}/{Max})...", "the engine stopped and is restarting"),
             ("Msg.HotkeysUnassigned", "New shortcut(s) left unassigned because your custom keys already use them: {Names}. Set them in Options, Hotkeys.", "new hotkeys clashed with yours"),
@@ -285,6 +286,9 @@ namespace WSJTX_Controller
             }
             return d;
         }
+
+        // True when the file changes at least one entry (the Export prompt offers wording only then).
+        internal static bool HasOverrides => _overrides.Count > 0;
 
         internal static void SetForTest(Dictionary<string, string> overrides) =>
             _overrides = overrides ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

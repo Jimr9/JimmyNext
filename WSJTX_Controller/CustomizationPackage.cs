@@ -1,0 +1,335 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+
+namespace WSJTX_Controller
+{
+    // What a customization package can carry; the operator picks which, each time.
+    [Flags]
+    internal enum CustomizationParts
+    {
+        None = 0,
+        Wording = 1,
+        Notifications = 2,
+        Sounds = 4,
+        Hotkeys = 8,
+        ListDisplay = 16,
+    }
+
+    // Customization package (operator request, 2026-10-01): one zip file that carries the
+    // wording file, notifications, sounds and -- if chosen -- hotkeys and list display to another
+    // operator. Only keys on the allowed lists below go out or come in: an allowed list, not a
+    // blocked one, so a setting added later (a password, a radio port) can never travel by
+    // accident. Radio, audio, station, callsign, logins, windows and the logbook never do.
+    // Import re-checks every key against the same lists, so a hand-edited file can't set them
+    // either. Entry names inside the zip are never used as paths (sound files keep only their
+    // bare file name).
+    internal sealed class CustomizationPackage
+    {
+        internal const int FormatVersion = 1;
+        internal const string FileFilter = "Jimmy Next customizations (*.zip)|*.zip";
+        internal const string DefaultFileName = "Jimmy Next customizations.zip";
+        private const string ManifestEntry = "Jimmy Next customizations.txt";
+        private const string SettingsEntry = "settings.ini";
+        private const string WordingEntry = "Wording.txt";
+        private const string SoundsPrefix = "Sounds/";
+        private const string SettingsSection = "Settings";
+        private const string HotkeysSection = "Hotkeys";
+        private const long MaxSoundBytes = 10L * 1024 * 1024;
+        private const long MaxTextBytes = 2L * 1024 * 1024;
+
+        internal CustomizationParts Parts;
+        internal readonly Dictionary<string, string> Settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        internal readonly Dictionary<string, string> Hotkeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        internal string WordingText;
+        internal readonly Dictionary<string, byte[]> SoundFiles = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
+
+        // ---- The allowed lists ----
+
+        private static readonly string[] NotificationKeys =
+        {
+            "routineStatusSpeakWhen", "routineStatusCondition", "routineStatusDuringQso",
+            "announceImportantAlertsWhenFocusElsewhere", "suppressReceiveNotificationsDuringTx",
+            "notificationJoinOrder", "notificationHistoryIncludeRoutineStatus",
+            "spaceCallsignsAndGrids", "cmdPrompts",
+        };
+        private static readonly string[] SoundKeys =
+        {
+            "soundsEnabled", "soundNewOncePerPeriod", "playMyCall", "playLogged", "playCallAdded", "alertRegions",
+        };
+        private static readonly string[] ListDisplayKeys =
+        {
+            "rawNewestFirst", "rawMaxRows", "callWaitingRowOrder", "rawDecodeRowOrder", "spotWatchRowOrder",
+            "spotWatchSortKey", "listFontSize", "listBackColor", "listForeColor", "listAltRowColor", "showUsState",
+        };
+
+        // Which part a profile setting belongs to; None = it never travels.
+        internal static CustomizationParts PartOf(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key)) return CustomizationParts.None;
+            bool Starts(string p) => key.StartsWith(p, StringComparison.OrdinalIgnoreCase);
+            bool In(string[] list) => list.Contains(key, StringComparer.OrdinalIgnoreCase);
+            if (Starts("notify") || In(NotificationKeys)) return CustomizationParts.Notifications;
+            if (Starts("soundEnabled_") || Starts("soundFile_") || In(SoundKeys)) return CustomizationParts.Sounds;
+            if (Starts("rawShow") || Starts("rawOnly") || Starts("alertFore_") || Starts("alertBack_") || In(ListDisplayKeys))
+                return CustomizationParts.ListDisplay;
+            return CustomizationParts.None;
+        }
+
+        private static bool IsHotkeyEntry(string key, string value) =>
+            Enum.TryParse(key, false, out HotkeyAction _) && int.TryParse(value, out _);
+
+        // "wording, notifications and sounds"
+        internal static string Describe(CustomizationParts parts)
+        {
+            var names = new List<string>();
+            if (parts.HasFlag(CustomizationParts.Wording)) names.Add("wording");
+            if (parts.HasFlag(CustomizationParts.Notifications)) names.Add("notifications");
+            if (parts.HasFlag(CustomizationParts.Sounds)) names.Add("sounds");
+            if (parts.HasFlag(CustomizationParts.Hotkeys)) names.Add("hotkeys");
+            if (parts.HasFlag(CustomizationParts.ListDisplay)) names.Add("list display");
+            if (names.Count == 0) return "nothing";
+            return names.Count == 1 ? names[0] : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[names.Count - 1];
+        }
+
+        internal static string MainSection => Assembly.GetExecutingAssembly().GetName().Name;
+
+        // ---- Export ----
+
+        // From the active profile ini (flushed by the caller first) and the wording file.
+        // installSoundsFolder: Jimmy Next's own Resources\Sounds -- shipped sounds travel by name
+        // only; a sound file of the operator's own goes inside the package.
+        internal static CustomizationPackage FromProfile(string iniPath, string wordingPath, CustomizationParts parts,
+            string installSoundsFolder, string mainSection = null)
+        {
+            var pkg = new CustomizationPackage { Parts = parts };
+            var ini = ReadIni(File.Exists(iniPath) ? File.ReadAllLines(iniPath) : new string[0]);
+            if (ini.TryGetValue(mainSection ?? MainSection, out var main))
+            {
+                foreach (var kv in main)
+                {
+                    var part = PartOf(kv.Key);
+                    if (part == CustomizationParts.None || !parts.HasFlag(part)) continue;
+                    string value = kv.Value;
+                    if (part == CustomizationParts.Sounds && kv.Key.StartsWith("soundFile_", StringComparison.OrdinalIgnoreCase))
+                        value = PortableSound(value, installSoundsFolder, pkg.SoundFiles);
+                    pkg.Settings[kv.Key] = value;
+                }
+            }
+            if (parts.HasFlag(CustomizationParts.Hotkeys) && ini.TryGetValue(HotkeysSection, out var hk))
+                foreach (var kv in hk)
+                    if (IsHotkeyEntry(kv.Key, kv.Value)) pkg.Hotkeys[kv.Key] = kv.Value;
+            if (parts.HasFlag(CustomizationParts.Wording))
+                pkg.WordingText = File.Exists(wordingPath) ? File.ReadAllText(wordingPath) : "";
+            return pkg;
+        }
+
+        // A sound setting as it travels: a bare file name. A file of the operator's own (outside
+        // Jimmy Next's install) is added to the package; a shipped one resolves by name anywhere.
+        private static string PortableSound(string value, string installSoundsFolder, Dictionary<string, byte[]> files)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "";
+            if (!Path.IsPathRooted(value)) return value;
+            string name = Path.GetFileName(value);
+            try
+            {
+                string installRoot = Path.GetDirectoryName(Path.GetFullPath(installSoundsFolder)) + Path.DirectorySeparatorChar;
+                bool shipped = Path.GetFullPath(value).StartsWith(installRoot, StringComparison.OrdinalIgnoreCase);
+                if (!shipped && File.Exists(value) && new FileInfo(value).Length <= MaxSoundBytes && !files.ContainsKey(name))
+                    files[name] = File.ReadAllBytes(value);
+            }
+            catch { }
+            return name;
+        }
+
+        internal void Save(string zipPath)
+        {
+            string temp = zipPath + ".tmp";
+            if (File.Exists(temp)) File.Delete(temp);
+            using (var zip = ZipFile.Open(temp, ZipArchiveMode.Create))
+            {
+                AddText(zip, ManifestEntry,
+                    "Jimmy Next customizations\r\n" +
+                    $"format={FormatVersion}\r\n" +
+                    $"parts={Parts}\r\n" +
+                    $"made by={Assembly.GetExecutingAssembly().GetName().Name} {Assembly.GetExecutingAssembly().GetName().Version}\r\n" +
+                    "Holds no radio, audio, station, login or window settings.\r\n");
+                var sb = new StringBuilder();
+                sb.AppendLine("[" + SettingsSection + "]");
+                foreach (var kv in Settings.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)) sb.AppendLine(kv.Key + "=" + kv.Value);
+                if (Parts.HasFlag(CustomizationParts.Hotkeys))
+                {
+                    sb.AppendLine("[" + HotkeysSection + "]");
+                    foreach (var kv in Hotkeys.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase)) sb.AppendLine(kv.Key + "=" + kv.Value);
+                }
+                AddText(zip, SettingsEntry, sb.ToString());
+                if (Parts.HasFlag(CustomizationParts.Wording)) AddText(zip, WordingEntry, WordingText ?? "");
+                if (Parts.HasFlag(CustomizationParts.Sounds))
+                    foreach (var kv in SoundFiles)
+                    {
+                        var e = zip.CreateEntry(SoundsPrefix + kv.Key);
+                        using (var s = e.Open()) s.Write(kv.Value, 0, kv.Value.Length);
+                    }
+            }
+            if (File.Exists(zipPath)) File.Delete(zipPath);
+            File.Move(temp, zipPath);
+        }
+
+        private static void AddText(ZipArchive zip, string name, string text)
+        {
+            var e = zip.CreateEntry(name);
+            using (var w = new StreamWriter(e.Open(), new UTF8Encoding(false))) w.Write(text);
+        }
+
+        // ---- Import ----
+
+        // Reads and checks a package; throws InvalidDataException with a plain reason when it is
+        // not one, or is from a newer format. Everything not on the allowed lists is dropped here.
+        internal static CustomizationPackage Load(string zipPath)
+        {
+            using (var zip = ZipFile.OpenRead(zipPath))
+            {
+                var manifest = zip.GetEntry(ManifestEntry);
+                if (manifest == null) throw new InvalidDataException("it is not a Jimmy Next customization file");
+                var info = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string line in ReadText(manifest).Split('\n'))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq > 0) info[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+                }
+                if (!info.TryGetValue("format", out string f) || !int.TryParse(f, out int format))
+                    throw new InvalidDataException("it is not a Jimmy Next customization file");
+                if (format > FormatVersion) throw new InvalidDataException("it was made by a newer version of Jimmy Next");
+                info.TryGetValue("parts", out string partsText);
+                Enum.TryParse(partsText ?? "", out CustomizationParts parts);
+
+                var pkg = new CustomizationPackage();
+                var settings = zip.GetEntry(SettingsEntry);
+                if (settings != null)
+                {
+                    var ini = ReadIni(ReadText(settings).Split('\n'));
+                    if (ini.TryGetValue(SettingsSection, out var main))
+                        foreach (var kv in main)
+                        {
+                            var part = PartOf(kv.Key);
+                            if (part != CustomizationParts.None && parts.HasFlag(part)) pkg.Settings[kv.Key] = kv.Value;
+                        }
+                    if (parts.HasFlag(CustomizationParts.Hotkeys) && ini.TryGetValue(HotkeysSection, out var hk))
+                        foreach (var kv in hk)
+                            if (IsHotkeyEntry(kv.Key, kv.Value)) pkg.Hotkeys[kv.Key] = kv.Value;
+                }
+                var wording = zip.GetEntry(WordingEntry);
+                if (parts.HasFlag(CustomizationParts.Wording) && wording != null) pkg.WordingText = ReadText(wording);
+                if (parts.HasFlag(CustomizationParts.Sounds))
+                    foreach (var e in zip.Entries)
+                    {
+                        if (!e.FullName.StartsWith(SoundsPrefix, StringComparison.OrdinalIgnoreCase) || e.Length > MaxSoundBytes) continue;
+                        string name = SafeFileName(e.FullName.Substring(SoundsPrefix.Length));
+                        if (name == null) continue;
+                        using (var s = e.Open())
+                        using (var ms = new MemoryStream()) { s.CopyTo(ms); pkg.SoundFiles[name] = ms.ToArray(); }
+                    }
+
+                // What the file actually holds.
+                if (pkg.WordingText != null) pkg.Parts |= CustomizationParts.Wording;
+                foreach (var key in pkg.Settings.Keys) pkg.Parts |= PartOf(key);
+                if (pkg.Hotkeys.Count > 0) pkg.Parts |= CustomizationParts.Hotkeys;
+                if (pkg.Parts == CustomizationParts.None) throw new InvalidDataException("it holds nothing to import");
+                return pkg;
+            }
+        }
+
+        private static string ReadText(ZipArchiveEntry e)
+        {
+            if (e.Length > MaxTextBytes) throw new InvalidDataException($"'{e.Name}' is too large");
+            using (var r = new StreamReader(e.Open(), Encoding.UTF8)) return r.ReadToEnd();
+        }
+
+        // A bare .wav file name, or null.
+        private static string SafeFileName(string name)
+        {
+            name = Path.GetFileName((name ?? "").Replace('\\', '/').Split('/').Last());
+            if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
+            return name.EndsWith(".wav", StringComparison.OrdinalIgnoreCase) ? name : null;
+        }
+
+        // Copies the profile ini and the wording file aside; returns the backup folder.
+        internal static string Backup(string iniPath, string wordingPath, string backupsRoot)
+        {
+            string dir = Path.Combine(backupsRoot, "before-import-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            Directory.CreateDirectory(dir);
+            if (File.Exists(iniPath)) File.Copy(iniPath, Path.Combine(dir, Path.GetFileName(iniPath)), true);
+            if (File.Exists(wordingPath)) File.Copy(wordingPath, Path.Combine(dir, Path.GetFileName(wordingPath)), true);
+            return dir;
+        }
+
+        // Applies the chosen parts to the active profile: each chosen settings part replaces that
+        // part as a whole (a setting the sender left at its default goes back to the default
+        // here), never touching any other setting. Sound files land in <dataFolder>\Sounds.
+        internal void ApplyTo(IniFile ini, CustomizationParts chosen, string dataFolder, string mainSection = null)
+        {
+            chosen &= Parts;
+            var existing = ReadIni(File.Exists(ini.FilePath) ? File.ReadAllLines(ini.FilePath) : new string[0]);
+            existing.TryGetValue(mainSection ?? MainSection, out var main);
+
+            string soundsDir = Path.Combine(dataFolder, "Sounds");
+            if (chosen.HasFlag(CustomizationParts.Sounds) && SoundFiles.Count > 0)
+            {
+                Directory.CreateDirectory(soundsDir);
+                foreach (var kv in SoundFiles) File.WriteAllBytes(Path.Combine(soundsDir, kv.Key), kv.Value);
+            }
+            if (chosen.HasFlag(CustomizationParts.Wording) && WordingText != null)
+                File.WriteAllText(Path.Combine(dataFolder, Wording.FileName), WordingText, new UTF8Encoding(false));
+
+            using (var batch = ini.BeginBatchScope())
+            {
+                foreach (var part in new[] { CustomizationParts.Notifications, CustomizationParts.Sounds, CustomizationParts.ListDisplay })
+                {
+                    if (!chosen.HasFlag(part)) continue;
+                    if (main != null)
+                        foreach (var key in main.Keys.Where(k => PartOf(k) == part).ToList()) ini.DeleteKey(key);
+                    foreach (var kv in Settings.Where(s => PartOf(s.Key) == part))
+                    {
+                        string value = kv.Value;
+                        if (part == CustomizationParts.Sounds && SoundFiles.ContainsKey(value ?? "")) value = Path.Combine(soundsDir, value);
+                        ini.Write(kv.Key, value);
+                    }
+                }
+                if (chosen.HasFlag(CustomizationParts.Hotkeys))
+                {
+                    ini.DeleteSection(HotkeysSection);
+                    foreach (var kv in Hotkeys) ini.Write(kv.Key, kv.Value, HotkeysSection);
+                }
+                batch.Commit();
+            }
+        }
+
+        // section -> key -> value, the way Windows reads an ini: '[' starts a section, ';' a
+        // comment, the first '=' splits key and value, both trimmed.
+        internal static Dictionary<string, Dictionary<string, string>> ReadIni(IEnumerable<string> lines)
+        {
+            var result = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> current = null;
+            foreach (string raw in lines)
+            {
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith(";")) continue;
+                if (line.StartsWith("[") && line.EndsWith("]"))
+                {
+                    string name = line.Substring(1, line.Length - 2).Trim();
+                    if (!result.TryGetValue(name, out current))
+                        result[name] = current = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    continue;
+                }
+                int eq = line.IndexOf('=');
+                if (eq <= 0 || current == null) continue;
+                current[line.Substring(0, eq).Trim()] = line.Substring(eq + 1).Trim();
+            }
+            return result;
+        }
+    }
+}
