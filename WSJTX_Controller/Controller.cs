@@ -328,14 +328,18 @@ namespace WSJTX_Controller
 
         // Lookup / Data settings
         public LookupManager    lookupManager;
-        public bool             useLookupData           = false;
+        // On by default (operator, 2026-10-01): a new install works with the FCC license
+        // database and the LoTW users list from the first start. QRZ stays off until a login
+        // is entered, so nothing account-backed goes online on its own. A profile that has
+        // saved these keeps its own choice.
+        public bool             useLookupData           = true;
         public bool             qrzEnabled              = false;
         public string           qrzUsername             = "";
         public string           qrzPassword             = "";
         public int              qrzCacheDays            = 7;
         public QrzLookupPolicy  qrzLookupPolicy         = QrzLookupPolicy.Disabled;
         public int              qrzMinIntervalSeconds   = 10;
-        public bool             lotwEnabled             = false;
+        public bool             lotwEnabled             = true;
         public bool             lotwBoostEnabled        = false;
         public int              lotwRefreshDays         = 30;
         // No clubLogEnabled/clubLogApiKey fields: Club Log country data is
@@ -343,10 +347,11 @@ namespace WSJTX_Controller
         // per-user credential -- the key is Jimmy's application key
         // (ClubLogAppKey.Resolve()) and downloads happen unconditionally,
         // subject only to the refresh interval below. See RuleUniverse.cs.
-        public int              clubLogRefreshDays      = 30;
-        // Opt-in (default off) since the full download is ~170MB -- unlike Club
-        // Log's small country file, this isn't unconditional background infrastructure.
-        public bool             fccUlsEnabled           = false;
+        public int              clubLogRefreshDays      = 7;    // small file, updated as exceptions come in
+        // On by default since 2026-10-01 (was opt-in): ~170MB, downloaded in the background at
+        // the first start and then every fccUlsRefreshDays; until it lands, US state comes from
+        // the grid as before.
+        public bool             fccUlsEnabled           = true;
         public int              fccUlsRefreshDays       = 7;
 
         private bool formLoaded = false;

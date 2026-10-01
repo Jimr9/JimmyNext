@@ -2286,7 +2286,21 @@ namespace WSJTX_Controller
                     ShowStatus();
                 }
 
-                if (!txEnabled && deCall != null && !(idSem.Is73 || idSem.IsRr73) && !ignore)
+                // KF0MZU, 2026-10-01: a station already logged this mode/band repeating its report
+                // (R-NN or bare) did not copy our RR73 -- it belongs to the contact just logged, not
+                // a new call (a new contact never opens with a report). Nexus keeps that contact
+                // Confirming and answers the repeat with one RR73 (WSJT-X's own behaviour), so it is
+                // not queued; it is noted for the runaway-Tx backstop, which must not count that
+                // answering RR73 as an orphan (WsjtxClient.Direct.cs, _closingRepeatCall).
+                bool closingRepeat = !ignore && (idSem.IsRReport || idSem.IsReport) && logList.Contains(deCall);
+                if (closingRepeat)
+                {
+                    DebugOutput($"{spacer}'{deCall}' already logged, repeating its report: the closing exchange, not a new call");
+                    _closingRepeatCall = deCall;
+                    _closingRepeatSlot = _directLastSlotSeen;
+                }
+
+                if (!txEnabled && deCall != null && !(idSem.Is73 || idSem.IsRr73) && !ignore && !closingRepeat)
                 {
                     if (!callQueue.Contains(deCall))
                     {
@@ -2323,7 +2337,7 @@ namespace WSJTX_Controller
                     }
                     else
                     {
-                        if (!(idSem.Is73 || idSem.IsRr73) && !ignore)       //not a 73 or RR73 (or an already-logged repeat signoff)
+                        if (!(idSem.Is73 || idSem.IsRr73) && !ignore && !closingRepeat)       //not a 73 or RR73 (or an already-logged repeat signoff or report)
                         {
                             DebugOutput($"{spacer}not a 73 or RR73");
                             if (deCall != callInProg)

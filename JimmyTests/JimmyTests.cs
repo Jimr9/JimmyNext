@@ -4267,6 +4267,44 @@ static class JimmyTests
             Check("a fresh completion's exemption is NOT still spent from an earlier episode -- one exempted over is tolerated again",
                   !SeenCmd("HALT_TX") && wc.TestOrphanTxOvers == 0 && wc.TestFinishingCall == qsoCall, true);
 
+            // ══ 4. KF0MZU live finding (2026-10-01), done Nexus's way: the worked station did
+            //       not copy our RR73 and repeats its R-report; Nexus (still Confirming with it)
+            //       answers each repeat with one RR73. Those answers are the contact, not a runaway
+            //       -- and the repeating station is not re-listed as a new caller. An RR73 with no
+            //       repeat behind it still falls to the cap and the orphan halt (CT2HEX). ══
+            DirectSnapshot SnapConfirming(bool transmitting, ulong slot, string txNow, string decodeMsg = null)
+            {
+                string decodes = decodeMsg == null ? "" :
+                    @"{ ""from"": """ + qsoCall + @""", ""snr"": -7, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + decodeMsg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": " + (transmitting ? "true" : "false") + @", ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"],
+                    ""qso"": { ""state"": ""Confirming"", ""dxcall"": """ + qsoCall + @"""" + (txNow == null ? "" : @", ""txNow"": """ + txNow + @"""") + @" }
+                }");
+            }
+            lock (seenLock) seen.Clear();
+            CompleteQso(2170);
+            FinishingOver(2180);   // our first RR73 (uses the one-over allowance, as before)
+            for (int i = 0; i < 3; i++)
+            {
+                ulong s = 2182UL + (ulong)(i * 2);
+                wc.TestApplyDirectSnapshot(myCall, myGrid, SnapConfirming(false, s, null, $"{myCall} {qsoCall} R-05"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, SnapConfirming(true, s + 1, $"{qsoCall} {myCall} RR73"));
+                wc.TestApplyDirectSnapshot(myCall, myGrid, SnapConfirming(false, s + 2, null));
+            }
+            Check("KF0MZU: three RR73s answering three repeated R-reports are the closing exchange -- no halt, no orphan count",
+                  !SeenCmd("HALT_TX") && wc.TestOrphanTxOvers == 0, true);
+            Check("KF0MZU: the just-logged station repeating its R-report is not re-listed as a new caller",
+                  !wc.callQueue.Contains(qsoCall), true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, SnapConfirming(true, 2200, $"{qsoCall} {myCall} RR73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, SnapConfirming(false, 2201, null));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, SnapConfirming(true, 2240, $"{qsoCall} {myCall} RR73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, SnapConfirming(false, 2241, null));
+            PumpUntil(() => SeenCmd("HALT_TX"), 10000);
+            Check("KF0MZU: an RR73 with NO repeat heard behind it still counts, and the second halts (CT2HEX protection kept)",
+                  SeenCmd("HALT_TX"), true);
+
             // ══ 5. With Finishing cleared, an UNRELATED orphaned Tx still halts fast (at the 2nd) ══
             lock (seenLock) seen.Clear();
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2220, $"W9XYZ {myCall} RR73"));

@@ -22,6 +22,11 @@
   are in). "Receive Only" and "System default" audio are gone: Jimmy Next always talks to the
   radio through Hamlib rigctld and the radio's own audio devices.
 
+- **Lookup data is on from the first start** on a new install: the FCC license database
+  (about 170 MB, downloaded in the background, refreshed every 7 days) and the LoTW users list
+  download on their own, and the Club Log country data now refreshes every 7 days. QRZ stays
+  off until you enter a login. Settings you have already saved are kept.
+
 ## Profiles
 
 - **Shared settings:** callsign and grid, operator name and contest email, TQSL station location,
@@ -85,6 +90,12 @@
   left blank rather than guessed.
   If the activator called CQ POTA but no spot names its park, the contact is logged as POTA
   with the park blank, for you to fill in -- never a guessed park.
+
+## Finishing a contact
+
+- When a station misses your RR73 and repeats its report, Jimmy Next answers each repeat with
+  one more RR73, the way WSJT-X and Nexus do, and no longer stops transmitting with "no contact
+  in progress". That station is no longer listed again as a new caller.
 
 ## Mouse
 

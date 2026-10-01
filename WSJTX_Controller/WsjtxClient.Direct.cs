@@ -592,6 +592,14 @@ namespace WSJTX_Controller
         private int _finishingTailExemptedOvers;
         private const int MaxFinishingTailExemptedOvers = 1;
 
+        // The just-logged station last heard repeating its report, and the slot it was heard in
+        // (ProcessDecodeMsg's closingRepeat). One RR73 answering it is the closing exchange the
+        // way Nexus and WSJT-X run it -- one answer per repeat heard -- never a runaway; the
+        // answer uses the repeat up. Unanswered within MaxClosingRepeatSlots, it lapses.
+        private string _closingRepeatCall;
+        private ulong? _closingRepeatSlot;
+        private const ulong MaxClosingRepeatSlots = 3;
+
         // Live-radio audit fix, 2026-09-08 (Problem 1 / KB2SLO). Nexus can decode the DX's
         // closing RR73 at the LEADING EDGE of one of Jimmy's own TX slots: it advances qso.txNow
         // to the closing "73" and Jimmy's level-triggered completion block logs + clears
@@ -2078,8 +2086,21 @@ namespace WSJTX_Controller
             // _finishingTailExemptedOvers's own comment) -- a repeat that arrives after the cap
             // is spent is no longer treated as the legitimate closing tail, however well it still
             // matches _finishingCall/curTxMsg, and falls through to ordinary orphan counting.
+            // KF0MZU, 2026-10-01 -- Nexus's own semantics: while Nexus still reports the contact
+            // Confirming with the station just logged, an over sent right after that station was
+            // heard repeating its report is Nexus answering it (qso.rs: "DX repeated their
+            // report -> re-sending our closing over", WSJT-X's behaviour). That is always part of
+            // the contact, however many repeats it takes -- the cap below was halting a genuine
+            // close on the second repeat. Only an over with NO fresh repeat behind it (the
+            // CT2HEX case: the cap's own reason) still uses the cap and the orphan count.
+            bool answeringRepeat = finishingTailOverCandidate
+                && string.Equals(_closingRepeatCall, _finishingCall, StringComparison.OrdinalIgnoreCase)
+                && _closingRepeatSlot.HasValue && radio.Slot >= _closingRepeatSlot.Value
+                && radio.Slot - _closingRepeatSlot.Value <= MaxClosingRepeatSlots
+                && string.Equals(snap.Qso?.State, "Confirming", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(snap.Qso?.Dxcall, _finishingCall, StringComparison.OrdinalIgnoreCase);
             bool finishingTailOver = finishingTailOverCandidate
-                && _finishingTailExemptedOvers < MaxFinishingTailExemptedOvers;
+                && (answeringRepeat || _finishingTailExemptedOvers < MaxFinishingTailExemptedOvers);
 
             if (callInProg != null || txMode != TxModes.LISTEN || tuning || finishingTailOver)
             {
@@ -2089,7 +2110,10 @@ namespace WSJTX_Controller
                 // edge (mirrors _directOrphanTxOvers's own increment site below), never on every
                 // poll a matching decode merely stays in view.
                 if (finishingTailOver && wasTransmitting && !transmitting)
-                    _finishingTailExemptedOvers++;
+                {
+                    if (answeringRepeat) { _closingRepeatCall = null; _closingRepeatSlot = null; }   // this repeat is answered
+                    else _finishingTailExemptedOvers++;
+                }
             }
             else if (wasTransmitting && !transmitting)
             {

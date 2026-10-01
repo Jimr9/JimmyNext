@@ -7335,7 +7335,7 @@ namespace WSJTX_Controller
             ctrl.lotwLogbookPass         = _lotwLogbookPassTb?.Text            ?? "";
             ctrl.lotwLogbookAutoSyncEnabled = _lotwLogbookAutoSyncCb?.Checked    ?? false;
             ctrl.lotwLogbookRefreshDays  = (int)(_lotwLogbookRefreshDaysNum?.Value ?? 7);
-            ctrl.clubLogRefreshDays      = (int)(_clubLogRefreshDaysNum?.Value   ?? 30);
+            ctrl.clubLogRefreshDays      = (int)(_clubLogRefreshDaysNum?.Value   ?? 7);
             ctrl.clubLogUploadEnabled    = _clubLogUploadEnabledCb?.Checked     ?? false;
             ctrl.clubLogUploadRealtime   = _clubLogUploadRealtimeCb?.Checked    ?? false;
             ctrl.clubLogUploadEmail      = _clubLogUploadEmailTb?.Text.Trim()   ?? "";
