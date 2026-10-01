@@ -67,14 +67,23 @@ namespace WSJTX_Controller
             bool isDirectedAlert = isCq && IsDirectedAlert(directedTo, classification.IsDx);
             bool isGridReply = string.Equals(sem.Kind, "reply", System.StringComparison.Ordinal);
             bool isAcceptableCq = isCq && (directedTo == null /*|| directedTo == "QRP"*/ || (directedTo == "DX" && classification.IsDx) || directedTo == myContinent);
-            bool isWantedNewCallOnBand = ctrl.bandComboBox.SelectedIndex == (int)WsjtxClient.NewCallBands.CURRENT && classification.IsNewCallOnBand;
+            // W0CAS (2.0.80): while the logbook is not ready (still loading, or its move to Nexus
+            // failed) worked-before is UNKNOWN. The classification then says "not new" so no
+            // false new-station alert sounds -- but for ADMISSION, unknown must never mean
+            // "already worked": that emptied the call lists completely (every station rejected)
+            // for an operator whose logbook move had failed. Admission treats unknown as
+            // possibly new; alerts stay paused.
+            bool logKnown = NexusLogbook.LogReady;
+            bool admitNewAnyBand = !logKnown || classification.IsNewCallAnyBand;
+            bool admitNewOnBand = !logKnown || classification.IsNewCallOnBand;
+            bool isWantedNewCallOnBand = ctrl.bandComboBox.SelectedIndex == (int)WsjtxClient.NewCallBands.CURRENT && admitNewOnBand;
             bool isWantedAzimuth = Ranker.rankMethod < RankMethods.AZ_NQUAD || Ranker.rankMethod > RankMethods.AZ_NWQUAD || emsg.Rank != CallQueueRanker.OffBeamRank;         //within desired azimuth
             bool isWantedMsgType =
                 (ctrl.cqOnlyRadioButton.Checked && (isAcceptableCq || sem.IsRr73 || sem.Is73))                              //CQ, with or without grid info, or (RR)73   (Stage 6)
                 || (ctrl.cqGridRadioButton.Checked && ((isAcceptableCq && sem.Grid != null) || isGridReply))             //CQ or reply, with grid info   (Stage 6)
                 || ctrl.anyMsgRadioButton.Checked;                                                 //don't care about grid info
             bool isWantedOrigin = ((ctrl.replyDxCheckBox.Checked && classification.IsDx) || (ctrl.replyLocalCheckBox.Checked && !classification.IsDx)) && (!isCq || isAcceptableCq);
-            bool isWantedCall = isWantedMsgType && isWantedOrigin && isWantedAzimuth && (classification.IsNewCallAnyBand || isWantedNewCallOnBand);
+            bool isWantedCall = isWantedMsgType && isWantedOrigin && isWantedAzimuth && (admitNewAnyBand || isWantedNewCallOnBand);
             // isWantedDirected: pure classification — whether this decode IS a directed CQ that
             // matches the alert list.  Admission is gated by IsCallingEnabled(WANTED_CQ) in the
             // category switch below; the replyDirCqCheckBox no longer controls admission.
@@ -255,7 +264,7 @@ namespace WSJTX_Controller
                                         || emsg.Category == CallCategory.NEW_COUNTRY_ON_BAND;
                 bool isStillNeededByActiveAward = _awardTagger.MatchedAwardRuleId(emsg) != null;
                 if (AwardMatcher.ShouldRejectAlreadyWorked(
-                        classification.IsNewCallOnBand, isPota, isNewDxccCategory, isStillNeededByActiveAward))
+                        admitNewOnBand, isPota, isNewDxccCategory, isStillNeededByActiveAward))
                 {
                     DebugOutput($"{spacer}AddSelectedCall: already worked '{deCall}'");
                     return;
@@ -627,7 +636,8 @@ namespace WSJTX_Controller
             int periodCount = _callQueueStore.PeriodCallCount(isEvenPeriod);
             // Stage A6: IsNewCallOnBand/IsNewCallAnyBand now read via EffectiveClassification().
             ClassifiedCall decodeClassification = decode.EffectiveClassification();
-            if (periodCount < maxAutoGenEnqueue || decodeClassification.IsNewCallOnBand || decodeClassification.IsNewCallAnyBand || IsPrimarySort(RankMethods.MOST_RECENT)) return true;
+            bool logUnknown = !NexusLogbook.LogReady;   // see AddSelectedCall: unknown is never "already worked"
+            if (periodCount < maxAutoGenEnqueue || logUnknown || decodeClassification.IsNewCallOnBand || decodeClassification.IsNewCallAnyBand || IsPrimarySort(RankMethods.MOST_RECENT)) return true;
             if (IsPrimarySort(RankMethods.CALL_ORDER) || !isWantedCall) return false;
 
             var callArray = callQueue.ToArray();

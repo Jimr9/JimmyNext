@@ -86,7 +86,7 @@ namespace WSJTX_Controller
             var result = SupportReportBuilder.Build(
                 ctrl,
                 dlg.Callsign, dlg.PersonName, dlg.Email,
-                dlg.ProblemType, dlg.Description, dlg.Steps);
+                dlg.ProblemType, dlg.Description, dlg.Steps, dlg.IncludeLogbook);
 
             if (result.Success)
             {

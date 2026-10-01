@@ -1599,6 +1599,8 @@ static class JimmyTests
         SuppressReceiveNotificationsDuringTxTests();
         ResolveActiveIniPathTests();
         ActiveIniFilePathTests();
+        SupportReportFolderTests();
+        NexusMoveOldSchemaTests();
         ListNamedProfilesTests();
         BuildWorkingFrequencyEntriesTests();
         DirectSetWorkingFrequenciesSendsCorrectCommandTests();
@@ -1965,6 +1967,31 @@ static class JimmyTests
                 var wc = MakeClient(out var ctrl);
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(140, "K4YT2", "CQ K4YT2 EM63"));
                 Check("ordinary CQ (no envelope) -> still queued normally", wc.callQueue.Contains("K4YT2"), true);
+            }
+
+            // 5b. W0CAS (2.0.80): the logbook is NOT ready (its move to Nexus failed) -- an
+            //     ordinary CQ must still be queued. Unknown worked-before is never "already worked";
+            //     before the fix every station was rejected and the call lists stayed empty.
+            {
+                string lbDir = Path.Combine(Path.GetTempPath(), "jimmy-notready-" + Guid.NewGuid().ToString("N"));
+                NexusLogbook.Reset();
+                NexusLogbook.TestFolderOverride = Path.Combine(lbDir, "NexusLog");
+                NexusLogbook.TestForceActive = true;
+                try
+                {
+                    Check("setup: logbook not ready", NexusLogbook.LogReady, false);
+                    var wc = MakeClient(out var ctrl);
+                    wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(145, "K4YT5", "CQ K4YT5 EM63"));
+                    Check("W0CAS: logbook not ready -> an ordinary CQ is still queued, not rejected as already worked",
+                          wc.callQueue.Contains("K4YT5"), true);
+                }
+                finally
+                {
+                    NexusLogbook.Reset();
+                    NexusLogbook.TestForceActive = null;
+                    NexusLogbook.TestFolderOverride = null;
+                    try { Directory.Delete(lbDir, true); } catch { }
+                }
             }
 
             // 6. NON-REGRESSION: a report directed AT ME still reaches the toMyCall path.
@@ -20087,6 +20114,104 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+        }
+    }
+
+    // ── 2.0.80 (W0CAS): his logbook was last opened by a Jimmy Next before schema v10, so it had
+    // no qso_extra_field table; the logbook move read it unconditionally and stopped at every
+    // start ("no such table: qso_extra_field"), leaving the logbook never ready. ──
+    static void NexusMoveOldSchemaTests()
+    {
+        Console.WriteLine("\n── Logbook move: a logbook from before schema v10 (no extra-fields table) -- THE FIX ──");
+        string db = Path.Combine(Path.GetTempPath(), "JimmyOldSchema_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var c = new System.Data.SQLite.SQLiteConnection($"Data Source={db};"))
+            {
+                c.Open();
+                using (var cmd = c.CreateCommand())
+                {
+                    cmd.CommandText = "CREATE TABLE qso (id INTEGER PRIMARY KEY, callsign TEXT, band TEXT); INSERT INTO qso VALUES (1,'K4YT5','20m');";
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            System.Data.SQLite.SQLiteConnection.ClearAllPools();
+            var rows = NexusMigration.ReadJimmyRows(db);
+            Check("old logbook reads: every contact, no extra fields", rows.Count == 1 && rows[0].C("callsign") == "K4YT5" && rows[0].Extras.Count == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NexusMoveOldSchemaTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            System.Data.SQLite.SQLiteConnection.ClearAllPools();
+            try { File.Delete(db); } catch { }
+        }
+    }
+
+    // ── 2.0.80 (W0CAS): the support report carries the whole Jimmy Next folder -- settings
+    // with passwords blanked, lookup data and key files left out, the logbook only when the
+    // operator leaves "Include my logbook" checked; the logbook-move reports always. ──
+    static void SupportReportFolderTests()
+    {
+        Console.WriteLine("\n── Support report: whole Jimmy Next folder -- THE FIX ──");
+        string root = Path.Combine(Path.GetTempPath(), "JimmySupportFolder_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            void Put(string rel, string text)
+            {
+                string f = Path.Combine(root, rel.Replace('/', '\\'));
+                Directory.CreateDirectory(Path.GetDirectoryName(f));
+                File.WriteAllText(f, text);
+            }
+            Put("Jimmy Next.ini", "[General]\nmyCall=K0XYZ\nqrzPassword=hunter2\n");
+            Put("Data/NexusLog/migration-report.txt", "move failed: reason");
+            Put("Data/NexusLog/log.sqlite3", "contacts");
+            Put("Data/Logbook/jimmy.db", "old contacts");
+            Put("Data/FccUls/fcc.dat", "lookup");
+            Put("Data/ClubLog/clublog_key.txt", "secret");
+            Put("Data/nexus-logbook-auto-move.txt", "auto move: failed");
+
+            Dictionary<string, string> Run(bool includeLogbook)
+            {
+                var ms = new MemoryStream();
+                using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
+                    SupportReportBuilder.AddDataFolder(zip, root, includeLogbook);
+                ms.Position = 0;
+                var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Read))
+                    foreach (var e in zip.Entries)
+                        using (var r = new StreamReader(e.Open())) d[e.FullName] = r.ReadToEnd();
+                return d;
+            }
+
+            var with = Run(true);
+            Check("settings included", with.ContainsKey("JimmyNextFolder/Jimmy Next.ini"), true);
+            Check("settings: password blanked", with["JimmyNextFolder/Jimmy Next.ini"].Contains("hunter2"), false);
+            Check("move reports included", with.ContainsKey("JimmyNextFolder/Data/NexusLog/migration-report.txt")
+                && with.ContainsKey("JimmyNextFolder/Data/nexus-logbook-auto-move.txt"), true);
+            Check("logbook included when checked", with.ContainsKey("JimmyNextFolder/Data/NexusLog/log.sqlite3")
+                && with.ContainsKey("JimmyNextFolder/Data/Logbook/jimmy.db"), true);
+            Check("lookup data left out", with.ContainsKey("JimmyNextFolder/Data/FccUls/fcc.dat"), false);
+            Check("key file left out", with.Keys.Any(k => k.Contains("clublog_key")), false);
+            Check("listing names every file", with.ContainsKey("jimmy_folder_listing.txt")
+                && with["jimmy_folder_listing.txt"].Contains("Data/FccUls/fcc.dat"), true);
+
+            var without = Run(false);
+            Check("logbook left out when unchecked", without.ContainsKey("JimmyNextFolder/Data/NexusLog/log.sqlite3")
+                || without.ContainsKey("JimmyNextFolder/Data/Logbook/jimmy.db"), false);
+            Check("move report still included when unchecked", without.ContainsKey("JimmyNextFolder/Data/NexusLog/migration-report.txt"), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SupportReportFolderTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
         }
     }
 

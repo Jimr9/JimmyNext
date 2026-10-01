@@ -19,6 +19,8 @@ namespace WSJTX_Controller
         public string ProblemType => _problemTypeCombo.Text;
         public string Description => _descTextBox.Text.Trim();
         public string Steps       => _stepsTextBox.Text.Trim();
+        public bool IncludeLogbook => _includeLogbookCheckBox.Checked;
+        private CheckBox _includeLogbookCheckBox;
 
         public SupportReportDlg(string prefillCallsign)
         {
@@ -141,6 +143,29 @@ namespace WSJTX_Controller
             };
             y += 90;
 
+            // 2.0.80 (W0CAS): the report carries the whole Jimmy Next folder (passwords blanked,
+            // downloadable lookup data left out). The logbook is the operator's own choice.
+            _includeLogbookCheckBox = new CheckBox
+            {
+                Text           = "Include my logbook (my contacts; helps with logbook problems)",
+                AccessibleName = "Include my logbook",
+                Location       = new Point(lx, y),
+                AutoSize       = true,
+                Checked        = true,
+                TabIndex       = tab++,
+            };
+            y += 26;
+            var hintPrivacy = new Label
+            {
+                Text      = "Settings, logs and Jimmy Next's folder are included; passwords and logins are never included.",
+                Location  = new Point(lx, y),
+                Size      = new Size(fw, 16),
+                Font      = new Font(SystemFonts.DefaultFont.FontFamily, 7.5f),
+                ForeColor = SystemColors.GrayText,
+                AutoSize  = false,
+            };
+            y += 18;
+
             // ---- Buttons ----
             y += 4;
             var okButton = new Button
@@ -169,6 +194,7 @@ namespace WSJTX_Controller
                 lblType,     _problemTypeCombo,
                 lblDesc,     hintDesc,  _descTextBox,
                 lblSteps,    hintSteps, _stepsTextBox,
+                _includeLogbookCheckBox, hintPrivacy,
                 okButton,    cancelButton,
             });
 

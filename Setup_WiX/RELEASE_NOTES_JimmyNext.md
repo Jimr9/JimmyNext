@@ -1,4 +1,21 @@
-# Jimmy Next 2.0.79 — release notes (draft, not yet published)
+# Jimmy Next 2.0.80 — release notes
+
+A fix release for 2.0.79.
+
+- **The logbook move works for older logbooks.** If you had not run Jimmy Next for a while
+  before 2.0.79, your logbook was in an older format and the move to Nexus stopped at every
+  start ("no such table: qso_extra_field"). It now moves normally the next time you start.
+  Your old logbook was never changed, and it is backed up again before the move.
+- **Stations are no longer all hidden while the logbook is not ready.** While the logbook is
+  still loading, or if its move did not finish, Jimmy Next cannot tell who you have worked.
+  2.0.79 treated every station as "already worked", so the call lists stayed empty. Stations
+  now appear as usual; only the new-station alerts wait for the logbook.
+- **Support reports include everything needed to help you:** your whole Jimmy Next folder
+  (settings, logs, logbook move reports), with every password and login removed. Downloaded
+  lookup data is left out. A new **Include my logbook** check box (on by default) lets you
+  leave your contacts out.
+
+# Jimmy Next 2.0.79 — release notes
 
 ## Your logbook now lives in Nexus
 
