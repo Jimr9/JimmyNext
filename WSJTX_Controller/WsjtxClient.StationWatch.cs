@@ -132,7 +132,7 @@ namespace WSJTX_Controller
             if (!ctrl.smartQsoStartEnabled)
                 // No Notification event models "the feature is off" -- that's a Jimmy setting,
                 // not an on-air fact -- so there is nothing to source this one from.
-                msg = "Smart Mode is off.";
+                msg = Wording.Get("Msg.SmartModeOff");
             else if (_smartStart.AwaitingEngagement)
                 msg = RenderNotificationPhrase(NotificationEventType.SmartStartCallStarting,
                     new SmartStartCallStartingEvent(SC(_smartStart.TargetCall)).ToTokens());
@@ -158,9 +158,9 @@ namespace WSJTX_Controller
             else
                 // Armed-but-idle (enabled, nothing captured yet) is also not an on-air fact --
                 // no Notification event exists for it either.
-                msg = "Smart Mode is on, no target.";
+                msg = Wording.Get("Msg.SmartModeNoTarget");
 
-            if (string.IsNullOrEmpty(msg)) msg = "Smart Mode status unavailable.";
+            if (string.IsNullOrEmpty(msg)) msg = Wording.Get("Msg.SmartModeStatusUnavailable");
             StatusView.ShowMessage(msg, false);
             return true;
         }
@@ -201,7 +201,7 @@ namespace WSJTX_Controller
             }
             if (string.IsNullOrEmpty(focusedOrSelectedCall))
             {
-                StatusView.ShowMessage("No station selected to watch", false);
+                StatusView.ShowMessage(Wording.Get("Msg.WatchNoStation"), false);
                 return;
             }
             StartOrReplaceStationWatch(focusedOrSelectedCall);
@@ -220,7 +220,7 @@ namespace WSJTX_Controller
         {
             if (!_stationWatch.IsActive)
             {
-                StatusView.ShowMessage("Station Watch is not active", false);
+                StatusView.ShowMessage(Wording.Get("Msg.WatchNotActive"), false);
                 return;
             }
             if (_stationWatch.LastUsableDecode == null)
@@ -229,7 +229,7 @@ namespace WSJTX_Controller
                 Notify?.Publish(new SmartStartWaitingEvent(spacedWatched,
                     $"Waiting for another decode from {spacedWatched}.",
                     armGeneration: _stationWatch.ArmGeneration, stateSeq: _stationWatch.AdvanceStateSeq()));
-                StatusView.ShowMessage($"Waiting for another decode from {spacedWatched}", false);
+                StatusView.ShowMessage(Wording.Fill("Msg.WatchWaiting", ("Call", spacedWatched)), false);
                 return;
             }
             // Explicit operator "now" -- but still revalidated (fresh, in-context, not busy)
@@ -489,7 +489,7 @@ namespace WSJTX_Controller
                 HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
             }
             _smartStart.Stop(announce: false);
-            StatusView.ShowMessage($"{SC(target)} not heard after {limit} calls; Smart Mode stopped", true);
+            StatusView.ShowMessage(Wording.Fill("Msg.SmartModeNotHeard", ("Call", SC(target)), ("Count", limit.ToString())), true);
         }
 
         // Operator request (2026-09-13): an absolute wall-clock backstop, independent of both the
@@ -513,9 +513,9 @@ namespace WSJTX_Controller
                 HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
             }
             _smartStart.Stop(announce: false);
-            string minuteWord = limitMinutes == 1 ? "minute" : "minutes";
+            string minuteWord = Wording.Get(limitMinutes == 1 ? "Msg.MinuteOne" : "Msg.MinuteMany");
             StatusView.ShowMessage(
-                $"Smart Mode time limit reached after {limitMinutes} {minuteWord} calling {SC(target)}, no contact completed", true);
+                Wording.Fill("Msg.SmartModeTimeLimit", ("Minutes", limitMinutes.ToString()), ("MinuteWord", minuteWord), ("Call", SC(target))), true);
         }
 
         // The Smart Start Repeat Limit -- (int)ctrl.timeoutNumUpDown.Value, the operator's own
@@ -543,7 +543,7 @@ namespace WSJTX_Controller
             _smartStart.Stop(announce: false);
             // Concise terminal message so the operator knows the effort ended on the Repeat
             // Limit (counted calling overs only), distinct from the busy-churn stop above.
-            StatusView.ShowMessage($"Repeat limit reached after {limit} calls to {SC(target)}, no contact completed", true);
+            StatusView.ShowMessage(Wording.Fill("Msg.RepeatLimit", ("Count", limit.ToString()), ("Call", SC(target))), true);
         }
 
         // Called once per real, completed receive-period boundary (the exact same signal

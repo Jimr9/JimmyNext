@@ -1548,7 +1548,7 @@ namespace WSJTX_Controller
                 // Rapid band changes: a band only passed through is not announced when a newer
                 // band change is already on its way -- only the band landed on is.
                 if (_pendingBandIdx == null || _pendingBandIdx == FreqToBandIdx(newDialFrequency / 1e6))
-                    StatusView.ShowMessage($"Band changed to {FreqToBandStr(newDialFrequency / 1e6)}", false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.BandChanged", ("Band", FreqToBandStr(newDialFrequency / 1e6))), false);
             }
             dialFrequency = newDialFrequency;
             lastDialFrequency = dialFrequency;
@@ -3209,12 +3209,12 @@ namespace WSJTX_Controller
         {
             if (!_directConnected)
             {
-                StatusView.ShowMessage("Hound: engine not connected.", false);
+                StatusView.ShowMessage(Wording.Get("Msg.HoundNoEngine"), false);
                 return true;
             }
             if (!_houndRequested && mode != "FT8")
             {
-                StatusView.ShowMessage("Hound is FT8 only.", false);
+                StatusView.ShowMessage(Wording.Get("Msg.HoundFt8Only"), false);
                 return true;
             }
             _houndRequested = !_houndRequested;
@@ -3233,7 +3233,7 @@ namespace WSJTX_Controller
                     return;
                 }
                 _houndRequested = HoundActive;
-                StatusView.ShowMessage("Hound not changed: " + (resp == null ? "engine not responding" : resp.StartsWith("ERR ") ? resp.Substring(4) : resp), false);
+                StatusView.ShowMessage(Wording.Fill("Msg.HoundNotChanged", ("Reason", resp == null ? "engine not responding" : resp.StartsWith("ERR ") ? resp.Substring(4) : resp)), false);
             });
         }
 
@@ -3253,7 +3253,7 @@ namespace WSJTX_Controller
             _engineSpecialOp = engineState;
             ctrl.Text = pgmName + (HoundActive ? " - HOUND" : "");
             DebugOutput($"{Time()} [DIRECT] Hound {(HoundActive ? "ON" : "OFF")} (engine specialOp:'{engineState}', requested:{_houndRequested}, mode:{mode})");
-            StatusView.ShowMessage(HoundActive ? "Hound on" : "Hound off", false);
+            StatusView.ShowMessage(Wording.Get(HoundActive ? "Msg.HoundOn" : "Msg.HoundOff"), false);
         }
 
         // Alt+T (Toggle Tune Mode) for direct-engine mode -- see WsjtxClient.BandAudio.cs's

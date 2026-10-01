@@ -18944,6 +18944,13 @@ static class JimmyTests
             CheckStr("list title, spoken, built-in", Wording.Fill("List.TitleSpoken", ("Side", "RX1"), ("Count", "4")), "RX1 available stations, 4 calls");
             Wording.SetForTest(Wording.Parse(new[] { "List.TitleSpoken = {Side} stations" }));
             CheckStr("...the operator removed the count", Wording.Fill("List.TitleSpoken", ("Side", "RX1"), ("Count", "4")), "RX1 stations");
+            var sec = Wording.Parse(new[] { "[NOTIFICATIONS]", "Msg.TxHalted = Transmit stopped", "[TAGS]" });
+            CheckStr("a section line is not an entry", sec.Count.ToString(), "1");
+            Wording.SetForTest(sec);
+            CheckStr("a spoken message reworded", Wording.Get("Msg.TxHalted"), "Transmit stopped");
+            Wording.SetForTest(null);
+            CheckStr("a message with its call filled in", Wording.Fill("Msg.Replying", ("Call", "K1ABC")), "Replying to K1ABC");
+            Check("every entry name is unique", Wording.Known.Select(k => k.Key).Distinct(StringComparer.OrdinalIgnoreCase).Count() == Wording.Known.Length, true);
         }
         finally { Wording.SetForTest(null); }
     }

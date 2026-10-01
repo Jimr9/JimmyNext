@@ -11,24 +11,30 @@ namespace WSJTX_Controller
 {
     public partial class WsjtxClient
     {
-        // The spoken key hints name the key the operator actually has for that action
-        // (Options > Hotkeys), in the spoken form "Alt, E" -- they used to always say Alt E /
-        // Alt K / Control W / Alt N, wrong once a key was reassigned (2026-10-01). No key
-        // assigned: no hint at all, never "use  to ...".
-        private string KeyHint(HotkeyAction action, string format)
+        // A spoken key hint from the wording file, with {Key} filled from the operator's own
+        // hotkey for that action (Options > Hotkeys) in its spoken form ("Alt, E") -- the
+        // wording can change around {Key}, never the key itself. No key assigned: no hint.
+        // Returns ", <hint>" (the status line's separator) or "".
+        private string KeyHint(HotkeyAction action, string entry)
+        {
+            string key = SpokenKey(action);
+            return key == "" ? "" : ", " + Wording.Fill(entry, ("Key", key));
+        }
+
+        private string SpokenKey(HotkeyAction action)
         {
             var hk = ctrl.hotkeyConfig;   // not loaded yet: the built-in defaults
             Keys keys = hk != null ? hk[action] : (HotkeyConfig.Defaults.TryGetValue(action, out Keys d) ? d : Keys.None);
-            string key = HotkeyConfig.FormatKeysForHelp(keys);
-            return string.IsNullOrEmpty(key) ? "" : string.Format(format, key);
+            return HotkeyConfig.FormatKeysForHelp(keys);
         }
 
         private string ListOrNextHint()
         {
-            string list = KeyHint(HotkeyAction.NavCallList, "{0} for list");
-            string next = KeyHint(HotkeyAction.NextCall, "{0} for next");
+            string lk = SpokenKey(HotkeyAction.NavCallList), nk = SpokenKey(HotkeyAction.NextCall);
+            string list = lk == "" ? "" : Wording.Fill("Status.ListHint", ("Key", lk));
+            string next = nk == "" ? "" : Wording.Fill("Status.NextHint", ("Key", nk));
             if (list == "" && next == "") return "";
-            return ", " + (list != "" && next != "" ? $"{list} or {next}" : list + next);
+            return ", " + (list != "" && next != "" ? Wording.Fill("Status.ListOrNext", ("List", list), ("Next", next)) : list + next);
         }
 
         internal bool PlayCategorySound(EnqueueDecodeMessage msg)
@@ -153,8 +159,8 @@ namespace WSJTX_Controller
             {
                 newMode = SelectionMode.None;
                 newItems.Add(callInProg == null
-                    ? "[No stations calling or in progress]"
-                    : "[No stations calling]");
+                    ? Wording.Get("List.EmptyCallingOrInProgress")
+                    : Wording.Get("List.EmptyCalling"));
                 newKeys.Add(null);      // keep keys parallel to items even for the placeholder row
                 newCategories.Add(CallCategory.DEFAULT);
             }
@@ -291,7 +297,7 @@ namespace WSJTX_Controller
                 string tx1Name = Wording.Fill("List.TitleSpoken", ("Side", tx1Prefix), ("Count", _tx1SnapshotRows.Count.ToString()));
                 var display = tx1HasItems
                     ? _tx1SnapshotRows
-                    : new List<string> { "No available stations" };
+                    : new List<string> { Wording.Get("List.EmptyAvailable") };
                 var keys = tx1HasItems
                     ? _tx1SnapshotCalls
                     : new List<string> { null };
@@ -308,7 +314,7 @@ namespace WSJTX_Controller
                 string tx2Name = Wording.Fill("List.TitleSpoken", ("Side", tx2Prefix), ("Count", _tx2SnapshotRows.Count.ToString()));
                 var display = tx2HasItems
                     ? _tx2SnapshotRows
-                    : new List<string> { "No available stations" };
+                    : new List<string> { Wording.Get("List.EmptyAvailable") };
                 var keys = tx2HasItems
                     ? _tx2SnapshotCalls
                     : new List<string> { null };
@@ -744,7 +750,7 @@ namespace WSJTX_Controller
             // Not in queue — do not transmit.  The call was deliberately excluded
             // by queue filters (already logged, blocked, origin filter, wrong period,
             // etc.).  Bypassing those filters via ReplyTo would be unsafe.
-            StatusView.ShowMessage($"{deCall} not in call queue", false);
+            StatusView.ShowMessage(Wording.Fill("Msg.NotInQueue", ("Call", deCall)), false);
         }
 
         // Like GetRawDecodeCallOrText, but returns null (rather than falling back to
@@ -1007,7 +1013,7 @@ namespace WSJTX_Controller
             // "clear a stale Receive cycle summary" behaviour for THIS render.
             bool isIdleReceiveCycleSummaryRender = false;
 
-            string k = cmdPrompts ? KeyHint(HotkeyAction.Help, ", use {0}, for command key list") : "";
+            string k = cmdPrompts ? KeyHint(HotkeyAction.Help, "Status.HelpHint") : "";
 
             try
             {
@@ -1018,7 +1024,7 @@ namespace WSJTX_Controller
                     // Shown, not spoken: the setup message is said once, at the right moment
                     // (Controller.ApplyEngineMode / OptionsDlgClosed), never on every status render.
                     suppressRoutineSpeechThisRender = true;
-                    status = ctrl.SetupInProgress ? "Setting up Jimmy Next." : ctrl.SetupMessage() ?? "";
+                    status = ctrl.SetupInProgress ? Wording.Get("Status.SettingUp") : ctrl.SetupMessage() ?? "";
                     foreColor = Color.Black;
                     backColor = Color.Orange;
                     return;
@@ -1052,29 +1058,28 @@ namespace WSJTX_Controller
                             string newSel = "";
                             if (newMode)
                             {
-                                newSel = $"{mode} mode selected.";
+                                newSel = Wording.Fill("Status.ModeSelected", ("Mode", mode));
                             }
 
                             if (newBand)
                             {
-                                string b = bandIdx != null ? $"{bands[(int)bandIdx]} meter" : "Unknown";
-                                newSel = $"{b} band selected.";
+                                newSel = (bandIdx != null ? Wording.Fill("Status.BandSelected", ("Band", bands[(int)bandIdx].ToString())) : Wording.Get("Status.BandUnknown")) + ".";
                             }
 
                             if (ctrl.freqCheckBox.Checked)
                             {
-                                status = $"{newSel} Analyzing audio, calls not queued yet{k}.";
+                                status = $"{newSel} {Wording.Get("Status.AnalyzingAudio")}{k}.";
                             }
                             else
                             {
-                                status = $"{newSel}Connecting, wait until ready{k}.";
+                                status = $"{newSel}{Wording.Get("Status.Connecting")}{k}.";
                             }
                             foreColor = Color.Black;
                             backColor = Color.Orange;
                             newBand = false;
                             return;
                         case (int)OpModes.IDLE:
-                            status = modeSupported ? $"Connecting, wait until ready{k}." : "operating mode not supported";
+                            status = modeSupported ? $"{Wording.Get("Status.Connecting")}{k}." : Wording.Get("Status.ModeNotSupported");
                             foreColor = Color.Black;
                             backColor = Color.Orange;
                             return;
@@ -1329,14 +1334,14 @@ namespace WSJTX_Controller
                             // Advanced mode. Alt E to enable transmit is left ungated -- that's a
                             // real TX-enable action available in both layouts, not Beginner list
                             // navigation.
-                            string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? KeyHint(HotkeyAction.EnableTx, ", {0} to enable transmit")
+                            string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? KeyHint(HotkeyAction.EnableTx, "Status.EnableTxHint")
                                 : (!ctrl.advancedCallLayout && !transmitting && qcw > 0 ? ListOrNextHint() : "")) : "";
 
                             string curCall = callInProg;
                             //string txToCall = WsjtxMessage.ToCall(curTxMsg);
                             //if (transmitting && curTxMsg != null) curCall = curTxToCall;
  
-                            string sel = newSelection ? " selected" : "";
+                            string sel = newSelection ? " " + Wording.Get("Status.Selected") : "";
                             // The plain "name the active station" fragment. Captured on its own so
                             // the other-party block further down -- which builds its OWN
                             // "<call> to <other>, <what>" text that already opens with this exact
@@ -1368,7 +1373,7 @@ namespace WSJTX_Controller
                             // their own transition text -- those are gated by their own flags,
                             // not this row). The idle branch reuses curTxMode directly as the
                             // state clause; the other branches embed it as {curTxMode}.
-                            string stateVerb = (transmitting || loggedCall != null) ? "Transmitting" : "Receiving";
+                            string stateVerb = Wording.Get((transmitting || loggedCall != null) ? "Status.Transmitting" : "Status.Receiving");
                             curTxMode = RoutineClause(NotificationEventType.ReceiveStateSummary, ("State", stateVerb)) ?? "";
                             // CAT-down routine status, reworked 2026-09-02 (2.0.59): when the
                             // engine reports the rig's CAT link is KNOWN DOWN (_lastCatOk ==
@@ -1386,7 +1391,7 @@ namespace WSJTX_Controller
                             // reconnect, and the dedicated edge-triggered RadioCatLost
                             // notification are all untouched.
                             bool catDownIdle = _lastCatOk == false && !transmitting && !tuning && loggedCall == null;
-                            string cond = (!transmitting && txMode == TxModes.CALL_CQ) ? (!cqPaused ? ((uploadResult != null || txEnableChanged) ? ", transmit enabled" : "") : ", transmit disabled") : "";
+                            string cond = (!transmitting && txMode == TxModes.CALL_CQ) ? (!cqPaused ? ((uploadResult != null || txEnableChanged) ? ", " + Wording.Get("Status.TxEnabled") : "") : ", " + Wording.Get("Status.TxDisabled")) : "";
 
                             // Live-testing finding, 2026-08-21: this used to fire regardless of
                             // Advanced Call Layout -- but "TX1"/"TX2" is a side-labeling concept
@@ -1397,23 +1402,21 @@ namespace WSJTX_Controller
                             // when the Tx-first side flips (e.g. Alt+F) was meaningless to them,
                             // not just extra detail.
                             if (newTxFirst && ctrl.advancedCallLayout)
-                                curTxMode = (txFirst ? "TX1 selected, " : "TX2 selected, ") + curTxMode;
+                                curTxMode = Wording.Fill("Status.TxSideSelected", ("Side", Wording.Get(txFirst ? "Side.TX1" : "Side.TX2"))) + ", " + curTxMode;
 
                             if (newPskReporter)
                             {
-                                string u = usePskReporter ? "Enabled" : "Disabled";
-                                curTxMode = $"{u} PSKReporter spots, " + curTxMode;
+                                curTxMode = Wording.Get(usePskReporter ? "Status.PskReporterOn" : "Status.PskReporterOff") + ", " + curTxMode;
                             }
 
                             if (newMode)
                             {
-                                curTxMode = $"{mode} mode, " + curTxMode;
+                                curTxMode = Wording.Fill("Status.ModeName", ("Mode", mode)) + ", " + curTxMode;
                             }
 
                             if (newBand)
                             {
-                                string b = bandIdx != null ? $"{bands[(int)bandIdx]} meter" : "Unknown";
-                                curTxMode = $"{b} band selected, " + curTxMode;
+                                curTxMode = (bandIdx != null ? Wording.Fill("Status.BandSelected", ("Band", bands[(int)bandIdx].ToString())) : Wording.Get("Status.BandUnknown")) + ", " + curTxMode;
                             }
 
                             if (uploadResult != null)
@@ -1423,7 +1426,7 @@ namespace WSJTX_Controller
 
                             if (deletedAllCalls)
                             {
-                                curTxMode = $"Deleted all waiting calls, " + curTxMode;
+                                curTxMode = Wording.Get("Status.DeletedCalls") + ", " + curTxMode;
                             }
 
                             // Restored 2026-08-10 (removed 2026-08-07, see the git history for
@@ -1460,7 +1463,7 @@ namespace WSJTX_Controller
 
                             if (finalSignoffCall != null)
                             {
-                                curTxMode = $"{DisplayCallsign(finalSignoffCall, ctrl.spaceCallsignsAndGrids)} final 73, " + curTxMode;
+                                curTxMode = Wording.Fill("Status.FinalSignoff", ("Call", DisplayCallsign(finalSignoffCall, ctrl.spaceCallsignsAndGrids))) + ", " + curTxMode;
                             }
 
                             if (consecNoDecodes >= maxNoDecodes)
@@ -1482,8 +1485,7 @@ namespace WSJTX_Controller
 
                             if (promptsChanged)
                             {
-                                string p = cmdPrompts ? "enabled" : "disabled";
-                                curTxMode = $"Command prompts {p}, " + curTxMode;
+                                curTxMode = Wording.Get(cmdPrompts ? "Status.CommandPromptsOn" : "Status.CommandPromptsOff") + ", " + curTxMode;
                                 if (!cmdPrompts) prompt = "";
                             }
 
@@ -1501,7 +1503,7 @@ namespace WSJTX_Controller
                                 }
                                 else if (catDownIdle)
                                 {
-                                    status = "Radio CAT link lost, CQ, transmit disabled.";
+                                    status = Wording.Fill("Status.CatLost", ("Mode", Wording.Get("Status.CqTxDisabled")));
                                     foreColor = Color.White;
                                     backColor = Color.Green;
                                     // Visible + history only -- see the other catDownIdle branch.
@@ -1630,7 +1632,7 @@ namespace WSJTX_Controller
                                     // the clause (and its visible text) is absent.
                                     string recClean = "";
                                     if (curRxPayload != null)
-                                        recClean = $"received {curRxPayload}";
+                                        recClean = Wording.Fill("Status.Received", ("Message", curRxPayload));
                                     // Phase C (2026-09-14): reads _curTxMsgSemantic instead of
                                     // re-parsing curTxMsg's text, same as the TxMessageChanged
                                     // clause above -- closes the gap the Stage 12 audit flagged.
@@ -1661,8 +1663,8 @@ namespace WSJTX_Controller
                                         // minutes-stale "working YV0DX" every period. A fixed
                                         // "no response" is honest and stable, and still gives the
                                         // render words so the TX line no longer freezes.
-                                        recClean = "no response";
-                                    string prevClean = prevRxPayload != null ? $"previous {prevRxPayload}" : "";
+                                        recClean = Wording.Get("Status.NoResponse");
+                                    string prevClean = prevRxPayload != null ? Wording.Fill("Status.Previous", ("Message", prevRxPayload)) : "";
                                     if (transmitting && (curTxPayload == "73" || curTxPayload == "RR73")) prevClean = "";    //don't need that detail any more
                                     string receivedPhrase = recClean;
                                     if (prevClean != "")
@@ -1682,7 +1684,7 @@ namespace WSJTX_Controller
                                 if (expiredCall != null && ((txMode == TxModes.LISTEN && !txEnabled) || txMode == TxModes.CALL_CQ))
                                 {
                                     inProg = $", {DisplayCallsign(expiredCall, ctrl.spaceCallsignsAndGrids)}";
-                                    cond = " expired";
+                                    cond = " " + Wording.Get("Status.Expired");
                                     curRxStr = "";
                                     prevRxStr = "";
                                     expiredCall = null;
@@ -1690,19 +1692,19 @@ namespace WSJTX_Controller
                                 else if (timedOutCall != null && ((txMode == TxModes.CALL_CQ && transmitting) || (txMode == TxModes.LISTEN && !txEnabled)))
                                 {
                                     inProg = $", {DisplayCallsign(timedOutCall, ctrl.spaceCallsignsAndGrids)}";
-                                    cond = " timed out,";
+                                    cond = " " + Wording.Get("Status.TimedOut") + ",";
                                     timedOutCall = null;
-                                    if (cmdPrompts && txMode == TxModes.LISTEN) prompt = KeyHint(HotkeyAction.EnableTx, ", use {0} to resume QSO");
+                                    if (cmdPrompts && txMode == TxModes.LISTEN) prompt = KeyHint(HotkeyAction.EnableTx, "Status.ResumeHint");
                                 }
                                 else if (modePrompt && callInProg != null && txMode == TxModes.LISTEN && !txEnabled)
                                 {
                                     if (cmdPrompts)
                                     {
-                                        prompt = KeyHint(HotkeyAction.EnableTx, ", use {0} to resume QSO");
+                                        prompt = KeyHint(HotkeyAction.EnableTx, "Status.ResumeHint");
                                     }
                                     /*else
                                     {
-                                        cond = ", transmit disabled";
+                                        cond = ", " + Wording.Get("Status.TxDisabled");
                                     }*/
                                 }
 
@@ -1772,7 +1774,7 @@ namespace WSJTX_Controller
                                 }
                                 else if (autoFreqPauseMode > autoFreqPauseModes.DISABLED)
                                 {
-                                    status = "Updating best transmit frequency.";
+                                    status = Wording.Get("Status.UpdatingTxFreq");
                                 }
                                 else if (replyFromInProg && RoutineClauseEnabled(NotificationEventType.QsoStarted))
                                 {
@@ -1802,9 +1804,9 @@ namespace WSJTX_Controller
                                     // replyFromInProg branches above still win, so a genuine
                                     // operating intent is never hidden by this.
                                     string catMode = (txMode == TxModes.CALL_CQ)
-                                        ? (txEnabled ? "CQ mode" : "CQ, transmit disabled")
-                                        : "Listen mode";
-                                    status = $"Radio CAT link lost, {catMode}.";
+                                        ? Wording.Get(txEnabled ? "Status.CqMode" : "Status.CqTxDisabled")
+                                        : Wording.Get("Status.ListenMode");
+                                    status = Wording.Fill("Status.CatLost", ("Mode", catMode));
                                     // Shown on screen + recorded in history every render, but not
                                     // spoken: the edge-triggered RadioCatLost / RadioCatRecovered
                                     // notifications own the spoken CAT transitions, so one CAT
@@ -1989,7 +1991,7 @@ namespace WSJTX_Controller
             for (int i = _sessionLogged.Count - 1; i >= 0; i--) logKeys.Add(_sessionLogged[i].Call);   // the row's key stays the bare callsign
             if (logItems.Count == 0)
             {
-                logItems.Add("[No calls auto-logged]");
+                logItems.Add(Wording.Get("List.EmptyAutoLogged"));
                 logKeys.Add(null);
             }
 
