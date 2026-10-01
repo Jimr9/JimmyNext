@@ -71,6 +71,12 @@
   If the activator called CQ POTA but no spot names its park, the contact is logged as POTA
   with the park blank, for you to fill in -- never a guessed park.
 
+## Mouse
+
+- In the advanced layout, double-click a station in the TX1/TX2 or Raw Decodes list to call it
+  (same as Enter), and right-click a station in TX1/TX2 to remove it (same as Delete) -- as the
+  main call list already did. In the Logbook Edit tab, double-click a contact to edit it.
+
 ## Known limitations
 
 - The antenna tuner key works only with Kenwood radios, and has been confirmed on the air only

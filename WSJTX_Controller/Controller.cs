@@ -6820,6 +6820,36 @@ namespace WSJTX_Controller
             }
         }
 
+        // Double-click on a station in the TX1/TX2/Raw Decodes lists does what Enter does there,
+        // so a mouse user can call from them too (operator, 2026-10-01). Only on a row: a
+        // double-click on empty space does nothing.
+        private void AdvListBox_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            if (!formLoaded || e.Button != MouseButtons.Left) return;
+            var lb = (ListBox)sender;
+            int idx = lb.IndexFromPoint(e.Location);
+            if (idx < 0 || idx >= lb.Items.Count || !lb.GetItemRectangle(idx).Contains(e.Location)) return;
+            if (lb == advTx1ListBox) wsjtxClient.NextCallFromTx1(idx);
+            else if (lb == advTx2ListBox) wsjtxClient.NextCallFromTx2(idx);
+            else if (lb == advRawListBox) wsjtxClient.NextCallFromRawDecode(idx);
+            else return;
+            MoveFocusToStatusIfEnabled();
+        }
+
+        // Right-click on a station in the TX1/TX2 lists: selects it and does what Delete does,
+        // the same as right-click in the main call list. Only on a row.
+        private void AdvListBox_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (!formLoaded || e.Button != MouseButtons.Right || Control.ModifierKeys != Keys.None) return;
+            var lb = (ListBox)sender;
+            int idx = lb.IndexFromPoint(e.Location);
+            if (idx < 0 || idx >= lb.Items.Count || !lb.GetItemRectangle(idx).Contains(e.Location)) return;
+            lb.SelectedIndex = idx;
+            int queueIdx = lb == advTx1ListBox ? wsjtxClient.GetQueueIndexForTx1(idx)
+                : lb == advTx2ListBox ? wsjtxClient.GetQueueIndexForTx2(idx) : -1;
+            if (queueIdx >= 0) wsjtxClient.EditCallQueue(queueIdx);
+        }
+
         private void AdvRawListBox_KeyDown(object sender, KeyEventArgs e)
         {
             if (!formLoaded) return;

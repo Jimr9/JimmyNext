@@ -1086,6 +1086,12 @@ namespace WSJTX_Controller
                     EditQsoBtn_Click(_editLv, EventArgs.Empty);
                 }
             };
+            // Double-click on a contact opens it too, for a mouse user.
+            _editLv.MouseDoubleClick += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left && _editLv.HitTest(e.Location).Item != null && _editLv.SelectedItems.Count == 1)
+                    EditQsoBtn_Click(_editLv, EventArgs.Empty);
+            };
 
             _editLogPanel.Controls.Add(_editLv);
             _editLogPanel.Controls.Add(header);

@@ -1373,6 +1373,8 @@
             this.advTx1ListBox.Visible = false;
             this.advTx1ListBox.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.AdvListBox_DrawItem);
             this.advTx1ListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.AdvTx1ListBox_KeyDown);
+            this.advTx1ListBox.MouseDoubleClick += new System.Windows.Forms.MouseEventHandler(this.AdvListBox_MouseDoubleClick);
+            this.advTx1ListBox.MouseDown += new System.Windows.Forms.MouseEventHandler(this.AdvListBox_MouseDown);
             //
             // advTx2Label
             //
@@ -1399,6 +1401,8 @@
             this.advTx2ListBox.Visible = false;
             this.advTx2ListBox.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.AdvListBox_DrawItem);
             this.advTx2ListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.AdvTx2ListBox_KeyDown);
+            this.advTx2ListBox.MouseDoubleClick += new System.Windows.Forms.MouseEventHandler(this.AdvListBox_MouseDoubleClick);
+            this.advTx2ListBox.MouseDown += new System.Windows.Forms.MouseEventHandler(this.AdvListBox_MouseDown);
             //
             // advRawLabel
             //
@@ -1425,6 +1429,7 @@
             this.advRawListBox.Visible = false;
             this.advRawListBox.DrawItem += new System.Windows.Forms.DrawItemEventHandler(this.AdvListBox_DrawItem);
             this.advRawListBox.KeyDown += new System.Windows.Forms.KeyEventHandler(this.AdvRawListBox_KeyDown);
+            this.advRawListBox.MouseDoubleClick += new System.Windows.Forms.MouseEventHandler(this.AdvListBox_MouseDoubleClick);
             //
             // spotWatchLabel
             //
