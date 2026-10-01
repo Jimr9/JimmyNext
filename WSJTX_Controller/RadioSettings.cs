@@ -10,7 +10,9 @@ namespace WSJTX_Controller
     // revisited structurally when Phase 1 lands.
     public class RadioSettings
     {
-        public RadioControlMode Mode { get; set; } = RadioControlMode.WsjtxCat;
+        // 2026-10-01: Hamlib rigctld is the only radio mode (Receive Only removed; a saved
+        // "WsjtxCat" no longer parses, so this default stays). Ready or not: Controller.RadioSetUp.
+        public RadioControlMode Mode { get; set; } = RadioControlMode.HamlibRigctld;
 
         // false (default): Jimmy launches its own bundled rigctld.exe (Phase 1) against
         // RigModel/ComPort. true: connect to an already-running rigctld elsewhere instead,

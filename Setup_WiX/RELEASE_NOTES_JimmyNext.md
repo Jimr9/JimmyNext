@@ -10,6 +10,18 @@
 - The contact editor (Logbook, Enter or Space on a contact) shows every field. Protected fields
   need "Allow editing protected fields"; confirmations (LoTW, QRZ, eQSL, card) are always read only.
 
+## Setup first
+
+- **First start opens setup:** Station (callsign, grid), Radio (model, COM port, PTT, SWR halt),
+  Audio (the radio's input and output devices), then Operating (Call CQ or Listen, CQ /
+  CQ DX, who to reply to, POTA role, reply order), with Back / Next / Finish. It opens again
+  at each start until everything is set, and until then the status line says exactly what is
+  missing and on which Options page. The old Options "Basic" page is now that last step.
+- **No sound card is touched until the radio is set up** -- not even Windows' default device.
+  Until then the logbook, imports, uploads and lookups still work (once the callsign and grid
+  are in). "Receive Only" and "System default" audio are gone: Jimmy Next always talks to the
+  radio through Hamlib rigctld and the radio's own audio devices.
+
 ## Profiles
 
 - **Shared settings:** callsign and grid, operator name and contest email, TQSL station location,
@@ -41,6 +53,8 @@
   release.
 
 - New sounds: **New grid** and **New grid on band** (Options, Sounds).
+- **One new DXCC / new grid sound per receive period** (Options, Sounds, off by default): a busy
+  period with several new stations plays each of those sounds once instead of once per station.
 - **Alert regions** (Options, Sounds, Choose regions): keep new DXCC, new grid, directed CQ,
   POTA, SOTA and call-added sounds to the continents and countries you chase. Default is All
   regions. Calling you and wanted calls always sound.

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -1585,6 +1585,7 @@ static class JimmyTests
         OptimizeReducesOnlyUntilReportExchangedTests();
         RawDecodesIngestsEveryDecodeBothModesTests();
         EngineLaunchKeyTests();
+        SetupReadinessTests();
         StationLocationTests();
         RadioPowerAndExportHeaderTests();
         SharedSettingsTests();
@@ -8702,6 +8703,35 @@ static class JimmyTests
                 dlg.BuildFrequenciesTab();
                 Check("BuildFrequenciesTab runs without throwing (the actual live-reported crash)", true, true);
             }
+            // Setup (2026-10-01): Basic left the Options list and became setup's last step.
+            using (var dlg = new OptionsDlg(wc, ctrl))
+            {
+                var t = typeof(OptionsDlg);
+                var list = (System.Windows.Forms.ListBox)t.GetField("_categoryListBox",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg);
+                Check("Options has no Basic page any more", list.Items.Contains("Basic"), false);
+                Check("...and starts at General", (string)list.Items[0] == "General", true);
+                dlg.EnterSetupMode();
+                // On screen the window's Load builds every Options page, then the setup pages; here
+                // only Station & Operator and Decode Engine (the full Load needs the Hotkeys setup,
+                // and the Radio page lists COM ports, which this test build cannot) -- the Radio
+                // setup page is checked on screen.
+                foreach (var m in new[] { "BuildStationOperatorTab", "BuildDecodeEngineTab" })
+                    t.GetMethod(m, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance).Invoke(dlg, null);
+                dlg.BuildSetupSteps();
+                var steps = (System.Array)t.GetField("_setupSteps",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg);
+                Check("setup has four steps, Operating last", steps.Length == 4 && steps.GetValue(3).ToString().Contains("Operating"), true);
+                System.Windows.Forms.Control Page(int i) => (System.Windows.Forms.Control)steps.GetValue(i).GetType().GetField("Item1").GetValue(steps.GetValue(i));
+                T F<T>(string name) => (T)t.GetField(name, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg);
+                var station = Page(0); var radio = Page(1); var audio = Page(2);
+                Check("setup Station page: callsign and grid", F<System.Windows.Forms.TextBox>("_engineMyCallTextBox").Parent == station
+                    && F<System.Windows.Forms.TextBox>("_engineMyGridTextBox").Parent == station, true);
+                Check("...and nothing else -- no 'This profile only', no Open Contesting",
+                    station.Controls.OfType<System.Windows.Forms.CheckBox>().Any() || station.Controls.OfType<System.Windows.Forms.Button>().Any(), false);
+                Check("setup Audio page: the two audio devices", F<System.Windows.Forms.ComboBox>("_engineAudioDeviceCombo").Parent == audio
+                    && F<System.Windows.Forms.ComboBox>("_engineAudioOutputDeviceCombo").Parent == audio, true);
+            }
         }
         catch (Exception ex)
         {
@@ -9228,10 +9258,10 @@ static class JimmyTests
     static void OptionsDlgSystemDefaultDeviceLabelTests()
     {
         Console.WriteLine("\n── T13 fix: 'System default' audio device label round-trip -- THE FIX ──");
-        CheckStr("THE FIX: an empty stored value displays as 'System default', not a blank item",
-            OptionsDlg.ToDisplayDeviceName(""), OptionsDlg.SystemDefaultDeviceLabel);
-        CheckStr("A null stored value also displays as 'System default'",
-            OptionsDlg.ToDisplayDeviceName(null), OptionsDlg.SystemDefaultDeviceLabel);
+        CheckStr("2026-10-01: an empty stored value shows an empty box -- no 'System default' (Windows' default device)",
+            OptionsDlg.ToDisplayDeviceName(""), "");
+        CheckStr("A null stored value also shows an empty box",
+            OptionsDlg.ToDisplayDeviceName(null), "");
         CheckStr("A real device name displays unchanged",
             OptionsDlg.ToDisplayDeviceName("USB Audio CODEC"), "USB Audio CODEC");
         CheckStr("THE FIX: selecting 'System default' saves back to the empty string (no storage-format change)",
@@ -18778,6 +18808,60 @@ static class JimmyTests
     // Profile switch without a restart (Controller.TryAdoptHandedOffEngine): a new window keeps the
     // running engine only when its launch key matches -- radio, audio devices and the session token
     // left out (they change live, or belong to the session), everything else counted.
+    // Setup before the radio (2026-10-01): the engine runs a radio only once the callsign, grid,
+    // radio and both its audio devices are set; until then the logbook only, touching no sound card.
+    static void SetupReadinessTests()
+    {
+        Console.WriteLine("\n── Setup: no radio, no sound card, until it is set up ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.Radio = new RadioSettings();
+            ctrl.NativeEngine.MyCall = "KB0UZT"; ctrl.NativeEngine.MyGrid = "EN34";
+            ctrl.NativeEngine.AudioInputDevice = ""; ctrl.NativeEngine.AudioOutputDevice = "";
+            Check("a new install: Hamlib is the radio mode", ctrl.Radio.Mode == RadioControlMode.HamlibRigctld, true);
+            Check("nothing chosen -> not set up", ctrl.RadioSetUp, false);
+            CheckStr("...and the setup message names the radio and its audio, and where",
+                ctrl.SetupMessage(), "To begin operating, set in Options: your radio on the Radio page, and your radio's audio devices on the Decode Engine page.");
+            ctrl.Radio.RigModel = "2037"; ctrl.Radio.ComPort = "COM4";
+            ctrl.NativeEngine.AudioInputDevice = "USB Audio CODEC";
+            Check("an output device still missing -> not set up (never Windows' default)", ctrl.RadioSetUp, false);
+            CheckStr("...the message names only what is missing",
+                ctrl.SetupMessage(), "To begin operating, set in Options: your radio's audio devices on the Decode Engine page.");
+            ctrl.NativeEngine.AudioOutputDevice = "USB Audio CODEC";
+            Check("model, port and both audio devices -> set up", ctrl.RadioSetUp && ctrl.SetupComplete, true);
+            CheckStr("...no setup message", ctrl.SetupMessage(), null);
+            ctrl.NativeEngine.MyCall = "";
+            Check("no callsign -> setup incomplete", ctrl.SetupComplete, false);
+
+            string ini = Path.GetTempFileName();
+            try
+            {
+                new IniFile(ini).Write("radioControlMode", "WsjtxCat");
+                var r = new RadioSettings(); r.LoadFromIni(new IniFile(ini));
+                Check("a profile saved as Receive Only reads as Hamlib", r.Mode == RadioControlMode.HamlibRigctld, true);
+            }
+            finally { try { File.Delete(ini); } catch { } }
+
+            var radio = new RadioSettings { RigModel = "2037", ComPort = "COM4", BaudRate = "115200" };
+            string full = NativeEngineClient.BuildArgs("KB0UZT", "EN34", "USB Audio CODEC", 2237, "USB Audio CODEC", radio,
+                null, false, null, "tok", 7, null, 60, false, radioAndAudio: true);
+            string logOnly = NativeEngineClient.BuildArgs("KB0UZT", "EN34", "", 2237, "", radio,
+                null, false, null, "tok", 7, null, 60, false, radioAndAudio: true, logbookOnly: true);
+            Check("the radio engine gets its devices and radio", full.Contains("--device") && full.Contains("--rig-model") && !full.Contains("--no-radio"), true);
+            Check("logbook-only: --no-radio, no audio device, no radio", logOnly.Contains("--no-radio") && !logOnly.Contains("--device") && !logOnly.Contains("--rig-"), true);
+            Check("...and still its session token (it can be shut down)", logOnly.Contains("--session-token tok"), true);
+            Check("a logbook-only engine is never kept for a ready profile",
+                NativeEngineClient.BuildArgs("KB0UZT", "EN34", "", 2237, "", radio, null, false, null, null, 7, null, 60, false, radioAndAudio: false, logbookOnly: true)
+                != NativeEngineClient.BuildArgs("KB0UZT", "EN34", "", 2237, "", radio, null, false, null, null, 7, null, 60, false, radioAndAudio: false), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SetupReadinessTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
     static void EngineLaunchKeyTests()
     {
         Console.WriteLine("\n── Engine launch key: what a profile switch may keep ──");
@@ -18922,6 +19006,30 @@ static class JimmyTests
         CheckStr("tune-up over, radio left in transmit (its own menu setting)", WsjtxClient.AtuFinishedMessage("1", "1"), "Tuner finished, radio still transmitting");
         CheckStr("transmit state not read yet -> keep asking", WsjtxClient.AtuFinishedMessage("1", "?"), null);
         CheckStr("tuner never switched in", WsjtxClient.AtuFinishedMessage("0", "0"), "The radio's tuner did not start");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.trPeriod = 15000;
+            var day = DateTime.UtcNow.Date;
+            EnqueueDecodeMessage At(int h, int m, int sec) => new EnqueueDecodeMessage { Message = "CQ EA4DS IN80", RxDate = day, SinceMidnight = new TimeSpan(h, m, sec) };
+            ctrl.soundNewOncePerPeriod = false;
+            Check("setting off: every station sounds", !wc.SoundedThisPeriod("NEW_COUNTRY_ON_BAND", At(5, 30, 15)) && !wc.SoundedThisPeriod("NEW_COUNTRY_ON_BAND", At(5, 30, 15)), true);
+            ctrl.soundNewOncePerPeriod = true;
+            Check("one period: the first new-on-band station sounds", wc.SoundedThisPeriod("NEW_COUNTRY_ON_BAND", At(5, 30, 30)), false);
+            Check("...the next ones in the same period stay quiet", wc.SoundedThisPeriod("NEW_COUNTRY_ON_BAND", At(5, 30, 31)), true);
+            Check("...a new DXCC in that period still gets its own sound", wc.SoundedThisPeriod("NEW_COUNTRY", At(5, 30, 31)), false);
+            Check("the next period sounds again", wc.SoundedThisPeriod("NEW_COUNTRY_ON_BAND", At(5, 30, 45)), false);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  one sound per period threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
     }
 
     // Shared call, grid and logins (2026-09-29): the one-time move-over and the routing.

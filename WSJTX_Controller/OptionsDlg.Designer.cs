@@ -98,7 +98,6 @@ namespace WSJTX_Controller
             this._categoryListBox.FormattingEnabled = true;
             this._categoryListBox.IntegralHeight = false;
             this._categoryListBox.Items.AddRange(new object[] {
-                "Basic",
                 "General",
                 "Receive / Auto Reply",
                 "Transmit",

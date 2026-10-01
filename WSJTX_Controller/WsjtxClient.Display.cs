@@ -34,8 +34,10 @@ namespace WSJTX_Controller
                 case CallCategory.TO_MYCALL:
                     return Sounds.PlaySoundEvent(ctrl.soundEnabled_CallingMe, ctrl.soundFile_CallingMe, call, "CALLING_ME");
                 case CallCategory.NEW_COUNTRY:
+                    if (SoundedThisPeriod("NEW_COUNTRY", msg)) return true;
                     return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewDxcc, ctrl.soundFile_NewDxcc, call, "NEW_COUNTRY");
                 case CallCategory.NEW_COUNTRY_ON_BAND:
+                    if (SoundedThisPeriod("NEW_COUNTRY_ON_BAND", msg)) return true;
                     return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewDxccOnBand, ctrl.soundFile_NewDxccOnBand, call, "NEW_COUNTRY_ON_BAND");
                 case CallCategory.ALWAYS_WANTED:
                     return Sounds.PlaySoundEvent(ctrl.soundEnabled_AlwaysWanted, ctrl.soundFile_AlwaysWanted, call, "ALWAYS_WANTED");
@@ -64,9 +66,26 @@ namespace WSJTX_Controller
         {
             var c = msg.EffectiveClassification();
             if (c.IsNewGrid && ctrl.soundEnabled_NewGrid && !string.IsNullOrEmpty(ctrl.soundFile_NewGrid))
-                return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGrid, ctrl.soundFile_NewGrid, call, "NEW_GRID");
+                return SoundedThisPeriod("NEW_GRID", msg) || Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGrid, ctrl.soundFile_NewGrid, call, "NEW_GRID");
             if (c.IsNewGridOnBand && ctrl.soundEnabled_NewGridOnBand && !string.IsNullOrEmpty(ctrl.soundFile_NewGridOnBand))
-                return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGridOnBand, ctrl.soundFile_NewGridOnBand, call, "NEW_GRID_ON_BAND");
+                return SoundedThisPeriod("NEW_GRID_ON_BAND", msg) || Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGridOnBand, ctrl.soundFile_NewGridOnBand, call, "NEW_GRID_ON_BAND");
+            return false;
+        }
+
+        // "One new DXCC / new grid sound per receive period" (Options > Sounds, 2026-10-01): with
+        // it on, each of the four new-station sounds plays at most once per receive period,
+        // however many stations that period found -- a station that drops off the list and
+        // returns is new again, and its period gets its one sound. True = already sounded this
+        // period: stay quiet (and the caller skips the generic "Call added" too).
+        private readonly Dictionary<string, long> _newSoundLastPeriod = new Dictionary<string, long>();
+
+        internal bool SoundedThisPeriod(string soundKey, EnqueueDecodeMessage msg)
+        {
+            if (!ctrl.soundNewOncePerPeriod || msg == null) return false;
+            int periodMs = trPeriod > 0 ? trPeriod.Value : 15000;
+            long period = (long)Math.Floor((msg.RxDate.Date + msg.SinceMidnight).Ticks / (double)TimeSpan.TicksPerMillisecond / periodMs);
+            if (_newSoundLastPeriod.TryGetValue(soundKey, out long last) && last == period) return true;
+            _newSoundLastPeriod[soundKey] = period;
             return false;
         }
 
@@ -972,6 +991,18 @@ namespace WSJTX_Controller
 
             try
             {
+                // Setup incomplete (2026-10-01): say what is missing instead of "Connecting" --
+                // no radio engine runs until the callsign, grid, radio and its audio are set.
+                if (!TestModeGuard.IsTestMode && !ctrl.SetupComplete)
+                {
+                    // Shown, not spoken: the setup message is said once, at the right moment
+                    // (Controller.ApplyEngineMode / OptionsDlgClosed), never on every status render.
+                    suppressRoutineSpeechThisRender = true;
+                    status = ctrl.SetupInProgress ? "Setting up Jimmy Next." : ctrl.SetupMessage() ?? "";
+                    foreColor = Color.Black;
+                    backColor = Color.Orange;
+                    return;
+                }
                 if (WsjtxMessage.NegoState == WsjtxMessage.NegoStates.WAIT)
                 {
                     // "Waiting for WSJT-X" removed 2026-08-12: obsolete wording from before
