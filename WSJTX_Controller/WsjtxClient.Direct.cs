@@ -3284,7 +3284,7 @@ namespace WSJTX_Controller
         // Task.Run -- ToggleTuningProcess (WsjtxClient.BandAudio.cs) passes onComplete instead of
         // wrapping this call in its own Task.Run+BeginInvoke; the dispatcher already marshals
         // onComplete onto the UI thread.
-        // Alt+Shift+T: the radio's own antenna tuner (EngineHost ATU_START / ATU_STOP / ATU_STATUS,
+        // Alt+Shift+T: the radio's own antenna tuner (EngineHost ATU_START / ATU_STATUS / ATU_RECEIVE,
         // main.rs kenwood_atu). onReply gets the engine's raw reply, or null when it could not be
         // sent. A start keys the radio, so it is a TX-arm command (purged by an emergency halt).
         internal void DirectAtuCommand(string command, Action<string> onReply)

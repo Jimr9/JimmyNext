@@ -1058,17 +1058,30 @@ fn read_one_control_line(
 /// added: this is a loopback-only, single-operator, one-shot-per-command local control channel
 /// (Jimmy's own client already opens a fresh connection per command, matching the eQSL/HamQTH
 /// spawns' own established shape), not a public-facing service that needs DoS hardening.
-/// ATU_START / ATU_STOP / ATU_STATUS -- Jimmy's "Start antenna tuner" (Alt+Shift+T), 2026-09-29.
+/// ATU_START / ATU_STATUS / ATU_RECEIVE -- Jimmy's "Start antenna tuner" (Alt+Shift+T), 2026-09-29.
 /// Nexus's own ATU command (Engine::atu_tune) goes through Hamlib's `set_func TUNER`, which on the
 /// Kenwood backend can only switch the tuner IN, never start a tune-up -- so Nexus refuses it there
 /// (rigmodels::hamlib_atu_start_tune_reaches). The TS-590-family CAT command that does start one is
 /// `AC111;` (third digit: 1 start / 0 stop; `AC;` reads it back), sent as raw CAT through the SAME
 /// rigctld Nexus already runs, with Nexus's own client (Rig::rigctld, send_raw_set / send_raw) --
 /// never a second connection to the radio. That client never keys, so dropping it never unkeys.
-/// Kenwood backend only for now. The transmit gates are Nexus's (Engine::atu_tune_gate) minus two:
+/// Kenwood backend only for now (operator decision 2026-09-29: the whole Kenwood family, not one
+/// model). Every step is confirmed by reading the radio back, so a model that answers differently
+/// is reported, never assumed. Nothing here ever sends a menu (EX) or power (PC) command: the
+/// radio's own settings, e.g. the TS-590SG's Menu 57, stay as the operator set them.
+/// A tune-up is the radio's (or its external tuner's) own job: it ends by itself, with a match or
+/// the radio's own warning, so nothing here ever tries to stop one (operator, 2026-09-30).
+/// ATU_STATUS also reads the radio's transmit state (Hamlib's `t`, read only) apart from the
+/// tuner's -- a finished tune-up is not proof the radio stopped transmitting: a radio set to stay
+/// in transmit after tuning (the TS-590SG's Menu 57) does not. ATU_RECEIVE is Jimmy's safety net
+/// for that case: once the tune-up is OVER (refused while the radio still reports tuning), it
+/// returns the radio to receive with the standard PTT-off (Hamlib `T 0`) and answers "OK receive"
+/// only when the radio reads back not transmitting. It changes no setting -- only that carrier.
+/// The transmit gates are Nexus's (Engine::atu_tune_gate) minus two:
 /// the "can't start over CAT" refusal this replaces, and the Enable-TX latch -- Jimmy disarms TX
 /// before a tune-up exactly as it does for Tune (Alt+T), and FT8/FT4 are never receive-only tiers.
-/// Replies "OK", "OK <tuning 1|0> <tuner in 1|0> <radio's AC answer>" for ATU_STATUS, or "ERR <reason>".
+/// Replies "OK" (start), "OK <tuning 1|0> <tuner in 1|0> <transmitting 1|0|?> <radio's AC answer>"
+/// (status), "OK receive" (confirmed), or "ERR <reason>".
 /// See GRID_STATES. Built once: 32,400 cells, a few hundred of them in the US.
 fn grid_states_json() -> &'static str {
     static JSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -1118,15 +1131,31 @@ fn kenwood_atu(engine: &Arc<Mutex<Engine>>, cmd: &str) -> String {
         return format!("ERR Unexpected tuner answer from the radio: {reply}");
     };
     if cmd == "ATU_STATUS" {
-        // "OK <tuning 1|0> <tuner in 1|0> <raw answer>": the third digit is 1 while a tune-up
-        // runs; the second says whether the tuner is in line at all.
-        return format!("OK {} {} {reply}", digits[2], digits[1]);
+        // "OK <tuning 1|0> <tuner in 1|0> <transmitting 1|0|?> <raw answer>": the third digit is
+        // 1 while a tune-up runs; the second says whether the tuner is in line at all.
+        let tx = match rig.read_ptt() { Some(true) => '1', Some(false) => '0', None => '?' };
+        return format!("OK {} {} {tx} {reply}", digits[2], digits[1]);
     }
-    // The first digit (receive through the tuner) is the operator's own setting: keep it, and
-    // change only TX-AT in (second digit) and start/stop (third).
+    if cmd == "ATU_RECEIVE" {
+        if digits[2] != '0' {
+            return "ERR Tuner still working".to_string();
+        }
+        // Confirmed only by reading the radio back; a few reads, as it may take a moment.
+        let _ = rig.ptt(false);
+        for _ in 0..6 {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            match rig.read_ptt() {
+                Some(false) => return "OK receive".to_string(),
+                Some(true) => { let _ = rig.ptt(false); }
+                None => {}
+            }
+        }
+        return "ERR Could not return the radio to receive, check the radio".to_string();
+    }
+    // Start. The first digit (receive through the tuner) is the operator's own setting: keep it,
+    // and change only TX-AT in (second digit) and start (third).
     let rx_at = digits[0];
-    let start = cmd == "ATU_START";
-    if start && digits[1] == '0' {
+    if digits[1] == '0' {
         // Tuner switched OUT (through): the TS-590SG ignores a start then -- live 2026-09-29,
         // "AC011;" left it at AC000 three times, until the radio's own AT key put it in. Put it
         // in first, as that key does, then start.
@@ -1135,14 +1164,18 @@ fn kenwood_atu(engine: &Arc<Mutex<Engine>>, cmd: &str) -> String {
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    if !rig.send_raw_set(&format!("AC{rx_at}1{};", if start { '1' } else { '0' })) {
+    if !rig.send_raw_set(&kenwood_atu_start(digits)) {
         return "ERR The radio control link is not reachable".to_string();
     }
-    if start {
-        // Same stand-down Nexus does when a tune-up reaches the radio (#322).
-        engine.lock().unwrap_or_else(|e| e.into_inner()).note_atu_tune_started();
-    }
+    // Same stand-down Nexus does when a tune-up reaches the radio (#322).
+    engine.lock().unwrap_or_else(|e| e.into_inner()).note_atu_tune_started();
     "OK".to_string()
+}
+
+/// The only tuner command ever written: start, with the radio's own receive digit kept. Never a
+/// menu (EX) or power (PC) command, and never a stop -- the radio ends its own tune-up.
+fn kenwood_atu_start(current: [char; 3]) -> String {
+    format!("AC{}11;", current[0])
 }
 
 /// The three digits of a Kenwood `AC` answer ("AC110;" -> ['1','1','0']), else None.
@@ -1424,7 +1457,7 @@ fn handle_control_connection(
         } else if let Some(v) = line.strip_prefix("SET_TUNING ") {
             engine.lock().unwrap_or_else(|e| e.into_inner()).set_tune(v.trim() == "1");
             let _ = writeln!(stream, "OK");
-        } else if line == "ATU_START" || line == "ATU_STOP" || line == "ATU_STATUS" {
+        } else if line == "ATU_START" || line == "ATU_STATUS" || line == "ATU_RECEIVE" {
             let _ = writeln!(stream, "{}", kenwood_atu(&engine, line));
         } else if let Some(v) = line.strip_prefix("SET_TX_OFFSET ") {
             match parse_offset_arg("SET_TX_OFFSET", v) {
@@ -1490,6 +1523,28 @@ fn handle_control_connection(
                 }
                 Err(e) => {
                     let _ = writeln!(stream, "ERR bad APPLY_SETTINGS args: {e}");
+                }
+            }
+        } else if let Some(v) = line.strip_prefix("SET_CLOCK_CHECK ") {
+            // Nexus's internet time check, changed on the running engine (2026-09-29): the same
+            // Settings.clock_check Nexus's own settings save changes through apply_settings. Its
+            // clock thread reads it every round; clear_clock_offset(true) -- Nexus's own call for
+            // "drop the measurement and measure again" -- wakes that round now, so on measures at
+            // once and off stops steering by the old measurement at once.
+            let on = match v.trim() { "on" => Some(true), "off" => Some(false), _ => None };
+            match on {
+                Some(on) => {
+                    let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+                    if eng.settings().clock_check != on {
+                        let mut s = eng.settings().clone();
+                        s.clock_check = on;
+                        eng.apply_settings(s);
+                        eng.clear_clock_offset(true);
+                    }
+                    let _ = writeln!(stream, "OK");
+                }
+                None => {
+                    let _ = writeln!(stream, "ERR SET_CLOCK_CHECK takes on or off");
                 }
             }
         } else if let Some(json) = line.strip_prefix("SET_WORKING_FREQUENCIES ") {
@@ -2432,6 +2487,15 @@ fn wait_for_shutdown(backstop: Option<std::time::Duration>) -> ! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn kenwood_tuner_writes_only_its_own_command_and_keeps_the_radios_settings() {
+        // Start: tuner in and tune, receive-through-tuner kept. There is no stop command.
+        assert_eq!(kenwood_atu_start(['1', '0', '0']), "AC111;");
+        assert_eq!(kenwood_atu_start(['0', '1', '0']), "AC011;");
+        let c = kenwood_atu_start(['0', '1', '1']);
+        assert!(c.starts_with("AC") && !c.contains("EX") && !c.contains("PC"));
+    }
+
     use super::*;
 
     fn radio_args() -> ApplyRadioArgs {

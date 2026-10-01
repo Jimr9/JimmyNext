@@ -495,7 +495,7 @@ namespace WSJTX_Controller
 
             // 2026-09-28: Nexus's own internet time check (Settings.clock_check). On: Nexus
             // measures the PC clock against time servers and corrects TX / decode timing by it.
-            // Launch-time only, so a change restarts the engine (SaveGeneralClockCheck).
+            // Applied to the running engine (Controller.TryApplyClockCheckLive), 2026-09-29.
             _clockCheckCheckBox = new System.Windows.Forms.CheckBox
             {
                 Text           = "Check clock with internet time servers",
@@ -534,8 +534,8 @@ namespace WSJTX_Controller
 
             var smartStartGroup = new System.Windows.Forms.GroupBox
             {
-                Text           = "Smart QSO Start",
-                AccessibleName = "Smart QSO Start",
+                Text           = "Smart Mode",
+                AccessibleName = "Smart Mode",
                 Location       = new System.Drawing.Point(5, 178),
                 Size           = new System.Drawing.Size(650, 168),
                 Font           = font,
@@ -548,8 +548,8 @@ namespace WSJTX_Controller
             // WsjtxClient.StationWatch.cs.
             _smartQsoStartCheckBox = new System.Windows.Forms.CheckBox
             {
-                Text           = "Smart QSO Start (Enter means \"work when appropriate\", not immediately)",
-                AccessibleName = "Smart QSO Start",
+                Text           = "Smart Mode (Enter means \"work when appropriate\", not immediately)",
+                AccessibleName = "Smart Mode",
                 AutoSize       = true,
                 Location       = new System.Drawing.Point(10, 20),
                 TabIndex       = 0,
@@ -570,7 +570,7 @@ namespace WSJTX_Controller
 
             _smartStartSilencePeriodsNumeric = new System.Windows.Forms.NumericUpDown
             {
-                AccessibleName = "Smart Start silence periods",
+                AccessibleName = "Smart Mode silence periods",
                 Location       = new System.Drawing.Point(320, 45),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 1,
@@ -626,7 +626,7 @@ namespace WSJTX_Controller
 
             _smartStartTimeLimitMinutesNumeric = new System.Windows.Forms.NumericUpDown
             {
-                AccessibleName = "Smart Start time limit in minutes",
+                AccessibleName = "Smart Mode time limit in minutes",
                 Location       = new System.Drawing.Point(320, 101),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 3,
@@ -644,7 +644,7 @@ namespace WSJTX_Controller
             // WsjtxClient's own comment) -- it lives in this group for lack of a better home.
             var otherStationRepliesLabel = new System.Windows.Forms.Label
             {
-                Text     = "Other-station replies before yielding:",
+                Text     = "Other-station replies before yielding (Smart Mode):",
                 AutoSize = true,
                 Location = new System.Drawing.Point(10, 132),
                 Font     = font,
@@ -654,7 +654,7 @@ namespace WSJTX_Controller
 
             _otherStationRepliesBeforeYieldingNumeric = new System.Windows.Forms.NumericUpDown
             {
-                AccessibleName = "Other-station replies before yielding",
+                AccessibleName = "Other-station replies before yielding, Smart Mode",
                 Location       = new System.Drawing.Point(320, 129),
                 Size           = new System.Drawing.Size(50, 20),
                 TabIndex       = 4,
@@ -720,12 +720,13 @@ namespace WSJTX_Controller
             int maxQueued = (int)(_maxQueuedCallsNumeric?.Value ?? 5);
             ctrl.maxQueuedCallsBase = Math.Max(4, Math.Min(100, maxQueued));
 
-            // Internet time check: a launch argument of the engine, so a change restarts it.
+            // Internet time check: applied to the running engine; only if it does not take it
+            // (none running, an older engine) is the engine restarted as before.
             bool clockCheck = _clockCheckCheckBox?.Checked ?? ctrl.NativeEngine.ClockCheck;
             if (clockCheck != ctrl.NativeEngine.ClockCheck)
             {
                 ctrl.NativeEngine.ClockCheck = clockCheck;
-                ctrl.ApplyEngineMode();
+                if (!ctrl.TryApplyClockCheckLive()) ctrl.ApplyEngineMode();
             }
 
             ctrl.alwaysOnTop = udpOnTopCheckBox.Checked;
@@ -2721,6 +2722,7 @@ namespace WSJTX_Controller
             stationOperatorPanel.Controls.Add(openContestingBtn);
 
             AddProfileOnlyCheckBox("Station", _engineMyCallTextBox, _engineMyCallTextBox.Left, font, _engineMyCallTextBox, _engineMyGridTextBox);
+            AddProfileOnlyCheckBox("Operator", _stationContestEmailTextBox, _engineMyCallTextBox.Left, font, _stationOperatorNameTextBox, _stationContestEmailTextBox);
         }
 
         // "This profile only" (shared settings, 2026-09-29 -- see SharedSettings): one per group,
@@ -2736,7 +2738,7 @@ namespace WSJTX_Controller
         {
             var ini = ctrl.SettingsIni;
             var container = after.Parent;
-            if (ini?.Shared == null || container == null) return;
+            if (ini == null || !ini.SharesGroup(group) || container == null) return;
             string[] keys = SharedSettings.KeysOf(group);
             int top = after.Bottom + 4;
             foreach (System.Windows.Forms.Control c in container.Controls)
@@ -2748,6 +2750,7 @@ namespace WSJTX_Controller
             {
                 Text           = "This profile only",
                 AccessibleName = "This profile only",
+                AccessibleDescription = ProfileOnlyDescription(group),
                 AutoSize       = true,
                 Location       = new System.Drawing.Point(x, top),
                 TabIndex       = after.TabIndex + 1,
@@ -2762,6 +2765,24 @@ namespace WSJTX_Controller
             };
             container.Controls.Add(cb);
             _profileOnlyCbs[group] = cb;
+        }
+
+        private static string ProfileOnlyDescription(string group)
+        {
+            switch (group)
+            {
+                case "Station": return "Callsign and grid";
+                case "Operator": return "Operator name and contest email";
+                case "QrzLookup": return "QRZ lookup login";
+                case "QrzLogbook": return "QRZ logbook key";
+                case "Lotw": return "LoTW login";
+                case "TqslLocation": return "TQSL station location";
+                case "ClubLog": return "Club Log login";
+                case "HrdLog": return "HRDLog login";
+                case "Eqsl": return "eQSL login";
+                case "HamQth": return "HamQTH login";
+                default: return null;
+            }
         }
 
         private void ApplyProfileOnlyChoices()
@@ -4840,6 +4861,8 @@ namespace WSJTX_Controller
                 new { Key = "Disconnected",   Label = "Engine disconnected",              Enabled = ctrl.soundEnabled_Disconnected,   File = ctrl.soundFile_Disconnected    },
                 new { Key = "NewDxcc",        Label = "New DXCC",                         Enabled = ctrl.soundEnabled_NewDxcc,        File = ctrl.soundFile_NewDxcc         },
                 new { Key = "NewDxccOnBand",  Label = "New DXCC on band",                 Enabled = ctrl.soundEnabled_NewDxccOnBand,  File = ctrl.soundFile_NewDxccOnBand   },
+                new { Key = "NewGrid",        Label = "New grid",                         Enabled = ctrl.soundEnabled_NewGrid,        File = ctrl.soundFile_NewGrid         },
+                new { Key = "NewGridOnBand",  Label = "New grid on band",                 Enabled = ctrl.soundEnabled_NewGridOnBand,  File = ctrl.soundFile_NewGridOnBand   },
                 new { Key = "AlwaysWanted",   Label = "Always Wanted",                    Enabled = ctrl.soundEnabled_AlwaysWanted,   File = ctrl.soundFile_AlwaysWanted    },
                 new { Key = "DirectedCq",     Label = "Directed CQ",                      Enabled = ctrl.soundEnabled_DirectedCq,     File = ctrl.soundFile_DirectedCq      },
                 new { Key = "Pota",           Label = "POTA",                             Enabled = ctrl.soundEnabled_Pota,           File = ctrl.soundFile_Pota            },
@@ -4913,6 +4936,36 @@ namespace WSJTX_Controller
             _soundTestBtn.Click += (s, e) => TestSoundFile(SelectedSoundItem()?.FilePath);
             soundsPanel.Controls.Add(_soundTestBtn);
 
+            // Alert regions (AlertRegions), beside the alert sounds they govern.
+            _alertRegionsDraft = AlertRegions.Parse(ctrl.alertRegions);
+            var regionsLabel = new System.Windows.Forms.Label
+            {
+                Text = "Alert regions:", AutoSize = true, Location = new System.Drawing.Point(320, 150), Font = font, TabStop = false,
+            };
+            soundsPanel.Controls.Add(regionsLabel);
+            _alertRegionsSummary = new System.Windows.Forms.TextBox
+            {
+                ReadOnly = true, Location = new System.Drawing.Point(320, 168), Size = new System.Drawing.Size(328, 20),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "Alert regions",
+                Text = _alertRegionsDraft.Describe(CountryNameOf),
+            };
+            soundsPanel.Controls.Add(_alertRegionsSummary);
+            var regionsBtn = new System.Windows.Forms.Button
+            {
+                Text = "Choose &regions...", Location = new System.Drawing.Point(320, 194), Size = new System.Drawing.Size(140, 24),
+                TabIndex = tabIdx++, Font = font, AccessibleName = "Choose alert regions",
+            };
+            regionsBtn.Click += (s, e) =>
+            {
+                using (var dlg = new AlertRegionsDlg(_alertRegionsDraft, ctrl.wsjtxClient?.lookupManager?.ClubLog?.AllEntities, font))
+                {
+                    if (dlg.ShowDialog(this) != System.Windows.Forms.DialogResult.OK || dlg.Result == null) return;
+                    _alertRegionsDraft = dlg.Result;
+                    _alertRegionsSummary.Text = _alertRegionsDraft.Describe(CountryNameOf);
+                }
+            };
+            soundsPanel.Controls.Add(regionsBtn);
+
             _soundsListBox.SelectedIndexChanged += (s, e) => RefreshSelectedSoundFileDisplay();
             if (_soundsListBox.Items.Count > 0) _soundsListBox.SelectedIndex = 0;
             RefreshSelectedSoundFileDisplay();
@@ -4964,8 +5017,15 @@ namespace WSJTX_Controller
                 wsjtxClient.Sounds.TestPlaySound(filePath);
         }
 
+        private AlertRegions _alertRegionsDraft = new AlertRegions();
+        private System.Windows.Forms.TextBox _alertRegionsSummary;
+
+        private string CountryNameOf(int adif) =>
+            System.Linq.Enumerable.FirstOrDefault(ctrl.wsjtxClient?.lookupManager?.ClubLog?.AllEntities ?? new ClubLogEntity[0], e => e.Adif == adif)?.Name ?? ("DXCC " + adif);
+
         private void SaveSoundsTab()
         {
+            ctrl.alertRegions = _alertRegionsDraft.Format();
             if (_soundsListBox == null) return;
             if (_soundsEnabledCb != null) ctrl.soundsEnabled = _soundsEnabledCb.Checked;
             // Fix, 2026-09-14: reads the CheckedListBox's own items/checked-state directly --
@@ -5005,6 +5065,14 @@ namespace WSJTX_Controller
                     case "NewDxccOnBand":
                         ctrl.soundEnabled_NewDxccOnBand = enabled;
                         ctrl.soundFile_NewDxccOnBand = file;
+                        break;
+                    case "NewGrid":
+                        ctrl.soundEnabled_NewGrid = enabled;
+                        ctrl.soundFile_NewGrid = file;
+                        break;
+                    case "NewGridOnBand":
+                        ctrl.soundEnabled_NewGridOnBand = enabled;
+                        ctrl.soundFile_NewGridOnBand = file;
                         break;
                     case "AlwaysWanted":
                         ctrl.soundEnabled_AlwaysWanted = enabled;
@@ -6212,6 +6280,7 @@ namespace WSJTX_Controller
 
             AddProfileOnlyCheckBox("QrzLogbook", _qrzLogbookApiKeyTb, 10, font, _qrzLogbookApiKeyTb);
             AddProfileOnlyCheckBox("Lotw", _lotwLogbookPassTb, 10, font, _lotwLogbookUserTb, _lotwLogbookPassTb);
+            AddProfileOnlyCheckBox("TqslLocation", _tqslStationLocationTb, 10, font, _tqslStationLocationTb);
             AddProfileOnlyCheckBox("ClubLog", _clubLogUploadCallsignTb, 10, font, _clubLogUploadEmailTb, _clubLogUploadPasswordTb, _clubLogUploadCallsignTb);
             AddProfileOnlyCheckBox("HrdLog", _hrdLogUploadCodeTb, 10, font, _hrdLogUploadCallsignTb, _hrdLogUploadCodeTb);
             AddProfileOnlyCheckBox("Eqsl", _eqslPasswordTb, 10, font, _eqslUsernameTb, _eqslPasswordTb);

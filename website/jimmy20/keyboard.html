@@ -34,7 +34,7 @@
   <h1>Keyboard Commands</h1>
   <p class="lede">Every command below is reachable without a mouse. These are Jimmy Next's defaults — every one of them (except the handful marked fixed) can be reassigned from <strong>Options &gt; Hotkeys</strong> (<kbd>Alt</kbd>+<kbd>O</kbd>).</p>
 
-  <p><kbd>Enter</kbd> on a station in any list selects it and starts calling. With <strong>Smart QSO Start</strong> turned on (Options &gt; Transmit), <kbd>Enter</kbd> instead arms that station to be worked automatically when the moment is right — see <a href="using.html#smart-qso-start">Using Jimmy Next</a>.</p>
+  <p><kbd>Enter</kbd> on a station in any list selects it and starts calling. With <strong>Smart Mode</strong> turned on (Options &gt; Transmit), <kbd>Enter</kbd> instead arms that station to be worked automatically when the moment is right — see <a href="using.html#smart-qso-start">Using Jimmy Next</a>.</p>
 
   <table class="keys">
     <caption>Command keys</caption>
@@ -60,6 +60,7 @@
     <thead><tr><th scope="col">Key</th><th scope="col">Action</th></tr></thead>
     <tbody>
       <tr><td><kbd>Alt+T</kbd></td><td>Toggle Tune mode, to set the correct audio output level to your radio.</td></tr>
+      <tr><td><kbd>Alt+Shift+T</kbd></td><td>Start the radio's own automatic antenna tuner (Kenwood radios). When the tune-up ends you hear "Tuner finished" — the radio reports that it stopped, not whether it found a match, so a failed tune shows as the radio's own warning. The tune-up is the radio's own job and ends by itself, so pressing again only tells you "Tuner still working", and <kbd>Escape</kbd> leaves it alone (pressed before the start has gone out, it cancels it: "Tuner not started"). If your radio is set to stay in transmit after tuning (a menu setting on some radios), you hear "Tuner finished, radio still transmitting"; if it is still transmitting 30 seconds later — or at once if you press <kbd>Escape</kbd> or <kbd>Alt+Shift+T</kbd> — Jimmy Next returns the radio to receive and tells you whether that worked. Jimmy Next never changes your power setting or radio menus.</td></tr>
       <tr><td><kbd>F12</kbd></td><td>Increase audio output level to the radio (during tune or transmit).</td></tr>
       <tr><td><kbd>F11</kbd></td><td>Decrease audio output level to the radio (during tune or transmit).</td></tr>
       <tr><td><kbd>Alt+Q</kbd></td><td>Quick check of output power, SWR and ALC (during transmit) or audio input level (during receive). Turn on <em>Explain meter readings</em> on the Radio tab to also hear a plain-language hint for each value and, while receiving, the radio's S-meter.</td></tr>
@@ -90,7 +91,7 @@
     <tbody>
       <tr><td><kbd>Ctrl+Shift+W</kbd></td><td>Start or stop watching the selected station — a receive-only running commentary on what that one station is doing. Never transmits. See <a href="using.html#station-watch">Using Jimmy Next</a>.</td></tr>
       <tr><td><kbd>Ctrl+Shift+Enter</kbd></td><td>Work Watched Station Now — call the station currently being watched, using its most recent decode.</td></tr>
-      <tr><td><em>unassigned by default</em></td><td>Report Smart Start status — on demand, hear whether Smart QSO Start currently has a target armed, is waiting on one, or is calling one right now.</td></tr>
+      <tr><td><em>unassigned by default</em></td><td>Report Smart Mode status — on demand, hear whether Smart Mode currently has a target armed, is waiting on one, or is calling one right now.</td></tr>
       <tr><td><em>unassigned by default</em></td><td>Report Station Watch status — on demand, hear whether a station is currently being watched, and which one.</td></tr>
     </tbody>
   </table>

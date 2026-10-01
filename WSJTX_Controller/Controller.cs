@@ -169,6 +169,8 @@ namespace WSJTX_Controller
         // unrelated to the Sounds tab's own Test button. These three plain bools now match the
         // other ten events' own shape exactly -- no reused UI control, no side effect possible.
         public bool   soundsEnabled         = true;
+        // Alert regions (AlertRegions.Format), "" = All regions.
+        public string alertRegions          = "";
         public bool   soundEnabled_CallAdded = true;
         public string soundFile_CallAdded   = "blip.wav";
         public bool   soundEnabled_CallingMe = true;
@@ -183,6 +185,10 @@ namespace WSJTX_Controller
         public string soundFile_NewDxcc           = "";
         public bool   soundEnabled_NewDxccOnBand  = false;
         public string soundFile_NewDxccOnBand     = "";
+        public bool   soundEnabled_NewGrid        = false;
+        public string soundFile_NewGrid           = "";
+        public bool   soundEnabled_NewGridOnBand  = false;
+        public string soundFile_NewGridOnBand     = "";
         public bool   soundEnabled_AlwaysWanted   = false;
         public string soundFile_AlwaysWanted      = "";
         public bool   soundEnabled_DirectedCq     = false;
@@ -976,6 +982,10 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("soundFile_NewDxcc"))          soundFile_NewDxcc          = iniFile.Read("soundFile_NewDxcc");
                 if (iniFile.KeyExists("soundEnabled_NewDxccOnBand")) soundEnabled_NewDxccOnBand = iniFile.Read("soundEnabled_NewDxccOnBand") == "True";
                 if (iniFile.KeyExists("soundFile_NewDxccOnBand"))    soundFile_NewDxccOnBand    = iniFile.Read("soundFile_NewDxccOnBand");
+                if (iniFile.KeyExists("soundEnabled_NewGrid"))       soundEnabled_NewGrid       = iniFile.Read("soundEnabled_NewGrid") == "True";
+                if (iniFile.KeyExists("soundFile_NewGrid"))          soundFile_NewGrid          = iniFile.Read("soundFile_NewGrid");
+                if (iniFile.KeyExists("soundEnabled_NewGridOnBand")) soundEnabled_NewGridOnBand = iniFile.Read("soundEnabled_NewGridOnBand") == "True";
+                if (iniFile.KeyExists("soundFile_NewGridOnBand"))    soundFile_NewGridOnBand    = iniFile.Read("soundFile_NewGridOnBand");
                 if (iniFile.KeyExists("soundEnabled_AlwaysWanted"))  soundEnabled_AlwaysWanted  = iniFile.Read("soundEnabled_AlwaysWanted") == "True";
                 if (iniFile.KeyExists("soundFile_AlwaysWanted"))     soundFile_AlwaysWanted     = iniFile.Read("soundFile_AlwaysWanted");
                 if (iniFile.KeyExists("soundEnabled_DirectedCq"))    soundEnabled_DirectedCq    = iniFile.Read("soundEnabled_DirectedCq") == "True";
@@ -991,6 +1001,7 @@ namespace WSJTX_Controller
                 if (iniFile.KeyExists("soundEnabled_AwardNeeded"))    soundEnabled_AwardNeeded    = iniFile.Read("soundEnabled_AwardNeeded") == "True";
                 if (iniFile.KeyExists("soundFile_AwardNeeded"))       soundFile_AwardNeeded       = iniFile.Read("soundFile_AwardNeeded");
                 if (iniFile.KeyExists("soundsEnabled"))               soundsEnabled               = iniFile.Read("soundsEnabled") != "False";
+                alertRegions = AlertRegions.Parse(iniFile.Read("alertRegions")).Format();
 
                 // Lookup / Data settings
                 if (iniFile.KeyExists("useLookupData"))      useLookupData      = iniFile.Read("useLookupData") == "True";
@@ -1147,6 +1158,17 @@ namespace WSJTX_Controller
             // above for the fresh-install-crash history this area of code has) -- dropped
             // 2026-08-18 along with WsjtxProtocolAdapter and the rest of that transport.
             wsjtxClient = new WsjtxClient(this, port, debug, diagLog, txMode);
+            // The wording file (Wording): read once per window, before anything is spoken.
+            string wordingNote = Wording.Load(path);
+            if (wordingNote != null) wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {wordingNote}");
+            if (_sharedSettingsReport != null)
+            {
+                wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {_sharedSettingsReport}");
+                if (_sharedSettingsFailed)
+                    BeginInvoke(new Action(() => wsjtxClient?.StatusView?.ShowMessage("Shared settings could not be saved, see the crash log", false)));
+                _sharedSettingsReport = null;
+                _sharedSettingsFailed = false;
+            }
             if (parsedCallWaitingRowOrder != null)
             {
                 wsjtxClient.callWaitingRowOrderFields = parsedCallWaitingRowOrder;
@@ -1754,6 +1776,10 @@ namespace WSJTX_Controller
                 iniFile.Write("soundFile_NewDxcc",          soundFile_NewDxcc      ?? "");
                 iniFile.Write("soundEnabled_NewDxccOnBand", soundEnabled_NewDxccOnBand.ToString());
                 iniFile.Write("soundFile_NewDxccOnBand",    soundFile_NewDxccOnBand ?? "");
+                iniFile.Write("soundEnabled_NewGrid",       soundEnabled_NewGrid.ToString());
+                iniFile.Write("soundFile_NewGrid",          soundFile_NewGrid ?? "");
+                iniFile.Write("soundEnabled_NewGridOnBand", soundEnabled_NewGridOnBand.ToString());
+                iniFile.Write("soundFile_NewGridOnBand",    soundFile_NewGridOnBand ?? "");
                 iniFile.Write("soundEnabled_AlwaysWanted",  soundEnabled_AlwaysWanted.ToString());
                 iniFile.Write("soundFile_AlwaysWanted",     soundFile_AlwaysWanted  ?? "");
                 iniFile.Write("soundEnabled_DirectedCq",    soundEnabled_DirectedCq.ToString());
@@ -1769,6 +1795,7 @@ namespace WSJTX_Controller
                 iniFile.Write("soundEnabled_AwardNeeded",    soundEnabled_AwardNeeded.ToString());
                 iniFile.Write("soundFile_AwardNeeded",       soundFile_AwardNeeded       ?? "");
                 iniFile.Write("soundsEnabled",               soundsEnabled.ToString());
+                iniFile.Write("alertRegions",                alertRegions ?? "");
                 iniFile.Write("txOddOffset",  wsjtxClient.cachedOddOffset.ToString());
                 iniFile.Write("txEvenOffset", wsjtxClient.cachedEvenOffset.ToString());
                 // Lookup / Data settings
@@ -1954,14 +1981,22 @@ namespace WSJTX_Controller
             }
         }
 
-        // Shared settings (SharedSettings), 2026-09-29: the one-time move-over. If it fails part
-        // way, Shared.ini is removed so nothing is attached and the next start tries again from
-        // the profiles, which the move-over only changes after the shared values are written.
+        // Shared settings (SharedSettings), 2026-09-29: moves over any group not yet shared. A
+        // failure changes nothing a profile relies on (see MigrateOnce) and is tried again next
+        // start; it goes to the crash log, the debug log and, once, the status line.
+        private static string _sharedSettingsReport;
+        private static bool _sharedSettingsFailed;
+
         private static void MigrateToSharedSettings(string activeIniPath)
         {
-            string sharedPath = Path.Combine(ProfilesAppDataPath(), SharedSettings.FileName);
-            try { SharedSettings.MigrateOnce(ProfilesAppDataPath(), BaseIniFilePath(), ProfilesDirectory(), activeIniPath); }
-            catch { try { File.Delete(sharedPath); } catch { } }
+            try { _sharedSettingsReport = SharedSettings.MigrateOnce(ProfilesAppDataPath(), BaseIniFilePath(), ProfilesDirectory(), activeIniPath); }
+            catch (Exception ex)
+            {
+                _sharedSettingsFailed = true;
+                _sharedSettingsReport = "shared settings NOT moved over, will retry next start: " + ex.Message;
+                CrashLogger.Log("SharedSettings.MigrateOnce", ex);
+                try { File.Delete(Path.Combine(ProfilesAppDataPath(), SharedSettings.FileName + ".new")); } catch { }
+            }
         }
 
         // Attaches Shared.ini from `dir` (the settings folder, or the test copy's) when it exists.
@@ -2500,6 +2535,10 @@ namespace WSJTX_Controller
             iniFile.Write("soundFile_NewDxcc",          soundFile_NewDxcc      ?? "");
             iniFile.Write("soundEnabled_NewDxccOnBand", soundEnabled_NewDxccOnBand.ToString());
             iniFile.Write("soundFile_NewDxccOnBand",    soundFile_NewDxccOnBand ?? "");
+            iniFile.Write("soundEnabled_NewGrid",       soundEnabled_NewGrid.ToString());
+            iniFile.Write("soundFile_NewGrid",          soundFile_NewGrid ?? "");
+            iniFile.Write("soundEnabled_NewGridOnBand", soundEnabled_NewGridOnBand.ToString());
+            iniFile.Write("soundFile_NewGridOnBand",    soundFile_NewGridOnBand ?? "");
             iniFile.Write("soundEnabled_AlwaysWanted",  soundEnabled_AlwaysWanted.ToString());
             iniFile.Write("soundFile_AlwaysWanted",     soundFile_AlwaysWanted  ?? "");
             iniFile.Write("soundEnabled_DirectedCq",    soundEnabled_DirectedCq.ToString());
@@ -2515,6 +2554,7 @@ namespace WSJTX_Controller
             iniFile.Write("soundEnabled_AwardNeeded",    soundEnabled_AwardNeeded.ToString());
             iniFile.Write("soundFile_AwardNeeded",       soundFile_AwardNeeded       ?? "");
             iniFile.Write("soundsEnabled",               soundsEnabled.ToString());
+            iniFile.Write("alertRegions",                alertRegions ?? "");
         }
 
         private void SaveLookupSettings()
@@ -2671,6 +2711,7 @@ namespace WSJTX_Controller
         {
             StopAllTimers(this);
             wsjtxClient?.StopTimersForClose();
+            RadioPower.Reset(); // the next window's radio is read afresh
         }
 
         // Every System.Windows.Forms.Timer field of this object, found by type so a timer added
@@ -2909,7 +2950,7 @@ namespace WSJTX_Controller
                     listenModeButton_Click(null, null);
                     if (hadSomethingToHalt) ShowMsg("Tx halted", true);
                     else if (smartStartWasActive)
-                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Start stopped" : $"Smart Start stopped, {smartStartTarget}", true);
+                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Mode stopped" : $"Smart Mode stopped, {smartStartTarget}", true);
                 }
                 BeginInvoke((Action)(() => RestoreFocus(focused)));
                 return true;
@@ -4556,8 +4597,21 @@ namespace WSJTX_Controller
             if (client == null || !client.Running) return false;
             if (!client.ApplySettingsLive(Radio, NativeEngine.AudioInputDevice, NativeEngine.AudioOutputDevice))
                 return false;
+            if (!client.SetClockCheckLive(NativeEngine.ClockCheck))
+                return false;
             ApplyRadioMasterAudioLevels();
-            wsjtxClient?.DebugOutput("[NativeEngine] radio/audio settings applied live (no restart)");
+            wsjtxClient?.DebugOutput("[NativeEngine] radio/audio settings and time check applied live (no restart)");
+            return true;
+        }
+
+        // Options > General's internet time check, on the running engine. False: none running,
+        // or it did not accept -- the caller restarts the engine as before.
+        public bool TryApplyClockCheckLive()
+        {
+            if (TestModeGuard.IsTestMode) return false;
+            var client = nativeEngineClient;
+            if (client == null || !client.Running || !client.SetClockCheckLive(NativeEngine.ClockCheck)) return false;
+            wsjtxClient?.DebugOutput($"[NativeEngine] internet time check {(NativeEngine.ClockCheck ? "on" : "off")} applied live (no restart)");
             return true;
         }
 
@@ -5497,7 +5551,7 @@ namespace WSJTX_Controller
                     listenModeButton_Click(null, null);
                     if (hadSomethingToHalt) ShowMsg("Tx halted", true);
                     else if (smartStartWasActive)
-                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Start stopped" : $"Smart Start stopped, {smartStartTarget}", true);
+                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? "Smart Mode stopped" : $"Smart Mode stopped, {smartStartTarget}", true);
                 }
                 BeginInvoke((Action)(() =>
                     BeginInvoke((Action)(() => RestoreFocus(focused)))

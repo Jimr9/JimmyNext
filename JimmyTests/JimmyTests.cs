@@ -1588,6 +1588,9 @@ static class JimmyTests
         StationLocationTests();
         RadioPowerAndExportHeaderTests();
         SharedSettingsTests();
+        AlertRegionsAndNewGridTests();
+        QsoTimeOnIsStartOfContactTests();
+        WordingFileTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
         ReportClockStatusTests();
@@ -3677,6 +3680,12 @@ static class JimmyTests
             // ── Part 2 (Finding 2): a failed local write is held for retry, not lost ──
             // Construct + seed while the path is still valid (WsjtxClient's ctor opens its own
             // LogbookDb); only the COMPLETION write below hits the bad path.
+            // A fresh test logbook for Part 2: Part 1 queued the same station (same call, band and
+            // mode), and the queue names a contact by its start MINUTE -- so the "exactly one row"
+            // check below counted Part 1's contacts too whenever the test crossed a minute boundary
+            // (full-suite failure 2026-09-30). Part 2's count must see only Part 2's contact.
+            EndTestNexusLog(nexusDir);
+            nexusDir = UseTestNexusLog();
             var wcFail = MakeClient(logEarly: false);
             SeedMidQso(wcFail, (int)WsjtxClient.CallPriority.DEFAULT);
             BreakTestNexusLog(true);   // the logbook save now fails
@@ -18778,6 +18787,11 @@ static class JimmyTests
         Check("a different radio port, audio device or session token keeps the engine",
             Key("KB0UZT", "COM4", "Mic A", "t1") == Key("KB0UZT", "COM3", "Mic B", "t2"), true);
         Check("a different callsign restarts it", Key("KB0UZT", "COM4", "Mic A", "t1") == Key("K5KPE", "COM4", "Mic A", "t1"), false);
+        string Args(bool clock, bool launch) =>
+            NativeEngineClient.BuildArgs("KB0UZT", "EN34", "Mic A", 2237, "Speakers", new RadioSettings { Mode = RadioControlMode.HamlibRigctld, RigModel = "2037", ComPort = "COM4", BaudRate = "115200" },
+                null, true, null, "t1", 7, null, 60, clock, radioAndAudio: launch);
+        Check("a different internet time check keeps the engine (sent live)", Args(true, false) == Args(false, false), true);
+        Check("...and a fresh launch still carries it", Args(true, true).Contains("--clock-check on") && Args(false, true).Contains("--clock-check off"), true);
     }
 
     // Where a worked station IS (StationLocation, 2026-09-29: AF0EC activating in Idaho, grid DN43,
@@ -18817,6 +18831,92 @@ static class JimmyTests
 
     // Logged power = the radio's setting in watts, only for the exact setting it was read for; an
     // export names Jimmy Next, its version and when (2026-09-29 operator requests).
+    // The wording file (2026-09-30): spoken notification pieces the operator can reword.
+    static void WordingFileTests()
+    {
+        Console.WriteLine("\n── Wording file ──");
+        try
+        {
+            Wording.SetForTest(null);
+            CheckStr("built-in: new DXCC on band", Wording.Fill("Summary.NewDxccOnBand", ("Count", "1")), "1 new DXCC on band");
+            CheckStr("built-in side name", Wording.Get("Side.RX1"), "RX1");
+            var d = Wording.Parse(new[]
+            {
+                "# Summary.NewDxcc = {Count} new DXCC",
+                "Summary.NewDxccOnBand = {Count} new on band",
+                "Side.RX1 = RX even",
+                "Nonsense.Key = ignored",
+                "Summary.Wanted =",
+            });
+            CheckStr("a commented line keeps the built-in wording", d.ContainsKey("Summary.NewDxcc").ToString(), "False");
+            CheckStr("an unknown key or blank words are ignored", (d.ContainsKey("Nonsense.Key") || d.ContainsKey("Summary.Wanted")).ToString(), "False");
+            Wording.SetForTest(d);
+            CheckStr("the operator's words are used", Wording.Fill("Summary.NewDxccOnBand", ("Count", "2")), "2 new on band");
+            CheckStr("...side name too", Wording.Get("Side.RX1"), "RX even");
+            CheckStr("built-in station tag", Wording.Get("Tag.NewDxccOnBand"), "New DXCC on band");
+            Wording.SetForTest(Wording.Parse(new[] { "Tag.AwardNeeded = needs {Award}" }));
+            CheckStr("an award tag with its name filled in", Wording.Fill("Tag.AwardNeeded", ("Award", "5BDXCC")), "needs 5BDXCC");
+            Wording.SetForTest(null);
+            CheckStr("list title, spoken, built-in", Wording.Fill("List.TitleSpoken", ("Side", "RX1"), ("Count", "4")), "RX1 available stations, 4 calls");
+            Wording.SetForTest(Wording.Parse(new[] { "List.TitleSpoken = {Side} stations" }));
+            CheckStr("...the operator removed the count", Wording.Fill("List.TitleSpoken", ("Side", "RX1"), ("Count", "4")), "RX1 stations");
+        }
+        finally { Wording.SetForTest(null); }
+    }
+
+    // TIME_ON is when the station was handed to the contact (2026-09-30, WB8JUI: answered at
+    // 01:11:22, R+00 at 01:11:42, logged 01:11:42 before this fix).
+    static void QsoTimeOnIsStartOfContactTests()
+    {
+        Console.WriteLine("\n── TIME_ON: the start of the contact ──");
+        try
+        {
+            var ctrl = new Controller();
+            var _ = ctrl.Handle;
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestApplyDirectSnapshot("KB0UZT", "EN34", ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""EN34"", ""radio"": { ""dialMhz"": 7.074, ""transmitting"": false, ""slot"": 1 }, ""recentDecodes"": [] }"));
+            var day = DateTime.UtcNow.Date;
+            EnqueueDecodeMessage At(string msg, int h, int m, int sec) => new EnqueueDecodeMessage
+                { Message = msg, RxDate = day, SinceMidnight = new TimeSpan(h, m, sec), DeltaFrequency = 1908, Snr = -3 };
+            var report = At("KB0UZT WB8JUI R+00", 1, 11, 42);
+            CheckStr("no start recorded -> the report's time, as before", wc.QsoStartFor("WB8JUI", report).ToString("HHmmss"), "011142");
+            wc.TestSetQsoStart("WB8JUI", DateTime.SpecifyKind(day + new TimeSpan(1, 11, 22), DateTimeKind.Utc));
+            CheckStr("handed to the contact at 01:11:22 -> that is the start", wc.QsoStartFor("WB8JUI", report).ToString("HHmmss"), "011122");
+            CheckStr("another station's start is never this contact's", wc.QsoStartFor("K2NKP", At("KB0UZT K2NKP R-02", 1, 10, 42)).ToString("HHmmss"), "011042");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  QsoTimeOnIsStartOfContactTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
+    // Alert regions and the New grid sounds (2026-09-29).
+    static void AlertRegionsAndNewGridTests()
+    {
+        Console.WriteLine("\n── Alert regions and new grid ──");
+        var all = AlertRegions.Parse("");
+        Check("default: all regions, every station sounds", all.IsAll && all.Allows("NA", 291), true);
+        var r = AlertRegions.Parse("EU;339");
+        CheckStr("saved form round-trips", AlertRegions.Parse(r.Format()).Format(), "EU;339");
+        Check("a chosen continent sounds", r.Allows("EU", 230), true);
+        Check("a chosen country sounds (Japan)", r.Allows("AS", 339), true);
+        Check("anywhere else is quiet", r.Allows("NA", 291), false);
+        Check("unknown place still sounds -- a missing lookup never silences", r.Allows("", 0), true);
+        CheckStr("described for the screen reader", r.Describe(d => d == 339 ? "Japan" : null), "Europe, Japan");
+        CheckStr("a grid's square", LogbookDb.Grid4("en34rn"), "EN34");
+        CheckStr("RR73 is not a grid", LogbookDb.Grid4("RR73"), null);
+        CheckStr("a report is not a grid", LogbookDb.Grid4("-12"), null);
+        CheckStr("tune-up over, receiving", WsjtxClient.AtuFinishedMessage("1", "0"), "Tuner finished");
+        CheckStr("tune-up over, radio left in transmit (its own menu setting)", WsjtxClient.AtuFinishedMessage("1", "1"), "Tuner finished, radio still transmitting");
+        CheckStr("transmit state not read yet -> keep asking", WsjtxClient.AtuFinishedMessage("1", "?"), null);
+        CheckStr("tuner never switched in", WsjtxClient.AtuFinishedMessage("0", "0"), "The radio's tuner did not start");
+    }
+
     // Shared call, grid and logins (2026-09-29): the one-time move-over and the routing.
     static void SharedSettingsTests()
     {
@@ -18861,6 +18961,40 @@ static class JimmyTests
             CheckStr("a batched save reaches the shared file", new IniFile(Path.Combine(dir, SharedSettings.FileName)).Read("nativeEngineMyCall"), "K0SAVED");
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+
+        // Recovery: a Shared.ini without migratedGroups (partly written, or the first tester
+        // build's) is not a finished move-over; a write failure changes no profile.
+        dir = Path.Combine(Path.GetTempPath(), "JimmySharedTest_" + Guid.NewGuid().ToString("N"));
+        profiles = Path.Combine(dir, "Profiles");
+        Directory.CreateDirectory(profiles);
+        try
+        {
+            string basePath = Path.Combine(dir, "Jimmy Next.ini"), portable = Path.Combine(profiles, "portable.ini");
+            string sharedPath = Path.Combine(dir, SharedSettings.FileName);
+            new IniFile(sharedPath).Write("nativeEngineMyCall", "KB0AAA"); // left by an interrupted move-over
+            new IniFile(basePath).Write("tqslStationLocation", "Home");
+            new IniFile(portable).Write("tqslStationLocation", "Park K-1234");
+            var legacy = new IniFile(basePath); legacy.AttachShared(new IniFile(sharedPath));
+            Check("an unfinished Shared.ini is not used", legacy.Shared == null, true);
+
+            Directory.CreateDirectory(sharedPath + ".new"); // the temporary file cannot be written
+            byte[] before = File.ReadAllBytes(portable);
+            bool threw = false;
+            try { SharedSettings.MigrateOnce(dir, basePath, profiles, basePath); } catch (IOException) { threw = true; }
+            Check("a write failure is reported", threw, true);
+            Check("...and changes no profile", File.ReadAllBytes(portable).SequenceEqual(before), true);
+            Check("...and finishes nothing", SharedSettings.MigratedGroups(new IniFile(sharedPath)).Count == 0, true);
+            Directory.Delete(sharedPath + ".new");
+
+            SharedSettings.MigrateOnce(dir, basePath, profiles, basePath);
+            var shared = new IniFile(sharedPath);
+            Check("the retry finishes every group", SharedSettings.MigratedGroups(shared).Count == SharedSettings.Groups.Length, true);
+            CheckStr("a value only the unfinished Shared.ini had is kept", shared.Read("nativeEngineMyCall"), "KB0AAA");
+            var p = new IniFile(portable); p.AttachShared(shared);
+            CheckStr("a different TQSL location stays with its profile", p.Read("tqslStationLocation") + " / " + shared.Read("tqslStationLocation"), "Park K-1234 / Home");
+            Check("a finished move-over is not repeated", SharedSettings.MigrateOnce(dir, basePath, profiles, basePath) == null, true);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
     static void RadioPowerAndExportHeaderTests()
@@ -18874,11 +19008,25 @@ static class JimmyTests
             CheckStr("an old reading -> blank, never a stale number", RadioPower.WattsText(), "");
             RadioPower.ResetForTest();
             CheckStr("nothing read -> blank", RadioPower.WattsText(), "");
+            RadioPower.SetForTest(100, DateTime.UtcNow, "2037|127.0.0.1:4532|kenwood");
+            RadioPower.SetCurrentRadioForTest("3087|127.0.0.1:4532|x6100");
+            CheckStr("another radio's reading is never logged", RadioPower.WattsText(), "");
+            RadioPower.ResetForTest();
+            RadioPower.SetCurrentRadioForTest("2037|127.0.0.1:4532|kenwood");
+            long asked = RadioPower.GenerationForTest;
+            RadioPower.Reset(); // profile switch while the read is on its way
+            RadioPower.SetCurrentRadioForTest("2037|127.0.0.1:4532|kenwood");
+            Check("a reply from before the switch is dropped", RadioPower.Accept(asked, "2037|127.0.0.1:4532|kenwood", 100), false);
+            CheckStr("...and nothing is logged", RadioPower.WattsText(), "");
+            Check("a current reply is kept", RadioPower.Accept(RadioPower.GenerationForTest, "2037|127.0.0.1:4532|kenwood", 50), true);
+            CheckStr("...and logged", RadioPower.WattsText(), "50");
         }
         finally { RadioPower.ResetForTest(); }
         Check("Kenwood PC; reply PC100; -> 100 W", RadioPower.ParseKenwoodPc("PC100;") == 100, true);
         Check("Kenwood PC; reply PC005; -> 5 W", RadioPower.ParseKenwoodPc("PC005;") == 5, true);
         Check("an error reply -> unknown", RadioPower.ParseKenwoodPc("RPRT -1").HasValue, false);
+        using (var ms = new MemoryStream(Encoding.ASCII.GetBytes("PC050;\0")))
+            CheckStr("rigctld's raw answer ends in a NUL, no newline -> read at once", RadioPower.ReadRawReply(ms), "PC050;");
         Check("TS-590SG (2037) is Kenwood-family, X6100 (3087) is not",
             RadioPower.IsKenwoodFamily("2037") && !RadioPower.IsKenwoodFamily("3087"), true);
         string header = NexusLogbookService.AdifExportHeader();
@@ -23236,12 +23384,12 @@ static class JimmyTests
                 Check("B: ...Smart Start was NOT armed", wc.TestSmartStartTarget == null, true);
             }
 
-            // ── C. Smart Start OFF, ordinary active QSO: ONE partner -> peer report -> NOT yet
+            // ── C. Smart Mode ON, ordinary active QSO (not Smart Start-started): ONE partner -> peer report -> NOT yet
             //      yielded (VP5/K5UR fix -- a single interleaved over is inconclusive) ──
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
-                ctrl.smartQsoStartEnabled = false;
+                ctrl.smartQsoStartEnabled = true;    // the guard applies only with Smart Mode on (2026-09-30)
                 ctrl.otherStationRepliesBeforeYielding = 2;   // explicit: the shipped default
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(200));
                 wc.callInProg = target;                                   // an ordinary Enter-started QSO
@@ -23264,7 +23412,7 @@ static class JimmyTests
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
-                ctrl.smartQsoStartEnabled = false;
+                ctrl.smartQsoStartEnabled = true;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(300));
                 wc.callInProg = target;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(301, target, $"{peer} {target} RR73"));
@@ -23281,7 +23429,7 @@ static class JimmyTests
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
-                ctrl.smartQsoStartEnabled = false;
+                ctrl.smartQsoStartEnabled = true;
                 ctrl.otherStationRepliesBeforeYielding = 2;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(310));
                 wc.callInProg = target;
@@ -23303,7 +23451,7 @@ static class JimmyTests
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
-                ctrl.smartQsoStartEnabled = false;
+                ctrl.smartQsoStartEnabled = true;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(400));
                 wc.callInProg = target;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(401, target, $"{myCall} {target} R-10"));
@@ -23319,7 +23467,7 @@ static class JimmyTests
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
-                ctrl.smartQsoStartEnabled = false;
+                ctrl.smartQsoStartEnabled = true;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(500));
                 wc.callInProg = target;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(501, target, $"{peer} {target} -10"));
@@ -23342,7 +23490,7 @@ static class JimmyTests
             {
                 lock (seenLock) seen.Clear();
                 var wc = MakeWc(out var ctrl);
-                ctrl.smartQsoStartEnabled = false;
+                ctrl.smartQsoStartEnabled = true;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(600));
                 wc.callInProg = target;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
@@ -23427,7 +23575,7 @@ static class JimmyTests
             ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
             ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
             ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
-            ctrl.smartQsoStartEnabled = false;   // ordinary Enter-started QSO, exactly as in the log
+            ctrl.smartQsoStartEnabled = true;    // the busy guard applies only with Smart Mode on (2026-09-30); off, nothing yields (ActivePartner test 4)
             var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
             wc.TestSetDirectConnected(true);
             wc.TestSetMode("FT8");
@@ -23621,18 +23769,19 @@ static class JimmyTests
                     wc.TestSmartStartTarget == null && wc.TestSmartStartTransmittedCallCount == 0, true);
             }
 
-            // ── 4. Smart Start OFF (ordinary manual QSO): the 5a58e95 guard still yields, but
-            //       Smart Start is NOT armed ──
+            // ── 4. Smart Mode OFF (ordinary manual QSO): the busy guard does NOT apply -- Jimmy
+            //       keeps calling, busy or not, until the Repeat Limit (operator, 2026-09-30) ──
             {
                 var wc = MakeWc(out var ctrl);
                 ctrl.smartQsoStartEnabled = false;
                 wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT));
                 wc.callInProg = target;                       // an ordinary Enter-started QSO
                 lock (seenLock) seen.Clear();
-                wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 1, target, $"{peer} {target} -10"));
-                PumpUntil(() => Saw("HALT_TX"), 2000);
-                Check("4: ordinary QSO still yields on the guard", Saw("HALT_TX") && wc.callInProg == null, true);
-                Check("4: ...Smart Start is NOT armed", wc.TestSmartStartTarget == null, true);
+                for (ulong k = 1; k <= 3; k++)                // three busy overs, past any threshold
+                    wc.TestApplyDirectSnapshot(myCall, myGrid, DecodeSnap(wc, SLOT + 2 * k, target, $"{peer} {target} -10"));
+                PumpUntil(() => Saw("HALT_TX"), 500);
+                Check("4: Smart Mode off -> a busy station is still called (no yield)", !Saw("HALT_TX") && wc.callInProg == target, true);
+                Check("4: ...Smart Mode is NOT armed", wc.TestSmartStartTarget == null, true);
             }
 
             // ── 4b. Smart Start ENABLED but the contact did NOT originate under Smart Start ──

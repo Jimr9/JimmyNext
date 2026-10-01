@@ -237,7 +237,7 @@ namespace WSJTX_Controller
             [HotkeyAction.NavSpotWatch]    = "Focus Spot Watch List",
             [HotkeyAction.ToggleStationWatch]    = "Toggle Station Watch",
             [HotkeyAction.WorkWatchedStationNow] = "Work Watched Station Now",
-            [HotkeyAction.SmartStartStatus]      = "Report Smart Start Status",
+            [HotkeyAction.SmartStartStatus]      = "Report Smart Mode Status",
             [HotkeyAction.StationWatchStatus]    = "Report Station Watch Status",
         };
 

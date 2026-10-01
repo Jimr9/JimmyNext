@@ -503,6 +503,7 @@ namespace WSJTX_Controller
             R(db => db.GetContestSessionRows(contestSessionId), new List<ContestSessionRow>());
         public bool HasWorkedBefore(string callsign, string band = null) => R(db => db.HasWorkedBefore(callsign, band), false);
         public bool HasWorkedDxcc(int dxcc, string band = null) => R(db => db.HasWorkedDxcc(dxcc, band), false);
+        public bool HasWorkedGrid(string grid, string band = null) => R(db => db.HasWorkedGrid(grid, band), true);
         public int TotalQsos(string source = null) => R(db => db.TotalQsos(source), 0);
         public int ConfirmedQsos(string source = null) => R(db => db.ConfirmedQsos(source), 0);
         public int LotwConfirmedQsos() => R(db => db.LotwConfirmedQsos(), 0);

@@ -54,19 +54,30 @@ namespace WSJTX_Controller
         public bool IsBatching => _pendingOps != null;
 
         // ===== Shared settings, 2026-09-29 (see SharedSettings) =====
-        // A profile's ini with Shared.ini attached: SharedSettings' keys are read from and
-        // written to the shared file unless this profile has its own for that group. A batch on
-        // this file batches the shared file with it.
+        // A profile's ini with Shared.ini attached: the keys of every group Shared.ini has finished
+        // moving over (SharedSettings.MigratedGroups) are read from and written to the shared file
+        // unless this profile has its own for that group. A batch on this file batches the shared
+        // file with it.
         private IniFile _shared;
+        private HashSet<string> _sharedGroups = new HashSet<string>();
         private bool _sharedBatchOwned;
         internal IniFile Shared => _shared;
-        internal void AttachShared(IniFile shared) => _shared = shared;
+        internal bool SharesGroup(string group) => _shared != null && _sharedGroups.Contains(group);
+
+        // Attaches nothing when the shared file has finished no group.
+        internal void AttachShared(IniFile shared)
+        {
+            var groups = SharedSettings.MigratedGroups(shared);
+            if (groups.Count == 0) return;
+            _shared = shared;
+            _sharedGroups = groups;
+        }
 
         private IniFile Route(string key, string section)
         {
             if (_shared == null || section != null) return this;
             string group = SharedSettings.GroupOf(key);
-            if (group == null || ReadOwn(SharedSettings.ProfileOnlyKey(group)) == "True") return this;
+            if (group == null || !_sharedGroups.Contains(group) || ReadOwn(SharedSettings.ProfileOnlyKey(group)) == "True") return this;
             return _shared;
         }
 

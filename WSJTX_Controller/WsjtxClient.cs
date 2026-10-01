@@ -180,6 +180,7 @@ namespace WSJTX_Controller
         {
             Controller.StopAllTimers(this);
             _nowBatchScheduler.Dispose();
+            Sounds?.Stop();
         }
         internal List<string> sentReportList = new List<string>();
         // 2026-09-26: the report value we actually TRANSMITTED to each call (dB), from the engine's
@@ -1838,20 +1839,14 @@ namespace WSJTX_Controller
             // Update advanced list labels to reflect the active transmit side.
             // txFirst=true  → user transmits on TX1 (even); TX2 is the receive side → label TX2 as RX2.
             // txFirst=false → user transmits on TX2 (odd);  TX1 is the receive side → label TX1 as RX1.
-            if (txFirst)
-            {
-                ctrl.advTx1Label.Text             = "TX1 available stations:";
-                ctrl.advTx1ListBox.AccessibleName = $"TX1 available stations, {_tx1SnapshotRows.Count} calls";
-                ctrl.advTx2Label.Text             = "RX2 available stations:";
-                ctrl.advTx2ListBox.AccessibleName = $"RX2 available stations, {_tx2SnapshotRows.Count} calls";
-            }
-            else
-            {
-                ctrl.advTx1Label.Text             = "RX1 available stations:";
-                ctrl.advTx1ListBox.AccessibleName = $"RX1 available stations, {_tx1SnapshotRows.Count} calls";
-                ctrl.advTx2Label.Text             = "TX2 available stations:";
-                ctrl.advTx2ListBox.AccessibleName = $"TX2 available stations, {_tx2SnapshotRows.Count} calls";
-            }
+            // Label and spoken name from the wording file (Wording: List.Title, List.TitleSpoken,
+            // Side.*), 2026-09-30 -- what is seen and what is heard follow the same entries.
+            string side1 = Wording.Get(txFirst ? "Side.TX1" : "Side.RX1");
+            string side2 = Wording.Get(txFirst ? "Side.RX2" : "Side.TX2");
+            ctrl.advTx1Label.Text             = Wording.Fill("List.Title", ("Side", side1)) + ":";
+            ctrl.advTx1ListBox.AccessibleName = Wording.Fill("List.TitleSpoken", ("Side", side1), ("Count", _tx1SnapshotRows.Count.ToString()));
+            ctrl.advTx2Label.Text             = Wording.Fill("List.Title", ("Side", side2)) + ":";
+            ctrl.advTx2ListBox.AccessibleName = Wording.Fill("List.TitleSpoken", ("Side", side2), ("Count", _tx2SnapshotRows.Count.ToString()));
         }
 
         public void WsjtxSettingChanged()
@@ -2046,8 +2041,10 @@ namespace WSJTX_Controller
                     // stops sending another over and yields the contact exactly the way an
                     // operator Escape would (YieldActiveContactToOtherQso). One shared guard for
                     // every active-contact origin -- an ordinary Enter/queue-started QSO and a
-                    // Smart Start QSO after hand-off alike (confirmed: this is NOT limited to
-                    // Smart Start). The Smart Start *calling* phase keeps its own richer yield
+                    // Smart Start QSO after hand-off alike -- BUT only with Smart Mode (the Smart
+                    // QSO Start option) checked (operator, 2026-09-30): unchecked, Jimmy keeps
+                    // calling whether or not the station is busy, until the Repeat Limit, as it
+                    // did before Smart Start existed. The Smart Start *calling* phase keeps its own richer yield
                     // (ServiceSmartStartAwaitingEngagement -> YieldSmartStartToOtherQso, which
                     // carries the cumulative Repeat Limit / standby-round accounting and its own
                     // "standing by" narration), so it is deliberately left to that path. A
@@ -2056,7 +2053,7 @@ namespace WSJTX_Controller
                     // as an opening). The existing Repeat Limit and Smart Start time limit remain
                     // the authoritative backstops regardless of this setting -- this only governs
                     // how eagerly Jimmy proactively yields, never whether it eventually gives up.
-                    if (_directConnected && !isSpecOp && otherPartyForCallInProg != null)
+                    if (_directConnected && !isSpecOp && otherPartyForCallInProg != null && ctrl.smartQsoStartEnabled)
                     {
                         var partnerSem = dmsg.EffectiveSemantic(myCall);
                         bool smartStartCallingThisTarget =
@@ -2983,8 +2980,11 @@ namespace WSJTX_Controller
             // WsjtxMessage.RstRecd re-parsing the text), formatted exactly as before ("+05", "-08").
             int? rptDb = reptMsg.EffectiveSemantic(myCall).ReportDb;
             string rstRecd = rptDb == null ? null : (rptDb.Value < 0 ? "-" : "+") + Math.Abs(rptDb.Value).ToString("D2");
-            string qsoDateOn = reptMsg.RxDate.ToString("yyyyMMdd");
-            string qsoTimeOn = reptMsg.SinceMidnight.ToString("hhmmss");      //one of the report decodes
+            // TIME_ON is when the contact BEGAN (operator, 2026-09-30; ADIF and WSJT-X alike) -- it
+            // used to be the time of the station's report message, up to a minute or more late.
+            DateTime timeOn = QsoStartFor(call, reptMsg);
+            string qsoDateOn = timeOn.ToString("yyyyMMdd");
+            string qsoTimeOn = timeOn.ToString("HHmmss");
             EnqueueDecodeMessage cqMsg = CqMsg(call);
             bool isPota = cqMsg != null && cqMsg.IsPota();
             var dtNow = DateTime.UtcNow;
@@ -3028,13 +3028,21 @@ namespace WSJTX_Controller
                 : ctrl.Station.OperatorCallsign.Trim().ToUpperInvariant();
             // A POTA activator spotted on this band: the park, and the state its park is in --
             // where the station IS, not the licence's mailing address (StationLocation).
-            StationLocation.TryFindActivation(call, band, out string parkRefs, out string parkState);
+            bool parkFound = StationLocation.TryFindActivation(call, band, out string parkRefs, out string parkState);
+            // 2026-09-30 (KE8WVB, CQ POTA on 80m, no spot found): say in the debug log why a park
+            // was or was not logged, and when the station called CQ POTA but no spot names its park,
+            // still log the program -- POTA with the park blank, for the operator to fill in.
+            // Never a guessed park.
+            if (parkFound || isPota)
+                DebugOutput($"{Time()} [PARK] {call} {band}: " + (parkFound
+                    ? $"park {parkRefs}, state {parkState ?? "(blank, not certain)"}"
+                    : "called CQ POTA, but no POTA spot for it on this band -- logged as POTA, park blank"));
             string adifRecord = AdifRecordBuilder.Build(
                 call, band, (long)(dialFrequency + txOffset), mode,
                 qsoDateOn, qsoTimeOn, qsoTimeOff, rstSent, rstRecd, grid,
                 name: "", comment: "", txPwr: RadioPower.WattsText(), operatorCall: operatorCall,
                 stationCall: myCall, myGrid: myGrid, qsoDateOff: qsoDateOff,
-                state: parkState ?? "", sig: parkRefs != null ? "POTA" : "", sigInfo: parkRefs ?? "");
+                state: parkState ?? "", sig: parkFound || isPota ? "POTA" : "", sigInfo: parkRefs ?? "");
 
             // Jimmy has every field needed to record this Jimmy-initiated QSO itself, so it does
             // so directly here rather than depending on any round trip back from the engine.
@@ -3654,8 +3662,35 @@ namespace WSJTX_Controller
             DebugOutput($"{Time()} AddAllCallDict, call:{call} msg.Message:{emsg.Message}");
         }
 
+        // When the station was handed to the contact -- Jimmy began working it (SetCallInProg):
+        // the contact's start (operator, 2026-09-30), as WSJT-X logs it.
+        private DateTime? _qsoStartUtc;
+        private string _qsoStartCall;
+
+        private static DateTime DecodeUtc(EnqueueDecodeMessage m) =>
+            DateTime.SpecifyKind(m.RxDate.Date + m.SinceMidnight, DateTimeKind.Utc);
+
+        // The contact's start: when it was handed to the contact, never later than the station's
+        // report; the report's own time when no start belongs to this contact (a late log after
+        // the contact moved on), as before.
+        internal DateTime QsoStartFor(string call, EnqueueDecodeMessage reptMsg)
+        {
+            DateTime report = DecodeUtc(reptMsg);
+            if (_qsoStartUtc.HasValue && string.Equals(_qsoStartCall, call, StringComparison.OrdinalIgnoreCase)
+                && _qsoStartUtc.Value < report)
+                return _qsoStartUtc.Value;
+            return report;
+        }
+
+        internal void TestSetQsoStart(string call, DateTime utc) { _qsoStartCall = call; _qsoStartUtc = utc; }
+
         private void SetCallInProg(string call)
         {
+            if (call != callInProg)
+            {
+                _qsoStartCall = call;
+                _qsoStartUtc = call != null ? DateTime.UtcNow : (DateTime?)null;
+            }
             DebugOutput($"{spacer}SetCallInProg: callInProg:'{CallPriorityString(call)}' (was '{CallPriorityString(callInProg)}')");
 
             if (call != null) lCall = null;     //last logged call is not relevant now

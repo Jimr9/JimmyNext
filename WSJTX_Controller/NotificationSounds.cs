@@ -64,9 +64,17 @@ namespace WSJTX_Controller
         {
             _soundsEnabled = soundsEnabled;
             RefreshResourceFileCache();
-            Task task = new Task(new Action(ProcSoundQueue));
-            task.Start();
+            // Its own background thread, not a thread-pool Task (2026-09-30): this loop never
+            // returns, so as a Task it held a pool thread for good -- one more with every client a
+            // profile switch creates, and hundreds across the test suite, starving the Direct
+            // command sender. Stop() ends it when the window closes.
+            new Thread(ProcSoundQueue) { IsBackground = true, Name = "Jimmy sound queue" }.Start();
         }
+
+        private volatile bool _stopped;
+
+        // The window is closing (WsjtxClient.StopTimersForClose): end the queue loop.
+        public void Stop() => _stopped = true;
 
         public void RefreshResourceFileCache()
         {
@@ -152,7 +160,7 @@ namespace WSJTX_Controller
 
         private void ProcSoundQueue()
         {
-            while (true)
+            while (!_stopped)
             {
                 if (_soundQueue.Count > 0)
                 {

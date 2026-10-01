@@ -457,6 +457,8 @@ namespace WSJTX_Controller
             sb.AppendLine($"  Disconnected         {ctrl.soundEnabled_Disconnected,-8} {ctrl.soundFile_Disconnected}");
             sb.AppendLine($"  New DXCC             {ctrl.soundEnabled_NewDxcc,-8} {ctrl.soundFile_NewDxcc}");
             sb.AppendLine($"  New DXCC on band     {ctrl.soundEnabled_NewDxccOnBand,-8} {ctrl.soundFile_NewDxccOnBand}");
+            sb.AppendLine($"  New grid             {ctrl.soundEnabled_NewGrid,-8} {ctrl.soundFile_NewGrid}");
+            sb.AppendLine($"  New grid on band     {ctrl.soundEnabled_NewGridOnBand,-8} {ctrl.soundFile_NewGridOnBand}");
             sb.AppendLine($"  Always wanted        {ctrl.soundEnabled_AlwaysWanted,-8} {ctrl.soundFile_AlwaysWanted}");
             sb.AppendLine($"  Directed CQ          {ctrl.soundEnabled_DirectedCq,-8} {ctrl.soundFile_DirectedCq}");
             sb.AppendLine($"  POTA                 {ctrl.soundEnabled_Pota,-8} {ctrl.soundFile_Pota}");

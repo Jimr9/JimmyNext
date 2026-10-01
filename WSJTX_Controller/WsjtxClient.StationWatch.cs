@@ -132,7 +132,7 @@ namespace WSJTX_Controller
             if (!ctrl.smartQsoStartEnabled)
                 // No Notification event models "the feature is off" -- that's a Jimmy setting,
                 // not an on-air fact -- so there is nothing to source this one from.
-                msg = "Smart Start is off.";
+                msg = "Smart Mode is off.";
             else if (_smartStart.AwaitingEngagement)
                 msg = RenderNotificationPhrase(NotificationEventType.SmartStartCallStarting,
                     new SmartStartCallStartingEvent(SC(_smartStart.TargetCall)).ToTokens());
@@ -158,9 +158,9 @@ namespace WSJTX_Controller
             else
                 // Armed-but-idle (enabled, nothing captured yet) is also not an on-air fact --
                 // no Notification event exists for it either.
-                msg = "Smart Start is on, no target.";
+                msg = "Smart Mode is on, no target.";
 
-            if (string.IsNullOrEmpty(msg)) msg = "Smart Start status unavailable.";
+            if (string.IsNullOrEmpty(msg)) msg = "Smart Mode status unavailable.";
             StatusView.ShowMessage(msg, false);
             return true;
         }
@@ -489,7 +489,7 @@ namespace WSJTX_Controller
                 HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
             }
             _smartStart.Stop(announce: false);
-            StatusView.ShowMessage($"{SC(target)} not heard after {limit} calls; Smart Start stopped", true);
+            StatusView.ShowMessage($"{SC(target)} not heard after {limit} calls; Smart Mode stopped", true);
         }
 
         // Operator request (2026-09-13): an absolute wall-clock backstop, independent of both the
@@ -515,7 +515,7 @@ namespace WSJTX_Controller
             _smartStart.Stop(announce: false);
             string minuteWord = limitMinutes == 1 ? "minute" : "minutes";
             StatusView.ShowMessage(
-                $"Smart Start time limit reached after {limitMinutes} {minuteWord} calling {SC(target)}, no contact completed", true);
+                $"Smart Mode time limit reached after {limitMinutes} {minuteWord} calling {SC(target)}, no contact completed", true);
         }
 
         // The Smart Start Repeat Limit -- (int)ctrl.timeoutNumUpDown.Value, the operator's own
@@ -599,7 +599,7 @@ namespace WSJTX_Controller
 
         // N4BP live-radio audit -- fix 6. Escape / Alt+H (Controller.cs) capture this BEFORE
         // AbortContact() so, when nothing was transmitting (the Smart-Start-only-waiting case),
-        // it can still give a short "Smart Start stopped" confirmation -- the "Tx halted"
+        // it can still give a short "Smart Mode stopped" confirmation -- the "Tx halted"
         // announcement is gated on HasActiveTxOrCycle, which is false while merely waiting.
         public bool SmartStartActive => _smartStart.IsActive || _pendingAutoStart != null;
         public string SmartStartTarget => _smartStart.TargetCall;

@@ -51,7 +51,7 @@ namespace WSJTX_Controller
                 new NotificationVariable("AvailableCount", "How many stations are available to call, e.g. \"3\" (\"no\" when none in the simple layout). The RX1/TX2 side name is its own row (\"Receive side name\") now, not part of this."),
                 new NotificationVariable("Stations", "\"available stations\" / \"available station\" (pluralized). Replace with your own word, e.g. \"calls\"."),
                 new NotificationVariable("ToYou", "\", N to you, CALL first\" when stations are calling you, otherwise empty."),
-                new NotificationVariable("NewDxcc", "\", N new DXCC\" when any, otherwise empty."),
+                new NotificationVariable("NewDxcc", "\", N new DXCC, N new DXCC on band\" -- each part only when any, otherwise empty. The words are in Wording.txt."),
                 new NotificationVariable("Wanted", "\", N wanted\" when any, otherwise empty."),
                 new NotificationVariable("Awards", "\", N <award>\" for each award still needed on a spotted station, otherwise empty."),
                 new NotificationVariable("NewDxccCount", "Bare count of new-DXCC stations (renders \"0\" when none)."),
@@ -141,12 +141,12 @@ namespace WSJTX_Controller
             [NotificationEventType.SmartStartWaiting] = new List<NotificationVariable>
             {
                 new NotificationVariable("Phrase", "A ready-made sentence describing what Jimmy is still waiting for."),
-                new NotificationVariable("Target", "The captured Smart Start target callsign."),
+                new NotificationVariable("Target", "The captured Smart Mode target callsign."),
                 new NotificationVariable("Progress", "\"N of M\" -- how many appropriate receive opportunities have elapsed of the configured threshold (empty for a non-progress wait)."),
             },
             [NotificationEventType.SmartStartTargetAvailable] = new List<NotificationVariable>
             {
-                new NotificationVariable("Target", "The Smart Start target callsign."),
+                new NotificationVariable("Target", "The Smart Mode target callsign."),
             },
             [NotificationEventType.SmartStartCallStarting] = new List<NotificationVariable>
             {
@@ -159,13 +159,13 @@ namespace WSJTX_Controller
             [NotificationEventType.SmartStartTargetBusy] = new List<NotificationVariable>
             {
                 new NotificationVariable("Phrase", "A ready-made sentence: \"X working Y, minus 8.\" when the other station and its report are known, \"X working Y.\" with just the station, or \"X working another station.\" when neither could be parsed. The default template."),
-                new NotificationVariable("Target", "The Smart Start target callsign."),
+                new NotificationVariable("Target", "The Smart Mode target callsign."),
                 new NotificationVariable("Peer", "The other station the target is working (empty when it couldn't be parsed)."),
                 new NotificationVariable("Report", "The report the target passed, spoken (e.g. \"minus 8\", \"R minus 5\"), empty when the decode carried none."),
             },
             [NotificationEventType.SmartStartYielded] = new List<NotificationVariable>
             {
-                new NotificationVariable("Target", "The Smart Start target Jimmy has stopped calling for now."),
+                new NotificationVariable("Target", "The Smart Mode target Jimmy has stopped calling for now."),
             },
             [NotificationEventType.SmartStartEngaged] = new List<NotificationVariable>
             {

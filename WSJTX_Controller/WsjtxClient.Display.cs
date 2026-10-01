@@ -17,6 +17,18 @@ namespace WSJTX_Controller
             // drop-in sound file override (PlaySoundEvent -> ResolveSoundPath), not just a
             // display label. Sourced from EffectiveSemantic (was msg.DeCall()).
             string call = msg.EffectiveSemantic(myCall).From;
+            // Alert regions (AlertRegions): the new-station, new-grid and CQ sounds only for the
+            // chosen places. Returning true = handled, so the generic "Call added" does not sound
+            // for the same station either. Calling me and always wanted are never filtered.
+            bool regional = msg.Category == CallCategory.NEW_COUNTRY || msg.Category == CallCategory.NEW_COUNTRY_ON_BAND
+                || msg.Category == CallCategory.WANTED_CQ || msg.Category == CallCategory.POTA || msg.Category == CallCategory.SOTA
+                || msg.Category == CallCategory.DEFAULT;
+            if (regional && !AlertRegionAllows(msg, call)) return true;
+            // New grid (2026-09-29): after calling me, new DXCC and always wanted, before the CQ
+            // sounds -- a new grid is the more specific news.
+            bool gridFirst = msg.Category == CallCategory.WANTED_CQ || msg.Category == CallCategory.POTA
+                || msg.Category == CallCategory.SOTA || msg.Category == CallCategory.DEFAULT;
+            if (gridFirst && PlayNewGridSound(msg, call)) return true;
             switch (msg.Category)
             {
                 case CallCategory.TO_MYCALL:
@@ -46,6 +58,33 @@ namespace WSJTX_Controller
                 default:
                     return false;
             }
+        }
+
+        private bool PlayNewGridSound(EnqueueDecodeMessage msg, string call)
+        {
+            var c = msg.EffectiveClassification();
+            if (c.IsNewGrid && ctrl.soundEnabled_NewGrid && !string.IsNullOrEmpty(ctrl.soundFile_NewGrid))
+                return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGrid, ctrl.soundFile_NewGrid, call, "NEW_GRID");
+            if (c.IsNewGridOnBand && ctrl.soundEnabled_NewGridOnBand && !string.IsNullOrEmpty(ctrl.soundFile_NewGridOnBand))
+                return Sounds.PlaySoundEvent(ctrl.soundEnabled_NewGridOnBand, ctrl.soundFile_NewGridOnBand, call, "NEW_GRID_ON_BAND");
+            return false;
+        }
+
+        private string _alertRegionsText;
+        private AlertRegions _alertRegions = new AlertRegions();
+
+        internal bool AlertRegionAllows(EnqueueDecodeMessage msg, string call)
+        {
+            if (!string.Equals(_alertRegionsText, ctrl.alertRegions ?? ""))
+            {
+                _alertRegionsText = ctrl.alertRegions ?? "";
+                _alertRegions = AlertRegions.Parse(_alertRegionsText);
+            }
+            if (_alertRegions.IsAll) return true;
+            int dxcc = 0;
+            if (_alertRegions.Dxcc.Count > 0)
+                try { dxcc = lookupManager?.BuildOffline(call)?.Dxcc ?? 0; } catch { }
+            return _alertRegions.Allows(msg.EffectiveClassification().Continent, dxcc);
         }
 
         internal bool IsAlertCooledDown(Dictionary<string, DateTime> dict, string call, int cooldownSecs)
@@ -209,8 +248,8 @@ namespace WSJTX_Controller
             if (ctrl.advShowTx1 && rebuildTx1)
             {
                 bool tx1HasItems = _tx1SnapshotRows.Count > 0;
-                string tx1Prefix = txFirst ? "TX1" : "RX1";
-                string tx1Name = $"{tx1Prefix} available stations, {_tx1SnapshotRows.Count} calls";
+                string tx1Prefix = Wording.Get(txFirst ? "Side.TX1" : "Side.RX1");
+                string tx1Name = Wording.Fill("List.TitleSpoken", ("Side", tx1Prefix), ("Count", _tx1SnapshotRows.Count.ToString()));
                 var display = tx1HasItems
                     ? _tx1SnapshotRows
                     : new List<string> { "No available stations" };
@@ -226,8 +265,8 @@ namespace WSJTX_Controller
             if (ctrl.advShowTx2 && rebuildTx2)
             {
                 bool tx2HasItems = _tx2SnapshotRows.Count > 0;
-                string tx2Prefix = txFirst ? "RX2" : "TX2";
-                string tx2Name = $"{tx2Prefix} available stations, {_tx2SnapshotRows.Count} calls";
+                string tx2Prefix = Wording.Get(txFirst ? "Side.RX2" : "Side.TX2");
+                string tx2Name = Wording.Fill("List.TitleSpoken", ("Side", tx2Prefix), ("Count", _tx2SnapshotRows.Count.ToString()));
                 var display = tx2HasItems
                     ? _tx2SnapshotRows
                     : new List<string> { "No available stations" };
@@ -337,21 +376,23 @@ namespace WSJTX_Controller
             finally { lb.EndUpdate(); }
         }
 
+        // Raw Decodes tags, by wording-file key (Wording, 2026-09-30) -- the same entry as the
+        // main list's tag wherever both show one ("New DXCC on band"; was "New DXCC band" here).
         private static readonly Dictionary<CallCategory, string> RawTagLabels =
             new Dictionary<CallCategory, string>
         {
-            { CallCategory.NEW_COUNTRY,         "New DXCC" },
-            { CallCategory.NEW_COUNTRY_ON_BAND, "New DXCC band" },
-            { CallCategory.ALWAYS_WANTED,       "Wanted" },
-            { CallCategory.TO_MYCALL,           "Calling me" },
-            { CallCategory.MANUAL_SEL,          "Manual" },
-            { CallCategory.WANTED_CQ,           "Dir CQ" },
-            { CallCategory.POTA,                "POTA" },
-            { CallCategory.SOTA,                "SOTA" },
-            { CallCategory.WAS_NEEDED,          "WAS Needed" },
-            { CallCategory.WAS_UNCONFIRMED,     "WAS Unconf" },
-            { CallCategory.DXCC_UNCONFIRMED,    "DXCC Unconf" },
-            { CallCategory.ZONE_NEEDED,         "Zone Needed" },
+            { CallCategory.NEW_COUNTRY,         "Tag.NewDxcc" },
+            { CallCategory.NEW_COUNTRY_ON_BAND, "Tag.NewDxccOnBand" },
+            { CallCategory.ALWAYS_WANTED,       "Tag.Wanted" },
+            { CallCategory.TO_MYCALL,           "Tag.CallingMe" },
+            { CallCategory.MANUAL_SEL,          "Tag.Manual" },
+            { CallCategory.WANTED_CQ,           "Tag.DirCq" },
+            { CallCategory.POTA,                "Tag.Pota" },
+            { CallCategory.SOTA,                "Tag.Sota" },
+            { CallCategory.WAS_NEEDED,          "Tag.WasNeeded" },
+            { CallCategory.WAS_UNCONFIRMED,     "Tag.WasUnconf" },
+            { CallCategory.DXCC_UNCONFIRMED,    "Tag.DxccUnconf" },
+            { CallCategory.ZONE_NEEDED,         "Tag.ZoneNeeded" },
         };
 
         private void ShowRawDecodes()
@@ -400,11 +441,11 @@ namespace WSJTX_Controller
                         // decode the main list already showed as "WAS Needed" for.
                         catTag = _awardTagger.CategoryTag(d);
                     else
-                        RawTagLabels.TryGetValue(d.Category, out catTag);
+                        catTag = RawTagLabels.TryGetValue(d.Category, out string tagKey) ? Wording.Get(tagKey) : null;
                     if (!string.IsNullOrEmpty(catTag)) tag = catTag;
                 }
                 if (WsjtxMessage.IsFoxHound(d.Message))
-                    tag = tag.Length > 0 ? $"{tag}, Possible F/H" : "Possible F/H";
+                    tag = tag.Length > 0 ? $"{tag}, {Wording.Get("Tag.FoxHound")}" : Wording.Get("Tag.FoxHound");
                 tag = tag.Length > 0 ? $", {tag}" : "";
 
                 // Stage 12 audit (2026-09-14): operational -- this same value becomes part of
@@ -1066,8 +1107,9 @@ namespace WSJTX_Controller
                             // TX1/RX1/RX2/TX2 naming matches ShowAdvancedQueue's own list headers:
                             // whichever slot is Jimmy's own Tx turn is the "TX" side, the other is
                             // the "RX" side (txFirst decides which is which).
-                            string tx1Prefix = txFirst ? "TX1" : "RX1";
-                            string tx2Prefix = txFirst ? "RX2" : "TX2";
+                            // Spoken pieces from the wording file (Wording, 2026-09-30).
+                            string tx1Prefix = Wording.Get(txFirst ? "Side.TX1" : "Side.RX1");
+                            string tx2Prefix = Wording.Get(txFirst ? "Side.RX2" : "Side.TX2");
                             int tx1Count = ctrl.advShowTx1 ? _tx1SnapshotRows.Count : 0;
                             int tx2Count = ctrl.advShowTx2 ? _tx2SnapshotRows.Count : 0;
                             // currentSideIsTx1: is the period that just completed the even one
@@ -1103,7 +1145,7 @@ namespace WSJTX_Controller
                             int displayedCount = ctrl.advancedCallLayout
                                 ? (currentSideIsTx1 ? tx1Count : tx2Count)
                                 : (callInProg != null && callQueue.Contains(callInProg) ? qcw - 1 : qcw);
-                            string callsStr = displayedCount == 1 ? "available station" : "available stations";
+                            string callsStr = Wording.Get(displayedCount == 1 ? "Summary.Stations.One" : "Summary.Stations.Many");
                             // Split 2026-09-05: the advanced-layout side name ("RX1"/"TX2") is its
                             // OWN routine clause (ReceiveSideId) now, no longer welded onto the
                             // count -- so it can be worded and role-scoped independently. The
@@ -1121,7 +1163,7 @@ namespace WSJTX_Controller
                             }
                             else
                             {
-                                countText = displayedCount == 0 ? "no" : $"{displayedCount}";
+                                countText = displayedCount == 0 ? Wording.Get("Summary.None") : $"{displayedCount}";
                             }
 
                             // Which CURRENT role does the slot whose period just ended hold? tx1 is
@@ -1148,21 +1190,26 @@ namespace WSJTX_Controller
                             int n = SnapshotPriorityCount(CallPriority.TO_MYCALL, visibleCalls);
                             EnqueueDecodeMessage dmsg = new EnqueueDecodeMessage();
                             string c = PeekVisibleCall(out dmsg, visibleCalls);
-                            string pc = (c != null && (callInProg == null || timedOutCall != null || loggedCall != null)) ? $", {DisplayCallsign(c, ctrl.spaceCallsignsAndGrids)} first" : "";
-                            string pri = n > 0 ? $", {n} to you{pc}" : "";
+                            string pc = (c != null && (callInProg == null || timedOutCall != null || loggedCall != null))
+                                ? ", " + Wording.Fill("Summary.FirstInLine", ("Call", DisplayCallsign(c, ctrl.spaceCallsignsAndGrids))) : "";
+                            string pri = n > 0 ? ", " + Wording.Fill("Summary.ToYou", ("Count", n.ToString())) + pc : "";
 
-                            n = SnapshotPriorityCount(CallPriority.NEW_COUNTRY, visibleCalls) + SnapshotPriorityCount(CallPriority.NEW_COUNTRY_ON_BAND, visibleCalls);
-                            int newDxccCount = n;
-                            string cty = n > 0 ? $", {n} new DXCC" : "";
+                            // New DXCC and new DXCC on band said apart (operator, 2026-09-30) --
+                            // "1 new DXCC, 1 new DXCC on band" -- each counting stations.
+                            int nNew = SnapshotPriorityCount(CallPriority.NEW_COUNTRY, visibleCalls);
+                            int nNewOnBand = SnapshotPriorityCount(CallPriority.NEW_COUNTRY_ON_BAND, visibleCalls);
+                            int newDxccCount = nNew + nNewOnBand;
+                            string cty = (nNew > 0 ? ", " + Wording.Fill("Summary.NewDxcc", ("Count", nNew.ToString())) : "")
+                                       + (nNewOnBand > 0 ? ", " + Wording.Fill("Summary.NewDxccOnBand", ("Count", nNewOnBand.ToString())) : "");
 
                             n = SnapshotPriorityCount(CallPriority.WANTED_CQ, visibleCalls);
                             int wantedCount = n;
-                            string want = n > 0 ? $", {n} wanted" : "";
+                            string want = n > 0 ? ", " + Wording.Fill("Summary.Wanted", ("Count", n.ToString())) : "";
 
                             var neededAwardCounts = SnapshotNeededAwardCounts(visibleCalls);
                             int neededAwardKindCount = neededAwardCounts.Count();
                             string needed = string.Concat(neededAwardCounts
-                                .Select(kv => $", {kv.Value} {kv.Key}"));
+                                .Select(kv => ", " + Wording.Fill("Summary.Award", ("Count", kv.Value.ToString()), ("Award", kv.Key))));
 
                             // Once actively engaged with a specific station (callInProg set), the
                             // operator wants to hear the call status and RX activity, not the

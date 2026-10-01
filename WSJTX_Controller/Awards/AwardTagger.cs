@@ -207,27 +207,29 @@ namespace WSJTX_Controller
         // Rule Definition name.
         public string CategoryTag(EnqueueDecodeMessage d)
         {
+            // Words from the wording file (Wording, 2026-09-30) -- display only; the award counts
+            // that group by this text group the same whatever the words are.
             switch (d.Category)
             {
-                case WsjtxClient.CallCategory.NEW_COUNTRY:         return "New DXCC";
-                case WsjtxClient.CallCategory.NEW_COUNTRY_ON_BAND: return "New DXCC on band";
-                case WsjtxClient.CallCategory.ALWAYS_WANTED:       return "Wanted";
+                case WsjtxClient.CallCategory.NEW_COUNTRY:         return Wording.Get("Tag.NewDxcc");
+                case WsjtxClient.CallCategory.NEW_COUNTRY_ON_BAND: return Wording.Get("Tag.NewDxccOnBand");
+                case WsjtxClient.CallCategory.ALWAYS_WANTED:       return Wording.Get("Tag.Wanted");
                 case WsjtxClient.CallCategory.WANTED_CQ:
                     return "";  // pri field already shows the directed-to target
-                case WsjtxClient.CallCategory.POTA:                return "POTA";
-                case WsjtxClient.CallCategory.SOTA:                return "SOTA";
-                case WsjtxClient.CallCategory.WAS_NEEDED:          return "WAS Needed";
-                case WsjtxClient.CallCategory.WAS_UNCONFIRMED:     return "WAS Unconf";
-                case WsjtxClient.CallCategory.DXCC_UNCONFIRMED:    return "DXCC Unconf";
-                case WsjtxClient.CallCategory.ZONE_NEEDED:         return "Zone Needed";
+                case WsjtxClient.CallCategory.POTA:                return Wording.Get("Tag.Pota");
+                case WsjtxClient.CallCategory.SOTA:                return Wording.Get("Tag.Sota");
+                case WsjtxClient.CallCategory.WAS_NEEDED:          return Wording.Get("Tag.WasNeeded");
+                case WsjtxClient.CallCategory.WAS_UNCONFIRMED:     return Wording.Get("Tag.WasUnconf");
+                case WsjtxClient.CallCategory.DXCC_UNCONFIRMED:    return Wording.Get("Tag.DxccUnconf");
+                case WsjtxClient.CallCategory.ZONE_NEEDED:         return Wording.Get("Tag.ZoneNeeded");
                 case WsjtxClient.CallCategory.STILL_NEEDED:
-                    if (d.MatchedAwardRuleId == "WAS") return "WAS Needed";
-                    if (d.MatchedAwardRuleId == "WAZ") return "Zone Needed";
-                    return AwardDisplayName(d) + " Needed";
+                    if (d.MatchedAwardRuleId == "WAS") return Wording.Get("Tag.WasNeeded");
+                    if (d.MatchedAwardRuleId == "WAZ") return Wording.Get("Tag.ZoneNeeded");
+                    return Wording.Fill("Tag.AwardNeeded", ("Award", AwardDisplayName(d)));
                 case WsjtxClient.CallCategory.STILL_UNCONFIRMED:
-                    if (d.MatchedAwardRuleId == "WAS")  return "WAS Unconf";
-                    if (d.MatchedAwardRuleId == "DXCC") return "DXCC Unconf";
-                    return AwardDisplayName(d) + " Unconf";
+                    if (d.MatchedAwardRuleId == "WAS")  return Wording.Get("Tag.WasUnconf");
+                    if (d.MatchedAwardRuleId == "DXCC") return Wording.Get("Tag.DxccUnconf");
+                    return Wording.Fill("Tag.AwardUnconf", ("Award", AwardDisplayName(d)));
                 default:                               return "";
             }
         }

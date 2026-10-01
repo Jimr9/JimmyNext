@@ -596,22 +596,39 @@ namespace WSJTX_Controller
 
         // Alt+Shift+T (operator request, 2026-09-29): run the radio's OWN automatic antenna tuner,
         // like pressing its TUNE button -- not Alt+T's audio test tone. The radio keys itself for
-        // the tune-up; Jimmy never touches its power setting. EngineHost's kenwood_atu (main.rs)
-        // sends the command through Nexus's rigctld and says why it is Kenwood-only for now.
-        // Once started, the radio is asked about once a second whether it is still tuning (every
-        // answer is logged, [ATU]); "Tuner done" when it reports finished. Pressing again, or
-        // Escape (HaltTx), stops it; after AtuMaxSeconds Jimmy stops waiting and stops it.
-        internal const int AtuPollMs = 1000, AtuMaxSeconds = 30;
-        private bool _atuRunning, _atuRequestInFlight;
-        private DateTime _atuStartedUtc;
+        // the tune-up; Jimmy never touches its power setting or menus. EngineHost's kenwood_atu
+        // (main.rs) sends the command through Nexus's rigctld and says why it is Kenwood-only.
+        //
+        // A tune-up is the radio's (or external tuner's) own job (operator, 2026-09-30): it ends by
+        // itself, with a match or the radio's own warning beep, so Jimmy never tries to stop one --
+        // a second press says "Tuner still working", Escape leaves it alone. The radio is asked
+        // about once a second whether it is still tuning and, separately, still transmitting
+        // (every answer logged, [ATU]):
+        //  - over, receiving: "Tuner finished" (never "done": the radio reports THAT it ended,
+        //    not whether it matched);
+        //  - over, tuner never switched in: "The radio's tuner did not start";
+        //  - over, still transmitting (a radio set to stay in transmit after tuning, e.g. the
+        //    TS-590SG's Menu 57): "Tuner finished, radio still transmitting". Safety net
+        //    (operator's choice, 2026-09-30): if it is still transmitting AtuReceiveAfterSeconds
+        //    later -- or at once on Escape or another Alt+Shift+T -- the radio is returned to
+        //    receive (ATU_RECEIVE: PTT off, read back), and the operator hears whether it worked.
+        //    That changes no setting; it only ends that carrier.
+        // Escape before the start has gone out: the halt drops it -- "Tuner not started".
+        internal const int AtuPollMs = 1000, AtuMaxSeconds = 60, AtuReceiveAfterSeconds = 30;
+        private bool _atuRunning, _atuRequestInFlight, _atuCancelRequested, _atuTxWatch, _atuReceiveInFlight;
+        private DateTime _atuStartedUtc, _atuTxSinceUtc;
         private string _atuOrigin;
         private System.Windows.Forms.Timer _atuPollTimer;
 
         public bool ToggleAntennaTuner()
         {
             string origin = ctrl.ActiveHotkeyOrigin;
-            if (_atuRunning) { StopAntennaTuner(origin, "Tuner stopped"); return true; }
-            if (_atuRequestInFlight) return true;
+            if (_atuTxWatch) { ReturnRadioToReceive(origin); return true; }
+            if (_atuRunning || _atuRequestInFlight || _atuReceiveInFlight)
+            {
+                StatusView.ShowMessage("Tuner still working", false);
+                return true;
+            }
             if (tuning)
             {
                 StatusView.ShowMessage("Stop Tune before starting the antenna tuner", false);
@@ -620,6 +637,7 @@ namespace WSJTX_Controller
             // Same as Alt+T: a normal transmission must never race a tune-up.
             if (txEnabled) HaltTx();
             _atuRequestInFlight = true;
+            _atuCancelRequested = false;
             DirectAtuCommand("ATU_START", resp =>
             {
                 _atuRequestInFlight = false;
@@ -627,7 +645,9 @@ namespace WSJTX_Controller
                 string msg;
                 if (resp != null && resp.StartsWith("OK"))
                 {
+                    // Sent before an Escape could drop it: the radio is tuning -- watch as usual.
                     _atuRunning = true;
+                    _atuTxWatch = false;
                     _atuStartedUtc = DateTime.UtcNow;
                     _atuOrigin = origin;
                     if (_atuPollTimer == null)
@@ -638,6 +658,8 @@ namespace WSJTX_Controller
                     _atuPollTimer.Start();
                     msg = "Tuner started";
                 }
+                else if (resp == null && _atuCancelRequested)
+                    msg = "Tuner not started";
                 else if (resp != null && resp.StartsWith("ERR "))
                     msg = resp.Substring(4);
                 else
@@ -649,44 +671,99 @@ namespace WSJTX_Controller
 
         private void PollAntennaTuner()
         {
-            if (!_atuRunning) { _atuPollTimer?.Stop(); return; }
+            if (_atuReceiveInFlight) return;
+            if (!_atuRunning && !_atuTxWatch) { _atuPollTimer?.Stop(); return; }
             double elapsed = (DateTime.UtcNow - _atuStartedUtc).TotalSeconds;
-            if (elapsed > AtuMaxSeconds)
+            if (_atuRunning && elapsed > AtuMaxSeconds)
             {
-                StopAntennaTuner(_atuOrigin, "Tuner stopped, no result after 30 seconds");
+                EndAntennaTunerWatch($"No tuner result after {AtuMaxSeconds} seconds, check the radio");
+                return;
+            }
+            if (_atuTxWatch && (DateTime.UtcNow - _atuTxSinceUtc).TotalSeconds >= AtuReceiveAfterSeconds)
+            {
+                ReturnRadioToReceive(_atuOrigin);
                 return;
             }
             DirectAtuCommand("ATU_STATUS", resp =>
             {
                 DebugOutput($"{Time()} [ATU] status at {elapsed:0.0}s: {resp ?? "(not sent)"}");
-                // "OK <tuning> <tuner in> AC...;". Finished = not tuning, judged after the first
-                // 1.5 s (the radio may not yet report the tune-up it just started). Finished with
-                // the tuner still OUT means it never started (live 2026-09-29: AC000 was
-                // announced "Tuner done" though nothing tuned) -- said so, never "done".
+                // "OK <tuning> <tuner in> <transmitting 1|0|?> AC...;". Finished = not tuning,
+                // judged after the first 1.5 s (the radio may not yet report the tune-up it just
+                // started). Finished with the tuner still OUT means it never started (live
+                // 2026-09-29: AC000 was announced "Tuner done" though nothing tuned).
                 string[] parts = resp?.Split(' ');
-                if (_atuRunning && elapsed >= 1.5 && parts != null && parts.Length >= 3 && parts[0] == "OK" && parts[1] == "0")
+                if (parts == null || parts.Length < 4 || parts[0] != "OK" || _atuReceiveInFlight) return;
+                if (_atuTxWatch)
                 {
-                    _atuRunning = false;
-                    _atuPollTimer?.Stop();
-                    string msg = parts[2] == "1" ? "Tuner done" : "The radio's tuner did not start";
-                    ctrl.WithHotkeyOrigin(_atuOrigin, () => StatusView.ShowMessage(msg, false));
+                    if (parts[3] == "0") EndAntennaTunerWatch("Radio back to receive");
+                    return;
                 }
+                if (!_atuRunning || elapsed < 1.5 || parts[1] != "0") return;
+                string msg = AtuFinishedMessage(parts[2], parts[3]);
+                if (msg == null) return; // transmit state not read yet: ask again next second
+                _atuRunning = false;
+                if (parts[2] == "1" && parts[3] == "1")
+                {
+                    _atuTxWatch = true;
+                    _atuTxSinceUtc = DateTime.UtcNow;
+                    ctrl.WithHotkeyOrigin(_atuOrigin, () => StatusView.ShowMessage(msg, false));
+                    return;
+                }
+                EndAntennaTunerWatch(msg);
             });
         }
 
-        // Stops a running tune-up (second press, Escape, or the time limit).
-        private void StopAntennaTuner(string origin, string message)
+        // What is said when the radio reports the tune-up over: tunerIn "1"/"0", transmitting
+        // "1"/"0"/"?". Null = transmit state not known yet, keep asking.
+        internal static string AtuFinishedMessage(string tunerIn, string transmitting)
         {
-            _atuRunning = false;
-            _atuPollTimer?.Stop();
-            DirectAtuCommand("ATU_STOP", resp => DebugOutput($"{Time()} [ATU] stop: {resp ?? "(not sent)"}"));
-            if (message != null) ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(message, false));
+            if (tunerIn != "1") return "The radio's tuner did not start";
+            if (transmitting == "0") return "Tuner finished";
+            if (transmitting == "1") return "Tuner finished, radio still transmitting";
+            return null;
         }
 
-        // Escape / Alt+H: HaltTx also stops a running tune-up.
+        private void EndAntennaTunerWatch(string message)
+        {
+            _atuRunning = false;
+            _atuTxWatch = false;
+            _atuPollTimer?.Stop();
+            if (message != null) ctrl.WithHotkeyOrigin(_atuOrigin, () => StatusView.ShowMessage(message, false));
+        }
+
+        // The safety net: a finished tune-up left the radio transmitting -- return it to receive
+        // and say, from the radio's own read-back, whether that worked.
+        private void ReturnRadioToReceive(string origin)
+        {
+            if (_atuReceiveInFlight) return;
+            _atuReceiveInFlight = true;
+            if (origin != null) _atuOrigin = origin;
+            DirectAtuCommand("ATU_RECEIVE", resp =>
+            {
+                _atuReceiveInFlight = false;
+                DebugOutput($"{Time()} [ATU] receive: {resp ?? "(not sent)"}");
+                if (resp == "ERR Tuner still working")
+                {
+                    // Tuning again (the operator pressed the radio's own key): watch it as a tune-up.
+                    _atuTxWatch = false;
+                    _atuRunning = true;
+                    _atuStartedUtc = DateTime.UtcNow;
+                    _atuPollTimer?.Start();
+                    return;
+                }
+                EndAntennaTunerWatch(resp == "OK receive" ? "Radio back to receive"
+                    : resp != null && resp.StartsWith("ERR ") ? resp.Substring(4)
+                    : "Could not return the radio to receive, check the radio");
+            });
+        }
+
+        // Escape / Alt+H (HaltTx): a start not yet sent is dropped by the halt ("Tuner not
+        // started"); a running tune-up is the radio's own and is left alone; a radio still
+        // transmitting after its tune-up is returned to receive at once.
         internal void StopAntennaTunerForHalt()
         {
-            if (_atuRunning) StopAntennaTuner(null, "Tuner stopped");
+            if (_atuRequestInFlight) _atuCancelRequested = true;
+            if (_atuTxWatch) ReturnRadioToReceive(null);
         }
 
         // Self-sufficiency plan, Phase 1: the one and only F11/F12 redirect point (confirmed by

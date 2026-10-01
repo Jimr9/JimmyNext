@@ -15,6 +15,11 @@ namespace WSJTX_Controller
         public bool IsNewCallAnyBand { get; set; }
         public bool IsNewCountry { get; set; }
         public bool IsNewCountryOnBand { get; set; }
+        // New grid sounds (2026-09-29): the grid the station SENT (never a lookup's home grid)
+        // not in the log -- false whenever that cannot be known. Sounds only; ranking and
+        // automatic calling do not read these.
+        public bool IsNewGrid { get; set; }
+        public bool IsNewGridOnBand { get; set; }
         public string Country { get; set; } = "";
         public string Continent { get; set; } = "";
         public bool IsDx { get; set; }
@@ -169,6 +174,11 @@ namespace WSJTX_Controller
             // parsing decodedMessage's raw text here.
             string theirGrid = !string.IsNullOrEmpty(canonicalGrid) ? canonicalGrid
                 : !string.IsNullOrEmpty(decodedMessage) ? WsjtxMessage.Grid(decodedMessage) : null;
+            if (logReady && _logbookDb != null && LogbookDb.Grid4(theirGrid) != null)
+            {
+                result.IsNewGrid = !_logbookDb.HasWorkedGrid(theirGrid, null);
+                result.IsNewGridOnBand = bandKnown && !_logbookDb.HasWorkedGrid(theirGrid, currentBand);
+            }
             if (string.IsNullOrEmpty(theirGrid)) theirGrid = rec?.Grid;
             if (!string.IsNullOrEmpty(myGrid) && !string.IsNullOrEmpty(theirGrid))
             {

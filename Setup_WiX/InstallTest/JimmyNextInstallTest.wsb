@@ -1,0 +1,15 @@
+<Configuration>
+  <!-- Jimmy Next install/upgrade test. Double-click to run in Windows Sandbox; the test starts by
+       itself and writes results\report.txt into this folder. No network, no radio. -->
+  <Networking>Disable</Networking>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\claude\jimmy_next_nexus_integ\Setup_WiX\InstallTest</HostFolder>
+      <SandboxFolder>C:\InstallTest</SandboxFolder>
+      <ReadOnly>false</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -ExecutionPolicy Bypass -File C:\InstallTest\run-install-test.ps1</Command>
+  </LogonCommand>
+</Configuration>

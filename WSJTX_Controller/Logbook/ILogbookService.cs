@@ -28,6 +28,7 @@ namespace WSJTX_Controller
         // (ClassificationEngine, OtaSpotAnnotator).
         bool HasWorkedBefore(string callsign, string band = null);
         bool HasWorkedDxcc(int dxcc, string band = null);
+        bool HasWorkedGrid(string grid, string band = null);
 
         string GetMeta(string key);
 

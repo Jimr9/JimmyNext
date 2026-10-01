@@ -112,7 +112,7 @@ namespace WSJTX_Controller
                 new Item(HotkeyAction.UploadLotw,          "Upload to Logbook of the World."),
                 new Item(HotkeyAction.NotificationHistory, "Open Notification History (what has been announced this session)."),
                 new Item(HotkeyAction.ClockStatus,         "Report clock sync status."),
-                new Item(HotkeyAction.SmartStartStatus,    "Report Smart Start status."),
+                new Item(HotkeyAction.SmartStartStatus,    "Report Smart Mode status."),
                 new Item(HotkeyAction.StationWatchStatus,  "Report Station Watch status."),
                 new Item(HotkeyAction.LookupStation,       "Look up the selected station (callsign, country, state, LoTW status, and more)."),
                 new Item(HotkeyAction.OpenLogbook,         "Open the Ham Radio Center logbook."),

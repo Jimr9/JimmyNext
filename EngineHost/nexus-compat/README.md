@@ -27,6 +27,38 @@ tool versions) into `EngineHost/.nexus-src-info.json`. This process exists becau
 pre-v1.10.3 integration drifted ~175 commits behind `main` silently -- exact pinning gives
 reproducibility, this gives visibility.
 
+## Next upgrade readiness -- reviewed 2026-09-29 (pin stays v1.15.0)
+
+Reviewed upstream `main` at 191 commits past `v1.15.0` (no newer stable tag yet). Decision:
+stay pinned; do NOT import `main`. What the next stable upgrade needs:
+
+- **Patches to re-anchor:** upstream changed `tempo-app/src/engine.rs` (+367), `settings.rs`
+  (+147), `dto.rs` and `lib.rs` -- `tempo-app-engine.patch`, `tempo-app-settings.patch` and
+  `tempo-app-snapshot.patch` will need the usual re-anchor. `tempo-audio/src/rig.rs`,
+  `service.rs`, `slot.rs`, `tempo-core/src/message.rs` and `inbox.rs` are unchanged upstream.
+- **RFPOWER never-touch stays.** `rig.rs`/`service.rs` are unchanged upstream: Nexus still reads
+  and writes RFPOWER with no guard, and Hamlib 4.7.1's Kenwood RFPOWER read still runs the
+  power calibration sweep that leaves a TS-590 at 5 W (Hamlib/Hamlib#1595; Nexus issue #381,
+  open, TS-590S "power forced to 5W"). Remove the patch only when upstream fixes it and the fix
+  is verified on the air.
+- **Logbook conflict fix (038fdb27, `logstore.rs`/`logwrite.rs`):** a window no longer takes
+  another window's delete in as a stamp. Jimmy Next runs one engine writer with its own read
+  copy (NexusMigration.Rebuild), so the multi-window case does not arise today; after the
+  upgrade, re-run the logbook sync tests (edit, delete, re-import) to confirm the read copy
+  still follows every change kind.
+- **Park attribution (b575051a, 454c40a1):** the HUNT-ed park fills in for every activator
+  clicked (matched by base call) and never rides onto another station's contact. Jimmy Next
+  does not use Nexus's HUNT; it attributes parks itself (StationLocation.TryFindActivation, by
+  spot + band). Keep Jimmy's safeguards ("blank rather than wrong" state) -- nothing upstream
+  replaces them.
+- **Settings writer (75e90a93..f7c542f2):** settings.json is now written off the Engine lock and
+  a save sends only changed fields. The engine host builds Settings from its arguments and
+  changes them live with `apply_settings` (SET_CLOCK_CHECK, SET_WORKING_FREQUENCIES,
+  APPLY_SETTINGS); re-check those three after the re-anchor.
+- **Jimmy's own engine commands added 2026-09-29** (not patches, `EngineHost/src/main.rs`):
+  SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
+  reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
+
 ## Ten-patch re-assessment -- 2026-09-28 (v1.14.0 -> v1.15.0 upgrade)
 
 Re-checked against the new pin `v1.15.0` (`f47d43cc`, an ANNOTATED tag -- tag object

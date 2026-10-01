@@ -264,9 +264,9 @@ namespace WSJTX_Controller
             return sb.ToString();
         }
 
-        // The engine host's command line. radioAndAudio: false leaves out the radio and audio
-        // devices (both applied live by APPLY_SETTINGS) and the session token -- the engine's
-        // LaunchKey.
+        // The engine host's command line. radioAndAudio: false leaves out what a running engine
+        // takes live -- the radio and audio devices (APPLY_SETTINGS), the internet time check
+        // (SET_CLOCK_CHECK) -- and the session token: the engine's LaunchKey.
         internal static string BuildArgs(string mycall, string mygrid, string audioDevice, int jimmyPort,
             string outputDevice, RadioSettings radio, DecodeSettings decode, bool pskreporter,
             string dxClusterAddress, string sessionToken, int? repeatLimit,
@@ -285,7 +285,7 @@ namespace WSJTX_Controller
             if (tuneTimeoutSeconds.HasValue)
                 args += $" --tune-timeout-secs {tuneTimeoutSeconds.Value}";
             // Nexus's internet time check (NativeEngineSettings.ClockCheck, Options > General).
-            if (clockCheck.HasValue)
+            if (clockCheck.HasValue && radioAndAudio)
                 args += clockCheck.Value ? " --clock-check on" : " --clock-check off";
             // Frequency-override authority split, 2026-08-24 -- see
             // WsjtxClient.BuildWorkingFrequencyEntries' own comment. Omitted entirely when
@@ -795,7 +795,13 @@ namespace WSJTX_Controller
         }
 
         // Sends APPLY_SETTINGS to this running engine. True only on its "OK".
-        public bool ApplySettingsLive(RadioSettings radio, string audioIn, string audioOut)
+        public bool ApplySettingsLive(RadioSettings radio, string audioIn, string audioOut) =>
+            SendControlLine("APPLY_SETTINGS " + BuildApplySettingsJson(radio, audioIn, audioOut));
+
+        // Nexus's internet time check on the running engine. True only on its "OK".
+        public bool SetClockCheckLive(bool on) => SendControlLine("SET_CLOCK_CHECK " + (on ? "on" : "off"));
+
+        private bool SendControlLine(string line)
         {
             if (!Running) return false;
             try
@@ -808,7 +814,7 @@ namespace WSJTX_Controller
                     {
                         stream.WriteTimeout = 1000;
                         stream.ReadTimeout = 5000;
-                        byte[] cmd = Encoding.UTF8.GetBytes("APPLY_SETTINGS " + BuildApplySettingsJson(radio, audioIn, audioOut) + "\n");
+                        byte[] cmd = Encoding.UTF8.GetBytes(line + "\n");
                         stream.Write(cmd, 0, cmd.Length);
                         using (var reader = new StreamReader(stream, Encoding.UTF8))
                             return reader.ReadLine()?.Trim() == "OK";

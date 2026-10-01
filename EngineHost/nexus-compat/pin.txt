@@ -20,6 +20,7 @@ NEXUS_REPO=https://github.com/kd9taw/Nexus.git
 NEXUS_TAG=v1.15.0
 NEXUS_COMMIT=f47d43cc1053b90b882785dbc95a49c32395a890
 
-# DISPOSITION: 2026-09-28 -- pinned AT the current stable tag v1.15.0. Re-review with
+# DISPOSITION: 2026-09-29 -- stay pinned AT stable v1.15.0 (main reviewed at 191 commits past it;
+# see README.md "Next upgrade readiness"). Was: 2026-09-28 -- pinned AT the current stable tag v1.15.0. Re-review with
 # scripts/nexus-status.ps1 at the next Nexus STABLE tag. Update this line (date + decision) at
 # every significant Jimmy Next release.

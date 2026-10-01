@@ -159,6 +159,7 @@ namespace WSJTX_Controller
                 Exec("CREATE INDEX IF NOT EXISTS ix_date      ON qso(qso_date);");
                 Exec("CREATE INDEX IF NOT EXISTS ix_dxcc      ON qso(dxcc);");
                 Exec("CREATE INDEX IF NOT EXISTS ix_band_mode ON qso(band, mode);");
+                Exec("CREATE INDEX IF NOT EXISTS ix_grid4     ON qso(upper(substr(grid, 1, 4)));");
                 Exec("CREATE INDEX IF NOT EXISTS ix_state     ON qso(state);");
                 Exec("CREATE INDEX IF NOT EXISTS ix_cq_zone   ON qso(cq_zone);");
 
@@ -773,6 +774,34 @@ namespace WSJTX_Controller
                     return count > 0;
                 }
             }
+        }
+
+        // "Worked this 4-character grid square before" (New grid sounds, 2026-09-29). Anything
+        // that is not a grid (blank, "RR73") returns true -- never a false "new grid".
+        public bool HasWorkedGrid(string grid, string band = null)
+        {
+            string g4 = Grid4(grid);
+            if (g4 == null) return true;
+            lock (_lock)
+            {
+                using (var cmd = _conn.CreateCommand())
+                {
+                    cmd.CommandText = band == null
+                        ? "SELECT COUNT(*) FROM qso WHERE upper(substr(grid, 1, 4)) = @g;"
+                        : "SELECT COUNT(*) FROM qso WHERE upper(substr(grid, 1, 4)) = @g AND band = @band COLLATE NOCASE;";
+                    cmd.Parameters.AddWithValue("@g", g4);
+                    if (band != null) cmd.Parameters.AddWithValue("@band", band);
+                    return (long)cmd.ExecuteScalar() > 0;
+                }
+            }
+        }
+
+        internal static string Grid4(string grid)
+        {
+            string g = (grid ?? "").Trim().ToUpperInvariant();
+            if (g.Length < 4 || g == "RR73") return null;
+            return g[0] >= 'A' && g[0] <= 'R' && g[1] >= 'A' && g[1] <= 'R' && char.IsDigit(g[2]) && char.IsDigit(g[3])
+                ? g.Substring(0, 4) : null;
         }
 
         public Dictionary<string, int> GetSourceCounts()
