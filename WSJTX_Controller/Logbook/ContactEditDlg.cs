@@ -9,6 +9,9 @@ namespace WSJTX_Controller
 {
     // Logbook Center's editor for one logged contact: every field Nexus keeps for it.
     //
+    //   - Opens READ ONLY (operator, 2026-10-01): every field can be read and tabbed through,
+    //     nothing can change until "Allow editing" is checked -- off every time this opens.
+    //     Saving asks "Save these changes?" naming the fields that changed.
     //   - Editable: the contact, the station worked, my station, comment and notes.
     //   - Protected (DXCC, CQ/ITU zones, station callsign, operator, upload status): shown read
     //     only until "Allow editing protected fields" is checked -- off every time this opens,
@@ -30,7 +33,10 @@ namespace WSJTX_Controller
         private ComboBox _mode, _theirProgram, _myProgram;
         private TextBox _name, _qth, _state, _county, _country, _grid, _iota, _theirRef;
         private TextBox _power, _myRig, _myGrid, _myRef, _comment, _notes;
-        private CheckBox _allowProtected;
+        private CheckBox _allowProtected, _allowEdit;
+        private readonly List<Control> _normalFields = new List<Control>();
+        private readonly Dictionary<Control, string> _shown = new Dictionary<Control, string>();
+        private readonly HashSet<ComboBox> _lockedCombos = new HashSet<ComboBox>();
         private TextBox _dxcc, _cqz, _ituz, _stationCall, _operator;
         private readonly Dictionary<string, CheckBox> _uploads = new Dictionary<string, CheckBox>();
         private TextBox _status;
@@ -58,7 +64,7 @@ namespace WSJTX_Controller
         {
             _orig = q;
             _onSave = onSave;
-            Text = "Edit Contact " + q.Call;
+            Text = "Contact " + q.Call;
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = true;
             MinimizeBox = false;
@@ -80,6 +86,14 @@ namespace WSJTX_Controller
             var when = DateTimeOffset.FromUnixTimeSeconds((long)q.WhenUnix).UtcDateTime;
             string timeOff = q.TimeOffUnix.HasValue
                 ? DateTimeOffset.FromUnixTimeSeconds((long)q.TimeOffUnix.Value).UtcDateTime.ToString("HHmmss", CultureInfo.InvariantCulture) : "";
+
+            _allowEdit = new CheckBox
+            {
+                Text = "Allow editing", AccessibleName = "Allow editing", AutoSize = true, Checked = false,
+                TabIndex = _groupTab++, Margin = new Padding(3, 3, 3, 6),
+            };
+            _allowEdit.CheckedChanged += (s, e) => ApplyEditable();
+            _flow.Controls.Add(_allowEdit);
 
             var t = Group("Contact");
             _call = Box(t, "Callsign", q.Call, upper: true);
@@ -117,7 +131,7 @@ namespace WSJTX_Controller
 
             t = Group("Protected");
             _allowProtected = new CheckBox { Text = "Allow editing protected fields", AutoSize = true, Checked = false };
-            _allowProtected.CheckedChanged += (s, e) => SetProtectedEditable(_allowProtected.Checked);
+            _allowProtected.CheckedChanged += (s, e) => ApplyEditable();
             Add(t, _allowProtected, 4);
             _dxcc = Box(t, "DXCC", q.Dxcc?.ToString(CultureInfo.InvariantCulture));
             _cqz = Box(t, "CQ zone", q.ExtraValue("CQZ"));
@@ -156,7 +170,15 @@ namespace WSJTX_Controller
             };
             _flow.Controls.Add(_status);
 
-            SetProtectedEditable(false);
+            _normalFields.AddRange(new Control[]
+            {
+                _call, _band, _mode, _freq, _date, _timeOn, _timeOff, _rstSent, _rstRcvd,
+                _name, _qth, _state, _county, _country, _grid, _iota, _theirProgram, _theirRef,
+                _power, _myRig, _myGrid, _myProgram, _myRef, _comment, _notes,
+            });
+            foreach (var cb in new[] { _mode, _theirProgram, _myProgram }) LockWhenReadOnly(cb);
+            foreach (var c in _normalFields.Concat(new Control[] { _dxcc, _cqz, _ituz, _stationCall, _operator })) _shown[c] = c.Text;
+            ApplyEditable();
             ClientSize = new Size(Math.Min(_flow.PreferredSize.Width + 30, 760),
                                   Math.Min(_flow.PreferredSize.Height + 12, Screen.FromControl(this).WorkingArea.Height - 80));
         }
@@ -215,10 +237,47 @@ namespace WSJTX_Controller
         }
 
         // Read only = still reachable with Tab and read by the screen reader, just not changeable.
-        private void SetProtectedEditable(bool editable)
+        // Normal fields follow "Allow editing"; protected ones need "Allow editing protected
+        // fields" as well, which itself only works once editing is allowed.
+        private void ApplyEditable()
         {
-            foreach (var tb in new[] { _dxcc, _cqz, _ituz, _stationCall, _operator }) tb.ReadOnly = !editable;
-            foreach (var cb in _uploads.Values) cb.AutoCheck = editable;
+            bool edit = _allowEdit.Checked;
+            if (!edit && _allowProtected.Checked) _allowProtected.Checked = false;
+            _allowProtected.AutoCheck = edit;
+            bool prot = edit && _allowProtected.Checked;
+            foreach (var c in _normalFields)
+            {
+                if (c is TextBox tb) tb.ReadOnly = !edit;
+                else if (c is ComboBox cb) { if (edit) _lockedCombos.Remove(cb); else _lockedCombos.Add(cb); }
+            }
+            foreach (var tb in new[] { _dxcc, _cqz, _ituz, _stationCall, _operator }) tb.ReadOnly = !prot;
+            foreach (var cb in _uploads.Values) cb.AutoCheck = prot;
+        }
+
+        // A ComboBox has no ReadOnly: while locked it keeps focus and its value is read, but keys,
+        // the wheel and the drop-down cannot change it (Tab, arrows within the text, Home/End still move).
+        private void LockWhenReadOnly(ComboBox cb)
+        {
+            cb.KeyDown += (s, e) =>
+            {
+                if (!_lockedCombos.Contains(cb)) return;
+                if (e.KeyCode == Keys.Tab || e.KeyCode == Keys.Left || e.KeyCode == Keys.Right
+                    || e.KeyCode == Keys.Home || e.KeyCode == Keys.End || e.KeyCode == Keys.Escape || e.KeyCode == Keys.Enter) return;
+                e.SuppressKeyPress = true;
+                e.Handled = true;
+            };
+            cb.KeyPress += (s, e) => { if (_lockedCombos.Contains(cb)) e.Handled = true; };
+            cb.DropDown += (s, e) => { if (_lockedCombos.Contains(cb)) BeginInvoke(new Action(() => cb.DroppedDown = false)); };
+            cb.MouseWheel += (s, e) => { if (_lockedCombos.Contains(cb) && e is HandledMouseEventArgs h) h.Handled = true; };
+        }
+
+        // The fields whose shown value was changed, by name.
+        private List<string> ChangedFieldNames()
+        {
+            var names = _shown.Where(kv => kv.Key.Text != kv.Value).Select(kv => kv.Key.AccessibleName).ToList();
+            foreach (var (service, label) in UploadServices)
+                if (_uploads[service].Checked != UploadSent(_orig, service)) names.Add(label);
+            return names;
         }
 
         // ── What the contact holds ───────────────────────────────────────────────────────────
@@ -295,6 +354,9 @@ namespace WSJTX_Controller
 
         private void Save_Click(object sender, EventArgs e)
         {
+            if (!_allowEdit.Checked) { _status.Text = "Check Allow editing to make changes."; return; }
+            var changedNames = ChangedFieldNames();
+            if (changedNames.Count == 0) { _status.Text = "No changes to save."; return; }
             string error = null;
             var q = NexusLogClient.FromJson<NexusQso>(NexusLogClient.ToJson(_orig));   // a copy to change
 
@@ -379,6 +441,12 @@ namespace WSJTX_Controller
             }
 
             if (error != null) { _status.Text = error; return; }
+            if (MessageBox.Show(this, $"Save these changes to {_orig.Call}?\n\n{string.Join(", ", changedNames)}", "Save Changes",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                _status.Text = "Not saved.";
+                return;
+            }
             string failed = _onSave?.Invoke(q, uploadChanges);
             if (failed != null) { _status.Text = failed; return; }   // every field stays as typed
             Close();

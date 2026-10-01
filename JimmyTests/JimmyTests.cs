@@ -1593,6 +1593,7 @@ static class JimmyTests
         QsoTimeOnIsStartOfContactTests();
         WordingFileTests();
         CustomizationPackageTests();
+        BulkEditApplyTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
         ReportClockStatusTests();
@@ -17213,10 +17214,6 @@ static class JimmyTests
                         "Still Needed awards", "Band filter", "Needed entries", "Refresh needed list",
                         "Needed items", "Status", "Close",
                     });
-                    CheckPage("Lookup", 3, new[] {
-                        "Callsign search", "Search for callsign", "Search results", "Clear search results",
-                        "Status", "Close",
-                    });
                     // Edit/Delete/Export are correctly skipped here: they start Enabled=false
                     // until a row is selected (no QSOs exist to select in this bare fixture),
                     // and a real Tab press skips a genuinely disabled control -- same as it
@@ -17224,13 +17221,13 @@ static class JimmyTests
                     // credentials passed to the constructor above, which cover that case for
                     // Sync so its full sequence can be checked; there's no equivalent
                     // workaround for "a row is selected" without a real, seeded database).
-                    CheckPage("Edit Log", 4, new[] {
+                    CheckPage("Lookup and Edit", 3, new[] {
                         "Callsign filter", "Source filter", "Date from, format year month day, optional",
                         "Date to, format year month day, optional", "Search", "Clear filters",
-                        "Choose Edit Log column order", "Edit Log results", "Add a new QSO",
+                        "Choose column order", "Contacts found", "Add a new QSO",
                         "Status", "Close",
                     });
-                    CheckPage("Sync", 5, new[] {
+                    CheckPage("Sync", 4, new[] {
                         "Import ADIF file", "Download from QRZ Logbook", "Download from LoTW",
                         "Download from Club Log", "Download and reconcile eQSL confirmations",
                         "Export all QSOs to ADIF file", "Import history", "Status", "Close",
@@ -19017,6 +19014,25 @@ static class JimmyTests
                 HotkeyConfig.FormatKeysForHelp(System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.E, Wording.Get("Status.KeySeparator")), "Alt, E");
         }
         finally { Wording.SetForTest(null); }
+    }
+
+    // Bulk edit (2026-10-01): log safety -- only the chosen my-station/remark fields change, a
+    // blank clears, and a contact already holding the value is reported unchanged.
+    static void BulkEditApplyTests()
+    {
+        Console.WriteLine("\n── Logbook bulk edit ──");
+        var q = new NexusQso { Call = "W1AW", Band = "20m", Mode = "FT8", TxPower = 50, MyRig = "TS-590", Comment = "tnx", Notes = "keep" };
+        bool changed = BulkEditDlg.Apply(q, new Dictionary<string, string> { ["power"] = "100", ["myGrid"] = "en34ab", ["comment"] = null });
+        Check("bulk edit changes only the chosen fields; a blank clears; grid upper-cased",
+            changed && q.TxPower == 100 && q.MyGrid == "EN34AB" && q.Comment == null
+            && q.Call == "W1AW" && q.Band == "20m" && q.Mode == "FT8" && q.MyRig == "TS-590" && q.Notes == "keep", true);
+        Check("a contact already holding the value is not changed (not saved again)",
+            !BulkEditDlg.Apply(q, new Dictionary<string, string> { ["power"] = "100", ["myGrid"] = "EN34AB" }), true);
+        Check("bulk edit offers no field that identifies the contact or the station worked",
+            !BulkEditDlg.Fields.Any(f => new[] { "call", "band", "mode", "date", "time", "state", "grid", "dxcc", "operator", "stationCall" }
+                .Contains(f.Field, StringComparer.OrdinalIgnoreCase)), true);
+        CheckStr("a power that is not a number is refused",
+            BulkEditDlg.Validate(new Dictionary<string, string> { ["power"] = "lots" }) ?? "", "Power is not a number of watts.");
     }
 
     // Customization package (2026-10-01): settings safety -- only the allowed parts travel, a

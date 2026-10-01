@@ -38,7 +38,7 @@ namespace WSJTX_Controller
 
         public EditLogRowOrderDlg(List<string> currentOrder)
         {
-            Text            = "Edit Log Row Order";
+            Text            = "Column Order";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox     = false;
             MinimizeBox     = false;
@@ -59,7 +59,7 @@ namespace WSJTX_Controller
                 Location       = new Point(12, 30),
                 Size           = new Size(200, 210),
                 TabIndex       = 1,
-                AccessibleName = "Edit Log columns",
+                AccessibleName = "Columns",
                 CheckOnClick   = true,
             };
             _listBox.SelectedIndexChanged += (s, e) => UpdateMoveButtons();

@@ -317,6 +317,16 @@ namespace WSJTX_Controller
             NexusLogbook.Refresh();
         }
 
+        // A full copy of the logbook (Nexus's own ADIF export, every field) -- taken before a
+        // bulk edit, so the contacts as they were can always be imported back.
+        public void BackupTo(string path)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            var reply = Client.Export(path);
+            if (reply.State != "saved" || !File.Exists(path))
+                throw new InvalidOperationException($"The logbook backup failed ({reply.State}{(string.IsNullOrEmpty(reply.Why) ? "" : ": " + reply.Why)}).");
+        }
+
         private static string EditFailure(NexusWriteReply r) =>
             r.State == "changed" ? "That contact changed since it was shown -- refresh and try again."
             : r.State == "gone" ? "That contact was removed -- refresh the list."

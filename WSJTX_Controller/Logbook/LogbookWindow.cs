@@ -82,7 +82,6 @@ namespace WSJTX_Controller
         private Panel _myLogPanel;
         private Panel _awardsPanel;
         private Panel _stillNeedPanel;
-        private Panel _lookupPanel;
         private Panel _editLogPanel;
         private Panel _syncPanel;
 
@@ -119,11 +118,6 @@ namespace WSJTX_Controller
         private bool     _suppressNeededEvent;
 
         // ── Lookup controls ───────────────────────────────────────────────────────
-        private TextBox  _searchTb;
-        private Button   _searchBtn;
-        private Label    _searchCountLbl;
-        private ListView _searchLv;
-        private Button   _searchClearBtn;
 
         // ── Sync controls ─────────────────────────────────────────────────────────
         private Button   _syncImportBtn;
@@ -167,9 +161,10 @@ namespace WSJTX_Controller
         private const int PAGE_MYLOG     = 0;
         private const int PAGE_AWARDS    = 1;
         private const int PAGE_STILLNEED = 2;
-        private const int PAGE_LOOKUP    = 3;
-        private const int PAGE_EDITLOG   = 4;
-        private const int PAGE_SYNC      = 5;
+        // Lookup and Edit Log are one page since 2026-10-01 ("Lookup and Edit"): the Edit Log
+        // filters already searched by callsign exactly as Lookup did, so Lookup only duplicated it.
+        private const int PAGE_EDITLOG   = 3;
+        private const int PAGE_SYNC      = 4;
 
         private static readonly string[] AllBands =
         {
@@ -329,12 +324,11 @@ namespace WSJTX_Controller
             BuildMyLogPage(font, hfont);
             BuildAwardsPage(font, hfont);
             BuildStillNeedPage(font, hfont);
-            BuildLookupPage(font, hfont);
             BuildEditLogPage(font, hfont);
             BuildSyncPage(font, hfont);
 
-            string[] pageNames  = { "My Log", "Awards", "Still Need", "Lookup", "Edit Log", "Sync" };
-            Panel[]  pagePanels = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel };
+            string[] pageNames  = { "My Log", "Awards", "Still Need", "Lookup and Edit", "Sync" };
+            Panel[]  pagePanels = { _myLogPanel, _awardsPanel, _stillNeedPanel, _editLogPanel, _syncPanel };
             for (int i = 0; i < pageNames.Length; i++)
             {
                 pagePanels[i].Dock = DockStyle.Fill;
@@ -815,95 +809,6 @@ namespace WSJTX_Controller
             _stillNeedPanel.Controls.Add(header);
         }
 
-        private void BuildLookupPage(Font font, Font hfont)
-        {
-            _lookupPanel = MakePage();
-            var header = new Panel { Dock = DockStyle.Top, Height = 36, AccessibleName = "", AccessibleRole = AccessibleRole.None };
-
-            var searchLbl = new Label
-            {
-                Text     = "Callsign:",
-                Font     = font,
-                Location = new Point(8, 11),
-                AutoSize = true,
-            };
-            header.Controls.Add(searchLbl);
-
-            _searchTb = new TextBox
-            {
-                Font           = font,
-                Location       = new Point(68, 8),
-                Size           = new Size(140, 20),
-                TabIndex       = 1,
-                AccessibleName = "Callsign search",
-            };
-            _searchTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoSearch(); } };
-            header.Controls.Add(_searchTb);
-
-            _searchBtn = new Button
-            {
-                Text           = "Search",
-                AccessibleName = "Search for callsign",
-                Font           = font,
-                Location       = new Point(214, 7),
-                Size           = new Size(70, 23),
-                TabIndex       = 2,
-            };
-            _searchBtn.Click += (s, e) => DoSearch();
-            header.Controls.Add(_searchBtn);
-
-            _searchCountLbl = new Label
-            {
-                Text     = "",
-                Font     = font,
-                Location = new Point(292, 11),
-                AutoSize = true,
-                AccessibleName = "Search result count",
-            };
-            header.Controls.Add(_searchCountLbl);
-
-            // Bottom-docked footer, TabIndex above the list, so Clear stays after the list
-            // in tab order exactly as it was when it was merely Bottom-anchored.
-            var footer = new Panel { Dock = DockStyle.Bottom, Height = 31, TabIndex = 5, AccessibleName = "", AccessibleRole = AccessibleRole.None };
-            _searchClearBtn = new Button
-            {
-                Text           = "Clear",
-                AccessibleName = "Clear search results",
-                Font           = font,
-                Location       = new Point(8, 4),
-                Size           = new Size(70, 23),
-                TabIndex       = 4,
-            };
-            _searchClearBtn.Click += (s, e) => ClearSearch();
-            footer.Controls.Add(_searchClearBtn);
-
-            _searchLv = MakeListView(font);
-            _searchLv.Dock = DockStyle.Fill;
-            _searchLv.TabIndex = 3;
-            _searchLv.Columns.Add("Date",      80);
-            _searchLv.Columns.Add("UTC",       55);
-            _searchLv.Columns.Add("Callsign",  90);
-            _searchLv.Columns.Add("Band",      55);
-            _searchLv.Columns.Add("Mode",      55);
-            _searchLv.Columns.Add("State",     50);
-            _searchLv.Columns.Add("Country",  120);
-            _searchLv.Columns.Add("Confirmed", 80);
-            _searchLv.Columns.Add("Source",    60);
-            _searchLv.AccessibleName = "Search results";
-
-            _lookupPanel.Controls.Add(_searchLv);
-            _lookupPanel.Controls.Add(header);
-            _lookupPanel.Controls.Add(footer);
-        }
-
-        private void ClearSearch()
-        {
-            _searchTb.Text = "";
-            _searchLv.Items.Clear();
-            _searchCountLbl.Text = "";
-            _searchTb.Focus();
-        }
-
         private void BuildEditLogPage(Font font, Font hfont)
         {
             _editLogPanel = MakePage();
@@ -1005,7 +910,7 @@ namespace WSJTX_Controller
             _editRowOrderBtn = new Button
             {
                 Text           = "Row Order...",
-                AccessibleName = "Choose Edit Log column order",
+                AccessibleName = "Choose column order",
                 Font           = font,
                 Location       = new Point(416, 33),
                 Size           = new Size(90, 23),
@@ -1017,7 +922,7 @@ namespace WSJTX_Controller
             // Bottom-docked footer, TabIndex above the list, so the four action buttons stay
             // after the list in tab order exactly as they were when merely Bottom-anchored.
             // AccessibleName=""/AccessibleRole=None -- pure layout container, see MakePage().
-            var footer = new Panel { Dock = DockStyle.Bottom, Height = 31, TabIndex = 13, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            var footer = new Panel { Dock = DockStyle.Bottom, Height = 31, TabIndex = 14, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             _editAddBtn = new Button
             {
@@ -1033,8 +938,8 @@ namespace WSJTX_Controller
 
             _editEditBtn = new Button
             {
-                Text           = "Edit...",
-                AccessibleName = "Edit selected QSO",
+                Text           = "Open...",
+                AccessibleName = "Open selected contact",
                 Font           = font,
                 Location       = new Point(104, 4),
                 Size           = new Size(70, 23),
@@ -1044,14 +949,28 @@ namespace WSJTX_Controller
             _editEditBtn.Click += EditQsoBtn_Click;
             footer.Controls.Add(_editEditBtn);
 
+            // Bulk edit (BulkEditDlg): two or more contacts selected.
+            _editBulkBtn = new Button
+            {
+                Text           = "Edit Selected...",
+                AccessibleName = "Edit selected contacts together",
+                Font           = font,
+                Location       = new Point(180, 4),
+                Size           = new Size(110, 23),
+                TabIndex       = 11,
+                Enabled        = false,
+            };
+            _editBulkBtn.Click += BulkEditBtn_Click;
+            footer.Controls.Add(_editBulkBtn);
+
             _editDeleteBtn = new Button
             {
                 Text           = "Delete...",
                 AccessibleName = "Delete selected QSOs",
                 Font           = font,
-                Location       = new Point(180, 4),
+                Location       = new Point(296, 4),
                 Size           = new Size(80, 23),
-                TabIndex       = 11,
+                TabIndex       = 12,
                 Enabled        = false,
             };
             _editDeleteBtn.Click += DeleteQsosBtn_Click;
@@ -1062,9 +981,9 @@ namespace WSJTX_Controller
                 Text           = "Export Selected...",
                 AccessibleName = "Export selected QSOs to ADIF",
                 Font           = font,
-                Location       = new Point(266, 4),
+                Location       = new Point(382, 4),
                 Size           = new Size(130, 23),
-                TabIndex       = 12,
+                TabIndex       = 13,
                 Enabled        = false,
             };
             _editExportBtn.Click += ExportSelectedBtn_Click;
@@ -1075,9 +994,9 @@ namespace WSJTX_Controller
             _editLv.MultiSelect = true;
             _editLv.TabIndex    = 8;
             RebuildEditLogColumns();
-            _editLv.AccessibleName = "Edit Log results";
+            _editLv.AccessibleName = "Contacts found";
             _editLv.SelectedIndexChanged += (s, e) => UpdateEditLogButtons();
-            // Enter or Space on one contact opens it in the editor, like the Edit button.
+            // Enter or Space on one contact opens it (read only until "Allow editing"), like Open.
             _editLv.KeyDown += (s, e) =>
             {
                 if ((e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) && !e.Control && !e.Alt && _editLv.SelectedItems.Count == 1)
@@ -1110,10 +1029,13 @@ namespace WSJTX_Controller
             _editCallTb.Focus();
         }
 
+        private Button _editBulkBtn;
+
         private void UpdateEditLogButtons()
         {
             int n = _editLv.SelectedItems.Count;
             _editEditBtn.Enabled   = n == 1;
+            _editBulkBtn.Enabled   = n >= 2;
             _editDeleteBtn.Enabled = n >= 1;
             _editExportBtn.Enabled = n >= 1;
         }
@@ -1151,7 +1073,7 @@ namespace WSJTX_Controller
                     : $"{results.Count} QSO{(results.Count == 1 ? "" : "s")} found.";
                 UpdateEditLogButtons();
             }
-            catch (Exception ex) { SetStatus("Edit Log search error: " + ex.Message); }
+            catch (Exception ex) { SetStatus("Search error: " + ex.Message); }
         }
 
         private string GetEditLogFieldValue(QsoRecord q, string field)
@@ -1294,6 +1216,59 @@ namespace WSJTX_Controller
             }
         }
 
+        // Bulk edit: the same value into chosen fields of every selected contact (BulkEditDlg has
+        // the rules). Asks first, naming the fields and the count; backs the logbook up before
+        // the first change; each contact goes back through the same save the contact window uses.
+        private void BulkEditBtn_Click(object sender, EventArgs e)
+        {
+            if (_db == null || _editLv.SelectedItems.Count < 2) return;
+            var nexus = (NexusLogbookService)_db;
+            var ids = SelectedEditIds();
+            Dictionary<string, string> changes;
+            using (var dlg = new BulkEditDlg(ids.Count) { Owner = this })
+            {
+                if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Changes == null) return;
+                changes = dlg.Changes;
+            }
+            string what = BulkEditDlg.Describe(changes.Keys);
+            if (MessageBox.Show(this,
+                    $"Change {what} on {ids.Count} contacts?\n\nThe logbook is backed up first. Changes are not sent again to QRZ, Club Log or LoTW.",
+                    "Save Changes", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+            {
+                SetStatus("Bulk edit cancelled; nothing changed.");
+                return;
+            }
+
+            string backup = Path.Combine(Path.GetDirectoryName(LookupManager.DataRoot), "Backups",
+                $"logbook-before-bulk-edit-{DateTime.Now:yyyyMMdd-HHmmss}.adi");
+            try { nexus.BackupTo(backup); }
+            catch (Exception ex) { SetStatus("Bulk edit stopped before changing anything: " + ex.Message); return; }
+
+            int changed = 0, same = 0, failed = 0;
+            string firstError = null;
+            Cursor = Cursors.WaitCursor;
+            try
+            {
+                foreach (int id in ids)
+                {
+                    try
+                    {
+                        var q = nexus.GetRecord(id);
+                        if (!BulkEditDlg.Apply(q, changes)) { same++; continue; }
+                        nexus.SaveRecord(q, null);
+                        changed++;
+                    }
+                    catch (Exception ex) { failed++; firstError = firstError ?? ex.Message; }
+                }
+            }
+            finally { Cursor = Cursors.Default; }
+            SetStatus($"Changed {changed} contact{(changed == 1 ? "" : "s")}" +
+                      (same > 0 ? $", {same} already had that value" : "") +
+                      (failed > 0 ? $", {failed} failed ({firstError})" : "") +
+                      $". Backup: {Path.GetFileName(backup)} in the Backups folder.");
+            DoEditSearch();
+        }
+
         private void DeleteQsosBtn_Click(object sender, EventArgs e)
         {
             if (_db == null || _editLv.SelectedItems.Count == 0) return;
@@ -1366,7 +1341,7 @@ namespace WSJTX_Controller
 
         private void NavigateToPage(int page)
         {
-            Panel[] pages = { _myLogPanel, _awardsPanel, _stillNeedPanel, _lookupPanel, _editLogPanel, _syncPanel };
+            Panel[] pages = { _myLogPanel, _awardsPanel, _stillNeedPanel, _editLogPanel, _syncPanel };
             if (page >= 0 && page < pages.Length)
                 _activePage = pages[page];
 
@@ -1379,7 +1354,6 @@ namespace WSJTX_Controller
                 case PAGE_MYLOG:     PopulateMyLog();  break;
                 case PAGE_AWARDS:    PopulateAwards(); break;
                 case PAGE_STILLNEED: PopulateNeeded(); break;
-                case PAGE_LOOKUP:    break;
                 case PAGE_EDITLOG:   break;
                 case PAGE_SYNC:      PopulateSync();   break;
             }
@@ -1492,12 +1466,9 @@ namespace WSJTX_Controller
                 case PAGE_STILLNEED: return new Control[] {
                     _neededAwardsClb, _neededBandCb, _neededCountLbl, _neededRefreshBtn, _neededLv,
                 };
-                case PAGE_LOOKUP: return new Control[] {
-                    _searchTb, _searchBtn, _searchLv, _searchClearBtn,
-                };
                 case PAGE_EDITLOG: return new Control[] {
                     _editCallTb, _editSourceCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
-                    _editRowOrderBtn, _editLv, _editAddBtn, _editEditBtn, _editDeleteBtn, _editExportBtn,
+                    _editRowOrderBtn, _editLv, _editAddBtn, _editEditBtn, _editBulkBtn, _editDeleteBtn, _editExportBtn,
                 };
                 case PAGE_SYNC: return new Control[] {
                     _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncClubLogBtn, _syncEqslBtn, _syncExportBtn,
@@ -2042,36 +2013,6 @@ namespace WSJTX_Controller
             _neededCountLbl.Text = $"{result.StillNeeded.Count} {itemHeader.ToLowerInvariant()} needed{bandNote}.{liveTagNote}";
         }
 
-        private void DoSearch()
-        {
-            if (_db == null) return;
-            string pat = (_searchTb.Text ?? "").Trim();
-            if (pat.Length == 0) { _searchCountLbl.Text = "Enter a callsign."; return; }
-
-            try
-            {
-                var results = _db.SearchByCallsign(pat);
-                _searchLv.Items.Clear();
-                foreach (var q in results)
-                {
-                    var item = new ListViewItem(FormatDate(q.QsoDate));
-                    item.SubItems.Add(FormatTime(q.TimeOn));
-                    item.SubItems.Add(q.Callsign);
-                    item.SubItems.Add(q.Band);
-                    item.SubItems.Add(q.Mode);
-                    item.SubItems.Add(q.State);
-                    item.SubItems.Add(q.Country);
-                    item.SubItems.Add(ConfirmedText(q.LotwQslRcvd, q.QrzQslRcvd));
-                    item.SubItems.Add(q.Source);
-                    _searchLv.Items.Add(item);
-                }
-                _searchCountLbl.Text = results.Count == 0
-                    ? "No QSOs found."
-                    : $"{results.Count} QSO{(results.Count == 1 ? "" : "s")} found.";
-            }
-            catch (Exception ex) { SetStatus("Search error: " + ex.Message); }
-        }
-
         // ── Import handlers ───────────────────────────────────────────────────────
 
         private async void ImportBtn_Click(object sender, EventArgs e)
@@ -2396,15 +2337,15 @@ namespace WSJTX_Controller
             if      (_activePage == _myLogPanel)     PopulateMyLog();
             else if (_activePage == _awardsPanel)    PopulateAwards();
             else if (_activePage == _stillNeedPanel) PopulateNeeded();
-            else if (_activePage == _lookupPanel)    DoSearch();
             else if (_activePage == _editLogPanel)   { if (_editLv.Items.Count > 0) DoEditSearch(); }
             else if (_activePage == _syncPanel)      PopulateSync();
         }
 
+        // Ctrl+F: the Lookup and Edit page's callsign filter.
         private void GoToLookup()
         {
-            _categoryListBox.SelectedIndex = PAGE_LOOKUP;
-            _searchTb?.Focus();
+            _categoryListBox.SelectedIndex = PAGE_EDITLOG;
+            _editCallTb?.Focus();
         }
 
         // ── Helpers ───────────────────────────────────────────────────────────────
