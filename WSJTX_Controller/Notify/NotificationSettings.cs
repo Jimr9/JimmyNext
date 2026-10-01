@@ -348,7 +348,7 @@ namespace WSJTX_Controller
             NotificationJoinOrder = OrderedListMigration.Merge(
                 savedJoinOrder,
                 NotificationCenter.WatchEventTypes
-                    .Concat(new[] { NotificationEventType.AwardsNeeded, NotificationEventType.RoutineStatusLine })
+                    .Concat(new[] { NotificationEventType.AwardsNeeded, NotificationEventType.RoutineStatusLine, NotificationEventType.OtherMessage })
                     .ToList(),
                 NotificationDefaults.DefaultJoinOrder);
 

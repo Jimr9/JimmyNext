@@ -145,6 +145,7 @@ namespace WSJTX_Controller
             {
                 NotificationEventType.AwardsNeeded,
                 NotificationEventType.RoutineStatusLine,
+                NotificationEventType.OtherMessage,
             };
 
             var ordered = new List<NotificationEventType>();

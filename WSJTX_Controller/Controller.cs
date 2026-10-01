@@ -158,6 +158,14 @@ namespace WSJTX_Controller
         // AccessibleDescription this comment used to point to was removed from the checkbox
         // itself per a third-party audit -- its own accessible name already says what it does).
         public bool announceImportantAlertsWhenFocusElsewhere = false;
+        // Speech experiment (operator, 2026-10-01), all three parts together, off = unchanged:
+        //   1. speak by handing the text to Windows (UI Automation notification, "process all"
+        //      = the screen reader queues it after what it is saying) instead of re-reading the
+        //      status line, which interrupts;
+        //   2. every automatic utterance is joined (SpeechCoordinator.JoinEverything);
+        //   3. the status line holds what was last SPOKEN -- routine renders no longer rewrite
+        //      it silently, so reading it back matches what was heard.
+        public bool queueSpeechExperiment = false;
 
         // Sound settings: enabled flags and file paths for each sound event.
         // Fix, 2026-09-14: CallAdded/CallingMe/Logged used to have their enabled state carried by
@@ -953,6 +961,7 @@ namespace WSJTX_Controller
                 // today's spaced-callsign presentation until the operator opts out.
                 spaceCallsignsAndGrids = iniFile.Read("spaceCallsignsAndGrids") != "False";
                 announceImportantAlertsWhenFocusElsewhere = iniFile.Read("announceImportantAlertsWhenFocusElsewhere") == "True";
+                queueSpeechExperiment = iniFile.Read("queueSpeechExperiment") == "True";
                 // 2.0.58: default true (== "False" test, so a missing/blank key stays true) --
                 // the testing-phase default; the operator can turn it off in the Notification
                 // History window and that choice is persisted.
@@ -1775,6 +1784,7 @@ namespace WSJTX_Controller
                 iniFile.Write("checkForUpdatesOnStartup", checkForUpdatesOnStartup.ToString());
                 iniFile.Write("spaceCallsignsAndGrids", spaceCallsignsAndGrids.ToString());
                 iniFile.Write("announceImportantAlertsWhenFocusElsewhere", announceImportantAlertsWhenFocusElsewhere.ToString());
+                iniFile.Write("queueSpeechExperiment", queueSpeechExperiment.ToString());
                 iniFile.Write("notificationHistoryIncludeRoutineStatus", notificationHistoryIncludeRoutineStatus.ToString());
                 iniFile.Write("routineStatusSpeakWhen", routineStatusSpeakWhen.ToString());
                 iniFile.Write("routineStatusCondition", routineStatusCondition.ToString());
@@ -4061,7 +4071,14 @@ namespace WSJTX_Controller
             // spoken status update funnels through -- this is a direct, one-shot operator-
             // feedback message, so it is the Immediate lane's DEFER case (speaks now, unmodified,
             // never touches a pending Now-batch; see SpeechCoordinator's own header comment).
-            CoordinatedSpeak(text);
+            var speech = wsjtxClient?.Notify?.Speech;
+            if (queueSpeechExperiment && speech != null && _activeHotkeyOrigin == null)
+                speech.SubmitMessage(text);   // joins whatever else is being said (speech experiment)
+            else
+            {
+                CoordinatedSpeak(text);       // a key press's answer: at once
+                speech?.NoteExternalSpeech();
+            }
 
             // 2.0.58 Notification History: recorded HERE, unconditionally, for every direct
             // operator-feedback message -- independent of whether it was actually spoken (that is
@@ -4188,7 +4205,8 @@ namespace WSJTX_Controller
             {
                 this.statusText.ForeColor = foreColor;
                 this.statusText.BackColor = backColor;
-                this.statusText.Text = statusText;
+                // Speech experiment: the line holds what was last spoken (CoordinatedSpeak sets it).
+                if (!queueSpeechExperiment) this.statusText.Text = statusText;
                 this.statusText.SelectionStart = 0;
                 this.statusText.SelectionLength = 0;
                 _lastReceiveCycleSummaryText = isReceiveCycleSummaryRender ? statusText : null;
@@ -4200,7 +4218,7 @@ namespace WSJTX_Controller
                 if (notificationHistoryIncludeRoutineStatus)
                     NotificationHistory?.RecordRoutineStatus(statusText);
             }
-            else if (isReceiveCycleSummaryRender
+            else if (!queueSpeechExperiment && isReceiveCycleSummaryRender
                 && _lastReceiveCycleSummaryText != null
                 && this.statusText.Text == _lastReceiveCycleSummaryText
                 && ShouldClearStaleReceiveCycleSummary())
@@ -4279,7 +4297,19 @@ namespace WSJTX_Controller
             wsjtxClient?.DebugOutput($"{wsjtxClient.Time()} [ANNOUNCE announced={announced}]{(nearImmediateRepeat ? " (repeat suppressed)" : "")}{(isDeliberateRepeat ? " (deliberate repeat)" : "")} '{text}'");
             if (announced)
             {
-                SendKeys.Send("{UP}");  //triggers screen reader
+                if (queueSpeechExperiment)
+                {
+                    // Queued: the screen reader says it after what it is saying now.
+                    try
+                    {
+                        statusText.AccessibilityObject.RaiseAutomationNotification(
+                            System.Windows.Forms.Automation.AutomationNotificationKind.Other,
+                            System.Windows.Forms.Automation.AutomationNotificationProcessing.All, text);
+                    }
+                    catch { SendKeys.Send("{UP}"); }
+                }
+                else
+                    SendKeys.Send("{UP}");  //triggers screen reader
                 _lastAnnouncedStatusText = text;
                 _lastAnnouncedStatusTime = DateTime.UtcNow;
             }

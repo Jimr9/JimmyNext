@@ -111,5 +111,11 @@ namespace WSJTX_Controller
         // NotificationSettingsTests/DisplayNames coverage tests), even though its policy is never
         // actually consulted for delivery timing/eligibility.
         RoutineStatusLine,
+
+        // Pseudo-category like RoutineStatusLine (2026-10-01, speech experiment): the plain
+        // status messages Jimmy says on its own (StatusView.ShowMessage that no key press
+        // produced -- "Band changed to 40m", "Transmit slot analysis complete") when they join
+        // the speech queue. Never published; its place in the join order is all it carries.
+        OtherMessage,
     }
 }

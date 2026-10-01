@@ -1701,6 +1701,7 @@ namespace WSJTX_Controller
         // one place. Same Controller.announceImportantAlertsWhenFocusElsewhere setting/key.
         private System.Windows.Forms.CheckBox _notifyAnnounceOffFocusCheckBox;
         private System.Windows.Forms.CheckBox _notifyRepeatUnchangedTargetActivityCheckBox;
+        private System.Windows.Forms.CheckBox _notifyQueueSpeechCheckBox;
         private System.Windows.Forms.NumericUpDown _notifyRepeatSecondsUpDown;
         private System.Windows.Forms.NumericUpDown _notifyThrottleMsUpDown;
         private System.Windows.Forms.CheckBox _notifySuppressUnchangedCheckBox;
@@ -4062,7 +4063,7 @@ namespace WSJTX_Controller
             var globalGroup = new System.Windows.Forms.GroupBox
             {
                 Text = "Global speech behaviour", Location = new System.Drawing.Point(L, y),
-                Size = new System.Drawing.Size(W, 218), Font = font,
+                Size = new System.Drawing.Size(W, 244), Font = font,
             };
             notificationsPanel.Controls.Add(globalGroup);
             globalGroup.Controls.Add(new System.Windows.Forms.Label
@@ -4212,6 +4213,16 @@ namespace WSJTX_Controller
                 Checked = ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod,
             };
             globalGroup.Controls.Add(_notifyRepeatUnchangedTargetActivityCheckBox);
+
+            // Experiment (Controller.queueSpeechExperiment): queue speech instead of interrupting.
+            _notifyQueueSpeechCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Queue speech instead of interrupting (experimental)",
+                AccessibleName = "Queue speech instead of interrupting, experimental",
+                Location = new System.Drawing.Point(12, 210), Size = new System.Drawing.Size(W - 24, 20),
+                TabIndex = tabIdx++, Font = font, Checked = ctrl.queueSpeechExperiment,
+            };
+            globalGroup.Controls.Add(_notifyQueueSpeechCheckBox);
             y += globalGroup.Height + 10;
 
             // ── G. Reset ────────────────────────────────────────────────────────────────────
@@ -4751,6 +4762,8 @@ namespace WSJTX_Controller
             // Global speech behaviour -- committed here (Codex #7), not by the live handlers.
             ctrl.suppressReceiveNotificationsDuringTx = _suppressReceiveDuringTxCheckBox?.Checked ?? false;
             ctrl.announceImportantAlertsWhenFocusElsewhere = _notifyAnnounceOffFocusCheckBox?.Checked ?? false;
+            ctrl.queueSpeechExperiment = _notifyQueueSpeechCheckBox?.Checked ?? false;
+            if (ctrl.wsjtxClient?.Notify != null) ctrl.wsjtxClient.Notify.Speech.JoinEverything = ctrl.queueSpeechExperiment;
             ctrl.routineStatusSpeakWhen = _pendingRoutineStatusSpeakWhen;
             ctrl.routineStatusCondition = _pendingRoutineStatusCondition;
             ctrl.Notifications.ReceiveSideIdScope = _pendingReceiveSideIdScope;

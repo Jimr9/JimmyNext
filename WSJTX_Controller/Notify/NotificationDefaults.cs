@@ -453,6 +453,16 @@ namespace WSJTX_Controller
                 SpeakWhen = SpeakWhen.AfterRx,
                 Condition = SpeakCondition.Always,
             },
+            // Same pseudo-category role as RoutineStatusLine (see NotificationEventType.OtherMessage):
+            // never published, never consulted for delivery -- a place in the join order only.
+            [NotificationEventType.OtherMessage] = new NotificationPolicy
+            {
+                Enabled = true,
+                Priority = NotificationPriority.Normal,
+                Template = "",
+                SpeakWhen = SpeakWhen.Now,
+                Condition = SpeakCondition.Always,
+            },
         };
 
         // Notification-joining support (2026-09-11): the default order in which the joinable
@@ -480,6 +490,7 @@ namespace WSJTX_Controller
             NotificationEventType.StationWatchStopped,
             NotificationEventType.AwardsNeeded,
             NotificationEventType.RoutineStatusLine,
+            NotificationEventType.OtherMessage,
         };
 
         // Human-readable name shown in the configurable-notifications UI's first list --
@@ -516,6 +527,7 @@ namespace WSJTX_Controller
             [NotificationEventType.SmartStartYielded] = "Smart Mode standing by (target busy)",
             [NotificationEventType.SmartStartEngaged] = "Smart Mode target engaged (QSO takeover)",
             [NotificationEventType.RoutineStatusLine] = "Routine receive/transmit status",
+            [NotificationEventType.OtherMessage] = "Other messages",
         };
     }
 }

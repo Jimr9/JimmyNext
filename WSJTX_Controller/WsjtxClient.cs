@@ -1000,6 +1000,7 @@ namespace WSJTX_Controller
                 // Batch lifecycle diagnostics (2026-09-11) -- routed through the same diagnostic
                 // log every other [ANNOUNCE]/[DIRECT]/[SMART] tag already uses.
                 logDiagnostic: text => DebugOutput(text));
+            Notify.Speech.JoinEverything = ctrl.queueSpeechExperiment;   // speech experiment (Controller.queueSpeechExperiment)
             InitTargetMonitors();
             LiveQsoUploader = new LiveQsoUploadOrchestrator(
                 credentials: () => new LiveUploadCredentials

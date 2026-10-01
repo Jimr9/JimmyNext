@@ -1636,6 +1636,7 @@ static class JimmyTests
         SmartStartSeedNoImmediateCqTests();
         NotificationSpaceCallsignsAndGridsTests();
         NotificationJoiningTests();
+        SpeechJoinEverythingTests();
         DeliberateRepeatBypassTests();
         SemanticBoundaryAndJoinTimingTests();
         OrderedListMigrationTests();
@@ -25320,6 +25321,41 @@ static class JimmyTests
     // AdvanceStateSeq), Posture/Observation join-vs-supersede, lifecycle-boundary reconciliation
     // (not discard), and the final Critical/Important/Immediate arbitration table. All timing uses
     // NewTestCoordinator's paired fake clock/scheduler -- no Thread.Sleep, fully deterministic.
+    // Speech experiment (2026-10-01, SpeechCoordinator.JoinEverything): things said together are
+    // joined into one utterance instead of each cutting the last off; the newest status line wins.
+    static void SpeechJoinEverythingTests()
+    {
+        Console.WriteLine("\n── Speech: join everything (experiment) ──");
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.JoinEverything = true;
+            c.UpdateJoinOrder(new[] { NotificationEventType.RoutineStatusLine, NotificationEventType.SmartStartCallStarting, NotificationEventType.OtherMessage });
+            c.SubmitRoutineComposite(new[] { new RoutineFragment { Key = "_base", Order = 0, Text = "1 new DXCC on band.", When = SpeakWhen.Now } }, speakNow: true);
+            c.SubmitNotification("call", "Calling BD8ENU.", SpeakWhen.Now, NotificationPriority.Normal, eventType: NotificationEventType.SmartStartCallStarting);
+            c.SubmitMessage("Transmit slot analysis complete");
+            Check("nothing is said the instant each arrives", said.Count == 0, true);
+            sched.Advance(c.MaxBatchWindowMs);
+            Check("the summary, a notification and a plain message arriving together are said as ONE sentence, in join order",
+                said.Count == 1 && said[0] == "1 new DXCC on band. Calling BD8ENU. Transmit slot analysis complete", true);
+        }
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.JoinEverything = true;
+            c.SubmitRoutineComposite(new[] { new RoutineFragment { Key = "_base", Order = 0, Text = "Receiving", When = SpeakWhen.Now } }, speakNow: true);
+            c.SubmitRoutineComposite(new[] { new RoutineFragment { Key = "_base", Order = 0, Text = "Transmitting", When = SpeakWhen.Now } }, speakNow: true);
+            sched.Advance(c.MaxBatchWindowMs);
+            Check("only the newest status line is said", said.Count == 1 && said[0] == "Transmitting", true);
+        }
+        {
+            var said = new List<string>();
+            var c = NewTestCoordinator((t, cue) => said.Add(t), out var sched);
+            c.SubmitNotification("x", "Band changed to 40m", SpeakWhen.Now, NotificationPriority.Normal, eventType: NotificationEventType.ErrorWarning);
+            Check("with the experiment off, an ordinary notification still speaks at once (unchanged)", said.Count == 1, true);
+        }
+    }
+
     static void NotificationJoiningTests()
     {
         Console.WriteLine("\n── Notification joining: correlation, reconciliation, arbitration ──");

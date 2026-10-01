@@ -153,6 +153,15 @@ namespace WSJTX_Controller
         private int _maxBatchWindowMs = DefaultMaxBatchWindowMs;
         private int _minSequentialGapMs = DefaultMinSequentialGapMs;
 
+        // Speech experiment (operator, 2026-10-01; Controller.queueSpeechExperiment): EVERY
+        // automatic utterance -- ordinary notifications, the routine status line, plain messages
+        // (SubmitMessage) -- goes through the Now-batch, so things arriving together are joined
+        // into one sentence instead of each nudging the screen reader and cutting the last one
+        // off. The routine status line keeps only its newest version. Critical still speaks at
+        // once; a message a key press produced bypasses this (NoteExternalSpeech). Off = the
+        // 2026-09-11 behaviour exactly.
+        public bool JoinEverything { get; set; }
+
         internal int QuietPeriodMs => _quietPeriodMs;
         internal int MaxBatchWindowMs => _maxBatchWindowMs;
         internal int MinSequentialGapMs => _minSequentialGapMs;
@@ -367,9 +376,9 @@ namespace WSJTX_Controller
             if (when == SpeakWhen.Now || IsTimingAlreadySatisfied(when))
             {
                 if (!IsConditionEligible(condition)) return false;
-                if (isWatchCategory)
+                if (isWatchCategory || JoinEverything)
                 {
-                    AddToOpenBatch(eventType, identity, text, cue, onSpoken, correlation);
+                    AddToOpenBatch(eventType, identity, text, cue, onSpoken, isWatchCategory ? correlation : null);
                     return true;
                 }
                 // Ordinary immediate (non-Watch) Now notification -- DEFER, same as Important/C-F:
@@ -778,9 +787,14 @@ namespace WSJTX_Controller
 
         // Joins several independent, already-complete utterances with a single space -- see
         // ComposeMerged's own comment for why this is deliberately not Compose(List<Pending>).
-        private static string JoinUtterances(IEnumerable<string> texts)
+        private string JoinUtterances(IEnumerable<string> texts)
         {
             var nonEmpty = texts.Where(t => !string.IsNullOrWhiteSpace(t)).Select(t => t.Trim()).ToList();
+            // JoinEverything: plain messages often have no closing punctuation ("Band changed to
+            // 40m") -- end each joined piece as a sentence so two never run together.
+            if (JoinEverything && nonEmpty.Count > 1)
+                for (int i = 0; i < nonEmpty.Count - 1; i++)
+                    if (!".!?".Contains(nonEmpty[i][nonEmpty[i].Length - 1])) nonEmpty[i] += ".";
             if (nonEmpty.Count == 0) return "";
             string joined = string.Join(" ", nonEmpty);
             while (joined.Contains("  ")) joined = joined.Replace("  ", " ");
@@ -861,9 +875,32 @@ namespace WSJTX_Controller
             if (speakNow)
             {
                 string composed = Compose(nowBatch);
-                if (composed.Length > 0) SpeakNow(composed, AlertCue.None);
+                if (composed.Length == 0) return;
+                if (JoinEverything) AddRoutineToBatch(composed);
+                else SpeakNow(composed, AlertCue.None);
             }
         }
+
+        // JoinEverything: the routine line joins the batch, replacing any older routine line
+        // still waiting (open or frozen) -- only the newest status is ever said.
+        private void AddRoutineToBatch(string composed)
+        {
+            _openBatch.RemoveAll(i => i.EventType == NotificationEventType.RoutineStatusLine);
+            _frozenParts?.RemoveAll(p => p.category == NotificationEventType.RoutineStatusLine);
+            AddToOpenBatch(NotificationEventType.RoutineStatusLine, "_routine", composed, AlertCue.None, null, null);
+        }
+
+        // JoinEverything: a plain status message Jimmy says on its own joins the batch.
+        public void SubmitMessage(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return;
+            if (_stationWatchSuppressingRoutine) return;
+            AddToOpenBatch(NotificationEventType.OtherMessage, text, text, AlertCue.None, null, null);
+        }
+
+        // Something was just spoken outside the coordinator (a key press's own message): a
+        // waiting batch keeps its gap from it like from any other utterance.
+        public void NoteExternalSpeech() => _lastSpeechElapsedMs = _clock.ElapsedMilliseconds;
 
         // Join routine fragments into ONE natural spoken sentence: sort by Order, then append
         // each fragment's clean text, inserting ", " only where two clean phrases would
