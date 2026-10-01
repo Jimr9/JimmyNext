@@ -1177,18 +1177,11 @@ namespace WSJTX_Controller
             {
                 string ctx = "";
                 if (!string.IsNullOrEmpty(Band) || !string.IsNullOrEmpty(Mode))
-                    ctx = $" for {string.Join(" ", new[] { Band, Mode }.Where(s => !string.IsNullOrEmpty(s)))}";
-                switch (State)
-                {
-                    case SlotAnalysisState.Complete:
-                        return $"Transmit slot analysis{ctx}: even period {EvenOffsetHz} Hz, odd period {OddOffsetHz} Hz.";
-                    case SlotAnalysisState.Partial:
-                        return EvenOffsetHz > 0
-                            ? $"Transmit slot analysis{ctx} incomplete: only the even period had usable data, {EvenOffsetHz} Hz."
-                            : $"Transmit slot analysis{ctx} incomplete: only the odd period had usable data, {OddOffsetHz} Hz.";
-                    default:
-                        return $"Transmit slot analysis{ctx} incomplete: not enough decodes to analyze the transmit slot.";
-                }
+                    ctx = " " + Wording.Fill("Msg.SlotFor", ("BandMode", string.Join(" ", new[] { Band, Mode }.Where(s => !string.IsNullOrEmpty(s)))));
+                string key = State == SlotAnalysisState.Complete ? "Msg.SlotResult"
+                    : State == SlotAnalysisState.Partial ? (EvenOffsetHz > 0 ? "Msg.SlotEvenOnly" : "Msg.SlotOddOnly")
+                    : "Msg.SlotNotEnough";
+                return Wording.Fill(key, ("For", ctx), ("Even", EvenOffsetHz.ToString()), ("Odd", OddOffsetHz.ToString()));
             }
         }
 
@@ -1847,6 +1840,18 @@ namespace WSJTX_Controller
             ctrl.advTx1ListBox.AccessibleName = Wording.Fill("List.TitleSpoken", ("Side", side1), ("Count", _tx1SnapshotRows.Count.ToString()));
             ctrl.advTx2Label.Text             = Wording.Fill("List.Title", ("Side", side2)) + ":";
             ctrl.advTx2ListBox.AccessibleName = Wording.Fill("List.TitleSpoken", ("Side", side2), ("Count", _tx2SnapshotRows.Count.ToString()));
+            // Raw Decodes and Spot Watch: one entry each, the label and the spoken name alike.
+            string raw = Wording.Get("List.RawTitle"), spot = Wording.Get("List.SpotWatchTitle");
+            if (ctrl.advRawListBox.AccessibleName != raw)
+            {
+                ctrl.advRawLabel.Text = raw + ":";
+                ctrl.advRawListBox.AccessibleName = raw;
+            }
+            if (ctrl.spotWatchListBox.AccessibleName != spot)
+            {
+                ctrl.spotWatchLabel.Text = spot + ":";
+                ctrl.spotWatchListBox.AccessibleName = spot;
+            }
         }
 
         public void WsjtxSettingChanged()

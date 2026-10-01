@@ -44,14 +44,6 @@
 
 - The receive summary now says new DXCC and new DXCC on band apart: "1 new DXCC, 1 new DXCC on
   band" (each counts stations).
-- **Wording file:** the words of the spoken receive summary ("to you", "new DXCC", "new DXCC on
-  band", "wanted", "available stations"...), the side names TX1/RX1/TX2/RX2 and the station
-  tags in the lists ("New DXCC", "WAS Needed", "POTA"...), and the advanced layout's list titles
-  (what you see, and what the screen reader says -- with or without the count) are in
-  Wording.txt in the Jimmy Next settings folder (%LOCALAPPDATA%\Jimmy Next). Remove the '#' in
-  front of a line, change the words, and restart Jimmy Next. Screen labels follow in a later
-  release.
-
 - New sounds: **New grid** and **New grid on band** (Options, Sounds).
 - **One new DXCC / new grid sound per receive period** (Options, Sounds, off by default): a busy
   period with several new stations plays each of those sounds once instead of once per station.

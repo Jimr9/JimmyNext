@@ -10,10 +10,11 @@ namespace WSJTX_Controller
     // -- the receive side names, shared with the list titles, and the station tags in the lists --
     // live in Wording.txt in the
     // settings folder, read once at startup, so the operator changes a word without a code change.
-    // A missing file, missing entry or unreadable line means the built-in wording. First start
-    // writes the file with every entry commented out ("# key = words"); remove the '#' to change
-    // one. {Name} placeholders are filled in by Jimmy. Never read in test mode. Screen labels and
-    // buttons are a later release.
+    // A missing file, missing entry or unreadable line means the built-in wording. Not public
+    // (operator, 2026-10-01): Jimmy Next never creates the file -- the operator, or someone they
+    // tell, creates an empty Wording.txt and the next start fills it with every entry commented
+    // out ("# key = words"); remove the '#' to change one. {Name} placeholders are filled in by
+    // Jimmy. Never read in test mode.
     internal static class Wording
     {
         internal const string FileName = "Wording.txt";
@@ -120,11 +121,90 @@ namespace WSJTX_Controller
             ("Msg.SharedSettingsNotSaved", "Shared settings could not be saved, see the crash log", "the shared settings move-over failed"),
             ("Msg.EngineRestarting", "Native engine host stopped unexpectedly -- restarting ({Attempt}/{Max})...", "the engine stopped and is restarting"),
             ("Msg.HotkeysUnassigned", "New shortcut(s) left unassigned because your custom keys already use them: {Names}. Set them in Options, Hotkeys.", "new hotkeys clashed with yours"),
+            ("Status.Receiving", "Receiving", "status line: receiving"),
+            ("Status.Transmitting", "Transmitting", "status line: transmitting"),
+            ("Status.TxEnabled", "transmit enabled", "status line: transmit just enabled"),
+            ("Status.TxDisabled", "transmit disabled", "status line: transmit disabled"),
+            ("Status.Selected", "selected", "after the station just picked"),
+            ("Status.Expired", "expired", "after a station that expired"),
+            ("Status.TimedOut", "timed out", "after a station that timed out"),
+            ("Status.FinalSignoff", "{Call} final 73", "the station's final 73"),
+            ("Status.Received", "received {Message}", "what the station just sent"),
+            ("Status.Previous", "previous {Message}", "what the station sent before"),
+            ("Status.NoResponse", "no response", "the station did not answer"),
+            ("Status.TxSideSelected", "{Side} selected", "the transmit period just chosen ({Side} from the Side entries)"),
+            ("Status.PskReporterOn", "Enabled PSKReporter spots", "PSKReporter spotting turned on"),
+            ("Status.PskReporterOff", "Disabled PSKReporter spots", "PSKReporter spotting turned off"),
+            ("Status.ModeName", "{Mode} mode", "the mode just changed to"),
+            ("Status.ModeSelected", "{Mode} mode selected.", "starting up: the mode chosen"),
+            ("Status.BandSelected", "{Band} meter band selected", "the band just chosen"),
+            ("Status.BandUnknown", "Unknown band selected", "the band just chosen, not known"),
+            ("Status.DeletedCalls", "Deleted all waiting calls", "the waiting list was cleared"),
+            ("Status.CommandPromptsOn", "Command prompts enabled", "command prompts turned on"),
+            ("Status.CommandPromptsOff", "Command prompts disabled", "command prompts turned off"),
+            ("Status.Connecting", "Connecting, wait until ready", "starting up, connecting to the engine"),
+            ("Status.AnalyzingAudio", "Analyzing audio, calls not queued yet", "starting up, best-frequency analysis"),
+            ("Status.ModeNotSupported", "operating mode not supported", "the radio's mode cannot be used"),
+            ("Status.UpdatingTxFreq", "Updating best transmit frequency.", "best transmit frequency being worked out"),
+            ("Status.CatLost", "Radio CAT link lost, {Mode}.", "the radio control link was lost"),
+            ("Status.CqMode", "CQ mode", "operating mode word: calling CQ"),
+            ("Status.CqTxDisabled", "CQ, transmit disabled", "operating mode words: CQ with transmit off"),
+            ("Status.ListenMode", "Listen mode", "operating mode word: listening"),
+            ("Status.HelpHint", "use {Key}, for command key list", "command key list hint; {Key} is your Help hotkey (Options, Hotkeys)"),
+            ("Status.EnableTxHint", "{Key} to enable transmit", "enable transmit hint; {Key} is your Enable Transmit hotkey"),
+            ("Status.ResumeHint", "use {Key} to resume QSO", "resume hint; {Key} is your Enable Transmit hotkey"),
+            ("Status.ListHint", "{Key} for list", "list hint; {Key} is your Focus Available Stations List hotkey"),
+            ("Status.NextHint", "{Key} for next", "next hint; {Key} is your Skip to Next Call hotkey"),
+            ("Status.ListOrNext", "{List} or {Next}", "both hints together"),
+            ("Status.SettingUp", "Setting up Jimmy Next.", "starting up while setup is open"),
+            ("Status.SetupNeeded", "To begin operating, set in Options: {List}.", "setup not finished; {List} is the parts below still missing"),
+            ("Status.SetupCallGrid", "your callsign and grid on the Station & Operator page", "missing part: callsign and grid"),
+            ("Status.SetupRadio", "your radio on the Radio page", "missing part: radio"),
+            ("Status.SetupAudio", "your radio's audio devices on the Decode Engine page", "missing part: audio devices"),
+            ("List.EmptyCalling", "[No stations calling]", "standard layout: nobody waiting, a QSO in progress"),
+            ("List.EmptyCallingOrInProgress", "[No stations calling or in progress]", "standard layout: nobody waiting, no QSO"),
+            ("List.EmptyAvailable", "No available stations", "advanced layout: a TX/RX list with nobody in it"),
+            ("List.EmptyAutoLogged", "[No calls auto-logged]", "the auto-logged list is empty"),
+            ("Msg.ClockFast", "{Seconds} seconds fast", "clock report: computer clock ahead"),
+            ("Msg.ClockSlow", "{Seconds} seconds slow", "clock report: computer clock behind"),
+            ("Msg.ClockTooFar", "Clock {Offset}, too far to correct, set the computer clock", "clock report: too far off for the time server"),
+            ("Msg.ClockCorrected", "Clock {Offset}, corrected by time server, {When}", "clock report: time server correcting"),
+            ("Msg.ClockCheckedNow", "checked just now", "clock report: when it was checked"),
+            ("Msg.ClockCheckedMinute", "checked 1 minute ago", "clock report: when it was checked"),
+            ("Msg.ClockCheckedMinutes", "checked {Minutes} minutes ago", "clock report: when it was checked"),
+            ("Msg.ClockNotMeasured", "Clock not yet measured", "clock report: nothing to go on yet"),
+            ("Msg.ClockSignalsBad", "Clock {Seconds} seconds by signals, out of sync, no time server, check clock time", "clock report: judged from signals, off"),
+            ("Msg.ClockSignalsGood", "Clock {Seconds} seconds by signals, good, no time server", "clock report: judged from signals, good"),
+            ("Msg.MeterPower", "power {Watts} W", "power/SWR report: output power"),
+            ("Msg.MeterSwr", "SWR {Swr}", "power/SWR report: SWR"),
+            ("Msg.MeterAlc", "ALC {Alc}", "power/SWR report: ALC"),
+            ("Msg.AudioInExplained", "Audio in {Level} dB, {Hint}", "receive audio level, Explain meter readings on"),
+            ("Msg.SMeter", "S-meter {Reading}", "receive S-meter, Explain meter readings on"),
+            ("Msg.SMeterPlus", "S9 plus {Db} dB", "S-meter above S9"),
+            ("Msg.SwrGood", "good", "SWR hint"),
+            ("Msg.SwrAcceptable", "acceptable", "SWR hint"),
+            ("Msg.SwrHigh", "high", "SWR hint"),
+            ("Msg.SwrVeryHigh", "very high, check antenna", "SWR hint"),
+            ("Msg.AlcClean", "clean", "ALC hint"),
+            ("Msg.AlcLittleHigh", "a little high, reduce audio", "ALC hint"),
+            ("Msg.AlcHigh", "high, reduce audio", "ALC hint"),
+            ("Msg.AudioInLow", "low", "audio-in hint"),
+            ("Msg.AudioInGood", "good", "audio-in hint"),
+            ("Msg.AudioInHot", "hot", "audio-in hint"),
+            ("Msg.AudioInClipping", "too hot, clipping", "audio-in hint"),
+            ("Msg.SlotFor", "for {BandMode}", "slot analysis report: the band and mode it was for"),
+            ("Msg.SlotResult", "Transmit slot analysis{For}: even period {Even} Hz, odd period {Odd} Hz.", "slot analysis report, both periods"),
+            ("Msg.SlotEvenOnly", "Transmit slot analysis{For} incomplete: only the even period had usable data, {Even} Hz.", "slot analysis report, even period only"),
+            ("Msg.SlotOddOnly", "Transmit slot analysis{For} incomplete: only the odd period had usable data, {Odd} Hz.", "slot analysis report, odd period only"),
+            ("Msg.SlotNotEnough", "Transmit slot analysis{For} incomplete: not enough decodes to analyze the transmit slot.", "slot analysis report, not enough decodes"),
+            ("List.RawTitle", "Raw decodes", "the Raw Decodes list: its label and spoken name"),
+            ("List.SpotWatchTitle", "Spot Watch", "the Spot Watch list: its label and spoken name"),
         };
 
         // The file's sections, by key prefix: grouping only -- a key means the same in any section.
         internal static string SectionOf(string key) =>
             key.StartsWith("Msg.") || key.StartsWith("Summary.") ? "NOTIFICATIONS"
+            : key.StartsWith("Status.") ? "STATUS"
             : key.StartsWith("Tag.") ? "TAGS"
             : "LISTS";
 
@@ -144,8 +224,9 @@ namespace WSJTX_Controller
             return s;
         }
 
-        // Startup: read the file, or write it (all commented out) when there is none. Returns a
-        // line for the debug log, or null.
+        // Startup: read the file if there is one (none: the built-in wording, and no file is
+        // made). An empty file is filled with every entry, commented out. Returns a line for the
+        // debug log, or null.
         internal static string Load(string folder)
         {
             if (TestModeGuard.IsTestMode) return null;
@@ -153,6 +234,11 @@ namespace WSJTX_Controller
             try
             {
                 if (!File.Exists(path))
+                {
+                    _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    return null;
+                }
+                if (new FileInfo(path).Length == 0)
                 {
                     File.WriteAllText(path, Template(), new UTF8Encoding(false));
                     _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

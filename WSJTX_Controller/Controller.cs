@@ -4643,13 +4643,13 @@ namespace WSJTX_Controller
         {
             var parts = new List<string>();
             if (NativeEngineClient.DescribeConfigProblem(NativeEngine.MyCall, NativeEngine.MyGrid) != null)
-                parts.Add("your callsign and grid on the Station & Operator page");
-            if (!RadioConnectionSetUp) parts.Add("your radio on the Radio page");
-            if (!RadioAudioSetUp) parts.Add("your radio's audio devices on the Decode Engine page");
+                parts.Add(Wording.Get("Status.SetupCallGrid"));
+            if (!RadioConnectionSetUp) parts.Add(Wording.Get("Status.SetupRadio"));
+            if (!RadioAudioSetUp) parts.Add(Wording.Get("Status.SetupAudio"));
             if (parts.Count == 0) return null;
             string list = parts.Count == 1 ? parts[0]
                 : string.Join(", ", parts.Take(parts.Count - 1)) + ", and " + parts[parts.Count - 1];
-            return $"To begin operating, set in Options: {list}.";
+            return Wording.Fill("Status.SetupNeeded", ("List", list));
         }
 
         // Options as setup (OptionsDlg.EnterSetupMode): Station & Operator, Radio, Decode Engine,

@@ -51,7 +51,7 @@ namespace WSJTX_Controller
                 new NotificationVariable("AvailableCount", "How many stations are available to call, e.g. \"3\" (\"no\" when none in the simple layout). The RX1/TX2 side name is its own row (\"Receive side name\") now, not part of this."),
                 new NotificationVariable("Stations", "\"available stations\" / \"available station\" (pluralized). Replace with your own word, e.g. \"calls\"."),
                 new NotificationVariable("ToYou", "\", N to you, CALL first\" when stations are calling you, otherwise empty."),
-                new NotificationVariable("NewDxcc", "\", N new DXCC, N new DXCC on band\" -- each part only when any, otherwise empty. The words are in Wording.txt."),
+                new NotificationVariable("NewDxcc", "\", N new DXCC, N new DXCC on band\" -- each part only when any, otherwise empty."),
                 new NotificationVariable("Wanted", "\", N wanted\" when any, otherwise empty."),
                 new NotificationVariable("Awards", "\", N <award>\" for each award still needed on a spotted station, otherwise empty."),
                 new NotificationVariable("NewDxccCount", "Bare count of new-DXCC stations (renders \"0\" when none)."),
