@@ -5245,8 +5245,18 @@ namespace WSJTX_Controller
                 dlg.Filter = "WAV files (*.wav)|*.wav|All files (*.*)|*.*";
                 dlg.FilterIndex = 1;
                 dlg.CheckFileExists = true;
-                // Start in the shipped sounds folder unless the current sound is a file elsewhere.
-                if (System.IO.Directory.Exists(NotificationSounds.SoundsFolder))
+                // Start in your own sounds folder once it has a sound in it, else the shipped
+                // sounds; a current sound that is a file elsewhere opens its own folder.
+                bool ownSounds = false;
+                try
+                {
+                    ownSounds = System.IO.Directory.Exists(NotificationSounds.UserSoundsFolder)
+                        && System.Linq.Enumerable.Any(System.IO.Directory.EnumerateFiles(NotificationSounds.UserSoundsFolder, "*.wav"));
+                }
+                catch { }
+                if (ownSounds)
+                    dlg.InitialDirectory = NotificationSounds.UserSoundsFolder;
+                else if (System.IO.Directory.Exists(NotificationSounds.SoundsFolder))
                     dlg.InitialDirectory = NotificationSounds.SoundsFolder;
                 if (!string.IsNullOrEmpty(item.FilePath))
                 {

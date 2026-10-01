@@ -48,6 +48,10 @@
 
 - The receive summary now says new DXCC and new DXCC on band apart: "1 new DXCC, 1 new DXCC on
   band" (each counts stations).
+- **Your own sounds folder:** put your own .wav files in %LOCALAPPDATA%\Jimmy Next\Sounds (no
+  administrator rights needed). Jimmy Next looks there first, so a file with the same name as a
+  built-in sound replaces it, and callsign or award sound files (e.g. W1AW.wav, WAS.wav) work from
+  there. Choosing a sound in Options, Sounds opens that folder once it has a sound in it.
 - New sounds: **New grid** and **New grid on band** (Options, Sounds).
 - **One new DXCC / new grid sound per receive period** (Options, Sounds, off by default): a busy
   period with several new stations plays each of those sounds once instead of once per station.

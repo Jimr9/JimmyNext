@@ -60,6 +60,14 @@ namespace WSJTX_Controller
         public static string SoundsFolder =>
             Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "Resources", "Sounds");
 
+        // The operator's own sounds (2026-10-01): %LOCALAPPDATA%\Jimmy Next\Sounds -- one place for
+        // them, no administrator rights needed. Looked in first, so a file there wins over a
+        // shipped one of the same name; callsign and award sound files work from here too.
+        // Imported customizations put their sound files here.
+        public static string UserSoundsFolder =>
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                Assembly.GetExecutingAssembly().GetName().Name, "Sounds");
+
         public NotificationSounds(Func<bool> soundsEnabled)
         {
             _soundsEnabled = soundsEnabled;
@@ -81,7 +89,7 @@ namespace WSJTX_Controller
             var files = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                foreach (string dir in new[] { SoundsFolder, Path.GetDirectoryName(SoundsFolder) })
+                foreach (string dir in new[] { UserSoundsFolder, SoundsFolder, Path.GetDirectoryName(SoundsFolder) })
                     if (Directory.Exists(dir))
                         foreach (string f in Directory.GetFiles(dir))
                             if (!files.ContainsKey(Path.GetFileName(f))) files[Path.GetFileName(f)] = f;
