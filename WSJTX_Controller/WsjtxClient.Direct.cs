@@ -600,6 +600,14 @@ namespace WSJTX_Controller
         private ulong? _closingRepeatSlot;
         private const ulong MaxClosingRepeatSlots = 3;
 
+        // KT7AZ, 2026-10-01: the just-worked station's late RR73/RRR (it missed our 73), and the
+        // slot it was heard in. Nexus answers it with ONE more 73 (its RecentPartner memory --
+        // WSJT-X mainwindow.cpp:6369, "a late RR73/RRR earns the 73"), after Finishing has
+        // already ended on that very RR73. That one answering 73 is the contact, not an orphan;
+        // the answer uses it up.
+        private string _lateCloseCall;
+        private ulong? _lateCloseSlot;
+
         // Live-radio audit fix, 2026-09-08 (Problem 1 / KB2SLO). Nexus can decode the DX's
         // closing RR73 at the LEADING EDGE of one of Jimmy's own TX slots: it advances qso.txNow
         // to the closing "73" and Jimmy's level-triggered completion block logs + clears
@@ -2101,9 +2109,16 @@ namespace WSJTX_Controller
                 && string.Equals(snap.Qso?.Dxcall, _finishingCall, StringComparison.OrdinalIgnoreCase);
             bool finishingTailOver = finishingTailOverCandidate
                 && (answeringRepeat || _finishingTailExemptedOvers < MaxFinishingTailExemptedOvers);
+            // ...and the one 73 Nexus sends answering the worked station's late RR73/RRR.
+            bool lateCloseAnswer = _lateCloseCall != null
+                && !string.IsNullOrEmpty(curTxMsg) && _curTxMsgSemantic != null && _curTxMsgSemantic.Is73
+                && string.Equals(_curTxMsgSemantic.To, _lateCloseCall, StringComparison.OrdinalIgnoreCase)
+                && _lateCloseSlot.HasValue && radio.Slot >= _lateCloseSlot.Value
+                && radio.Slot - _lateCloseSlot.Value <= MaxClosingRepeatSlots;
 
-            if (callInProg != null || txMode != TxModes.LISTEN || tuning || finishingTailOver)
+            if (callInProg != null || txMode != TxModes.LISTEN || tuning || finishingTailOver || lateCloseAnswer)
             {
+                if (lateCloseAnswer && wasTransmitting && !transmitting) { _lateCloseCall = null; _lateCloseSlot = null; }   // answered
                 _directOrphanTxOvers = 0;
                 _directOrphanExemptSlot = null;   // a real contact / finishing tail -- no stale exemption
                 // Consume one unit of the exemption -- only at the actual transmitting-just-ended
@@ -2792,6 +2807,7 @@ namespace WSJTX_Controller
                     && (finSem.IsRr73 || finSem.Is73 || finSem.IsRrr))
                 {
                     DebugOutput($"{Time()} [DIRECT] finishing: '{_finishingCall}' sent its own closing over -- QSO fully closed");
+                    if (finSem.IsRr73 || finSem.IsRrr) { _lateCloseCall = _finishingCall; _lateCloseSlot = _directLastSlotSeen; }
                     _finishingCall = null;
                     _finishingTailExemptedOvers = 0;
                 }

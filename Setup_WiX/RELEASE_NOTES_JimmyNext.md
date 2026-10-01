@@ -95,7 +95,9 @@
 
 - When a station misses your RR73 and repeats its report, Jimmy Next answers each repeat with
   one more RR73, the way WSJT-X and Nexus do, and no longer stops transmitting with "no contact
-  in progress". That station is no longer listed again as a new caller.
+  in progress". That station is no longer listed again as a new caller. Likewise, when a station
+  misses your 73 and repeats its RR73, the one extra 73 sent in answer is treated as part of the
+  contact.
 
 ## Mouse
 

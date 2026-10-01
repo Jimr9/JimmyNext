@@ -4305,6 +4305,25 @@ static class JimmyTests
             Check("KF0MZU: an RR73 with NO repeat heard behind it still counts, and the second halts (CT2HEX protection kept)",
                   SeenCmd("HALT_TX"), true);
 
+            // ══ 4b. KT7AZ (2026-10-01): the worked station missed our 73 and repeats its RR73;
+            //        Nexus answers with ONE more 73 (WSJT-X's "a late RR73 earns the 73"). That
+            //        answer is the contact, not an orphan -- but a further 73 with no late RR73
+            //        behind it still counts. ══
+            lock (seenLock) seen.Clear();
+            CompleteQso(2242);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2244, null, qsoCall, $"{myCall} {qsoCall} RR73"));
+            Check("KT7AZ: the worked station's late RR73 ends Finishing", wc.TestFinishingCall == null, true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2245, $"{qsoCall} {myCall} 73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2246, null));
+            Check("KT7AZ: the one 73 answering that late RR73 is not counted as an orphan",
+                  wc.TestOrphanTxOvers == 0 && !SeenCmd("HALT_TX"), true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2247, $"{qsoCall} {myCall} 73"));
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2248, null));
+            Check("KT7AZ: a second 73 with no new late RR73 behind it is counted again",
+                  wc.TestOrphanTxOvers == 1, true);
+            CompleteQso(2249);   // leave a clean slate for the sections below: a real contact resets the orphan count...
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(false, 2251, null, qsoCall, $"{myCall} {qsoCall} 73"));   // ...and its own 73 ends Finishing
+
             // ══ 5. With Finishing cleared, an UNRELATED orphaned Tx still halts fast (at the 2nd) ══
             lock (seenLock) seen.Clear();
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(true, 2220, $"W9XYZ {myCall} RR73"));
