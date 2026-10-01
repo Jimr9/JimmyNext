@@ -39,6 +39,45 @@ namespace WSJTX_Controller
         private static readonly NotificationVariable TimeVariable =
             new NotificationVariable(TimeKey, "The current time when the notification is spoken.");
 
+        // Live limits and counters every template can use, like {Time} (operator request,
+        // 2026-10-01): each limit as set in Options, and where it stands right now. Supplied by
+        // the running WsjtxClient (LiveValues); "0" when nothing is being counted.
+        private static readonly NotificationVariable[] LiveVariables =
+        {
+            new NotificationVariable("RepeatLimit", "The Repeat limit in effect now."),
+            new NotificationVariable("RepeatCount", "Calls sent so far toward the Repeat limit (Smart Mode: the whole effort for its target)."),
+            new NotificationVariable("SilencePeriods", "The Smart Mode silence periods setting."),
+            new NotificationVariable("SilenceCount", "Quiet periods counted so far for the Smart Mode target."),
+            new NotificationVariable("NotHeardLimit", "The consecutive target-not-heard limit."),
+            new NotificationVariable("NotHeardCount", "Calls in a row the Smart Mode target has not been heard."),
+            new NotificationVariable("TimeLimit", "The Smart Mode time limit in minutes (0 = no limit)."),
+            new NotificationVariable("TimeElapsed", "Minutes since Smart Mode started on its target."),
+            new NotificationVariable("RepliesLimit", "Other-station replies before yielding."),
+            new NotificationVariable("RepliesCount", "Replies to another station counted so far for the station you are working."),
+        };
+
+        // Set by WsjtxClient to its live values (key -> value, keys as above).
+        public static Func<IReadOnlyDictionary<string, string>> LiveValues;
+
+        // {Time} and the live values: in every type's list, never in an event's own ToTokens().
+        public static bool IsUniversal(string key) =>
+            key == TimeKey || LiveVariables.Any(v => v.Key == key);
+
+        // Adds {Time} and the live values to a template's tokens -- an event's own token of the
+        // same name wins.
+        public static void AddUniversal(IDictionary<string, string> tokens)
+        {
+            tokens[TimeKey] = DateTime.Now.ToString("h:mm tt");
+            foreach (var kv in CurrentLiveValues())
+                if (!tokens.ContainsKey(kv.Key)) tokens[kv.Key] = kv.Value;
+        }
+
+        public static IReadOnlyDictionary<string, string> CurrentLiveValues()
+        {
+            try { return LiveValues?.Invoke() ?? new Dictionary<string, string>(); }
+            catch { return new Dictionary<string, string>(); }
+        }
+
         private static readonly Dictionary<NotificationEventType, List<NotificationVariable>> ByEventType =
             new Dictionary<NotificationEventType, List<NotificationVariable>>
         {
@@ -204,6 +243,7 @@ namespace WSJTX_Controller
         {
             var list = ByEventType.TryGetValue(type, out var v) ? new List<NotificationVariable>(v) : new List<NotificationVariable>();
             list.Add(TimeVariable);
+            list.AddRange(LiveVariables);
             return list;
         }
 

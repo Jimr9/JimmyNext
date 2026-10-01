@@ -221,6 +221,9 @@ namespace WSJTX_Controller
         {
             string s = Get(key);
             foreach (var (name, value) in values) s = s.Replace("{" + name + "}", value ?? "");
+            // The live limits and counters (NotificationVariableRegistry) work here too.
+            if (s.IndexOf('{') >= 0)
+                foreach (var kv in NotificationVariableRegistry.CurrentLiveValues()) s = s.Replace("{" + kv.Key + "}", kv.Value);
             return s;
         }
 
@@ -286,9 +289,6 @@ namespace WSJTX_Controller
             }
             return d;
         }
-
-        // True when the file changes at least one entry (the Export prompt offers wording only then).
-        internal static bool HasOverrides => _overrides.Count > 0;
 
         internal static void SetForTest(Dictionary<string, string> overrides) =>
             _overrides = overrides ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

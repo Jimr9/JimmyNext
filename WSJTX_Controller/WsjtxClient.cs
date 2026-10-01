@@ -979,6 +979,7 @@ namespace WSJTX_Controller
         public WsjtxClient(Controller c, int reqPort, bool reqDebug, bool reqLog, WsjtxClient.TxModes tMode)
         {
             ctrl = c;           //used for accessing/updating UI
+            NotificationVariableRegistry.LiveValues = LiveCounterValues;
             StatusView = c;
             QueueView = c;
             LogView = c;
@@ -3989,9 +3990,14 @@ namespace WSJTX_Controller
             if (removed) DebugOutput($"{spacer}CheckCallQueuePeriod: calls removed{nl}{_callQueueStore.CallQueueString()}");
         }
 
+        // The operator's Repeat limit as last read here (on the UI thread), for {RepeatLimit} --
+        // a template may be formatted off the UI thread, where the control must not be read.
+        private volatile int _configuredRepeatLimit = 4;
+
         internal void UpdateMaxTxRepeat()
         {
             int limit = (int)ctrl.timeoutNumUpDown.Value;
+            _configuredRepeatLimit = limit;
 
             // "Optimize throughput" trims the per-call retry budget by how many calls are
             // waiting, but that trim is only appropriate while Jimmy is still trying to get a

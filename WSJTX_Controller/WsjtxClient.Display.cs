@@ -793,7 +793,7 @@ namespace WSJTX_Controller
                 return null;
             var dict = new Dictionary<string, string>();
             foreach (var t in tokens) dict[t.Key] = t.Value ?? "";
-            dict[NotificationVariableRegistry.TimeKey] = DateTime.Now.ToString("h:mm tt");
+            NotificationVariableRegistry.AddUniversal(dict);
             string text = NotificationTemplateEngine.Format(policy.Template, dict);
             _clauseTextsThisRender[type] = text ?? "";
             return text;

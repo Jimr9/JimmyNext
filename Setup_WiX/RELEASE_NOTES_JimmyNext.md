@@ -32,9 +32,12 @@
   check differ. A crash when switching profiles is fixed.
 - "Save current configuration first" keeps the choice you made.
 - **Export and Import Customizations** (Options, Profiles): share your notifications and sounds
-  -- and, if you choose, hotkeys and list display -- with another operator as one file. Your own
-  sound files go inside it. Radio, audio, station, logins and windows are never included. Import
-  asks what to bring in, backs up your profile first, and reloads.
+  -- and, if you choose, calls and operating (wanted calls, Spot Watch, ranking, auto-reply,
+  Smart Mode), hotkeys, list display, the band frequency table and contest categories --
+  with another operator as one file. The
+  sound files themselves go inside it. Radio, audio, station (including a contest's section), logins and
+  windows are never included. Import
+  asks what to bring in, backs up your settings first (a checkbox, on by default), and reloads.
 
 ## Smart Mode
 
@@ -43,6 +46,10 @@
   not it is busy with someone else** — as before Smart Start existed. Previously it also stopped
   calling a busy station with the option off. With Smart Mode on, nothing changes: it waits
   while the station is busy and yields after "Other-station replies before yielding".
+- **Limits and counters in your notifications** (Options, Notifications): every notification and
+  status template can say {RepeatLimit} and {RepeatCount}, {SilencePeriods} and {SilenceCount},
+  {NotHeardLimit} and {NotHeardCount}, {TimeLimit} and {TimeElapsed} (minutes), and
+  {RepliesLimit} and {RepliesCount} -- each setting, and where it stands right now.
 
 ## Sounds and alerts
 

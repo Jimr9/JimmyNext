@@ -2285,14 +2285,16 @@ namespace WSJTX_Controller
         // the chosen parts of the active profile, plus the wording file, to one zip file.
         internal void ExportCustomizations_Click()
         {
-            // Wording is offered only when the wording file changes something: it is not public.
-            var all = (Wording.HasOverrides ? CustomizationParts.Wording : CustomizationParts.None)
-                    | CustomizationParts.Notifications | CustomizationParts.Sounds
-                    | CustomizationParts.Hotkeys | CustomizationParts.ListDisplay;
+            var all = CustomizationParts.Notifications | CustomizationParts.Sounds | CustomizationParts.Operating
+                    | CustomizationParts.Hotkeys | CustomizationParts.ListDisplay | CustomizationParts.BandFrequencies
+                    | CustomizationParts.ContestCategories;
             var parts = PromptForParts("Export Customizations",
                 "Choose what to export. Radio, audio, station, logins and windows are never included.",
-                all, CustomizationParts.Wording | CustomizationParts.Notifications | CustomizationParts.Sounds);
+                all, CustomizationParts.Notifications | CustomizationParts.Sounds);
             if (parts == CustomizationParts.None) return;
+            // The wording file travels with the notifications, with no checkbox of its own: it is
+            // not public (operator, 2026-10-01).
+            if (parts.HasFlag(CustomizationParts.Notifications)) parts |= CustomizationParts.Wording;
 
             using (var sfd = new SaveFileDialog
             {
@@ -2309,7 +2311,8 @@ namespace WSJTX_Controller
                     SaveAllSettingsToIniFile();   // export what is in effect now, as Save Profile As does
                     if (iniFile == null) throw new InvalidOperationException("no active settings file");
                     var pkg = CustomizationPackage.FromProfile(iniFile.FilePath,
-                        Path.Combine(ProfilesAppDataPath(), Wording.FileName), parts, NotificationSounds.SoundsFolder);
+                        Path.Combine(ProfilesAppDataPath(), Wording.FileName), parts, NotificationSounds.SoundsFolder,
+                        NotificationSounds.UserSoundsFolder);
                     pkg.Save(sfd.FileName);
                     ShowMsg(Wording.Fill("Msg.CustomizationsExported", ("Parts", CustomizationPackage.Describe(parts))), false);
                 }
@@ -2347,13 +2350,18 @@ namespace WSJTX_Controller
                 return;
             }
 
+            bool makeBackup = true;   // the operator's choice, checked by default (2026-10-01)
             var parts = PromptForParts("Import Customizations", "Choose what to import into the current profile.",
-                pkg.Parts, pkg.Parts & ~(CustomizationParts.Hotkeys | CustomizationParts.ListDisplay));
+                pkg.Parts & ~CustomizationParts.Wording,
+                pkg.Parts & (CustomizationParts.Notifications | CustomizationParts.Sounds),
+                "Back up my current settings first", ref makeBackup);
             if (parts == CustomizationParts.None) return;
+            if (parts.HasFlag(CustomizationParts.Notifications)) parts |= pkg.Parts & CustomizationParts.Wording;
 
             string profile = ActiveProfileDisplayName();
             var confirm = MessageBox.Show(this,
-                $"Import {CustomizationPackage.Describe(parts)} into profile '{profile}'? Your current settings are backed up first, and Jimmy Next reloads.",
+                $"Import {CustomizationPackage.Describe(parts)} into profile '{profile}'? " +
+                (makeBackup ? "Your current settings are backed up first, and Jimmy Next reloads." : "No backup is made. Jimmy Next reloads."),
                 "Import Customizations", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (confirm != DialogResult.Yes) return;
 
@@ -2362,10 +2370,11 @@ namespace WSJTX_Controller
                 SaveAllSettingsToIniFile();   // this session's changes are kept, and in the backup
                 if (iniFile == null) throw new InvalidOperationException("no active settings file");
                 string dataFolder = ProfilesAppDataPath();
-                string backup = CustomizationPackage.Backup(iniFile.FilePath, Path.Combine(dataFolder, Wording.FileName),
-                    Path.Combine(dataFolder, "Backups"));
-                pkg.ApplyTo(iniFile, parts, dataFolder);
-                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} customizations imported ({CustomizationPackage.Describe(parts)}) from '{file}' into '{profile}'; backup: {backup}");
+                string backup = makeBackup
+                    ? CustomizationPackage.Backup(iniFile.FilePath, Path.Combine(dataFolder, Wording.FileName), Path.Combine(dataFolder, "Backups"))
+                    : null;
+                pkg.ApplyTo(iniFile, parts, dataFolder, NotificationSounds.SoundsFolder, backup);
+                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} customizations imported ({CustomizationPackage.Describe(parts)}) from '{file}' into '{profile}'; backup: {backup ?? "none (operator's choice)"}");
             }
             catch (Exception ex)
             {
@@ -2384,8 +2393,18 @@ namespace WSJTX_Controller
         // (None on Cancel or none checked).
         private CustomizationParts PromptForParts(string title, string prompt, CustomizationParts available, CustomizationParts defaults)
         {
-            var order = new[] { CustomizationParts.Wording, CustomizationParts.Notifications, CustomizationParts.Sounds,
-                                CustomizationParts.Hotkeys, CustomizationParts.ListDisplay };
+            bool unused = false;
+            return PromptForParts(title, prompt, available, defaults, null, ref unused);
+        }
+
+        // ...plus, when extraOption is given, one more checkbox after the parts (e.g. "Back up my
+        // current settings first"), starting as extraChecked and returning its final state.
+        private CustomizationParts PromptForParts(string title, string prompt, CustomizationParts available, CustomizationParts defaults,
+            string extraOption, ref bool extraChecked)
+        {
+            var order = new[] { CustomizationParts.Notifications, CustomizationParts.Sounds, CustomizationParts.Operating,
+                                CustomizationParts.Hotkeys, CustomizationParts.ListDisplay, CustomizationParts.BandFrequencies,
+                                CustomizationParts.ContestCategories };
             var shown = order.Where(p => available.HasFlag(p)).ToList();
             using (var dlg = new Form
             {
@@ -2395,7 +2414,7 @@ namespace WSJTX_Controller
                 MinimizeBox = false,
                 MaximizeBox = false,
                 ShowInTaskbar = false,
-                ClientSize = new Size(360, 90 + shown.Count * 26),
+                ClientSize = new Size(360, 90 + (shown.Count + (extraOption != null ? 1 : 0)) * 26),
             })
             {
                 var label = new Label { Text = prompt, Location = new Point(10, 10), Size = new Size(340, 32) };
@@ -2411,6 +2430,13 @@ namespace WSJTX_Controller
                     boxes.Add((cb, p));
                     y += 26;
                 }
+                CheckBox extraBox = null;
+                if (extraOption != null)
+                {
+                    extraBox = new CheckBox { Text = extraOption, AccessibleName = extraOption, Checked = extraChecked, Location = new Point(14, y), AutoSize = true };
+                    dlg.Controls.Add(extraBox);
+                    y += 26;
+                }
                 var okButton = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(190, y + 6), Width = 75 };
                 var cancelButton = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(275, y + 6), Width = 75 };
                 dlg.Controls.Add(okButton);
@@ -2419,6 +2445,7 @@ namespace WSJTX_Controller
                 dlg.CancelButton = cancelButton;
                 if (boxes.Count > 0) dlg.ActiveControl = boxes[0].Box;
                 if (dlg.ShowDialog(this) != DialogResult.OK) return CustomizationParts.None;
+                if (extraBox != null) extraChecked = extraBox.Checked;
                 var chosen = CustomizationParts.None;
                 foreach (var (box, part) in boxes) if (box.Checked) chosen |= part;
                 return chosen;

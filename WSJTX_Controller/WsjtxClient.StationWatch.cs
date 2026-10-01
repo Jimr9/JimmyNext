@@ -102,10 +102,34 @@ namespace WSJTX_Controller
         // separately-invented copy of the phrase -- if the operator customizes e.g. "Watching
         // {Target}.", this on-demand report reflects that customization too, and can never drift
         // from what the live narration actually says for the same fact.
+        // The live limits and counters templates can use (NotificationVariableRegistry.LiveVariables).
+        internal IReadOnlyDictionary<string, string> LiveCounterValues()
+        {
+            bool smart = _smartStart.IsActive;
+            int configuredRepeat = _configuredRepeatLimit;
+            bool ordinaryCall = !smart && callInProg != null && discardCall == callInProg;
+            return new Dictionary<string, string>
+            {
+                ["RepeatLimit"]    = (ordinaryCall ? maxTxRepeat : configuredRepeat).ToString(),
+                ["RepeatCount"]    = (smart ? _smartStart.TransmittedCallCount : ordinaryCall ? discardCallCycleCount : 0).ToString(),
+                ["SilencePeriods"] = ctrl.smartStartSilencePeriods.ToString(),
+                ["SilenceCount"]   = (smart ? _smartStart.SilenceCount : 0).ToString(),
+                ["NotHeardLimit"]  = ctrl.smartStartMaxStandbyRounds.ToString(),
+                ["NotHeardCount"]  = (smart ? _smartStart.TargetNotHeardStreak : 0).ToString(),
+                ["TimeLimit"]      = ctrl.smartStartTimeLimitMinutes.ToString(),
+                ["TimeElapsed"]    = (smart ? (int)(DateTime.UtcNow - _smartStart.ArmedAtUtc).TotalMinutes : 0).ToString(),
+                ["RepliesLimit"]   = Math.Max(1, Math.Min(6, ctrl.otherStationRepliesBeforeYielding)).ToString(),
+                ["RepliesCount"]   = (callInProg != null ? _otherPartyOverStrikes : 0).ToString(),
+            };
+        }
+
         private string RenderNotificationPhrase(NotificationEventType type, IReadOnlyDictionary<string, string> tokens)
         {
             if (!ctrl.Notifications.Policies.TryGetValue(type, out NotificationPolicy policy)) return "";
-            return NotificationTemplateEngine.Format(policy.Template, tokens);
+            var all = new Dictionary<string, string>();
+            foreach (var kv in tokens) all[kv.Key] = kv.Value;
+            NotificationVariableRegistry.AddUniversal(all);
+            return NotificationTemplateEngine.Format(policy.Template, all);
         }
 
         // Options > General "Space callsigns and grids" (2026-09-12): extended, at Jim's request,

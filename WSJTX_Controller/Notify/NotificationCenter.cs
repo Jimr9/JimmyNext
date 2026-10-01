@@ -125,10 +125,8 @@ namespace WSJTX_Controller
             // below, which needs the formatted text) only ever happens here, for an event that
             // has ALREADY cleared Enabled/dedup/throttle/timing -- never for one that's about to
             // be suppressed, per the "don't build speech nobody will hear" performance rule.
-            var tokens = new Dictionary<string, string>(evt.ToTokens())
-            {
-                [NotificationVariableRegistry.TimeKey] = DateTime.Now.ToString("h:mm tt"),
-            };
+            var tokens = new Dictionary<string, string>(evt.ToTokens());
+            NotificationVariableRegistry.AddUniversal(tokens);   // {Time} and the live limits/counters
             string text = NotificationTemplateEngine.Format(policy.Template, tokens);
             if (string.IsNullOrEmpty(text)) return;
 

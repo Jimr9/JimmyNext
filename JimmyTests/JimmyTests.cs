@@ -12975,7 +12975,7 @@ static class JimmyTests
         {
             var registryKeys = new HashSet<string>();
             foreach (var v in NotificationVariableRegistry.For(kv.Key))
-                if (v.Key != NotificationVariableRegistry.TimeKey) registryKeys.Add(v.Key);
+                if (!NotificationVariableRegistry.IsUniversal(v.Key)) registryKeys.Add(v.Key);
             var realKeys = new HashSet<string>(kv.Value.ToTokens().Keys);
             Check($"Registry variable set for {kv.Key} exactly matches its event class's real ToTokens() keys",
                 registryKeys.SetEquals(realKeys), true);
@@ -18976,20 +18976,32 @@ static class JimmyTests
             src.Write("nativeEngineAudioDevice", "Speakers");
             src.Write("windowPosX", "40");
             src.Write("EnableTx", "123", "Hotkeys");
+            src.Write("soundFile_CallAdded", "blip.wav");
+            src.Write("wantedCalls", "K1ABC");
+            src.Write("decodeDepth", "3");
+            var srcContests = new IniFile(ContestConfigStore.CompanionPathFor(src.FilePath));
+            srcContests.Write("class", "2A", "arrlfd");
+            srcContests.Write("section", "MN", "arrlfd");
+            string install = Path.Combine(dir, "install", "Resources", "Sounds");
+            Directory.CreateDirectory(install);
+            File.WriteAllBytes(Path.Combine(install, "blip.wav"), new byte[] { 9, 9 });
             string wording = Path.Combine(dir, "Wording.txt");
             File.WriteAllText(wording, "Side.RX1 = RX even");
 
-            var parts = CustomizationParts.Wording | CustomizationParts.Notifications | CustomizationParts.Sounds;
-            var pkg = CustomizationPackage.FromProfile(src.FilePath, wording, parts, Path.Combine(dir, "install", "Resources", "Sounds"));
+            var parts = CustomizationParts.Wording | CustomizationParts.Notifications | CustomizationParts.Sounds | CustomizationParts.Operating
+                      | CustomizationParts.ContestCategories;
+            var pkg = CustomizationPackage.FromProfile(src.FilePath, wording, parts, install, Path.Combine(dir, "nosuchfolder"));
             string zip = Path.Combine(dir, "out.zip");
             pkg.Save(zip);
             var back = CustomizationPackage.Load(zip);
             Check("export: logins, radio, audio, window, unchosen hotkeys and list display stay home",
                 !back.Settings.ContainsKey("qrzPassword") && !back.Settings.ContainsKey("radioComPort") && !back.Settings.ContainsKey("nativeEngineAudioDevice")
-                && !back.Settings.ContainsKey("windowPosX") && back.Hotkeys.Count == 0 && !back.Settings.ContainsKey("rawShowGrid"), true);
-            Check("export: notifications, wording and my own sound file travel",
+                && !back.Settings.ContainsKey("windowPosX") && back.Hotkeys.Count == 0 && !back.Settings.ContainsKey("rawShowGrid")
+                && !back.Settings.ContainsKey("decodeDepth"), true);
+            Check("export: notifications, wording, calls and every sound file (mine and shipped) travel",
                 back.Settings.ContainsKey("notifyTemplate_CallingMe") && back.WordingText == "Side.RX1 = RX even"
-                && back.Settings["soundFile_Logged"] == "mine.wav" && back.SoundFiles.ContainsKey("mine.wav"), true);
+                && back.Settings["soundFile_Logged"] == "mine.wav" && back.SoundFiles.ContainsKey("mine.wav")
+                && back.SoundFiles.ContainsKey("blip.wav") && back.Settings["wantedCalls"] == "K1ABC", true);
 
             // A hand-edited package: forbidden keys are dropped on the way in.
             string evil = Path.Combine(dir, "evil.zip");
@@ -19011,18 +19023,23 @@ static class JimmyTests
             dst.Write("radioComPort", "COM3");
             dst.Write("soundFile_Logged", "echo.wav");
             dst.Write("rawShowGrid", "True");
+            new IniFile(ContestConfigStore.CompanionPathFor(dst.FilePath)).Write("section", "WI", "arrlfd");
             string data = Path.Combine(dir, "data");
             Directory.CreateDirectory(data);
             string backup = CustomizationPackage.Backup(dst.FilePath, Path.Combine(data, "Wording.txt"), Path.Combine(data, "Backups"));
-            back.ApplyTo(dst, CustomizationParts.Notifications | CustomizationParts.Sounds, data);
+            back.ApplyTo(dst, CustomizationParts.Notifications | CustomizationParts.Sounds | CustomizationParts.ContestCategories, data, install, backup);
+            var dstContests = new IniFile(ContestConfigStore.CompanionPathFor(dst.FilePath));
+            Check("contest categories: the class travels, the sender's section never does, mine is kept",
+                !back.Contests["arrlfd"].ContainsKey("section") && dstContests.Read("class", "arrlfd") == "2A"
+                && dstContests.Read("section", "arrlfd") == "WI", true);
             var after = new IniFile(dst.FilePath);
             Check("import: the chosen parts replace mine, everything else is untouched",
                 after.Read("notifyTemplate_CallingMe") == "{Call} calls" && string.IsNullOrEmpty(after.Read("notifyTemplate_Old"))
                 && after.Read("radioComPort") == "COM3" && after.Read("rawShowGrid") == "True"
-                && !File.Exists(Path.Combine(data, "Wording.txt")), true);
-            Check("import: my own sound lands in the data folder and is used from there; backup made",
-                after.Read("soundFile_Logged") == Path.Combine(data, "Sounds", "mine.wav") && File.Exists(Path.Combine(data, "Sounds", "mine.wav"))
-                && File.Exists(Path.Combine(backup, "receiver.ini")), true);
+                && string.IsNullOrEmpty(after.Read("wantedCalls")) && !File.Exists(Path.Combine(data, "Wording.txt")), true);
+            Check("import: my own sound lands in the sounds folder (a shipped one already here is not copied); backup made",
+                after.Read("soundFile_Logged") == "mine.wav" && File.Exists(Path.Combine(data, "Sounds", "mine.wav"))
+                && !File.Exists(Path.Combine(data, "Sounds", "blip.wav")) && File.Exists(Path.Combine(backup, "receiver.ini")), true);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
