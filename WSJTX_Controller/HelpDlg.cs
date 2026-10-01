@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.Data;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -19,6 +20,7 @@ namespace WSJTX_Controller
         // roughly three times (Show, the tick's own Activate(), Load's old Activate()). Focus it
         // exactly once, on first activation.
         private bool _initialFocusDone;
+        private static string _lastSupportFolder;   // where the last support report was saved, this session
 
         public HelpDlg(Controller co, string c, string t)
         {
@@ -70,12 +72,10 @@ namespace WSJTX_Controller
             if (dlg.ShowDialog() != DialogResult.OK) return;
 
             string confirmText =
-                "Jimmy will create a support report ZIP in your Downloads folder.\n\n" +
-                "The ZIP may contain diagnostic information including Jimmy version, settings, " +
-                "recent log files, recent decode history, Windows information, WSJT-X connection " +
-                "information, and your written description.\n\n" +
-                "Nothing will be emailed automatically.\n\n" +
-                "You may review the ZIP before sending it.\n\n" +
+                "Jimmy Next will create a support report ZIP. Next you choose where to save it.\n\n" +
+                "It contains your description, your Jimmy Next folder (settings with passwords removed, " +
+                "logs" + (dlg.IncludeLogbook ? ", your logbook" : "") + ") and Windows information.\n\n" +
+                (dlg.Upload ? "Nothing is sent until you upload it on the page that opens.\n\n" : "") +
                 "Create the report?";
 
             if (MessageBox.Show(confirmText, "Create Support Report",
@@ -83,18 +83,32 @@ namespace WSJTX_Controller
                     MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                 return;
 
+            // 2.0.81: the operator chooses where it is saved (not everyone uses Downloads);
+            // Enter keeps the offered place and name. Remembered for the rest of the session.
+            string offered = SupportReportBuilder.DefaultZipPath();
+            string zipPath;
+            using (var save = new SaveFileDialog
+            {
+                Title            = "Save support report",
+                Filter           = "ZIP file (*.zip)|*.zip",
+                FileName         = Path.GetFileName(offered),
+                InitialDirectory = _lastSupportFolder ?? Path.GetDirectoryName(offered),
+                OverwritePrompt  = true,
+            })
+            {
+                if (save.ShowDialog(this) != DialogResult.OK) return;
+                zipPath = save.FileName;
+            }
+            _lastSupportFolder = Path.GetDirectoryName(zipPath);
+
             var result = SupportReportBuilder.Build(
                 ctrl,
                 dlg.Callsign, dlg.PersonName, dlg.Email,
-                dlg.ProblemType, dlg.Description, dlg.Steps, dlg.IncludeLogbook);
+                dlg.ProblemType, dlg.Description, dlg.Steps, dlg.IncludeLogbook, zipPath);
 
             if (result.Success)
             {
-                MessageBox.Show(
-                    $"Support report saved:\n{result.ZipPath}\n\nYou may review the ZIP before sending it to support.",
-                    "Support Report Created",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information);
+                SupportReportDelivery.Deliver(this, dlg.Upload, result.ZipPath);
             }
             else
             {

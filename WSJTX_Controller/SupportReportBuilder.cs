@@ -37,7 +37,8 @@ namespace WSJTX_Controller
         internal static SupportReportResult Build(
             Controller ctrl,
             string callsign, string name, string email,
-            string problemType, string description, string steps, bool includeLogbook = true)
+            string problemType, string description, string steps, bool includeLogbook = true,
+            string zipPathChosen = null)
         {
             var result = new SupportReportResult();
             try
@@ -49,7 +50,7 @@ namespace WSJTX_Controller
                 string appName   = (Assembly.GetExecutingAssembly().GetName().Name ?? "Jimmy").Replace(" ", "");
                 string zipName   = $"{appName}_{safeVer}_support_{timestamp}.zip";
                 string outputDir = GetOutputDir();
-                string zipPath   = Path.Combine(outputDir, zipName);
+                string zipPath   = string.IsNullOrEmpty(zipPathChosen) ? Path.Combine(outputDir, zipName) : zipPathChosen;
 
                 // Capture diagnostic snapshot on the UI thread before any I/O
                 WsjtxDiagData diag = null;
@@ -754,6 +755,14 @@ namespace WSJTX_Controller
         // -----------------------------------------------------------------------
         // Path helpers
         // -----------------------------------------------------------------------
+
+        // 2.0.81: the default place and name the Save As box offers (not everyone uses Downloads).
+        internal static string DefaultZipPath()
+        {
+            string infoVer = GetInfoVersion().Replace("/", "-").Replace("\\", "-").Replace(":", "").Replace(" ", "_");
+            string appName = (Assembly.GetExecutingAssembly().GetName().Name ?? "Jimmy").Replace(" ", "");
+            return Path.Combine(GetOutputDir(), $"{appName}_{infoVer}_support_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
+        }
 
         private static string GetOutputDir()
         {

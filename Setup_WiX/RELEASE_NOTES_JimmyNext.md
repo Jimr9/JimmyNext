@@ -1,3 +1,12 @@
+# Jimmy Next 2.0.81 — release notes
+
+- **Send a support report straight to KB0UZT.** Create Support Report (in Help) has a new
+  **How to send it** choice: **Send to KB0UZT** (the default) or **Save to my computer only**.
+  Send copies the report's location and opens a private upload page: choose Add files, press
+  Control+V to paste, press Enter, then Upload. Only KB0UZT can see what is uploaded.
+- **You choose where the report is saved.** A Save box opens with Downloads offered; press Enter
+  to keep it or pick any folder.
+
 # Jimmy Next 2.0.80 — release notes
 
 A fix release for 2.0.79.
