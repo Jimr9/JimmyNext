@@ -11,6 +11,26 @@ namespace WSJTX_Controller
 {
     public partial class WsjtxClient
     {
+        // The spoken key hints name the key the operator actually has for that action
+        // (Options > Hotkeys), in the spoken form "Alt, E" -- they used to always say Alt E /
+        // Alt K / Control W / Alt N, wrong once a key was reassigned (2026-10-01). No key
+        // assigned: no hint at all, never "use  to ...".
+        private string KeyHint(HotkeyAction action, string format)
+        {
+            var hk = ctrl.hotkeyConfig;   // not loaded yet: the built-in defaults
+            Keys keys = hk != null ? hk[action] : (HotkeyConfig.Defaults.TryGetValue(action, out Keys d) ? d : Keys.None);
+            string key = HotkeyConfig.FormatKeysForHelp(keys);
+            return string.IsNullOrEmpty(key) ? "" : string.Format(format, key);
+        }
+
+        private string ListOrNextHint()
+        {
+            string list = KeyHint(HotkeyAction.NavCallList, "{0} for list");
+            string next = KeyHint(HotkeyAction.NextCall, "{0} for next");
+            if (list == "" && next == "") return "";
+            return ", " + (list != "" && next != "" ? $"{list} or {next}" : list + next);
+        }
+
         internal bool PlayCategorySound(EnqueueDecodeMessage msg)
         {
             // Stage 12 audit (2026-09-14): operational -- `call` selects a per-callsign
@@ -987,7 +1007,7 @@ namespace WSJTX_Controller
             // "clear a stale Receive cycle summary" behaviour for THIS render.
             bool isIdleReceiveCycleSummaryRender = false;
 
-            string k = cmdPrompts ? $", use Alt, K, for command key list" : "";
+            string k = cmdPrompts ? KeyHint(HotkeyAction.Help, ", use {0}, for command key list") : "";
 
             try
             {
@@ -1309,7 +1329,8 @@ namespace WSJTX_Controller
                             // Advanced mode. Alt E to enable transmit is left ungated -- that's a
                             // real TX-enable action available in both layouts, not Beginner list
                             // navigation.
-                            string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? $", Alt E to enable transmit" : (!ctrl.advancedCallLayout && !transmitting && qcw > 0 ? $", Control W for list or Alt N for next" : "")) : "";
+                            string prompt = (cmdPrompts && modePrompt) ? ((txMode == TxModes.CALL_CQ) ? KeyHint(HotkeyAction.EnableTx, ", {0} to enable transmit")
+                                : (!ctrl.advancedCallLayout && !transmitting && qcw > 0 ? ListOrNextHint() : "")) : "";
 
                             string curCall = callInProg;
                             //string txToCall = WsjtxMessage.ToCall(curTxMsg);
@@ -1671,13 +1692,13 @@ namespace WSJTX_Controller
                                     inProg = $", {DisplayCallsign(timedOutCall, ctrl.spaceCallsignsAndGrids)}";
                                     cond = " timed out,";
                                     timedOutCall = null;
-                                    if (cmdPrompts && txMode == TxModes.LISTEN) prompt = $", use Alt E to resume QSO";
+                                    if (cmdPrompts && txMode == TxModes.LISTEN) prompt = KeyHint(HotkeyAction.EnableTx, ", use {0} to resume QSO");
                                 }
                                 else if (modePrompt && callInProg != null && txMode == TxModes.LISTEN && !txEnabled)
                                 {
                                     if (cmdPrompts)
                                     {
-                                        prompt = $", use Alt E to resume QSO";
+                                        prompt = KeyHint(HotkeyAction.EnableTx, ", use {0} to resume QSO");
                                     }
                                     /*else
                                     {
