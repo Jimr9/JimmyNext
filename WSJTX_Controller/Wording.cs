@@ -222,14 +222,73 @@ namespace WSJTX_Controller
             ("List.SpotWatchTitle", "Spot Watch", "the Spot Watch list: its label and spoken name"),
         };
 
-        // The file's sections, by key prefix: grouping only -- a key means the same in any section.
-        internal static string SectionOf(string key) =>
-            key.StartsWith("Msg.") || key.StartsWith("Summary.") ? "NOTIFICATIONS"
-            : key.StartsWith("Status.") ? "STATUS"
-            : key.StartsWith("Tag.") ? "TAGS"
-            : "LISTS";
+        // The file's sections, by topic (operator, 2026-10-02: "so I can find things faster").
+        // Grouping only -- a key means the same in any section. Listed in file order.
+        internal static readonly string[] Sections =
+        {
+            "STATUS LINE", "LIST TITLES AND SIDE NAMES", "RECEIVE SUMMARY", "QSO", "SMART MODE AND STATION WATCH", "STATION TAGS",
+            "BLOCKING", "RADIO, TUNING AND METERS", "CLOCK", "TRANSMIT SLOT ANALYSIS", "LOGBOOK, PROFILES AND SETTINGS",
+        };
+
+        internal static string SectionOf(string key)
+        {
+            string k = key ?? "";
+            bool Msg(params string[] starts) => starts.Any(x => k.StartsWith("Msg." + x, StringComparison.Ordinal));
+            if (k.StartsWith("Status.")) return "STATUS LINE";
+            if (k.StartsWith("Side.") || k.StartsWith("List.")) return "LIST TITLES AND SIDE NAMES";
+            if (k.StartsWith("Summary.")) return "RECEIVE SUMMARY";
+            if (k.StartsWith("Tag.")) return "STATION TAGS";
+            if (k.StartsWith("Fact.") || Msg("Replying", "NoLongerAvailable", "NoCallSelected", "NotInQueue", "NoCallOnLine",
+                    "NotConnectedCall", "SelectCallsManually", "ManualCall", "PartnerWorkingOther", "RepeatLimit", "TxHalted"))
+                return "QSO";
+            if (Msg("Smart", "Still", "Watch", "MinuteOne", "MinuteMany")) return "SMART MODE AND STATION WATCH";
+            if (Msg("Blocked", "AlreadyBlocked", "BlockingTemporarily", "IsBlocked", "IgnoredNotDx")) return "BLOCKING";
+            if (Msg("Clock")) return "CLOCK";
+            if (Msg("AnalyzingSlot", "StillAnalyzingSlot", "Slot")) return "TRANSMIT SLOT ANALYSIS";
+            if (Msg("Logbook", "Profile", "Customizations", "SharedSettings", "EngineRestarting", "Hotkeys"))
+                return "LOGBOOK, PROFILES AND SETTINGS";
+            return "RADIO, TUNING AND METERS";
+        }
+
+        // Known, in file order: by section, then as listed above.
+        internal static IEnumerable<(string Key, string Default, string Note)> InFileOrder() =>
+            Known.Select((k, i) => (k, i))
+                 .OrderBy(x => Array.IndexOf(Sections, SectionOf(x.k.Key))).ThenBy(x => x.i)
+                 .Select(x => x.k);
 
         private static Dictionary<string, string> _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        // Where the file lives (set by Load) -- the wording editor saves there.
+        internal static string Folder { get; private set; }
+
+        internal static bool IsChanged(string key) => _overrides.ContainsKey(key);
+        internal static string DefaultOf(string key) => Known.FirstOrDefault(k => k.Key == key).Default ?? "";
+        internal static string NoteOf(string key) => Known.FirstOrDefault(k => k.Key == key).Note ?? "";
+
+        // The wording editor: words for one entry (null/empty = back to the built-in words).
+        internal static void Set(string key, string words)
+        {
+            if (string.IsNullOrEmpty(words) || words == DefaultOf(key)) _overrides.Remove(key);
+            else _overrides[key] = words;
+            Changed?.Invoke();
+        }
+
+        // Raised whenever the words change (the file read at start, an edit in the wording
+        // editor) -- what shows words on screen once, like the list titles, refreshes on it.
+        internal static event Action Changed;
+
+        // Writes the whole file in section order: changed entries as "key = words", the rest
+        // commented out. Returns null, or why it could not be written.
+        internal static string Save()
+        {
+            if (string.IsNullOrEmpty(Folder)) return "no settings folder";
+            try
+            {
+                File.WriteAllText(Path.Combine(Folder, FileName), Template(), new UTF8Encoding(false));
+                return null;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
 
         internal static string Get(string key)
         {
@@ -253,6 +312,7 @@ namespace WSJTX_Controller
         internal static string Load(string folder)
         {
             if (TestModeGuard.IsTestMode) return null;
+            Folder = folder;
             string path = Path.Combine(folder, FileName);
             try
             {
@@ -264,6 +324,15 @@ namespace WSJTX_Controller
                 }
                 string[] lines = File.ReadAllLines(path);
                 _overrides = Parse(lines);
+                Changed?.Invoke();
+                // A file in the old four-section layout is rewritten once, organized by topic, with
+                // the operator's own entries kept (a backup copy is made first).
+                if (!lines.Any(l => l.StartsWith(LayoutMarker, StringComparison.Ordinal)))
+                {
+                    File.Copy(path, path + ".before-sections-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".bak", true);
+                    File.WriteAllText(path, Template(), new UTF8Encoding(false));
+                    return $"wording: {FileName} reorganized by topic ({_overrides.Count} own entr{(_overrides.Count == 1 ? "y" : "ies")} kept)";
+                }
                 // Entries added in a later version: appended, commented out, so the file always
                 // lists everything that can be reworded. The operator's own lines are untouched.
                 var listed = new HashSet<string>(lines.Select(l => l.TrimStart('#', ' ', '\t'))
@@ -272,7 +341,7 @@ namespace WSJTX_Controller
                 if (missing.Count > 0)
                 {
                     var sb = new StringBuilder();
-                    foreach (var group in missing.GroupBy(m => SectionOf(m.Key)))
+                    foreach (var group in missing.GroupBy(m => SectionOf(m.Key)).OrderBy(g => Array.IndexOf(Sections, g.Key)))
                     {
                         sb.AppendLine();
                         sb.AppendLine("[" + group.Key + "]");
@@ -317,14 +386,18 @@ namespace WSJTX_Controller
         internal static void SetForTest(Dictionary<string, string> overrides) =>
             _overrides = overrides ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        private static string Template()
+        // Bumped when the sections change, so a file in an older layout is reorganized once.
+        private const string LayoutMarker = "# Layout: by topic, v2";
+
+        internal static string Template()
         {
             var sb = new StringBuilder();
             sb.AppendLine("# Jimmy Next wording. Remove the '#' in front of a line and change the words after '='.");
             sb.AppendLine("# Read when Jimmy Next starts. A line left with '#' keeps the built-in wording.");
             sb.AppendLine("# Words in {braces} are filled in by Jimmy Next; keep them.");
             sb.AppendLine("# [SECTIONS] only group the lines; an entry means the same in any section.");
-            foreach (var group in Known.GroupBy(k => SectionOf(k.Key)))
+            sb.AppendLine(LayoutMarker + " -- " + string.Join(", ", Sections.Select(x => x.ToLowerInvariant())) + ".");
+            foreach (var group in InFileOrder().GroupBy(k => SectionOf(k.Key)))
             {
                 sb.AppendLine();
                 sb.AppendLine("[" + group.Key + "]");
@@ -332,7 +405,9 @@ namespace WSJTX_Controller
                 {
                     sb.AppendLine();
                     sb.AppendLine("# " + note);
-                    sb.AppendLine("# " + key + " = " + Shown(def));
+                    sb.AppendLine(_overrides.TryGetValue(key, out string own)
+                        ? key + " = " + Shown(own)
+                        : "# " + key + " = " + Shown(def));
                 }
             }
             return sb.ToString();

@@ -19181,6 +19181,48 @@ static class JimmyTests
         try
         {
             Wording.SetForTest(null);
+            // 2026-10-02: organized by topic; the editor's file keeps the operator's own words.
+            Check("sections: every entry is in a listed section",
+                Wording.Known.All(k => Array.IndexOf(Wording.Sections, Wording.SectionOf(k.Key)) >= 0), true);
+            Check("sections: none is empty",
+                Wording.Sections.All(x => Wording.Known.Any(k => Wording.SectionOf(k.Key) == x)), true);
+            Wording.Set("Msg.Still", "again");
+            string file = Wording.Template();
+            Check("file: an own entry is written uncommented", file.Contains("\nMsg.Still = again"), true);
+            Check("file: a built-in entry stays commented", file.Contains("# Msg.SmartNotHeard = "), true);
+            CheckStr("file: reading it back gives the same words",
+                Wording.Parse(file.Split('\n')).TryGetValue("Msg.Still", out var back) ? back : "", "again");
+            Wording.Set("Msg.Still", "still");
+            Check("file: the built-in words again means not your own", Wording.IsChanged("Msg.Still"), false);
+            Wording.SetForTest(null);
+
+            // List titles follow the wording -- the label AND the name a screen reader reads.
+            {
+                string prevDb = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+                Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH",
+                    Path.Combine(Path.GetTempPath(), "JimmyTest_WordingTitles_" + Guid.NewGuid().ToString("N") + ".db"));
+                try
+                {
+                    var ctrl = new Controller();
+                    ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                    ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                    ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                    ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                    ctrl.advancedCallLayout = true;
+                    var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                    Wording.SetForTest(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                        { ["List.RawTitle"] = "Naked decodes", ["List.SpotWatchTitle"] = "Stocker List" });
+                    wc.UpdateCallListAccessibleName(force: true);
+                    CheckStr("titles: Raw Decodes spoken name", ctrl.advRawListBox.AccessibleName, "Naked decodes");
+                    CheckStr("titles: Raw Decodes label", ctrl.advRawLabel.Text, "Naked decodes:");
+                    CheckStr("titles: Spot Watch spoken name", ctrl.spotWatchListBox.AccessibleName, "Stocker List");
+                }
+                finally
+                {
+                    Wording.SetForTest(null);
+                    Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb);
+                }
+            }
             CheckStr("built-in: new DXCC on band", Wording.Fill("Summary.NewDxccOnBand", ("Count", "1")), "1 new DXCC on band");
             CheckStr("built-in side name", Wording.Get("Side.RX1"), "RX1");
             var d = Wording.Parse(new[]

@@ -167,6 +167,17 @@ namespace WSJTX_Controller
         //   3. the status line holds what was last SPOKEN -- routine renders no longer rewrite
         //      it silently, so reading it back matches what was heard.
         public bool queueSpeechExperiment = false;
+        // The wording editor (operator, 2026-10-02): only when Jimmy Next was started with
+        // --wording does Options > Notifications show its "Wording..." button. Not public.
+        private void ApplyWordingToScreen()
+        {
+            if (IsDisposed) return;
+            if (InvokeRequired) { BeginInvoke((Action)ApplyWordingToScreen); return; }
+            wsjtxClient?.UpdateCallListAccessibleName(force: true);
+        }
+
+        internal readonly bool wordingEditorUnlocked = Environment.GetCommandLineArgs()
+            .Any(a => string.Equals(a, "--wording", StringComparison.OrdinalIgnoreCase));
 
         // Sound settings: enabled flags and file paths for each sound event.
         // Fix, 2026-09-14: CallAdded/CallingMe/Logged used to have their enabled state carried by
@@ -1177,6 +1188,11 @@ namespace WSJTX_Controller
             // 2026-08-18 along with WsjtxProtocolAdapter and the rest of that transport.
             wsjtxClient = new WsjtxClient(this, port, debug, diagLog, txMode);
             // The wording file (Wording): read once per window, before anything is spoken.
+            // List titles and side names follow the wording whenever it changes -- at load and on
+            // every wording-editor edit (2026-10-02: they used to refresh only on a transmit-side
+            // change or at connect, so a changed title could keep its old name).
+            Wording.Changed -= ApplyWordingToScreen;
+            Wording.Changed += ApplyWordingToScreen;
             string wordingNote = Wording.Load(path);
             if (wordingNote != null) wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {wordingNote}");
             if (_sharedSettingsReport != null)

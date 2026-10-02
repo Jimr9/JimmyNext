@@ -4308,6 +4308,19 @@ namespace WSJTX_Controller
             notificationOrderButton.Click += NotificationOrder_Click;
             notificationsPanel.Controls.Add(notificationOrderButton);
 
+            // Only for a Jimmy Next started with --wording (Controller.wordingEditorUnlocked).
+            if (ctrl.wordingEditorUnlocked)
+            {
+                var wordingButton = new System.Windows.Forms.Button
+                {
+                    Text = "Wording...", Location = new System.Drawing.Point(L, y + 34),
+                    Size = new System.Drawing.Size(120, 27), TabIndex = tabIdx++, Font = font,
+                    AccessibleName = "Wording",
+                };
+                wordingButton.Click += (s, e) => { using (var dlg = new WordingEditorDlg()) dlg.ShowDialog(this); };
+                notificationsPanel.Controls.Add(wordingButton);
+            }
+
             _notifyTypesListBox.SelectedIndex = 0;
         }
 
