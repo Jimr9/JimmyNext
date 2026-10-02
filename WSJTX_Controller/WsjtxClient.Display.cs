@@ -741,7 +741,7 @@ namespace WSJTX_Controller
             // never finds the call. Sourced from EffectiveSemantic (was d.DeCall()).
             string deCall = d.EffectiveSemantic(myCall).From;
             if (string.IsNullOrEmpty(deCall)) { StatusView.ShowMessage(Wording.Get("Msg.NoCallOnLine"), false); return; }
-            if (!ConnectedToWsjtx()) { StatusView.ShowMessage(Wording.Fill("Msg.NotConnectedCall", ("Call", deCall)), false); return; }
+            if (!ConnectedToWsjtx()) { StatusView.ShowMessage(Wording.Fill("Msg.NotConnectedCall", ("Call", SC(deCall))), false); return; }
 
             // Enter (or a double-click) on a Raw Decodes line calls that station, as WSJT-X does
             // (operator, 2026-10-01) -- even one the call list left out (already worked, blocked,
@@ -761,7 +761,7 @@ namespace WSJTX_Controller
                 return;
             }
             // Only when the list would not take it -- e.g. Smart Mode is already waiting on it.
-            StatusView.ShowMessage(Wording.Fill("Msg.NotInQueue", ("Call", deCall)), false);
+            StatusView.ShowMessage(Wording.Fill("Msg.NotInQueue", ("Call", SC(deCall))), false);
         }
 
         // Like GetRawDecodeCallOrText, but returns null (rather than falling back to
@@ -1640,7 +1640,10 @@ namespace WSJTX_Controller
                                 // of "Logged" and "Sending 73" as two separate utterances. No
                                 // change to LogQso's own trigger/timing -- this only widens when
                                 // the ALREADY-known curTxMsg gets described in the status text.
-                                if (curTxMsg != null && (transmitting || loggedCall != null))
+                                // Not after a stop (operator, 2026-10-02): once transmit is off, a radio
+                                // still unkeying is not "sending" -- C91RU's halted call said
+                                // "Sending EN34" twice after Smart Mode had stopped it.
+                                if (curTxMsg != null && ((transmitting && txEnabled) || loggedCall != null))
                                 {
                                     // Stage 7b: structured Nexus-semantic formatting off the
                                     // cached _curTxMsgSemantic (set alongside curTxMsg itself --

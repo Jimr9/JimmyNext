@@ -15,34 +15,10 @@ namespace WSJTX_Controller
         internal const int DefaultKeep = 5;
         private static readonly Regex Stamp = new Regex(@"\d{8}-\d{6}");
 
-        private static string SharedIni => Controller.SharedIniFilePath();
-
-        internal static int Keep
-        {
-            get
-            {
-                if (TestModeGuard.IsTestMode) return DefaultKeep;
-                try
-                {
-                    string v = File.Exists(SharedIni) ? new IniFile(SharedIni).Read(KeepKey) : "";
-                    return int.TryParse(v, out int n) ? Math.Max(1, n) : DefaultKeep;
-                }
-                catch { return DefaultKeep; }
-            }
-        }
+        internal static int Keep => SharedIniNumbers.Read(KeepKey, DefaultKeep, 1, int.MaxValue);
 
         // At start: put the setting in Shared.ini, so it is there to edit.
-        internal static void EnsureSetting()
-        {
-            if (TestModeGuard.IsTestMode) return;
-            try
-            {
-                if (!File.Exists(SharedIni)) return;
-                var ini = new IniFile(SharedIni);
-                if (!ini.KeyExists(KeepKey)) ini.Write(KeepKey, DefaultKeep.ToString());
-            }
-            catch { }
-        }
+        internal static void EnsureSetting() => SharedIniNumbers.Ensure(KeepKey, DefaultKeep);
 
         // Deletes all but the newest `keep` files or folders in `folder` matching `pattern`
         // (newest by the date-time stamp in the name, else by last write). Returns how many went.

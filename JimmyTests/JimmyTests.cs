@@ -1595,7 +1595,9 @@ static class JimmyTests
         QsoTimeOnIsStartOfContactTests();
         WordingFileTests();
         SendingNeverWaitsForReceiveTests();
+        SmartModeWaitingListTests();
         BackupRetentionTests();
+        UndoImportTests();
         CustomizationPackageTests();
         BulkEditApplyTests();
         RawDecodesSideLabelReflectsTxFirstTests();
@@ -19179,6 +19181,129 @@ static class JimmyTests
     // The wording file (2026-09-30): spoken notification pieces the operator can reword.
     // "Sending EN34" was shown but never said with the routine line set to After RX (operator,
     // 2026-10-02): what you send keeps its own timing instead of a receive boundary.
+    // Smart Mode's waiting list (operator, 2026-10-02): up to three stations; whichever is free
+    // first is worked first; Escape stops the one being worked, a second Escape stops it all.
+    static void SmartModeWaitingListTests()
+    {
+        Console.WriteLine("\n── Smart Mode: waiting for more than one station ──");
+        var listener = new StubEngineHost(line => "OK");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_SmartList_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var _ = ctrl.Handle;
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            wc.TestSetDirectConnected(true);
+            wc.TestSetMode("FT8");
+            ctrl.smartQsoStartEnabled = true;
+            ctrl.smartStartSilencePeriods = 2;
+            const string myCall = "KB0UZT", myGrid = "FN42";
+            EnqueueDecodeMessage Dq(string msg, double ageSeconds) => new EnqueueDecodeMessage
+            {
+                Message = msg,
+                RxDate = DateTime.UtcNow.AddSeconds(-ageSeconds).Date,
+                SinceMidnight = DateTime.UtcNow.AddSeconds(-ageSeconds).TimeOfDay,
+                DeltaFrequency = 1500, Snr = -8,
+            };
+            DirectSnapshot Snap(ulong slot, string from = null, string msg = null)
+            {
+                string decodes = from == null ? "" :
+                    @"{ ""from"": """ + from + @""", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + msg + @""" }";
+                return ParseDirectSnapshot(@"{
+                    ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [" + decodes + @"] }");
+            }
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(100));
+
+            // Three busy stations, each picked in turn: all three wait; the first picked is first.
+            wc.TestTryCaptureSmartStart("OM0AJ", Dq("N7DNF OM0AJ -11", 4));
+            wc.TestTryCaptureSmartStart("US2YW", Dq("M9POB US2YW -05", 4));
+            wc.TestTryCaptureSmartStart("YU1EU", Dq("W2BCC YU1EU RR73", 40));
+            Check("three busy stations all wait", wc.IsSmartModeWaitingOn("OM0AJ")
+                && wc.IsSmartModeWaitingOn("US2YW") && wc.IsSmartModeWaitingOn("YU1EU"), true);
+            Check("the first picked is worked first", wc.TestSmartStartTarget == "OM0AJ", true);
+            wc.TestTryCaptureSmartStart("SP1TJ", Dq("K5WKH SP1TJ -09", 4));
+            Check("a fourth is refused", wc.IsSmartModeWaitingOn("SP1TJ"), false);
+
+            // US2YW calls CQ while OM0AJ is still busy: US2YW is free first, so it is worked first.
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(105, "US2YW", "CQ US2YW KN28"));
+            Check("the one free first becomes the one worked", wc.TestSmartStartTarget == "US2YW", true);
+            Check("the others still wait", wc.IsSmartModeWaitingOn("OM0AJ") && wc.IsSmartModeWaitingOn("YU1EU"), true);
+
+            // Escape: only the one being worked comes off; the earliest of the rest is next.
+            Check("first Escape stops one", wc.EscapeOneStation(out string stopped, out string still), true);
+            Check("  ...the one being worked", stopped.Replace(" ", "") == "US2YW" && !wc.IsSmartModeWaitingOn("US2YW"), true);
+            Check("  ...the rest keep waiting", wc.IsSmartModeWaitingOn("OM0AJ") && wc.IsSmartModeWaitingOn("YU1EU"), true);
+            Check("  ...the earliest picked is next", wc.TestSmartStartTarget == "OM0AJ", true);
+
+            // Escape again: the full stop.
+            Check("second Escape stops it all", wc.EscapeOneStation(out string _s, out string _w), false);
+            wc.TestCancelStationWatchPendingStart();   // what the full Escape runs (AbortContact)
+            Check("  ...nothing left waiting", !wc.IsSmartModeWaitingOn("OM0AJ") && !wc.IsSmartModeWaitingOn("YU1EU")
+                && !wc.SmartStartActive, true);
+
+            // One station only: Escape is the full stop, as before.
+            wc.TestTryCaptureSmartStart("OM0AJ", Dq("N7DNF OM0AJ -11", 4));
+            Check("one station: Escape is the full stop", wc.EscapeOneStation(out string _s2, out string _w2), false);
+        }
+        finally
+        {
+            listener.Stop();
+            WsjtxClient.TestQuiesceAllDirectClients();
+            if (prevTestDbPath == null) Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
+            else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // Undo an import (operator, 2026-10-02): an import's backup goes back exactly, the settings
+    // it replaces are kept first, and a backup without a note (made before notes) still works.
+    static void UndoImportTests()
+    {
+        Console.WriteLine("\n── Undo an import ──");
+        string root = Path.Combine(Path.GetTempPath(), "JimmyTest_Undo_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string profiles = Path.Combine(root, "Profiles"), backups = Path.Combine(root, "Backups"), sounds = Path.Combine(root, "Sounds");
+            Directory.CreateDirectory(profiles); Directory.CreateDirectory(sounds);
+            string baseIni = Path.Combine(root, "Jimmy Next.ini"), ini = Path.Combine(profiles, "Contest.ini");
+            string wording = Path.Combine(root, "Wording.txt"), sound = Path.Combine(sounds, "crow.wav");
+            File.WriteAllText(ini, "a=1"); File.WriteAllText(wording, "w=1"); File.WriteAllText(sound, "mine");
+
+            // The import: backup first, then the import changes things (its replaced sound kept).
+            string dir = CustomizationPackage.Backup(ini, wording, backups, "import", "notifications", "Contest");
+            Directory.CreateDirectory(Path.Combine(dir, "Sounds"));
+            File.Copy(sound, Path.Combine(dir, "Sounds", "crow.wav"));
+            File.WriteAllText(ini, "a=2"); File.WriteAllText(wording, "w=2"); File.WriteAllText(sound, "theirs");
+
+            var info = CustomizationPackage.ReadBackupInfo(dir, baseIni, profiles, wording);
+            Check("the note says what it was", info.Kind == "import" && info.Profile == "Contest" && info.Parts == "notifications"
+                && info.IniPath == ini && info.WordingPath == wording, true);
+
+            string undoDir = CustomizationPackage.Backup(info.IniPath, info.WordingPath, backups, "undo", null, info.Profile, prune: false);
+            CustomizationPackage.RestoreBackup(info, sounds, undoDir);
+            Check("settings, wording and sound are back", File.ReadAllText(ini) == "a=1" && File.ReadAllText(wording) == "w=1"
+                && File.ReadAllText(sound) == "mine", true);
+            Check("what the undo replaced is kept, so it can be undone", File.ReadAllText(Path.Combine(undoDir, "Contest.ini")) == "a=2"
+                && File.ReadAllText(Path.Combine(undoDir, "Wording.txt")) == "w=2"
+                && File.ReadAllText(Path.Combine(undoDir, "Sounds", "crow.wav")) == "theirs", true);
+
+            // A backup from before the note existed: worked out from its files.
+            File.Delete(Path.Combine(dir, CustomizationPackage.BackupInfoFile));
+            var old = CustomizationPackage.ReadBackupInfo(dir, baseIni, profiles, wording);
+            Check("an older backup is still understood", old.Profile == "Contest" && old.IniPath == ini && old.WordingPath == wording
+                && old.When != default, true);
+        }
+        finally { try { Directory.Delete(root, true); } catch { } }
+    }
+
     // Only the newest few backups of each kind are kept (operator, 2026-10-02).
     static void BackupRetentionTests()
     {
@@ -23756,10 +23881,11 @@ static class JimmyTests
             Check("silence progression continued past the redundant re-capture -> count 2",
                 wc.TestSmartStartSilenceCount >= 2, true);
 
-            // Regression: selecting a genuinely DIFFERENT call still replaces the monitor.
+            // A genuinely DIFFERENT call is now ADDED to Smart Mode's list (operator, 2026-10-02);
+            // it used to replace the first.
             wc.TestTryCaptureSmartStart("W9XYZ", Dq("CQ W9XYZ EM63", 1));
-            Check("selecting a different call still replaces the Smart Start target",
-                wc.TestSmartStartTarget == "W9XYZ", true);
+            Check("selecting a different call adds it to Smart Mode's list",
+                wc.IsSmartModeWaitingOn("W9XYZ") && wc.IsSmartModeWaitingOn(target), true);
         }
         finally
         {

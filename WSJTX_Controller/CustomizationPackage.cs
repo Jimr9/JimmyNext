@@ -337,17 +337,129 @@ namespace WSJTX_Controller
             return name.EndsWith(".wav", StringComparison.OrdinalIgnoreCase) ? name : null;
         }
 
-        // Copies the profile ini and the wording file aside; returns the backup folder.
-        internal static string Backup(string iniPath, string wordingPath, string backupsRoot)
+        // Copies the profile ini, the wording file and the contest file aside; returns the backup
+        // folder ("before-import-<time>", or "before-undo-<time>" for Undo an import). A short
+        // note (BackupInfoFile) says what it was for and where each file came from -- Undo an
+        // import reads it. Only the newest of each kind are kept (BackupRetention); prune: false
+        // leaves that to the caller (Undo an import prunes after it has read the backup it uses).
+        internal static string Backup(string iniPath, string wordingPath, string backupsRoot,
+            string kind = "import", string parts = null, string profile = null, bool prune = true)
         {
-            string dir = Path.Combine(backupsRoot, "before-import-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string dir = Path.Combine(backupsRoot, $"before-{kind}-{stamp}");
+            for (int n = 2; Directory.Exists(dir); n++) dir = Path.Combine(backupsRoot, $"before-{kind}-{stamp}-{n}");
             Directory.CreateDirectory(dir);
             if (File.Exists(iniPath)) File.Copy(iniPath, Path.Combine(dir, Path.GetFileName(iniPath)), true);
             if (File.Exists(wordingPath)) File.Copy(wordingPath, Path.Combine(dir, Path.GetFileName(wordingPath)), true);
             string contestIni = ContestConfigStore.CompanionPathFor(iniPath);
             if (!string.IsNullOrEmpty(contestIni) && File.Exists(contestIni)) File.Copy(contestIni, Path.Combine(dir, Path.GetFileName(contestIni)), true);
-            BackupRetention.Prune(backupsRoot, "before-import-*");
+            File.WriteAllLines(Path.Combine(dir, BackupInfoFile), new[]
+            {
+                "kind=" + kind,
+                "when=" + DateTime.Now.ToString("o"),
+                "parts=" + (parts ?? ""),
+                "profile=" + (profile ?? ""),
+                "ini=" + (iniPath ?? ""),
+                "wording=" + (wordingPath ?? ""),
+                "contest=" + (contestIni ?? ""),
+            }, new UTF8Encoding(false));
+            if (prune) BackupRetention.Prune(backupsRoot, $"before-{kind}-*");
             return dir;
+        }
+
+        internal const string BackupInfoFile = "backup-info.txt";
+
+        // What one import (or undo) backup holds and where each file goes back to.
+        internal sealed class BackupInfo
+        {
+            public string Dir, Kind, Parts, Profile, IniPath, WordingPath, ContestPath;
+            public DateTime When;
+        }
+
+        // Reads a backup's note. A backup from before the note existed (2026-10-02) is worked out
+        // from its files: the profile ini by its name, the wording file (Wording.txt = shared,
+        // <profile>.txt = the profile's own), the contest file beside the ini.
+        internal static BackupInfo ReadBackupInfo(string dir, string baseIniPath, string profilesDir, string sharedWordingPath)
+        {
+            string name = Path.GetFileName(dir);
+            var info = new BackupInfo { Dir = dir, Kind = name.StartsWith("before-undo-", StringComparison.OrdinalIgnoreCase) ? "undo" : "import" };
+            string note = Path.Combine(dir, BackupInfoFile);
+            if (File.Exists(note))
+            {
+                foreach (string line in File.ReadAllLines(note))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string k = line.Substring(0, eq), v = line.Substring(eq + 1);
+                    switch (k)
+                    {
+                        case "kind": info.Kind = v; break;
+                        case "when": DateTime.TryParse(v, null, System.Globalization.DateTimeStyles.RoundtripKind, out info.When); break;
+                        case "parts": info.Parts = v; break;
+                        case "profile": info.Profile = v; break;
+                        case "ini": info.IniPath = v; break;
+                        case "wording": info.WordingPath = v; break;
+                        case "contest": info.ContestPath = v; break;
+                    }
+                }
+            }
+            else
+            {
+                string baseName = Path.GetFileName(baseIniPath);
+                string ini = Directory.GetFiles(dir, "*.ini").Select(Path.GetFileName)
+                    .FirstOrDefault(f => !f.EndsWith(".Contests.ini", StringComparison.OrdinalIgnoreCase));
+                if (ini != null)
+                {
+                    bool isBase = string.Equals(ini, baseName, StringComparison.OrdinalIgnoreCase);
+                    info.IniPath = isBase ? baseIniPath : Path.Combine(profilesDir, ini);
+                    info.Profile = isBase ? "" : Path.GetFileNameWithoutExtension(ini);
+                    string contest = ContestConfigStore.CompanionPathFor(info.IniPath);
+                    if (contest != null && File.Exists(Path.Combine(dir, Path.GetFileName(contest)))) info.ContestPath = contest;
+                    if (File.Exists(Path.Combine(dir, Path.GetFileName(sharedWordingPath)))) info.WordingPath = sharedWordingPath;
+                    else if (!isBase && File.Exists(Path.Combine(dir, info.Profile + ".txt")))
+                        info.WordingPath = Path.Combine(profilesDir, "Wording", info.Profile + ".txt");
+                }
+            }
+            if (info.When == default)
+            {
+                var m = System.Text.RegularExpressions.Regex.Match(name, @"\d{8}-\d{6}");
+                if (!(m.Success && DateTime.TryParseExact(m.Value, "yyyyMMdd-HHmmss", null, System.Globalization.DateTimeStyles.None, out info.When)))
+                    info.When = Directory.GetCreationTime(dir);
+            }
+            return info;
+        }
+
+        // Puts a backup back: each file to where it came from, and the sound files an import
+        // replaced back into the sounds folder. Every file it overwrites is first copied to
+        // saveCurrentTo (the "before-undo" backup), so the undo can itself be undone.
+        internal static void RestoreBackup(BackupInfo info, string soundsDir, string saveCurrentTo)
+        {
+            void Put(string target)
+            {
+                if (string.IsNullOrEmpty(target)) return;
+                string src = Path.Combine(info.Dir, Path.GetFileName(target));
+                if (!File.Exists(src)) return;
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                File.Copy(src, target, true);
+            }
+            Put(info.IniPath);
+            Put(info.WordingPath);
+            Put(info.ContestPath);
+            string backupSounds = Path.Combine(info.Dir, "Sounds");
+            if (Directory.Exists(backupSounds))
+            {
+                Directory.CreateDirectory(soundsDir);
+                foreach (string f in Directory.GetFiles(backupSounds))
+                {
+                    string dest = Path.Combine(soundsDir, Path.GetFileName(f));
+                    if (File.Exists(dest) && saveCurrentTo != null)
+                    {
+                        Directory.CreateDirectory(Path.Combine(saveCurrentTo, "Sounds"));
+                        File.Copy(dest, Path.Combine(saveCurrentTo, "Sounds", Path.GetFileName(f)), true);
+                    }
+                    File.Copy(f, dest, true);
+                }
+            }
         }
 
         // Applies the chosen parts to the active profile: each chosen settings part replaces that

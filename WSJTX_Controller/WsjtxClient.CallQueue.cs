@@ -262,6 +262,16 @@ namespace WSJTX_Controller
                 // queue even though this year's award still needs a fresh contact with it.
                 // Exact boolean combination lives in AwardMatcher.ShouldRejectAlreadyWorked
                 // (Awards/AwardMatcher.cs) so it has direct, exhaustive test coverage.
+                // Logged on this band and mode this session: worked, whatever the logbook says yet
+                // (operator, 2026-10-02: C91RU's "-18" to KW9U, a second after our QSO was logged,
+                // still read as a new DXCC -- the logbook's read copy had not caught up -- and was
+                // listed again with the eagle). POTA can be worked again from another park.
+                if (logList.Contains(deCall) && !isPota)
+                {
+                    DebugOutput($"{spacer}AddSelectedCall: just logged '{deCall}'");
+                    return;
+                }
+
                 bool isNewDxccCategory = emsg.Category == CallCategory.NEW_COUNTRY
                                         || emsg.Category == CallCategory.NEW_COUNTRY_ON_BAND;
                 bool isStillNeededByActiveAward = _awardTagger.MatchedAwardRuleId(emsg) != null;
@@ -445,11 +455,11 @@ namespace WSJTX_Controller
             {
                 ctrl.ExceptTextBoxAdd(call);       //callqueue updated by BlockedTextChanged()
                 DebugOutput($"{spacer}added  {call} to blocked call list");
-                StatusView.ShowMessage(Wording.Fill("Msg.Blocked", ("Call", call)), ctrl.soundEnabled_CallAdded);
+                StatusView.ShowMessage(Wording.Fill("Msg.Blocked", ("Call", SC(call))), ctrl.soundEnabled_CallAdded);
             }
             else
             {
-                StatusView.ShowMessage(Wording.Fill("Msg.AlreadyBlocked", ("Call", call)), ctrl.soundEnabled_CallAdded);
+                StatusView.ShowMessage(Wording.Fill("Msg.AlreadyBlocked", ("Call", SC(call))), ctrl.soundEnabled_CallAdded);
             }
         }
 

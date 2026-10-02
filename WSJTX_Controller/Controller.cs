@@ -1194,6 +1194,7 @@ namespace WSJTX_Controller
             Wording.Changed -= ApplyWordingToScreen;
             Wording.Changed += ApplyWordingToScreen;
             BackupRetention.EnsureSetting();
+            SharedIniNumbers.Ensure(WsjtxClient.SmartModeStationsKey, WsjtxClient.DefaultSmartModeStations);
             string wordingNote = Wording.Load(ActiveWordingPath());
             if (wordingNote != null) wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {wordingNote}");
             if (_sharedSettingsReport != null)
@@ -2257,7 +2258,7 @@ namespace WSJTX_Controller
             int preSelect = names.FindIndex(n => string.Equals(n, activeDisplayName, StringComparison.OrdinalIgnoreCase));
             var decorated = names.Select((n, i) => i == preSelect ? n + " (active)" : n).ToList();
 
-            string chosenDecorated = PromptForChoice("Load Profile", "Choose a profile to load. Jimmy will reload.", decorated, preSelect < 0 ? 0 : preSelect);
+            string chosenDecorated = PromptForChoice("Load Profile", "Choose a profile to load. The window reopens with it; the radio stays connected.", decorated, preSelect < 0 ? 0 : preSelect);
             if (chosenDecorated == null) return;
             int chosenIdx = decorated.IndexOf(chosenDecorated);
             string chosen = chosenIdx >= 0 ? names[chosenIdx] : chosenDecorated;
@@ -2278,7 +2279,7 @@ namespace WSJTX_Controller
                 ? "This session's changes to the current profile are saved first."
                 : "This session's changes to the current profile will be discarded.";
             var confirm = MessageBox.Show(this,
-                $"Loading '{chosen}' will reload Jimmy. {savePhrase} Continue?",
+                $"Loading '{chosen}' reopens the window with its settings; the radio stays connected. {savePhrase} Continue?",
                 "Load Profile", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (confirm != DialogResult.Yes) return;
 
@@ -2436,7 +2437,7 @@ namespace WSJTX_Controller
             string profile = ActiveProfileDisplayName();
             var confirm = MessageBox.Show(this,
                 $"Import {CustomizationPackage.Describe(parts)} into profile '{profile}'? " +
-                (makeBackup ? "Your current settings are backed up first, and Jimmy Next reloads." : "No backup is made. Jimmy Next reloads."),
+                (makeBackup ? "Your current settings are backed up first. " : "No backup is made. ") + "The window then reopens with the imported settings; the radio stays connected.",
                 "Import Customizations", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (confirm != DialogResult.Yes) return;
 
@@ -2446,7 +2447,8 @@ namespace WSJTX_Controller
                 if (iniFile == null) throw new InvalidOperationException("no active settings file");
                 string dataFolder = ProfilesAppDataPath();
                 string backup = makeBackup
-                    ? CustomizationPackage.Backup(iniFile.FilePath, ActiveWordingPath(), Path.Combine(dataFolder, "Backups"))
+                    ? CustomizationPackage.Backup(iniFile.FilePath, ActiveWordingPath(), Path.Combine(dataFolder, "Backups"),
+                        "import", CustomizationPackage.Describe(parts), profile)
                     : null;
                 // Imported wording replaces the wording in effect: the profile's own, else the shared.
                 pkg.ApplyTo(iniFile, parts, dataFolder, NotificationSounds.SoundsFolder, backup, wordingPath: ActiveWordingPath());
@@ -2461,6 +2463,83 @@ namespace WSJTX_Controller
 
             // The imported settings are on disk; closing must not write this window's older copy
             // over them. Reloading picks them up (engine handed over, as a profile switch does).
+            _suppressSettingsSaveOnExit = true;
+            SwitchProfileInPlace();
+        }
+
+        // Options > Profiles' "Undo an import..." (operator, 2026-10-02): puts back the settings
+        // from just before an import -- the profile, wording, contest file and the operator's own
+        // sounds the import replaced -- from that import's backup. The settings in effect now are
+        // backed up first ("before-undo"), and listed too, so an undo can itself be undone. A
+        // backup only ever goes back to the profile it came from.
+        internal void UndoImport_Click()
+        {
+            string root = Path.Combine(ProfilesAppDataPath(), "Backups");
+            var backups = new List<CustomizationPackage.BackupInfo>();
+            if (Directory.Exists(root))
+                foreach (string d in Directory.GetDirectories(root, "before-*"))
+                {
+                    string n = Path.GetFileName(d);
+                    if (!n.StartsWith("before-import-", StringComparison.OrdinalIgnoreCase)
+                        && !n.StartsWith("before-undo-", StringComparison.OrdinalIgnoreCase)) continue;
+                    try
+                    {
+                        var info = CustomizationPackage.ReadBackupInfo(d, BaseIniFilePath(), ProfilesDirectory(), SharedWordingPath());
+                        if (!string.IsNullOrEmpty(info.IniPath)) backups.Add(info);
+                    }
+                    catch { }   // an unreadable backup is simply not offered
+                }
+            if (backups.Count == 0)
+            {
+                MessageBox.Show(this, "No imports to undo.", "Undo an Import", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            backups = backups.OrderByDescending(b => b.When).ToList();
+            string ProfileName(CustomizationPackage.BackupInfo b) => string.IsNullOrEmpty(b.Profile) ? DefaultProfileDisplayName : b.Profile;
+            var lines = backups.Select(b => b.Kind == "undo"
+                ? $"Before an undo, {b.When:MMMM d, h:mm tt}, {ProfileName(b)}"
+                : $"{b.When:MMMM d, h:mm tt}: {(string.IsNullOrEmpty(b.Parts) ? "settings" : b.Parts)}, into {ProfileName(b)}").ToList();
+            for (int i = 1; i < lines.Count; i++)   // two in the same minute still read apart
+                if (lines.IndexOf(lines[i]) < i) lines[i] += $" ({backups[i].When:h:mm:ss tt})";
+
+            string pick = PromptForChoice("Undo an Import",
+                "Choose the import to undo. Settings go back to how they were just before it.", lines);
+            if (pick == null) return;
+            var chosen = backups[lines.IndexOf(pick)];
+            string profile = ProfileName(chosen);
+            bool isActive = string.Equals(profile, ActiveProfileDisplayName(), StringComparison.OrdinalIgnoreCase);
+            bool affectsActive = isActive || string.Equals(chosen.WordingPath, ActiveWordingPath(), StringComparison.OrdinalIgnoreCase);
+
+            string question = (chosen.Kind == "undo" ? "Put back the settings from before that undo?" : "Put back the settings you had before this import?")
+                + (isActive ? "" : $" It was for profile '{profile}', and only that profile is changed.")
+                + (ReferenceEquals(chosen, backups[0]) ? "" : " Changes made since then are undone too.")
+                + (affectsActive ? " The window then reopens; the radio stays connected." : "");
+            if (MessageBox.Show(this, question, "Undo an Import", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+
+            try
+            {
+                SaveAllSettingsToIniFile();   // this session's settings are what the undo backup keeps
+                string undoDir = CustomizationPackage.Backup(chosen.IniPath, chosen.WordingPath, root,
+                    "undo", null, chosen.Profile, prune: false);
+                CustomizationPackage.RestoreBackup(chosen, NotificationSounds.UserSoundsFolder, undoDir);
+                BackupRetention.Prune(root, "before-undo-*");
+                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} undo: put back '{chosen.Dir}' into '{profile}'; current settings kept in '{undoDir}'");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not undo the import: {ex.Message}", "Undo an Import",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            if (!affectsActive)
+            {
+                ShowMsg($"Profile '{profile}' has its settings from before that import.", false);
+                return;
+            }
+            // The put-back files are on disk; closing must not write this window's copy over
+            // them. Reopening reads them (engine kept, as a profile switch does).
             _suppressSettingsSaveOnExit = true;
             SwitchProfileInPlace();
         }
@@ -3210,7 +3289,7 @@ namespace WSJTX_Controller
                     listenModeButton_Click(null, null);
                     if (hadSomethingToHalt) ShowMsg(Wording.Get("Msg.TxHalted"), true);
                     else if (smartStartWasActive)
-                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? Wording.Get("Msg.SmartModeStopped") : Wording.Fill("Msg.SmartModeStoppedFor", ("Call", smartStartTarget)), true);
+                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? Wording.Get("Msg.SmartModeStopped") : Wording.Fill("Msg.SmartModeStoppedFor", ("Call", WsjtxClient.DisplayCallsign(smartStartTarget, spaceCallsignsAndGrids))), true);
                 }
                 BeginInvoke((Action)(() => RestoreFocus(focused)));
                 return true;
@@ -5951,12 +6030,23 @@ namespace WSJTX_Controller
                     bool smartStartWasActive = wsjtxClient.SmartStartActive;
                     string smartStartTarget = wsjtxClient.SmartStartTarget;
 
-                    wsjtxClient.AbortContact();         // unconditional: works in both CQ and Listen mode
-                    wsjtxClient.ResetTxToCq();
-                    listenModeButton_Click(null, null);
-                    if (hadSomethingToHalt) ShowMsg(Wording.Get("Msg.TxHalted"), true);
-                    else if (smartStartWasActive)
-                        ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? Wording.Get("Msg.SmartModeStopped") : Wording.Fill("Msg.SmartModeStoppedFor", ("Call", smartStartTarget)), true);
+                    // Smart Mode with more than one station (operator, 2026-10-02): the first
+                    // Escape stops only the station being worked; the next Escape stops it all.
+                    if (wsjtxClient.EscapeOneStation(out string stoppedCall, out string stillWaiting))
+                    {
+                        wsjtxClient.ResetTxToCq();
+                        listenModeButton_Click(null, null);
+                        ShowMsg(Wording.Fill("Msg.SmartEscapedOne", ("Call", stoppedCall), ("Calls", stillWaiting)), true);
+                    }
+                    else
+                    {
+                        wsjtxClient.AbortContact();         // unconditional: works in both CQ and Listen mode
+                        wsjtxClient.ResetTxToCq();
+                        listenModeButton_Click(null, null);
+                        if (hadSomethingToHalt) ShowMsg(Wording.Get("Msg.TxHalted"), true);
+                        else if (smartStartWasActive)
+                            ShowMsg(string.IsNullOrEmpty(smartStartTarget) ? Wording.Get("Msg.SmartModeStopped") : Wording.Fill("Msg.SmartModeStoppedFor", ("Call", WsjtxClient.DisplayCallsign(smartStartTarget, spaceCallsignsAndGrids))), true);
+                    }
                 }
                 BeginInvoke((Action)(() =>
                     BeginInvoke((Action)(() => RestoreFocus(focused)))
@@ -6866,12 +6956,12 @@ namespace WSJTX_Controller
                 _lastManualCall = callsign;
                 bool started = wsjtxClient.ManualEnqueueCall(callsign);
                 if (started)
-                    ShowMsg(Wording.Fill("Msg.ManualCallStarted", ("Call", callsign)), false);
+                    ShowMsg(Wording.Fill("Msg.ManualCallStarted", ("Call", WsjtxClient.DisplayCallsign(callsign, spaceCallsignsAndGrids))), false);
                 else
                     // Found live, 2026-08-10: this used to be a silent no-op on failure -- the
                     // operator got zero feedback that anything went wrong, indistinguishable
                     // from Jimmy simply doing nothing.
-                    ShowMsg(Wording.Fill("Msg.ManualCallFailed", ("Call", callsign)), true);
+                    ShowMsg(Wording.Fill("Msg.ManualCallFailed", ("Call", WsjtxClient.DisplayCallsign(callsign, spaceCallsignsAndGrids))), true);
             }
         }
 

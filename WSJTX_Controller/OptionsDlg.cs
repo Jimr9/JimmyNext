@@ -7855,8 +7855,8 @@ namespace WSJTX_Controller
                 Size = new System.Drawing.Size(560, 50),
                 Text = "A profile is a complete, saved copy of every Jimmy setting. Save the " +
                     "current configuration under a name, then load it back (or a different " +
-                    "one) at any time -- loading restarts Jimmy cleanly with that profile's " +
-                    "settings, it never merges into the current session.",
+                    "one) at any time -- loading reopens the window with that profile's " +
+                    "settings (the radio stays connected); it never merges into the current session.",
                 TabStop = false,
                 Font = font,
             };
@@ -7956,6 +7956,19 @@ namespace WSJTX_Controller
             };
             importButton.Click += (s, e) => ctrl.ImportCustomizations_Click();
             profilesPanel.Controls.Add(importButton);
+
+            // Undo an import (2026-10-02): puts back the settings from just before an import.
+            var undoImportButton = new System.Windows.Forms.Button
+            {
+                Text = "Undo an Import...",
+                AccessibleName = "Undo an import",
+                Location = new System.Drawing.Point(8, 290),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 6,
+                Font = font,
+            };
+            undoImportButton.Click += (s, e) => ctrl.UndoImport_Click();
+            profilesPanel.Controls.Add(undoImportButton);
         }
 
         // Tests QRZ.com login (username/password) as before, and -- if a Logbook API key

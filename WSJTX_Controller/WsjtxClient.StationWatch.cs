@@ -14,12 +14,49 @@ namespace WSJTX_Controller
     public partial class WsjtxClient
     {
         private readonly TargetMonitor _stationWatch = new TargetMonitor(TargetPurpose.StationWatch);
-        private readonly TargetMonitor _smartStart = new TargetMonitor(TargetPurpose.SmartStart);
+        private TargetMonitor _smartStart = new TargetMonitor(TargetPurpose.SmartStart);
+
+        // Smart Mode's waiting list (operator, 2026-10-02): up to SmartModeMaxStations stations --
+        // "smartModeStations" in Shared.ini, 3 unless changed by hand (1 to 10). At 1, a new pick
+        // replaces the station Smart Mode was waiting for (the old Smart Mode); above 1, a new pick
+        // is added, and refused once the list is full until one is done or Escaped.
+        // _smartStart is the one worked first -- everything below about "the target" is about
+        // it; _smartMore are the others, in the order picked, each watched by its own monitor.
+        // Whichever is free first is called (MakeCurrent swaps it in), never during a QSO and
+        // never while another is being called. The others are not narrated: only "also waiting"
+        // when added, the call when one is free, and the reason when one is dropped.
+        private readonly List<TargetMonitor> _smartMore = new List<TargetMonitor>();
+        internal const string SmartModeStationsKey = "smartModeStations";
+        internal const int DefaultSmartModeStations = 3;
+        private static int SmartModeMaxStations => SharedIniNumbers.Read(SmartModeStationsKey, DefaultSmartModeStations, 1, 10);
+        // Escape took one station off; the next Escape stops Smart Mode altogether.
+        private bool _smartEscapeTookOne;
+        // The last station refused because the list was full -- said once, not on every re-issue.
+        private string _smartFullRefused;
 
         // True while Smart Mode is armed on `call` (waiting or calling) -- CallQueueStore keeps
         // that station out of the list meanwhile.
         internal bool IsSmartModeWaitingOn(string call) =>
-            _smartStart.IsActive && string.Equals(_smartStart.TargetCall, call, StringComparison.OrdinalIgnoreCase);
+            (_smartStart.IsActive && string.Equals(_smartStart.TargetCall, call, StringComparison.OrdinalIgnoreCase))
+            || _smartMore.Any(m => string.Equals(m.TargetCall, call, StringComparison.OrdinalIgnoreCase));
+
+        private int SmartStationCount => (_smartStart.IsActive ? 1 : 0) + _smartMore.Count;
+
+        private string SmartMoreCalls() => string.Join(", ", _smartMore.Select(m => SC(m.TargetCall)));
+
+        // Every station still on Smart Mode's list, worked-first first; "" when none.
+        private string SmartStillWaitingCalls() =>
+            string.Join(", ", new[] { _smartStart }.Concat(_smartMore).Where(m => m.IsActive).Select(m => SC(m.TargetCall)));
+
+        // A station leaving Smart Mode on a limit (operator, 2026-10-02): "dropped; still waiting
+        // for ..." while others remain -- Smart Mode carries on -- else the "Smart Mode stopped"
+        // wording. Both are wording entries; {StillWaiting} lists the stations left.
+        private void SayStationLeftSmartMode(string droppedKey, string lastKey, params (string Name, string Value)[] fields)
+        {
+            string still = SmartStillWaitingCalls();
+            var all = fields.Concat(new[] { ("StillWaiting", still) }).ToArray();
+            StatusView.ShowMessage(Wording.Fill(still.Length > 0 ? droppedKey : lastKey, all), true);
+        }
 
         // Smart Start ownership survives a temporary hand-off to the normal QSO sequencer.
         // Operator policy (2026-09-08): once Smart Start owns a target, it keeps owning it until
@@ -180,12 +217,16 @@ namespace WSJTX_Controller
                     msg = RenderNotificationPhrase(NotificationEventType.SmartStartArmed,
                         new SmartStartArmedEvent(SC(_smartStart.TargetCall)).ToTokens());
             }
+            else if (_smartMore.Count > 0)
+                msg = Wording.Fill("Msg.SmartWaitingList", ("Calls", SmartMoreCalls()));
             else
                 // Armed-but-idle (enabled, nothing captured yet) is also not an on-air fact --
                 // no Notification event exists for it either.
                 msg = Wording.Get("Msg.SmartModeNoTarget");
 
             if (string.IsNullOrEmpty(msg)) msg = Wording.Get("Msg.SmartModeStatusUnavailable");
+            else if (ctrl.smartQsoStartEnabled && _smartStart.IsActive && _smartMore.Count > 0)
+                msg = msg.TrimEnd() + " " + Wording.Fill("Msg.SmartAlsoWaitingList", ("Calls", SmartMoreCalls()));
             StatusView.ShowMessage(msg, false);
             return true;
         }
@@ -312,11 +353,15 @@ namespace WSJTX_Controller
             // panels (2.0.71) still runs below -- the operator may have re-picked the call from
             // the other panel -- and the method still returns true so the caller does not fall
             // through to an immediate ReplyTo. A genuine change of target still replaces.
-            bool alreadyArmedOnThisCall = _smartStart.IsActive
-                && string.Equals(_smartStart.TargetCall, call, StringComparison.OrdinalIgnoreCase);
+            // A different station while Smart Mode already has one is ADDED to its list
+            // (operator, 2026-10-02) -- it no longer replaces the first.
+            bool alreadyArmedOnThisCall = IsSmartModeWaitingOn(call);
 
-            if (!alreadyArmedOnThisCall)
+            if (!alreadyArmedOnThisCall && SmartStationCount > 0 && SmartModeMaxStations > 1)
+                AddSmartStation(call, dmsg);
+            else if (!alreadyArmedOnThisCall)
             {
+                _smartEscapeTookOne = false;
                 _smartStart.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);
                 // Seed the freshly-started monitor with the exact decode the operator selected.
                 // SeedSelectedDecode records it as the decode to eventually reply from, but only
@@ -330,6 +375,7 @@ namespace WSJTX_Controller
                 _smartStartSeeding = true;
                 try { _smartStart.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall); }
                 finally { _smartStartSeeding = false; }
+                TakeOffListForSmartMode(call);
                 // "Waiting to work {call}." is announced by SmartStartArmedEvent, raised from
                 // _smartStart.Start above via HandleTargetObservation -- no separate ShowMessage
                 // (that would be a near-duplicate on both the visible line and in speech).
@@ -365,6 +411,152 @@ namespace WSJTX_Controller
                 else if (_smartStart.ConsumeReadyToStart())
                     ArmPendingAutoStart(_smartStart);
             }
+            // The others on the list: watched the same way, after the current one (picked first,
+            // called first when both are free).
+            foreach (var m in _smartMore.ToArray())
+            {
+                if (!m.IsActive) { _smartMore.Remove(m); continue; }
+                m.ObserveDecode(enq, evenSlot, myCall);
+                if (m.ConsumeEngagedWhileWaiting())
+                {
+                    if (MakeCurrent(m)) HandOffSmartStartWhileWaiting(enq);
+                    else DropSmartStation(m, "called us during another QSO -- listed normally from now on");
+                }
+                else if (CanMakeCurrent && m.ConsumeReadyToStart() && MakeCurrent(m))
+                    ArmPendingAutoStart(_smartStart);
+            }
+        }
+
+        // ── Smart Mode's waiting list (operator, 2026-10-02) ───────────────────────────────────
+
+        // Another station picked while Smart Mode already has one: watched alongside it.
+        private void AddSmartStation(string call, EnqueueDecodeMessage dmsg)
+        {
+            int max = SmartModeMaxStations;
+            if (SmartStationCount >= max)
+            {
+                if (!string.Equals(_smartFullRefused, call, StringComparison.OrdinalIgnoreCase))
+                    StatusView.ShowMessage(Wording.Fill("Msg.SmartListFull",
+                        ("Call", SC(call)), ("Count", SmartStationCount.ToString())), false);
+                _smartFullRefused = call;
+                return;
+            }
+            _smartFullRefused = null;
+            _smartEscapeTookOne = false;
+            var m = new TargetMonitor(TargetPurpose.SmartStart)
+            {
+                SilenceThreshold = ctrl.smartStartSilencePeriods,
+                BusySilenceThreshold = ctrl.smartStartBusyQuietPeriods,
+            };
+            m.Observed += HandleTargetObservation;
+            _smartMore.Add(m);
+            m.Start(call, CurrentBandStr, mode, _directExpectedSessionToken);   // "Also waiting for ..."
+            DebugOutput($"{Time()} [SMART] {call} added to the waiting list ({SmartStationCount} waiting)");
+            _smartStartSeeding = true;
+            try { m.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall); }
+            finally { _smartStartSeeding = false; }
+            TakeOffListForSmartMode(call);
+            if (CanMakeCurrent && m.ConsumeReadyToStart() && MakeCurrent(m))
+                ArmPendingAutoStart(_smartStart);
+        }
+
+        // A station Smart Mode takes leaves the list at once (operator, 2026-10-02): kept there it
+        // was counted again in the summary ("1 new DXCC" for 9H5TB, already waited for) and could
+        // be picked twice. CallQueueStore keeps it out while Smart Mode has it; it is listed
+        // normally again once Smart Mode lets it go. The status line is refreshed so the summary
+        // is the truth now.
+        private void TakeOffListForSmartMode(string call)
+        {
+            if (!callQueue.Contains(call)) return;
+            _callQueueStore.RemoveCall(call);
+            ShowStatus();
+        }
+
+        // Nothing is being worked or called, and no start is about to go out.
+        private bool CanMakeCurrent => callInProg == null && !_smartStart.AwaitingEngagement && _pendingAutoStart == null;
+
+        // Makes `m` the station worked first; the one it replaces goes back on the list in
+        // picked order. False when a QSO or a call is under way.
+        private bool MakeCurrent(TargetMonitor m)
+        {
+            if (ReferenceEquals(m, _smartStart)) return true;
+            if (!CanMakeCurrent) return false;
+            int i = _smartMore.IndexOf(m);
+            if (i < 0) return false;
+            _smartMore.RemoveAt(i);
+            if (_smartStart.IsActive)
+            {
+                _smartMore.Add(_smartStart);
+                _smartMore.Sort((a, b) => a.ArmedAtUtc.CompareTo(b.ArmedAtUtc));
+            }
+            _smartStart = m;
+            DebugOutput($"{Time()} [SMART] {m.TargetCall} is free first -- working it now{(_smartMore.Count > 0 ? "; still waiting for " + string.Join(", ", _smartMore.Select(x => x.TargetCall)) : "")}");
+            return true;
+        }
+
+        // The current station is done (worked, given up, taken off): the next one on the list
+        // becomes current once no QSO is running. Its own monitor already has all it has seen.
+        private void PromoteNextIfIdle()
+        {
+            if (_smartStart.IsActive || _smartMore.Count == 0 || callInProg != null) return;
+            _smartStart = _smartMore[0];
+            _smartMore.RemoveAt(0);
+            DebugOutput($"{Time()} [SMART] now working toward {_smartStart.TargetCall}{(_smartMore.Count > 0 ? "; also waiting for " + string.Join(", ", _smartMore.Select(x => x.TargetCall)) : "")}");
+            if (CanMakeCurrent && _smartStart.ConsumeReadyToStart()) ArmPendingAutoStart(_smartStart);
+        }
+
+        private void DropSmartStation(TargetMonitor m, string why)
+        {
+            DebugOutput($"{Time()} [SMART] {m.TargetCall} off the waiting list: {why}");
+            m.Stop(announce: false);
+            _smartMore.Remove(m);
+        }
+
+        private void StopSmartMore()
+        {
+            foreach (var m in _smartMore) m.Stop(announce: false);
+            _smartMore.Clear();
+            _smartFullRefused = null;
+        }
+
+        // Escape with more than one station going (operator, 2026-10-02): the first Escape stops
+        // only the station being worked -- a QSO with someone else, or Smart Mode's current
+        // station -- and the rest of Smart Mode's list keeps waiting; the next Escape stops it
+        // all (the caller then does the ordinary full Escape). False = do the full Escape now.
+        public bool EscapeOneStation(out string stopped, out string stillWaiting)
+        {
+            stopped = null;
+            stillWaiting = null;
+            bool otherQso = callInProg != null && !IsSmartModeWaitingOn(callInProg);
+            int smart = SmartStationCount;
+            if (_smartEscapeTookOne || smart == 0 || (smart == 1 && !otherQso)) return false;
+            if (otherQso)
+            {
+                stopped = callInProg;
+                RequeueAbortedCall();
+                CancelQso();
+                HaltAndDisableTx();
+            }
+            else
+            {
+                if (!_smartStart.IsActive) PromoteNextIfIdle();
+                stopped = _smartStart.TargetCall;
+                ClearPendingAutoStart();
+                _smartStart.Stop(announce: false);   // off the list first, so a requeue lists it normally
+                if (string.Equals(callInProg, stopped, StringComparison.OrdinalIgnoreCase))
+                {
+                    RequeueAbortedCall();
+                    CancelQso();
+                    HaltAndDisableTx();
+                }
+                PromoteNextIfIdle();
+            }
+            _smartEscapeTookOne = true;
+            stillWaiting = string.Join(", ", new[] { _smartStart }.Concat(_smartMore)
+                .Where(m => m.IsActive).Select(m => SC(m.TargetCall)));
+            DebugOutput($"{Time()} [SMART] Escape: {stopped} stopped; still waiting for {stillWaiting}");
+            stopped = SC(stopped);
+            return true;
         }
 
         // N4BP live-radio audit -- fix 4. The target addressed OUR callsign with a mid-exchange
@@ -485,6 +677,7 @@ namespace WSJTX_Controller
             HaltAndDisableTx();     // HALT_TX + SET_TX_ENABLED 0
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
+            ShowStatus();   // the line held to be spoken ("Sending ...") is replaced by the truth now
             // Hearing the target working another station is presence, not silence -- it does NOT
             // count against the consecutive target-not-heard limit (TargetMonitor already reset
             // that streak the moment this busy decode was ingested). Jimmy just yields and stays
@@ -516,7 +709,8 @@ namespace WSJTX_Controller
                 HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
             }
             _smartStart.Stop(announce: false);
-            StatusView.ShowMessage(Wording.Fill("Msg.SmartModeNotHeard", ("Call", SC(target)), ("Count", limit.ToString())), true);
+            PromoteNextIfIdle();
+            SayStationLeftSmartMode("Msg.SmartDroppedNotHeard", "Msg.SmartModeNotHeard", ("Call", SC(target)), ("Count", limit.ToString()));
         }
 
         // Operator request (2026-09-13): an absolute wall-clock backstop, independent of both the
@@ -540,9 +734,10 @@ namespace WSJTX_Controller
                 HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
             }
             _smartStart.Stop(announce: false);
+            PromoteNextIfIdle();
             string minuteWord = Wording.Get(limitMinutes == 1 ? "Msg.MinuteOne" : "Msg.MinuteMany");
-            StatusView.ShowMessage(
-                Wording.Fill("Msg.SmartModeTimeLimit", ("Minutes", limitMinutes.ToString()), ("MinuteWord", minuteWord), ("Call", SC(target))), true);
+            SayStationLeftSmartMode("Msg.SmartDroppedTimeLimit", "Msg.SmartModeTimeLimit",
+                ("Minutes", limitMinutes.ToString()), ("MinuteWord", minuteWord), ("Call", SC(target)));
         }
 
         // The Smart Start Repeat Limit -- (int)ctrl.timeoutNumUpDown.Value, the operator's own
@@ -568,9 +763,10 @@ namespace WSJTX_Controller
                 HaltAndDisableTx();                         // HALT_TX + SET_TX_ENABLED 0
             }
             _smartStart.Stop(announce: false);
+            PromoteNextIfIdle();
             // Concise terminal message so the operator knows the effort ended on the Repeat
             // Limit (counted calling overs only), distinct from the busy-churn stop above.
-            StatusView.ShowMessage(Wording.Fill("Msg.RepeatLimit", ("Count", limit.ToString()), ("Call", SC(target))), true);
+            SayStationLeftSmartMode("Msg.SmartDroppedRepeatLimit", "Msg.RepeatLimit", ("Count", limit.ToString()), ("Call", SC(target)));
         }
 
         // Called once per real, completed receive-period boundary (the exact same signal
@@ -582,20 +778,39 @@ namespace WSJTX_Controller
             // OpportunitiesSinceLiveEvidence) -- it just never signals an automatic start.
             if (_stationWatch.IsActive)
                 _stationWatch.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
-            if (!_smartStart.IsActive) return;
-            // Operator-configurable wall-clock backstop (2026-09-13) -- checked BEFORE the
-            // ordinary readiness machinery below, and regardless of AwaitingEngagement, so it is
-            // an absolute limit on the whole effort, not just the waiting phase. 0 = no limit.
-            if (_smartStart.ExceedsTimeLimit(DateTime.UtcNow, ctrl.smartStartTimeLimitMinutes))
+            PromoteNextIfIdle();
+            if (_smartStart.IsActive)
             {
-                SmartStartTimeLimitReached();
-                return;
+                // Operator-configurable wall-clock backstop (2026-09-13) -- checked BEFORE the
+                // ordinary readiness machinery below, and regardless of AwaitingEngagement, so it is
+                // an absolute limit on the whole effort, not just the waiting phase. 0 = no limit.
+                if (_smartStart.ExceedsTimeLimit(DateTime.UtcNow, ctrl.smartStartTimeLimitMinutes))
+                    SmartStartTimeLimitReached();
+                else
+                {
+                    _smartStart.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
+                    // While awaiting engagement (already calling) the readiness machinery is dormant --
+                    // OnReceivePeriodComplete won't SignalReady, but gate the consume too for clarity.
+                    if (!_smartStart.AwaitingEngagement && _smartStart.ConsumeReadyToStart())
+                        ArmPendingAutoStart(_smartStart);
+                }
             }
-            _smartStart.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
-            // While awaiting engagement (already calling) the readiness machinery is dormant --
-            // OnReceivePeriodComplete won't SignalReady, but gate the consume too for clarity.
-            if (!_smartStart.AwaitingEngagement && _smartStart.ConsumeReadyToStart())
-                ArmPendingAutoStart(_smartStart);
+            // The others on the list: same time limit and readiness, after the current one.
+            foreach (var m in _smartMore.ToArray())
+            {
+                if (m.ExceedsTimeLimit(DateTime.UtcNow, ctrl.smartStartTimeLimitMinutes))
+                {
+                    int limitMinutes = ctrl.smartStartTimeLimitMinutes;
+                    string target = m.TargetCall;
+                    DropSmartStation(m, $"time limit ({limitMinutes} min)");
+                    SayStationLeftSmartMode("Msg.SmartDroppedTimeLimit", "Msg.SmartModeTimeLimit", ("Minutes", limitMinutes.ToString()),
+                        ("MinuteWord", Wording.Get(limitMinutes == 1 ? "Msg.MinuteOne" : "Msg.MinuteMany")), ("Call", SC(target)));
+                    continue;
+                }
+                m.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
+                if (CanMakeCurrent && m.ConsumeReadyToStart() && MakeCurrent(m))
+                    ArmPendingAutoStart(_smartStart);
+            }
         }
 
         // Band or mode change, or a full session reset (ResetBandSession -- see its own comment):
@@ -610,6 +825,7 @@ namespace WSJTX_Controller
                 Notify?.SetStationWatchActive(false);
             }
             _smartStart.Stop(announce: false);
+            StopSmartMore();
         }
 
         // Escape / Alt+H: cancel any pending automatic start, but do NOT stop a receive-only
@@ -622,13 +838,15 @@ namespace WSJTX_Controller
             ClearPendingAutoStart();
             _stationWatch.CancelPendingStart();
             _smartStart.Stop(announce: false);
+            StopSmartMore();
+            _smartEscapeTookOne = false;
         }
 
         // N4BP live-radio audit -- fix 6. Escape / Alt+H (Controller.cs) capture this BEFORE
         // AbortContact() so, when nothing was transmitting (the Smart-Start-only-waiting case),
         // it can still give a short "Smart Mode stopped" confirmation -- the "Tx halted"
         // announcement is gated on HasActiveTxOrCycle, which is false while merely waiting.
-        public bool SmartStartActive => _smartStart.IsActive || _pendingAutoStart != null;
+        public bool SmartStartActive => _smartStart.IsActive || _pendingAutoStart != null || _smartMore.Count > 0;
         public string SmartStartTarget => _smartStart.TargetCall;
 
         // CAT loss / TX disabled: Smart Start becomes non-actionable and its silence count resets;
@@ -637,6 +855,7 @@ namespace WSJTX_Controller
         {
             ClearPendingAutoStart();
             _smartStart.OnSmartStartNonActionable();
+            foreach (var m in _smartMore) m.OnSmartStartNonActionable();
         }
 
         // ── Deferred auto-start (snapshot-finality guard) ───────────────────────────────────────
@@ -753,6 +972,9 @@ namespace WSJTX_Controller
             {
                 if (obs.Purpose == TargetPurpose.StationWatch)
                     Notify?.Publish(new StationWatchLifecycleEvent(NotificationEventType.StationWatchStarted, SC(obs.Target)));
+                else if (IsOtherSmartStation(obs.Target))
+                    StatusView.ShowMessage(Wording.Fill("Msg.SmartAlsoWaiting",
+                        ("Call", SC(obs.Target)), ("Count", SmartStationCount.ToString())), false);
                 else
                     Notify?.Publish(new SmartStartArmedEvent(SC(obs.Target), _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
                 return;
@@ -767,7 +989,8 @@ namespace WSJTX_Controller
             // ── Smart Start: the small decision-support narration subset ───────────────────────
             if (obs.Purpose == TargetPurpose.SmartStart)
             {
-                HandleSmartStartObservation(obs);
+                // The others on Smart Mode's list are watched quietly (operator, 2026-10-02).
+                if (!IsOtherSmartStation(obs.Target)) HandleSmartStartObservation(obs);
                 return;
             }
 
@@ -796,6 +1019,10 @@ namespace WSJTX_Controller
             if (isRepeat) phrase = RepeatPhrase.Mark(phrase, SC(obs.Target), Wording.Get("Msg.Still"));
             Notify?.Publish(new StationWatchActivityEvent(phrase, SC(obs.Target), SC(obs.Peer), obs.Value, obs.Kind.ToString()));
         }
+
+        // On Smart Mode's list but not the station being worked first.
+        private bool IsOtherSmartStation(string target) =>
+            !(_smartStart.IsActive && string.Equals(_smartStart.TargetCall, target, StringComparison.OrdinalIgnoreCase));
 
         // The ONE gate Smart Start, Station Watch, and the ordinary callInProg path (WsjtxClient.
         // cs's ProcessDecodeMsg) all submit the identical structured fact through, keyed on target
@@ -854,11 +1081,12 @@ namespace WSJTX_Controller
             if (_smartStart.IsActive && !_smartStart.AwaitingEngagement)
             {
                 string call = SC(_smartStart.TargetCall);
+                string more = _smartMore.Count > 0 ? ", " + Wording.Fill("Status.SmartMore", ("Count", _smartMore.Count.ToString())) : "";
                 if (_smartStart.BusyWithOther && !string.IsNullOrEmpty(_smartStart.ApparentPeer))
-                    return Wording.Fill("Status.SmartBusy", ("Call", call), ("Peer", SC(_smartStart.ApparentPeer)));
+                    return Wording.Fill("Status.SmartBusy", ("Call", call), ("Peer", SC(_smartStart.ApparentPeer))) + more;
                 if (_smartStart.SilenceCount > 0)
-                    return Wording.Fill("Status.SmartQuiet", ("Call", call));
-                return Wording.Fill("Status.SmartWaiting", ("Call", call));
+                    return Wording.Fill("Status.SmartQuiet", ("Call", call)) + more;
+                return Wording.Fill("Status.SmartWaiting", ("Call", call)) + more;
             }
             if (_stationWatch.IsActive)
                 return Wording.Fill("Status.Watching", ("Call", SC(_stationWatch.TargetCall)));

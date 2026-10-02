@@ -1374,11 +1374,12 @@ namespace WSJTX_Controller
             RequeueAbortedCall();
             CancelQso();
             HaltAndDisableTx();
+            ShowStatus();   // the line held to be spoken ("Sending ...") is replaced by the truth now
 
             if (resumeSmartStart)
                 ResumeSmartStartAfterHandoffYield(partner, carriedCallCount);
             else
-                StatusView.ShowMessage(Wording.Fill("Msg.PartnerWorkingOther", ("Call", partner), ("Other", other)), true);
+                StatusView.ShowMessage(Wording.Fill("Msg.PartnerWorkingOther", ("Call", SC(partner)), ("Other", SC(other))), true);
         }
 
         public bool EnableMode()              //cq/listen mode selected
@@ -2227,7 +2228,7 @@ namespace WSJTX_Controller
                 DebugOutput($"{spacer}prevTo:{prevTo} maxTo:{maxTo}");
                 if (!(idSem.Is73 || idSem.IsRr73) && !idSem.IsRrr && prevTo >= maxTo)        //trouble finishing signal report(s)
                 {
-                    StatusView.ShowMessage(Wording.Fill("Msg.BlockingTemporarily", ("Call", deCall)), false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.BlockingTemporarily", ("Call", SC(deCall))), false);
                     DebugOutput($"{spacer}ignoring call, prevTo:{prevTo} restartQueue:{restartQueue}");
                     tmpBlock = true;
                 }
@@ -2245,7 +2246,7 @@ namespace WSJTX_Controller
 
                 if (IsBlocked(deCall) || tmpBlock)
                 {
-                    StatusView.ShowMessage(Wording.Fill("Msg.IsBlocked", ("Call", deCall)), false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.IsBlocked", ("Call", SC(deCall))), false);
                     if (debugDetail) DebugOutput($"{spacer}{deCall} ignored, blocked");
                     return;
                 }
@@ -2276,7 +2277,7 @@ namespace WSJTX_Controller
                     && !(idSem.Is73 || idSem.IsRr73)
                     )
                 {
-                    StatusView.ShowMessage(Wording.Fill("Msg.IgnoredNotDx", ("Call", deCall)), false);
+                    StatusView.ShowMessage(Wording.Fill("Msg.IgnoredNotDx", ("Call", SC(deCall))), false);
                     DebugOutput($"{spacer}{deCall} ignored, DX only");
                     return;
                 }
@@ -2388,7 +2389,11 @@ namespace WSJTX_Controller
 
                                 if (isCorrectTimePeriod)
                                 {
-                                    _callQueueStore.AddCall(deCall, dmsg);
+                                    // No station sound for a reply from the station already being
+                                    // worked (operator, 2026-10-02: OM3DX's "-02" played the new-DXCC
+                                    // crow mid-QSO, SP1TJ's grid the trumpet) -- that sound said "new
+                                    // station" when it was first found; QSO replies are spoken.
+                                    _callQueueStore.AddCall(deCall, dmsg, playSounds: deCall != callInProg);
 
                                     if ((txEnabled && txMode == TxModes.LISTEN) || (!cqPaused && txMode == TxModes.CALL_CQ))
                                     {
@@ -3465,7 +3470,7 @@ namespace WSJTX_Controller
             if (idx < 0)
             {
                 DebugOutput($"{spacer}NextCall aborted: selected call no longer in queue");
-                StatusView.ShowMessage(expectedCall != null ? Wording.Fill("Msg.NoLongerAvailable", ("Call", expectedCall)) : Wording.Get("Msg.NoCallSelected"), false);
+                StatusView.ShowMessage(expectedCall != null ? Wording.Fill("Msg.NoLongerAvailable", ("Call", SC(expectedCall))) : Wording.Get("Msg.NoCallSelected"), false);
                 return;
             }
 
@@ -3483,9 +3488,9 @@ namespace WSJTX_Controller
                     // Smart QSO Start (2.0.63): an operator's own Enter press ("operatorSelected"
                     // -- never an internal auto-dispatch) is captured instead of replied to
                     // immediately when the setting is on. Nothing below this (TX-period halting,
-                    // discard timers, ShowStatus) applies to a pure capture -- the call stays
-                    // exactly where it was, untouched, until TargetMonitor itself decides to
-                    // request the real reply through this same path later.
+                    // discard timers, ShowStatus) applies to a pure capture. The call leaves the
+                    // list (2026-10-02) -- Smart Mode replies later from its own saved decode
+                    // (RequestTargetMonitorStart -> ReplyTo), never from the list.
                     if (operatorSelected && ctrl.smartQsoStartEnabled && TryCaptureSmartStart(call, dmsg))
                         return;
 
@@ -3562,7 +3567,7 @@ namespace WSJTX_Controller
                     ClearCallTimeout(call);
 
                     UpdateDebug();
-                    if (!confirm) StatusView.ShowMessage(Wording.Fill(cqPaused ? "Msg.ReplyingNext" : "Msg.Replying", ("Call", call)), ctrl.soundEnabled_CallAdded);
+                    if (!confirm) StatusView.ShowMessage(Wording.Fill(cqPaused ? "Msg.ReplyingNext" : "Msg.Replying", ("Call", SC(call))), ctrl.soundEnabled_CallAdded);
                     return;
                 }
                 return;
@@ -4545,6 +4550,10 @@ namespace WSJTX_Controller
                 xmitCycleCount = 0;
                 timedOutCall = null;
                 UpdateDebug();
+                // The status line is the truth the moment a call starts (operator, 2026-10-02): a
+                // Smart Mode start did not refresh it, so a receive summary held for the end of the
+                // period still counted the station just called ("1 new DXCC on band" for SV9QWC).
+                ShowStatus();
             });
             DebugOutput($"{Time()} >>>>>Sent Reply (direct) nCall:'{nCall}' msg:'{dmsg.Message}'");
         }
