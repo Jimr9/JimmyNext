@@ -1,3 +1,42 @@
+# Jimmy Next (next version) — release notes (draft, not yet published)
+
+## Notifications you can trust
+
+- **The status line is always what is true now.** Something just announced shows there at once,
+  so you can read it back, then gives way to the current status at the next update. Nothing old
+  is left standing (a stale "1 wanted", or "Smart Mode is on, no target" after you picked a station).
+- **After you choose a station, the first thing you hear is the news** ("Waiting to work K1ABC"),
+  never the old status line.
+- **Smart Mode and Station Watch say "not heard" once**, not two messages every period with a
+  confusing "3 of 1". With *Repeat unchanged station progress each period* on, a repeat says
+  "still" ("K1ABC still not heard", "K1ABC still working K2XYZ"); off, only changes are spoken.
+- **A computer clock out of sync stays at the front of the status line until it is fixed**
+  (*Keep on the status line until fixed*).
+- **Calling CQ summary:** while you call CQ, the receive summary has its own wording — by default
+  only who is calling you.
+- **QSO started can name the station's facts:** country, grid, new DXCC, new grid, POTA, SOTA,
+  wanted list, or an award you track.
+- **In a QSO, say what I received together with what I send, at transmit start** (Options,
+  Notifications): one sentence instead of one cutting off the other.
+- Advanced layout with *Keep transmit list during transmit* off: the emptied transmit side no
+  longer produces a "0" summary.
+
+## Logbook Center
+
+- **Awards and Still Need are one page:** arrow through the awards to see any one; Space tracks
+  it live; Band and Show (Everything / Still needed only) choose the view. If an award can't be
+  tracked live, the reason is spoken.
+- **Bulk edit is fast and runs in the background** (hundreds of contacts in seconds), and can
+  change **every contact found**, not only the 500 shown.
+- Contest exchanges (Field Day "2A NL" and the like) show in the Logbook Center again.
+
+## Operating
+
+- **Raw Decodes:** Enter or a double-click calls any station, as in WSJT-X; the status line says
+  why when it can't.
+- **Smart Mode quiet periods after busy:** how long to wait after the target was heard working
+  someone else.
+
 # Jimmy Next 2.0.81 — release notes
 
 - **Send a support report straight to KB0UZT.** Create Support Report (in Help) has a new

@@ -280,6 +280,13 @@ namespace WSJTX_Controller
         // "say it again immediately if it changed, never repeat it verbatim."
         public bool SuppressUnchanged { get; set; } = false;
 
+        // 2026-10-02 (operator): a problem that is a lasting STATE, not a one-off -- shown at the
+        // front of the status line until its "fixed" notification arrives, so the line reads true
+        // while it lasts. Offered only where nothing else already keeps it on the line (the clock;
+        // CAT and engine loss are part of the routine line itself). Persisted as
+        // notifyStayOnStatusLine_{Type}.
+        public bool StayOnStatusLine { get; set; } = false;
+
         public NotificationPolicy Clone() => new NotificationPolicy
         {
             Enabled = Enabled,
@@ -294,6 +301,7 @@ namespace WSJTX_Controller
             Timing = Timing,
             DeferWhileTransmitting = DeferWhileTransmitting,
             SuppressUnchanged = SuppressUnchanged,
+            StayOnStatusLine = StayOnStatusLine,
         };
     }
 }

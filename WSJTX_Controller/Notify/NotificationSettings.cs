@@ -66,6 +66,13 @@ namespace WSJTX_Controller
         // ClearReceiveCycleSummaryWhenEmpty above).
         public bool RepeatUnchangedTargetActivityEachPeriod { get; set; } = true;
 
+        // 2026-10-02 (operator): during a QSO, what was just received ("received R -12", "logged")
+        // is said together with what Jimmy sends next, as one sentence when the transmission
+        // starts -- instead of the receive line being cut off by the transmit line. When no
+        // transmission follows, it is still said (at the next receive cycle, or when the QSO ends).
+        // Default off: nothing changes for a profile that never sets it.
+        public bool JoinReplyWithTransmit { get; set; } = false;
+
         // Notification-joining support (2026-09-11): the order in which the joinable categories
         // (NotificationCenter.WatchEventTypes, plus AwardsNeeded and the RoutineStatusLine
         // pseudo-category) compose into one utterance when more than one lands in the same
@@ -172,6 +179,11 @@ namespace WSJTX_Controller
                     policy.ThrottleMilliseconds = throttleMs;
 
                 string template = ini.Read($"notifyTemplate_{type}");
+
+                // 2026-10-02: a saved copy of the WSJT-X-era "connection lost" wording is the old
+                // default, not the operator's choice -- the engine is Jimmy Next's own now.
+                if (type == NotificationEventType.ConnectionLost && template == "WSJT-X disconnected")
+                    template = null;
 
                 // 2026-09-05 split migration: a saved copy of the PRE-split "Receive cycle
                 // summary" default (which carried the state verb {Status} and the mode
@@ -294,6 +306,8 @@ namespace WSJTX_Controller
 
                 if (ini.KeyExists($"notifySuppressUnchanged_{type}"))
                     policy.SuppressUnchanged = ini.Read($"notifySuppressUnchanged_{type}") == "True";
+                if (ini.KeyExists($"notifyStayOnStatusLine_{type}"))
+                    policy.StayOnStatusLine = ini.Read($"notifyStayOnStatusLine_{type}") == "True";
 
                 // 2026-09-09: the per-notification status-area delivery choice. Missing /
                 // unparseable -> the code default (Normal), so a pre-2026-09-09 INI is unchanged.
@@ -337,6 +351,9 @@ namespace WSJTX_Controller
             RepeatUnchangedTargetActivityEachPeriod =
                 !ini.KeyExists("notifyRepeatUnchangedTargetActivityEachPeriod")
                 || ini.Read("notifyRepeatUnchangedTargetActivityEachPeriod") == "True";
+
+            // Default false (missing key).
+            JoinReplyWithTransmit = ini.Read("notifyJoinReplyWithTransmit") == "True";
 
             // Notification join order (2026-09-11): a missing/empty key merges to
             // DefaultJoinOrder verbatim (OrderedListMigration.Merge's own empty-saved-list rule).
@@ -388,6 +405,7 @@ namespace WSJTX_Controller
                 ini.Write($"notifyTiming_{type}", policy.Timing.ToString());
                 ini.Write($"notifyDeferWhileTx_{type}", policy.DeferWhileTransmitting.ToString());
                 ini.Write($"notifySuppressUnchanged_{type}", policy.SuppressUnchanged.ToString());
+                ini.Write($"notifyStayOnStatusLine_{type}", policy.StayOnStatusLine.ToString());
                 ini.Write($"notifyStatusDelivery_{type}", policy.StatusDelivery.ToString());
             }
 
@@ -395,6 +413,7 @@ namespace WSJTX_Controller
             ini.Write("notifyReceiveCountScope", ReceiveCountScope.ToString());
             ini.Write("notifyClearReceiveCycleSummaryWhenEmpty", ClearReceiveCycleSummaryWhenEmpty.ToString());
             ini.Write("notifyRepeatUnchangedTargetActivityEachPeriod", RepeatUnchangedTargetActivityEachPeriod.ToString());
+            ini.Write("notifyJoinReplyWithTransmit", JoinReplyWithTransmit.ToString());
             ini.Write("notificationJoinOrder", string.Join(",", NotificationJoinOrder));
         }
     }

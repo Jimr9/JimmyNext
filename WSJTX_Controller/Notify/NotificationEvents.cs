@@ -76,11 +76,30 @@ namespace WSJTX_Controller
         public NotificationEventType EventType => NotificationEventType.QsoStarted;
         public string DedupKey => Callsign;
 
+        // Station facts (2026-10-02) -- WsjtxClient.QsoStartedFacts fills them on the status line;
+        // here they are the same keys, for the Options field list and preview.
+        public string Country { get; set; } = "";
+        public string Grid { get; set; } = "";
+        public string NewDxcc { get; set; } = "";
+        public string NewGrid { get; set; } = "";
+        public string Pota { get; set; } = "";
+        public string Sota { get; set; } = "";
+        public string AlwaysWanted { get; set; } = "";
+        public string Awards { get; set; } = "";
+
         public IReadOnlyDictionary<string, string> ToTokens() => new Dictionary<string, string>
         {
             ["Callsign"] = Callsign,
             ["Band"] = Band,
             ["Mode"] = Mode,
+            ["Country"] = Country,
+            ["Grid"] = Grid,
+            ["NewDxcc"] = NewDxcc,
+            ["NewGrid"] = NewGrid,
+            ["Pota"] = Pota,
+            ["Sota"] = Sota,
+            ["AlwaysWanted"] = AlwaysWanted,
+            ["Awards"] = Awards,
         };
     }
 
@@ -436,12 +455,31 @@ namespace WSJTX_Controller
     // DedupKey folds in the peer so the line re-announces each time the target turns to a NEW
     // station (naturally the right cadence in FT8 and FT4 alike), while several decodes for the
     // SAME peer in one exchange still collapse via RepeatSeconds.
+    // Marks a station fact as a repeat: "K1ABC working K2XYZ." -> "K1ABC still working K2XYZ."
+    // Only when the phrase opens with the station's call -- anything else is left as it is.
+    public static class RepeatPhrase
+    {
+        public static string Mark(string phrase, string target, string stillWord)
+        {
+            if (string.IsNullOrEmpty(phrase) || string.IsNullOrEmpty(target) || string.IsNullOrEmpty(stillWord)) return phrase;
+            if (!phrase.StartsWith(target + " ", System.StringComparison.Ordinal)) return phrase;
+            return target + " " + stillWord + " " + phrase.Substring(target.Length + 1);
+        }
+    }
+
     public sealed class SmartStartTargetBusyEvent : ISmartStartCorrelatedEvent
     {
         public string Target { get; }
         public string Peer { get; }
         public string Report { get; }
-        public string Phrase { get; }
+        public string Phrase { get; private set; }
+
+        // A repeated, unchanged fact (operator, 2026-10-02): "K1ABC still working K2XYZ".
+        public SmartStartTargetBusyEvent AsRepeat(string stillWord)
+        {
+            Phrase = RepeatPhrase.Mark(Phrase, Target, stillWord);
+            return this;
+        }
         public int ArmGeneration { get; private set; }
         public int StateSeq { get; private set; }
         public SmartStartGroup Group => SmartStartGroup.Observation;

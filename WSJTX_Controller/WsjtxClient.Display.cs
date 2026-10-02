@@ -791,6 +791,33 @@ namespace WSJTX_Controller
         private readonly Dictionary<NotificationEventType, string> _clauseTextsThisRender
             = new Dictionary<NotificationEventType, string>();
 
+        // The facts "QSO started" can say about the station being worked -- the same tests the
+        // receive summary counts by (priority, classification, POTA/SOTA, award tag), so the two
+        // never disagree. Each "comma" field is ", <fact>" when true and "" when not.
+        internal (string Country, string Grid, string NewDxcc, string NewGrid, string Pota, string Sota,
+            string AlwaysWanted, string Awards) QsoStartedFacts(string call)
+        {
+            EnqueueDecodeMessage d = null;
+            if (!string.IsNullOrEmpty(call)) callDict.TryGetValue(call, out d);
+            if (d == null && replyDecode != null
+                && string.Equals(replyDecode.EffectiveSemantic(myCall).From, call, StringComparison.OrdinalIgnoreCase))
+                d = replyDecode;
+            if (d == null) return ("", "", "", "", "", "", "", "");
+            string F(string key) => ", " + Wording.Get(key);
+            var cls = d.EffectiveClassification();
+            string grid = d.EffectiveSemantic(myCall).Grid;
+            string newDxcc = d.Priority == (int)CallPriority.NEW_COUNTRY ? F("Fact.NewDxcc")
+                : d.Priority == (int)CallPriority.NEW_COUNTRY_ON_BAND ? F("Fact.NewDxccOnBand") : "";
+            string newGrid = cls.IsNewGrid ? F("Fact.NewGrid") : cls.IsNewGridOnBand ? F("Fact.NewGridOnBand") : "";
+            string pota = (d.Category == CallCategory.POTA || IsPotaCall(d)) ? F("Fact.Pota") : "";
+            string sota = (d.Category == CallCategory.SOTA || _awardTagger.IsSotaCall(d)) ? F("Fact.Sota") : "";
+            string always = d.Category == CallCategory.ALWAYS_WANTED ? F("Fact.AlwaysWanted") : "";
+            string tag = (d.Category == CallCategory.STILL_NEEDED || d.Category == CallCategory.STILL_UNCONFIRMED)
+                ? _awardTagger.CategoryTag(d) : "";
+            return (cls.Country ?? "", string.IsNullOrEmpty(grid) ? "" : DisplayGrid(grid, ctrl.spaceCallsignsAndGrids),
+                newDxcc, newGrid, pota, sota, always, string.IsNullOrEmpty(tag) ? "" : ", " + tag);
+        }
+
         // A routine-status wording clause (ReceiveCycleSummary / QsoStarted / QsoCompleted /
         // TxMessageChanged / ReceivedReply / NoDecodeWarning): returns the policy's Template
         // formatted with `tokens` when the row is Enabled, or null when it is disabled (caller
@@ -1253,6 +1280,13 @@ namespace WSJTX_Controller
                                 bool sideEnabled = currentSideIsTx1 ? ctrl.advShowTx1 : ctrl.advShowTx2;
                                 if (sideEnabled) foreach (var vc in sideCalls) visibleCalls.Add(vc);
                             }
+                            // Advanced layout, "Keep transmit list during transmit" off (operator,
+                            // 2026-10-02): the side we transmit on is held EMPTY (ShowAdvancedQueue's
+                            // _evenSideHeld/_oddSideHeld latch), so a summary for it would only be a
+                            // stale or "0" non-fact -- none is said or shown. When that side really
+                            // receives again (a fresh decode lifts the hold) it works as configured.
+                            bool currentSideBlanked = ctrl.advancedCallLayout && !ctrl.keepTransmitListDuringTx
+                                && (currentSideIsTx1 ? (txFirst && _evenSideHeld) : (!txFirst && _oddSideHeld));
 
                             int n = SnapshotPriorityCount(CallPriority.TO_MYCALL, visibleCalls);
                             EnqueueDecodeMessage dmsg = new EnqueueDecodeMessage();
@@ -1286,8 +1320,12 @@ namespace WSJTX_Controller
 
                             // {Wanted} (directed CQs): a POTA/SOTA CQ is not counted twice when the
                             // summary also says {Pota}/{Sota}.
+                            // Calling CQ (operator, 2026-10-02): its own summary wording -- by
+                            // default only who is calling you, not the listening counts.
+                            var summaryType = (txMode == TxModes.CALL_CQ && !cqPaused)
+                                ? NotificationEventType.ReceiveCycleSummaryCq : NotificationEventType.ReceiveCycleSummary;
                             string summaryTemplate = ctrl.Notifications?.Policies != null
-                                && ctrl.Notifications.Policies.TryGetValue(NotificationEventType.ReceiveCycleSummary, out var summaryPolicy)
+                                && ctrl.Notifications.Policies.TryGetValue(summaryType, out var summaryPolicy)
                                 ? summaryPolicy.Template ?? "" : "";
                             bool potaSaid = summaryTemplate.Contains("{Pota}"), sotaSaid = summaryTemplate.Contains("{Sota}");
                             n = SnapshotCount(d => d.Priority == (int)CallPriority.WANTED_CQ
@@ -1330,22 +1368,24 @@ namespace WSJTX_Controller
                             // not applicable (simple layout has no side name).
                             bool receiveSummaryAllowed = (!transmitting || !ctrl.suppressReceiveNotificationsDuringTx)
                                 && callInProg == null
-                                && !(justStoppedTransmitting && displayedCount == 0);
+                                && !(justStoppedTransmitting && displayedCount == 0)
+                                && !currentSideBlanked;
                             // During a QSO (operator, 2026-10-01): the summary's station FACTS (new DXCC,
                             // POTA, calling you... whatever the operator's own template names) still
                             // show, so a sound always has its words on the status line -- but never the
                             // "N available stations" count or the side name, the noise the 2026-08-07
                             // rule removed. Whether it is SPOKEN follows the row's own during-QSO setting.
                             bool qsoFactsOnly = callInProg != null
-                                && (!transmitting || !ctrl.suppressReceiveNotificationsDuringTx);
+                                && (!transmitting || !ctrl.suppressReceiveNotificationsDuringTx)
+                                && !currentSideBlanked;
 
                             string sideIdClause = (receiveSummaryAllowed && sideIdScopeOk && sideName != "")
                                 ? (RoutineClause(NotificationEventType.ReceiveSideId, ("Side", sideName)) ?? "")
                                 : "";
 
                             string countClause = ((receiveSummaryAllowed || qsoFactsOnly) && countScopeOk
-                                    && RoutineClauseEnabled(NotificationEventType.ReceiveCycleSummary))
-                                ? (RoutineClause(NotificationEventType.ReceiveCycleSummary,
+                                    && RoutineClauseEnabled(summaryType))
+                                ? (RoutineClause(summaryType,
                                        ("AvailableCount", qsoFactsOnly ? "" : countText),
                                        ("Stations", qsoFactsOnly ? "" : callsStr),
                                        ("NewGrid", grid),
@@ -1835,10 +1875,17 @@ namespace WSJTX_Controller
                                     // disabling the row genuinely removes the QSO-start clause.
                                     // The render then falls through to the normal progress line
                                     // below, which still shows the station being worked.
+                                    // Station facts (operator, 2026-10-02): what is known about the
+                                    // station being worked, each an optional template field.
+                                    var facts = QsoStartedFacts(callInProg);
                                     status = RoutineClause(NotificationEventType.QsoStarted,
                                                  ("Callsign", DisplayCallsign(callInProg, ctrl.spaceCallsignsAndGrids)),
                                                  ("Band", bandIdx != null ? $"{bands[(int)bandIdx]}m" : ""),
-                                                 ("Mode", mode ?? "")) ?? "";
+                                                 ("Mode", mode ?? ""),
+                                                 ("Country", facts.Country), ("Grid", facts.Grid),
+                                                 ("NewDxcc", facts.NewDxcc), ("NewGrid", facts.NewGrid),
+                                                 ("Pota", facts.Pota), ("Sota", facts.Sota),
+                                                 ("AlwaysWanted", facts.AlwaysWanted), ("Awards", facts.Awards)) ?? "";
                                 }
                                 else if (catDownIdle)
                                 {
@@ -1988,6 +2035,21 @@ namespace WSJTX_Controller
                         ? SpeakWhen.AfterRx : ctrl.routineStatusSpeakWhen;
 
                 var fragments = BuildRoutineFragments(statusForSpeech, baseWhen, ctrl.routineStatusCondition);
+
+                // "Join what I received with what I send" (operator, 2026-10-02): in a QSO with
+                // transmit on, the whole QSO line waits for the transmission and is said once then
+                // -- "VE6KIX, received R -17, sending RR73." -- the newest line at that moment.
+                // SpeechCoordinator says it anyway if no transmission follows (QSO end / fallback).
+                if (ctrl.Notifications?.JoinReplyWithTransmit == true && callInProg != null && txEnabled
+                    && !string.IsNullOrEmpty(statusForSpeech))
+                    fragments = new[]
+                    {
+                        new RoutineFragment
+                        {
+                            Key = "_base", Order = 0, Text = statusForSpeech, When = SpeakWhen.TxStart,
+                            Condition = ctrl.routineStatusCondition, Sticky = false, TxStartJoin = true,
+                        },
+                    };
 
                 // suppressRoutineSpeechThisRender: a render that only re-states a persistent
                 // condition the edge-triggered notifications already speak (CAT link down while

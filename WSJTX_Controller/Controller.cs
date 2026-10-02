@@ -4158,26 +4158,33 @@ namespace WSJTX_Controller
         private string _lastAnnouncedStatusText;
         private DateTime _lastAnnouncedStatusTime = DateTime.MinValue;
 
-        // 2026-09-10: the exact text the idle Receive cycle summary render most recently wrote to
-        // statusText, or null if the currently-displayed text did not come from that render (a
-        // QSO/CAT/error/upload/Smart Start/Station Watch line, a direct operator-feedback message,
-        // or nothing has been shown yet). Set ONLY inside the `speakable` branch below, and only
-        // when isReceiveCycleSummaryRender is true -- any other kind of real status write (a
-        // different ShowStatus branch, or ANY of Controller/WsjtxClient's other direct
-        // `statusText.Text =` sites) naturally makes this null on its next real render, since
-        // those all pass isReceiveCycleSummaryRender:false (the interface's own default). This is
-        // what lets a later empty summary render tell "the box still shows exactly what I last
-        // wrote" from "something newer has replaced it" -- see ShouldClearStaleReceiveCycleSummary.
-        private string _lastReceiveCycleSummaryText;
-        // Speech experiment: the routine line as last written to the box (see RenderStatusVisible).
-        private string _lastRoutineShownText;
+        // ── The status box: always the truth right now (operator, 2026-10-02) ────────────────────
+        // Three sources, one rule:
+        //   * the ROUTINE line (ShowStatus -> RenderStatusVisible) is what is true now;
+        //   * a NOTIFICATION / message (CoordinatedSpeak) shows the moment it is said -- so what
+        //     was just heard can be read back -- and gives way to the routine line at the first
+        //     routine update at least TransientMinMs later;
+        //   * a lasting PROBLEM (SetStatusProblem -- the clock) sits at the front of the routine
+        //     line until it is fixed. It is not repeated inside notifications, so it is not heard
+        //     before every sentence.
+        // An empty routine line blanks the box when "Clear the display when this summary becomes
+        // empty" is on (ShouldClearStaleReceiveCycleSummary); otherwise the last real routine line
+        // stays, as it always did. This replaces the speech experiment's "an unchanged routine
+        // line never re-writes the box" rule, which left notifications up long after they
+        // stopped being true (I1RJP, 2026-10-01: "Smart Mode is on, no target" read after Enter).
+        internal const int TransientMinMs = 2500;
+        // Test seam: the clock the transient rule reads (milliseconds, monotonic).
+        internal Func<long> StatusClockMs = () => Environment.TickCount64;
+        private string _routineLine = "";          // what the box shows when nothing else does
+        private string _transientText;             // a notification/message just said, or null
+        private long _transientAtMs;
+        private readonly List<KeyValuePair<string, string>> _statusProblems = new List<KeyValuePair<string, string>>();
 
-        // Item 1/2 split, 2026-09-03: this is now VISIBLE + HISTORY only -- it never nudges the
-        // screen reader. WsjtxClient.ShowStatus() calls this every time (so the on-screen status
-        // is always live) and separately hands the text to SpeechCoordinator.SubmitRoutineStatus,
-        // which owns the WHEN of speech and drives CoordinatedSpeak() below. Returns whether
-        // Jimmy is really foregrounded/focused right now, for the coordinator's "would this have
-        // been spoken now" hint.
+        // Item 1/2 split, 2026-09-03: VISIBLE + HISTORY only -- it never nudges the screen reader.
+        // WsjtxClient.ShowStatus() calls this every time and separately hands the text to the
+        // SpeechCoordinator, which owns the WHEN of speech and drives CoordinatedSpeak() below.
+        // Returns whether Jimmy is really foregrounded/focused right now, for the coordinator's
+        // "would this have been spoken now" hint.
         public bool RenderStatusVisible(string headingText, string statusText, Color foreColor, Color backColor,
             bool isReceiveCycleSummaryRender = false)
         {
@@ -4186,68 +4193,85 @@ namespace WSJTX_Controller
             statusHeadingLabel.Text = headingText;
             this.statusText.AccessibleName = headingText;
 
-            // A routine render can compose to no words at all -- e.g. the operator disabled the
-            // "Receive or transmit state" / "Operating mode announcement" / "Receive cycle
-            // summary" clauses, so NormalizeStatusLine (WsjtxClient.Display.cs) collapsed the
-            // whole line to "". Writing that would BLANK the visible status box; a screen-reader
-            // user returns to this control specifically to re-read the LAST real message. So a
-            // wordless render leaves the previous text AND its colours untouched -- matching the
-            // pre-redesign behaviour where the box always kept the last non-empty line. Speech is
-            // unaffected: SpeechCoordinator already discards a wordless routine line, and
-            // ShowStatus still composes/submits its fragments independently of this method.
-            //
-            // 2026-09-10 exception, opt-in and default off (Options > Notifications > Receive
-            // cycle summary > "Clear previous summary when it becomes empty"): when THIS wordless
-            // render is specifically the idle Receive-cycle-summary lifecycle, the box is still
-            // showing exactly what that same lifecycle last wrote (nothing newer has replaced it),
-            // and the summary itself is a genuinely live, currently-enabled, field-driven
-            // template (not disabled, not a fields-free literal) -- clear the stale text instead
-            // of leaving it. No speech (this method never speaks), no Notification History entry
-            // (the RecordRoutineStatus call below is reached only from the `speakable` branch).
             if (WsjtxClient.HasSpeakableContent(statusText))
             {
                 this.statusText.ForeColor = foreColor;
                 this.statusText.BackColor = backColor;
-                // Speech experiment: new routine news shows the moment it happens (the operator
-                // hears a sound and reads it), but an UNCHANGED routine line no longer re-writes the
-                // box every render -- that wiped a message just heard. A spoken (joined) utterance
-                // still replaces it (CoordinatedSpeak), so reading back matches what was heard.
-                if (!queueSpeechExperiment) this.statusText.Text = statusText;
-                else if (statusText != _lastRoutineShownText)
-                {
-                    this.statusText.Text = statusText;
-                    _lastRoutineShownText = statusText;
-                }
-                this.statusText.SelectionStart = 0;
-                this.statusText.SelectionLength = 0;
-                _lastReceiveCycleSummaryText = isReceiveCycleSummaryRender ? statusText : null;
+                _routineLine = statusText;
 
                 // 2.0.58 Notification History: the routine status render path -- recorded HERE,
-                // immediately and independent of whether/when the line is spoken. Opt-in (default
-                // on for the testing phase) and deduplicated on change inside RecordRoutineStatus
-                // (called with identical text every poll tick; the history must not fill with dups).
+                // immediately and independent of whether/when the line is spoken. Deduplicated on
+                // change inside RecordRoutineStatus (called with identical text every poll tick).
                 if (notificationHistoryIncludeRoutineStatus)
                     NotificationHistory?.RecordRoutineStatus(statusText);
             }
-            // With the speech experiment on, the box may hold the summary as SPOKEN (", 1 wanted."
-            // spoken as "1 wanted.", written back by CoordinatedSpeak), so the two are compared
-            // with their joining punctuation set aside (SameStatusWords) -- this used to be skipped
-            // for the experiment altogether, leaving a stale "1 wanted" up for minutes (operator,
-            // 2026-10-01). A joined utterance carrying other news is never equal, so it is never
-            // cleared: only a box still showing nothing but that summary is.
-            else if (isReceiveCycleSummaryRender
-                && _lastReceiveCycleSummaryText != null
-                && SameStatusWords(this.statusText.Text, _lastReceiveCycleSummaryText)
-                && ShouldClearStaleReceiveCycleSummary())
-            {
-                this.statusText.Text = "";
-                this.statusText.SelectionStart = 0;
-                this.statusText.SelectionLength = 0;
-                _lastReceiveCycleSummaryText = null;
-                _lastRoutineShownText = null;   // the same summary coming back is shown again
-            }
+            // A wordless routine render (every clause disabled or nothing to report) keeps the
+            // last real line -- a screen-reader user comes back to re-read it -- unless the
+            // operator chose to clear an emptied summary (opt-in, enabled, field-driven template).
+            else if (isReceiveCycleSummaryRender && ShouldClearStaleReceiveCycleSummary())
+                _routineLine = "";
+
+            // A notification just said stays readable for a moment, then the truth returns.
+            if (_transientText != null && StatusClockMs() - _transientAtMs >= TransientMinMs)
+                _transientText = null;
+            RefreshStatusBox();
 
             return this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
+        }
+
+        // A lasting problem shown at the front of the routine line until it is fixed (text null =
+        // fixed). Keyed, so one problem is shown once however often it is reported.
+        public void SetStatusProblem(string key, string text)
+        {
+            int i = _statusProblems.FindIndex(kv => kv.Key == key);
+            if (string.IsNullOrEmpty(text)) { if (i >= 0) _statusProblems.RemoveAt(i); }
+            else if (i >= 0) _statusProblems[i] = new KeyValuePair<string, string>(key, text);
+            else _statusProblems.Add(new KeyValuePair<string, string>(key, text));
+            RefreshStatusBox();
+        }
+
+        // A message gives way to the truth even when no routine update follows (a long transmit
+        // over renders nothing new): a one-shot timer ends it TransientMinMs after it was shown.
+        private System.Windows.Forms.Timer _transientExpiryTimer;
+        private void StartTransientExpiry()
+        {
+            if (_transientExpiryTimer == null)
+            {
+                _transientExpiryTimer = new System.Windows.Forms.Timer { Interval = TransientMinMs };
+                _transientExpiryTimer.Tick += (s, e) =>
+                {
+                    _transientExpiryTimer.Stop();
+                    if (_transientText != null && StatusClockMs() - _transientAtMs >= TransientMinMs)
+                    {
+                        _transientText = null;
+                        RefreshStatusBox();
+                    }
+                    else if (_transientText != null)
+                        StartTransientExpiry();   // a newer message arrived meanwhile -- wait for it
+                };
+            }
+            _transientExpiryTimer.Stop();
+            long left = _transientText == null ? TransientMinMs : TransientMinMs - (StatusClockMs() - _transientAtMs);
+            _transientExpiryTimer.Interval = (int)Math.Max(50, Math.Min(TransientMinMs, left));
+            _transientExpiryTimer.Start();
+        }
+
+        // What the box shows: the notification just said, else the problems + the routine line.
+        private void RefreshStatusBox()
+        {
+            string text = _transientText;
+            if (text == null)
+            {
+                var parts = _statusProblems.Select(kv => kv.Value).ToList();
+                if (!string.IsNullOrEmpty(_routineLine)) parts.Add(_routineLine);
+                text = string.Join(" ", parts);
+            }
+            if (this.statusText.Text != text)
+            {
+                this.statusText.Text = text;
+                this.statusText.SelectionStart = 0;
+                this.statusText.SelectionLength = 0;
+            }
         }
 
         // The new clear-when-empty option only ever engages for a genuinely live, currently
@@ -4296,11 +4320,14 @@ namespace WSJTX_Controller
             // "clear a stale summary" writes still go straight to statusText, unaffected -- this
             // guard is scoped to the ONE nudge seam every spoken path shares.
             if (string.IsNullOrEmpty(text)) return;
-            if (this.statusText.Text != text)
+            // What is said shows at once, so it can be read back (see RefreshStatusBox). A
+            // deliberate repeat / focus read IS the box's own text -- not a new message.
+            if (!isDeliberateRepeat && this.statusText.Text != text)
             {
-                this.statusText.Text = text;
-                this.statusText.SelectionStart = 0;
-                this.statusText.SelectionLength = 0;
+                _transientText = text;
+                _transientAtMs = StatusClockMs();
+                RefreshStatusBox();
+                StartTransientExpiry();
             }
             // Real OS foreground state, not just the two WinForms-internal properties -- see
             // ShowMsg's own comment for the 2026-08-19 root cause (SendKeys.Send targets whatever
@@ -6606,7 +6633,32 @@ namespace WSJTX_Controller
             // if the status text has not genuinely changed yet, nothing extra is said; the real
             // narration still announces normally, on its own, once it arrives.
             if (sendReadNudge && (Control.ModifierKeys & (Keys.Control | Keys.Shift | Keys.Alt)) == Keys.None)
-                BeginInvoke((Action)(() => CoordinatedSpeak(statusText.Text)));
+                ReadStatusAfterSelection();
+        }
+
+        // I1RJP (2026-10-01): reading the box the instant focus lands read the OLD line ("Smart Mode
+        // is on, no target") 11 ms after Enter, and the real news ("Waiting to work I1RJP") came
+        // 100 ms later -- the selection's own announcement is collected for a moment so related
+        // facts join. So the read waits FocusReadDelayMs: if anything was announced meanwhile, that
+        // news WAS the answer and nothing more is said; otherwise the (current) box is read.
+        internal const int FocusReadDelayMs = 400;
+        private System.Windows.Forms.Timer _focusReadTimer;
+        private void ReadStatusAfterSelection()
+        {
+            DateTime announcedBefore = _lastAnnouncedStatusTime;
+            _focusReadTimer?.Stop();
+            _focusReadTimer?.Dispose();
+            _focusReadTimer = new System.Windows.Forms.Timer { Interval = FocusReadDelayMs };
+            _focusReadTimer.Tick += (s, e) =>
+            {
+                var t = (System.Windows.Forms.Timer)s;
+                t.Stop();
+                t.Dispose();
+                if (ReferenceEquals(_focusReadTimer, t)) _focusReadTimer = null;
+                if (_lastAnnouncedStatusTime != announcedBefore) return;   // the news already spoke
+                CoordinatedSpeak(statusText.Text);
+            };
+            _focusReadTimer.Start();
         }
 
         private void statusText_TextChanged(object sender, EventArgs e)

@@ -78,6 +78,12 @@ namespace WSJTX_Controller
             catch { return new Dictionary<string, string>(); }
         }
 
+        // The Calling CQ summary offers exactly the receive summary's fields.
+        static NotificationVariableRegistry()
+        {
+            ByEventType[NotificationEventType.ReceiveCycleSummaryCq] = ByEventType[NotificationEventType.ReceiveCycleSummary];
+        }
+
         private static readonly Dictionary<NotificationEventType, List<NotificationVariable>> ByEventType =
             new Dictionary<NotificationEventType, List<NotificationVariable>>
         {
@@ -120,6 +126,14 @@ namespace WSJTX_Controller
                 new NotificationVariable("Callsign", "The station you're now working."),
                 new NotificationVariable("Band", "The band you're operating on, e.g. 20m."),
                 new NotificationVariable("Mode", "FT8 or FT4."),
+                new NotificationVariable("Country", "The station's country, when known, otherwise empty."),
+                new NotificationVariable("Grid", "The grid the station sent, otherwise empty."),
+                new NotificationVariable("NewDxcc", "\", new DXCC\" or \", new DXCC on band\" when it is, otherwise empty."),
+                new NotificationVariable("NewGrid", "\", new grid\" or \", new grid on band\" when it is, otherwise empty."),
+                new NotificationVariable("Pota", "\", POTA\" when the station is a POTA activator, otherwise empty."),
+                new NotificationVariable("Sota", "\", SOTA\" when the station is a SOTA activator, otherwise empty."),
+                new NotificationVariable("AlwaysWanted", "\", on wanted list\" when the station is on your wanted-calls list, otherwise empty."),
+                new NotificationVariable("Awards", "\", <award>\" when the station is needed for an award you track, otherwise empty."),
             },
             [NotificationEventType.QsoCompleted] = new List<NotificationVariable>
             {

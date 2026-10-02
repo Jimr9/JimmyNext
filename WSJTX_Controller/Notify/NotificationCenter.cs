@@ -65,9 +65,25 @@ namespace WSJTX_Controller
         public void UpdateJoinOrder(System.Collections.Generic.IReadOnlyList<NotificationEventType> order) =>
             _coordinator.UpdateJoinOrder(order);
 
+        // 2026-10-02 (operator): a problem that is a lasting state stays at the front of the status
+        // line until its "fixed" event (StayOnStatusLine). Wired by WsjtxClient to
+        // IJimmyStatusView.SetStatusProblem: (key, text) shows it, (key, null) clears it.
+        public Action<string, string> StatusProblemChanged;
+
+        // Problem event -> the event that says it is fixed.
+        internal static readonly Dictionary<NotificationEventType, NotificationEventType> ProblemResolvedBy =
+            new Dictionary<NotificationEventType, NotificationEventType>
+            {
+                [NotificationEventType.ClockOutOfSync] = NotificationEventType.ClockSynced,
+            };
+
         public void Publish(INotificationEvent evt)
         {
             if (evt == null) return;
+            // A "fixed" event clears its problem from the status line even when the operator has
+            // turned the spoken "fixed" notice off -- the line must not keep saying a fixed problem.
+            foreach (var kv in ProblemResolvedBy)
+                if (kv.Value == evt.EventType) StatusProblemChanged?.Invoke(kv.Key.ToString(), null);
             if (!_settings.Policies.TryGetValue(evt.EventType, out NotificationPolicy policy)) return;
             if (!policy.Enabled) return;
             // Time/count-based dedup and throttle run BEFORE any formatting -- an event this gate
@@ -129,6 +145,9 @@ namespace WSJTX_Controller
             NotificationVariableRegistry.AddUniversal(tokens);   // {Time} and the live limits/counters
             string text = NotificationTemplateEngine.Format(policy.Template, tokens);
             if (string.IsNullOrEmpty(text)) return;
+
+            if (ProblemResolvedBy.ContainsKey(evt.EventType))
+                StatusProblemChanged?.Invoke(evt.EventType.ToString(), policy.StayOnStatusLine ? text : null);
 
             if (policy.SuppressUnchanged && _dedupThrottle.IsUnchanged(evt.EventType, evt.DedupKey, text))
                 return;   // identical to the last thing actually said for this identity -- stay quiet, don't touch RecordFired/RecordText either

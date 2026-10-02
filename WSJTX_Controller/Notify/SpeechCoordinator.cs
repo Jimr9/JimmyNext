@@ -88,6 +88,10 @@ namespace WSJTX_Controller
         // received reply, no-decode): a held copy is dropped the moment a render omits it, so a
         // stale snapshot is never spoken.
         public bool Sticky;
+        // "Join what I received with what I send" (operator, 2026-10-02): this QSO line waits for
+        // the transmission to start and is said then, as one sentence with what is being sent.
+        // If no transmission follows it is still said -- see SpeechCoordinator.JoinFallbackMs.
+        public bool TxStartJoin;
     }
 
     // Which of two INDEPENDENT correlation groups a Smart Start lifecycle event belongs to -- see
@@ -216,6 +220,8 @@ namespace WSJTX_Controller
             public int Order;              // routine only -- composition order
             public bool Sticky;            // routine only -- survive an absent render
             public bool IsBase;            // routine only -- a "_base.*" structural skeleton span
+            public bool TxStartJoin;       // routine only -- see RoutineFragment.TxStartJoin
+            public long HeldAtMs;          // routine only -- when this key was first held (TxStartJoin fallback)
             public NotificationEventType EventType;   // notifications only -- for reconciliation
 
             // Notifications only. True for a Station Watch/Smart Start event -- bypasses the
@@ -282,6 +288,19 @@ namespace WSJTX_Controller
         private readonly Action<string> _logDiagnostic;
         private long _nextBatchId;
         private long _openBatchId;
+
+        // ── Transmit-start join (2026-10-02) ──────────────────────────────────────────────────
+        // The radio's TX rising edge arrives BEFORE the status render that carries "Sending ...",
+        // so a join done at the edge itself would still be two sentences. With a TxStartJoin line
+        // held, the edge opens a short window instead: the next routine render (normally the same
+        // poll) replaces the held line with the newest one and speaks it once -- or, if no render
+        // comes, the window's own timer speaks what is held.
+        internal const int TxStartJoinWindowMs = 400;
+        // A held join line whose transmission never came is said anyway: when the QSO ends, or at
+        // a receive cycle at least this long after it was first held.
+        internal const int JoinFallbackMs = 4000;
+        private bool _txStartJoinOpen;
+        private object _txStartJoinToken;
 
         public SpeechCoordinator(Action<string, AlertCue> speak, INowBatchScheduler scheduler, IMonotonicClock clock,
             Action<string> logDiagnostic = null)
@@ -840,6 +859,25 @@ namespace WSJTX_Controller
                     (drop ?? (drop = new List<string>())).Add(kv.Key);
             if (drop != null) foreach (var k in drop) _pendingRoutine.Remove(k);
 
+            // A transmission just started and a join line is waiting: this render IS the line to
+            // say -- hold it (newest wins) and speak the transmit-start join now.
+            if (_txStartJoinOpen)
+            {
+                foreach (var f in fragments)
+                {
+                    if (f == null || string.IsNullOrEmpty(f.Text)) continue;
+                    if (f.When == SpeakWhen.Never || f.Condition == SpeakCondition.Never) continue;
+                    _pendingRoutine[f.Key ?? ""] = new Pending
+                    {
+                        Text = f.Text, Cue = AlertCue.None, When = SpeakWhen.TxStart, Condition = f.Condition,
+                        Order = f.Order, Sticky = f.Sticky, IsBase = (f.Key ?? "").StartsWith("_base", StringComparison.Ordinal),
+                        RenderedWhileTx = _physicallyTransmitting, TxStartJoin = true, HeldAtMs = _clock.ElapsedMilliseconds,
+                    };
+                }
+                FinishTxStartJoin("render");
+                return;
+            }
+
             var nowBatch = new List<Pending>();
             foreach (var f in fragments)
             {
@@ -860,6 +898,9 @@ namespace WSJTX_Controller
                     Sticky = f.Sticky,
                     IsBase = key.StartsWith("_base", StringComparison.Ordinal),
                     RenderedWhileTx = _physicallyTransmitting,
+                    TxStartJoin = f.TxStartJoin,
+                    HeldAtMs = _pendingRoutine.TryGetValue(key, out var held) && held.TxStartJoin
+                        ? held.HeldAtMs : _clock.ElapsedMilliseconds,
                 };
                 if (f.When == SpeakWhen.Now || IsTimingAlreadySatisfied(f.When))
                 {
@@ -963,7 +1004,16 @@ namespace WSJTX_Controller
             if (rising)
             {
                 DropRoutineIf(p => p.When == SpeakWhen.AfterRx || p.When == SpeakWhen.RxStart);
-                ReconcileAndFlush("TxStart", p => p.When == SpeakWhen.TxStart, p => p.When == SpeakWhen.TxStart);
+                if (_pendingRoutine.Values.Any(p => p.TxStartJoin && p.When == SpeakWhen.TxStart))
+                {
+                    // Wait for this transmission's own status render (see TxStartJoinWindowMs).
+                    _txStartJoinOpen = true;
+                    if (_txStartJoinToken != null) _scheduler.Cancel(_txStartJoinToken);
+                    var token = _scheduler.Schedule(TxStartJoinWindowMs, () => FinishTxStartJoin("window-timer"));
+                    _txStartJoinToken = _txStartJoinOpen ? token : null;
+                }
+                else
+                    ReconcileAndFlush("TxStart", p => p.When == SpeakWhen.TxStart, p => p.When == SpeakWhen.TxStart);
             }
             else if (falling)
             {
@@ -996,7 +1046,23 @@ namespace WSJTX_Controller
                 DropRoutineIf(p => p.When == SpeakWhen.AfterRx);
                 return;
             }
-            ReconcileAndFlush("AfterRx", p => p.When == SpeakWhen.AfterRx, p => p.When == SpeakWhen.AfterRx);
+            long now = _clock.ElapsedMilliseconds;
+            ReconcileAndFlush("AfterRx",
+                p => p.When == SpeakWhen.AfterRx || IsOverdueJoin(p, now),
+                p => p.When == SpeakWhen.AfterRx);
+        }
+
+        // A transmit-start join line held so long that its transmission is not coming.
+        private static bool IsOverdueJoin(Pending p, long now) =>
+            p.TxStartJoin && p.When == SpeakWhen.TxStart && now - p.HeldAtMs >= JoinFallbackMs;
+
+        private void FinishTxStartJoin(string reason)
+        {
+            if (_txStartJoinToken != null) { _scheduler.Cancel(_txStartJoinToken); _txStartJoinToken = null; }
+            if (!_txStartJoinOpen) return;
+            _txStartJoinOpen = false;
+            _logDiagnostic($"[TXSTART-JOIN] reason={reason} T={_clock.ElapsedMilliseconds}ms");
+            ReconcileAndFlush("TxStart", p => p.When == SpeakWhen.TxStart, p => p.When == SpeakWhen.TxStart);
         }
 
         // callInProg became null / non-null.
@@ -1006,7 +1072,9 @@ namespace WSJTX_Controller
             _qsoActive = active;
             if (!ending) return;
             if (_physicallyTransmitting) return;   // TX falling edge owns the release instead
-            ReconcileAndFlush("AfterQso", p => p.When == SpeakWhen.AfterQso, p => p.When == SpeakWhen.AfterQso);
+            ReconcileAndFlush("AfterQso",
+                p => p.When == SpeakWhen.AfterQso || (p.TxStartJoin && p.When == SpeakWhen.TxStart),
+                p => p.When == SpeakWhen.AfterQso);
         }
 
         // ── Boundary reconciliation (2026-09-11) ────────────────────────────────────────────────

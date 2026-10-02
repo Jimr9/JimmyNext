@@ -1423,6 +1423,7 @@ static class JimmyTests
         SpaceCallsignsAndGridsTests();
         AutoLoggedReportsAndQsoCompletedTokensTests();
         ClearStaleReceiveCycleSummaryTests();
+        NotificationAccuracyTests();
         LogbookDbUploadSyncStatusTests();
         RigctldClientListRigModelsTests();
         RigctldClientBoundedReadTests();
@@ -13571,6 +13572,136 @@ static class JimmyTests
     // directly with its new isReceiveCycleSummaryRender parameter -- the exact same seam
     // RenderStatusVisibleKeepsLastOnEmptyTests uses for the ordinary keep-last behaviour above,
     // so this proves the new option coexists with it rather than replacing it.
+    // ── 2026-10-02 notification accuracy (operator's plan): the status line is always the truth,
+    // a lasting problem stays on it until fixed, the QSO line joins at transmit start (and is
+    // still said when no transmission comes), and a repeated station fact says "still". ──
+    static void NotificationAccuracyTests()
+    {
+        Console.WriteLine("\n── Notification accuracy: status truth, lasting problems, transmit-start join, repeats ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_NotifyAccuracy_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevDb = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            var c1 = System.Drawing.Color.Black; var c2 = System.Drawing.Color.Yellow;
+
+            // 1. The status box: what was said shows at once, the truth returns after it.
+            {
+                var ctrl = new Controller();
+                long t = 1000;
+                ctrl.StatusClockMs = () => t;
+                ctrl.RenderStatusVisible("20m FT8", "1 wanted.", c1, c2, isReceiveCycleSummaryRender: true);
+                ctrl.CoordinatedSpeak("K 2 N K P not heard.");
+                CheckStr("1a: a notification shows the moment it is said", ctrl.statusText.Text, "K 2 N K P not heard.");
+                t += 1000;
+                ctrl.RenderStatusVisible("20m FT8", "1 wanted.", c1, c2, isReceiveCycleSummaryRender: true);
+                CheckStr("1b: ...and stays readable for a moment", ctrl.statusText.Text, "K 2 N K P not heard.");
+                t += Controller.TransientMinMs;
+                ctrl.RenderStatusVisible("20m FT8", "2 wanted.", c1, c2, isReceiveCycleSummaryRender: true);
+                CheckStr("1c: then the next update shows what is true now", ctrl.statusText.Text, "2 wanted.");
+                ctrl.CoordinatedSpeak(ctrl.statusText.Text, isDeliberateRepeat: true);
+                CheckStr("1d: reading the box back is not a new message", ctrl.statusText.Text, "2 wanted.");
+
+                // A lasting problem: in front of the routine line, never inside notifications.
+                ctrl.SetStatusProblem("ClockOutOfSync", "Clock off.");
+                CheckStr("1e: a lasting problem leads the status line", ctrl.statusText.Text, "Clock off. 2 wanted.");
+                ctrl.CoordinatedSpeak("Working K 1 A B C.");
+                CheckStr("1f: a notification is shown (and read) without the problem", ctrl.statusText.Text, "Working K 1 A B C.");
+                t += Controller.TransientMinMs;
+                ctrl.RenderStatusVisible("20m FT8", "2 wanted.", c1, c2, isReceiveCycleSummaryRender: true);
+                CheckStr("1g: the problem is back in front once the message gives way", ctrl.statusText.Text, "Clock off. 2 wanted.");
+                ctrl.SetStatusProblem("ClockOutOfSync", null);
+                CheckStr("1h: fixed: the problem leaves the line", ctrl.statusText.Text, "2 wanted.");
+            }
+
+            // 2. The clock problem through NotificationCenter -- the "fixed" event clears it even
+            //    when its own spoken notice is turned off.
+            {
+                var settings = new NotificationSettings();
+                var center = NewTestNotificationCenter(settings, new FakeNotificationDelivery());
+                var calls = new List<(string key, string text)>();
+                center.StatusProblemChanged = (k, x) => calls.Add((k, x));
+                center.Publish(new ClockOutOfSyncEvent(2.5, "FT8"));
+                Check("2a: clock out of sync goes onto the status line",
+                    calls.Count == 1 && calls[0].key == "ClockOutOfSync" && !string.IsNullOrEmpty(calls[0].text), true);
+                settings.Policies[NotificationEventType.ClockSynced].Enabled = false;
+                center.Publish(new ClockSyncedEvent("FT8"));
+                Check("2b: back in sync clears it, even with that notice off",
+                    calls.Count == 2 && calls[1].key == "ClockOutOfSync" && calls[1].text == null, true);
+                settings.Policies[NotificationEventType.ClockOutOfSync].StayOnStatusLine = false;
+                settings.Policies[NotificationEventType.ClockOutOfSync].RepeatSeconds = 0;
+                center.Publish(new ClockOutOfSyncEvent(9.0, "FT8"));
+                Check("2c: with \"Keep on the status line\" off it is not kept there",
+                    calls.Count == 3 && calls[2].text == null, true);
+            }
+
+            // 3. Transmit-start join: the QSO line waits for the transmission and is said ONCE, as
+            //    the newest line at that moment; with no transmission it is still said.
+            {
+                RoutineFragment Join(string text) => new RoutineFragment
+                    { Key = "_base", Order = 0, Text = text, When = SpeakWhen.TxStart, TxStartJoin = true };
+                var said = new List<string>();
+                var c = NewTestCoordinator((x, cue) => said.Add(x), out var sched);
+                c.OnQsoActiveChanged(true);
+                c.SubmitRoutineComposite(new[] { Join("K 1 A B C, received R -12.") }, speakNow: true);
+                Check("3a: held until the transmission starts", said.Count == 0, true);
+                c.OnPhysicalTxChanged(true);
+                Check("3b: not said at the TX edge itself (the line with sending comes next)", said.Count == 0, true);
+                c.SubmitRoutineComposite(new[] { Join("K 1 A B C, received R -12, sending RR73.") }, speakNow: true);
+                Check("3c: said once, joined, at transmit start",
+                    said.Count == 1 && said[0] == "K 1 A B C, received R -12, sending RR73.", true);
+                c.OnPhysicalTxChanged(false);
+
+                said.Clear();
+                c.SubmitRoutineComposite(new[] { Join("K 1 A B C, received R -12.") }, speakNow: true);
+                c.OnPhysicalTxChanged(true);
+                sched.Advance(SpeechCoordinator.TxStartJoinWindowMs);
+                Check("3d: no render at transmit start: the window says what is held",
+                    said.Count == 1 && said[0] == "K 1 A B C, received R -12.", true);
+                c.OnPhysicalTxChanged(false);
+
+                said.Clear();
+                c.SubmitRoutineComposite(new[] { Join("K 1 A B C final 73, logged.") }, speakNow: true);
+                c.OnQsoActiveChanged(false);
+                Check("3e: no transmission follows: said when the QSO ends",
+                    said.Count == 1 && said[0] == "K 1 A B C final 73, logged.", true);
+
+                said.Clear();
+                c.OnQsoActiveChanged(true);
+                c.SubmitRoutineComposite(new[] { Join("K 1 A B C, received -05.") }, speakNow: true);
+                c.OnReceiveCycleComplete();
+                Check("3f: not said early at the next decode", said.Count == 0, true);
+                sched.Advance(SpeechCoordinator.JoinFallbackMs);
+                c.OnReceiveCycleComplete();
+                Check("3g: a transmission that never comes: said at a later decode",
+                    said.Count == 1 && said[0] == "K 1 A B C, received -05.", true);
+            }
+
+            // 4. A repeated, unchanged station fact is marked "still".
+            {
+                var tracker = new TargetActivityTracker();
+                var fact = new TargetActivityFact("K1ABC", "K2XYZ", TargetObservationKind.TargetAddressingOther, "");
+                tracker.Evaluate(fact, 1, true);
+                Check("4a: the first time is news", tracker.LastWasRepeat, false);
+                tracker.Evaluate(fact, 2, true);
+                Check("4b: the same fact a period later is a repeat", tracker.LastWasRepeat, true);
+                CheckStr("4c: a repeat says still",
+                    RepeatPhrase.Mark("K 1 A B C working K 2 X Y Z.", "K 1 A B C", "still"), "K 1 A B C still working K 2 X Y Z.");
+                CheckStr("4d: a phrase not opening with the call is left alone",
+                    RepeatPhrase.Mark("K 2 X Y Z minus 5.", "K 1 A B C", "still"), "K 2 X Y Z minus 5.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NotificationAccuracyTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevDb);
+        }
+    }
+
     static void ClearStaleReceiveCycleSummaryTests()
     {
         Console.WriteLine("\n── Receive cycle summary: opt-in clear when it becomes empty ──");
@@ -13610,40 +13741,45 @@ static class JimmyTests
                     ctrl.NotificationHistory.Count == historyCountBeforeClear, true);
             }
 
-            // 11. A newer message (a QSO line, standing in for CAT/error/upload/Smart Start/
-            //     Station Watch -- all of which reach statusText through a render with
-            //     isReceiveCycleSummaryRender:false, or a direct write outside RenderStatusVisible
-            //     entirely) is never cleared by a later empty summary render.
+            // 11. (2026-10-02, the status line is always the truth) A QSO line that a later idle
+            //     summary render replaces is no longer current -- the idle render only happens
+            //     once the QSO is over -- so with the option on, an empty summary blanks it.
             {
                 var ctrl = new Controller();
                 ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
                 ctrl.RenderStatusVisible("20m FT8", "1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
                 ctrl.RenderStatusVisible("20m FT8", "Working W 1 A W, replying.", green, yellow, isReceiveCycleSummaryRender: false);
-                CheckStr("a newer QSO message replaced the summary", ctrl.statusText.Text, "Working W 1 A W, replying.");
+                CheckStr("a newer QSO line replaced the summary", ctrl.statusText.Text, "Working W 1 A W, replying.");
                 ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
-                CheckStr("a later empty summary render does NOT clear the newer QSO message",
-                    ctrl.statusText.Text, "Working W 1 A W, replying.");
+                CheckStr("the QSO is over: an empty summary render blanks the line", ctrl.statusText.Text, "");
             }
 
-            // 11b. Speech experiment on (operator, 2026-10-01: a stale "1 wanted" stayed up for
-            //      minutes): the box holds the summary as SPOKEN ("1 wanted.", written back by
-            //      CoordinatedSpeak) and is still cleared; a joined utterance with other news is not.
+            // 11b. Speech experiment on (2026-10-01: a stale "1 wanted" stayed up for minutes): what
+            //      was SAID shows at once and stays readable for TransientMinMs; the next routine
+            //      update after that shows the truth -- here nothing, so the box clears.
             {
                 var ctrl = new Controller();
+                long t = 1000;
+                ctrl.StatusClockMs = () => t;
                 ctrl.queueSpeechExperiment = true;
                 ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
                 ctrl.RenderStatusVisible("20m FT8", ", 1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
                 ctrl.CoordinatedSpeak("1 wanted.");
-                CheckStr("experiment: the box shows the spoken summary", ctrl.statusText.Text, "1 wanted.");
+                CheckStr("experiment: the box shows what was said", ctrl.statusText.Text, "1 wanted.");
+                t += Controller.TransientMinMs;
                 ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
-                CheckStr("experiment: the stale spoken summary is CLEARED once it becomes wordless", ctrl.statusText.Text, "");
+                CheckStr("experiment: the stale summary is CLEARED once it becomes wordless", ctrl.statusText.Text, "");
 
                 ctrl.RenderStatusVisible("20m FT8", ", 1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
                 CheckStr("experiment: the same summary coming back is shown again", ctrl.statusText.Text, ", 1 wanted.");
                 ctrl.CoordinatedSpeak("1 wanted. K 1 A B C calling you.");
+                t += 100;
                 ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
-                CheckStr("experiment: a joined line carrying other news is NOT cleared",
+                CheckStr("experiment: a line just said stays readable a moment",
                     ctrl.statusText.Text, "1 wanted. K 1 A B C calling you.");
+                t += Controller.TransientMinMs;
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("experiment: then the truth (nothing) replaces it", ctrl.statusText.Text, "");
             }
 
             // 12a. Disabling the event is NOT reinterpreted as "became empty this cycle" -- the
@@ -19851,6 +19987,11 @@ static class JimmyTests
                 ]
             }");
 
+            // 2026-10-02: calling CQ has its own summary (default: only who is calling you). This
+            // test is about the suppress-while-transmitting setting, so give that summary the
+            // station count it checks for.
+            ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummaryCq].Template =
+                ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template;
             ctrl.suppressReceiveNotificationsDuringTx = false;
             wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
             string textOff = fakeStatusView.LastStatusText ?? wc.TestPendingStatusText ?? "";
@@ -19868,6 +20009,8 @@ static class JimmyTests
             ctrl2.replyDxCheckBox.Checked = true;
             ctrl2.replyLocalCheckBox.Checked = true;
             ctrl2.suppressReceiveNotificationsDuringTx = true;
+            ctrl2.Notifications.Policies[NotificationEventType.ReceiveCycleSummaryCq].Template =
+                ctrl2.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template;
             var wc2 = new WsjtxClient(ctrl2, 2237, false, false, WsjtxClient.TxModes.CALL_CQ);
             WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
             wc2.cqPaused = false;

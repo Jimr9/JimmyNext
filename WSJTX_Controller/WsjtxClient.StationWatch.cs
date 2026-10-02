@@ -149,12 +149,6 @@ namespace WSJTX_Controller
         // this is idempotent -- applying it more than once to the same value is harmless.
         private string SC(string call) => DisplayCallsign(call, ctrl.spaceCallsignsAndGrids);
 
-        // Shared with HandleSmartStartObservation's SmartStartWaiting narration -- ONE place
-        // builds this phrase, so the on-demand report can never say something different from
-        // what was (or will be) actually spoken for the identical fact.
-        private static string BuildSmartStartWaitingPhrase(string target, string progress) =>
-            $"{target} not heard, {progress}.";
-
         public bool ReportSmartStartStatus()
         {
             string msg;
@@ -176,8 +170,10 @@ namespace WSJTX_Controller
                 {
                     string progress = $"{_smartStart.SilenceCount} of {_smartStart.SilenceThreshold}";
                     string spacedTarget = SC(_smartStart.TargetCall);
+                    // Plain words, not "3 of 1" (operator, 2026-10-02): how long it has been quiet.
                     var waiting = new SmartStartWaitingEvent(spacedTarget,
-                        BuildSmartStartWaitingPhrase(spacedTarget, progress), progress);
+                        Wording.Fill(_smartStart.SilenceCount == 1 ? "Msg.SmartNotHeardForOne" : "Msg.SmartNotHeardFor",
+                            ("Call", spacedTarget), ("Count", _smartStart.SilenceCount.ToString())), progress);
                     msg = RenderNotificationPhrase(NotificationEventType.SmartStartWaiting, waiting.ToTokens());
                 }
                 else
@@ -706,8 +702,15 @@ namespace WSJTX_Controller
                     Notify?.Publish(new SmartStartYieldedEvent(SC(monitor.TargetCall), monitor.ArmGeneration, monitor.AdvanceStateSeq()));
                 }
                 else
-                    Notify?.Publish(new SmartStartWaitingEvent(SC(monitor.TargetCall), why,
-                        armGeneration: monitor.ArmGeneration, stateSeq: monitor.AdvanceStateSeq()));
+                {
+                    // Stale or missing live evidence IS "not heard" to the operator -- the same one
+                    // fact, through the same once-per-period / changes-only gate.
+                    string phrase = (check == AutoStartCheck.StaleEvidence || check == AutoStartCheck.NoLiveEvidence)
+                        ? NextQuietPhrase(monitor) : why;
+                    if (phrase != null)
+                        Notify?.Publish(new SmartStartWaitingEvent(SC(monitor.TargetCall), phrase,
+                            armGeneration: monitor.ArmGeneration, stateSeq: monitor.AdvanceStateSeq()));
+                }
                 // Leave the monitor armed and watching -- a later fresh decode / cleared-busy
                 // state can still start it; it simply did not fire this time.
                 return;
@@ -783,12 +786,14 @@ namespace WSJTX_Controller
             // most one of the three ever narrates a given decode period's fact -- see
             // TargetActivityTracker.cs's own header. TargetAddressingUs is a different fact
             // entirely (the peer is US) and stays fully independent, ungated.
+            bool isRepeat = false;
             if (obs.Kind != TargetObservationKind.TargetAddressingUs
-                && !ShouldAnnounceTargetActivity(obs.Target, obs.Peer ?? "", obs.Kind, obs.Value ?? ""))
+                && !ShouldAnnounceTargetActivity(obs.Target, obs.Peer ?? "", obs.Kind, obs.Value ?? "", out isRepeat))
                 return;
 
             string phrase = BuildActivityPhrase(obs);
             if (string.IsNullOrEmpty(phrase)) return;
+            if (isRepeat) phrase = RepeatPhrase.Mark(phrase, SC(obs.Target), Wording.Get("Msg.Still"));
             Notify?.Publish(new StationWatchActivityEvent(phrase, SC(obs.Target), SC(obs.Peer), obs.Value, obs.Kind.ToString()));
         }
 
@@ -798,12 +803,52 @@ namespace WSJTX_Controller
         // exactly when the caller should still publish its OWN (context-selected) wording this
         // period; false means an identical fact already spoke this period (from any of the three
         // contexts), or "Repeat unchanged QSO activity each period" is off and nothing changed.
-        private bool ShouldAnnounceTargetActivity(string target, string peer, TargetObservationKind kind, string rawValue)
+        private bool ShouldAnnounceTargetActivity(string target, string peer, TargetObservationKind kind, string rawValue) =>
+            ShouldAnnounceTargetActivity(target, peer, kind, rawValue, out _);
+
+        private bool ShouldAnnounceTargetActivity(string target, string peer, TargetObservationKind kind, string rawValue, out bool isRepeat)
         {
+            isRepeat = false;
             if (string.IsNullOrEmpty(target)) return false;
             var fact = new TargetActivityFact(target, peer ?? "", kind, rawValue ?? "");
-            return GetActivityTracker(target).Evaluate(fact, _directLastSlotSeen,
+            var tracker = GetActivityTracker(target);
+            bool announce = tracker.Evaluate(fact, _directLastSlotSeen,
                 ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod) == TargetActivityDecision.Announce;
+            isRepeat = announce && tracker.LastWasRepeat;
+            return announce;
+        }
+
+        // ── "Not heard" narration (operator, 2026-10-02) ───────────────────────────────────────
+        // One fact, said once per period at most: the target is not being heard. It used to be two
+        // messages every period ("K2NKP not heard, 3 of 1." AND "No recent decode from K2NKP; still
+        // watching"), with a confusing count. Now: "K2NKP not heard." when the quiet starts; then,
+        // with "Repeat unchanged ... each period" on, "K2NKP still not heard." each period -- or,
+        // with it off, nothing more until something changes (heard again, called, given up). The
+        // count stays available as a field ({Progress}, {SilenceCount}) for those who want it.
+        private string _quietRunTarget;
+        private int _quietRunArm = -1;
+        private ulong _quietRunSlot = ulong.MaxValue;
+        private bool _quietRunSaid;
+
+        // The phrase to say now for "target not heard", or null when nothing should be said.
+        private string NextQuietPhrase(TargetMonitor monitor)
+        {
+            if (monitor?.TargetCall == null) return null;
+            bool sameRun = _quietRunSaid && _quietRunArm == monitor.ArmGeneration
+                && string.Equals(_quietRunTarget, monitor.TargetCall, StringComparison.OrdinalIgnoreCase);
+            if (sameRun && _quietRunSlot == _directLastSlotSeen) return null;                        // once per period
+            if (sameRun && !ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod) return null;  // changes only
+            _quietRunTarget = monitor.TargetCall;
+            _quietRunArm = monitor.ArmGeneration;
+            _quietRunSlot = _directLastSlotSeen;
+            _quietRunSaid = true;
+            return Wording.Fill(sameRun ? "Msg.SmartStillNotHeard" : "Msg.SmartNotHeard", ("Call", SC(monitor.TargetCall)));
+        }
+
+        // The target was heard: the next quiet is news again.
+        private void EndQuietRun(string target)
+        {
+            if (string.Equals(_quietRunTarget, target, StringComparison.OrdinalIgnoreCase)) _quietRunSaid = false;
         }
 
         // Smart Start's own narration -- deliberately a SUBSET of what Station Watch reports:
@@ -816,6 +861,7 @@ namespace WSJTX_Controller
         // ALSO running on the same call, so the richer Station Watch line is never doubled.
         private void HandleSmartStartObservation(TargetObservation obs)
         {
+            if (obs.Kind != TargetObservationKind.SmartStartWaiting) EndQuietRun(obs.Target);
             switch (obs.Kind)
             {
                 case TargetObservationKind.SmartStartWaiting:
@@ -824,9 +870,10 @@ namespace WSJTX_Controller
                     // guard). `obs.Value` is "1 of 2" ... "2 of 2" (the operator's own silence
                     // setting -- the final period is now narrated too, operator policy rule 6).
                     {
-                        string spacedTarget = SC(obs.Target);
+                        string phrase = NextQuietPhrase(_smartStart);
+                        if (phrase == null) return;
                         Notify?.Publish(new SmartStartWaitingEvent(
-                            spacedTarget, $"{spacedTarget} not heard, {obs.Value}.", obs.Value,
+                            SC(obs.Target), phrase, obs.Value,
                             armGeneration: _smartStart.ArmGeneration, stateSeq: _smartStart.AdvanceStateSeq()));
                     }
                     return;
@@ -868,8 +915,9 @@ namespace WSJTX_Controller
                     // ShouldAnnounceTargetActivity's own comment -- so a target that keeps CQing
                     // without hearing us, or that Station Watch/the ordinary path already
                     // narrated this period, is not re-announced.
-                    if (!ShouldAnnounceTargetActivity(obs.Target, "", TargetObservationKind.TargetCq, "")) return;
-                    Notify?.Publish(SmartStartTargetBusyEvent.Cq(SC(obs.Target), _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
+                    if (!ShouldAnnounceTargetActivity(obs.Target, "", TargetObservationKind.TargetCq, "", out bool cqRepeat)) return;
+                    var cqEvt = SmartStartTargetBusyEvent.Cq(SC(obs.Target), _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq());
+                    Notify?.Publish(cqRepeat ? cqEvt.AsRepeat(Wording.Get("Msg.Still")) : cqEvt);
                     return;
                 case TargetObservationKind.TargetAddressingOther:
                 case TargetObservationKind.TargetReport:
@@ -885,10 +933,11 @@ namespace WSJTX_Controller
                     // always re-announces, an unchanged fact repeats at most once per applicable
                     // period (or never, per the operator's setting), and Station Watch / the
                     // ordinary otherStr path never double up on the identical fact.
-                    if (!ShouldAnnounceTargetActivity(obs.Target, obs.Peer ?? "", obs.Kind, obs.Value ?? "")) return;
-                    Notify?.Publish(new SmartStartTargetBusyEvent(
+                    if (!ShouldAnnounceTargetActivity(obs.Target, obs.Peer ?? "", obs.Kind, obs.Value ?? "", out bool busyRepeat)) return;
+                    var busyEvt = new SmartStartTargetBusyEvent(
                         SC(obs.Target), SC(obs.Peer ?? ""), SpokenReport(obs.Value),
-                        _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
+                        _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq());
+                    Notify?.Publish(busyRepeat ? busyEvt.AsRepeat(Wording.Get("Msg.Still")) : busyEvt);
                     return;
             }
         }

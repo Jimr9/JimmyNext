@@ -44,6 +44,17 @@ namespace WSJTX_Controller
                 Condition = SpeakCondition.Always,
             },
 
+            // The same summary while Jimmy is calling CQ (2026-10-02, operator): by default only
+            // who is calling you -- the listening counts are not a CQ caller's news. Any summary
+            // field can be added; the timing follows ReceiveCycleSummary's.
+            [NotificationEventType.ReceiveCycleSummaryCq] = new NotificationPolicy
+            {
+                Enabled = true,
+                Template = "{ToYou}",
+                SpeakWhen = SpeakWhen.AfterRx,
+                Condition = SpeakCondition.Always,
+            },
+
             // The state verb of the idle receive line. Default template = the bare word, so it
             // composes to byte-identically today's line; Enabled=false removes "Receiving" /
             // "Transmitting" from BOTH the spoken utterance and the visible status line.
@@ -205,6 +216,8 @@ namespace WSJTX_Controller
                 Template = "Computer clock is out of sync, offset {ClockOffset} seconds.",
                 Timing = NotificationTiming.Immediate,
                 DeferWhileTransmitting = false,
+                // A lasting state: stays at the front of the status line until ClockSynced.
+                StayOnStatusLine = true,
             },
 
             // Companion recovery notice -- independently enable/disable-able (the operator
@@ -528,6 +541,7 @@ namespace WSJTX_Controller
             [NotificationEventType.SmartStartEngaged] = "Smart Mode target engaged (QSO takeover)",
             [NotificationEventType.RoutineStatusLine] = "Routine receive/transmit status",
             [NotificationEventType.OtherMessage] = "Other messages",
+            [NotificationEventType.ReceiveCycleSummaryCq] = "Calling CQ summary",
         };
     }
 }

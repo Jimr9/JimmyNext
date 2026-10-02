@@ -61,6 +61,10 @@ namespace WSJTX_Controller
         private TargetActivityFact? _lastAnnouncedFact;
         private ulong? _lastAnnouncedPeriodId;
 
+        // True when the last Announce was an unchanged fact said again (operator, 2026-10-02: a
+        // repeat is marked "still", so it is never mistaken for news).
+        public bool LastWasRepeat { get; private set; }
+
         // periodId: the completed-period identifier the observation belongs to (the engine's own
         // slot number, NOT a wall clock -- see WsjtxClient._directLastSlotSeen). repeatUnchanged:
         // the operator's "Repeat unchanged QSO activity each period" setting, read live by the
@@ -78,6 +82,7 @@ namespace WSJTX_Controller
                 // see SmartStartTargetBusy/StationWatchActivity's own policy comments).
                 _lastAnnouncedFact = fact;
                 _lastAnnouncedPeriodId = periodId;
+                LastWasRepeat = false;
                 return TargetActivityDecision.Announce;
             }
 
@@ -91,6 +96,7 @@ namespace WSJTX_Controller
 
             // A later applicable period, same unchanged fact, option enabled -- announce once more.
             _lastAnnouncedPeriodId = periodId;
+            LastWasRepeat = true;
             return TargetActivityDecision.Announce;
         }
     }

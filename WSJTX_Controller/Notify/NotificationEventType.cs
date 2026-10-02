@@ -117,5 +117,10 @@ namespace WSJTX_Controller
         // produced -- "Band changed to 40m", "Transmit slot analysis complete") when they join
         // the speech queue. Never published; its place in the join order is all it carries.
         OtherMessage,
+
+        // 2026-10-02 (operator): the receive-cycle summary while Jimmy is calling CQ -- its own
+        // wording, so a CQ caller hears what concerns the CQ (by default only who is calling) and
+        // not the listening summary. A routine clause like ReceiveCycleSummary, never published.
+        ReceiveCycleSummaryCq,
     }
 }

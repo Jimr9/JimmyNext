@@ -71,6 +71,10 @@ namespace WSJTX_Controller
         // doesn't support UIA notifications, or any other failure here, is a silent no-op, never
         // a crash or a fallback to anything that WOULD move focus/self-voice).
         void RaiseAccessibleAlert(string text);
+
+        // A lasting problem shown at the front of the status line until fixed (text null =
+        // fixed) -- see Controller.RefreshStatusBox. Default no-op for views without a box.
+        void SetStatusProblem(string key, string text) { }
     }
 
     public interface IJimmyQueueView

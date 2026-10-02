@@ -1006,6 +1006,7 @@ namespace WSJTX_Controller
                 // log every other [ANNOUNCE]/[DIRECT]/[SMART] tag already uses.
                 logDiagnostic: text => DebugOutput(text));
             Notify.Speech.JoinEverything = ctrl.queueSpeechExperiment;   // speech experiment (Controller.queueSpeechExperiment)
+            Notify.StatusProblemChanged = (key, text) => StatusView.SetStatusProblem(key, text);
             InitTargetMonitors();
             LiveQsoUploader = new LiveQsoUploadOrchestrator(
                 credentials: () => new LiveUploadCredentials

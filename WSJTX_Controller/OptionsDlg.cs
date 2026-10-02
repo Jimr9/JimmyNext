@@ -1723,6 +1723,8 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox _notifyAnnounceOffFocusCheckBox;
         private System.Windows.Forms.CheckBox _notifyRepeatUnchangedTargetActivityCheckBox;
         private System.Windows.Forms.CheckBox _notifyQueueSpeechCheckBox;
+        private System.Windows.Forms.CheckBox _notifyJoinReplyWithTransmitCheckBox;
+        private System.Windows.Forms.CheckBox _notifyStayOnStatusLineCheckBox;
         private System.Windows.Forms.NumericUpDown _notifyRepeatSecondsUpDown;
         private System.Windows.Forms.NumericUpDown _notifyThrottleMsUpDown;
         private System.Windows.Forms.CheckBox _notifySuppressUnchangedCheckBox;
@@ -1736,7 +1738,8 @@ namespace WSJTX_Controller
         // not meaningful (they are clauses of the one routine status utterance).
         private static readonly HashSet<NotificationEventType> _routineClauseTypes = new HashSet<NotificationEventType>
         {
-            NotificationEventType.ReceiveCycleSummary, NotificationEventType.ReceiveStateSummary,
+            NotificationEventType.ReceiveCycleSummary, NotificationEventType.ReceiveCycleSummaryCq,
+            NotificationEventType.ReceiveStateSummary,
             NotificationEventType.OperatingModeSummary, NotificationEventType.QsoStarted,
             NotificationEventType.QsoCompleted, NotificationEventType.TxMessageChanged,
             NotificationEventType.ReceivedReply, NotificationEventType.NoDecodeWarning,
@@ -3768,6 +3771,7 @@ namespace WSJTX_Controller
                 NotificationEventType.AutoTxResume,
                 NotificationEventType.ReceiveStateSummary,
                 NotificationEventType.ReceiveCycleSummary,
+                NotificationEventType.ReceiveCycleSummaryCq,
                 NotificationEventType.OperatingModeSummary,
                 NotificationEventType.QsoStarted,
                 NotificationEventType.QsoCompleted,
@@ -3940,6 +3944,21 @@ namespace WSJTX_Controller
                 Visible = false,
             };
             selGroup.Controls.Add(_notifyClearReceiveCycleSummaryWhenEmptyCheckBox);
+            gy += 24;
+
+            // 2026-10-02 (operator): a lasting problem stays at the front of the status line until
+            // it is fixed. Offered only for the problems nothing else keeps on the line (the clock;
+            // NotificationCenter.ProblemResolvedBy) -- shown while one of them is selected.
+            _notifyStayOnStatusLineCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "Keep on the status line until fixed",
+                AccessibleName = "Keep on the status line until fixed",
+                Location = new System.Drawing.Point(gx, gy), Size = new System.Drawing.Size(gw, 20),
+                TabIndex = tabIdx++, Font = font,
+                Visible = false,
+            };
+            _notifyStayOnStatusLineCheckBox.CheckedChanged += (s, e) => CommitNotifyCheckboxes();
+            selGroup.Controls.Add(_notifyStayOnStatusLineCheckBox);
             gy += 24;
 
             selGroup.Height = gy + 12;
@@ -4227,8 +4246,8 @@ namespace WSJTX_Controller
             // profile hears no change. Turning it off asks for change-only narration instead.
             _notifyRepeatUnchangedTargetActivityCheckBox = new System.Windows.Forms.CheckBox
             {
-                Text = "Repeat unchanged QSO activity each period",
-                AccessibleName = "Repeat unchanged QSO activity each period",
+                Text = "Repeat unchanged station progress each period (repeats say \"still\")",
+                AccessibleName = "Repeat unchanged station progress each period",
                 Location = new System.Drawing.Point(12, 184), Size = new System.Drawing.Size(W - 24, 20),
                 TabIndex = tabIdx++, Font = font,
                 Checked = ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod,
@@ -4244,6 +4263,18 @@ namespace WSJTX_Controller
                 TabIndex = tabIdx++, Font = font, Checked = ctrl.queueSpeechExperiment,
             };
             globalGroup.Controls.Add(_notifyQueueSpeechCheckBox);
+
+            // 2026-10-02 (operator): in a QSO, say what was received together with what is sent,
+            // when the transmission starts -- one sentence instead of one cutting off the other.
+            _notifyJoinReplyWithTransmitCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text = "In a QSO, say what I received together with what I send, at transmit start",
+                AccessibleName = "In a QSO, join what I received with what I send",
+                Location = new System.Drawing.Point(12, 236), Size = new System.Drawing.Size(W - 24, 20),
+                TabIndex = tabIdx++, Font = font, Checked = ctrl.Notifications.JoinReplyWithTransmit,
+            };
+            globalGroup.Controls.Add(_notifyJoinReplyWithTransmitCheckBox);
+            globalGroup.Height += 26;
             y += globalGroup.Height + 10;
 
             // ── G. Reset ────────────────────────────────────────────────────────────────────
@@ -4398,6 +4429,9 @@ namespace WSJTX_Controller
             bool isReceiveCycleSummary = has && type == NotificationEventType.ReceiveCycleSummary;
             _notifyClearReceiveCycleSummaryWhenEmptyCheckBox.Visible = isReceiveCycleSummary;
             _notifyClearReceiveCycleSummaryWhenEmptyCheckBox.Enabled = isReceiveCycleSummary;
+            bool isLastingProblem = has && NotificationCenter.ProblemResolvedBy.ContainsKey(type);
+            _notifyStayOnStatusLineCheckBox.Visible = isLastingProblem;
+            _notifyStayOnStatusLineCheckBox.Enabled = isLastingProblem;
             if (!has) { _notifyDeliveryExplainLabel.Text = ""; return; }
 
             _notifyUpdatingFields = true;
@@ -4423,6 +4457,7 @@ namespace WSJTX_Controller
                 for (int i = 0; i < _notifySpeakWhenExtraValues.Length && i < _notifySpeakWhenExtraList.Items.Count; i++)
                     _notifySpeakWhenExtraList.SetItemChecked(i, effSet.Contains(_notifySpeakWhenExtraValues[i]));
                 _notifySuppressUnchangedCheckBox.Checked = policy.SuppressUnchanged;
+                _notifyStayOnStatusLineCheckBox.Checked = policy.StayOnStatusLine;
                 _notifyRepeatSecondsUpDown.Value = System.Math.Max(_notifyRepeatSecondsUpDown.Minimum, System.Math.Min(_notifyRepeatSecondsUpDown.Maximum, policy.RepeatSeconds));
                 _notifyThrottleMsUpDown.Value = System.Math.Max(_notifyThrottleMsUpDown.Minimum, System.Math.Min(_notifyThrottleMsUpDown.Maximum, policy.ThrottleMilliseconds));
                 _notifyPriorityComboBox.SelectedIndex = (int)policy.Priority;
@@ -4667,6 +4702,7 @@ namespace WSJTX_Controller
                 ? NotificationTiming.NextPeriodBoundary : NotificationTiming.Immediate;
             policy.DeferWhileTransmitting = timing == SpeakWhen.AfterTx;
             policy.SuppressUnchanged = _notifySuppressUnchangedCheckBox.Checked;
+            if (_notifyStayOnStatusLineCheckBox.Visible) policy.StayOnStatusLine = _notifyStayOnStatusLineCheckBox.Checked;
             int pi = _notifyPriorityComboBox.SelectedIndex;
             policy.Priority = pi == 2 ? NotificationPriority.Critical
                             : pi == 1 ? NotificationPriority.Important
@@ -4764,6 +4800,7 @@ namespace WSJTX_Controller
             _suppressReceiveDuringTxCheckBox.Checked = false;
             _notifyAnnounceOffFocusCheckBox.Checked = false;
             _notifyRepeatUnchangedTargetActivityCheckBox.Checked = true;
+            _notifyJoinReplyWithTransmitCheckBox.Checked = false;
             _notifyUpdatingFields = false;
         }
 
@@ -4791,6 +4828,7 @@ namespace WSJTX_Controller
             ctrl.Notifications.ReceiveCountScope = _pendingReceiveCountScope;
             ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = _notifyClearReceiveCycleSummaryWhenEmptyCheckBox?.Checked ?? false;
             ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod = _notifyRepeatUnchangedTargetActivityCheckBox?.Checked ?? true;
+            ctrl.Notifications.JoinReplyWithTransmit = _notifyJoinReplyWithTransmitCheckBox?.Checked ?? false;
             ctrl.PersistRoutineStatusSpeakWhen();
         }
 
