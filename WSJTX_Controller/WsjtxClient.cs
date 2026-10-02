@@ -383,6 +383,12 @@ namespace WSJTX_Controller
         // moved to a different peer.
         private DateTime otherPartyForCallInProgUtc = default;
 
+        // When the station being called/worked was last heard calling CQ (operator, 2026-10-02):
+        // the QSO line says "EA6AJW calling CQ, sending EN34" while that is current -- it used
+        // to flash past only as a notification. Same freshness rule as the "to <peer>" fact;
+        // cleared when the station answers us, works someone else, or callInProg changes.
+        private DateTime callInProgCqUtc = default;
+
         // Shared target-activity unification (2026-09-11): whether the CURRENT
         // otherPartyForCallInProg/otherPartyStage fact is this ordinary path's turn to SPEAK this
         // period -- false whenever Smart Start or Station Watch already owns callInProg (their
@@ -1997,6 +2003,7 @@ namespace WSJTX_Controller
                     otherPartyStage = null;
                     otherPartyForCallInProgUtc = default;
                     otherPartyActivitySpeakable = false;
+                    callInProgCqUtc = (idSem.IsCq && !toMyCall) ? DecodeUtcOf(dmsg) : default;
                     // Any message from the target back to us resets the KA1BMF evidence count --
                     // it just proved it hasn't abandoned us, whatever it was doing in between.
                     _otherPartyOverStrikes = 0;
@@ -2018,6 +2025,7 @@ namespace WSJTX_Controller
                     otherPartyForCallInProgUtc = dmsg.RxDate > new DateTime(2000, 1, 1)
                         ? dmsg.RxDate.Add(dmsg.SinceMidnight)
                         : DateTime.UtcNow;
+                    callInProgCqUtc = default;
 
                     // Shared target-activity unification (2026-09-11): the SPEECH decision for
                     // this identical fact, gated through the SAME per-target tracker Smart Start
@@ -3711,6 +3719,10 @@ namespace WSJTX_Controller
 
         internal void TestSetQsoStart(string call, DateTime utc) { _qsoStartCall = call; _qsoStartUtc = utc; }
 
+        // A decode's own capture time when it carries one (Direct decodes do), else now.
+        private static DateTime DecodeUtcOf(EnqueueDecodeMessage d) =>
+            d != null && d.RxDate > new DateTime(2000, 1, 1) ? d.RxDate.Add(d.SinceMidnight) : DateTime.UtcNow;
+
         private void SetCallInProg(string call)
         {
             if (call != callInProg)
@@ -3767,6 +3779,14 @@ namespace WSJTX_Controller
             otherPartyStage = null;
             otherPartyForCallInProgUtc = default;
             otherPartyActivitySpeakable = false;
+            // A call started by answering the station's CQ: that CQ is the current fact.
+            callInProgCqUtc = default;
+            if (call != null && replyDecode != null)
+            {
+                var rs = replyDecode.EffectiveSemantic(myCall);
+                if (rs.IsCq && string.Equals(rs.From, call, StringComparison.OrdinalIgnoreCase))
+                    callInProgCqUtc = DecodeUtcOf(replyDecode);
+            }
             _otherPartyOverStrikes = 0;
             _otherPartyOverStrikeLastSlot = null;
             // Item 1: the coordinator's AfterQso timing hook -- callInProg is the active-QSO

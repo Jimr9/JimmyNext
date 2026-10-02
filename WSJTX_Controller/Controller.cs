@@ -4074,6 +4074,8 @@ namespace WSJTX_Controller
 
         public void ShowMsg(string text, bool sound)
         {
+            // A message whose wording is set silent (Wording "") is neither said nor shown.
+            if (string.IsNullOrWhiteSpace(text)) return;
             // No raw Windows system beep here, ever -- confirmed with the user, 2026-08-11:
             // only Jimmy's own configured notification sounds (Options > Sounds) should ever
             // be audible; hotkeys, Escape, and invalid-key rejection must stay silent. `sound`
@@ -4206,8 +4208,11 @@ namespace WSJTX_Controller
         {
             // Heading / accessible name track the current band+mode (never wordless -- "17m FT8"
             // or "Status:"), so keep them in sync on every render.
-            statusHeadingLabel.Text = headingText;
-            this.statusText.AccessibleName = headingText;
+            // An empty heading = the operator silenced the box's name: the screen-reader name is
+            // empty, the on-screen label still says "Status:". Assigned only on a real change.
+            string label = string.IsNullOrEmpty(headingText) ? "Status:" : headingText;
+            if (statusHeadingLabel.Text != label) statusHeadingLabel.Text = label;
+            if (this.statusText.AccessibleName != (headingText ?? "")) this.statusText.AccessibleName = headingText ?? "";
 
             if (WsjtxClient.HasSpeakableContent(statusText))
             {

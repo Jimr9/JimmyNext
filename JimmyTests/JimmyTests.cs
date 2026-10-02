@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -19194,6 +19194,17 @@ static class JimmyTests
                 Wording.Parse(file.Split('\n')).TryGetValue("Msg.Still", out var back) ? back : "", "again");
             Wording.Set("Msg.Still", "still");
             Check("file: the built-in words again means not your own", Wording.IsChanged("Msg.Still"), false);
+            // Silent: neither said nor shown, written as key = "".
+            Wording.SetSilent("Msg.BandChanged", true);
+            Check("silent: written as an empty quoted value", Wording.Template().Contains("\nMsg.BandChanged = \"\""), true);
+            var silentBack = Wording.Parse(Wording.Template().Split('\n'));
+            Check("silent: read back as silent", silentBack.TryGetValue("Msg.BandChanged", out var sv) && sv.Length == 0, true);
+            CheckStr("silent: gives no words", Wording.Fill("Msg.BandChanged", ("Band", "20m")), "");
+            Wording.SetSilent("Msg.BandChanged", false);
+            Check("silent: off again means the built-in words", Wording.IsChanged("Msg.BandChanged"), false);
+            CheckStr("short name: from the key", Wording.ShortName("Msg.BandChanged"), "Band changed");
+            CheckStr("short name: abbreviations kept", Wording.ShortName("Tag.NewDxccOnBand"), "New DXCC on band");
+            CheckStr("short name: named by hand", Wording.ShortName("Status.Heading"), "Status box name");
             Wording.SetForTest(null);
 
             // List titles follow the wording -- the label AND the name a screen reader reads.
@@ -20031,7 +20042,8 @@ static class JimmyTests
 
             // 2026-10-02: calling CQ has its own summary (default: only who is calling you). This
             // test is about the suppress-while-transmitting setting, so give that summary the
-            // station count it checks for.
+            // station count it checks for -- AFTER the client exists (creating it can reload the
+            // notification settings from a test settings file an earlier test left behind).
             ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummaryCq].Template =
                 ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template;
             ctrl.suppressReceiveNotificationsDuringTx = false;
@@ -20051,9 +20063,9 @@ static class JimmyTests
             ctrl2.replyDxCheckBox.Checked = true;
             ctrl2.replyLocalCheckBox.Checked = true;
             ctrl2.suppressReceiveNotificationsDuringTx = true;
+            var wc2 = new WsjtxClient(ctrl2, 2237, false, false, WsjtxClient.TxModes.CALL_CQ);
             ctrl2.Notifications.Policies[NotificationEventType.ReceiveCycleSummaryCq].Template =
                 ctrl2.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template;
-            var wc2 = new WsjtxClient(ctrl2, 2237, false, false, WsjtxClient.TxModes.CALL_CQ);
             WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
             wc2.cqPaused = false;
             var fakeStatusView2 = new FakeStatusView();

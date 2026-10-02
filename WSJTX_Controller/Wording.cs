@@ -75,6 +75,11 @@ namespace WSJTX_Controller
             ("Msg.SmartNotHeardFor", "{Call} not heard for {Count} periods.", "Smart Mode status key: how long the station has been quiet"),
             ("Msg.SmartNotHeardForOne", "{Call} not heard for 1 period.", "Smart Mode status key: quiet for one period"),
             ("Msg.SmartWaitingDecode", "Waiting for a current decode from {Call}.", "Smart Mode: heard before, but nothing usable to answer yet"),
+            ("Status.SmartWaiting", "Waiting to work {Call}", "status line: Smart Mode is waiting on a station"),
+            ("Status.SmartBusy", "Waiting to work {Call}, working {Peer}", "status line: Smart Mode's station is working someone else"),
+            ("Status.SmartQuiet", "Waiting to work {Call}, not heard", "status line: Smart Mode's station has gone quiet"),
+            ("Status.Watching", "Watching {Call}", "status line: Station Watch is watching a station"),
+            ("Status.TargetCallingCq", "calling CQ", "the QSO line: the station you are calling was last heard calling CQ"),
             ("Msg.Still", "still", "the word marking a repeated station fact: \"K1ABC still working K2XYZ\""),
             ("Msg.SmartModeTimeLimit", "Smart Mode time limit reached after {Minutes} {MinuteWord} calling {Call}, no contact completed", "Smart Mode gave up: its time limit"),
             ("Msg.MinuteOne", "minute", "the word for one minute"),
@@ -157,7 +162,8 @@ namespace WSJTX_Controller
             ("Status.PskReporterOff", "Disabled PSKReporter spots", "PSKReporter spotting turned off"),
             ("Status.ModeName", "{Mode} mode", "the mode just changed to"),
             ("Status.ModeSelected", "{Mode} mode selected.", "starting up: the mode chosen"),
-            ("Status.BandSelected", "{Band} meter band selected", "the band just chosen"),
+            ("Status.BandSelected", "{Band} meter band selected", "the band just chosen ({Mode} = FT8 / FT4)"),
+            ("Status.Heading", "{Band} {Mode}", "the status box's name, read by a screen reader on focus or change (e.g. 20m FT8); silent = no name"),
             ("Status.BandUnknown", "Unknown band selected", "the band just chosen, not known"),
             ("Status.DeletedCalls", "Deleted all waiting calls", "the waiting list was cleared"),
             ("Status.CommandPromptsOn", "Command prompts enabled", "command prompts turned on"),
@@ -262,8 +268,55 @@ namespace WSJTX_Controller
         internal static string Folder { get; private set; }
 
         internal static bool IsChanged(string key) => _overrides.ContainsKey(key);
+
+        // Silent (operator, 2026-10-02): an entry set to "" is neither said nor shown -- the
+        // file writes it as key = "". The wording editor's Silent box sets it.
+        internal static bool IsSilent(string key) => _overrides.TryGetValue(key, out string v) && v.Length == 0;
+        internal static void SetSilent(string key, bool silent)
+        {
+            if (silent) _overrides[key] = "";
+            else if (IsSilent(key)) _overrides.Remove(key);
+            Changed?.Invoke();
+        }
         internal static string DefaultOf(string key) => Known.FirstOrDefault(k => k.Key == key).Default ?? "";
         internal static string NoteOf(string key) => Known.FirstOrDefault(k => k.Key == key).Note ?? "";
+
+        // A short spoken name for the wording editor's list: from the key itself ("Msg.BandChanged"
+        // -> "Band changed"), abbreviations kept (DXCC, POTA, TX1, CQ), a few unclear ones named.
+        private static readonly Dictionary<string, string> ShortNames = new Dictionary<string, string>
+        {
+            ["Status.Heading"] = "Status box name",
+            ["List.RawTitle"] = "Raw Decodes title",
+            ["List.SpotWatchTitle"] = "Spot Watch title",
+            ["List.Title"] = "List title",
+            ["List.TitleSpoken"] = "List spoken name",
+            ["Summary.Stations.One"] = "Stations, one",
+            ["Summary.Stations.Many"] = "Stations, several",
+            ["Msg.Still"] = "Still (repeat word)",
+            ["Msg.HoundFt8Only"] = "Hound FT8 only",
+            ["Summary.None"] = "None (no stations)",
+        };
+
+        private static readonly HashSet<string> Acronyms = new HashSet<string>
+            { "DXCC", "POTA", "SOTA", "CQ", "RX", "TX", "SWR", "ALC", "CAT", "QSO", "QRZ", "LOTW", "FT8", "FT4", "WAS", "PSK", "DX" };
+
+        internal static string ShortName(string key)
+        {
+            if (ShortNames.TryGetValue(key ?? "", out string n)) return n;
+            string rest = (key ?? "").Contains('.') ? key.Substring(key.IndexOf('.') + 1) : (key ?? "");
+            var words = System.Text.RegularExpressions.Regex.Matches(rest.Replace(".", " "),
+                @"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+[0-9]*|[0-9]+")
+                .Cast<System.Text.RegularExpressions.Match>().Select(m => m.Value).ToList();
+            if (words.Count == 0) return key ?? "";
+            for (int i = 0; i < words.Count; i++)
+            {
+                string w = words[i];
+                bool acronym = w.Length > 1 && w.All(c => char.IsUpper(c) || char.IsDigit(c));
+                if (Acronyms.Contains(w.ToUpperInvariant())) words[i] = w.ToUpperInvariant();
+                else if (!acronym) words[i] = i == 0 ? char.ToUpperInvariant(w[0]) + w.Substring(1).ToLowerInvariant() : w.ToLowerInvariant();
+            }
+            return string.Join(" ", words);
+        }
 
         // The wording editor: words for one entry (null/empty = back to the built-in words).
         internal static void Set(string key, string words)
@@ -375,10 +428,11 @@ namespace WSJTX_Controller
                 if (eq <= 0) continue;
                 string key = line.Substring(0, eq).Trim();
                 string words = line.Substring(eq + 1).Trim();
-                // "words in quotes" are kept exactly, spaces included (e.g. a separator " ").
-                if (words.Length >= 2 && words[0] == '"' && words[words.Length - 1] == '"')
-                    words = words.Substring(1, words.Length - 2);
-                if (words.Length > 0 && Known.Any(k => k.Key.Equals(key, StringComparison.OrdinalIgnoreCase))) d[key] = words;
+                // "words in quotes" are kept exactly, spaces included (e.g. a separator " ");
+                // "" alone means silent -- neither said nor shown.
+                bool quoted = words.Length >= 2 && words[0] == '"' && words[words.Length - 1] == '"';
+                if (quoted) words = words.Substring(1, words.Length - 2);
+                if ((words.Length > 0 || quoted) && Known.Any(k => k.Key.Equals(key, StringComparison.OrdinalIgnoreCase))) d[key] = words;
             }
             return d;
         }
@@ -414,6 +468,6 @@ namespace WSJTX_Controller
         }
 
         // Built-in words as the file shows them: in quotes when spaces at either end matter.
-        private static string Shown(string def) => def != def.Trim() ? "\"" + def + "\"" : def;
+        private static string Shown(string def) => def.Length == 0 || def != def.Trim() ? "\"" + def + "\"" : def;
     }
 }

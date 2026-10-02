@@ -845,6 +845,26 @@ namespace WSJTX_Controller
             return Wording.Fill(sameRun ? "Msg.SmartStillNotHeard" : "Msg.SmartNotHeard", ("Call", SC(monitor.TargetCall)));
         }
 
+        // What Smart Mode / Station Watch is doing, for the status line while no QSO is running
+        // (operator, 2026-10-02: the line went blank while Smart Mode waited on LA6RJA). "" when
+        // neither is working, or a QSO has the line (callInProg / the call is starting).
+        internal string WatchStateClause()
+        {
+            if (callInProg != null) return "";
+            if (_smartStart.IsActive && !_smartStart.AwaitingEngagement)
+            {
+                string call = SC(_smartStart.TargetCall);
+                if (_smartStart.BusyWithOther && !string.IsNullOrEmpty(_smartStart.ApparentPeer))
+                    return Wording.Fill("Status.SmartBusy", ("Call", call), ("Peer", SC(_smartStart.ApparentPeer)));
+                if (_smartStart.SilenceCount > 0)
+                    return Wording.Fill("Status.SmartQuiet", ("Call", call));
+                return Wording.Fill("Status.SmartWaiting", ("Call", call));
+            }
+            if (_stationWatch.IsActive)
+                return Wording.Fill("Status.Watching", ("Call", SC(_stationWatch.TargetCall)));
+            return "";
+        }
+
         // The target was heard: the next quiet is news again.
         private void EndQuietRun(string target)
         {
@@ -909,6 +929,10 @@ namespace WSJTX_Controller
                     // on-air CQ. A CQ decoded AFTER activation arrives via the live feed
                     // (ObserveDecode), where _smartStartSeeding is false, and still announces.
                     if (_smartStartSeeding) return;
+                    // Already calling this station: the QSO line says "X calling CQ" now, and a
+                    // separate narration would come AFTER "Calling X." -- the wrong order.
+                    if (string.Equals(callInProg, obs.Target, StringComparison.OrdinalIgnoreCase)
+                        || _smartStart.AwaitingEngagement) return;
                     // Operator policy rule 1: a CQ from the target is the opening. Narrate the
                     // fact ("N4BP calling CQ.") -- "Calling {Target}." follows at dispatch. Gated
                     // through the shared target-activity tracker (2026-09-11) -- see

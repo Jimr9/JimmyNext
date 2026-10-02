@@ -1101,7 +1101,7 @@ namespace WSJTX_Controller
 
                             if (newBand)
                             {
-                                newSel = (bandIdx != null ? Wording.Fill("Status.BandSelected", ("Band", bands[(int)bandIdx].ToString())) : Wording.Get("Status.BandUnknown")) + ".";
+                                newSel = (bandIdx != null ? Wording.Fill("Status.BandSelected", ("Band", bands[(int)bandIdx].ToString()), ("Mode", mode ?? "")) : Wording.Get("Status.BandUnknown")) + ".";
                             }
 
                             if (ctrl.freqCheckBox.Checked)
@@ -1501,7 +1501,7 @@ namespace WSJTX_Controller
 
                             if (newBand)
                             {
-                                curTxMode = (bandIdx != null ? Wording.Fill("Status.BandSelected", ("Band", bands[(int)bandIdx].ToString())) : Wording.Get("Status.BandUnknown")) + ", " + curTxMode;
+                                curTxMode = (bandIdx != null ? Wording.Fill("Status.BandSelected", ("Band", bands[(int)bandIdx].ToString()), ("Mode", mode ?? "")) : Wording.Get("Status.BandUnknown")) + ", " + curTxMode;
                             }
 
                             if (uploadResult != null)
@@ -1841,6 +1841,15 @@ namespace WSJTX_Controller
                                     // expired/timed-out reassignment above carries its own wording.
                                     if (inProg == standaloneInProg) inProg = "";
                                 }
+                                else if (curCall != null && callInProgCqUtc != default
+                                    && (DateTime.UtcNow - callInProgCqUtc).TotalMilliseconds <= otherFreshMs)
+                                {
+                                    // The station being called was last heard calling CQ, and that
+                                    // is still current: part of the QSO line, not only a passing
+                                    // notification (operator, 2026-10-02).
+                                    otherStr = $", {DisplayCallsign(curCall, ctrl.spaceCallsignsAndGrids)}{sel} {Wording.Get("Status.TargetCallingCq")}";
+                                    if (inProg == standaloneInProg) inProg = "";
+                                }
 
                                 // See DropBareCallsignFragment's own comment: harmless for the
                                 // tuning/autoFreq/replyFromInProg/catDownIdle/idle branches just
@@ -1994,8 +2003,13 @@ namespace WSJTX_Controller
             }
             finally
             {
+                // The status box's name (wording "Status.Heading", operator 2026-10-02): a screen
+                // reader reads it whenever it changes; silent or blank = just "Status:".
                 string bandMode = (bandIdx != null && !string.IsNullOrEmpty(mode))
-                    ? $"{bands[(int)bandIdx]}m {mode}" : "Status:";
+                    ? Wording.Fill("Status.Heading", ("Band", $"{bands[(int)bandIdx]}m"), ("Mode", mode)).Trim() : "";
+                // Silent name (operator, 2026-10-02): no name at all -- not the "Status:" fallback,
+                // which a screen reader then read on every focus instead of "20m FT8".
+                if (bandMode.Length == 0) bandMode = Wording.IsSilent("Status.Heading") ? "" : "Status:";
 
                 // Tidy any seam a disabled routine clause left behind (leading ", ", ", ,",
                 // ", ."). A no-op for the default all-clauses-enabled wording, so existing
@@ -2004,6 +2018,13 @@ namespace WSJTX_Controller
                 // Falls back to the (already-normalized) visible text for every branch that never
                 // set it -- i.e. every branch except the one that can carry otherStr's fragment.
                 statusForSpeech = statusForSpeech == null ? status : NormalizeStatusLine(statusForSpeech);
+
+                // Smart Mode / Station Watch state leads the line while no QSO runs -- SHOWN, not
+                // spoken again (its own notifications already said it); statusForSpeech above is
+                // unchanged. Not over a setup / connecting line (opMode not ACTIVE).
+                string watchState = opMode == OpModes.ACTIVE ? WatchStateClause() : "";
+                if (watchState != "")
+                    status = string.IsNullOrEmpty(status) ? watchState + "." : watchState + ", " + status;
 
                 // VISIBLE status + Notification History: ALWAYS immediate, every call. Never
                 // gated on whether/when the line is spoken (Item 2). Returns whether Jimmy is
