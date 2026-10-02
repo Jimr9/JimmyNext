@@ -127,33 +127,46 @@ namespace WSJTX_Controller
 
         // Rebuilds the projection when Nexus's revision moved (or always, with force). Returns
         // false when Nexus could not be read -- readers keep the last projection.
+        // One rebuild at a time (2026-10-02): the upkeep timer, a just-logged contact and an
+        // upload stamp each refresh, from different threads. Two at once each built their own
+        // file and then deleted every other one -- including the one still being built, which
+        // then became the read copy with no table in it ("no such table: qso"; OK2CNI's Club Log
+        // upload gave up in that window). Now the second waits, reads the revision again, and
+        // finds the copy already current.
+        private static readonly object _refreshLock = new object();
+
         public static bool Refresh(bool force = false)
         {
-            var client = Client;
-            var rows = client.Rows();
-            if (rows.Error != null || rows.Rows == null) return false;
-            lock (_lock)
+            bool becameReady;
+            lock (_refreshLock)
             {
-                if (!force && rows.Revision == _projectionRevision && ProjectionPath != null) return true;
+                var client = Client;
+                var rows = client.Rows();
+                if (rows.Error != null || rows.Rows == null) return false;
+                lock (_lock)
+                {
+                    if (!force && rows.Revision == _projectionRevision && ProjectionPath != null) return true;
+                }
+                bool wasReady = HasRealProjection;
+                Directory.CreateDirectory(ProjectionFolder);
+                string path = Path.Combine(ProjectionFolder, $"p-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{rows.Revision}.db");
+                NexusMigration.Rebuild(rows.Rows, path, StableRowId(rows.Rows));
+                lock (_lock)
+                {
+                    string old = _projectionPath;
+                    _projectionPath = path;
+                    _projectionRevision = rows.Revision;
+                    // The shared reader moves to the new file; the old files go when nothing holds them.
+                    _reader?.Dispose();
+                    _reader = null;
+                    _readerPath = null;
+                    foreach (var f in Directory.GetFiles(ProjectionFolder, "p-*.db"))
+                        if (f != path) TryDelete(f);
+                    if (old != null && old != path) TryDelete(old);
+                }
+                becameReady = !wasReady;
             }
-            bool wasReady = HasRealProjection;
-            Directory.CreateDirectory(ProjectionFolder);
-            string path = Path.Combine(ProjectionFolder, $"p-{DateTime.UtcNow:yyyyMMddHHmmssfff}-{rows.Revision}.db");
-            NexusMigration.Rebuild(rows.Rows, path, StableRowId(rows.Rows));
-            lock (_lock)
-            {
-                string old = _projectionPath;
-                _projectionPath = path;
-                _projectionRevision = rows.Revision;
-                // The shared reader moves to the new file; the old files go when nothing holds them.
-                _reader?.Dispose();
-                _reader = null;
-                _readerPath = null;
-                foreach (var f in Directory.GetFiles(ProjectionFolder, "p-*.db"))
-                    if (f != path) TryDelete(f);
-                if (old != null && old != path) TryDelete(old);
-            }
-            if (!wasReady) { try { LogBecameReady?.Invoke(); } catch { } }
+            if (becameReady) { try { LogBecameReady?.Invoke(); } catch { } }
             return true;
         }
 
