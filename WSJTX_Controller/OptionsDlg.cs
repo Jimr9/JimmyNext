@@ -7969,6 +7969,32 @@ namespace WSJTX_Controller
             };
             undoImportButton.Click += (s, e) => ctrl.UndoImport_Click();
             profilesPanel.Controls.Add(undoImportButton);
+
+            // Moving Jimmy Next to another computer (ComputerMove, 2026-10-02): everything,
+            // logins and the logbook included; radio settings only when asked.
+            var exportAllButton = new System.Windows.Forms.Button
+            {
+                Text = "Export Everything (for another computer)...",
+                AccessibleName = "Export everything for another computer",
+                Location = new System.Drawing.Point(8, 332),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 7,
+                Font = font,
+            };
+            exportAllButton.Click += (s, e) => ctrl.ExportEverything_Click();
+            profilesPanel.Controls.Add(exportAllButton);
+
+            var importAllButton = new System.Windows.Forms.Button
+            {
+                Text = "Import Everything...",
+                AccessibleName = "Import everything from another computer",
+                Location = new System.Drawing.Point(8, 366),
+                Size = new System.Drawing.Size(280, 27),
+                TabIndex = 8,
+                Font = font,
+            };
+            importAllButton.Click += (s, e) => ctrl.ImportEverything_Click();
+            profilesPanel.Controls.Add(importAllButton);
         }
 
         // Tests QRZ.com login (username/password) as before, and -- if a Logbook API key

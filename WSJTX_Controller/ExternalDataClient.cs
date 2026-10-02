@@ -279,6 +279,40 @@ namespace WSJTX_Controller
             return ParseOkOrError(resp, out error);
         }
 
+        // LoTW and QRZ Logbook downloads, fetched by Nexus's own code in the engine host
+        // (LOTW_DOWNLOAD / QRZ_DOWNLOAD, 2026-10-02) instead of Jimmy's own HTTP clients. A first
+        // full LoTW pull can take minutes (Nexus bounds its fetch at ten).
+        private const int DownloadTimeoutMs = 11 * 60_000;
+
+        public sealed class LotwDownloadResult
+        {
+            public string Adif { get; set; }
+            public string HighWater { get; set; }   // LoTW's APP_LoTW_LASTQSL; null = keep the old one
+        }
+
+        // since: confirmations matched since this LoTW high-water (null = everything). ownFrom:
+        // instead, the own-records report (which uploads LoTW holds) from this QSO date.
+        public LotwDownloadResult DownloadLotw(string username, string password, string since, DateTime? ownFrom, out string error)
+        {
+            if (TestModeGuard.IsTestMode) { error = "Blocked in test mode -- no real LoTW traffic."; return null; }
+            var args = new { username = (username ?? "").Trim(), password = (password ?? "").Trim(), since, ownFrom = ownFrom?.ToString("yyyy-MM-dd") };
+            string payload = ParseOkOrError(SendCommand("LOTW_DOWNLOAD " + JsonSerializer.Serialize(args, JsonOptions), DownloadTimeoutMs), out error);
+            if (payload == null) return null;
+            try { return JsonSerializer.Deserialize<LotwDownloadResult>(payload, JsonOptions); }
+            catch (Exception ex) { error = "Could not read the LoTW download: " + ex.Message; return null; }
+        }
+
+        // The whole QRZ Logbook as ADIF ("" for an empty logbook), or null with the reason.
+        public string DownloadQrzLogbook(string apiKey, out string error)
+        {
+            if (TestModeGuard.IsTestMode) { error = "Blocked in test mode -- no real QRZ traffic."; return null; }
+            var args = new { key = (apiKey ?? "").Trim() };
+            string payload = ParseOkOrError(SendCommand("QRZ_DOWNLOAD " + JsonSerializer.Serialize(args, JsonOptions), DownloadTimeoutMs), out error);
+            if (payload == null) return null;
+            try { return JsonSerializer.Deserialize<string>(payload) ?? ""; }
+            catch (Exception ex) { error = "Could not read the QRZ download: " + ex.Message; return null; }
+        }
+
         public HamQthLookupResult LookupHamQth(string username, string password, string callsign, out string error)
         {
             error = null;

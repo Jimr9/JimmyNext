@@ -1905,6 +1905,49 @@ fn handle_control_connection(
                 }
             }
             return;
+        } else if let Some(json) = line.strip_prefix("LOTW_DOWNLOAD ") {
+            // A full LoTW pull can take minutes: its own thread, like EQSL_DOWNLOAD.
+            match serde_json::from_str::<external_data::LotwDownloadArgs>(json) {
+                Ok(args) => {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        match external_data::lotw_download(&args) {
+                            Ok(reply) => match serde_json::to_string(&reply) {
+                                Ok(j) => { let _ = writeln!(stream, "OK {j}"); }
+                                Err(e) => { let _ = writeln!(stream, "ERR could not encode the LoTW report: {e}"); }
+                            },
+                            Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad LOTW_DOWNLOAD args: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            }
+            return;
+        } else if let Some(json) = line.strip_prefix("QRZ_DOWNLOAD ") {
+            match serde_json::from_str::<external_data::QrzDownloadArgs>(json) {
+                Ok(args) => {
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        match external_data::qrz_download(&args) {
+                            Ok(adif) => match serde_json::to_string(&adif) {
+                                Ok(j) => { let _ = writeln!(stream, "OK {j}"); }
+                                Err(e) => { let _ = writeln!(stream, "ERR could not encode the QRZ logbook: {e}"); }
+                            },
+                            Err(e) => { let _ = writeln!(stream, "ERR {e}"); }
+                        }
+                        let _ = stream.shutdown(std::net::Shutdown::Write);
+                    });
+                }
+                Err(e) => {
+                    let _ = writeln!(stream, "ERR bad QRZ_DOWNLOAD args: {e}");
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
+                }
+            }
+            return;
         } else if let Some(json) = line.strip_prefix("HAMQTH_LOOKUP ") {
             match serde_json::from_str::<external_data::HamQthLookupArgs>(json) {
                 Ok(args) => {

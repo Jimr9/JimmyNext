@@ -86,7 +86,7 @@ namespace WSJTX_Controller
             WsjtxClient.CallCategory.TO_MYCALL,
             WsjtxClient.CallCategory.WANTED_CQ,
             WsjtxClient.CallCategory.STILL_NEEDED,
-            WsjtxClient.CallCategory.STILL_UNCONFIRMED,
+            // STILL_UNCONFIRMED off by default (operator, 2026-10-02).
         };
 
         // ── Constructor ────────────────────────────────────────────────────────

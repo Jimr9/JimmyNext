@@ -1265,8 +1265,13 @@ namespace WSJTX_Controller
             // never removed, see CallCategory's own comment), but DeriveCategory never assigns
             // them any more, so Alt+N would silently lose the ability to call a worked-but-
             // unconfirmed station unless STILL_UNCONFIRMED takes their place here once.
+            // Only where the old list had one of the filters it replaces (operator, 2026-10-02): it
+            // used to be added to any older list without it, switching on a filter the operator
+            // never had.
             if (RunCallingMigrationOnce("callingMigratedStillUnconfirmed")
                 && !string.IsNullOrWhiteSpace(callingPrioritiesStr)
+                && (wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.WAS_UNCONFIRMED)
+                    || wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.DXCC_UNCONFIRMED))
                 && !wsjtxClient.Ranker.callingEnabled.Contains(WsjtxClient.CallCategory.STILL_UNCONFIRMED))
             {
                 wsjtxClient.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);
@@ -2434,6 +2439,21 @@ namespace WSJTX_Controller
             if (parts == CustomizationParts.None) return;
             if (parts.HasFlag(CustomizationParts.Notifications)) parts |= pkg.Parts & CustomizationParts.Wording;
 
+            // A file giving two actions one key: its hotkeys are not imported at all -- taking one
+            // would leave the other on its default key, which may clash too -- and the rest is
+            // (operator, 2026-10-02).
+            var clashes = parts.HasFlag(CustomizationParts.Hotkeys) ? pkg.HotkeyClashes() : new List<string>();
+            if (clashes.Count > 0)
+            {
+                parts &= ~CustomizationParts.Hotkeys;
+                MessageBox.Show(this,
+                    "The hotkeys in this file are not imported: it gives more than one action the same key.\n\n" +
+                    string.Join("\n", clashes) +
+                    (parts == CustomizationParts.None ? "" : "\n\nThe other parts you chose are still imported."),
+                    "Import Customizations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (parts == CustomizationParts.None) return;
+            }
+
             string profile = ActiveProfileDisplayName();
             var confirm = MessageBox.Show(this,
                 $"Import {CustomizationPackage.Describe(parts)} into profile '{profile}'? " +
@@ -2542,6 +2562,137 @@ namespace WSJTX_Controller
             // them. Reopening reads them (engine kept, as a profile switch does).
             _suppressSettingsSaveOnExit = true;
             SwitchProfileInPlace();
+        }
+
+        // ── Moving to another computer (ComputerMove, operator 2026-10-02) ─────────────────────
+
+        // Options > Profiles' "Export Everything (for another computer)...".
+        internal void ExportEverything_Click()
+        {
+            var answer = PromptForMovePassword(export: true);
+            if (answer == null) return;
+            using (var sfd = new SaveFileDialog
+            {
+                Title = "Export everything for another computer",
+                Filter = ComputerMove.FileFilter,
+                FileName = ComputerMove.DefaultFileName,
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+                OverwritePrompt = true,
+            })
+            {
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    SaveAllSettingsToIniFile();   // what is in effect now, as Save Profile As does
+                    if (NexusLogbook.Active) NexusLogbook.Client.Flush();   // the logbook on disk first
+                    ComputerMove.Export(ProfilesAppDataPath(), sfd.FileName, answer.Value.password, answer.Value.includeRadio);
+                    wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} exported everything to '{sfd.FileName}' (radio settings {(answer.Value.includeRadio ? "included" : "left out")})");
+                    ShowMsg("Everything exported for another computer.", false);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"Could not export: {ex.Message}", "Export Everything", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        // Options > Profiles' "Import Everything...": checks the file and its password, prepares it,
+        // and closes -- the next start puts it in place, before the engine runs.
+        internal void ImportEverything_Click()
+        {
+            string file;
+            using (var ofd = new OpenFileDialog
+            {
+                Title = "Import everything from another computer",
+                Filter = ComputerMove.FileFilter,
+                InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            })
+            {
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+                file = ofd.FileName;
+            }
+            var answer = PromptForMovePassword(export: false);
+            if (answer == null) return;
+            string problem = ComputerMove.Check(file, answer.Value.password);
+            if (problem != null)
+            {
+                MessageBox.Show(this, problem, "Import Everything", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (MessageBox.Show(this,
+                    "Import everything from this file? It replaces all Jimmy Next settings, profiles, logins, sounds and the logbook " +
+                    "on this computer. Everything here is backed up first. Jimmy Next then closes; start it again to finish the move.",
+                    "Import Everything", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            try
+            {
+                ComputerMove.Prepare(ProfilesAppDataPath(), file, answer.Value.password);
+                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} import everything prepared from '{file}'; finishing at the next start");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not import: {ex.Message}", "Import Everything", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+            MessageBox.Show(this, "Jimmy Next will now close. Start it again to finish the move.", "Import Everything",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            _suppressSettingsSaveOnExit = true;   // what is here is about to be replaced
+            Close();
+        }
+
+        // The move file's password (twice when exporting) and, when exporting, whether the radio and
+        // decode-engine settings go too (off unless checked). null on Cancel.
+        private (string password, bool includeRadio)? PromptForMovePassword(bool export)
+        {
+            using (var dlg = new Form
+            {
+                Text = export ? "Export Everything" : "Import Everything",
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+                ClientSize = new Size(380, export ? 196 : 110),
+            })
+            {
+                string intro = export
+                    ? "Choose a password for the file. Your logins are locked with it; you need it on the other computer."
+                    : "The password chosen when the file was made:";
+                var label = new Label { Text = intro, Location = new Point(10, 10), Size = new Size(360, 32) };
+                var pw = new TextBox { Location = new Point(10, 46), Width = 360, UseSystemPasswordChar = true, AccessibleName = "Password" };
+                dlg.Controls.Add(label);
+                dlg.Controls.Add(pw);
+                TextBox again = null;
+                CheckBox radio = null;
+                if (export)
+                {
+                    dlg.Controls.Add(new Label { Text = "Password again:", Location = new Point(10, 76), AutoSize = true });
+                    again = new TextBox { Location = new Point(10, 94), Width = 360, UseSystemPasswordChar = true, AccessibleName = "Password again" };
+                    radio = new CheckBox { Text = "Include radio and decode engine settings", Location = new Point(10, 124), AutoSize = true,
+                        AccessibleName = "Include radio and decode engine settings" };
+                    dlg.Controls.Add(again);
+                    dlg.Controls.Add(radio);
+                }
+                int by = export ? 160 : 76;
+                var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(210, by), Width = 75 };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(295, by), Width = 75 };
+                dlg.Controls.Add(ok);
+                dlg.Controls.Add(cancel);
+                dlg.AcceptButton = ok;
+                dlg.CancelButton = cancel;
+                dlg.ActiveControl = pw;
+                while (true)
+                {
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return null;
+                    if (pw.Text.Length == 0) { MessageBox.Show(this, "Please type a password.", dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning); continue; }
+                    if (export && pw.Text != again.Text)
+                    {
+                        MessageBox.Show(this, "The two passwords are not the same.", dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        again.Text = "";
+                        dlg.ActiveControl = pw;
+                        continue;
+                    }
+                    return (pw.Text, radio?.Checked ?? false);
+                }
+            }
         }
 
         // One checkbox per available part, the defaults checked; returns the parts left checked
@@ -6380,7 +6531,8 @@ namespace WSJTX_Controller
             WsjtxClient.CallCategory.DXCC_UNCONFIRMED,
             WsjtxClient.CallCategory.ZONE_NEEDED,
             WsjtxClient.CallCategory.STILL_NEEDED,
-            WsjtxClient.CallCategory.STILL_UNCONFIRMED,
+            // STILL_UNCONFIRMED is off for a new configuration (operator, 2026-10-02) -- turned on
+            // in Row Order's Call Filters by whoever wants worked-but-unconfirmed stations called.
             WsjtxClient.CallCategory.DEFAULT,
         };
 

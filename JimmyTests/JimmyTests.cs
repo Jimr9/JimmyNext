@@ -574,7 +574,11 @@ static class JimmyTests
             foreach (var (kind, file) in new[] { ("lotw", lotwFile), ("qrz", qrzFile) })
             {
                 string text = File.ReadAllText(file);
-                if (kind == "qrz") text = NexusSyncDiagnosis.JimmyQrzAdif(text);
+                if (kind == "qrz")   // a saved raw QRZ FETCH reply: the ADIF after "ADIF=", HTML-unescaped
+                {
+                    int at = text.IndexOf("ADIF=", StringComparison.OrdinalIgnoreCase);
+                    text = at < 0 ? "" : System.Net.WebUtility.HtmlDecode(text.Substring(at + 5));
+                }
                 text = NexusLogbookService.ToAdifText(AdifParser.ParseWithOrder(text), kind == "lotw" ? "LOTW" : "QRZ");
                 var prep = NexusReportPairing.Prepare(text, client.Rows().Rows);
                 string f = Path.Combine(work, $"guarded-{kind}.adi");
@@ -1254,13 +1258,6 @@ static class JimmyTests
             Console.WriteLine($"\n=== {passed} passed, {failed} failed ===");
             Environment.Exit(failed > 0 ? 1 : 0);
         }
-        if (args.Length >= 8 && args[0] == "--nexus-sync-diagnosis")
-        {
-            string Read(string p) => File.Exists(p) ? File.ReadAllText(p) : "";
-            var rep = new NexusSyncDiagnosis.Reports { JimmyLotwYes = Read(args[4]), JimmyLotwNo = Read(args[5]), NexusLotwYes = Read(args[6]), QrzRaw = Read(args[7]) };
-            Console.WriteLine(NexusSyncDiagnosis.Diagnose(args[1], args[2], args[3], rep, args.Length >= 9 ? args[8] : null));
-            Environment.Exit(0);
-        }
         if (args.Length >= 5 && args[0] == "--nexus-integration-tests")
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", null);
@@ -1598,6 +1595,9 @@ static class JimmyTests
         SmartModeWaitingListTests();
         BackupRetentionTests();
         UndoImportTests();
+        ImportHotkeyClashTests();
+        SupportReportSecretsTests();
+        ComputerMoveTests();
         CustomizationPackageTests();
         BulkEditApplyTests();
         RawDecodesSideLabelReflectsTxFirstTests();
@@ -19261,6 +19261,117 @@ static class JimmyTests
             else Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
             try { File.Delete(tmpDb); } catch { }
         }
+    }
+
+    // Moving Jimmy Next to another computer (operator, 2026-10-02): everything goes, logins
+    // re-locked for the new computer, radio settings stay the new computer's own, the logbook
+    // comes across, a wrong password is refused, and what was there is backed up.
+    static void ComputerMoveTests()
+    {
+        Console.WriteLine("\n── Moving to another computer ──");
+        string root = Path.Combine(Path.GetTempPath(), "JimmyTest_Move_" + Guid.NewGuid().ToString("N"));
+        string a = Path.Combine(root, "A"), b = Path.Combine(root, "B"), file = Path.Combine(root, "everything.jnmove");
+        try
+        {
+            void W(string dir, string rel, string text) { string p = Path.Combine(dir, rel); Directory.CreateDirectory(Path.GetDirectoryName(p)); File.WriteAllText(p, text); }
+            void Db(string dir, string value)
+            {
+                string p = Path.Combine(dir, "Data", "NexusLog", "log.sqlite3");
+                Directory.CreateDirectory(Path.GetDirectoryName(p));
+                using (var c = new System.Data.SQLite.SQLiteConnection($"Data Source={p}"))
+                {
+                    c.Open();
+                    using (var cmd = c.CreateCommand()) { cmd.CommandText = $"CREATE TABLE t(v TEXT); INSERT INTO t VALUES('{value}');"; cmd.ExecuteNonQuery(); }
+                }
+                System.Data.SQLite.SQLiteConnection.ClearAllPools();
+            }
+            string Ini(string dir, string rel, string key)
+            {
+                foreach (var line in File.ReadAllLines(Path.Combine(dir, rel)))
+                    if (line.StartsWith(key + "=")) return line.Substring(key.Length + 1);
+                return null;
+            }
+
+            // Computer A: everything to move.
+            W(a, "Jimmy Next.ini", "[Jimmy Next]\nradioComPort=COM3\nqrzUsername=kb0uzt\nqrzPassword=" + CredentialProtector.Protect("secret1") + "\n");
+            W(a, "Shared.ini", "[Jimmy Next]\nlotwLogbookPass=" + CredentialProtector.Protect("lotw-pw") + "\nnativeEngineMyCall=KB0UZT\n");
+            W(a, @"Profiles\Contest.ini", "[Jimmy Next]\ndecodeDepth=3\nsmartQsoStartEnabled=True\n[Hotkeys]\nHelp=262219\n");
+            W(a, "Wording.txt", "# wording A\n");
+            W(a, @"Sounds\crow.wav", "A-crow");
+            W(a, @"Data\NexusLog\ACTIVE", "migrated");
+            Db(a, "contacts of A");
+            ComputerMove.Export(a, file, "pw", includeRadio: false);
+
+            Check("a wrong password is refused", ComputerMove.Check(file, "nope") != null, true);
+            Check("the right password is accepted", ComputerMove.Check(file, "pw") == null, true);
+
+            // Computer B: its own radio, another profile, another log.
+            W(b, "Jimmy Next.ini", "[Jimmy Next]\nradioComPort=COM9\n");
+            W(b, @"Profiles\Old.ini", "[Jimmy Next]\nx=1\n");
+            Db(b, "contacts of B");
+            ComputerMove.Prepare(b, file, "pw");
+            Check("prepared, waiting for the next start", ComputerMove.Pending(b), true);
+            string note = ComputerMove.ApplyPending(b);
+            Check("put in place at start", note != null && !ComputerMove.Pending(b), true);
+
+            Check("logins locked for this computer and readable here",
+                CredentialProtector.Unprotect(Ini(b, "Jimmy Next.ini", "qrzPassword")) == "secret1"
+                && Ini(b, "Jimmy Next.ini", "qrzPassword").StartsWith("enc:")
+                && CredentialProtector.Unprotect(Ini(b, "Shared.ini", "lotwLogbookPass")) == "lotw-pw", true);
+            Check("radio settings left out of the file: this computer's own are kept",
+                Ini(b, "Jimmy Next.ini", "radioComPort") == "COM9" && Ini(b, @"Profiles\Contest.ini", "decodeDepth") == null, true);
+            Check("everything else comes across", Ini(b, "Jimmy Next.ini", "qrzUsername") == "kb0uzt"
+                && Ini(b, @"Profiles\Contest.ini", "smartQsoStartEnabled") == "True"
+                && Ini(b, @"Profiles\Contest.ini", "Help") == "262219"
+                && File.ReadAllText(Path.Combine(b, "Wording.txt")) == "# wording A\n"
+                && File.ReadAllText(Path.Combine(b, @"Sounds\crow.wav")) == "A-crow"
+                && File.Exists(Path.Combine(b, @"Data\NexusLog\ACTIVE")), true);
+            Check("this computer's other profile is replaced", !File.Exists(Path.Combine(b, @"Profiles\Old.ini")), true);
+            string logValue;
+            using (var c = new System.Data.SQLite.SQLiteConnection($"Data Source={Path.Combine(b, "Data", "NexusLog", "log.sqlite3")};Read Only=True"))
+            {
+                c.Open();
+                using (var cmd = c.CreateCommand()) { cmd.CommandText = "SELECT v FROM t"; logValue = cmd.ExecuteScalar() as string; }
+            }
+            System.Data.SQLite.SQLiteConnection.ClearAllPools();
+            Check("the logbook comes across", logValue == "contacts of A", true);
+            Check("what was here is backed up", Directory.GetDirectories(Path.Combine(b, "Backups"), "before-move-in-*")
+                .Any(d => File.Exists(Path.Combine(d, "Profiles", "Old.ini")) && File.Exists(Path.Combine(d, "Data", "NexusLog", "log.sqlite3"))), true);
+        }
+        finally { System.Data.SQLite.SQLiteConnection.ClearAllPools(); try { Directory.Delete(root, true); } catch { } }
+    }
+
+    // The support report blanks real secrets only (operator, 2026-10-02).
+    static void SupportReportSecretsTests()
+    {
+        Console.WriteLine("\n── Support report: only secrets are blanked ──");
+        string[] secret = { "qrzPassword", "qrzLogbookApiKey", "lotwLogbookPass", "eqslPassword", "hamQthPassword",
+                            "clubLogUploadPassword", "hrdLogUploadCode" };
+        string[] kept = { "qrzUploadEnabled", "qrzUploadRealtime", "lotwUploadEnabled", "eqslUploadEnabled", "qrzUsername",
+                          "lotwLogbookUser", "eqslUsername", "hamQthEnabled", "lotwLogbookRefreshDays", "UploadLotw",
+                          "decodeDepth", "rawDecodeRowOrder", "spotWatchSortKey" };
+        Check("every password, key and code is blanked", secret.All(SupportReportBuilder.IsSecretSetting), true);
+        Check("switches, days, usernames and hotkeys are kept", !kept.Any(SupportReportBuilder.IsSecretSetting), true);
+    }
+
+    // An imported file giving two actions one key is caught (operator, 2026-10-02).
+    static void ImportHotkeyClashTests()
+    {
+        Console.WriteLine("\n── Import: hotkeys that clash ──");
+        string altK = ((int)(System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.K)).ToString();
+        var ok = new CustomizationPackage();
+        ok.Hotkeys["Help"] = altK;
+        ok.Hotkeys["Options"] = ((int)(System.Windows.Forms.Keys.Alt | System.Windows.Forms.Keys.O)).ToString();
+        ok.Hotkeys["UpdateCheck"] = "0";
+        ok.Hotkeys["Help2"] = "0";   // two unassigned actions do not clash
+        Check("different keys: no clash", ok.HotkeyClashes().Count == 0, true);
+        var bad = new CustomizationPackage();
+        bad.Hotkeys["Help"] = altK;
+        bad.Hotkeys["Options"] = altK;
+        var clashes = bad.HotkeyClashes();
+        Check("one key for two actions is caught, both named", clashes.Count == 1
+            && clashes[0].Contains(HotkeyConfig.DisplayNames[HotkeyAction.Help])
+            && clashes[0].Contains(HotkeyConfig.DisplayNames[HotkeyAction.Options]), true);
     }
 
     // Undo an import (operator, 2026-10-02): an import's backup goes back exactly, the settings

@@ -179,6 +179,11 @@ namespace WSJTX_Controller
                             !string.IsNullOrWhiteSpace(ctrl.hrdLogUploadCode) &&
                             !string.IsNullOrWhiteSpace(ctrl.hrdLogUploadCallsign))
                             await CatchUpHrdLog(db).ConfigureAwait(false);
+
+                        if (ctrl.eqslUploadEnabled &&
+                            !string.IsNullOrWhiteSpace(ctrl.eqslUsername) &&
+                            !string.IsNullOrWhiteSpace(ctrl.eqslPassword))
+                            await CatchUpEqsl(db).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
@@ -288,6 +293,64 @@ namespace WSJTX_Controller
                 // here the way real-time upload needs one.
                 ctrl.BeginInvoke(new Action(() =>
                     ctrl.ShowUploadStatus($"Club Log upload failed: {client.LastError}", true)));
+            }
+        }
+
+        // eQSL (operator, 2026-10-02): every contact not yet sent goes, so an operator who signs up
+        // gets the whole log there once, then each new contact in real time. One record per request
+        // through Nexus's own eQSL sender (UploadThroughNexus), a courtesy second between them, and
+        // progress about once a minute -- a first catch-up of thousands takes an hour or two.
+        private static int _eqslCatchUpRunning;   // one at a time: a second Alt+U meanwhile adds nothing
+
+        private async Task CatchUpEqsl(ILogbookService db)
+        {
+            if (System.Threading.Interlocked.Exchange(ref _eqslCatchUpRunning, 1) == 1)
+            {
+                DebugOutput($"{Time()} eQSL upload catch-up already running");
+                return;
+            }
+            try { await CatchUpEqslOnce(db).ConfigureAwait(false); }
+            finally { System.Threading.Interlocked.Exchange(ref _eqslCatchUpRunning, 0); }
+        }
+
+        private async Task CatchUpEqslOnce(ILogbookService db)
+        {
+            var pending = db.GetPendingUploads("EQSL", limit: 100000);
+            if (pending.Count == 0) return;
+            DebugOutput($"{Time()} eQSL upload catch-up: {pending.Count} pending QSO(s).");
+            ctrl.BeginInvoke(new Action(() =>
+                ctrl.ShowUploadStatus($"eQSL upload: starting, {pending.Count} pending QSO(s)...", false)));
+
+            var nexus = (NexusLogbookService)db;
+            var creds = new LiveUploadCredentials { EqslUsername = ctrl.eqslUsername, EqslPassword = ctrl.eqslPassword };
+            int done = 0, succeeded = 0, failedCount = 0;
+            DateTime lastStatusUpdate = DateTime.UtcNow;
+            foreach (var q in pending)
+            {
+                bool ok = nexus.UploadThroughNexus(q.DedupKey, "EQSL", creds, out string error);
+                done++;
+                if (ok) succeeded++;
+                else
+                {
+                    failedCount++;
+                    DebugOutput($"{Time()} eQSL upload catch-up failed for {q.Callsign}: {error}");
+                }
+
+                bool isLast = done == pending.Count;
+                if (isLast || (DateTime.UtcNow - lastStatusUpdate).TotalSeconds >= 60)
+                {
+                    lastStatusUpdate = DateTime.UtcNow;
+                    int doneSnap = done, totalSnap = pending.Count, okSnap = succeeded, failSnap = failedCount;
+                    string msg = isLast
+                        ? $"eQSL upload: {totalSnap} QSO(s) processed ({okSnap} uploaded, {failSnap} failed)."
+                        : $"eQSL upload: {doneSnap}/{totalSnap} processed ({okSnap} uploaded, {failSnap} failed)...";
+                    if (isLast)
+                        ctrl.BeginInvoke(new Action(() => { ctrl.ShowUploadStatus(msg, false); ctrl.RefreshLogbookWindowIfOpen(); }));
+                    else
+                        ctrl.BeginInvoke(new Action(() => ctrl.ShowUploadStatus(msg, false)));
+                }
+
+                await Task.Delay(1000).ConfigureAwait(false);
             }
         }
 

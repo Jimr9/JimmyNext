@@ -9,9 +9,9 @@ using System.Threading.Tasks;
 
 namespace WSJTX_Controller
 {
-    // Downloads QSO data from the QRZ Logbook API.
-    // The API key is the logbook API key from qrz.com (same key used by logging programs
-    // that sync to the QRZ online logbook).
+    // Checks a QRZ Logbook API key (Options' Test Login). The logbook download itself is
+    // Nexus's own (NexusLogbookService.DownloadQrzLogbook, 2026-10-02). The API key is the
+    // logbook API key from qrz.com (same key used by logging programs that sync to QRZ).
     public class QrzLogbookClient
     {
         private static readonly HttpClient _http =
@@ -20,124 +20,6 @@ namespace WSJTX_Controller
         private const string ApiUrl = "https://logbook.qrz.com/api";
 
         public string LastError { get; private set; }
-        // The last FETCH reply exactly as QRZ sent it (header + HTML-escaped ADIF; no API key).
-        public string LastRawResponse { get; private set; }
-
-        // Fetches logbook as ADIF text.
-        // If since is not null, only records created after that date are returned.
-        public async Task<string> FetchAdifAsync(string apiKey, DateTime? since = null)
-        {
-            LastError = null;
-            if (TestModeGuard.IsTestMode)
-            {
-                LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real QRZ traffic allowed.";
-                return null;
-            }
-            if (string.IsNullOrWhiteSpace(apiKey))
-            {
-                LastError = "QRZ Logbook API key is not configured.";
-                return null;
-            }
-
-            // QRZ OPTION uses comma-separated, colon-delimited pairs with no spaces.
-            // The date filter key is MODSINCE (not SINCE) and takes a date-only value
-            // (YYYY-MM-DD, no time-of-day). Without a date filter, the API returns the
-            // full logbook.
-            string option = since.HasValue
-                ? "TYPE:ADIF,MODSINCE:" + since.Value.ToUniversalTime().ToString("yyyy-MM-dd")
-                : "TYPE:ADIF";
-
-            var form = new FormUrlEncodedContent(new[]
-            {
-                new KeyValuePair<string, string>("KEY",    apiKey.Trim()),
-                new KeyValuePair<string, string>("ACTION", "FETCH"),
-                new KeyValuePair<string, string>("OPTION", option),
-            });
-
-            HttpResponseMessage resp;
-            string response;
-            try
-            {
-                resp = await _http.PostAsync(ApiUrl, form).ConfigureAwait(false);
-                response = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-            }
-            catch (TaskCanceledException ex)
-            {
-                LastError = $"Timeout waiting for QRZ Logbook API ({ApiUrl}).";
-                LogFailure("Timeout", LastError, ex.ToString());
-                return null;
-            }
-            catch (HttpRequestException ex)
-            {
-                string category = ex.InnerException is SocketException ? "Network/DNS failure" : "HTTP request failure";
-                LastError = $"{category} contacting QRZ Logbook API ({ApiUrl}): {ex.Message}";
-                LogFailure(category, LastError, ex.ToString());
-                return null;
-            }
-            catch (Exception ex)
-            {
-                LastError = $"Network error contacting QRZ Logbook API ({ApiUrl}): {ex.Message}";
-                LogFailure("Network error", LastError, ex.ToString());
-                return null;
-            }
-
-            if (!resp.IsSuccessStatusCode)
-            {
-                LastError = $"HTTP {(int)resp.StatusCode} {resp.ReasonPhrase} from QRZ Logbook API ({ApiUrl}).";
-                LogFailure("HTTP error", LastError, response);
-                return null;
-            }
-
-            // The whole reply as received (no API key in it), for sync diagnosis while Nexus keeps
-            // the log -- see NexusSyncDiagnostics.
-            LastRawResponse = response;
-            NexusSyncDiagnostics.Retain("qrz-fetch", response);
-
-            // QRZ signals failure via RESULT=FAIL (general failure) or RESULT=AUTH
-            // (bad/expired API key) -- any RESULT other than OK is a failure.
-            // REASON is form-url-encoded (e.g. "Invalid+API+Key" or "Session%20Timeout"),
-            // so decode it before display.
-            int resultIdx = response.IndexOf("RESULT=", StringComparison.OrdinalIgnoreCase);
-            string result = resultIdx >= 0 ? response.Substring(resultIdx + 7).Split('&')[0] : null;
-
-            if (result != null && !result.Equals("OK", StringComparison.OrdinalIgnoreCase))
-            {
-                int ri = response.IndexOf("REASON=", StringComparison.OrdinalIgnoreCase);
-                string reason = ri >= 0 ? WebUtility.UrlDecode(response.Substring(ri + 7).Split('&')[0]) : null;
-
-                // QRZ quirk: a MODSINCE query that matches zero records comes back as
-                // RESULT=FAIL&COUNT=0 with no REASON, instead of RESULT=OK&COUNT=0.
-                // That shape means "nothing new," not an actual failure.
-                int ci = response.IndexOf("COUNT=", StringComparison.OrdinalIgnoreCase);
-                string count = ci >= 0 ? response.Substring(ci + 6).Split('&')[0] : null;
-                if (string.IsNullOrWhiteSpace(reason) && count == "0")
-                    return "";
-
-                LastError = !string.IsNullOrWhiteSpace(reason)
-                    ? $"QRZ API error ({result}): {reason}"
-                    : $"QRZ API reported failure (RESULT={result}) but did not include a REASON.";
-                LogFailure("QRZ API error", LastError, response);
-                return null;
-            }
-
-            // QRZ returns the ADIF inside an ADIF= field, HTML-entity-encoded.
-            // Example: COUNT=2003&RESULT=OK&ADIF=&lt;call:6&gt;KB0UZT&lt;EOR&gt;...
-            int adifIdx = response.IndexOf("ADIF=", StringComparison.OrdinalIgnoreCase);
-            if (adifIdx >= 0)
-            {
-                string encoded = response.Substring(adifIdx + 5);
-                if (string.IsNullOrWhiteSpace(encoded))
-                    return "";
-                return WebUtility.HtmlDecode(encoded);
-            }
-
-            // If no ADIF= field but RESULT=OK, logbook is empty
-            if (result != null && result.Equals("OK", StringComparison.OrdinalIgnoreCase))
-                return "";
-
-            // Fallback: whole response might be raw ADIF
-            return response;
-        }
 
         // Validates a Logbook API key with no side effects -- ACTION=STATUS just reports
         // on the logbook the key belongs to, unlike FETCH it never returns any QSO

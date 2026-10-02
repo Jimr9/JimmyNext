@@ -166,17 +166,29 @@ namespace WSJTX_Controller
                 NexusLogbookMigration.RunInteractive();
                 return;
             }
-            // Read-only LoTW/QRZ sync diagnosis on copies (optional: four saved download files).
-            int diag = Array.IndexOf(cmdArgs, "--nexus-logbook-diagnose-sync");
-            if (diag >= 0)
-            {
-                NexusSyncDiagnosis.RunInteractive(cmdArgs.Skip(diag + 1).ToArray());
-                return;
-            }
             try
             {
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                // A prepared "Import everything" (ComputerMove) is put in place first -- before the
+                // engine starts, the only time the logbook can be replaced.
+                if (!TestModeGuard.IsTestMode)
+                {
+                    string dataRoot = System.IO.Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                        System.Reflection.Assembly.GetExecutingAssembly().GetName().Name);
+                    try
+                    {
+                        string moved = ComputerMove.ApplyPending(dataRoot);
+                        if (moved != null) MessageBox.Show(moved, "Jimmy Next", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex)
+                    {
+                        CrashLogger.Log("ComputerMove.ApplyPending", ex);
+                        MessageBox.Show("The move from the other computer could not be finished: " + ex.Message +
+                            "\n\nWhat was here before is in the Backups folder.", "Jimmy Next", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
+                }
                 // Automatic logbook move (NexusLogbookMigration.AutoMove): until it has happened,
                 // before Jimmy starts its own engine.
                 if (NexusLogbookMigration.AutoMoveNeeded()) RunAutoMoveWithProgress();

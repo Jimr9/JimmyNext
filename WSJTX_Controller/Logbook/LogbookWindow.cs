@@ -116,6 +116,7 @@ namespace WSJTX_Controller
         private Button   _syncExportBtn;
         private Button   _syncQrzBtn;
         private Button   _syncLotwBtn;
+        private Button   _syncLotwFullBtn;
         private Button   _syncClubLogBtn;
         private Button   _syncEqslBtn;
         private Label    _srcQrzStatusLbl;
@@ -495,6 +496,22 @@ namespace WSJTX_Controller
             };
             _syncEqslBtn.Click += EqslRefreshBtn_Click;
             header.Controls.Add(_syncEqslBtn);
+
+            // Download from LoTW asks only for what is new since the last one (LoTW's own
+            // high-water, as the Nexus desktop does); this asks for the whole history again --
+            // for peace of mind, or a log that is missing older confirmations (2026-10-02).
+            _syncLotwFullBtn = new Button
+            {
+                Text           = "Full LoTW Download",
+                AccessibleName = "Full LoTW download, all confirmations",
+                Size           = new Size(150, 26),
+                Location       = new Point(164, y),
+                Font           = font,
+                TabIndex       = 6,
+                Enabled        = _syncLotwBtn.Enabled,
+            };
+            _syncLotwFullBtn.Click += LoTWFullBtn_Click;
+            header.Controls.Add(_syncLotwFullBtn);
             y += 34;
 
             _syncExportBtn = new Button
@@ -504,7 +521,7 @@ namespace WSJTX_Controller
                 Size           = new Size(120, 26),
                 Location       = new Point(8, y),
                 Font           = font,
-                TabIndex       = 6,
+                TabIndex       = 7,
             };
             _syncExportBtn.Click += (s, e) => ExportAdif(null);
             header.Controls.Add(_syncExportBtn);
@@ -1912,18 +1929,15 @@ namespace WSJTX_Controller
             SetBusy(true);
             try
             {
-                var client = new QrzLogbookClient();
-                // Always fetch the complete log, not just records modified since the last
-                // refresh -- an incremental MODSINCE filter can never re-discover a QSO that
-                // was missed on some earlier sync (its own last-modified date on QRZ's side
-                // predates every checkpoint since), permanently hiding it. Found 2026-07-09:
-                // 3 confirmed QRZ QSOs stuck exactly this way. A full ADIF pull is a few MB
-                // and imports in under a second (dedup-key upsert is idempotent), so there's
-                // no real cost to always doing the complete, authoritative pull.
-                string adif = await client.FetchAdifAsync(_qrzApiKey(), since: null).ConfigureAwait(true);
+                // Always the complete log (fetched by Nexus's own code, 2026-10-02): an incremental
+                // MODSINCE filter can never re-discover a QSO missed on an earlier sync (its own
+                // last-modified date on QRZ's side predates every checkpoint since). Found
+                // 2026-07-09: 3 confirmed QRZ QSOs stuck exactly this way.
+                string key = _qrzApiKey();
+                var (adif, error) = await Task.Run(() => NexusLogbookService.DownloadQrzLogbook(key)).ConfigureAwait(true);
                 if (adif == null)
                 {
-                    string msg = "QRZ error: " + (client.LastError ?? "Unknown error") + " (see debug log for details)";
+                    string msg = "QRZ error: " + (error ?? "Unknown error");
                     LogSyncFailure("QRZ", msg);
                     SetStatus(msg);
                     return;
@@ -1945,7 +1959,13 @@ namespace WSJTX_Controller
             finally { SetBusy(false); }
         }
 
-        private async void LoTWRefreshBtn_Click(object sender, EventArgs e)
+        private void LoTWRefreshBtn_Click(object sender, EventArgs e) => RunLotwDownload(full: false);
+        private void LoTWFullBtn_Click(object sender, EventArgs e) => RunLotwDownload(full: true);
+
+        // LoTW, fetched by Nexus's own code (2026-10-02): the confirmations matched since the last
+        // download's high-water, or every one with full -- see NexusLogbookService.
+        // DownloadLotwConfirmations for the rules that keep it from missing one.
+        private async void RunLotwDownload(bool full)
         {
             if (_db == null) { SetStatus("Database not available."); return; }
             if (string.IsNullOrWhiteSpace(_lotwUser())) { SetStatus("LoTW credentials not configured."); return; }
@@ -1953,27 +1973,22 @@ namespace WSJTX_Controller
             SetBusy(true);
             try
             {
-                var client = new LoTWQsoClient();
-                // Always fetch the complete history (since: null -> LoTWQsoClient uses
-                // 1900-01-01), not just records changed since the last refresh -- same
-                // reasoning as the QRZ sync above: an incremental filter can permanently hide
-                // a QSO confirmed before the last checkpoint if it was ever missed on an
-                // earlier sync. LoTW's own log is small enough that this costs nothing.
-
-                // LoTW splits confirmed and unconfirmed QSOs into separate API responses.
-                // Fetch both and concatenate; AdifParser handles multiple <EOH> tags.
-                SetStatus("Fetching LoTW confirmed QSOs…");
-                string adif1 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: true).ConfigureAwait(true);
+                SetStatus(full ? "Fetching all LoTW confirmations…" : "Fetching new LoTW confirmations…");
+                string user = _lotwUser(), pass = _lotwPass();
+                var (adif1, highWater, error) = await Task.Run(() =>
+                    NexusLogbookService.DownloadLotwConfirmations(user, pass, full)).ConfigureAwait(true);
                 if (adif1 == null)
                 {
-                    string msg = "LoTW error: " + (client.LastError ?? "Unknown error");
+                    string msg = "LoTW error: " + (error ?? "Unknown error");
                     LogSyncFailure("LOTW", msg);
                     SetStatus(msg);
                     return;
                 }
 
                 // Only the confirmations download is merged -- see LogbookAutoSync.SyncLotwAsync.
-                await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true);
+                // The high-water moves only after a clean merge.
+                if (await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true))
+                    NexusLogbookService.SaveLotwHighWater(user, highWater);
                 string received = await ((NexusLogbookService)_db).LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
                 if (received != null) SetStatus(SetStatus_Text + "  " + received);
             }
@@ -2119,7 +2134,8 @@ namespace WSJTX_Controller
             finally { SetBusy(false); }
         }
 
-        private async Task RunImportFromText(string adifText, string source, string metaKey, bool detected = false)
+        // Returns true for a clean import (no errors) -- what a download's checkpoint waits for.
+        private async Task<bool> RunImportFromText(string adifText, string source, string metaKey, bool detected = false)
         {
             SetBusy(true);
             int logId = _db.LogImportStart(source);
@@ -2164,11 +2180,13 @@ namespace WSJTX_Controller
 
                 // Notify Jimmy so it can refresh its HRC filter caches.
                 _onImportComplete?.Invoke();
+                return string.IsNullOrWhiteSpace(result.Errors);
             }
             catch (Exception ex)
             {
                 _db.LogImportFinish(logId, 0, 0, 0, 0, 0, ex.Message);
                 SetStatus($"{(detected ? $"Detected source: {source}." : source)} import error: " + ex.Message);
+                return false;
             }
             finally { SetBusy(false); }
         }
@@ -2326,6 +2344,7 @@ namespace WSJTX_Controller
             _syncImportBtn.Enabled  = !busy;
             _syncQrzBtn.Enabled     = !busy && !string.IsNullOrWhiteSpace(_qrzApiKey());
             _syncLotwBtn.Enabled    = !busy && !string.IsNullOrWhiteSpace(_lotwUser()) && !string.IsNullOrWhiteSpace(_lotwPass());
+            _syncLotwFullBtn.Enabled = _syncLotwBtn.Enabled;
             _syncClubLogBtn.Enabled = !busy && !string.IsNullOrWhiteSpace(_clubLogEmail()) &&
                                        !string.IsNullOrWhiteSpace(_clubLogPassword()) && !string.IsNullOrWhiteSpace(_clubLogCallsign());
             _syncEqslBtn.Enabled    = !busy && !string.IsNullOrWhiteSpace(_eqslUsername()) && !string.IsNullOrWhiteSpace(_eqslPassword());

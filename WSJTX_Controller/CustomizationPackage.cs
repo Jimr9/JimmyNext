@@ -125,6 +125,16 @@ namespace WSJTX_Controller
             return CustomizationParts.None;
         }
 
+        // Two actions on one key in the file's hotkeys (operator, 2026-10-02): one line per key,
+        // e.g. "Alt+X: Log QSO, Next call". Empty = none. Unassigned actions never clash.
+        internal List<string> HotkeyClashes() =>
+            Hotkeys.Where(kv => int.TryParse(kv.Value, out int k) && k != 0)
+                   .GroupBy(kv => int.Parse(kv.Value))
+                   .Where(g => g.Count() > 1)
+                   .Select(g => HotkeyConfig.FormatKeys((System.Windows.Forms.Keys)g.Key) + ": " +
+                       string.Join(", ", g.Select(kv => Enum.TryParse(kv.Key, out HotkeyAction a) && HotkeyConfig.DisplayNames.TryGetValue(a, out var n) ? n : kv.Key)))
+                   .ToList();
+
         private static bool IsHotkeyEntry(string key, string value) =>
             Enum.TryParse(key, false, out HotkeyAction _) && int.TryParse(value, out _);
 

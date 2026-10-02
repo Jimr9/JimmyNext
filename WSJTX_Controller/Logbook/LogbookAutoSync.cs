@@ -112,11 +112,10 @@ namespace WSJTX_Controller
         private async Task<bool> SyncQrzAsync(ILogbookService db)
         {
             _logbookWindowStatus("Auto-sync: fetching QRZ Logbook…");
-            var client = new QrzLogbookClient();
-            string adif = await client.FetchAdifAsync(_qrzApiKey(), since: null).ConfigureAwait(true);
+            var (adif, error) = await Task.Run(() => NexusLogbookService.DownloadQrzLogbook(_qrzApiKey())).ConfigureAwait(true);
             if (adif == null)
             {
-                _logbookWindowStatus("Auto-sync: QRZ error: " + (client.LastError ?? "Unknown error"));
+                _logbookWindowStatus("Auto-sync: QRZ error: " + (error ?? "Unknown error"));
                 return false;
             }
             return ImportAndReport(db, adif, "QRZ", "LogbookLastQrzRefresh");
@@ -125,17 +124,19 @@ namespace WSJTX_Controller
         private async Task<bool> SyncLotwAsync(ILogbookService db)
         {
             _logbookWindowStatus("Auto-sync: fetching LoTW Logbook…");
-            var client = new LoTWQsoClient();
-            string adif1 = await client.FetchReportAsync(_lotwUser(), _lotwPass(), since: null, confirmedOnly: true).ConfigureAwait(true);
+            string user = _lotwUser();
+            var (adif1, highWater, error) = await Task.Run(() =>
+                NexusLogbookService.DownloadLotwConfirmations(user, _lotwPass(), full: false)).ConfigureAwait(true);
             if (adif1 == null)
             {
-                _logbookWindowStatus("Auto-sync: LoTW error: " + (client.LastError ?? "Unknown error"));
+                _logbookWindowStatus("Auto-sync: LoTW error: " + (error ?? "Unknown error"));
                 return false;
             }
             // Only the confirmations download is merged (as Nexus's own sync does): the own-records
             // download restates every confirmed contact a second time, and Nexus's merge put those
             // second copies on other contacts of the same day.
             bool ok = ImportAndReport(db, adif1, "LOTW", "LogbookLastLoTWRefresh");
+            if (ok) NexusLogbookService.SaveLotwHighWater(user, highWater);
             string received = await ((NexusLogbookService)db).LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
             if (received != null) _logbookWindowStatus("Auto-sync: " + received);
             return ok;

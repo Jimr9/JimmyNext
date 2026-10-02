@@ -21,11 +21,18 @@ namespace WSJTX_Controller
 
     internal static class SupportReportBuilder
     {
-        private static readonly string[] SensitiveKeywords =
+        // Only real secrets are blanked (operator, 2026-10-02): passwords (qrzPassword,
+        // lotwLogbookPass, eqslPassword, hamQthPassword, clubLogUploadPassword), the QRZ Logbook API
+        // key, the HRDLog upload code, and any token/secret/credential. The rest -- on/off
+        // switches, refresh days, usernames, the upload hotkey -- is what support needs to see; it
+        // used to be blanked whenever its name merely mentioned qrz, lotw, eqsl or hamqth.
+        internal static bool IsSecretSetting(string key)
         {
-            "password", "pwd", "pass", "apikey", "api_key",
-            "token", "secret", "credential", "qrz", "lotw", "eqsl", "hamqth",
-        };
+            string k = (key ?? "").Trim().ToLowerInvariant();
+            return k.Contains("password") || k.Contains("passwd") || k.Contains("pwd") || k.EndsWith("pass")
+                || k.Contains("apikey") || k.Contains("api_key") || k.EndsWith("uploadcode")
+                || k.Contains("token") || k.Contains("secret") || k.Contains("credential");
+        }
 
         private const string Line80 = "================================================================================";
         private const string Line40 = "----------------------------------------";
@@ -597,8 +604,7 @@ namespace WSJTX_Controller
                     }
 
                     int eq  = line.IndexOf('=');
-                    string rawKey = line.Substring(0, eq).Trim().ToLowerInvariant();
-                    bool sensitive = SensitiveKeywords.Any(k => rawKey.Contains(k));
+                    bool sensitive = IsSecretSetting(line.Substring(0, eq));
 
                     if (sensitive)
                     {

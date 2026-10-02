@@ -607,6 +607,43 @@ namespace WSJTX_Controller
             finally { try { File.Delete(tmp); } catch { } }
         }
 
+        // ── LoTW and QRZ downloads, fetched by Nexus's own code (2026-10-02) ───────────────────
+        // LoTW: only the confirmations matched since the high-water LoTW gave last time
+        // (APP_LoTW_LASTQSL), as the Nexus desktop asks -- seconds instead of the whole history.
+        // The rules that keep it from missing one are Nexus's: LoTW's own time, not this PC's; only
+        // a complete report (the engine refuses a cut-off one); the high-water moves only after a
+        // clean merge (the caller then calls SaveLotwHighWater), and is kept per username, so a
+        // different account starts with everything. full: everything again.
+        private static string LotwHighWaterKey(string user) => "lotwLastQsl|" + (user ?? "").Trim().ToUpperInvariant();
+
+        // A full download asks "since 1900-01-01" in so many words: given no date, LoTW uses a
+        // "system supplied default" -- the account's last download -- and sends only what came
+        // after it (2026-10-02: the first run, with no high-water yet, got 1 confirmation, not the
+        // history; the old Jimmy client always sent the explicit date for this reason).
+        private const string LotwEverything = "1900-01-01";
+
+        public static (string adif, string highWater, string error) DownloadLotwConfirmations(string user, string pass, bool full)
+        {
+            string since = full ? null : NexusLogbook.GetMeta(LotwHighWaterKey(user));
+            if (string.IsNullOrWhiteSpace(since)) since = LotwEverything;
+            var r = new ExternalDataClient().DownloadLotw(user, pass, since, null, out string error);
+            return r == null ? (null, null, error) : (r.Adif ?? "", r.HighWater, null);
+        }
+
+        // After a clean merge only. No high-water (an empty answer) keeps the one there is.
+        public static void SaveLotwHighWater(string user, string highWater)
+        {
+            if (!string.IsNullOrWhiteSpace(highWater)) NexusLogbook.SetMeta(LotwHighWaterKey(user), highWater.Trim());
+        }
+
+        // QRZ: always the whole logbook -- QRZ's "modified since" follows a record's own edit date,
+        // not its confirmation, and lost confirmations that way (2026-07-09).
+        public static (string adif, string error) DownloadQrzLogbook(string apiKey)
+        {
+            string adif = new ExternalDataClient().DownloadQrzLogbook(apiKey, out string error);
+            return (adif, error);
+        }
+
         // The step a LoTW sync runs after merging confirmations while Nexus keeps the log.
         // Best-effort, as in the Nexus desktop: it never fails the sync. Returns a short note for
         // the status line, or null when there is nothing to say.
@@ -614,9 +651,11 @@ namespace WSJTX_Controller
         {
             var from = OldestPendingLotwUpload();
             if (from == null) return null;
-            var lotw = new LoTWQsoClient();
-            string text = await lotw.FetchReportAsync(user, pass, null, confirmedOnly: false, ownFromQsoDate: from).ConfigureAwait(false);
-            if (text == null) return "LoTW received check skipped: " + lotw.LastError;
+            string error = null;
+            var report = await System.Threading.Tasks.Task.Run(() =>
+                new ExternalDataClient().DownloadLotw(user, pass, null, from, out error)).ConfigureAwait(false);
+            if (report == null) return "LoTW received check skipped: " + error;
+            string text = report.Adif ?? "";
             int n = PromoteLotwReceived(text, out var why);
             return n < 0 ? "LoTW received status not updated: " + why : n > 0 ? $"LoTW has received {n:N0} upload(s)." : null;
         }

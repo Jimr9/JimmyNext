@@ -1109,7 +1109,11 @@ namespace WSJTX_Controller
         // ALSO running on the same call, so the richer Station Watch line is never doubled.
         private void HandleSmartStartObservation(TargetObservation obs)
         {
-            if (obs.Kind != TargetObservationKind.SmartStartWaiting) EndQuietRun(obs.Target);
+            // Only the station itself being heard ends a quiet run -- another station calling it
+            // (OtherPartyObserved) is not hearing it (operator, 2026-10-02: AA4SS, busy with
+            // callers, was "not heard." every period instead of "still not heard.").
+            if (obs.Kind != TargetObservationKind.SmartStartWaiting && obs.Kind != TargetObservationKind.OtherPartyObserved)
+                EndQuietRun(obs.Target);
             switch (obs.Kind)
             {
                 case TargetObservationKind.SmartStartWaiting:

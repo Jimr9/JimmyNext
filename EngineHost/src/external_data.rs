@@ -23,7 +23,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use propagation::geo::maidenhead_to_latlon;
-use propagation::live::{eqsl, hamqth, pota, swpc, swpc_scales};
+use propagation::live::{eqsl, hamqth, lotw, pota, qrz, swpc, swpc_scales};
 use propagation::model::{r_scale, SpaceWx};
 use propagation::pota::OtaSpot;
 use propagation::{representative_muf, NoaaScalesView};
@@ -552,6 +552,135 @@ pub fn eqsl_download(args: &EqslDownloadArgs) -> Result<String, String> {
         return Err("eQSL: download appears truncated -- try again".to_string());
     }
     Ok(body)
+}
+
+/// LOTW_DOWNLOAD wire args (2026-10-02): LoTW's report fetched by Nexus's own code -- the
+/// request the Nexus desktop builds (tempo_core::lotw), its fetch (propagation::live::lotw) and
+/// its checks -- instead of Jimmy Next's own copy. Jimmy keeps the high-water and its pairing
+/// guard, and merges through LOG_MERGE as before.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LotwDownloadArgs {
+    pub username: String,
+    pub password: String,
+    /// Confirmations matched since this LoTW high-water (`qso_qslsince`). Jimmy always sends a
+    /// date ("1900-01-01" for everything): with none, LoTW uses a "system supplied default" --
+    /// the account's last download -- and sends only what came after it.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// The own-records report (`qso_qsl=no`) from this QSO date (`YYYY-MM-DD`), instead of
+    /// confirmations -- what tells which uploads LoTW holds.
+    #[serde(default)]
+    pub own_from: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LotwDownloadReply {
+    pub adif: String,
+    /// LoTW's `APP_LoTW_LASTQSL` from a complete confirmations report: what Jimmy may store as the
+    /// next `since` once the merge is made. None when absent (an empty incremental answer), or
+    /// for the own-records report -- the caller then keeps the high-water it has.
+    pub high_water: Option<String>,
+}
+
+pub fn lotw_download(args: &LotwDownloadArgs) -> Result<LotwDownloadReply, String> {
+    let query = tempo_core::lotw::LotwQuery {
+        username: args.username.clone(),
+        password: args.password.clone(),
+        // No qso_owncall: every callsign in the account, as Jimmy has always downloaded.
+        owncall: None,
+        qsl_since: args.since.clone().filter(|s| !s.trim().is_empty()),
+    };
+    let own_from = args.own_from.as_deref().filter(|s| !s.trim().is_empty());
+    let body = {
+        let url = match own_from {
+            Some(from) => tempo_core::lotw::build_own_report_url(&query, Some(from)),
+            None => tempo_core::lotw::build_report_url(&query),
+        };
+        lotw::fetch_report(&url)?
+    }; // the URL carries the password -- dropped here, never logged
+    checked_lotw_report(body, own_from.is_some())
+}
+
+/// What LOTW_DOWNLOAD hands on, or why not: a real LoTW report, complete to its end marker; the
+/// high-water only from a confirmations report. Separate from the fetch so it is tested offline.
+fn checked_lotw_report(body: String, own_records: bool) -> Result<LotwDownloadReply, String> {
+    if !tempo_core::lotw::is_lotw_adif(&body) {
+        // The Nexus desktop's wording: the login worked (a wrong password fails earlier).
+        return Err("LoTW answered, but the download was not the report file it should have been. Your \
+                    username and password are fine -- this is not a login problem. LoTW may be returning \
+                    an error page, or may be down for maintenance. Try again shortly."
+            .to_string());
+    }
+    // Complete only with LoTW's end marker (the Nexus desktop's is_complete_lotw_body): every
+    // confirmation in a cut-off tail is dated at or before LASTQSL, so handing it on and storing
+    // the high-water would skip them on every later download. Nothing is handed on instead.
+    if !body.to_ascii_lowercase().contains("<app_lotw_eof>") {
+        return Err("LoTW: the download was cut off -- nothing was merged; try again.".to_string());
+    }
+    let high_water = if own_records { None } else { tempo_core::lotw::extract_last_qsl(&body) };
+    Ok(LotwDownloadReply { adif: body, high_water })
+}
+
+#[cfg(test)]
+mod lotw_download_tests {
+    use super::checked_lotw_report;
+
+    const HEAD: &str = "ARRL Logbook of the World Status Report
+<PROGBUGS:4>xxxx
+<APP_LoTW_LASTQSL:19>2026-10-02 18:40:11
+<eoh>
+";
+    const ROW: &str = "<CALL:5>C91RU<BAND:3>17M<MODE:3>FT8<QSO_DATE:8>20261002<TIME_ON:6>183000<QSL_RCVD:1>Y<eor>
+";
+
+    #[test]
+    fn complete_report_gives_its_high_water() {
+        let r = checked_lotw_report(format!("{HEAD}{ROW}<APP_LoTW_EOF>
+"), false).expect("complete report");
+        assert_eq!(r.high_water.as_deref(), Some("2026-10-02 18:40:11"));
+        assert!(r.adif.contains("C91RU"));
+    }
+
+    #[test]
+    fn cut_off_report_is_refused() {
+        assert!(checked_lotw_report(format!("{HEAD}{ROW}"), false).is_err());
+    }
+
+    #[test]
+    fn error_page_is_refused() {
+        assert!(checked_lotw_report("<html><body>LoTW is down for maintenance</body></html>".into(), false).is_err());
+    }
+
+    #[test]
+    fn own_records_report_never_moves_the_high_water() {
+        let r = checked_lotw_report(format!("{HEAD}{ROW}<APP_LoTW_EOF>
+"), true).expect("complete report");
+        assert_eq!(r.high_water, None);
+    }
+}
+
+/// QRZ_DOWNLOAD wire args (2026-10-02): the whole QRZ Logbook, fetched by Nexus's own code
+/// (tempo_core::qrz FETCH + parse, propagation::live::qrz). Always the whole book: QRZ's
+/// MODSINCE follows a record's own edit date, not its confirmation, and lost confirmations that
+/// way (2026-07-09).
+#[derive(serde::Deserialize)]
+pub struct QrzDownloadArgs {
+    pub key: String,
+}
+
+pub fn qrz_download(args: &QrzDownloadArgs) -> Result<String, String> {
+    let resp = qrz::post_form(tempo_core::qrz::QRZ_LOGBOOK_URL, tempo_core::qrz::build_fetch_body(&args.key))?;
+    let fetched = tempo_core::qrz::parse_fetch(&resp);
+    if !fetched.ok {
+        // An empty logbook answers FAIL with COUNT=0 and no reason -- not an error.
+        if fetched.count == 0 && fetched.reason.is_none() {
+            return Ok(String::new());
+        }
+        return Err(format!("QRZ refused the download: {}", fetched.reason.unwrap_or_else(|| "no reason given".into())));
+    }
+    Ok(fetched.adif)
 }
 
 /// HAMQTH_LOOKUP wire args. Combined login+lookup per call (no session-id caching across
