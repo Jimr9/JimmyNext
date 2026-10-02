@@ -1193,6 +1193,7 @@ namespace WSJTX_Controller
             // change or at connect, so a changed title could keep its old name).
             Wording.Changed -= ApplyWordingToScreen;
             Wording.Changed += ApplyWordingToScreen;
+            BackupRetention.EnsureSetting();
             string wordingNote = Wording.Load(ActiveWordingPath());
             if (wordingNote != null) wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {wordingNote}");
             if (_sharedSettingsReport != null)
@@ -1991,6 +1992,7 @@ namespace WSJTX_Controller
             string dir = Path.Combine(ProfilesAppDataPath(), "Backups");
             Directory.CreateDirectory(dir);
             File.Move(file, Path.Combine(dir, $"wording-{profile}-{DateTime.Now:yyyyMMdd-HHmmss}.txt"), true);
+            BackupRetention.Prune(dir, "wording-*.txt");
         }
 
         // Shown in the Profiles menu's own list alongside real named profiles, and used as the

@@ -1595,6 +1595,7 @@ static class JimmyTests
         QsoTimeOnIsStartOfContactTests();
         WordingFileTests();
         SendingNeverWaitsForReceiveTests();
+        BackupRetentionTests();
         CustomizationPackageTests();
         BulkEditApplyTests();
         RawDecodesSideLabelReflectsTxFirstTests();
@@ -19178,6 +19179,28 @@ static class JimmyTests
     // The wording file (2026-09-30): spoken notification pieces the operator can reword.
     // "Sending EN34" was shown but never said with the routine line set to After RX (operator,
     // 2026-10-02): what you send keeps its own timing instead of a receive boundary.
+    // Only the newest few backups of each kind are kept (operator, 2026-10-02).
+    static void BackupRetentionTests()
+    {
+        Console.WriteLine("\n── Backups: only the newest are kept ──");
+        string dir = Path.Combine(Path.GetTempPath(), "JimmyTest_Backups_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            for (int i = 1; i <= 7; i++) File.WriteAllText(Path.Combine(dir, $"logbook-before-bulk-edit-2026100{i}-120000.adi"), "x");
+            Directory.CreateDirectory(Path.Combine(dir, "before-import-20261001-120000"));
+            File.WriteAllText(Path.Combine(dir, "other.txt"), "x");
+            int gone = BackupRetention.Prune(dir, "logbook-before-bulk-edit-*.adi", 5);
+            Check("two oldest removed", gone == 2, true);
+            Check("newest five kept", Enumerable.Range(3, 5).All(i => File.Exists(Path.Combine(dir, $"logbook-before-bulk-edit-2026100{i}-120000.adi"))), true);
+            Check("other kinds untouched", File.Exists(Path.Combine(dir, "other.txt"))
+                && Directory.Exists(Path.Combine(dir, "before-import-20261001-120000")), true);
+            Check("folders of a kind pruned too", BackupRetention.Prune(dir, "before-import-*", 0) == 1
+                && Directory.Exists(Path.Combine(dir, "before-import-20261001-120000")) == false, true);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
     static void SendingNeverWaitsForReceiveTests()
     {
         Console.WriteLine("\n── Sending never waits for a receive boundary ──");

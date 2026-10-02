@@ -1178,6 +1178,7 @@ namespace WSJTX_Controller
                 $"logbook-before-bulk-edit-{DateTime.Now:yyyyMMdd-HHmmss}.adi");
             try { nexus.BackupTo(backup); }
             catch (Exception ex) { SetStatus("Bulk edit stopped before changing anything: " + ex.Message); return; }
+            BackupRetention.Prune(Path.GetDirectoryName(backup), "logbook-before-bulk-edit-*.adi");
 
             // In the background (one read of the log, one rebuild at the end -- NexusLogbookService
             // .BulkEdit), so the window keeps answering; the edit buttons wait until it is done.

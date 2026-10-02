@@ -346,6 +346,7 @@ namespace WSJTX_Controller
             if (File.Exists(wordingPath)) File.Copy(wordingPath, Path.Combine(dir, Path.GetFileName(wordingPath)), true);
             string contestIni = ContestConfigStore.CompanionPathFor(iniPath);
             if (!string.IsNullOrEmpty(contestIni) && File.Exists(contestIni)) File.Copy(contestIni, Path.Combine(dir, Path.GetFileName(contestIni)), true);
+            BackupRetention.Prune(backupsRoot, "before-import-*");
             return dir;
         }
 

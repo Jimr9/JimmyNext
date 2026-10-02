@@ -388,6 +388,7 @@ namespace WSJTX_Controller
                 if (!lines.Any(l => l.StartsWith(LayoutMarker, StringComparison.Ordinal)))
                 {
                     File.Copy(path, path + ".before-sections-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".bak", true);
+                    BackupRetention.Prune(Path.GetDirectoryName(path), Path.GetFileName(path) + ".before-*.bak");
                     File.WriteAllText(path, Template(), new UTF8Encoding(false));
                     return $"wording: {name} reorganized by topic ({_overrides.Count} own entr{(_overrides.Count == 1 ? "y" : "ies")} kept)";
                 }
