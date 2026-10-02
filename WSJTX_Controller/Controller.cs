@@ -95,6 +95,7 @@ namespace WSJTX_Controller
         public bool showSpotWatch { get => Settings.ShowSpotWatch; set => Settings.ShowSpotWatch = value; }
         public bool smartQsoStartEnabled { get => Settings.SmartQsoStartEnabled; set => Settings.SmartQsoStartEnabled = value; }
         public int smartStartSilencePeriods { get => Settings.SmartStartSilencePeriods; set => Settings.SmartStartSilencePeriods = value; }
+        public int smartStartBusyQuietPeriods { get => Settings.SmartStartBusyQuietPeriods; set => Settings.SmartStartBusyQuietPeriods = value; }
         public int smartStartMaxStandbyRounds { get => Settings.SmartStartMaxStandbyRounds; set => Settings.SmartStartMaxStandbyRounds = value; }
         public int smartStartTimeLimitMinutes { get => Settings.SmartStartTimeLimitMinutes; set => Settings.SmartStartTimeLimitMinutes = value; }
         public int otherStationRepliesBeforeYielding { get => Settings.OtherStationRepliesBeforeYielding; set => Settings.OtherStationRepliesBeforeYielding = value; }
@@ -4228,15 +4229,22 @@ namespace WSJTX_Controller
                 if (notificationHistoryIncludeRoutineStatus)
                     NotificationHistory?.RecordRoutineStatus(statusText);
             }
-            else if (!queueSpeechExperiment && isReceiveCycleSummaryRender
+            // With the speech experiment on, the box may hold the summary as SPOKEN (", 1 wanted."
+            // spoken as "1 wanted.", written back by CoordinatedSpeak), so the two are compared
+            // with their joining punctuation set aside (SameStatusWords) -- this used to be skipped
+            // for the experiment altogether, leaving a stale "1 wanted" up for minutes (operator,
+            // 2026-10-01). A joined utterance carrying other news is never equal, so it is never
+            // cleared: only a box still showing nothing but that summary is.
+            else if (isReceiveCycleSummaryRender
                 && _lastReceiveCycleSummaryText != null
-                && this.statusText.Text == _lastReceiveCycleSummaryText
+                && SameStatusWords(this.statusText.Text, _lastReceiveCycleSummaryText)
                 && ShouldClearStaleReceiveCycleSummary())
             {
                 this.statusText.Text = "";
                 this.statusText.SelectionStart = 0;
                 this.statusText.SelectionLength = 0;
                 _lastReceiveCycleSummaryText = null;
+                _lastRoutineShownText = null;   // the same summary coming back is shown again
             }
 
             return this.statusText.Focused && Form.ActiveForm == this && GetForegroundWindow() == this.Handle;
@@ -4250,6 +4258,14 @@ namespace WSJTX_Controller
         // what keeps "the event is disabled" / "the template deliberately has no fields" /
         // "the enabled live summary currently has nothing to report" three genuinely different
         // states -- the new behaviour applies only to the last one.
+        // The same words, setting aside the leading ", " and trailing "." a status line is joined
+        // with -- the written and the spoken form of one summary.
+        internal static bool SameStatusWords(string a, string b)
+        {
+            string Core(string s) => (s ?? "").Trim().TrimStart(',', ' ').TrimEnd('.', ' ');
+            return Core(a).Length > 0 && Core(a) == Core(b);
+        }
+
         private bool ShouldClearStaleReceiveCycleSummary()
         {
             if (!Notifications.ClearReceiveCycleSummaryWhenEmpty) return false;

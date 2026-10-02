@@ -36,6 +36,10 @@ namespace WSJTX_Controller
         // completed, appropriate-parity receive opportunities, not wall-clock seconds (see
         // TargetMonitor.OnReceivePeriodComplete's own comment for exactly what counts).
         public int SmartStartSilencePeriods { get; set; } = 2;
+        // Smart Mode: quiet periods to wait after the target was last heard working ANOTHER
+        // station (operator, 2026-10-01, TG9ADQ) -- a busy pile-up station is often missed by one
+        // decode pass mid-QSO. The larger of this and SmartStartSilencePeriods applies then.
+        public int SmartStartBusyQuietPeriods { get; set; } = 2;
 
         // Operator request (2026-09-13), reworked 2026-09-22 from "busy dead-end" round counting
         // into a consecutive target-not-heard limit -- same setting/storage key kept for profile
@@ -132,6 +136,8 @@ namespace WSJTX_Controller
             SmartQsoStartEnabled = ini.Read("smartQsoStartEnabled") == "True";
             if (int.TryParse(ini.Read("smartStartSilencePeriods"), out int silencePeriods) && silencePeriods >= 1 && silencePeriods <= 10)
                 SmartStartSilencePeriods = silencePeriods;
+            if (int.TryParse(ini.Read("smartStartBusyQuietPeriods"), out int busyQuiet) && busyQuiet >= 1 && busyQuiet <= 10)
+                SmartStartBusyQuietPeriods = busyQuiet;
             if (int.TryParse(ini.Read("smartStartMaxStandbyRounds"), out int maxStandbyRounds) && maxStandbyRounds >= 1 && maxStandbyRounds <= 20)
                 SmartStartMaxStandbyRounds = maxStandbyRounds;
             if (int.TryParse(ini.Read("smartStartTimeLimitMinutes"), out int timeLimitMinutes) && timeLimitMinutes >= 0 && timeLimitMinutes <= 999)
@@ -161,6 +167,7 @@ namespace WSJTX_Controller
             ini.Write("showSpotWatch", ShowSpotWatch.ToString());
             ini.Write("smartQsoStartEnabled", SmartQsoStartEnabled.ToString());
             ini.Write("smartStartSilencePeriods", SmartStartSilencePeriods.ToString());
+            ini.Write("smartStartBusyQuietPeriods", SmartStartBusyQuietPeriods.ToString());
             ini.Write("smartStartMaxStandbyRounds", SmartStartMaxStandbyRounds.ToString());
             ini.Write("smartStartTimeLimitMinutes", SmartStartTimeLimitMinutes.ToString());
             ini.Write("otherStationRepliesBeforeYielding", OtherStationRepliesBeforeYielding.ToString());

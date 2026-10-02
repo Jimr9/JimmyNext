@@ -81,7 +81,6 @@ namespace WSJTX_Controller
         // ── Page panels ───────────────────────────────────────────────────────────
         private Panel _myLogPanel;
         private Panel _awardsPanel;
-        private Panel _stillNeedPanel;
         private Panel _editLogPanel;
         private Panel _syncPanel;
 
@@ -99,23 +98,16 @@ namespace WSJTX_Controller
         private TextBox  _statUploadHrdLogTb;
         private ListView _dashRecentLv;
 
-        // ── Awards controls ───────────────────────────────────────────────────────
-        private ComboBox _awardsViewCb;
+        // ── Awards controls (Awards and Still Need are one page since 2026-10-01) ──────────
+        private CheckedListBox _awardsClb;
+        private ComboBox _awardsBandCb;
+        private ComboBox _awardsShowCb;
         private TextBox  _awardsProgressLbl;
         private ListView _awardsLv;
         private Button   _awardsManageBtn;
         private Button   _awardsRefreshBtn;
         private List<RuleDefinition> _awardsDefs = new List<RuleDefinition>();
         private bool     _suppressAwardsEvent;
-
-        // ── Still Need controls ────────────────────────────────────────────────────
-        private CheckedListBox _neededAwardsClb;
-        private ComboBox _neededBandCb;
-        private ListView _neededLv;
-        private TextBox  _neededCountLbl;
-        private Button   _neededRefreshBtn;
-        private List<RuleDefinition> _neededDefs = new List<RuleDefinition>();
-        private bool     _suppressNeededEvent;
 
         // ── Lookup controls ───────────────────────────────────────────────────────
 
@@ -159,12 +151,13 @@ namespace WSJTX_Controller
 
         // ── Page constants ────────────────────────────────────────────────────────
         private const int PAGE_MYLOG     = 0;
+        // Awards and Still Need are one page since 2026-10-01 ("Awards"): the same awards and the
+        // same RuleEngine; Still Need only added the live-tracking checks and a band filter.
         private const int PAGE_AWARDS    = 1;
-        private const int PAGE_STILLNEED = 2;
         // Lookup and Edit Log are one page since 2026-10-01 ("Lookup and Edit"): the Edit Log
         // filters already searched by callsign exactly as Lookup did, so Lookup only duplicated it.
-        private const int PAGE_EDITLOG   = 3;
-        private const int PAGE_SYNC      = 4;
+        private const int PAGE_EDITLOG   = 2;
+        private const int PAGE_SYNC      = 3;
 
         private static readonly string[] AllBands =
         {
@@ -323,12 +316,11 @@ namespace WSJTX_Controller
 
             BuildMyLogPage(font, hfont);
             BuildAwardsPage(font, hfont);
-            BuildStillNeedPage(font, hfont);
             BuildEditLogPage(font, hfont);
             BuildSyncPage(font, hfont);
 
-            string[] pageNames  = { "My Log", "Awards", "Still Need", "Lookup and Edit", "Sync" };
-            Panel[]  pagePanels = { _myLogPanel, _awardsPanel, _stillNeedPanel, _editLogPanel, _syncPanel };
+            string[] pageNames  = { "My Log", "Awards", "Lookup and Edit", "Sync" };
+            Panel[]  pagePanels = { _myLogPanel, _awardsPanel, _editLogPanel, _syncPanel };
             for (int i = 0; i < pageNames.Length; i++)
             {
                 pagePanels[i].Dock = DockStyle.Fill;
@@ -559,231 +551,99 @@ namespace WSJTX_Controller
             _syncPanel.Controls.Add(header);
         }
 
+        // Awards and Still Need are one page since 2026-10-01 (operator). Moving through the award
+        // list shows that award below -- everything, or only what is still needed, on all bands or
+        // one -- whether or not it is checked; checking it (Space) tracks it live while operating,
+        // exactly as the Still Need page's checks did (same saved ids, same refusal for an award
+        // with no fixed checklist).
         private void BuildAwardsPage(Font font, Font hfont)
         {
             _awardsPanel = MakePage();
 
-            // Two stacked Dock=Top panels, not one: manageBtn/refreshBtn sit visually above
-            // the list (old Y=34 vs list's old Y=66) but were already deliberately given a
-            // TabIndex (4,5) placing them AFTER the list (TabIndex=3) in tab order. A single
-            // merged header panel would force them back before the list, changing existing
-            // keyboard-nav behavior -- splitting into topRow (TabIndex 0, before the list) and
-            // buttonRow (TabIndex 6, after the list) reproduces the original order exactly.
-            // AccessibleName=""/AccessibleRole=None -- pure layout container, see MakePage().
-            var topRow = new Panel { Dock = DockStyle.Top, Height = 34, AccessibleName = "", AccessibleRole = AccessibleRole.None };
-
-            var viewLbl = new Label
-            {
-                Text     = "Award:",
-                Font     = font,
-                Location = new Point(8, 10),
-                AutoSize = true,
-            };
-            topRow.Controls.Add(viewLbl);
-
-            _awardsViewCb = new ComboBox
-            {
-                DropDownStyle  = ComboBoxStyle.DropDownList,
-                Font           = font,
-                Location       = new Point(56, 7),
-                Size           = new Size(300, 21),
-                TabIndex       = 1,
-                AccessibleName = "Award selector",
-            };
-            // Items are populated from RuleLibrary.Definitions in PopulateAwardsCombo() —
-            // dropping a new .ini file into RuleDefinitions adds it here with no code change.
-            _awardsViewCb.SelectedIndexChanged += (s, e) => { if (!_suppressAwardsEvent) PopulateAwards(); };
-            topRow.Controls.Add(_awardsViewCb);
-
-            // Read-only TextBox, not a Label -- a plain Label is never reachable by Tab,
-            // so JAWS/NVDA users tabbing through this page would never hear the progress
-            // summary at all (found 2026-07-12: a blind JAWS user's screen-reader
-            // transcript jumped straight from the combo box to the list, confirming this
-            // was genuinely unreachable, not just easy to miss). Matches the same
-            // focusable-readonly-TextBox pattern the My Log tab's stat fields already use.
-            _awardsProgressLbl = new TextBox
-            {
-                Text           = "",
-                Font           = font,
-                Location       = new Point(366, 8),
-                Size           = new Size(340, 20),
-                ReadOnly       = true,
-                BorderStyle    = BorderStyle.None,
-                BackColor      = SystemColors.Control,
-                TabStop        = true,
-                TabIndex       = 2,
-                AccessibleName = "Award progress summary",
-            };
-            topRow.Controls.Add(_awardsProgressLbl);
-
-            // AccessibleName=""/AccessibleRole=None -- pure layout container, see MakePage().
-            var buttonRow = new Panel { Dock = DockStyle.Top, Height = 32, TabIndex = 6, AccessibleName = "", AccessibleRole = AccessibleRole.None };
-
-            _awardsManageBtn = new Button
-            {
-                Text           = "Manage Rule Definitions...",
-                Font           = font,
-                Location       = new Point(8, 2),
-                Size           = new Size(180, 24),
-                TabIndex       = 4,
-                AccessibleName = "Manage Rule Definitions",
-            };
-            _awardsManageBtn.Click += (s, e) => OpenRuleDefinitionManager();
-            buttonRow.Controls.Add(_awardsManageBtn);
-
-            _awardsRefreshBtn = new Button
-            {
-                Text           = "Refresh",
-                Font           = font,
-                Location       = new Point(196, 2),
-                Size           = new Size(90, 24),
-                TabIndex       = 5,
-                AccessibleName = "Refresh award progress",
-            };
-            _awardsRefreshBtn.Click += (s, e) => PopulateAwards();
-            buttonRow.Controls.Add(_awardsRefreshBtn);
-
-            _awardsLv = MakeListView(font);
-            _awardsLv.Dock = DockStyle.Fill;
-            _awardsLv.TabIndex = 3;
-            _awardsLv.AccessibleName = "Award details";
-
-            // topRow added before buttonRow so it stacks above it (Y0-34 then Y34-66).
-            _awardsPanel.Controls.Add(_awardsLv);
-            _awardsPanel.Controls.Add(topRow);
-            _awardsPanel.Controls.Add(buttonRow);
-        }
-
-        // Opens the Rule Definition Manager and, if anything changed, refreshes
-        // every view that reads RuleLibrary.Definitions: this window's Awards
-        // and Still Need combos, plus (via _onImportComplete) the Controller's
-        // HRC cache and Still Need live-tagging cache.
-        private void OpenRuleDefinitionManager()
-        {
-            using (var mgr = new RuleDefinitionManagerDlg())
-            {
-                mgr.ShowDialog(this);
-                if (mgr.RulesChanged)
-                {
-                    PopulateAwardsCombo();
-                    PopulateNeededAwardsList();
-                    _onImportComplete?.Invoke();
-                }
-            }
-        }
-
-        private void BuildStillNeedPage(Font font, Font hfont)
-        {
-            _stillNeedPanel = MakePage();
-            // Height grown from 115 -- see _neededCountLbl's own comment below for why.
+            // header (before the list in Tab order) and buttonRow (after it) -- both Dock=Top, so
+            // the buttons sit above the list on screen but are reached after it, as before.
+            // AccessibleName=""/AccessibleRole=None -- pure layout containers, see MakePage().
             var header = new Panel { Dock = DockStyle.Top, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
-            var typeLbl = new Label
-            {
-                Text     = "Awards:",
-                Font     = font,
-                Location = new Point(8, 10),
-                AutoSize = true,
-            };
-            header.Controls.Add(typeLbl);
+            header.Controls.Add(new Label { Text = "Awards:", Font = font, Location = new Point(8, 10), AutoSize = true });
 
-            // One list serves two purposes: moving through it (arrow keys) picks which
-            // award's checklist is shown below, and checking/unchecking an item (Space)
-            // toggles that award's active live-tracking independently of which one is
-            // currently being browsed -- any number can be checked at once. Replaces the
-            // former award combo box + separate "Actively track" checkbox pair so both
-            // actions live in one control instead of needing a Tab stop each.
-            _neededAwardsClb = new CheckedListBox
+            _awardsClb = new CheckedListBox
             {
-                Font           = font,
-                Location       = new Point(56, 7),
-                Size           = new Size(300, 100),
-                TabIndex       = 1,
-                CheckOnClick   = false,
-                AccessibleName = "Still Needed awards",
+                Font                  = font,
+                Location              = new Point(56, 7),
+                Size                  = new Size(300, 100),
+                TabIndex              = 1,
+                CheckOnClick          = false,
+                AccessibleName        = "Awards",
+                AccessibleDescription = "Space tracks the award live",
             };
-            // CheckOnClick=false + manual toggle on MouseUp, not the built-in CheckOnClick=true --
-            // found live, 2026-09-15: WinForms' own CheckOnClick only toggles the box when the
-            // click does NOT also change the selection. Clicking a row that isn't already selected
-            // (the common case -- arrow-keying/clicking through the list to find an award, then
-            // clicking its box) selects it but silently eats the check-toggle, so the very
-            // interaction this control exists for could look like it worked (row highights) while
-            // never actually calling _onActiveAwardRuleIdsChanged or reaching activeAwardRuleIds/
-            // the ini at all. Toggling explicitly here fires on every left-click regardless of
-            // whether that same click also changed the selection. Keyboard (Space) already toggles
-            // correctly without CheckOnClick -- untouched by this change, so JAWS/NVDA users were
-            // never affected.
-            _neededAwardsClb.MouseUp += (s, e) =>
+            // CheckOnClick=false: WinForms' own CheckOnClick eats the toggle when the same click
+            // also changes the selection (found live, 2026-09-15). And now that clicking a row is
+            // how a mouse user BROWSES awards, a click toggles tracking only when it lands on the
+            // check box itself, never on the award's name. Keyboard: Space toggles, as always.
+            _awardsClb.MouseUp += (s, e) =>
             {
                 if (e.Button != MouseButtons.Left) return;
-                int index = _neededAwardsClb.IndexFromPoint(e.Location);
-                if (index < 0 || index >= _neededAwardsClb.Items.Count) return;
-                _neededAwardsClb.SetItemChecked(index, !_neededAwardsClb.GetItemChecked(index));
+                int index = _awardsClb.IndexFromPoint(e.Location);
+                if (index < 0 || index >= _awardsClb.Items.Count) return;
+                if (e.X > _awardsClb.GetItemRectangle(index).Left + 18) return;
+                _awardsClb.SetItemChecked(index, !_awardsClb.GetItemChecked(index));
             };
-            // Items are populated from RuleLibrary.Definitions in PopulateNeededAwardsList() --
-            // dropping a new .ini file into RuleDefinitions adds it here with no code change.
-            _neededAwardsClb.SelectedIndexChanged += (s, e) => { if (!_suppressNeededEvent) PopulateNeeded(); };
-            _neededAwardsClb.ItemCheck += (s, e) =>
+            // Items come from RuleLibrary.Definitions in PopulateAwardsList() -- dropping a new .ini
+            // file into RuleDefinitions adds it here with no code change.
+            _awardsClb.SelectedIndexChanged += (s, e) => { if (!_suppressAwardsEvent) PopulateAwards(); };
+            _awardsClb.ItemCheck += (s, e) =>
             {
-                if (_suppressNeededEvent) return;
-                if (e.Index < 0 || e.Index >= _neededDefs.Count) return;
-                var def = _neededDefs[e.Index];
+                if (_suppressAwardsEvent) return;
+                if (e.Index < 0 || e.Index >= _awardsDefs.Count) return;
+                var def = _awardsDefs[e.Index];
                 if (e.NewValue == CheckState.Checked && !RuleEngine.SupportsLiveTag(def))
                 {
                     e.NewValue = CheckState.Unchecked;
-                    SetStatus($"{def.Name} can't be actively tracked -- no fixed checklist is available live during decoding.");
+                    SetStatusSpoken(_awardsClb, $"{def.Name} can't be tracked live -- it has no fixed checklist to tag stations from.");
                     return;
                 }
                 _onActiveAwardRuleIdsChanged?.Invoke(def.Id, e.NewValue == CheckState.Checked);
+                // The summary says whether the award shown is tracked; ItemCheck fires before the
+                // box changes, so it is refreshed once the change has landed.
+                BeginInvoke((Action)(() => { if (!IsDisposed) PopulateAwards(); }));
             };
-            header.Controls.Add(_neededAwardsClb);
+            header.Controls.Add(_awardsClb);
 
-            var bandLbl = new Label
-            {
-                Text     = "Band:",
-                Font     = font,
-                Location = new Point(366, 10),
-                AutoSize = true,
-            };
-            header.Controls.Add(bandLbl);
-
-            _neededBandCb = new ComboBox
+            header.Controls.Add(new Label { Text = "Band:", Font = font, Location = new Point(366, 10), AutoSize = true });
+            _awardsBandCb = new ComboBox
             {
                 DropDownStyle  = ComboBoxStyle.DropDownList,
                 Font           = font,
-                Location       = new Point(402, 7),
-                Size           = new Size(90, 21),
+                Location       = new Point(410, 7),
+                Size           = new Size(110, 21),
                 TabIndex       = 2,
                 AccessibleName = "Band filter",
             };
-            _neededBandCb.Items.AddRange(AllBands);
-            _neededBandCb.SelectedIndex = 0;
-            _neededBandCb.SelectedIndexChanged += (s, e) => { if (!_suppressNeededEvent) PopulateNeeded(); };
-            header.Controls.Add(_neededBandCb);
+            _awardsBandCb.Items.AddRange(AllBands);
+            _awardsBandCb.SelectedIndex = 0;
+            _awardsBandCb.SelectedIndexChanged += (s, e) => { if (!_suppressAwardsEvent) PopulateAwards(); };
+            header.Controls.Add(_awardsBandCb);
 
-            _neededRefreshBtn = new Button
+            header.Controls.Add(new Label { Text = "Show:", Font = font, Location = new Point(366, 40), AutoSize = true });
+            _awardsShowCb = new ComboBox
             {
-                Text           = "Refresh",
+                DropDownStyle  = ComboBoxStyle.DropDownList,
                 Font           = font,
-                Location       = new Point(502, 6),
-                Size           = new Size(100, 23),
-                TabIndex       = 4,
-                AccessibleName = "Refresh needed list",
+                Location       = new Point(410, 37),
+                Size           = new Size(150, 21),
+                TabIndex       = 3,
+                AccessibleName = "Show",
             };
-            _neededRefreshBtn.Click += (s, e) => PopulateNeeded();
-            header.Controls.Add(_neededRefreshBtn);
+            _awardsShowCb.Items.AddRange(new object[] { "Everything", "Still needed only" });
+            _awardsShowCb.SelectedIndex = 0;
+            _awardsShowCb.SelectedIndexChanged += (s, e) => { if (!_suppressAwardsEvent) PopulateAwards(); };
+            header.Controls.Add(_awardsShowCb);
 
-            // Was Location(500,8) Size(200,20), single-line -- neededRefreshBtn starts at
-            // x=600, so this box's own declared width (ending at x=700) already overlapped it
-            // by 100px before any text-length problem, and its status text (e.g. "This rule
-            // does not have a fixed still-needed checklist. (Live decode tagging is
-            // unavailable for this award.)") is far longer than 200px besides. Moved to its
-            // own full-width row below the awards checklist/band/refresh row (header's Height
-            // grew to fit it), Multiline/WordWrap so the complete message is always readable,
-            // Anchor=Right so it keeps using the page's full width if the window is widened.
-            // Still a read-only TextBox, not a Label -- see the same fix on the Awards tab's
-            // _awardsProgressLbl for why a plain Label is unreachable by Tab/screen reader.
-            _neededCountLbl = new TextBox
+            // Read-only TextBox, not a Label -- a plain Label is never reachable by Tab, so a
+            // screen reader user would never hear the summary (found 2026-07-12). Full width and
+            // word-wrapped below the list/band/show row, so a long message is always readable.
+            _awardsProgressLbl = new TextBox
             {
                 Text           = "",
                 Font           = font,
@@ -796,17 +656,61 @@ namespace WSJTX_Controller
                 BorderStyle    = BorderStyle.None,
                 BackColor      = SystemColors.Control,
                 TabStop        = true,
-                TabIndex       = 3,
-                AccessibleName = "Needed entries",
+                TabIndex       = 4,
+                AccessibleName = "Award progress summary",
             };
-            header.Controls.Add(_neededCountLbl);
+            header.Controls.Add(_awardsProgressLbl);
 
-            _neededLv = MakeListView(font);
-            _neededLv.Dock = DockStyle.Fill;
-            _neededLv.TabIndex = 5;
-            _neededLv.AccessibleName = "Needed items";
-            _stillNeedPanel.Controls.Add(_neededLv);
-            _stillNeedPanel.Controls.Add(header);
+            var buttonRow = new Panel { Dock = DockStyle.Top, Height = 32, TabIndex = 6, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            _awardsManageBtn = new Button
+            {
+                Text           = "Manage Rule Definitions...",
+                Font           = font,
+                Location       = new Point(8, 2),
+                Size           = new Size(180, 24),
+                TabIndex       = 0,
+                AccessibleName = "Manage Rule Definitions",
+            };
+            _awardsManageBtn.Click += (s, e) => OpenRuleDefinitionManager();
+            buttonRow.Controls.Add(_awardsManageBtn);
+            _awardsRefreshBtn = new Button
+            {
+                Text           = "Refresh",
+                Font           = font,
+                Location       = new Point(196, 2),
+                Size           = new Size(90, 24),
+                TabIndex       = 1,
+                AccessibleName = "Refresh award progress",
+            };
+            _awardsRefreshBtn.Click += (s, e) => PopulateAwards();
+            buttonRow.Controls.Add(_awardsRefreshBtn);
+
+            _awardsLv = MakeListView(font);
+            _awardsLv.Dock = DockStyle.Fill;
+            _awardsLv.TabIndex = 5;
+            _awardsLv.AccessibleName = "Award details";
+
+            // header added before buttonRow so it stacks above it.
+            _awardsPanel.Controls.Add(_awardsLv);
+            _awardsPanel.Controls.Add(header);
+            _awardsPanel.Controls.Add(buttonRow);
+        }
+
+        // Opens the Rule Definition Manager and, if anything changed, refreshes every view that
+        // reads RuleLibrary.Definitions: this window's award list, plus (via _onImportComplete)
+        // the Controller's HRC cache and live-tagging cache.
+        private void OpenRuleDefinitionManager()
+        {
+            using (var mgr = new RuleDefinitionManagerDlg())
+            {
+                mgr.ShowDialog(this);
+                if (mgr.RulesChanged)
+                {
+                    PopulateAwardsList(force: true);
+                    PopulateAwards();
+                    _onImportComplete?.Invoke();
+                }
+            }
         }
 
         private void BuildEditLogPage(Font font, Font hfont)
@@ -1034,9 +938,9 @@ namespace WSJTX_Controller
         private void UpdateEditLogButtons()
         {
             int n = _editLv.SelectedItems.Count;
-            _editEditBtn.Enabled   = n == 1;
-            _editBulkBtn.Enabled   = n >= 2;
-            _editDeleteBtn.Enabled = n >= 1;
+            _editEditBtn.Enabled   = n == 1 && !_bulkRunning;
+            _editBulkBtn.Enabled   = n >= 2 && !_bulkRunning;
+            _editDeleteBtn.Enabled = n >= 1 && !_bulkRunning;
             _editExportBtn.Enabled = n >= 1;
         }
 
@@ -1059,7 +963,11 @@ namespace WSJTX_Controller
                 string dFrom  = NormalizeDateFilter(_editDateFromTb.Text);
                 string dTo    = NormalizeDateFilter(_editDateToTb.Text);
 
-                var results = _db.SearchQsos(call, source, dFrom, dTo);
+                // Every match is found (bulk edit can reach them all); the list shows the newest
+                // EditListShown of them, and the count says so when there are more.
+                var found = _db.SearchQsos(call, source, dFrom, dTo, int.MaxValue);
+                _editFoundIds = found.Select(q => q.Id).ToList();
+                var results = found.Take(EditListShown).ToList();
                 _editLv.Items.Clear();
                 foreach (var q in results)
                 {
@@ -1068,9 +976,11 @@ namespace WSJTX_Controller
                         item.SubItems.Add(GetEditLogFieldValue(q, _editLogRowOrder[i]));
                     _editLv.Items.Add(item);
                 }
-                _editCountLbl.Text = results.Count == 0
+                _editCountLbl.Text = found.Count == 0
                     ? "No QSOs found."
-                    : $"{results.Count} QSO{(results.Count == 1 ? "" : "s")} found.";
+                    : found.Count > results.Count
+                    ? $"{found.Count:N0} QSOs found; showing the newest {results.Count:N0}."
+                    : $"{found.Count} QSO{(found.Count == 1 ? "" : "s")} found.";
                 UpdateEditLogButtons();
             }
             catch (Exception ex) { SetStatus("Search error: " + ex.Message); }
@@ -1231,8 +1141,33 @@ namespace WSJTX_Controller
                 changes = dlg.Changes;
             }
             string what = BulkEditDlg.Describe(changes.Keys);
-            if (MessageBox.Show(this,
-                    $"Change {what} on {ids.Count} contacts?\n\nThe logbook is backed up first. Changes are not sent again to QRZ, Club Log or LoTW.",
+            const string after = "The logbook is backed up first. Changes are not sent again to QRZ, Club Log or LoTW.";
+            // The list shows only the newest EditListShown contacts found. With ALL of them
+            // selected, the one question also asks whether every contact found is meant -- the
+            // only way to reach a whole logbook. It replaces the usual confirmation, never adds one.
+            bool listCut = _editFoundIds.Count > _editLv.Items.Count && ids.Count == _editLv.Items.Count;
+            if (listCut)
+            {
+                var all = new TaskDialogButton($"All {_editFoundIds.Count:N0}");
+                var shown = new TaskDialogButton($"Only these {ids.Count:N0}");
+                var page = new TaskDialogPage
+                {
+                    Caption = "Save Changes",
+                    Heading = $"Change {what} on all {_editFoundIds.Count:N0} contacts found?",
+                    Text = $"The list shows only the newest {ids.Count:N0}. {after}",
+                    Buttons = { all, shown, TaskDialogButton.Cancel },
+                    DefaultButton = TaskDialogButton.Cancel,
+                };
+                var chosen = TaskDialog.ShowDialog(this, page);
+                if (chosen == all) ids = _editFoundIds.ToList();
+                else if (chosen != shown)
+                {
+                    SetStatus("Bulk edit cancelled; nothing changed.");
+                    return;
+                }
+            }
+            else if (MessageBox.Show(this,
+                    $"Change {what} on {ids.Count} contacts?\n\n{after}",
                     "Save Changes", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             {
                 SetStatus("Bulk edit cancelled; nothing changed.");
@@ -1244,30 +1179,40 @@ namespace WSJTX_Controller
             try { nexus.BackupTo(backup); }
             catch (Exception ex) { SetStatus("Bulk edit stopped before changing anything: " + ex.Message); return; }
 
-            int changed = 0, same = 0, failed = 0;
-            string firstError = null;
-            Cursor = Cursors.WaitCursor;
-            try
+            // In the background (one read of the log, one rebuild at the end -- NexusLogbookService
+            // .BulkEdit), so the window keeps answering; the edit buttons wait until it is done.
+            _bulkRunning = true;
+            UpdateEditLogButtons();
+            SetStatus($"Changing {ids.Count} contacts...");
+            Task.Run(() =>
             {
-                foreach (int id in ids)
+                string result;
+                try
                 {
-                    try
-                    {
-                        var q = nexus.GetRecord(id);
-                        if (!BulkEditDlg.Apply(q, changes)) { same++; continue; }
-                        nexus.SaveRecord(q, null);
-                        changed++;
-                    }
-                    catch (Exception ex) { failed++; firstError = firstError ?? ex.Message; }
+                    var (changed, same, failed, firstError) = nexus.BulkEdit(ids, q => BulkEditDlg.Apply(q, changes));
+                    result = $"Changed {changed} contact{(changed == 1 ? "" : "s")}" +
+                             (same > 0 ? $", {same} already had that value" : "") +
+                             (failed > 0 ? $", {failed} failed ({firstError})" : "") +
+                             $". Backup: {Path.GetFileName(backup)} in the Backups folder.";
                 }
-            }
-            finally { Cursor = Cursors.Default; }
-            SetStatus($"Changed {changed} contact{(changed == 1 ? "" : "s")}" +
-                      (same > 0 ? $", {same} already had that value" : "") +
-                      (failed > 0 ? $", {failed} failed ({firstError})" : "") +
-                      $". Backup: {Path.GetFileName(backup)} in the Backups folder.");
-            DoEditSearch();
+                catch (Exception ex) { result = "Bulk edit stopped: " + ex.Message + $" Backup: {Path.GetFileName(backup)} in the Backups folder."; }
+                try
+                {
+                    BeginInvoke((Action)(() =>
+                    {
+                        _bulkRunning = false;
+                        UpdateEditLogButtons();
+                        SetStatus(result);
+                        DoEditSearch();
+                    }));
+                }
+                catch (InvalidOperationException) { }   // the window was closed meanwhile
+            });
         }
+
+        private bool _bulkRunning;
+        private const int EditListShown = 500;
+        private List<int> _editFoundIds = new List<int>();   // every contact the last search found
 
         private void DeleteQsosBtn_Click(object sender, EventArgs e)
         {
@@ -1341,7 +1286,7 @@ namespace WSJTX_Controller
 
         private void NavigateToPage(int page)
         {
-            Panel[] pages = { _myLogPanel, _awardsPanel, _stillNeedPanel, _editLogPanel, _syncPanel };
+            Panel[] pages = { _myLogPanel, _awardsPanel, _editLogPanel, _syncPanel };
             if (page >= 0 && page < pages.Length)
                 _activePage = pages[page];
 
@@ -1353,7 +1298,6 @@ namespace WSJTX_Controller
             {
                 case PAGE_MYLOG:     PopulateMyLog();  break;
                 case PAGE_AWARDS:    PopulateAwards(); break;
-                case PAGE_STILLNEED: PopulateNeeded(); break;
                 case PAGE_EDITLOG:   break;
                 case PAGE_SYNC:      PopulateSync();   break;
             }
@@ -1461,10 +1405,7 @@ namespace WSJTX_Controller
                     _statUploadQrzTb, _statUploadClubLogTb, _statUploadLotwTb, _statUploadHrdLogTb, _dashRecentLv,
                 };
                 case PAGE_AWARDS: return new Control[] {
-                    _awardsViewCb, _awardsProgressLbl, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
-                };
-                case PAGE_STILLNEED: return new Control[] {
-                    _neededAwardsClb, _neededBandCb, _neededCountLbl, _neededRefreshBtn, _neededLv,
+                    _awardsClb, _awardsBandCb, _awardsShowCb, _awardsProgressLbl, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
                 };
                 case PAGE_EDITLOG: return new Control[] {
                     _editCallTb, _editSourceCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
@@ -1616,43 +1557,50 @@ namespace WSJTX_Controller
             catch (Exception ex) { SetStatus("Sync error: " + ex.Message); }
         }
 
-        // Rebuilds the Award selector from RuleLibrary.Definitions (enabled only),
-        // preserving the current selection by Id across rebuilds. Called on every
-        // PopulateAwards() so a future "Reload Rules" action is reflected without
-        // reopening the window.
-        private void PopulateAwardsCombo()
+        // Rebuilds the award list from RuleLibrary.Definitions (enabled only), keeping the award
+        // being shown by Id. Each item's check reflects whether that award is tracked live
+        // (Controller.activeAwardRuleIds), restricted to awards RuleEngine.SupportsLiveTag allows.
+        // Skipped when the enabled set is unchanged: PopulateAwards runs on every selection, band
+        // and view change, and the list's own SelectedIndexChanged fires during the same click
+        // that toggles a not-yet-selected row's box -- rebuilding mid-click could swallow that
+        // toggle (found 2026-09-15 on the Still Need page). force: after the Rule Definition
+        // Manager, where a name can change under the same Id.
+        private void PopulateAwardsList(bool force = false)
         {
             var defs = RuleLibrary.Definitions.Where(d => d.Enabled)
                 .OrderBy(d => d.Category ?? "").ThenBy(d => d.Name).ToList();
-
-            string prevId = (_awardsViewCb.SelectedIndex >= 0 && _awardsViewCb.SelectedIndex < _awardsDefs.Count)
-                ? _awardsDefs[_awardsViewCb.SelectedIndex].Id : null;
-
+            if (!force && _awardsDefs.Count == defs.Count && _awardsDefs.Select(d => d.Id).SequenceEqual(defs.Select(d => d.Id)))
+            {
+                _awardsDefs = defs;
+                return;
+            }
+            string prevId = (_awardsClb.SelectedIndex >= 0 && _awardsClb.SelectedIndex < _awardsDefs.Count)
+                ? _awardsDefs[_awardsClb.SelectedIndex].Id : _activeAwardRuleIds.FirstOrDefault();
             _awardsDefs = defs;
-
             _suppressAwardsEvent = true;
-            _awardsViewCb.Items.Clear();
+            _awardsClb.Items.Clear();
             if (_awardsDefs.Count == 0)
             {
-                _awardsViewCb.Items.Add("(No Rule Definitions available)");
-                _awardsViewCb.Enabled = false;
-                _awardsViewCb.SelectedIndex = 0;
+                _awardsClb.Items.Add("(No Rule Definitions available)");
+                _awardsClb.Enabled = false;
+                _awardsClb.SelectedIndex = 0;
             }
             else
             {
-                _awardsViewCb.Enabled = true;
-                foreach (var d in _awardsDefs) _awardsViewCb.Items.Add(d.Name);
+                _awardsClb.Enabled = true;
+                foreach (var d in _awardsDefs)
+                    _awardsClb.Items.Add(d.Name, RuleEngine.SupportsLiveTag(d) && _activeAwardRuleIds.Contains(d.Id));
                 int idx = prevId != null ? _awardsDefs.FindIndex(d => d.Id == prevId) : -1;
-                _awardsViewCb.SelectedIndex = idx >= 0 ? idx : 0;
+                _awardsClb.SelectedIndex = idx >= 0 ? idx : 0;
             }
             _suppressAwardsEvent = false;
         }
 
         private void PopulateAwards()
         {
-            if (_db == null || _awardsViewCb == null) return;
+            if (_db == null || _awardsClb == null) return;
 
-            PopulateAwardsCombo();
+            PopulateAwardsList();
             _awardsLv.Items.Clear();
             _awardsLv.Columns.Clear();
 
@@ -1664,22 +1612,52 @@ namespace WSJTX_Controller
                 return;
             }
 
-            int idx = _awardsViewCb.SelectedIndex;
+            int idx = _awardsClb.SelectedIndex;
             if (idx < 0 || idx >= _awardsDefs.Count) return;
             var def = _awardsDefs[idx];
 
+            // Only the bands that mean something for this award (a band-restricted award can never
+            // be evaluated "as" another band -- RuleEngine.ResolveBandsForEvaluation); rebuilt only
+            // when the choices differ, so changing the band never disturbs this list.
+            var bandChoices = RuleEngine.BandChoicesFor(def.Bands, AllBands);
+            if (!_awardsBandCb.Items.Cast<string>().SequenceEqual(bandChoices))
+            {
+                string prevBand = _awardsBandCb.SelectedIndex > 0 ? (string)_awardsBandCb.SelectedItem : null;
+                _suppressAwardsEvent = true;
+                _awardsBandCb.Items.Clear();
+                _awardsBandCb.Items.AddRange(bandChoices);
+                int newIdx = prevBand != null ? Array.IndexOf(bandChoices, prevBand) : -1;
+                _awardsBandCb.SelectedIndex = newIdx >= 0 ? newIdx : 0;
+                _suppressAwardsEvent = false;
+            }
+
             try
             {
-                var result = RuleEngine.Evaluate(def);
-                RenderAwardResult(def, result);
+                string band = _awardsBandCb.SelectedIndex <= 0 ? null : (string)_awardsBandCb.SelectedItem;
+                bool neededOnly = _awardsShowCb.SelectedIndex == 1;
+                // All bands, everything: the full evaluation with endorsements, as the Awards page
+                // always showed. A band, or still-needed-only: the band evaluation the Still Need
+                // page used (no endorsements).
+                var result = band == null && !neededOnly ? RuleEngine.Evaluate(def) : RuleEngine.EvaluateBand(def, band);
+                if (neededOnly) RenderNeededResult(def, result, band);
+                else RenderAwardResult(def, result, band);
             }
             catch (Exception ex) { SetStatus("Awards error: " + ex.Message); }
+        }
+
+        // The end of every summary: the band shown, and whether this award is tracked live.
+        private string AwardSummaryTail(RuleDefinition def, string band)
+        {
+            string onBand = band != null ? $"  On {band}." : "";
+            string live = !RuleEngine.SupportsLiveTag(def) ? "  Can't be tracked live."
+                : _activeAwardRuleIds.Contains(def.Id) ? "  Tracked live." : "  Not tracked live.";
+            return onBand + live;
         }
 
         // Renders one RuleResult generically, driven entirely by the definition's
         // Target/GroupBy/Confirmation -- no per-award-name branching, so a new
         // Rule Definition file just works without a UI code change.
-        private void RenderAwardResult(RuleDefinition def, RuleResult result)
+        private void RenderAwardResult(RuleDefinition def, RuleResult result, string band = null)
         {
             if (result.EvaluationError != null)
             {
@@ -1726,6 +1704,8 @@ namespace WSJTX_Controller
                         (next != null ? $"  (next: {next})" : "");
                     break;
             }
+
+            _awardsProgressLbl.Text += AwardSummaryTail(def, band);
 
             BuildAwardColumns(def);
             BuildAwardRows(def, result);
@@ -1862,132 +1842,27 @@ namespace WSJTX_Controller
             }
         }
 
-        // Rebuilds the Still Need awards list from RuleLibrary.Definitions (enabled
-        // only), preserving the current browsing selection by Id across rebuilds --
-        // mirrors PopulateAwardsCombo() so both tabs offer the same award list. Each
-        // item's checked state is independent of the selection: it reflects whether
-        // that award's Id is in Controller.activeAwardRuleIds, restricted to awards
-        // RuleEngine.SupportsLiveTag actually allows to be tracked live at all.
-        private void PopulateNeededAwardsList()
-        {
-            var defs = RuleLibrary.Definitions.Where(d => d.Enabled)
-                .OrderBy(d => d.Category ?? "").ThenBy(d => d.Name).ToList();
-
-            // Skip the rebuild when the enabled-rule set hasn't actually changed. PopulateNeeded()
-            // calls this on every plain selection/band change and tab switch, not just when a
-            // Rule Definition was added/removed -- and _neededAwardsClb's own SelectedIndexChanged
-            // fires as part of the SAME click that checks/unchecks a not-yet-selected row's box
-            // (selection changes before the click's check-toggle completes). Clearing and
-            // re-adding Items mid-click could silently swallow that pending checkbox toggle
-            // (found 2026-09-15: checking Route 66 On The Air, closing the Logbook window, and
-            // reopening it showed the box unchecked again -- activeAwardRuleIds in the profile
-            // ini never gained ROUTE66OTA). Comparing by Id leaves the list and its live checked
-            // states alone unless something genuinely added, removed, or reordered an award.
-            if (_neededDefs.Count == defs.Count && _neededDefs.Select(d => d.Id).SequenceEqual(defs.Select(d => d.Id)))
-            {
-                _neededDefs = defs;
-                return;
-            }
-
-            string prevId = (_neededAwardsClb.SelectedIndex >= 0 && _neededAwardsClb.SelectedIndex < _neededDefs.Count)
-                ? _neededDefs[_neededAwardsClb.SelectedIndex].Id : _activeAwardRuleIds.FirstOrDefault();
-
-            _neededDefs = defs;
-
-            _suppressNeededEvent = true;
-            _neededAwardsClb.Items.Clear();
-            if (_neededDefs.Count == 0)
-            {
-                _neededAwardsClb.Items.Add("(No Rule Definitions available)");
-                _neededAwardsClb.Enabled = false;
-                _neededAwardsClb.SelectedIndex = 0;
-            }
-            else
-            {
-                _neededAwardsClb.Enabled = true;
-                foreach (var d in _neededDefs)
-                {
-                    bool tracked = RuleEngine.SupportsLiveTag(d) && _activeAwardRuleIds.Contains(d.Id);
-                    _neededAwardsClb.Items.Add(d.Name, tracked);
-                }
-                int idx = prevId != null ? _neededDefs.FindIndex(d => d.Id == prevId) : -1;
-                _neededAwardsClb.SelectedIndex = idx >= 0 ? idx : 0;
-            }
-            _suppressNeededEvent = false;
-        }
-
-        private void PopulateNeeded()
-        {
-            if (_db == null || _neededAwardsClb == null) return;
-
-            PopulateNeededAwardsList();
-            _neededLv.Items.Clear();
-            _neededLv.Columns.Clear();
-
-            if (_neededDefs.Count == 0)
-            {
-                _neededCountLbl.Text = RuleLibrary.LoadErrors.Count > 0
-                    ? $"No enabled Rule Definitions ({RuleLibrary.LoadErrors.Count} load error(s) — see log_rules_errors.txt)."
-                    : "No Rule Definitions found.";
-                return;
-            }
-
-            int idx = _neededAwardsClb.SelectedIndex;
-            if (idx < 0 || idx >= _neededDefs.Count) return;
-            var def = _neededDefs[idx];
-
-            // Restrict the Band dropdown to bands that are actually meaningful for this
-            // award -- a band-restricted award (e.g. a per-band WAS variant, or a single-band
-            // special event) can never be meaningfully evaluated "as" some other band (see
-            // RuleEngine.ResolveBandsForEvaluation), so don't offer that choice at all. Only
-            // rebuild when the choice set actually differs, so switching bands (not awards)
-            // never disturbs this dropdown.
-            var bandChoices = RuleEngine.BandChoicesFor(def.Bands, AllBands);
-            if (!_neededBandCb.Items.Cast<string>().SequenceEqual(bandChoices))
-            {
-                string prevBand = _neededBandCb.SelectedIndex > 0 ? (string)_neededBandCb.SelectedItem : null;
-                _suppressNeededEvent = true;
-                _neededBandCb.Items.Clear();
-                _neededBandCb.Items.AddRange(bandChoices);
-                int newIdx = prevBand != null ? Array.IndexOf(bandChoices, prevBand) : -1;
-                _neededBandCb.SelectedIndex = newIdx >= 0 ? newIdx : 0;
-                _suppressNeededEvent = false;
-            }
-
-            try
-            {
-                string band = _neededBandCb.SelectedIndex == 0 ? null : (string)_neededBandCb.SelectedItem;
-                var result = RuleEngine.EvaluateBand(def, band);
-                RenderNeededResult(def, result, band);
-            }
-            catch (Exception ex) { SetStatus("Needed error: " + ex.Message); }
-        }
-
-        // Renders one RuleResult's StillNeeded list generically, driven by the
-        // definition's GroupBy -- no per-award-name branching. Definitions whose
-        // Target isn't ALL (or whose universe can't be resolved) have no fixed
-        // checklist, so RuleResult.StillNeeded is null; that's shown plainly
-        // rather than treated as an error.
+        // "Still needed only": one RuleResult's StillNeeded list, driven by the definition's
+        // GroupBy -- no per-award-name branching. A definition whose Target isn't ALL (or whose
+        // universe can't be resolved) has no fixed checklist, so StillNeeded is null; that is said
+        // plainly rather than treated as an error.
         private void RenderNeededResult(RuleDefinition def, RuleResult result, string band)
         {
             if (result.EvaluationError != null)
             {
-                _neededCountLbl.Text = "Error: " + result.EvaluationError;
+                _awardsProgressLbl.Text = "Error: " + result.EvaluationError;
                 return;
             }
-
             if (result.StillNeeded == null)
             {
-                _neededCountLbl.Text = "This rule does not have a fixed still-needed checklist. " +
-                    "(Live decode tagging is unavailable for this award.)";
+                _awardsProgressLbl.Text = "This award has no fixed checklist, so there is no still-needed list. Choose Show: Everything for its progress.";
                 return;
             }
-
             string itemHeader = GroupByHeader(def.GroupBy);
-            _neededLv.Columns.Add(itemHeader, 150);
+            _awardsLv.Columns.Add(itemHeader, 150);
             if (def.GroupBy == RuleGroupBy.Dxcc)
-                _neededLv.Columns.Add("Country", 200);
-            _neededLv.Columns.Add("Status", 120);
+                _awardsLv.Columns.Add("Country", 200);
+            _awardsLv.Columns.Add("Status", 120);
 
             Dictionary<int, string> dxccNames =
                 def.GroupBy == RuleGroupBy.Dxcc ? _db.GetDxccCountryNames() : null;
@@ -2003,14 +1878,10 @@ namespace WSJTX_Controller
                     item.SubItems.Add(name ?? "");
                 }
                 item.SubItems.Add("Not yet worked");
-                _neededLv.Items.Add(item);
+                _awardsLv.Items.Add(item);
             }
 
-            string bandNote = band != null ? $" on {band}" : "";
-            string liveTagNote = RuleEngine.SupportsLiveTag(def)
-                ? "  Live decode tagging: on."
-                : "  Live decode tagging: unavailable for this award.";
-            _neededCountLbl.Text = $"{result.StillNeeded.Count} {itemHeader.ToLowerInvariant()} needed{bandNote}.{liveTagNote}";
+            _awardsProgressLbl.Text = $"{result.StillNeeded.Count} {itemHeader.ToLowerInvariant()} still needed." + AwardSummaryTail(def, band);
         }
 
         // ── Import handlers ───────────────────────────────────────────────────────
@@ -2336,7 +2207,6 @@ namespace WSJTX_Controller
         {
             if      (_activePage == _myLogPanel)     PopulateMyLog();
             else if (_activePage == _awardsPanel)    PopulateAwards();
-            else if (_activePage == _stillNeedPanel) PopulateNeeded();
             else if (_activePage == _editLogPanel)   { if (_editLv.Items.Count > 0) DoEditSearch(); }
             else if (_activePage == _syncPanel)      PopulateSync();
         }
@@ -2510,6 +2380,23 @@ namespace WSJTX_Controller
         {
             SetStatus_Text = msg ?? "";
             if (_statusTb != null) _statusTb.Text = SetStatus_Text;
+        }
+
+        // SetStatus, also spoken at once: for an action that did NOT do what was asked, so a
+        // screen reader user hears why without tabbing to Status (operator, 2026-10-01). A UIA
+        // notification from the control in use -- the same mechanism as the main window's
+        // RaiseAccessibleAlert: it never moves focus and never self-voices; best effort only.
+        private void SetStatusSpoken(Control from, string msg)
+        {
+            SetStatus(msg);
+            try
+            {
+                (from ?? _statusTb)?.AccessibilityObject.RaiseAutomationNotification(
+                    System.Windows.Forms.Automation.AutomationNotificationKind.Other,
+                    System.Windows.Forms.Automation.AutomationNotificationProcessing.ImportantMostRecent,
+                    msg);
+            }
+            catch { }
         }
 
         private static string FormatDate(string d)

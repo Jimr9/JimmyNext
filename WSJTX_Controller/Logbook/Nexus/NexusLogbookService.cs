@@ -317,6 +317,42 @@ namespace WSJTX_Controller
             NexusLogbook.Refresh();
         }
 
+        // Bulk edit: the logbook is read from Nexus ONCE, each changed contact goes back in its own
+        // edit, and the read copy is rebuilt ONCE at the end. Per contact, GetRecord + SaveRecord
+        // fetch every contact twice and rebuild the whole read copy -- about 2 s a contact on a
+        // 2,500-contact log, so 500 contacts took over 15 minutes (2026-10-01).
+        public (int Changed, int Same, int Failed, string FirstError) BulkEdit(IEnumerable<int> ids, Func<NexusQso, bool> apply)
+        {
+            int changed = 0, same = 0, failed = 0;
+            string firstError = null;
+            var rows = Client.Rows();
+            if (rows.Error != null || rows.Rows == null)
+                throw new InvalidOperationException("The logbook could not be read: " + rows.Error);
+            var byNexusId = rows.Rows.Where(q => !string.IsNullOrEmpty(q.Id)).GroupBy(q => q.Id).ToDictionary(g => g.Key, g => g.First());
+            try
+            {
+                foreach (int id in ids)
+                {
+                    try
+                    {
+                        string nexusId = R(db => db.GetExtraFields(id).FirstOrDefault(e => e.Tag == "APP_NEXUS_ID").Value, null);
+                        if (string.IsNullOrEmpty(nexusId) || !byNexusId.TryGetValue(nexusId, out var q))
+                            throw new InvalidOperationException("That contact changed or was removed -- refresh and try again.");
+                        if (!apply(q)) { same++; continue; }
+                        var reply = Client.Edit(q.Id, q.EditKey, q);
+                        if (reply.State != "saved") throw new InvalidOperationException(EditFailure(reply));
+                        changed++;
+                    }
+                    catch (Exception ex) { failed++; firstError = firstError ?? ex.Message; }
+                }
+            }
+            finally
+            {
+                if (changed > 0) NexusLogbook.Refresh();
+            }
+            return (changed, same, failed, firstError);
+        }
+
         // A full copy of the logbook (Nexus's own ADIF export, every field) -- taken before a
         // bulk edit, so the contacts as they were can always be imported back.
         public void BackupTo(string path)

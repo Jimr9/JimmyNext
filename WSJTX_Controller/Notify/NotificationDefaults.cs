@@ -36,7 +36,7 @@ namespace WSJTX_Controller
                 // so each can be turned off or retimed on its own -- ShowStatus composes all
                 // three (plus any beginner prompt hint) back into ONE utterance, so the default
                 // spoken line is unchanged: "Receiving, no available stations, Listen mode."
-                Template = "{AvailableCount} {Stations}{ToYou}{NewDxcc}{Wanted}{Awards}",
+                Template = "{AvailableCount} {Stations}{ToYou}{NewDxcc}{NewGrid}{AlwaysWanted}{Wanted}{Pota}{Sota}{Awards}",
                 // Batched to the end of the receive-decode pass, coalesced to the latest count --
                 // the same cadence ShowStatus has always used for this summary so it doesn't
                 // announce "3 available" then "19 available" seconds apart.

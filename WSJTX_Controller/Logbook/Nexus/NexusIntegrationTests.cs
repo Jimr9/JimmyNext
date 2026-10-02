@@ -140,6 +140,19 @@ namespace WSJTX_Controller
                         saved.Qth == "TEST QTH" && saved.Notes == "test notes" && saved.MyRig == "TEST RIG" && saved.Dxcc == 1 &&
                         saved.ExtraValue("CNTY") == "MO,TEST" && saved.Upload?.Qrz?.IsSent == false && saved.QslRcvd.Lotw);
 
+                    // ── Bulk edit: one read, an edit per contact, one rebuild at the end ────
+                    var bulkIds = original.Where(r => r.Id != target.Id).Take(200).Select(r => (int)r.Id).ToList();
+                    var bulkClock = System.Diagnostics.Stopwatch.StartNew();
+                    var bulk = editor.BulkEdit(bulkIds, q => { if (q.MyRig == "BULK RIG") return false; q.MyRig = "BULK RIG"; return true; });
+                    bulkClock.Stop();
+                    var afterBulk = NexusLogbook.Client.Rows().Rows;
+                    Check($"bulk edit: {bulkIds.Count} contacts changed, read copy rebuilt once ({bulkClock.ElapsedMilliseconds} ms)",
+                        bulk.Changed == bulkIds.Count && bulk.Failed == 0 &&
+                        afterBulk.Count(x => x.MyRig == "BULK RIG") == bulkIds.Count,
+                        $"changed {bulk.Changed}, failed {bulk.Failed} ({bulk.FirstError})");
+                    var again = editor.BulkEdit(bulkIds, q => { if (q.MyRig == "BULK RIG") return false; q.MyRig = "BULK RIG"; return true; });
+                    Check("bulk edit again: every contact already had the value, nothing saved", again.Changed == 0 && again.Same == bulkIds.Count);
+
                     // ── Manual add, and Nexus's own duplicate rule (D2) ─────────────────────
                     int beforeManual = svc.TotalQsos();
                     var add = svc.Upsert("ZZ8ZZZ", "40m", "FT8", "20260928", "130000", "130100", 7_075_500, "-05", "-07", "", "", 0, 0,

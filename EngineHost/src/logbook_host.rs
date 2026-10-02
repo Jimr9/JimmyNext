@@ -375,7 +375,11 @@ pub fn log_edit(host: &LogHost, engine: &Mutex<Engine>, args: LogEditArgs) -> Wr
         engine,
         id,
         &args.edit_key,
-        |_| rec.clone(),
+        |old| {
+            let mut r = rec.clone();
+            fold_contest_tags(&mut r, old);
+            r
+        },
         |_, made| made.1.is_some(),
     );
     drop(gate);
@@ -854,6 +858,71 @@ pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -
     })
 }
 
+/// The contest block's own ADIF tags (Nexus's `contest_fields`). Nexus's desktop contact shape
+/// (`LoggedQso`) carries no contest block, so a contact imported with a contest exchange --
+/// WSJT-X writes Field Day's received exchange as `SRX_STRING` -- read back with it blank in
+/// Jimmy, though Nexus kept it (W0CAS's VO1VON, 2026-10-01). LOG_ROWS adds them to `extra`;
+/// LOG_EDIT folds them back, so an edit neither stores them twice nor loses a changed value.
+const CONTEST_TAGS: [&str; 5] = ["CONTEST_ID", "STX", "STX_STRING", "SRX", "SRX_STRING"];
+
+/// The contest block's tags with a value -- except one the record's own `extra` already
+/// carries (a contact Jimmy logged keeps its exchange there).
+fn contest_tags(r: &QsoRecord) -> Vec<(String, String)> {
+    let Some(c) = r.contest.as_deref() else { return Vec::new() };
+    let values = [
+        c.contest_id.clone(),
+        c.stx.map(|n| n.to_string()).unwrap_or_default(),
+        c.stx_string.clone().unwrap_or_default(),
+        c.srx.map(|n| n.to_string()).unwrap_or_default(),
+        c.srx_string.clone().unwrap_or_default(),
+    ];
+    CONTEST_TAGS
+        .iter()
+        .zip(values)
+        .filter(|(tag, v)| !v.is_empty() && !r.extra.iter().any(|(k, _)| k.eq_ignore_ascii_case(tag)))
+        .map(|(tag, v)| (tag.to_string(), v))
+        .collect()
+}
+
+/// LOG_EDIT: the tags [`contest_tags`] added come back in the edited contact's `extra`. Each one
+/// the stored contact keeps in its contest block goes back there, with the edited value (none =
+/// cleared); a tag the stored contact keeps in `extra` stays in `extra`. Nexus's `update_record`
+/// keeps the rest of the block (session, both exchange vectors, QID) because it is cloned here.
+fn fold_contest_tags(rec: &mut QsoRecord, old: &QsoRecord) {
+    let Some(stored) = old.contest.as_deref() else { return };
+    let in_block = |tag: &str| !old.extra.iter().any(|(k, _)| k.eq_ignore_ascii_case(tag));
+    let mut c = stored.clone();
+    let mut take = |tag: &str| -> Option<String> {
+        let at = rec.extra.iter().position(|(k, _)| k.eq_ignore_ascii_case(tag))?;
+        Some(rec.extra.remove(at).1.trim().to_string()).filter(|v| !v.is_empty())
+    };
+    if in_block("CONTEST_ID") {
+        c.contest_id = take("CONTEST_ID").unwrap_or_default();
+    }
+    if in_block("STX_STRING") {
+        c.stx_string = take("STX_STRING");
+    }
+    if in_block("SRX_STRING") {
+        c.srx_string = take("SRX_STRING");
+    }
+    // A serial that is not a number stays in `extra` as typed rather than being dropped.
+    let mut not_numbers = Vec::new();
+    for (tag, slot) in [("STX", &mut c.stx), ("SRX", &mut c.srx)] {
+        if !in_block(tag) {
+            continue;
+        }
+        *slot = None;
+        if let Some(v) = take(tag) {
+            match v.parse() {
+                Ok(n) => *slot = Some(n),
+                Err(_) => not_numbers.push((tag.to_string(), v)),
+            }
+        }
+    }
+    rec.extra.extend(not_numbers);
+    rec.contest = Some(Box::new(c));
+}
+
 /// LOG_ROWS's argument.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
@@ -882,8 +951,12 @@ pub fn rows_json(engine: &Mutex<Engine>, args: &LogRowsArgs) -> String {
                 .take(take)
                 .map(|r| {
                     let key = tempo_core::logbook::QsoEdit::project(&r).key();
+                    let contest = contest_tags(&r);
                     let mut v = serde_json::to_value(LoggedQso::from(r)).unwrap_or_default();
                     v["editKey"] = serde_json::Value::String(key);
+                    if let Some(extra) = v["extra"].as_array_mut() {
+                        extra.extend(contest.into_iter().map(|(k, val)| serde_json::json!([k, val])));
+                    }
                     v
                 })
                 .collect();
@@ -1123,6 +1196,45 @@ mod tests {
         let del = log_delete(&host, &eng, LogDeleteArgs { id, edit_key: key_now });
         assert_eq!(del.state, "saved", "{del:?}");
         assert_eq!(rows(&eng)["total"], 0);
+    }
+
+    #[test]
+    fn an_imported_contest_exchange_reads_back_and_survives_or_changes_with_an_edit() {
+        let d = TempDir::new("contest");
+        let (eng, host) = launch(&d.0);
+        // WSJT-X's Field Day contact: the received exchange, no CONTEST_ID (W0CAS's VO1VON).
+        let adi = d.0.join("fd.adi");
+        std::fs::write(&adi, "<EOH>\n<CALL:6>VO1VON <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20230624 \
+            <TIME_ON:6>180000 <SRX_STRING:5>2A NL <EOR>\n").unwrap();
+        let im = log_import(&host, &eng, LogFileArgs { path: adi.display().to_string(), kind: String::new() });
+        assert_eq!(im.state, "saved", "{im:?}");
+        let row = first_row(&eng);
+        let extra = row["extra"].to_string();
+        assert!(extra.contains("SRX_STRING") && extra.contains("2A NL"), "read back: {row}");
+        assert!(!extra.contains("CONTEST_ID"), "an empty tag is not invented: {row}");
+
+        // An ordinary edit sends the row back as read: stored once, in the contest block.
+        let id = row["id"].as_str().unwrap().to_string();
+        let mut edited: LoggedQso = serde_json::from_value(row.clone()).unwrap();
+        edited.name = Some("Joel".into());
+        let key = row["editKey"].as_str().unwrap().to_string();
+        assert_eq!(log_edit(&host, &eng, LogEditArgs { id: id.clone(), edit_key: key, qso: edited }).state, "saved");
+        let reads = lock(&eng).log_store_reads();
+        let stored = reads.rows(logstore::READ_WAIT).expect("rows").0[0].clone();
+        assert!(!stored.extra.iter().any(|(k, _)| k == "SRX_STRING"), "not stored twice: {:?}", stored.extra);
+        assert_eq!(stored.contest.as_deref().and_then(|c| c.srx_string.clone()).as_deref(), Some("2A NL"));
+
+        // Changing the exchange changes it.
+        let row = first_row(&eng);
+        let mut fix: LoggedQso = serde_json::from_value(row.clone()).unwrap();
+        for kv in fix.extra.iter_mut() {
+            if kv.0 == "SRX_STRING" {
+                kv.1 = "3A NL".into();
+            }
+        }
+        let key = row["editKey"].as_str().unwrap().to_string();
+        assert_eq!(log_edit(&host, &eng, LogEditArgs { id, edit_key: key, qso: fix }).state, "saved");
+        assert!(first_row(&eng)["extra"].to_string().contains("3A NL"));
     }
 
     #[test]

@@ -162,6 +162,7 @@ namespace WSJTX_Controller
             ["AvailableCount"] = "", ["Stations"] = "", ["ToYou"] = "",
             ["NewDxcc"] = "", ["Wanted"] = "", ["Awards"] = "",
             ["NewDxccCount"] = "", ["WantedCount"] = "", ["AwardCount"] = "", ["Band"] = "",
+            ["NewGrid"] = "", ["AlwaysWanted"] = "", ["Pota"] = "", ["Sota"] = "",
         };
     }
 

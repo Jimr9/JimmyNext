@@ -19,6 +19,10 @@ namespace WSJTX_Controller
         public string ProblemType => _problemTypeCombo.Text;
         public string Description => _descTextBox.Text.Trim();
         public string Steps       => _stepsTextBox.Text.Trim();
+        public bool IncludeLogbook => _includeLogbookCheckBox.Checked;
+        private CheckBox _includeLogbookCheckBox;
+        public bool Upload => _uploadRadio.Checked;
+        private RadioButton _uploadRadio;
 
         public SupportReportDlg(string prefillCallsign)
         {
@@ -141,6 +145,56 @@ namespace WSJTX_Controller
             };
             y += 90;
 
+            // 2.0.80 (W0CAS): the report carries the whole Jimmy Next folder (passwords blanked,
+            // downloadable lookup data left out). The logbook is the operator's own choice.
+            _includeLogbookCheckBox = new CheckBox
+            {
+                Text           = "Include my logbook (my contacts; helps with logbook problems)",
+                AccessibleName = "Include my logbook",
+                Location       = new Point(lx, y),
+                AutoSize       = true,
+                Checked        = true,
+                TabIndex       = tab++,
+            };
+            y += 26;
+            var hintPrivacy = new Label
+            {
+                Text      = "Settings, logs and Jimmy Next's folder are included; passwords and logins are never included.",
+                Location  = new Point(lx, y),
+                Size      = new Size(fw, 16),
+                Font      = new Font(SystemFonts.DefaultFont.FontFamily, 7.5f),
+                ForeColor = SystemColors.GrayText,
+                AutoSize  = false,
+            };
+            y += 18;
+
+            // 2.0.81: how the report reaches KB0UZT. Arrow keys move between the two choices.
+            var sendGroup = new GroupBox
+            {
+                Text     = "How to send it",
+                Location = new Point(lx, y),
+                Size     = new Size(fw, 66),
+                TabIndex = tab++,
+            };
+            _uploadRadio = new RadioButton
+            {
+                Text     = "Send to KB0UZT (opens the upload page)",
+                Location = new Point(10, 18),
+                AutoSize = true,
+                Checked  = true,
+                TabIndex = 0,
+            };
+            var saveRadio = new RadioButton
+            {
+                Text     = "Save to my computer only",
+                Location = new Point(10, 40),
+                AutoSize = true,
+                TabIndex = 1,
+            };
+            sendGroup.Controls.Add(_uploadRadio);
+            sendGroup.Controls.Add(saveRadio);
+            y += 72;
+
             // ---- Buttons ----
             y += 4;
             var okButton = new Button
@@ -169,6 +223,7 @@ namespace WSJTX_Controller
                 lblType,     _problemTypeCombo,
                 lblDesc,     hintDesc,  _descTextBox,
                 lblSteps,    hintSteps, _stepsTextBox,
+                _includeLogbookCheckBox, hintPrivacy, sendGroup,
                 okButton,    cancelButton,
             });
 

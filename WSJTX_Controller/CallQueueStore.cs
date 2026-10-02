@@ -134,9 +134,20 @@ namespace WSJTX_Controller
         //place in queue according to priority then rank using current rankMethod;
         //set sequence number if not already set
         //return false if already added
-        public bool AddCall(string call, EnqueueDecodeMessage msg)
+        // playSounds false: a station put BACK after a stopped call (RequeueAbortedCall) -- not a
+        // newly found station, so its sound does not play again (operator, 2026-10-01, TG9ADQ).
+        public bool AddCall(string call, EnqueueDecodeMessage msg, bool playSounds = true)
         {
             _wc._lastAddCallCategoryPlayed = false;
+            // The station Smart Mode is waiting on stays out of the list: Smart Mode calls it by
+            // itself, and listing it too only invites calling it twice and sounding it again
+            // (operator, 2026-10-01). It is listed normally once Smart Mode is no longer on it.
+            if (_wc.IsSmartModeWaitingOn(call))
+            {
+                _wc._lastAddCallCategoryPlayed = true;   // no "call added" sound either
+                if (_wc.debugDetail) _wc.DebugOutput($"{_wc.Time()} AddCall, call:{call} not listed: Smart Mode is waiting on it");
+                return false;
+            }
             var callArray = _wc.callQueue.ToArray();        //make queue accessible by index
 
             if (_wc.debugDetail) _wc.DebugOutput($"{_wc.Time()} AddCall, call:{call} priority:{msg.Priority} cat:{msg.Category} rank:{msg.Rank}");
@@ -181,11 +192,11 @@ namespace WSJTX_Controller
                 var addUtc = DecodeUtc(msg);
                 if (msg.LastHeardUtc < addUtc) msg.LastHeardUtc = addUtc;
 
-                _wc._lastAddCallCategoryPlayed = _wc.PlayCategorySound(msg);
+                _wc._lastAddCallCategoryPlayed = playSounds ? _wc.PlayCategorySound(msg) : true;
 
                 // Feature 2: opposite-period alert — fires when an interesting call is queued
                 // on the period opposite to the operator's current TX/RX focus.
-                if (_wc.ctrl.soundEnabled_OppositePeriod
+                if (playSounds && _wc.ctrl.soundEnabled_OppositePeriod
                     && msg.Category != WsjtxClient.CallCategory.DEFAULT
                     && _wc.IsEvenCall(msg) == _wc.txFirst   // call is on our TX period, not our listen period
                     && _wc.IsAlertCooledDown(_wc._oppositePeriodAlertTimes, call, WsjtxClient.OppositePeriodAlertCooldownSecs)

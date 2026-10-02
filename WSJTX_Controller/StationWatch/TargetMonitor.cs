@@ -142,6 +142,9 @@ namespace WSJTX_Controller
         // Station Watch never counts toward an automatic start.
         public int SilenceCount { get; private set; }
         public int SilenceThreshold { get; set; } = 2;
+        // After the target was heard working another station: the larger of this and
+        // SilenceThreshold (operator setting "quiet periods after busy", 2026-10-01).
+        public int BusySilenceThreshold { get; set; } = 2;
 
         // Smart Start only. Cumulative count of ACTUAL transmitted calling overs to this target
         // across the WHOLE armed effort -- the initial call, ordinary repeated calling overs,
@@ -867,9 +870,12 @@ namespace WSJTX_Controller
             // count reaches the threshold the target's earlier "working another station" traffic
             // has now been silent for the operator's full window, so clear BusyWithOther and
             // signal ready. Fresh target traffic (IngestTargetDecode) re-zeros SilenceCount.
+            // TG9ADQ (2026-10-01): a station last heard working someone else is often still in that
+            // QSO and merely missed by the first decode pass -- it needs the longer quiet window.
+            int needed = BusyWithOther ? Math.Max(SilenceThreshold, BusySilenceThreshold) : SilenceThreshold;
             SilenceCount++;
-            Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null, $"{SilenceCount} of {SilenceThreshold}");
-            if (SilenceCount >= SilenceThreshold)
+            Raise(TargetObservationKind.SmartStartWaiting, TargetCall, null, $"{SilenceCount} of {needed}");
+            if (SilenceCount >= needed)
             {
                 BusyWithOther = false;
                 SignalReady();

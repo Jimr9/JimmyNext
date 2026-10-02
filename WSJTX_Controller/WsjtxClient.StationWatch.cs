@@ -16,6 +16,11 @@ namespace WSJTX_Controller
         private readonly TargetMonitor _stationWatch = new TargetMonitor(TargetPurpose.StationWatch);
         private readonly TargetMonitor _smartStart = new TargetMonitor(TargetPurpose.SmartStart);
 
+        // True while Smart Mode is armed on `call` (waiting or calling) -- CallQueueStore keeps
+        // that station out of the list meanwhile.
+        internal bool IsSmartModeWaitingOn(string call) =>
+            _smartStart.IsActive && string.Equals(_smartStart.TargetCall, call, StringComparison.OrdinalIgnoreCase);
+
         // Smart Start ownership survives a temporary hand-off to the normal QSO sequencer.
         // Operator policy (2026-09-08): once Smart Start owns a target, it keeps owning it until
         // the QSO completes, the operator stops it, the Repeat Limit is reached, the operator
@@ -295,6 +300,7 @@ namespace WSJTX_Controller
                 return false;
 
             _smartStart.SilenceThreshold = ctrl.smartStartSilencePeriods;
+            _smartStart.BusySilenceThreshold = ctrl.smartStartBusyQuietPeriods;
 
             // Re-selecting the call Smart Start is ALREADY armed on -- a second Enter/Space, or
             // dialogTimer2_Tick re-issuing the operator's still-queued selection (Smart Start
@@ -457,6 +463,7 @@ namespace WSJTX_Controller
             ClearPendingAutoStart();
             _smartStart.ResumeAfterHandoff(target, CurrentBandStr, mode, _directExpectedSessionToken,
                 carriedCallCount, ctrl.smartStartSilencePeriods);
+            _smartStart.BusySilenceThreshold = ctrl.smartStartBusyQuietPeriods;
             Notify?.Publish(new SmartStartYieldedEvent(SC(target), _smartStart.ArmGeneration, _smartStart.AdvanceStateSeq()));
             DebugOutput($"{Time()} [SMART] {target} moved to another station mid-QSO -- Smart Start resumes ownership (cumulative calls: {carriedCallCount})");
         }

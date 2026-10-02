@@ -97,6 +97,10 @@ namespace WSJTX_Controller
                 new NotificationVariable("WantedCount", "Bare count of wanted stations (renders \"0\" when none)."),
                 new NotificationVariable("AwardCount", "Bare count of distinct awards still needed (renders \"0\" when none)."),
                 new NotificationVariable("Band", "The band you're operating on, e.g. 20m."),
+                new NotificationVariable("NewGrid", "\", N new grid, N new grid on band\" -- each part only when any, otherwise empty."),
+                new NotificationVariable("AlwaysWanted", "\", N on wanted list\" (your wanted-calls list) when any, otherwise empty."),
+                new NotificationVariable("Pota", "\", N POTA\" when any POTA activator is listed, otherwise empty. With it in the template, POTA CQs are no longer also counted in {Wanted}."),
+                new NotificationVariable("Sota", "\", N SOTA\" when any SOTA activator is listed, otherwise empty. With it in the template, SOTA CQs are no longer also counted in {Wanted}."),
             },
             [NotificationEventType.ReceiveStateSummary] = new List<NotificationVariable>
             {

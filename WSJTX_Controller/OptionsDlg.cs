@@ -173,6 +173,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox spaceCallsignsAndGridsCheckBox;
         private System.Windows.Forms.CheckBox _smartQsoStartCheckBox;
         private System.Windows.Forms.NumericUpDown _smartStartSilencePeriodsNumeric;
+        private System.Windows.Forms.NumericUpDown _smartStartBusyQuietNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartMaxStandbyRoundsNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartTimeLimitMinutesNumeric;
         private System.Windows.Forms.NumericUpDown _otherStationRepliesBeforeYieldingNumeric;
@@ -582,6 +583,25 @@ namespace WSJTX_Controller
             };
             smartStartGroup.Controls.Add(_smartStartSilencePeriodsNumeric);
 
+            // Same row, right after it in Tab order (2026-10-01): quiet periods after the target
+            // was heard working another station (TargetMonitor.BusySilenceThreshold).
+            smartStartGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "after busy:", AutoSize = true, Location = new System.Drawing.Point(385, 48), Font = font, TabStop = false,
+            });
+            _smartStartBusyQuietNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Smart Mode quiet periods after target busy",
+                Location       = new System.Drawing.Point(460, 45),
+                Size           = new System.Drawing.Size(50, 20),
+                TabIndex       = 1,
+                Minimum        = 1,
+                Maximum        = 10,
+                Value          = Math.Max(1, Math.Min(10, ctrl.smartStartBusyQuietPeriods)),
+                Font           = font,
+            };
+            smartStartGroup.Controls.Add(_smartStartBusyQuietNumeric);
+
             // Operator request (2026-09-13), reworked 2026-09-22 from "busy dead-end" round
             // counting into a consecutive target-not-heard limit -- same underlying setting
             // (ctrl.smartStartMaxStandbyRounds), only its meaning and this visible wording changed.
@@ -690,6 +710,7 @@ namespace WSJTX_Controller
             ctrl.smartQsoStartEnabled = _smartQsoStartCheckBox?.Checked ?? false;
             int silencePeriods = (int)(_smartStartSilencePeriodsNumeric?.Value ?? 2);
             ctrl.smartStartSilencePeriods = Math.Max(1, Math.Min(10, silencePeriods));
+            ctrl.smartStartBusyQuietPeriods = Math.Max(1, Math.Min(10, (int)(_smartStartBusyQuietNumeric?.Value ?? 2)));
             int maxStandbyRounds = (int)(_smartStartMaxStandbyRoundsNumeric?.Value ?? 4);
             ctrl.smartStartMaxStandbyRounds = Math.Max(1, Math.Min(20, maxStandbyRounds));
             int timeLimitMinutes = (int)(_smartStartTimeLimitMinutesNumeric?.Value ?? 0);
@@ -5126,7 +5147,7 @@ namespace WSJTX_Controller
                 new { Key = "Sota",           Label = "SOTA",                             Enabled = ctrl.soundEnabled_Sota,           File = ctrl.soundFile_Sota            },
                 new { Key = "WantedAnywhere", Label = "Wanted call heard anywhere",       Enabled = ctrl.soundEnabled_WantedAnywhere, File = ctrl.soundFile_WantedAnywhere  },
                 new { Key = "OppositePeriod", Label = "Interesting call opposite period", Enabled = ctrl.soundEnabled_OppositePeriod, File = ctrl.soundFile_OppositePeriod  },
-                new { Key = "AwardNeeded",    Label = "Award needed (Still Need tab)",    Enabled = ctrl.soundEnabled_AwardNeeded,    File = ctrl.soundFile_AwardNeeded     },
+                new { Key = "AwardNeeded",    Label = "Award needed (tracked award)",    Enabled = ctrl.soundEnabled_AwardNeeded,    File = ctrl.soundFile_AwardNeeded     },
             };
 
             _soundsListBox = new System.Windows.Forms.CheckedListBox

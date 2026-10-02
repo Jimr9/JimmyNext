@@ -1564,7 +1564,12 @@ namespace WSJTX_Controller
                 // Rapid band changes: a band only passed through is not announced when a newer
                 // band change is already on its way -- only the band landed on is.
                 if (_pendingBandIdx == null || _pendingBandIdx == FreqToBandIdx(newDialFrequency / 1e6))
-                    StatusView.ShowMessage(Wording.Fill("Msg.BandChanged", ("Band", FreqToBandStr(newDialFrequency / 1e6))), false);
+                {
+                    // A change Jimmy asked for carries the key that asked (none for a knob turn).
+                    string bandOrigin = _pendingBandIdx != null ? _bandChangeOrigin : null;
+                    ctrl.WithHotkeyOrigin(bandOrigin, () =>
+                        StatusView.ShowMessage(Wording.Fill("Msg.BandChanged", ("Band", FreqToBandStr(newDialFrequency / 1e6))), false));
+                }
             }
             dialFrequency = newDialFrequency;
             lastDialFrequency = dialFrequency;
@@ -3265,6 +3270,7 @@ namespace WSJTX_Controller
         private void DirectSetSpecialOp(bool hound)
         {
             _houndSentThisConnection = true;
+            string houndOrigin = ctrl.ActiveHotkeyOrigin;   // a refusal is Ctrl+Shift+D's answer too
             EnqueueDirectCommand("SET_SPECIAL_OP " + (hound ? "hound" : "none"), resp =>
             {
                 if (resp != null && resp.StartsWith("OK "))
@@ -3273,7 +3279,8 @@ namespace WSJTX_Controller
                     return;
                 }
                 _houndRequested = HoundActive;
-                StatusView.ShowMessage(Wording.Fill("Msg.HoundNotChanged", ("Reason", resp == null ? "engine not responding" : resp.StartsWith("ERR ") ? resp.Substring(4) : resp)), false);
+                ctrl.WithHotkeyOrigin(houndOrigin, () =>
+                    StatusView.ShowMessage(Wording.Fill("Msg.HoundNotChanged", ("Reason", resp == null ? "engine not responding" : resp.StartsWith("ERR ") ? resp.Substring(4) : resp)), false));
             });
         }
 

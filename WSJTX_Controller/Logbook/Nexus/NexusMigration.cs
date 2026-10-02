@@ -103,6 +103,17 @@ namespace WSJTX_Controller
                             byId[row.Id] = row;
                         }
                 }
+                // W0CAS (2.0.80): a logbook last opened by a Jimmy Next older than schema v10 has no
+                // qso_extra_field table -- it holds no extra fields at all. The move reads the
+                // logbook read-only (never upgrading it), so a missing table means "no extras", not
+                // a failure; treating it as an error stopped every move for those operators.
+                bool hasExtras;
+                using (var cmd = conn.CreateCommand())
+                {
+                    cmd.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='qso_extra_field';";
+                    hasExtras = Convert.ToInt64(cmd.ExecuteScalar()) > 0;
+                }
+                if (hasExtras)
                 using (var cmd = conn.CreateCommand())
                 {
                     cmd.CommandText = "SELECT qso_id, tag_name, tag_value FROM qso_extra_field ORDER BY qso_id, ordinal;";

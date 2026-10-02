@@ -740,24 +740,27 @@ namespace WSJTX_Controller
             // entries are keyed by (the semantic-derived one) or the lookup below silently
             // never finds the call. Sourced from EffectiveSemantic (was d.DeCall()).
             string deCall = d.EffectiveSemantic(myCall).From;
-            if (string.IsNullOrEmpty(deCall)) return;
-            if (!ConnectedToWsjtx()) return;
+            if (string.IsNullOrEmpty(deCall)) { StatusView.ShowMessage(Wording.Get("Msg.NoCallOnLine"), false); return; }
+            if (!ConnectedToWsjtx()) { StatusView.ShowMessage(Wording.Fill("Msg.NotConnectedCall", ("Call", deCall)), false); return; }
 
-            // If the call is already in the queue use the standard NextCall path,
-            // which handles listen-mode period checks, discard tracking, etc.
-            var arr = callQueue.ToArray();
-            for (int i = 0; i < arr.Length; i++)
+            // Enter (or a double-click) on a Raw Decodes line calls that station, as WSJT-X does
+            // (operator, 2026-10-01) -- even one the call list left out (already worked, blocked,
+            // not a CQ, origin filter...): picking it here is the operator's own choice. A station
+            // not listed is put in the list first, without its sound, then called through the
+            // same NextCall path as the other lists (listen-mode period checks, Smart Mode...).
+            int qi = FindCallIndexInQueue(deCall);
+            if (qi < 0)
             {
-                if (string.Equals(arr[i], deCall, StringComparison.OrdinalIgnoreCase))
-                {
-                    NextCall(false, i, operatorSelected: true, expectedCall: deCall);
-                    return;
-                }
+                SetRank(d);
+                _callQueueStore.AddCall(deCall, d, playSounds: false);
+                qi = FindCallIndexInQueue(deCall);
             }
-
-            // Not in queue — do not transmit.  The call was deliberately excluded
-            // by queue filters (already logged, blocked, origin filter, wrong period,
-            // etc.).  Bypassing those filters via ReplyTo would be unsafe.
+            if (qi >= 0)
+            {
+                NextCall(false, qi, operatorSelected: true, expectedCall: deCall);
+                return;
+            }
+            // Only when the list would not take it -- e.g. Smart Mode is already waiting on it.
             StatusView.ShowMessage(Wording.Fill("Msg.NotInQueue", ("Call", deCall)), false);
         }
 
@@ -1266,7 +1269,29 @@ namespace WSJTX_Controller
                             string cty = (nNew > 0 ? ", " + Wording.Fill("Summary.NewDxcc", ("Count", nNew.ToString())) : "")
                                        + (nNewOnBand > 0 ? ", " + Wording.Fill("Summary.NewDxccOnBand", ("Count", nNewOnBand.ToString())) : "");
 
-                            n = SnapshotPriorityCount(CallPriority.WANTED_CQ, visibleCalls);
+                            // POTA / SOTA / new grid / wanted list (2026-10-01): every list tag that
+                            // plays a sound has its own summary piece.
+                            bool IsPota(EnqueueDecodeMessage d) => d.Category == CallCategory.POTA || IsPotaCall(d);
+                            bool IsSota(EnqueueDecodeMessage d) => d.Category == CallCategory.SOTA || _awardTagger.IsSotaCall(d);
+                            int nPota = SnapshotCount(IsPota, visibleCalls);
+                            int nSota = SnapshotCount(IsSota, visibleCalls);
+                            string pota = nPota > 0 ? ", " + Wording.Fill("Summary.Pota", ("Count", nPota.ToString())) : "";
+                            string sota = nSota > 0 ? ", " + Wording.Fill("Summary.Sota", ("Count", nSota.ToString())) : "";
+                            int nGrid = SnapshotCount(d => d.EffectiveClassification().IsNewGrid, visibleCalls);
+                            int nGridOnBand = SnapshotCount(d => !d.EffectiveClassification().IsNewGrid && d.EffectiveClassification().IsNewGridOnBand, visibleCalls);
+                            string grid = (nGrid > 0 ? ", " + Wording.Fill("Summary.NewGrid", ("Count", nGrid.ToString())) : "")
+                                        + (nGridOnBand > 0 ? ", " + Wording.Fill("Summary.NewGridOnBand", ("Count", nGridOnBand.ToString())) : "");
+                            int nAlways = SnapshotCount(d => d.Category == CallCategory.ALWAYS_WANTED, visibleCalls);
+                            string always = nAlways > 0 ? ", " + Wording.Fill("Summary.AlwaysWanted", ("Count", nAlways.ToString())) : "";
+
+                            // {Wanted} (directed CQs): a POTA/SOTA CQ is not counted twice when the
+                            // summary also says {Pota}/{Sota}.
+                            string summaryTemplate = ctrl.Notifications?.Policies != null
+                                && ctrl.Notifications.Policies.TryGetValue(NotificationEventType.ReceiveCycleSummary, out var summaryPolicy)
+                                ? summaryPolicy.Template ?? "" : "";
+                            bool potaSaid = summaryTemplate.Contains("{Pota}"), sotaSaid = summaryTemplate.Contains("{Sota}");
+                            n = SnapshotCount(d => d.Priority == (int)CallPriority.WANTED_CQ
+                                && !(potaSaid && IsPota(d)) && !(sotaSaid && IsSota(d)), visibleCalls);
                             int wantedCount = n;
                             string want = n > 0 ? ", " + Wording.Fill("Summary.Wanted", ("Count", n.ToString())) : "";
 
@@ -1306,16 +1331,27 @@ namespace WSJTX_Controller
                             bool receiveSummaryAllowed = (!transmitting || !ctrl.suppressReceiveNotificationsDuringTx)
                                 && callInProg == null
                                 && !(justStoppedTransmitting && displayedCount == 0);
+                            // During a QSO (operator, 2026-10-01): the summary's station FACTS (new DXCC,
+                            // POTA, calling you... whatever the operator's own template names) still
+                            // show, so a sound always has its words on the status line -- but never the
+                            // "N available stations" count or the side name, the noise the 2026-08-07
+                            // rule removed. Whether it is SPOKEN follows the row's own during-QSO setting.
+                            bool qsoFactsOnly = callInProg != null
+                                && (!transmitting || !ctrl.suppressReceiveNotificationsDuringTx);
 
                             string sideIdClause = (receiveSummaryAllowed && sideIdScopeOk && sideName != "")
                                 ? (RoutineClause(NotificationEventType.ReceiveSideId, ("Side", sideName)) ?? "")
                                 : "";
 
-                            string countClause = (receiveSummaryAllowed && countScopeOk
+                            string countClause = ((receiveSummaryAllowed || qsoFactsOnly) && countScopeOk
                                     && RoutineClauseEnabled(NotificationEventType.ReceiveCycleSummary))
                                 ? (RoutineClause(NotificationEventType.ReceiveCycleSummary,
-                                       ("AvailableCount", countText),
-                                       ("Stations", callsStr),
+                                       ("AvailableCount", qsoFactsOnly ? "" : countText),
+                                       ("Stations", qsoFactsOnly ? "" : callsStr),
+                                       ("NewGrid", grid),
+                                       ("AlwaysWanted", always),
+                                       ("Pota", pota),
+                                       ("Sota", sota),
                                        ("ToYou", pri),
                                        ("NewDxcc", cty),
                                        ("Wanted", want),
@@ -1331,6 +1367,7 @@ namespace WSJTX_Controller
                             // JoinRoutineClauses' separators; NormalizeStatusLine tidies any seam a
                             // scoped-out clause leaves. The idle branch composes the two via
                             // JoinRoutineClauses instead.
+                            if (qsoFactsOnly) countClause = countClause.Trim().TrimStart(',', ' ');   // facts only: no count before them
                             string callsWaiting = (sideIdClause != "" ? ", " + sideIdClause : "")
                                                 + (countClause != "" ? ", " + countClause : "");
                             // T2 fix, 2026-08-23 (CONFIRMED bug -- KJ5OUL log evidence, 2026-08-21):

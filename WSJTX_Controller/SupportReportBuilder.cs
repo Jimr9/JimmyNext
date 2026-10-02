@@ -37,7 +37,8 @@ namespace WSJTX_Controller
         internal static SupportReportResult Build(
             Controller ctrl,
             string callsign, string name, string email,
-            string problemType, string description, string steps)
+            string problemType, string description, string steps, bool includeLogbook = true,
+            string zipPathChosen = null)
         {
             var result = new SupportReportResult();
             try
@@ -49,7 +50,7 @@ namespace WSJTX_Controller
                 string appName   = (Assembly.GetExecutingAssembly().GetName().Name ?? "Jimmy").Replace(" ", "");
                 string zipName   = $"{appName}_{safeVer}_support_{timestamp}.zip";
                 string outputDir = GetOutputDir();
-                string zipPath   = Path.Combine(outputDir, zipName);
+                string zipPath   = string.IsNullOrEmpty(zipPathChosen) ? Path.Combine(outputDir, zipName) : zipPathChosen;
 
                 // Capture diagnostic snapshot on the UI thread before any I/O
                 WsjtxDiagData diag = null;
@@ -85,6 +86,13 @@ namespace WSJTX_Controller
                     {
                         AddTextEntry(zip, "jimmy_settings_contests.ini", File.ReadAllText(contestIniPath));
                     }
+
+                    // 2.0.80 (W0CAS, operator: "zip up that folder so we have everything - passwords"):
+                    // the whole Jimmy Next folder under JimmyNextFolder/, with a listing of every file
+                    // and what was done with it -- so a report never again lacks the one file needed
+                    // (that report lacked the logbook-move reports).
+                    try { AddDataFolder(zip, GetLogDir(), includeLogbook); }
+                    catch (Exception ex) { AddTextEntry(zip, "jimmy_folder_listing.txt", "Folder copy failed: " + ex.Message); }
 
                     // Only create ZIP entries for files that were successfully read.
                     // This prevents 0-byte ghost entries when a read fails.
@@ -615,6 +623,88 @@ namespace WSJTX_Controller
         }
 
         // -----------------------------------------------------------------------
+        // Whole-folder copy (2.0.80)
+        // -----------------------------------------------------------------------
+
+        private const long MaxFolderFileBytes = 25L * 1024 * 1024;
+
+        // Downloadable lookup data (re-downloadable, large, and other stations' details): listed only.
+        private static readonly string[] LookupFolders = { "Data/FccUls", "Data/LoTW", "Data/ClubLog", "Data/QRZ", "Data/HamQTH", "Data/Temp" };
+
+        // The operator's own contacts: only with "Include my logbook".
+        internal static bool IsLogbookFile(string rel)
+        {
+            string r = rel.Replace('\\', '/');
+            string name = Path.GetFileName(r).ToLowerInvariant();
+            if (r.StartsWith("Data/Logbook/", StringComparison.OrdinalIgnoreCase)) return true;
+            bool inNexusLog = r.StartsWith("Data/NexusLog", StringComparison.OrdinalIgnoreCase);
+            if (!inNexusLog) return false;
+            if (r.IndexOf("/backups/", StringComparison.OrdinalIgnoreCase) >= 0 || r.IndexOf("/projection/", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return name.StartsWith("log.") || name == "outbox.json" || name == "row-ids.json";
+        }
+
+        internal static bool IsSecretFile(string rel)
+        {
+            string name = Path.GetFileName(rel).ToLowerInvariant();
+            return name.Contains("key") || name.Contains("credential") || name.Contains("token") || name.Contains("password");
+        }
+
+        // Settings files and their backups ("x.ini", "x.ini.before-fix.bak"): passwords blanked.
+        internal static bool IsSettingsFile(string rel)
+        {
+            string name = Path.GetFileName(rel).ToLowerInvariant();
+            return name.EndsWith(".ini") || name.Contains(".ini.");
+        }
+
+        internal static void AddDataFolder(ZipArchive zip, string root, bool includeLogbook)
+        {
+            var listing = new StringBuilder();
+            listing.AppendLine("Jimmy Next folder: " + root);
+            listing.AppendLine($"Logbook included: {(includeLogbook ? "yes" : "no (operator's choice)")}");
+            listing.AppendLine("Every file, its size and date, and what the report did with it.");
+            listing.AppendLine();
+            if (!Directory.Exists(root)) { AddTextEntry(zip, "jimmy_folder_listing.txt", listing + "(folder not found)"); return; }
+
+            foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                string rel = file.Substring(root.Length).TrimStart('\\', '/').Replace('\\', '/');
+                long size = 0; DateTime when = DateTime.MinValue;
+                try { var fi = new FileInfo(file); size = fi.Length; when = fi.LastWriteTime; } catch { }
+                string action;
+                if (LookupFolders.Any(f => rel.StartsWith(f + "/", StringComparison.OrdinalIgnoreCase)))
+                    action = "skipped: downloadable lookup data";
+                else if (!IsSettingsFile(rel) && IsSecretFile(rel))   // settings files are blanked below instead
+                    action = "skipped: may hold a key or password";
+                else if (!includeLogbook && IsLogbookFile(rel))
+                    action = "skipped: logbook (not included by the operator's choice)";
+                else if (size > MaxFolderFileBytes)
+                    action = "skipped: larger than 25 MB";
+                else
+                {
+                    try
+                    {
+                        string entryName = "JimmyNextFolder/" + rel;
+                        if (IsSettingsFile(rel))
+                        {
+                            AddTextEntry(zip, entryName, RedactIni(file));
+                            action = "included, passwords blanked";
+                        }
+                        else
+                        {
+                            byte[] data = ReadFileSafe(file);
+                            var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
+                            using (var dest = entry.Open()) dest.Write(data, 0, data.Length);
+                            action = "included";
+                        }
+                    }
+                    catch (Exception ex) { action = "not readable: " + ex.Message; }
+                }
+                listing.AppendLine($"{rel}\t{size:N0} bytes\t{when:yyyy-MM-dd HH:mm:ss}\t{action}");
+            }
+            AddTextEntry(zip, "jimmy_folder_listing.txt", listing.ToString());
+        }
+
+        // -----------------------------------------------------------------------
         // ZIP helpers
         // -----------------------------------------------------------------------
 
@@ -665,6 +755,14 @@ namespace WSJTX_Controller
         // -----------------------------------------------------------------------
         // Path helpers
         // -----------------------------------------------------------------------
+
+        // 2.0.81: the default place and name the Save As box offers (not everyone uses Downloads).
+        internal static string DefaultZipPath()
+        {
+            string infoVer = GetInfoVersion().Replace("/", "-").Replace("\\", "-").Replace(":", "").Replace(" ", "_");
+            string appName = (Assembly.GetExecutingAssembly().GetName().Name ?? "Jimmy").Replace(" ", "");
+            return Path.Combine(GetOutputDir(), $"{appName}_{infoVer}_support_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
+        }
 
         private static string GetOutputDir()
         {

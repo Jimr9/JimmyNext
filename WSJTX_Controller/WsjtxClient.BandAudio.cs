@@ -250,6 +250,7 @@ namespace WSJTX_Controller
             DebugOutput($"{Time()} [BAND-AUDIT] {caller}: currentBandIdx:{bandIdx} targetIdx:{targetIdx} newFreq:{freqHz} txFirst:{txFirst} sideband:{sideband}");
 
             _pendingBandIdx = targetIdx;
+            _bandChangeOrigin = ctrl.ActiveHotkeyOrigin;
             string bandLabel = $"{bands[targetIdx]}m";
             // Codex Audit 02 follow-up, 2026-08-21: DirectSetFrequency now routes through the
             // ordered dispatcher (WsjtxClient.Direct.cs's own class comment) instead of this method
@@ -349,7 +350,11 @@ namespace WSJTX_Controller
             // second, concurrent CAT session). One fresh, on-demand query either way, same as
             // the RX-audio-in path below always was -- not a cached/periodic value, matching
             // this hotkey's own "check now" purpose.
-            EnqueueDirectCommand("SNAPSHOT", snapJson =>
+            // The answer arrives after Alt+Q has been handled: carry its key over, as Tune and the
+            // drive-level keys do, so Notification History names the key and the speech queue
+            // treats it as a key's answer (2026-10-01).
+            string origin = ctrl.ActiveHotkeyOrigin;
+            EnqueueDirectCommand("SNAPSHOT", snapJson => ctrl.WithHotkeyOrigin(origin, () =>
             {
                 DirectRadioStatus radio = null;
                 if (snapJson != null && snapJson.Length > 0 && !snapJson.StartsWith("ERR"))
@@ -455,7 +460,7 @@ namespace WSJTX_Controller
                 string rxReport = Wording.Fill("Msg.AudioInExplained", ("Level", $"{audioInDb:0}"), ("Hint", AudioInHint(audioInDb)));
                 if (radio.SmeterDb.HasValue) rxReport += ", " + Wording.Fill("Msg.SMeter", ("Reading", SmeterToSUnits(radio.SmeterDb.Value)));
                 StatusView.ShowMessage(rxReport, false);
-            });
+            }));
             return true;
         }
 
@@ -1057,9 +1062,9 @@ namespace WSJTX_Controller
                 // 2.0.58: record the terminal outcome so "report latest transmit-slot analysis"
                 // can read it back later without re-running.
                 RecordSlotAnalysisFromCurrentOffsets(SlotAnalysisState.Complete);
-                StatusView.ShowMessage(
+                ctrl.WithHotkeyOrigin(_slotAnalysisOrigin, () => StatusView.ShowMessage(
                     Wording.Fill("Msg.SlotAnalysisComplete", ("Even", evenOffset.ToString()), ("Odd", oddOffset.ToString())),
-                    true);
+                    true));
                 if (pendingCqAfterAnalysis)
                 {
                     pendingCqAfterAnalysis = false;

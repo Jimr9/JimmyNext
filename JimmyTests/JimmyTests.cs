@@ -1386,6 +1386,7 @@ static class JimmyTests
         LastHeardSortTests();
         MaxCallQueueAgeFloorTests();
         SmartStartUnaffectedByLastHeardTests();
+        SmartModeQuietAfterBusyTests();
         CallQueueRankerCategoryWeightValidationTests();
         CallQueueRankerCallingPrioritiesTests();
         CallQueueRankerBeamRankTests();
@@ -1600,6 +1601,8 @@ static class JimmyTests
         SuppressReceiveNotificationsDuringTxTests();
         ResolveActiveIniPathTests();
         ActiveIniFilePathTests();
+        SupportReportFolderTests();
+        NexusMoveOldSchemaTests();
         ListNamedProfilesTests();
         BuildWorkingFrequencyEntriesTests();
         DirectSetWorkingFrequenciesSendsCorrectCommandTests();
@@ -1967,6 +1970,31 @@ static class JimmyTests
                 var wc = MakeClient(out var ctrl);
                 wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(140, "K4YT2", "CQ K4YT2 EM63"));
                 Check("ordinary CQ (no envelope) -> still queued normally", wc.callQueue.Contains("K4YT2"), true);
+            }
+
+            // 5b. W0CAS (2.0.80): the logbook is NOT ready (its move to Nexus failed) -- an
+            //     ordinary CQ must still be queued. Unknown worked-before is never "already worked";
+            //     before the fix every station was rejected and the call lists stayed empty.
+            {
+                string lbDir = Path.Combine(Path.GetTempPath(), "jimmy-notready-" + Guid.NewGuid().ToString("N"));
+                NexusLogbook.Reset();
+                NexusLogbook.TestFolderOverride = Path.Combine(lbDir, "NexusLog");
+                NexusLogbook.TestForceActive = true;
+                try
+                {
+                    Check("setup: logbook not ready", NexusLogbook.LogReady, false);
+                    var wc = MakeClient(out var ctrl);
+                    wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(145, "K4YT5", "CQ K4YT5 EM63"));
+                    Check("W0CAS: logbook not ready -> an ordinary CQ is still queued, not rejected as already worked",
+                          wc.callQueue.Contains("K4YT5"), true);
+                }
+                finally
+                {
+                    NexusLogbook.Reset();
+                    NexusLogbook.TestForceActive = null;
+                    NexusLogbook.TestFolderOverride = null;
+                    try { Directory.Delete(lbDir, true); } catch { }
+                }
             }
 
             // 6. NON-REGRESSION: a report directed AT ME still reaches the toMyCall path.
@@ -11528,6 +11556,27 @@ static class JimmyTests
     // last-heard field is inert to TargetMonitor: an armed Smart Start monitor reaches
     // byte-identical state whether or not the decodes it is fed carry a LastHeardUtc stamp
     // (the fuller 3022947 Smart Start / TargetMonitor battery is run unchanged alongside this).
+    // TG9ADQ (2026-10-01): a target last heard working another station is often still in that
+    // QSO and merely missed by the first decode pass. "Quiet periods after busy" makes Smart Mode
+    // wait longer then -- without touching the operator's ordinary silence setting.
+    static void SmartModeQuietAfterBusyTests()
+    {
+        Console.WriteLine("\n── Smart Mode: quiet periods after busy ──");
+        bool ReadyAfter(int busyQuiet, int silentPeriods)
+        {
+            var tm = new TargetMonitor(TargetPurpose.SmartStart) { SilenceThreshold = 1, BusySilenceThreshold = busyQuiet };
+            tm.Start(THEIR_CALL, "20m", "FT8", "tok1");
+            tm.ObserveDecode(D($"DL3EL {THEIR_CALL} -08"), true, MY_CALL);   // heard working another station
+            tm.OnReceivePeriodComplete(2, true, "20m", "FT8", "tok1", false); // the period he was heard in
+            for (int i = 0; i < silentPeriods; i++)
+                tm.OnReceivePeriodComplete((ulong)(4 + 2 * i), true, "20m", "FT8", "tok1", false);
+            return tm.ReadyToStart;
+        }
+        Check("TG9ADQ: silence 1, after busy 2 -- one quiet period is NOT enough after he was working someone", ReadyAfter(2, 1), false);
+        Check("...two quiet periods are", ReadyAfter(2, 2), true);
+        Check("after busy 1 -- one quiet period is enough, exactly as before", ReadyAfter(1, 1), true);
+    }
+
     static void SmartStartUnaffectedByLastHeardTests()
     {
         Console.WriteLine("\n── Smart Start compatibility: LastHeardUtc is inert to TargetMonitor ──");
@@ -13574,6 +13623,27 @@ static class JimmyTests
                 ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
                 CheckStr("a later empty summary render does NOT clear the newer QSO message",
                     ctrl.statusText.Text, "Working W 1 A W, replying.");
+            }
+
+            // 11b. Speech experiment on (operator, 2026-10-01: a stale "1 wanted" stayed up for
+            //      minutes): the box holds the summary as SPOKEN ("1 wanted.", written back by
+            //      CoordinatedSpeak) and is still cleared; a joined utterance with other news is not.
+            {
+                var ctrl = new Controller();
+                ctrl.queueSpeechExperiment = true;
+                ctrl.Notifications.ClearReceiveCycleSummaryWhenEmpty = true;
+                ctrl.RenderStatusVisible("20m FT8", ", 1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
+                ctrl.CoordinatedSpeak("1 wanted.");
+                CheckStr("experiment: the box shows the spoken summary", ctrl.statusText.Text, "1 wanted.");
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("experiment: the stale spoken summary is CLEARED once it becomes wordless", ctrl.statusText.Text, "");
+
+                ctrl.RenderStatusVisible("20m FT8", ", 1 wanted.", green, yellow, isReceiveCycleSummaryRender: true);
+                CheckStr("experiment: the same summary coming back is shown again", ctrl.statusText.Text, ", 1 wanted.");
+                ctrl.CoordinatedSpeak("1 wanted. K 1 A B C calling you.");
+                ctrl.RenderStatusVisible("20m FT8", "", red, white, isReceiveCycleSummaryRender: true);
+                CheckStr("experiment: a joined line carrying other news is NOT cleared",
+                    ctrl.statusText.Text, "1 wanted. K 1 A B C calling you.");
             }
 
             // 12a. Disabling the event is NOT reinterpreted as "became empty this cycle" -- the
@@ -17207,13 +17277,10 @@ static class JimmyTests
                         "QRZ upload status", "Club Log upload status", "LoTW upload status", "HRDLog.net upload status",
                         "Recent QSOs", "Status", "Close",
                     });
+                    // Awards and Still Need are one page since 2026-10-01.
                     CheckPage("Awards", 1, new[] {
-                        "Award selector", "Award progress summary", "Award details",
+                        "Awards", "Band filter", "Show", "Award progress summary", "Award details",
                         "Manage Rule Definitions", "Refresh award progress", "Status", "Close",
-                    });
-                    CheckPage("Still Need", 2, new[] {
-                        "Still Needed awards", "Band filter", "Needed entries", "Refresh needed list",
-                        "Needed items", "Status", "Close",
                     });
                     // Edit/Delete/Export are correctly skipped here: they start Enabled=false
                     // until a row is selected (no QSOs exist to select in this bare fixture),
@@ -17222,13 +17289,13 @@ static class JimmyTests
                     // credentials passed to the constructor above, which cover that case for
                     // Sync so its full sequence can be checked; there's no equivalent
                     // workaround for "a row is selected" without a real, seeded database).
-                    CheckPage("Lookup and Edit", 3, new[] {
+                    CheckPage("Lookup and Edit", 2, new[] {
                         "Callsign filter", "Source filter", "Date from, format year month day, optional",
                         "Date to, format year month day, optional", "Search", "Clear filters",
                         "Choose column order", "Contacts found", "Add a new QSO",
                         "Status", "Close",
                     });
-                    CheckPage("Sync", 4, new[] {
+                    CheckPage("Sync", 3, new[] {
                         "Import ADIF file", "Download from QRZ Logbook", "Download from LoTW",
                         "Download from Club Log", "Download and reconcile eQSL confirmations",
                         "Export all QSOs to ADIF file", "Import history", "Status", "Close",
@@ -20110,6 +20177,104 @@ static class JimmyTests
         finally
         {
             Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prev);
+        }
+    }
+
+    // ── 2.0.80 (W0CAS): his logbook was last opened by a Jimmy Next before schema v10, so it had
+    // no qso_extra_field table; the logbook move read it unconditionally and stopped at every
+    // start ("no such table: qso_extra_field"), leaving the logbook never ready. ──
+    static void NexusMoveOldSchemaTests()
+    {
+        Console.WriteLine("\n── Logbook move: a logbook from before schema v10 (no extra-fields table) -- THE FIX ──");
+        string db = Path.Combine(Path.GetTempPath(), "JimmyOldSchema_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var c = new System.Data.SQLite.SQLiteConnection($"Data Source={db};"))
+            {
+                c.Open();
+                using (var cmd = c.CreateCommand())
+                {
+                    cmd.CommandText = "CREATE TABLE qso (id INTEGER PRIMARY KEY, callsign TEXT, band TEXT); INSERT INTO qso VALUES (1,'K4YT5','20m');";
+                    cmd.ExecuteNonQuery();
+                }
+            }
+            System.Data.SQLite.SQLiteConnection.ClearAllPools();
+            var rows = NexusMigration.ReadJimmyRows(db);
+            Check("old logbook reads: every contact, no extra fields", rows.Count == 1 && rows[0].C("callsign") == "K4YT5" && rows[0].Extras.Count == 0, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  NexusMoveOldSchemaTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            System.Data.SQLite.SQLiteConnection.ClearAllPools();
+            try { File.Delete(db); } catch { }
+        }
+    }
+
+    // ── 2.0.80 (W0CAS): the support report carries the whole Jimmy Next folder -- settings
+    // with passwords blanked, lookup data and key files left out, the logbook only when the
+    // operator leaves "Include my logbook" checked; the logbook-move reports always. ──
+    static void SupportReportFolderTests()
+    {
+        Console.WriteLine("\n── Support report: whole Jimmy Next folder -- THE FIX ──");
+        string root = Path.Combine(Path.GetTempPath(), "JimmySupportFolder_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            void Put(string rel, string text)
+            {
+                string f = Path.Combine(root, rel.Replace('/', '\\'));
+                Directory.CreateDirectory(Path.GetDirectoryName(f));
+                File.WriteAllText(f, text);
+            }
+            Put("Jimmy Next.ini", "[General]\nmyCall=K0XYZ\nqrzPassword=hunter2\n");
+            Put("Data/NexusLog/migration-report.txt", "move failed: reason");
+            Put("Data/NexusLog/log.sqlite3", "contacts");
+            Put("Data/Logbook/jimmy.db", "old contacts");
+            Put("Data/FccUls/fcc.dat", "lookup");
+            Put("Data/ClubLog/clublog_key.txt", "secret");
+            Put("Data/nexus-logbook-auto-move.txt", "auto move: failed");
+
+            Dictionary<string, string> Run(bool includeLogbook)
+            {
+                var ms = new MemoryStream();
+                using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
+                    SupportReportBuilder.AddDataFolder(zip, root, includeLogbook);
+                ms.Position = 0;
+                var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Read))
+                    foreach (var e in zip.Entries)
+                        using (var r = new StreamReader(e.Open())) d[e.FullName] = r.ReadToEnd();
+                return d;
+            }
+
+            var with = Run(true);
+            Check("settings included", with.ContainsKey("JimmyNextFolder/Jimmy Next.ini"), true);
+            Check("settings: password blanked", with["JimmyNextFolder/Jimmy Next.ini"].Contains("hunter2"), false);
+            Check("move reports included", with.ContainsKey("JimmyNextFolder/Data/NexusLog/migration-report.txt")
+                && with.ContainsKey("JimmyNextFolder/Data/nexus-logbook-auto-move.txt"), true);
+            Check("logbook included when checked", with.ContainsKey("JimmyNextFolder/Data/NexusLog/log.sqlite3")
+                && with.ContainsKey("JimmyNextFolder/Data/Logbook/jimmy.db"), true);
+            Check("lookup data left out", with.ContainsKey("JimmyNextFolder/Data/FccUls/fcc.dat"), false);
+            Check("key file left out", with.Keys.Any(k => k.Contains("clublog_key")), false);
+            Check("listing names every file", with.ContainsKey("jimmy_folder_listing.txt")
+                && with["jimmy_folder_listing.txt"].Contains("Data/FccUls/fcc.dat"), true);
+
+            var without = Run(false);
+            Check("logbook left out when unchecked", without.ContainsKey("JimmyNextFolder/Data/NexusLog/log.sqlite3")
+                || without.ContainsKey("JimmyNextFolder/Data/Logbook/jimmy.db"), false);
+            Check("move report still included when unchecked", without.ContainsKey("JimmyNextFolder/Data/NexusLog/migration-report.txt"), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SupportReportFolderTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
         }
     }
 

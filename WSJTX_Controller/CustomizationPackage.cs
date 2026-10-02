@@ -105,7 +105,7 @@ namespace WSJTX_Controller
             "callCqDx", "callNonDirCq", "ignoreNonDx", "ignoreWeakSnr", "minSnr", "removeOnWeakSnr", "timeout",
             "maxQueuedCalls", "maxCallQueueAgePeriods", "optimizeTx", "skipLevelPrompt", "rankMethod", "rankOrder",
             "rankBeam", "categoryWeights", "callingPriorities", "rawPriorityTags", "otherStationRepliesBeforeYielding",
-            "smartQsoStartEnabled", "smartStartSilencePeriods", "smartStartMaxStandbyRounds", "smartStartTimeLimitMinutes",
+            "smartQsoStartEnabled", "smartStartSilencePeriods", "smartStartBusyQuietPeriods", "smartStartMaxStandbyRounds", "smartStartTimeLimitMinutes",
             "txFreqMode", "freqStepHz", "offsetLoLimit", "offsetHiLimit",
             "usePskReporter",
         };

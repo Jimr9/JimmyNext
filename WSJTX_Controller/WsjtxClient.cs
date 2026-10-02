@@ -254,6 +254,11 @@ namespace WSJTX_Controller
         // presses can keep advancing optimistically; cleared the moment a real confirmed bandIdx
         // arrives (line ~743) so it never drifts from reality for long.
         private int? _pendingBandIdx = null;
+        // The key (if any) that asked for the pending band change / the running slot analysis:
+        // carried over to their late announcements, so Notification History names the key and
+        // the speech queue treats them as a key's answer (2026-10-01).
+        private string _bandChangeOrigin;
+        private string _slotAnalysisOrigin;
         private List<int> bands = new List<int>() { 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 };
         // Read-only view for Options > Frequencies (OptionsDlg.cs) -- index-aligned with
         // freqsDict's own per-mode lists and FrequencySettings' override arrays.
@@ -1334,7 +1339,7 @@ namespace WSJTX_Controller
             if (FindCallIndexInQueue(callInProg) >= 0) return;
             SetRank(replyDecode);
             DebugOutput($"{Time()} RequeueAbortedCall: re-enqueuing '{callInProg}'");
-            _callQueueStore.AddCall(callInProg, replyDecode);
+            _callQueueStore.AddCall(callInProg, replyDecode, playSounds: false);
         }
 
         // KA1BMF live-radio audit (2026-09-08). Our active partner is demonstrably working a
@@ -3191,6 +3196,7 @@ namespace WSJTX_Controller
             ClearAudioOffsets();
             pendingCqAfterAnalysis = pendingCq;
             _manualAnalysisRequested = true;
+            _slotAnalysisOrigin = ctrl.ActiveHotkeyOrigin;
             StatusView.ShowMessage(Wording.Get("Msg.AnalyzingSlot"), false);
 
             // 2.0.58: the watchdog now runs for a STANDALONE Alt+Z analysis too, not only a
@@ -3239,13 +3245,13 @@ namespace WSJTX_Controller
                 _manualAnalysisRequested = false;
                 if (wasPendingCq)
                 {
-                    StatusView.ShowMessage(Wording.Fill("Msg.SlotStartingAnyway", ("Result", result.Describe())), false);
+                    ctrl.WithHotkeyOrigin(_slotAnalysisOrigin, () => StatusView.ShowMessage(Wording.Fill("Msg.SlotStartingAnyway", ("Result", result.Describe())), false));
                     ctrl.cqModeButton_Click(null, null);
                 }
                 else
                 {
                     // Standalone Alt+Z: terminal result, no CQ.
-                    StatusView.ShowMessage(result.Describe(), false);
+                    ctrl.WithHotkeyOrigin(_slotAnalysisOrigin, () => StatusView.ShowMessage(result.Describe(), false));
                 }
             }
             else
@@ -4771,6 +4777,19 @@ namespace WSJTX_Controller
                 if (StringComparer.OrdinalIgnoreCase.Equals(call, callInProg)) continue;
                 EnqueueDecodeMessage d;
                 if (callDict.TryGetValue(call, out d) && d.Priority == (int)p) count++;
+            }
+            return count;
+        }
+
+        // Counts visible (or, with no list, queued) stations matching `pred`, never the one in
+        // progress -- SnapshotPriorityCount's rule for any fact (POTA, new grid, wanted list).
+        private int SnapshotCount(Func<EnqueueDecodeMessage, bool> pred, HashSet<string> visibleCalls)
+        {
+            int count = 0;
+            foreach (var call in visibleCalls ?? (IEnumerable<string>)callDict.Keys)   // same fallback as CallQueuePriorityCount
+            {
+                if (StringComparer.OrdinalIgnoreCase.Equals(call, callInProg)) continue;
+                if (callDict.TryGetValue(call, out EnqueueDecodeMessage d) && pred(d)) count++;
             }
             return count;
         }
