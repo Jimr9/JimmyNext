@@ -149,7 +149,7 @@ namespace WSJTX_Controller
             AppendSection(sb, "SETTINGS", () =>
                 BuildSettingsSection(sb));
 
-            AppendSection(sb, "WSJT-X CONNECTION", () =>
+            AppendSection(sb, "ENGINE CONNECTION", () =>
                 BuildConnectionSection(sb, ctrl, diag));
 
             AppendSection(sb, "OPERATING STATE", () =>
@@ -207,7 +207,7 @@ namespace WSJTX_Controller
 
             sb.AppendLine($"Report created:    {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
             sb.AppendLine($"Jimmy version:     {infoVer}");
-            sb.AppendLine($"WSJT-X version:   {wsjtxVer}");
+            sb.AppendLine($"Engine version:    {wsjtxVer}");
             sb.AppendLine($"Windows:           {winVer}");
             sb.AppendLine($"Connection:        {connection}");
             sb.AppendLine($"Mode:              {modeStr} / {txModeStr}");
@@ -312,8 +312,8 @@ namespace WSJTX_Controller
 
             string connState = diag.Connected ? "Connected" : diag.Connecting ? "Connecting" : "Disconnected";
             sb.AppendLine($"Connection state:     {connState}");
-            sb.AppendLine($"WSJT-X program name:  {diag.PgmName ?? "Unknown"}");
-            sb.AppendLine($"WSJT-X version:       {diag.PgmVer ?? "Unknown"}");
+            sb.AppendLine($"Engine name:          {diag.PgmName ?? "Unknown"}");
+            sb.AppendLine($"Engine version:       {diag.PgmVer ?? "Unknown"}");
             // UDP IP address / UDP multicast lines removed 2026-08-18: both were the classic
             // WSJT-X/UDP transport's own listen-address configuration, which no longer exists
             // (WsjtxProtocolAdapter and the rest of that transport are deleted). Port is kept --
@@ -344,7 +344,7 @@ namespace WSJTX_Controller
 
             sb.AppendLine($"myCall:              {diag.MyCall ?? "(not set)"}");
             sb.AppendLine($"myGrid:              {diag.MyGrid ?? "(not set)"}");
-            sb.AppendLine($"WSJT-X mode:         {(string.IsNullOrEmpty(diag.Mode) ? "Unknown" : diag.Mode)}");
+            sb.AppendLine($"Mode:                {(string.IsNullOrEmpty(diag.Mode) ? "Unknown" : diag.Mode)}");
             sb.AppendLine($"Jimmy TX mode:       {FormatTxMode(diag.TxMode)}");
             sb.AppendLine($"TX first:            {diag.TxFirst}");
             sb.AppendLine($"Current band:        {band}");
@@ -511,7 +511,7 @@ namespace WSJTX_Controller
             if (diag == null || diag.DecodeHistory.Count == 0)
             {
                 sb.AppendLine("No recent decode history was available.");
-                sb.AppendLine("(Decode history accumulates after Jimmy connects to WSJT-X and decodes are received.)");
+                sb.AppendLine("(Decode history accumulates after the engine starts and decodes are received.)");
                 return;
             }
 
@@ -841,7 +841,7 @@ namespace WSJTX_Controller
             if (combined.Contains("connect") || combined.Contains("udp") ||
                 combined.Contains("wsjt-x") || combined.Contains("wsjtx") ||
                 combined.Contains("heartbeat"))
-                return "WSJT-X Connection";
+                return "Engine Connection";
             if (combined.Contains("audio") || combined.Contains("sound") ||
                 combined.Contains("volume") || combined.Contains("beep"))
                 return "Audio / Sounds";

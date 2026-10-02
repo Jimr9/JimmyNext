@@ -981,6 +981,13 @@ namespace WSJTX_Controller
                     // routineStatusSpeakWhen). Only an actual customization splits a clause out.
                     NotificationPolicy d = NotificationDefaults.Policies.TryGetValue(kv.Key, out var dd) ? dd : null;
                     if (d == null || p.SpeakWhen != d.SpeakWhen) w = p.SpeakWhen;
+                    // What you send never inherits a RECEIVE boundary (operator, 2026-10-02): it is
+                    // news during the over, and the next receive boundary only comes after it, by
+                    // which time the line has moved on -- "Sending EN34" was shown but never said
+                    // with the routine line set to After RX. It keeps its own timing instead.
+                    else if (kv.Key == NotificationEventType.TxMessageChanged
+                             && (baseWhen == SpeakWhen.AfterRx || baseWhen == SpeakWhen.RxStart))
+                        w = p.SpeakWhen;
                     if (d == null || p.Condition != d.Condition) c = p.Condition;
                 }
                 present.Add((kv.Key, t, pos, w, c, IsStickyClause(kv.Key)));

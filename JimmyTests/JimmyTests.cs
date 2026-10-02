@@ -1594,6 +1594,7 @@ static class JimmyTests
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
         WordingFileTests();
+        SendingNeverWaitsForReceiveTests();
         CustomizationPackageTests();
         BulkEditApplyTests();
         RawDecodesSideLabelReflectsTxFirstTests();
@@ -19175,6 +19176,33 @@ static class JimmyTests
     // Logged power = the radio's setting in watts, only for the exact setting it was read for; an
     // export names Jimmy Next, its version and when (2026-09-29 operator requests).
     // The wording file (2026-09-30): spoken notification pieces the operator can reword.
+    // "Sending EN34" was shown but never said with the routine line set to After RX (operator,
+    // 2026-10-02): what you send keeps its own timing instead of a receive boundary.
+    static void SendingNeverWaitsForReceiveTests()
+    {
+        Console.WriteLine("\n── Sending never waits for a receive boundary ──");
+        var ctrl = new Controller();
+        var _ = ctrl.Handle;
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var f = wc.TestBuildRoutineFragments("W1AW, received -05, sending R-12.", SpeakWhen.AfterRx,
+            (NotificationEventType.ReceivedReply, "received -05"), (NotificationEventType.TxMessageChanged, "sending R-12"));
+        var send = f.FirstOrDefault(x => x.Text == "sending R-12");
+        Check("After RX line: sending is said now", send != null && send.When == SpeakWhen.Now, true);
+        Check("After RX line: the received part still waits", f.Any(x => x.Text == "received -05" && x.When == SpeakWhen.AfterRx)
+            || f.All(x => x.Text != "received -05"), true);
+        CheckStr("After RX line: the fragments still make the whole line", string.Concat(f.OrderBy(x => x.Order).Select(x => x.Text)),
+            "W1AW, received -05, sending R-12.");
+        var g = wc.TestBuildRoutineFragments("W1AW, sending R-12.", SpeakWhen.Now,
+            (NotificationEventType.TxMessageChanged, "sending R-12"));
+        Check("Now line: still one utterance", g.Count == 1, true);
+        Check("TX start line: sending still follows it", wc.TestBuildRoutineFragments("W1AW, sending R-12.", SpeakWhen.TxStart,
+            (NotificationEventType.TxMessageChanged, "sending R-12")).Count == 1, true);
+    }
+
     static void WordingFileTests()
     {
         Console.WriteLine("\n── Wording file ──");

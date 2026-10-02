@@ -3795,6 +3795,15 @@ namespace WSJTX_Controller
         // would produce it in the field.
         internal void TestShowStatus() => ShowStatus();
 
+        // The routine line's speech fragments for a line made of these clauses.
+        internal IReadOnlyList<RoutineFragment> TestBuildRoutineFragments(string status, SpeakWhen baseWhen,
+            params (NotificationEventType Type, string Text)[] clauses)
+        {
+            _clauseTextsThisRender.Clear();
+            foreach (var c in clauses) _clauseTextsThisRender[c.Type] = c.Text;
+            return BuildRoutineFragments(status, baseWhen, SpeakCondition.Always);
+        }
+
         // Test-only: the receive-side role-scope regression coverage
         // (RoutineReceiveSideRoleScopeTests, JimmyTests) needs to drive the exact slot state
         // ShowStatus reads -- which slot is Jimmy's transmit side (txFirst), which slot's receive

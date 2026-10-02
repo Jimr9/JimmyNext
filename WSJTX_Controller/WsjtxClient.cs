@@ -997,7 +997,7 @@ namespace WSJTX_Controller
             _potaLog = new PotaLogTracker(this);
             _awardTagger = new AwardTagger(this);
             _callQueueStore = new CallQueueStore(this);
-            Sounds = new NotificationSounds(() => ctrl.soundsEnabled);
+            Sounds = new NotificationSounds(() => ctrl.soundsEnabled) { Log = DebugOutput };
             Notify = new NotificationCenter(ctrl.Notifications,
                 new UiaAlertNotificationDelivery(new StatusViewNotificationDelivery(StatusView), StatusView,
                     () => ctrl.announceImportantAlertsWhenFocusElsewhere),

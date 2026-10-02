@@ -355,7 +355,7 @@ namespace WSJTX_Controller
         // one identical to a shipped sound, already here -- and a file of the operator's own that
         // one replaces is copied to backupDir first.
         internal void ApplyTo(IniFile ini, CustomizationParts chosen, string dataFolder, string installSoundsFolder = null,
-            string backupDir = null, string mainSection = null)
+            string backupDir = null, string mainSection = null, string wordingPath = null)
         {
             chosen &= Parts;
             var existing = ReadIni(File.Exists(ini.FilePath) ? File.ReadAllLines(ini.FilePath) : new string[0]);
@@ -383,7 +383,7 @@ namespace WSJTX_Controller
                 }
             }
             if (chosen.HasFlag(CustomizationParts.Wording) && WordingText != null)
-                File.WriteAllText(Path.Combine(dataFolder, Wording.FileName), WordingText, new UTF8Encoding(false));
+                File.WriteAllText(wordingPath ?? Path.Combine(dataFolder, Wording.FileName), WordingText, new UTF8Encoding(false));
 
             using (var batch = ini.BeginBatchScope())
             {

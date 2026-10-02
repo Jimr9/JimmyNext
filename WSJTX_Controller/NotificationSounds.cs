@@ -138,7 +138,21 @@ namespace WSJTX_Controller
         public void Play(string strFileName, string callsign, string key)
         {
             string resolved = ResolveSoundPath(strFileName, callsign, key);
-            if (resolved != null) _soundQueue.Enqueue(resolved);
+            if (resolved == null) return;
+            LogQueued(resolved, callsign, key);
+            _soundQueue.Enqueue(resolved);
+        }
+
+        // One debug-log line per sound queued (operator, 2026-10-02: "so we can tell which sound
+        // you heard"). Set by the owner; null = no log.
+        public Action<string> Log;
+
+        private void LogQueued(string file, string callsign, string key)
+        {
+            if (Log == null) return;
+            string why = string.Join(", ", new[] { key, callsign }.Where(x => !string.IsNullOrEmpty(x)));
+            try { Log($"{DateTime.Now:HH:mm:ss} sound: {Path.GetFileName(file)}{(why.Length > 0 ? " (" + why + ")" : "")}"); }
+            catch { }
         }
 
         public bool PlaySoundEvent(bool enabled, string file)
@@ -156,6 +170,7 @@ namespace WSJTX_Controller
             if (!_soundsEnabled() || !enabled) return false;
             string resolved = ResolveSoundPath(file, callsign, key);
             if (resolved == null) return false;
+            LogQueued(resolved, callsign, key);
             _soundQueue.Enqueue(resolved);
             return true;
         }

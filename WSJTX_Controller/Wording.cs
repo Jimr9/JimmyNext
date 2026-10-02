@@ -264,8 +264,9 @@ namespace WSJTX_Controller
 
         private static Dictionary<string, string> _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        // Where the file lives (set by Load) -- the wording editor saves there.
-        internal static string Folder { get; private set; }
+        // The file in use (set by Load): the shared Wording.txt, or a profile's own file
+        // (Profiles\Wording\<profile>.txt) -- the wording editor saves there.
+        internal static string FilePath { get; private set; }
 
         internal static bool IsChanged(string key) => _overrides.ContainsKey(key);
 
@@ -334,10 +335,11 @@ namespace WSJTX_Controller
         // commented out. Returns null, or why it could not be written.
         internal static string Save()
         {
-            if (string.IsNullOrEmpty(Folder)) return "no settings folder";
+            if (string.IsNullOrEmpty(FilePath)) return "no settings folder";
             try
             {
-                File.WriteAllText(Path.Combine(Folder, FileName), Template(), new UTF8Encoding(false));
+                Directory.CreateDirectory(Path.GetDirectoryName(FilePath));
+                File.WriteAllText(FilePath, Template(), new UTF8Encoding(false));
                 return null;
             }
             catch (Exception ex) { return ex.Message; }
@@ -360,19 +362,22 @@ namespace WSJTX_Controller
             return s;
         }
 
-        // Startup: read the file, or write it (all commented out) when there is none or it is
-        // empty. Returns a line for the debug log, or null.
-        internal static string Load(string folder)
+        // Startup (and the editor's switch between shared and profile wording): read the file at
+        // `path`, or write it (all commented out) when there is none or it is empty. Returns a
+        // line for the debug log, or null.
+        internal static string Load(string path)
         {
             if (TestModeGuard.IsTestMode) return null;
-            Folder = folder;
-            string path = Path.Combine(folder, FileName);
+            FilePath = path;
+            string name = Path.GetFileName(path);
             try
             {
                 if (!File.Exists(path) || new FileInfo(path).Length == 0)
                 {
-                    File.WriteAllText(path, Template(), new UTF8Encoding(false));
                     _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    File.WriteAllText(path, Template(), new UTF8Encoding(false));
+                    Changed?.Invoke();
                     return null;
                 }
                 string[] lines = File.ReadAllLines(path);
@@ -384,7 +389,7 @@ namespace WSJTX_Controller
                 {
                     File.Copy(path, path + ".before-sections-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".bak", true);
                     File.WriteAllText(path, Template(), new UTF8Encoding(false));
-                    return $"wording: {FileName} reorganized by topic ({_overrides.Count} own entr{(_overrides.Count == 1 ? "y" : "ies")} kept)";
+                    return $"wording: {name} reorganized by topic ({_overrides.Count} own entr{(_overrides.Count == 1 ? "y" : "ies")} kept)";
                 }
                 // Entries added in a later version: appended, commented out, so the file always
                 // lists everything that can be reworded. The operator's own lines are untouched.
@@ -407,12 +412,13 @@ namespace WSJTX_Controller
                     }
                     File.AppendAllText(path, sb.ToString(), new UTF8Encoding(false));
                 }
-                return _overrides.Count > 0 ? $"wording: {_overrides.Count} entr{(_overrides.Count == 1 ? "y" : "ies")} from {FileName}" : null;
+                return _overrides.Count > 0 ? $"wording: {_overrides.Count} entr{(_overrides.Count == 1 ? "y" : "ies")} from {path}" : null;
             }
             catch (Exception ex)
             {
                 _overrides = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                return $"wording: {FileName} not read ({ex.Message}); built-in wording used";
+                Changed?.Invoke();
+                return $"wording: {name} not read ({ex.Message}); built-in wording used";
             }
         }
 

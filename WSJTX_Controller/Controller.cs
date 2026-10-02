@@ -1193,7 +1193,7 @@ namespace WSJTX_Controller
             // change or at connect, so a changed title could keep its old name).
             Wording.Changed -= ApplyWordingToScreen;
             Wording.Changed += ApplyWordingToScreen;
-            string wordingNote = Wording.Load(path);
+            string wordingNote = Wording.Load(ActiveWordingPath());
             if (wordingNote != null) wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {wordingNote}");
             if (_sharedSettingsReport != null)
             {
@@ -1962,6 +1962,37 @@ namespace WSJTX_Controller
             return TestModeGuard.IsTestMode ? baseIni : ResolveActiveIniPath(baseIni, ProfilesDirectory());
         }
 
+        // Wording per profile (operator, 2026-10-02): a named profile may have its own wording
+        // file, Profiles\Wording\<profile>.txt, used INSTEAD of the shared Wording.txt (the whole
+        // file, not just differences). No such file = the shared one, as before. The (Default)
+        // profile always uses the shared file.
+        internal static string SharedWordingPath() => Path.Combine(ProfilesAppDataPath(), Wording.FileName);
+        internal static string ProfileWordingPath(string profile) => Path.Combine(ProfilesDirectory(), "Wording", profile + ".txt");
+
+        // The active named profile, or null for (Default).
+        internal static string ActiveNamedProfile()
+        {
+            string active = SafeReadBaseIniKey("activeProfile");
+            return string.IsNullOrWhiteSpace(active) || !File.Exists(Path.Combine(ProfilesDirectory(), active + ".ini")) ? null : active;
+        }
+
+        internal static string ActiveWordingPath()
+        {
+            string profile = ActiveNamedProfile();
+            return profile != null && File.Exists(ProfileWordingPath(profile)) ? ProfileWordingPath(profile) : SharedWordingPath();
+        }
+
+        // A deleted profile's own wording, or one given up for the shared wording: kept in
+        // Backups, never just deleted.
+        internal static void BackUpAndRemoveProfileWording(string profile)
+        {
+            string file = ProfileWordingPath(profile);
+            if (!File.Exists(file)) return;
+            string dir = Path.Combine(ProfilesAppDataPath(), "Backups");
+            Directory.CreateDirectory(dir);
+            File.Move(file, Path.Combine(dir, $"wording-{profile}-{DateTime.Now:yyyyMMdd-HHmmss}.txt"), true);
+        }
+
         // Shown in the Profiles menu's own list alongside real named profiles, and used as the
         // reserved name a new profile may not claim -- never a literal product name (the
         // operator's own explicit requirement: don't design this around "Jimmy Next", since the
@@ -2192,6 +2223,15 @@ namespace WSJTX_Controller
                 if (!string.IsNullOrEmpty(srcContestIni) && File.Exists(srcContestIni))
                     File.Copy(srcContestIni, destContestIni, overwrite: true);
 
+                // The profile's own wording goes with it; shared wording stays shared.
+                string ownWording = ActiveWordingPath();
+                if (!string.Equals(ownWording, SharedWordingPath(), StringComparison.OrdinalIgnoreCase))
+                {
+                    Wording.Save();
+                    Directory.CreateDirectory(Path.GetDirectoryName(ProfileWordingPath(name)));
+                    File.Copy(ownWording, ProfileWordingPath(name), overwrite: true);
+                }
+
                 ShowMsg(Wording.Fill("Msg.ProfileSaved", ("Profile", name)), false);
             }
             catch (Exception ex)
@@ -2303,6 +2343,7 @@ namespace WSJTX_Controller
                 string chosenContestIni = ContestConfigStore.CompanionPathFor(ProfilesDirectory() + "\\" + chosen + ".ini");
                 if (!string.IsNullOrEmpty(chosenContestIni) && File.Exists(chosenContestIni))
                     File.Delete(chosenContestIni);
+                BackUpAndRemoveProfileWording(chosen);
 
                 ShowMsg(Wording.Fill("Msg.ProfileDeleted", ("Profile", chosen)), false);
             }
@@ -2343,7 +2384,7 @@ namespace WSJTX_Controller
                     SaveAllSettingsToIniFile();   // export what is in effect now, as Save Profile As does
                     if (iniFile == null) throw new InvalidOperationException("no active settings file");
                     var pkg = CustomizationPackage.FromProfile(iniFile.FilePath,
-                        Path.Combine(ProfilesAppDataPath(), Wording.FileName), parts, NotificationSounds.SoundsFolder,
+                        ActiveWordingPath(), parts, NotificationSounds.SoundsFolder,
                         NotificationSounds.UserSoundsFolder);
                     pkg.Save(sfd.FileName);
                     ShowMsg(Wording.Fill("Msg.CustomizationsExported", ("Parts", CustomizationPackage.Describe(parts))), false);
@@ -2403,9 +2444,10 @@ namespace WSJTX_Controller
                 if (iniFile == null) throw new InvalidOperationException("no active settings file");
                 string dataFolder = ProfilesAppDataPath();
                 string backup = makeBackup
-                    ? CustomizationPackage.Backup(iniFile.FilePath, Path.Combine(dataFolder, Wording.FileName), Path.Combine(dataFolder, "Backups"))
+                    ? CustomizationPackage.Backup(iniFile.FilePath, ActiveWordingPath(), Path.Combine(dataFolder, "Backups"))
                     : null;
-                pkg.ApplyTo(iniFile, parts, dataFolder, NotificationSounds.SoundsFolder, backup);
+                // Imported wording replaces the wording in effect: the profile's own, else the shared.
+                pkg.ApplyTo(iniFile, parts, dataFolder, NotificationSounds.SoundsFolder, backup, wordingPath: ActiveWordingPath());
                 wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} customizations imported ({CustomizationPackage.Describe(parts)}) from '{file}' into '{profile}'; backup: {backup ?? "none (operator's choice)"}");
             }
             catch (Exception ex)

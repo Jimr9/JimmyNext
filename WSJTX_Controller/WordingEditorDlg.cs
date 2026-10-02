@@ -14,8 +14,10 @@ namespace WSJTX_Controller
     //   Section box -> Entries (each line "short name: words", "(yours)" when changed, "silent")
     //   -> Words (the entry's description is its accessible description, said after a pause)
     //   -> Silent -> Fields (each line "Band, used" / "Mode, not used"; Space switches it)
-    //   -> Move earlier / Move later -> Reset -> Close.
-    // Changes apply at once and are saved to Wording.txt; list titles follow at once too.
+    //   -> Move earlier / Move later -> Reset -> Separate wording for this profile -> Close.
+    // Changes apply at once and are saved to the wording file in use; list titles follow at once.
+    // The title says which file that is: "Wording: all profiles" (the shared Wording.txt) or
+    // "Wording: profile Contest" (that profile's own file -- operator, 2026-10-02).
     internal sealed class WordingEditorDlg : Form
     {
         private readonly ComboBox _sectionCb;
@@ -23,7 +25,7 @@ namespace WSJTX_Controller
         private readonly TextBox _wordsTb;
         private readonly CheckBox _silentCb;
         private readonly ListBox _fieldsLb;
-        private readonly Button _earlierBtn, _laterBtn, _resetBtn, _closeBtn;
+        private readonly Button _earlierBtn, _laterBtn, _resetBtn, _profileBtn, _closeBtn;
         private List<string> _keys = new List<string>();
         private List<string> _fields = new List<string>();   // "{Band}" ... in list order
         private bool _updating;
@@ -120,15 +122,66 @@ namespace WSJTX_Controller
                 ShowEntry();
                 SaveFile();
             };
+            // A named profile: give it wording of its own (a copy of what is in use now), or go
+            // back to the shared wording. Hidden for the (Default) profile.
+            _profileBtn = new Button { Location = new Point(lx + 150, y), Size = new Size(260, 27), TabIndex = tab++ };
+            _profileBtn.Click += (s, e) => SwitchProfileWording();
             _closeBtn = new Button { Text = "Close", Location = new Point(lx + w - 90, y), Size = new Size(90, 27), TabIndex = tab++,
                 DialogResult = DialogResult.OK };
+            Controls.Add(_profileBtn);
             Controls.Add(_resetBtn);
             Controls.Add(_closeBtn);
             CancelButton = _closeBtn;
             ClientSize = new Size(w + 24, y + 40);
             FormClosing += (s, e) => SaveFile();
 
+            ShowWhichFile();
             _sectionCb.SelectedIndex = 0;
+        }
+
+        private static bool UsingProfileFile(string profile) =>
+            profile != null && string.Equals(Wording.FilePath, Controller.ProfileWordingPath(profile), StringComparison.OrdinalIgnoreCase);
+
+        private void ShowWhichFile()
+        {
+            string profile = Controller.ActiveNamedProfile();
+            bool own = UsingProfileFile(profile);
+            Text = own ? "Wording: profile " + profile : "Wording: all profiles";
+            _profileBtn.Visible = profile != null;
+            _profileBtn.Text = own ? "Use the shared wording" : "Separate wording for this profile";
+            _profileBtn.AccessibleName = own ? "Use the shared wording for all profiles" : "Separate wording for profile " + profile;
+        }
+
+        private void SwitchProfileWording()
+        {
+            string profile = Controller.ActiveNamedProfile();
+            if (profile == null) return;
+            try
+            {
+                if (UsingProfileFile(profile))
+                {
+                    if (MessageBox.Show(this, $"Use the shared wording for profile '{profile}'? Its own wording is kept in Backups.",
+                            "Wording", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                    Wording.Load(Controller.SharedWordingPath());
+                    Controller.BackUpAndRemoveProfileWording(profile);
+                }
+                else
+                {
+                    // Starts as a copy of the wording in use now.
+                    SaveFile();
+                    string own = Controller.ProfileWordingPath(profile);
+                    System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(own));
+                    System.IO.File.Copy(Wording.FilePath, own, true);
+                    Wording.Load(own);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Could not switch the wording: " + ex.Message, "Wording", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            ShowWhichFile();
+            FillEntries(Math.Max(0, _entriesLb.SelectedIndex));
+            _profileBtn.Focus();
         }
 
         private static string Title(string section) =>
@@ -239,6 +292,7 @@ namespace WSJTX_Controller
         {
             string err = Wording.Save();
             if (err != null) Text = "Wording (not saved: " + err + ")";
+            else if (Text.StartsWith("Wording (not saved", StringComparison.Ordinal)) ShowWhichFile();
         }
     }
 }

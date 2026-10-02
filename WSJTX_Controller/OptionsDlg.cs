@@ -2614,7 +2614,7 @@ namespace WSJTX_Controller
                 ForeColor = System.Drawing.SystemColors.ControlText,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(w, 48),
-                Text = "Jimmy decodes FT8 audio itself -- no separate WSJT-X-family program needed. Replying " +
+                Text = "Jimmy decodes FT8 and FT4 audio itself -- no separate decoding program is needed. Replying " +
                        "WILL transmit for real -- with real PTT and real audio -- if Radio Mode (Radio tab) is " +
                        "set to Hamlib rigctld with PTT enabled; otherwise it stays receive-only with nowhere " +
                        "to key PTT.",
@@ -3151,7 +3151,7 @@ namespace WSJTX_Controller
                 ForeColor = System.Drawing.SystemColors.ControlText,
                 Location = new System.Drawing.Point(left, y),
                 Size = new System.Drawing.Size(w, 48),
-                Text = "WSJT-X's own decode settings, for Jimmy Native (Decode Engine tab). Decode depth " +
+                Text = "The engine's decode settings (Decode Engine tab). Decode depth " +
                        "takes effect immediately; the rest take effect the next time the engine restarts " +
                        "(changing them here, or changing decode engine/radio settings, restarts it).",
                 TabStop = false,

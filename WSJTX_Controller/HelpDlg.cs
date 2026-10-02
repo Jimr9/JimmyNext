@@ -33,6 +33,41 @@ namespace WSJTX_Controller
             // re-reading its (version-bearing) contents. The version stays exactly once, in the
             // visible help text itself.
             helpLabel.AccessibleName = "Jimmy Next help and shortcut keys";
+            // Escape closes it, like any other window (operator, 2026-10-01).
+            CancelButton = closeButton;
+
+            // The website (operator, 2026-10-02): guides, keyboard list, updates.
+            websiteButton = new Button
+            {
+                Text = "Jimmy Next website", Size = new Size(150, 26), TabIndex = 3,
+                AccessibleName = "Jimmy Next website", UseVisualStyleBackColor = true,
+            };
+            websiteButton.Click += (s, e) => OpenLink(WebsiteUrl);
+            Controls.Add(websiteButton);
+
+            // Donations (operator, 2026-10-02): the PayPal Donate page.
+            donateButton = new Button
+            {
+                Text = "Donate", Size = new Size(90, 26), TabIndex = 4,
+                AccessibleName = "Donate to Jimmy Next", UseVisualStyleBackColor = true,
+            };
+            donateButton.Click += (s, e) => OpenLink(DonateUrl);
+            Controls.Add(donateButton);
+        }
+
+        internal const string DonateUrl = "https://www.paypal.com/donate/?hosted_button_id=5BKHZQ4ZU6UNG";
+        private readonly Button donateButton;
+
+        internal const string WebsiteUrl = "https://blindsea.com/jimmy20";
+        private readonly Button websiteButton;
+
+        private void OpenLink(string url)
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Could not open {url}\n\n{ex.Message}", "Jimmy Next", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void HelpDlg_Load(object sender, EventArgs e)
@@ -46,6 +81,8 @@ namespace WSJTX_Controller
             Height = helpLabel.Location.Y + y + 85;
             closeButton.Location = new Point(closeButton.Location.X, Height - 70);
             supportReportButton.Location = new Point(15, closeButton.Location.Y);
+            websiteButton.Location = new Point(supportReportButton.Right + 10, closeButton.Location.Y);
+            donateButton.Location = new Point(websiteButton.Right + 10, closeButton.Location.Y);
 
             helpLabel.SelectionStart = 0;
             helpLabel.SelectionLength = 0;
