@@ -102,7 +102,9 @@ namespace WSJTX_Controller
                 // the contacts QRZ adds carry their own DXCC.)
                 if (source != "LOTW" && source != "QRZ" && source != "EQSL")
                     foreach (var r in list) FillEntityGaps(r, resolveUsState);
-                if (source == "WSJTX" && list.Count == 1)
+                // Jimmy Next's own live contact -- only that: a WSJT-X file import, even of one
+                // contact, is an ordinary import and keeps its own source (2026-10-04).
+                if (source == QsoRecord.JimmyNextSource && list.Count == 1)
                 {
                     var f = list[0].Fields;
                     string key = BuildDedupKey(f.TryGetValue("CALL", out var c) ? c : "", (f.TryGetValue("BAND", out var b) ? b : "").ToLowerInvariant(),

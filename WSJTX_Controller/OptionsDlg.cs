@@ -5950,6 +5950,7 @@ namespace WSJTX_Controller
             HotkeyAction.AnalyzeSlot,
             HotkeyAction.ClockStatus,
             HotkeyAction.SmartStartStatus,
+            HotkeyAction.OpenSmartModeWindow,
             HotkeyAction.StationWatchStatus,
             HotkeyAction.LookupStation,
             HotkeyAction.OpenLogbook,

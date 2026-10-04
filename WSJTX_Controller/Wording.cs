@@ -75,6 +75,7 @@ namespace WSJTX_Controller
             ("Msg.SmartDroppedRepeatLimit", "{Call} repeat limit reached after {Count} calls, dropped; still waiting for {StillWaiting}.", "Smart Mode dropped a station on the repeat limit; others still wait"),
             ("Msg.SmartNotHeard", "{Call} not heard.", "Smart Mode / Station Watch: the station has gone quiet"),
             ("Msg.SmartStillNotHeard", "{Call} still not heard.", "Smart Mode / Station Watch: still quiet (a repeat)"),
+            ("Msg.SmartCancelCallingConfirm", "Calling {Call} now. Cancel and stop transmitting?", "Smart Mode stations window: cancelling the station being called"),
             ("Msg.SmartNotHeardFor", "{Call} not heard for {Count} periods.", "Smart Mode status key: how long the station has been quiet"),
             ("Msg.SmartNotHeardForOne", "{Call} not heard for 1 period.", "Smart Mode status key: quiet for one period"),
             ("Msg.SmartWaitingDecode", "Waiting for a current decode from {Call}.", "Smart Mode: heard before, but nothing usable to answer yet"),

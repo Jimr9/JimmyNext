@@ -74,6 +74,12 @@ namespace WSJTX_Controller
         // same Nexus record, so it can never be logged twice.
         public static string RequestIdFor(string source, string dedupKey) => $"{source}:{dedupKey}";
 
+        // The request id namespace of Jimmy Next's own live contacts. Deliberately still "WSJTX"
+        // though their Source is now "Jimmy Next": the request id is the contact's identity in
+        // Nexus (RecordIdForRequest), so a contact queued before the change and retried after it
+        // is still the same contact -- never logged twice.
+        public const string LiveRequestPrefix = "WSJTX";
+
         // Queue durably, then send now. The contact is safe once queued (the outbox file is flushed
         // to disk); "saved" is only claimed from Nexus's own answer.
         private static NexusLogQsoReply Log(string reqId, NexusQso q, bool sendNow)
@@ -119,9 +125,9 @@ namespace WSJTX_Controller
             int.TryParse(G("ITUZ"), out int ituz);
             var q = ToQso(G("CALL"), G("BAND").ToLowerInvariant(), G("MODE"), G("QSO_DATE"), G("TIME_ON"), G("TIME_OFF"), hz,
                 G("RST_SENT"), G("RST_RCVD"), G("STATE"), G("COUNTRY"), dxcc, cqz, G("GRIDSQUARE"), G("NAME"), G("COMMENT"),
-                G("TX_PWR"), G("OPERATOR"), G("STATION_CALLSIGN"), G("MY_GRIDSQUARE"), "WSJTX", "",
+                G("TX_PWR"), G("OPERATOR"), G("STATION_CALLSIGN"), G("MY_GRIDSQUARE"), QsoRecord.JimmyNextSource, "",
                 G("CONT"), ituz, G("CNTY"), G("IOTA"), G("SIG"), G("SIG_INFO"), G("MY_SIG"), G("MY_SIG_INFO"), "", G("PFX"), "", "");
-            string reqId = RequestIdFor("WSJTX", dedupKey);
+            string reqId = RequestIdFor(LiveRequestPrefix, dedupKey);
             Log(reqId, q, sendNow: false);
             System.Threading.Tasks.Task.Run(() =>
             {
@@ -169,9 +175,20 @@ namespace WSJTX_Controller
                 IEnumerable<KeyValuePair<string, string>> fields = r.Ordered != null && r.Ordered.Count > 0
                     ? r.Ordered.Select(o => new KeyValuePair<string, string>(o.Tag, o.Value))
                     : r.Fields;
+                bool hasSource = false;
                 foreach (var kv in fields)
                     if (!string.IsNullOrEmpty(kv.Value))
+                    {
+                        if (string.Equals(kv.Key, NexusMigration.SourceTag, StringComparison.OrdinalIgnoreCase)) hasSource = true;
                         sb.Append('<').Append(kv.Key).Append(':').Append(Encoding.UTF8.GetByteCount(kv.Value)).Append('>').Append(kv.Value).Append(' ');
+                    }
+                // Where the contact came from (2026-10-04: imports since the move to Nexus kept no
+                // source, so the read copy showed them all as "WSJTX"). A record that already says
+                // keeps its own. Only a contact the import ADDS takes it: a merge that matches a
+                // contact already logged changes only its confirmations and upload stamps
+                // (Nexus reconcile::apply_match), never its extra fields.
+                if (!hasSource && !string.IsNullOrEmpty(source))
+                    sb.Append('<').Append(NexusMigration.SourceTag).Append(':').Append(Encoding.UTF8.GetByteCount(source)).Append('>').Append(source).Append(' ');
                 sb.Append("<eor>\n");
             }
             return sb.ToString();
@@ -396,7 +413,7 @@ namespace WSJTX_Controller
             {
                 var id = db.GetIdByDedupKey(dedupKey);
                 return id.HasValue ? db.GetExtraFields(id.Value).FirstOrDefault(e => e.Tag == "APP_NEXUS_ID").Value : null;
-            }, null) ?? NexusLogbook.RecordIdForRequest(RequestIdFor("WSJTX", dedupKey));
+            }, null) ?? NexusLogbook.RecordIdForRequest(RequestIdFor(LiveRequestPrefix, dedupKey));
 
         // One contact to one service (QRZ, CLUBLOG, EQSL) through Nexus: EngineHost writes the
         // record from Nexus's full data, sends it with Nexus's transport, and Nexus classifies and

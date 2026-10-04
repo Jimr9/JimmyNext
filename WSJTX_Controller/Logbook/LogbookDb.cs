@@ -36,7 +36,11 @@ namespace WSJTX_Controller
         // NEXUS_CONTEST added for the Nexus contesting foundation (phase 2/3/4) -- completed
         // contest QSOs delivered from EngineHost. See ix_nexus_contest_source_qso (LogbookDb
         // schema v10) for the idempotency constraint scoped to this source only.
-        public static readonly string[] KnownSources = { "WSJTX", "QRZ", "LOTW", "CLUBLOG", "MANUAL", "NEXUS_CONTEST" };
+        public static readonly string[] KnownSources = { JimmyNextSource, "WSJTX", "QRZ", "LOTW", "CLUBLOG", "MANUAL", "NEXUS_CONTEST" };
+
+        // A contact Jimmy Next logged itself (operator, 2026-10-04: these were labelled "WSJTX").
+        // Contacts already in the log keep the label they have; a genuine WSJT-X import stays "WSJTX".
+        public const string JimmyNextSource = "Jimmy Next";
     }
 
     public class ImportLogEntry

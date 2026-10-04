@@ -113,6 +113,7 @@ namespace WSJTX_Controller
                 new Item(HotkeyAction.NotificationHistory, "Open Notification History (what has been announced this session)."),
                 new Item(HotkeyAction.ClockStatus,         "Report clock sync status."),
                 new Item(HotkeyAction.SmartStartStatus,    "Report Smart Mode status."),
+                new Item(HotkeyAction.OpenSmartModeWindow, "Open the Smart Mode stations window: each station's status, last heard, calls and time; cancel one. Escape closes it; Smart Mode keeps running."),
                 new Item(HotkeyAction.StationWatchStatus,  "Report Station Watch status."),
                 new Item(HotkeyAction.LookupStation,       "Look up the selected station (callsign, country, state, LoTW status, and more)."),
                 new Item(HotkeyAction.OpenLogbook,         "Open the Ham Radio Center logbook."),

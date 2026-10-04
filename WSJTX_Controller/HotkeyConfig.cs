@@ -78,6 +78,8 @@ namespace WSJTX_Controller
         // ReportStationWatchStatus.
         SmartStartStatus,
         StationWatchStatus,
+        // The Smart Mode stations window (operator, 2026-10-04). No default key.
+        OpenSmartModeWindow,
     }
 
     public class HotkeyConfig
@@ -176,6 +178,7 @@ namespace WSJTX_Controller
             // No default key (operator request, 2026-09-12) -- the operator assigns one under
             // Options > Hotkeys if wanted, same as OpenRxTxFreqControls above.
             [HotkeyAction.SmartStartStatus]       = Keys.None,
+            [HotkeyAction.OpenSmartModeWindow]    = Keys.None,
             [HotkeyAction.StationWatchStatus]     = Keys.None,
         };
 
@@ -238,6 +241,7 @@ namespace WSJTX_Controller
             [HotkeyAction.ToggleStationWatch]    = "Toggle Station Watch",
             [HotkeyAction.WorkWatchedStationNow] = "Work Watched Station Now",
             [HotkeyAction.SmartStartStatus]      = "Report Smart Mode Status",
+            [HotkeyAction.OpenSmartModeWindow]   = "Open Smart Mode Stations",
             [HotkeyAction.StationWatchStatus]    = "Report Station Watch Status",
         };
 
@@ -281,6 +285,7 @@ namespace WSJTX_Controller
             // not an error.
             HotkeyAction.SmartStartStatus,
             HotkeyAction.StationWatchStatus,
+            HotkeyAction.OpenSmartModeWindow,
         };
 
         private static readonly HashSet<Keys> ReservedKeys = new HashSet<Keys>

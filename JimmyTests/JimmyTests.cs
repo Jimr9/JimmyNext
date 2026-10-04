@@ -984,7 +984,7 @@ static class JimmyTests
                 // The live path: Jimmy's own record for a completed QSO (no DXCC in it), into Nexus.
                 string liveAdif = AdifRecordBuilder.Build("K1ABC", "20m", 14_075_500, "FT8", "20260928", "210000", "210100",
                     "-10", "-12", "FN42", "", "", "", "KB0UZT", "KB0UZT", "EN34");
-                AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(liveAdif), "WSJTX", null,
+                AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(liveAdif), QsoRecord.JimmyNextSource, null,
                     call => call == "K1ABC" ? "MA" : null);
                 NexusQso live = null;
                 for (int i = 0; i < 100 && live == null; i++)
@@ -996,6 +996,17 @@ static class JimmyTests
                 Check("live-logged contact arrives with DXCC 291, continent NA and Club Log's country",
                     live != null && live.Dxcc == 291 && live.ExtraValue("CONT") == "NA" && live.Country == "UNITED STATES OF AMERICA", true);
                 Check("live-logged contact arrives with its state", live?.State == "MA", true);
+                // 2026-10-04: Jimmy Next's own contact says so; its identity in Nexus is unchanged.
+                Check("live-logged contact's Source is Jimmy Next", live?.ExtraValue(NexusMigration.SourceTag) == QsoRecord.JimmyNextSource, true);
+                Check("...and its request id keeps the WSJTX: form (a retry is the same contact)",
+                    (live?.ExtraValue("APP_JIMMY_REQ_ID") ?? "").StartsWith(NexusLogbookService.LiveRequestPrefix + ":", StringComparison.Ordinal), true);
+                // A WSJT-X file of one contact is an import, not Jimmy Next's own contact.
+                string oneWsjtx = AdifRecordBuilder.Build("K2XYZ", "20m", 14_075_500, "FT8", "20260928", "211000", "211100",
+                    "-10", "-12", "FN42", "", "", "", "KB0UZT", "KB0UZT", "EN34");
+                AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(oneWsjtx), "WSJTX");
+                var imported = client.Rows().Rows.FirstOrDefault(q => q.Call == "K2XYZ");
+                Check("a one-contact WSJT-X import is not labelled Jimmy Next",
+                    imported != null && imported.ExtraValue(NexusMigration.SourceTag) != QsoRecord.JimmyNextSource, true);
                 client.Shutdown(token);
             }
         }
@@ -1604,6 +1615,8 @@ static class JimmyTests
         LogbookFieldSearchTests();
         CqOnlyKeepsAlertStationsTests();
         BareCallInProgSpeechTests();
+        ImportKeepsSourceTests();
+        CqTypeRowFieldTests();
         ComputerMoveTests();
         CustomizationPackageTests();
         BulkEditApplyTests();
@@ -9758,9 +9771,9 @@ static class JimmyTests
         {
             using (var svc = LogbookFactory.Open())
             {
-                AdifImporter.Import(svc, new[] { LiveFieldsNoGrid("K5KPE", "104200") }, "WSJTX", null,
+                AdifImporter.Import(svc, new[] { LiveFieldsNoGrid("K5KPE", "104200") }, QsoRecord.JimmyNextSource, null,
                     resolveUsState: call => call == "K5KPE" ? "AR" : null);
-                AdifImporter.Import(svc, new[] { LiveFieldsNoGrid("K5KPE", "104500") }, "WSJTX", null, null);
+                AdifImporter.Import(svc, new[] { LiveFieldsNoGrid("K5KPE", "104500") }, QsoRecord.JimmyNextSource, null, null);
             }
             var queued = NexusLogbook.Outbox.Snapshot();
             Check("resolveUsState callback wired in: no-grid QSO still gets a real state",
@@ -9840,8 +9853,8 @@ static class JimmyTests
             withRealDxcc["DXCC"] = "6"; withRealDxcc["COUNTRY"] = "ALASKA"; withRealDxcc["CONT"] = "NA";
             using (var svc = LogbookFactory.Open())
             {
-                AdifImporter.Import(svc, new[] { Live("K9ABC", "104200") }, "WSJTX");
-                AdifImporter.Import(svc, new[] { withRealDxcc }, "WSJTX");
+                AdifImporter.Import(svc, new[] { Live("K9ABC", "104200") }, QsoRecord.JimmyNextSource);
+                AdifImporter.Import(svc, new[] { withRealDxcc }, QsoRecord.JimmyNextSource);
             }
             var queued = NexusLogbook.Outbox.Snapshot();
             var filled = queued.First(e => e.Qso.Call == "K9ABC").Qso;
@@ -19352,6 +19365,38 @@ static class JimmyTests
 
     // A decode from Nexus's deeper pass, arriving just after its period ended, belongs to that
     // period -- not the next one (operator, 2026-10-02: SP1MGM listed on the wrong side).
+    // The "CQ type" row field shows the CQ as received (2026-10-04).
+    static void CqTypeRowFieldTests()
+    {
+        Console.WriteLine("\n── Station rows: CQ type ──");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        wc.callWaitingRowOrderFields = new List<string> { "callp", "cqType" };
+        var build = typeof(WsjtxClient).GetMethod("BuildCallWaitingRow", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        string Row(string call, string msg) => (string)build.Invoke(wc, new object[] { call, new EnqueueDecodeMessage { Message = msg } });
+        Check("CQ POTA shown as received", Row("K4HXM", "CQ POTA K4HXM FM07").EndsWith("CQ POTA"), true);
+        Check("plain CQ shown as CQ", Row("HB9EFK", "CQ HB9EFK JN46").Replace(" ", "").EndsWith("HB9EFK,CQ"), true);
+        Check("not calling CQ: nothing shown", Row("TF3VS", "W2CG TF3VS HP94").Contains("CQ"), false);
+        Check("a contest CQ shown as received", Row("K1ABC", "CQ TEST K1ABC FN42").EndsWith("CQ TEST"), true);
+        Check("a directed CQ shown as received", Row("JA1XYZ", "CQ NA JA1XYZ PM95").EndsWith("CQ NA"), true);
+    }
+
+    // An imported contact says where it came from (2026-10-04); one that already says keeps it.
+    static void ImportKeepsSourceTests()
+    {
+        Console.WriteLine("\n── Imports keep their source ──");
+        string adif = "x<eoh>\n<CALL:4>W1AW <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20261001 <TIME_ON:6>120000 <eor>\n" +
+                      "<CALL:5>K1ABC <BAND:3>20m <MODE:3>FT8 <QSO_DATE:8>20261001 <TIME_ON:6>121000 <APP_JIMMY_SOURCE:10>Jimmy Next <eor>\n";
+        string text = NexusLogbookService.ToAdifText(AdifParser.ParseWithOrder(adif), "QRZ");
+        string[] recs = text.Split(new[] { "<eor>" }, StringSplitOptions.RemoveEmptyEntries);
+        Check("a contact without a source takes the import's", recs[0].Contains("<APP_JIMMY_SOURCE:3>QRZ"), true);
+        Check("a contact that says Jimmy Next keeps it", recs[1].Contains("<APP_JIMMY_SOURCE:10>Jimmy Next") && !recs[1].Contains(">QRZ"), true);
+    }
+
     // While calling a station, the after-receive line never says its callsign alone (operator,
     // 2026-10-02: "V 2 6 K." every period in the V26K pileup).
     static void BareCallInProgSpeechTests()

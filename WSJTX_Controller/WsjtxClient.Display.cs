@@ -386,6 +386,8 @@ namespace WSJTX_Controller
 
             string to = sem.CqTarget;
             string dirTo = (to == null ? "" : $" {to}");
+            // The CQ as received (the engine's parse of the message), never guessed.
+            string cqType = sem.IsCq ? $", CQ{dirTo}" : "";
             string callp = $"{DisplayCallsign(call, ctrl.spaceCallsignsAndGrids)}";
             string pri = (d.Priority == (int)CallPriority.TO_MYCALL) ? " replying" : (d.Priority == (int)CallPriority.WANTED_CQ ? dirTo : "");
 
@@ -403,7 +405,7 @@ namespace WSJTX_Controller
             {
                 { "callp", callp }, { "pri", pri }, { "tag", tagStr }, { "grid", grid }, { "snr", snr },
                 { "freq", freq }, { "country", country }, { "distAz", distAz }, { "age", age }, { "oe", oe },
-                { "descr", descr }, { "rankStr", rankStr }
+                { "descr", descr }, { "rankStr", rankStr }, { "cqType", cqType }
             };
             return RowFormatter.BuildOrderedRow(fieldMap, callWaitingRowOrderFields, fallback);
         }

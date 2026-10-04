@@ -104,12 +104,12 @@ namespace WSJTX_Controller
                     int before = svc.TotalQsos();
                     string live = "<CALL:6>ZZ9ZZZ <BAND:3>20m <FREQ:9>14.075500 <MODE:3>FT8 <QSO_DATE:8>20260928 <TIME_ON:6>120000 " +
                                   "<TIME_OFF:6>120130 <RST_SENT:3>-10 <RST_RCVD:3>-12 <GRIDSQUARE:4>FN31 <STATION_CALLSIGN:6>KB0UZT <MY_GRIDSQUARE:4>EN34 <EOR>";
-                    var r1 = AdifImporter.Import(svc, AdifParser.ParseWithOrder(live), "WSJTX");
+                    var r1 = AdifImporter.Import(svc, AdifParser.ParseWithOrder(live), QsoRecord.JimmyNextSource);
                     string liveKey = AdifImporter.BuildDedupKey("ZZ9ZZZ", "20m", "FT8", "20260928", "120000");
                     Check("live contact queued", r1.NewQsos == 1);
-                    Check("live contact reached Nexus", NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor("WSJTX", liveKey), 30_000));
-                    AdifImporter.Import(svc, AdifParser.ParseWithOrder(live), "WSJTX"); // a retry of the same contact
-                    NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor("WSJTX", liveKey), 30_000);
+                    Check("live contact reached Nexus", NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor(NexusLogbookService.LiveRequestPrefix, liveKey), 30_000));
+                    AdifImporter.Import(svc, AdifParser.ParseWithOrder(live), QsoRecord.JimmyNextSource); // a retry of the same contact
+                    NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor(NexusLogbookService.LiveRequestPrefix, liveKey), 30_000);
                     NexusLogbook.Refresh(force: true);
                     Check("live contact logged exactly once, and worked-before sees it",
                         svc.TotalQsos() == before + 1 && svc.HasWorkedBefore("ZZ9ZZZ", "20m"), $"{svc.TotalQsos()} vs {before + 1}");

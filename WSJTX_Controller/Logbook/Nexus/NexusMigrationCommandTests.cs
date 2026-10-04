@@ -77,8 +77,8 @@ namespace WSJTX_Controller
                 {
                     var svc = LogbookFactory.Open();
                     string live = "<CALL:6>ZZ9ZZZ <BAND:3>20m <FREQ:9>14.075500 <MODE:3>FT8 <QSO_DATE:8>20260928 <TIME_ON:6>120000 <EOR>";
-                    AdifImporter.Import(svc, AdifParser.ParseWithOrder(live), "WSJTX");
-                    NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor("WSJTX",
+                    AdifImporter.Import(svc, AdifParser.ParseWithOrder(live), QsoRecord.JimmyNextSource);
+                    NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor(NexusLogbookService.LiveRequestPrefix,
                         AdifImporter.BuildDedupKey("ZZ9ZZZ", "20m", "FT8", "20260928", "120000")), 30_000);
                     NexusLogbook.Refresh(force: true);
                     var r = original[10];

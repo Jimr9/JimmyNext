@@ -28,7 +28,7 @@ namespace WSJTX_Controller
         private readonly List<TargetMonitor> _smartMore = new List<TargetMonitor>();
         internal const string SmartModeStationsKey = "smartModeStations";
         internal const int DefaultSmartModeStations = 3;
-        private static int SmartModeMaxStations => SharedIniNumbers.Read(SmartModeStationsKey, DefaultSmartModeStations, 1, 10);
+        internal static int SmartModeMaxStations => SharedIniNumbers.Read(SmartModeStationsKey, DefaultSmartModeStations, 1, 10);
         // Escape took one station off; the next Escape stops Smart Mode altogether.
         private bool _smartEscapeTookOne;
         // The last station refused because the list was full -- said once, not on every re-issue.
@@ -556,6 +556,89 @@ namespace WSJTX_Controller
                 .Where(m => m.IsActive).Select(m => SC(m.TargetCall)));
             DebugOutput($"{Time()} [SMART] Escape: {stopped} stopped; still waiting for {stillWaiting}");
             stopped = SC(stopped);
+            return true;
+        }
+
+        // -- Smart Mode stations window (operator, 2026-10-04) --------------------------------
+        // One row per station Smart Mode is managing, current first, and what is going on with it.
+        internal sealed class SmartStationRow
+        {
+            public string Call;       // as logged: the row's identity
+            public string Shown;      // as the operator has callsigns shown and spoken
+            public bool Current;
+            public string Status;
+            public string LastHeard;
+            public string Calls;
+            public string OnList;
+        }
+
+        internal List<SmartStationRow> SmartStationRows()
+        {
+            var rows = new List<SmartStationRow>();
+            var now = DateTime.UtcNow;
+            string Age(TimeSpan t) => t.TotalSeconds < 90 ? $"{Math.Max(0, (int)t.TotalSeconds)} seconds ago" : $"{(int)t.TotalMinutes} minutes ago";
+            foreach (var m in new[] { _smartStart }.Concat(_smartMore))
+            {
+                if (m == null || !m.IsActive) continue;
+                bool current = ReferenceEquals(m, _smartStart);
+                bool calling = current && (m.AwaitingEngagement || string.Equals(callInProg, m.TargetCall, StringComparison.OrdinalIgnoreCase));
+                string what = calling ? (m.TargetNotHeardStreak > 0 ? $"calling, not heard after {m.TargetNotHeardStreak} calls" : "calling")
+                    : m.BusyWithOther && !string.IsNullOrEmpty(m.ApparentPeer) ? $"waiting, working {SC(m.ApparentPeer)}"
+                    : m.SilenceCount > 0 ? $"waiting, not heard for {m.SilenceCount} {(m.SilenceCount == 1 ? "period" : "periods")}"
+                    : "waiting";
+                var d = m.LastUsableDecode;
+                int limitMin = ctrl.smartStartTimeLimitMinutes;
+                int onMin = (int)(now - m.ArmedAtUtc).TotalMinutes;
+                rows.Add(new SmartStationRow
+                {
+                    Call = m.TargetCall,
+                    Shown = SC(m.TargetCall),
+                    Current = current,
+                    Status = (current ? "current, " : "") + what,
+                    LastHeard = d == null || m.LastUsableDecodeUtc == default ? "not heard yet"
+                        : $"{Age(now - m.LastUsableDecodeUtc)}, {d.Message}",
+                    Calls = $"{m.TransmittedCallCount} of {_configuredRepeatLimit}",
+                    OnList = limitMin > 0 ? $"{onMin} of {limitMin} minutes" : $"{onMin} minutes",
+                });
+            }
+            return rows;
+        }
+
+        // Being called right now: cancelling it stops the transmission.
+        internal bool SmartStationBeingCalled(string call) =>
+            _smartStart.IsActive && string.Equals(_smartStart.TargetCall, call, StringComparison.OrdinalIgnoreCase)
+            && (_smartStart.AwaitingEngagement || string.Equals(callInProg, call, StringComparison.OrdinalIgnoreCase));
+
+        // Cancel one station from the window. The current one: as the first Escape -- the call
+        // stops at once and goes back to the ordinary list, and the next station is worked once
+        // nothing is running. A waiting one: off the list; nothing on the air changes.
+        internal bool CancelSmartStation(string call, out bool stoppedTx, out string stillWaiting)
+        {
+            stoppedTx = false;
+            stillWaiting = null;
+            if (string.IsNullOrEmpty(call)) return false;
+            if (_smartStart.IsActive && string.Equals(_smartStart.TargetCall, call, StringComparison.OrdinalIgnoreCase))
+            {
+                ClearPendingAutoStart();
+                _smartStart.Stop(announce: false);   // off the list first, so a requeue lists it normally
+                if (string.Equals(callInProg, call, StringComparison.OrdinalIgnoreCase))
+                {
+                    RequeueAbortedCall();
+                    CancelQso();
+                    HaltAndDisableTx();
+                    stoppedTx = true;
+                }
+                PromoteNextIfIdle();
+            }
+            else
+            {
+                var m = _smartMore.FirstOrDefault(x => string.Equals(x.TargetCall, call, StringComparison.OrdinalIgnoreCase));
+                if (m == null) return false;
+                DropSmartStation(m, "cancelled in the Smart Mode window");
+            }
+            DebugOutput($"{Time()} [SMART] {call} cancelled in the Smart Mode window{(stoppedTx ? "; transmission stopped" : "")}");
+            stillWaiting = string.Join(", ", new[] { _smartStart }.Concat(_smartMore).Where(x => x.IsActive).Select(x => SC(x.TargetCall)));
+            ShowStatus();
             return true;
         }
 

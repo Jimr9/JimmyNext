@@ -155,7 +155,7 @@ namespace WSJTX_Controller
                     // ParseWithOrder(adifRecord) rather than wrapping fields directly: this is
                     // Jimmy's own AdifRecordBuilder-authored text, so true file order/duplicates
                     // are available and cheap to use -- see AdifImporter.Import's own comment.
-                    AdifImporter.Import(db, AdifParser.ParseWithOrder(adifRecord), "WSJTX", null, _resolveUsState);
+                    AdifImporter.Import(db, AdifParser.ParseWithOrder(adifRecord), QsoRecord.JimmyNextSource, null, _resolveUsState);
                 }
             }
             catch (Exception ex)
@@ -199,7 +199,7 @@ namespace WSJTX_Controller
                 {
                     // Uploads are stamped on the contact once it has reached Nexus. Test mode: none.
                     if (!nexus) return;
-                    NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor("WSJTX", dedupKey), 90_000);
+                    NexusLogbook.WaitSent(NexusLogbookService.RequestIdFor(NexusLogbookService.LiveRequestPrefix, dedupKey), 90_000);
                     using (var nx = new NexusLogbookService())
                     {
                         var creds = _credentials();

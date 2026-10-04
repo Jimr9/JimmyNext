@@ -3627,6 +3627,14 @@ namespace WSJTX_Controller
                 return wsjtxClient.ReportSmartStartStatus();
             }
 
+            // Smart Mode stations window (operator, 2026-10-04): with Smart Mode set to one station
+            // there is no list to manage, and the key does nothing.
+            if (keyData == hotkeyConfig[HotkeyAction.OpenSmartModeWindow] && hotkeyConfig[HotkeyAction.OpenSmartModeWindow] != Keys.None)
+            {
+                if (WsjtxClient.SmartModeMaxStations > 1) OpenSmartModeWindow();
+                return true;
+            }
+
             if (keyData == hotkeyConfig[HotkeyAction.StationWatchStatus] && hotkeyConfig[HotkeyAction.StationWatchStatus] != Keys.None)
             {
                 return wsjtxClient.ReportStationWatchStatus();
@@ -6215,6 +6223,44 @@ namespace WSJTX_Controller
                     BeginInvoke((Action)(() => RestoreFocus(focused)))
                 ));
             }
+        }
+
+        private SmartModeWindow _smartModeWindow;
+
+        private void OpenSmartModeWindow()
+        {
+            if (wsjtxClient == null) return;
+            if (_smartModeWindow == null || _smartModeWindow.IsDisposed)
+            {
+                _smartModeWindow = new SmartModeWindow(this);
+                _smartModeWindow.Show(this);
+            }
+            else
+                _smartModeWindow.Activate();
+        }
+
+        internal List<WsjtxClient.SmartStationRow> SmartStationRows() =>
+            wsjtxClient?.SmartStationRows() ?? new List<WsjtxClient.SmartStationRow>();
+
+        // Cancel from the Smart Mode stations window. A station being called is confirmed first:
+        // cancelling it stops the transmission at once, as the first Escape does.
+        internal void CancelSmartStation(string call, IWin32Window owner)
+        {
+            if (wsjtxClient == null || string.IsNullOrEmpty(call)) return;
+            string shown = WsjtxClient.DisplayCallsign(call, spaceCallsignsAndGrids);
+            if (wsjtxClient.SmartStationBeingCalled(call)
+                && MessageBox.Show(owner, Wording.Fill("Msg.SmartCancelCallingConfirm", ("Call", shown)),
+                       "Smart Mode", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return;
+            if (!wsjtxClient.CancelSmartStation(call, out bool stoppedTx, out string stillWaiting)) return;
+            if (stoppedTx)
+            {
+                wsjtxClient.ResetTxToCq();
+                listenModeButton_Click(null, null);
+            }
+            ShowMsg(string.IsNullOrEmpty(stillWaiting)
+                ? Wording.Fill("Msg.SmartModeStoppedFor", ("Call", shown))
+                : Wording.Fill("Msg.SmartEscapedOne", ("Call", shown), ("Calls", stillWaiting)), true);
         }
 
         private void RestoreFocus(Control c)
