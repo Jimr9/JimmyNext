@@ -1597,6 +1597,13 @@ static class JimmyTests
         UndoImportTests();
         ImportHotkeyClashTests();
         SupportReportSecretsTests();
+        DecodePeriodStampTests();
+        IniDuplicateSectionTests();
+        QueueAgeInPeriodsTests();
+        SmartNotHeardOncePerCycleTests();
+        LogbookFieldSearchTests();
+        CqOnlyKeepsAlertStationsTests();
+        BareCallInProgSpeechTests();
         ComputerMoveTests();
         CustomizationPackageTests();
         BulkEditApplyTests();
@@ -15314,9 +15321,11 @@ static class JimmyTests
             {
                 var wc = MakeWc(out var ctrl);
                 wc.callInProg = "WA4VLC";
+                // txEnabled: a real engine snapshot always carries it with its transmissions, and
+                // "sending" is only shown while transmit is enabled (2026-10-02, not after a halt).
                 wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{
                     ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
-                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""tuning"": false, ""catOk"": true, ""slot"": 501 },
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": true, ""txEnabled"": true, ""tuning"": false, ""catOk"": true, ""slot"": 501 },
                     ""recentDecodes"": [],
                     ""qso"": { ""state"": ""awaitReport"", ""txNow"": ""WA4VLC KB0UZT EN34"" } }"));
                 wc.callInProg = "WA4VLC";   // TestApplyDirectSnapshot doesn't touch it; belt-and-suspenders
@@ -19341,6 +19350,194 @@ static class JimmyTests
         finally { System.Data.SQLite.SQLiteConnection.ClearAllPools(); try { Directory.Delete(root, true); } catch { } }
     }
 
+    // A decode from Nexus's deeper pass, arriving just after its period ended, belongs to that
+    // period -- not the next one (operator, 2026-10-02: SP1MGM listed on the wrong side).
+    // While calling a station, the after-receive line never says its callsign alone (operator,
+    // 2026-10-02: "V 2 6 K." every period in the V26K pileup).
+    static void BareCallInProgSpeechTests()
+    {
+        Console.WriteLine("\n── Calling a station: never just its callsign ──");
+        string S(string boundary, string routine, bool heard, params string[] others) =>
+            WsjtxClient.BareCallInProgSpeech(boundary, routine, others, "V 2 6 K", heard);
+        CheckStr("not heard this period: says so", S("AfterRx", "V 2 6 K.", false), "V 2 6 K not heard.");
+        CheckStr("its news is in the same utterance: callsign dropped", S("AfterRx", "V 2 6 K.", true, "V 2 6 K working K 0 M V, RR73."), "");
+        CheckStr("heard, news said earlier: nothing", S("AfterRx", ", V 2 6 K.", true), "");
+        CheckStr("another boundary: nothing", S("TxStart", "V 2 6 K.", false), "");
+        CheckStr("a real line is untouched", S("AfterRx", "V 2 6 K, Sending E N 34.", false), "V 2 6 K, Sending E N 34.");
+        CheckStr("another station's callsign is untouched", S("AfterRx", "K 7 G P S.", false), "K 7 G P S.");
+    }
+
+    // "CQ only" no longer drops a new-DXCC station heard working someone, which the list then put
+    // straight back with its sound (operator, 2026-10-02: HB9EFK's crow 20 times).
+    static void CqOnlyKeepsAlertStationsTests()
+    {
+        Console.WriteLine("\n── CQ only: alert stations stay listed while working someone ──");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.cqOnlyRadioButton.Checked = true;
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var update = typeof(WsjtxClient).GetMethod("UpdateCallQueue", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        bool StillListedAfter(string call, WsjtxClient.CallCategory cat)
+        {
+            var msg = new EnqueueDecodeMessage { Message = $"DL1HTB {call} -05", Category = cat, Quality = (int)EnqueueDecodeMessage.Qualities.LOW };
+            wc.callDict[call] = msg;
+            wc.callQueue.Enqueue(call);
+            update.Invoke(wc, new object[] { call, msg });
+            return wc.callQueue.Contains(call);
+        }
+        Check("new DXCC on band working someone: stays listed", StillListedAfter("HB9EFK", WsjtxClient.CallCategory.NEW_COUNTRY_ON_BAND), true);
+        Check("an ordinary station working someone: taken off, as before", StillListedAfter("W1XYZ", WsjtxClient.CallCategory.DEFAULT), false);
+    }
+
+    // Lookup and Edit: Search in a field, or all fields (operator, 2026-10-02: "just my POTA
+    // contacts for the day").
+    static void LogbookFieldSearchTests()
+    {
+        Console.WriteLine("\n── Logbook: search in a field or all fields ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_FieldSearch_" + Guid.NewGuid().ToString("N") + ".db");
+        try
+        {
+            using (var db = new LogbookDb(tmpDb))
+            {
+                void Q(string call, string date, string sig, string sigInfo, string comment) => SeedQso(db, new Dictionary<string, object>
+                {
+                    ["callsign"] = call, ["band"] = "20m", ["mode"] = "FT8", ["qso_date"] = date, ["time_on"] = "1200",
+                    ["source"] = "MANUAL", ["sig"] = sig, ["sig_info"] = sigInfo, ["comment"] = comment,
+                });
+                Q("KO4YIN", "20261002", "POTA", "US-12593", "");
+                Q("N1MRE",  "20261002", "POTA", "US-4512", "");
+                Q("W1AW",   "20261002", "", "", "asked about POTA");
+                Q("K4ISU",  "20261001", "POTA", "US-7459", "");
+                string Calls(List<QsoRecord> r) => string.Join(",", r.Select(q => q.Callsign).OrderBy(c => c));
+
+                Check("Program POTA, today: just today's POTA contacts",
+                    Calls(db.SearchQsos(null, null, "20261002", "20261002", 500, "sig", "pota")) == "KO4YIN,N1MRE", true);
+                Check("All fields also finds the comment",
+                    Calls(db.SearchQsos(null, null, "20261002", "20261002", 500, null, "POTA")) == "KO4YIN,N1MRE,W1AW", true);
+                Check("part of a park reference",
+                    Calls(db.SearchQsos(null, null, null, null, 500, "sig_info", "US-45")) == "N1MRE", true);
+                Check("a typed % is not a wildcard",
+                    db.SearchQsos(null, null, null, null, 500, null, "%").Count == 0, true);
+                bool refused = false;
+                try { db.SearchQsos(null, null, null, null, 500, "callsign; DROP TABLE qso", "x"); } catch (ArgumentException) { refused = true; }
+                Check("only listed fields can be searched", refused, true);
+            }
+        }
+        finally { try { File.Delete(tmpDb); } catch { } }
+    }
+
+    // "Not heard" once per the station's cycle (operator, 2026-10-02: K7GPS "still not heard."
+    // then "not heard." 3 s later, every cycle).
+    static void SmartNotHeardOncePerCycleTests()
+    {
+        Console.WriteLine("\n── Smart Mode: not heard said once per cycle ──");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        var tm = new TargetMonitor(TargetPurpose.SmartStart);
+        tm.Start("K7GPS", "20m", "FT8", "tok1");
+        typeof(WsjtxClient).GetField("_smartStart", flags).SetValue(wc, tm);
+        var slot = typeof(WsjtxClient).GetField("_directLastSlotSeen", flags);
+        var phraseAt = typeof(WsjtxClient).GetMethod("NextQuietPhrase", flags);
+        var handle = typeof(WsjtxClient).GetMethod("HandleSmartStartObservation", flags);
+        string At(ulong s) { slot.SetValue(wc, s); return (string)phraseAt.Invoke(wc, new object[] { tm }); }
+        void Obs(TargetObservationKind k) => handle.Invoke(wc, new object[] { new TargetObservation(k, TargetPurpose.SmartStart, "K7GPS") });
+
+        string first = At(10);
+        Check("first: not heard", first != null && first.Contains("not heard") && !first.Contains("still"), true);
+        Obs(TargetObservationKind.SmartStartTargetAvailable);   // ready to call after the quiet periods
+        Check("the start check one period later says nothing", At(11) == null, true);
+        string next = At(12);
+        Check("next cycle: still not heard", next != null && next.Contains("still not heard"), true);
+        Obs(TargetObservationKind.TargetCq);                     // heard again
+        string again = At(13);
+        Check("heard, then quiet again: not heard", again != null && again.Contains("not heard") && !again.Contains("still"), true);
+    }
+
+    // List age counted in whole periods (operator, 2026-10-02): YU65AEC, calling CQ every other
+    // period with the age at 2, was dropped as its next CQ arrived and added back with its crow.
+    static void QueueAgeInPeriodsTests()
+    {
+        Console.WriteLine("\n── List age in whole periods ──");
+        DateTime T(int m, double s) => new DateTime(2026, 10, 2, 22, m, 0, DateTimeKind.Utc).AddSeconds(s);
+        Check("every other period, age 2: kept as its next CQ arrives", CallQueueStore.QueueAgeExpired(T(34, 13.2), T(34, 43.25), 15000, 2), false);
+        Check("unheard for 2 whole periods, age 2: dropped", CallQueueStore.QueueAgeExpired(T(34, 13.2), T(35, 13.2), 15000, 2), true);
+        Check("late pass just after a period counts for that period", CallQueueStore.QueueAgeExpired(T(34, 13.2), T(34, 46.0), 15000, 2), false);
+        Check("age 1: the very next period still keeps it", CallQueueStore.QueueAgeExpired(T(34, 13.2), T(34, 28.2), 15000, 1), false);
+        Check("FT4, age 2: dropped after 2 whole unheard periods", CallQueueStore.QueueAgeExpired(T(34, 5.0), T(34, 28.0), 7500, 2), true);
+    }
+
+    // A settings section written twice (KF4CCG, 2026-10-02): saves landed in the second copy,
+    // Windows read the first, so Options changes and Smart Mode were lost at every start.
+    static void IniDuplicateSectionTests()
+    {
+        Console.WriteLine("\n── Settings section that appears twice ──");
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy-inidup-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(dir, "Profiles"));
+            string path = Path.Combine(dir, "Profiles", "p.ini");
+            File.WriteAllText(path, "[Hotkeys]\r\nk=1\r\n[S]\r\na=old\r\nonlyFirst=1\r\n\r\n[S]\r\na=new\r\nsmart=True\r\n");
+
+            // Saving before any repair: goes to the copy Windows reads.
+            var ini = new IniFile(path);
+            using (var batch = ini.BeginBatchScope()) { ini.Write("onlyFirst", "2", "S"); ini.Write("added", "x", "S"); batch.Commit(); }
+            Check("save before repair: read back", ini.Read("onlyFirst", "S") == "2" && ini.Read("added", "S") == "x", true);
+
+            string note = IniFile.RepairDuplicateSections(dir);
+            string text = File.ReadAllText(path);
+            Check("repair reported", note != null && note.Contains("p.ini"), true);
+            Check("one section left", text.Split(new[] { "[S]" }, StringSplitOptions.None).Length == 2, true);
+            Check("later copy's value wins", ini.Read("a", "S") == "new", true);
+            Check("key only in the later copy kept", ini.Read("smart", "S") == "True", true);
+            Check("other sections untouched", ini.Read("k", "Hotkeys") == "1", true);
+            Check("backup kept", Directory.GetFiles(Path.Combine(dir, "Backups"), "p.ini", SearchOption.AllDirectories).Length == 1, true);
+
+            using (var batch = ini.BeginBatchScope()) { ini.Write("smart", "False", "S"); batch.Commit(); }
+            Check("after repair a save survives", ini.Read("smart", "S") == "False", true);
+            Check("a clean file is left alone", IniFile.RepairDuplicateSections(dir) == null, true);
+
+            // A UTF-8 mark at the start hides the first section from Windows ("notification qso test").
+            string marked = Path.Combine(dir, "Profiles", "m.ini");
+            File.WriteAllText(marked, "[S]\r\nfirst=1\r\n", new System.Text.UTF8Encoding(true));
+            var mini = new IniFile(marked);
+            Check("behind the mark Windows does not see the section", mini.Read("first", "S") == "", true);
+            Check("repair takes the mark off", IniFile.RepairDuplicateSections(dir) != null && File.ReadAllBytes(marked)[0] == (byte)'[', true);
+            Check("then the section is read", mini.Read("first", "S") == "1", true);
+            File.WriteAllText(marked, "[S]\r\nfirst=1\r\n", new System.Text.UTF8Encoding(true));
+            using (var batch = mini.BeginBatchScope()) { mini.Write("first", "2", "S"); batch.Commit(); }
+            Check("a save never writes the mark back", File.ReadAllBytes(marked)[0] == (byte)'[' && mini.Read("first", "S") == "2", true);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    static void DecodePeriodStampTests()
+    {
+        Console.WriteLine("\n── Decodes stamped with the period they were heard in ──");
+        DateTime T(int h, int m, double s) => new DateTime(2026, 10, 2, h, m, 0, DateTimeKind.Utc).AddSeconds(s);
+        bool Even(DateTime t, double p) => ((long)Math.Floor(t.TimeOfDay.TotalSeconds / p)) % 2 == 0;
+
+        // FT8 (15 s): SP1MGM arrived 21:43:01.1 from the period 21:42:45 (odd).
+        var late = WsjtxClient.DecodeHeardUtc(T(21, 43, 1.1), 15);
+        Check("FT8 late pass: back in the period it was heard in", late < T(21, 43, 0) && late >= T(21, 42, 45) && !Even(late, 15), true);
+        Check("FT8 early pass: arrival time stands", WsjtxClient.DecodeHeardUtc(T(21, 47, 57.2), 15) == T(21, 47, 57.2), true);
+        Check("FT8 just before the boundary: stands", WsjtxClient.DecodeHeardUtc(T(21, 43, 14.9), 15) == T(21, 43, 14.9), true);
+        // FT4 (7.5 s): a late pass 0.6 s into 21:43:07.5 belongs to 21:43:00.
+        var ft4 = WsjtxClient.DecodeHeardUtc(T(21, 43, 8.1), 7.5);
+        Check("FT4 late pass: back in its period", ft4 < T(21, 43, 7.5) && ft4 >= T(21, 43, 0), true);
+        Check("FT4 early pass: stands", WsjtxClient.DecodeHeardUtc(T(21, 43, 13.0), 7.5) == T(21, 43, 13.0), true);
+        // Over midnight: 00:00:01 belongs to 23:59:45 the day before.
+        var midnight = WsjtxClient.DecodeHeardUtc(new DateTime(2026, 10, 3, 0, 0, 1, DateTimeKind.Utc), 15);
+        Check("over midnight: the day before", midnight.Day == 2 && midnight.Hour == 23 && midnight.Minute == 59, true);
+    }
+
     // The support report blanks real secrets only (operator, 2026-10-02).
     static void SupportReportSecretsTests()
     {
@@ -20334,6 +20531,10 @@ static class JimmyTests
             ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummaryCq].Template =
                 ctrl.Notifications.Policies[NotificationEventType.ReceiveCycleSummary].Template;
             ctrl.suppressReceiveNotificationsDuringTx = false;
+            // The test logbook can hold W1AW as worked-but-unconfirmed, which is not called by
+            // default since 2026-10-02 (Still Need unconfirmed off): this test is about the
+            // suppress-while-transmitting setting, so the station is callable here either way.
+            wc.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);
             wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
             string textOff = fakeStatusView.LastStatusText ?? wc.TestPendingStatusText ?? "";
             Check("Setting OFF (default): the routine available-stations summary can still appear while transmitting/calling CQ -- unchanged existing behavior",
@@ -20357,6 +20558,7 @@ static class JimmyTests
             wc2.cqPaused = false;
             var fakeStatusView2 = new FakeStatusView();
             wc2.StatusView = fakeStatusView2;
+            wc2.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);   // as above
             wc2.TestApplyDirectSnapshot(myCall, myGrid, snap);
             string textOn = fakeStatusView2.LastStatusText ?? wc2.TestPendingStatusText ?? "";
             Check("THE FIX: setting ON suppresses the available-stations summary while transmitting, even while calling CQ",
@@ -20468,7 +20670,7 @@ static class JimmyTests
                 Check("Committed: deleted whole section is gone from disk", result.Contains("GoneSection"), false);
             }
 
-            // -- Encoding/newline preservation: UTF-8 BOM + LF-only file stays UTF-8 BOM + LF. --
+            // -- Encoding/newline: a UTF-8 BOM is dropped (it hides the first section from Windows, 2026-10-02); LF stays LF. --
             {
                 string path = Path.Combine(tmpDir, "utf8bom.ini");
                 var utf8Bom = new UTF8Encoding(true);
@@ -20480,8 +20682,8 @@ static class JimmyTests
                     batch.Commit();
                 }
                 byte[] bytes = File.ReadAllBytes(path);
-                Check("UTF-8 BOM preserved after batch commit",
-                    bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF, true);
+                Check("UTF-8 BOM dropped after batch commit",
+                    bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF, false);
                 string text = new UTF8Encoding(true).GetString(bytes);
                 Check("Non-ASCII value round-tripped correctly", text.Contains("café"), true);
                 Check("LF-only newline style preserved (no \\r introduced)", text.Contains("\r"), false);

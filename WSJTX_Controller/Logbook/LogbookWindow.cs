@@ -135,6 +135,8 @@ namespace WSJTX_Controller
         private TextBox  _editDateToTb;
         private Button   _editSearchBtn;
         private Button   _editClearBtn;
+        private ComboBox _editFieldCb;    // "Search in": All fields, or one field (2026-10-02)
+        private TextBox  _editTextTb;     // "Search for"
         private Label    _editCountLbl;
         private ListView _editLv;
         private Button   _editAddBtn;
@@ -733,7 +735,7 @@ namespace WSJTX_Controller
         private void BuildEditLogPage(Font font, Font hfont)
         {
             _editLogPanel = MakePage();
-            var header = new Panel { Dock = DockStyle.Top, Height = 86, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            var header = new Panel { Dock = DockStyle.Top, Height = 112, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             var callLbl = new Label { Text = "Callsign:", Font = font, Location = new Point(8, 11), AutoSize = true };
             header.Controls.Add(callLbl);
@@ -749,6 +751,35 @@ namespace WSJTX_Controller
             _editCallTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
             header.Controls.Add(_editCallTb);
 
+            // Search any field (operator, 2026-10-02: "just my POTA contacts for the day"): Search in
+            // "Program", Search for "POTA", with today's date.
+            header.Controls.Add(new Label { Text = "Search in:", Font = font, Location = new Point(8, 37), AutoSize = true });
+            _editFieldCb = new ComboBox
+            {
+                Font           = font,
+                Location       = new Point(70, 34),
+                Size           = new Size(170, 21),
+                DropDownStyle  = ComboBoxStyle.DropDownList,
+                TabIndex       = 2,
+                AccessibleName = "Search in",
+            };
+            _editFieldCb.Items.Add(LogbookDb.AllFieldsLabel);
+            foreach (var f in LogbookDb.SearchFields) _editFieldCb.Items.Add(f.Label);
+            _editFieldCb.SelectedIndex = 0;
+            header.Controls.Add(_editFieldCb);
+
+            header.Controls.Add(new Label { Text = "for:", Font = font, Location = new Point(246, 37), AutoSize = true });
+            _editTextTb = new TextBox
+            {
+                Font           = font,
+                Location       = new Point(274, 34),
+                Size           = new Size(140, 20),
+                TabIndex       = 3,
+                AccessibleName = "Search for",
+            };
+            _editTextTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
+            header.Controls.Add(_editTextTb);
+
             var sourceLbl = new Label { Text = "Source:", Font = font, Location = new Point(196, 11), AutoSize = true };
             header.Controls.Add(sourceLbl);
 
@@ -758,7 +789,7 @@ namespace WSJTX_Controller
                 Location       = new Point(244, 8),
                 Size           = new Size(110, 21),
                 DropDownStyle  = ComboBoxStyle.DropDownList,
-                TabIndex       = 2,
+                TabIndex       = 4,
                 AccessibleName = "Source filter",
             };
             _editSourceCb.Items.Add("(Any)");
@@ -766,29 +797,29 @@ namespace WSJTX_Controller
             _editSourceCb.SelectedIndex = 0;
             header.Controls.Add(_editSourceCb);
 
-            var dateFromLbl = new Label { Text = "Date from:", Font = font, Location = new Point(8, 37), AutoSize = true };
+            var dateFromLbl = new Label { Text = "Date from:", Font = font, Location = new Point(8, 63), AutoSize = true };
             header.Controls.Add(dateFromLbl);
 
             _editDateFromTb = new TextBox
             {
                 Font           = font,
-                Location       = new Point(70, 34),
+                Location       = new Point(70, 60),
                 Size           = new Size(80, 20),
-                TabIndex       = 3,
+                TabIndex       = 5,
                 AccessibleName = "Date from, format year month day, optional",
             };
             _editDateFromTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
             header.Controls.Add(_editDateFromTb);
 
-            var dateToLbl = new Label { Text = "to:", Font = font, Location = new Point(156, 37), AutoSize = true };
+            var dateToLbl = new Label { Text = "to:", Font = font, Location = new Point(156, 63), AutoSize = true };
             header.Controls.Add(dateToLbl);
 
             _editDateToTb = new TextBox
             {
                 Font           = font,
-                Location       = new Point(176, 34),
+                Location       = new Point(176, 60),
                 Size           = new Size(80, 20),
-                TabIndex       = 4,
+                TabIndex       = 6,
                 AccessibleName = "Date to, format year month day, optional",
             };
             _editDateToTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
@@ -799,9 +830,9 @@ namespace WSJTX_Controller
                 Text           = "Search",
                 AccessibleName = "Search",
                 Font           = font,
-                Location       = new Point(264, 33),
+                Location       = new Point(264, 59),
                 Size           = new Size(70, 23),
-                TabIndex       = 5,
+                TabIndex       = 7,
             };
             _editSearchBtn.Click += (s, e) => DoEditSearch();
             header.Controls.Add(_editSearchBtn);
@@ -811,9 +842,9 @@ namespace WSJTX_Controller
                 Text           = "Clear",
                 AccessibleName = "Clear filters",
                 Font           = font,
-                Location       = new Point(340, 33),
+                Location       = new Point(340, 59),
                 Size           = new Size(70, 23),
-                TabIndex       = 6,
+                TabIndex       = 8,
             };
             _editClearBtn.Click += (s, e) => ClearEditLog();
             header.Controls.Add(_editClearBtn);
@@ -822,7 +853,7 @@ namespace WSJTX_Controller
             {
                 Text           = "",
                 Font           = font,
-                Location       = new Point(8, 62),
+                Location       = new Point(8, 88),
                 AutoSize       = true,
                 AccessibleName = "Result count",
             };
@@ -833,9 +864,9 @@ namespace WSJTX_Controller
                 Text           = "Row Order...",
                 AccessibleName = "Choose column order",
                 Font           = font,
-                Location       = new Point(416, 33),
+                Location       = new Point(416, 59),
                 Size           = new Size(90, 23),
-                TabIndex       = 7,
+                TabIndex       = 9,
             };
             _editRowOrderBtn.Click += RowOrderBtn_Click;
             header.Controls.Add(_editRowOrderBtn);
@@ -941,6 +972,8 @@ namespace WSJTX_Controller
         private void ClearEditLog()
         {
             _editCallTb.Text = "";
+            _editFieldCb.SelectedIndex = 0;
+            _editTextTb.Text = "";
             _editSourceCb.SelectedIndex = 0;
             _editDateFromTb.Text = "";
             _editDateToTb.Text = "";
@@ -982,7 +1015,9 @@ namespace WSJTX_Controller
 
                 // Every match is found (bulk edit can reach them all); the list shows the newest
                 // EditListShown of them, and the count says so when there are more.
-                var found = _db.SearchQsos(call, source, dFrom, dTo, int.MaxValue);
+                string field  = _editFieldCb.SelectedIndex > 0 ? LogbookDb.SearchFields[_editFieldCb.SelectedIndex - 1].Column : null;
+                string text   = _editTextTb.Text.Trim();
+                var found = _db.SearchQsos(call, source, dFrom, dTo, int.MaxValue, field, text);
                 _editFoundIds = found.Select(q => q.Id).ToList();
                 var results = found.Take(EditListShown).ToList();
                 _editLv.Items.Clear();
@@ -1426,7 +1461,7 @@ namespace WSJTX_Controller
                     _awardsClb, _awardsBandCb, _awardsShowCb, _awardsProgressLbl, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
                 };
                 case PAGE_EDITLOG: return new Control[] {
-                    _editCallTb, _editSourceCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
+                    _editCallTb, _editFieldCb, _editTextTb, _editSourceCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
                     _editRowOrderBtn, _editLv, _editAddBtn, _editEditBtn, _editBulkBtn, _editDeleteBtn, _editExportBtn,
                 };
                 case PAGE_SYNC: return new Control[] {

@@ -561,8 +561,9 @@ namespace WSJTX_Controller
         public List<QsoRecord> GetRecentQsos(int limit = 10) => R(db => db.GetRecentQsos(limit), new List<QsoRecord>());
         public QsoRecord GetQso(int id) => R(db => db.GetQso(id), null);
         public List<QsoRecord> SearchByCallsign(string pattern, int limit = 200) => R(db => db.SearchByCallsign(pattern, limit), new List<QsoRecord>());
-        public List<QsoRecord> SearchQsos(string callsignPattern, string source, string dateFrom, string dateTo, int limit = 500) =>
-            R(db => db.SearchQsos(callsignPattern, source, dateFrom, dateTo, limit), new List<QsoRecord>());
+        public List<QsoRecord> SearchQsos(string callsignPattern, string source, string dateFrom, string dateTo, int limit = 500,
+            string searchField = null, string searchText = null) =>
+            R(db => db.SearchQsos(callsignPattern, source, dateFrom, dateTo, limit, searchField, searchText), new List<QsoRecord>());
         public Dictionary<int, string> GetDxccCountryNames() => R(db => db.GetDxccCountryNames(), new Dictionary<int, string>());
         public List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null) =>
             R(db => db.GetAdifFieldDicts(ids, sources), new List<Dictionary<string, string>>());

@@ -895,10 +895,26 @@ namespace WSJTX_Controller
             Source      = Str(r, 18),
         };
 
+        // "Search in" choices on Lookup and Edit (operator, 2026-10-02: "just my POTA contacts for
+        // the day"): label and column. The column names only ever come from this list.
+        internal static readonly (string Label, string Column)[] SearchFields =
+        {
+            ("Band", "band"), ("Mode", "mode"), ("Country", "country"), ("State", "state"),
+            ("County", "county"), ("Grid", "grid"), ("Name", "name"), ("Comment", "comment"),
+            ("Program", "sig"), ("Park or summit reference", "sig_info"),
+            ("My program", "my_sig"), ("My park reference", "my_sig_info"),
+            ("Continent", "continent"), ("IOTA", "iota"), ("Prefix", "wpx_prefix"), ("Power", "tx_pwr"),
+            ("Report sent", "rst_sent"), ("Report received", "rst_rcvd"),
+            ("Contest exchange sent", "exchange_sent"), ("Contest exchange received", "exchange_rcvd"),
+        };
+        internal const string AllFieldsLabel = "All fields";
+
         // callsignPattern/source/dateFrom/dateTo are all optional (null/blank = no filter).
         // dateFrom/dateTo are inclusive, expected in qso_date's own YYYYMMDD form.
+        // searchText (optional): found anywhere in searchField (a SearchFields column), or in the
+        // callsign or any SearchFields column when searchField is null. Capitals do not matter.
         public List<QsoRecord> SearchQsos(string callsignPattern, string source,
-            string dateFrom, string dateTo, int limit = 500)
+            string dateFrom, string dateTo, int limit = 500, string searchField = null, string searchText = null)
         {
             lock (_lock)
             {
@@ -927,6 +943,17 @@ namespace WSJTX_Controller
                     {
                         where.Add("qso_date <= @dto");
                         cmd.Parameters.AddWithValue("@dto", dateTo);
+                    }
+                    if (!string.IsNullOrWhiteSpace(searchText))
+                    {
+                        var cols = searchField == null
+                            ? new[] { "callsign" }.Concat(SearchFields.Select(f => f.Column)).ToArray()
+                            : SearchFields.Where(f => f.Column == searchField).Select(f => f.Column).ToArray();
+                        if (cols.Length == 0) throw new ArgumentException("Unknown search field: " + searchField);
+                        // Typed % and _ are plain characters, not wildcards.
+                        where.Add("(" + string.Join(" OR ", cols.Select(c => $"IFNULL({c},'') LIKE @text ESCAPE '\\'")) + ")");
+                        string t = searchText.Trim().Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+                        cmd.Parameters.AddWithValue("@text", "%" + t + "%");
                     }
                     string whereClause = where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "";
                     cmd.CommandText =

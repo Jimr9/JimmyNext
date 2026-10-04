@@ -2721,12 +2721,13 @@ namespace WSJTX_Controller
                 // stations) was dropped at ProcessDecodeMsg's deCall/toCall == null gate.
                 string normMsg = WsjtxMessage.NormalizeDecodedMessage(row.Message);
 
+                DateTime heard = DecodeHeardUtc(DateTime.UtcNow, PeriodSecondsForMode(mode));
                 var dmsg = new DecodeMessage
                 {
                     Id = WsjtxMessage.UniqueId,
                     New = true,
-                    SinceMidnight = DateTime.UtcNow.TimeOfDay,
-                    RxDate = DateTime.UtcNow.Date,
+                    SinceMidnight = heard.TimeOfDay,
+                    RxDate = heard.Date,
                     Snr = row.Snr,
                     DeltaTime = row.DtSec,
                     DeltaFrequency = (int)Math.Round(row.FreqHz),
@@ -3794,6 +3795,22 @@ namespace WSJTX_Controller
         // status after a plain state change like CAT dropping, exactly as a later decode tick
         // would produce it in the field.
         internal void TestShowStatus() => ShowStatus();
+
+        // When a decode was heard, for its period (operator, 2026-10-02). Nexus decodes each
+        // period twice: an early pass ending ~12 s in, and a deeper pass -- the weaker stations --
+        // ending 0-2 s after the period is over. A decode is stamped with when it arrives, so the
+        // deeper pass's decodes (18.5% of a day's) were stamped into the NEXT period: listed on
+        // the wrong side (SP1MGM sat in the transmit-side list, blanked while transmitting) and,
+        // answered, set Jimmy's own transmit side the wrong way round. No decode can finish in
+        // the first half of a period (its own audio is not over until ~12.6 s of 15, ~4.5 of 7.5),
+        // so one arriving then belongs to the period before: stamped just before that period's
+        // end. Otherwise the arrival time stands -- ages measured from it barely change.
+        internal static DateTime DecodeHeardUtc(DateTime arrivedUtc, double periodSecs)
+        {
+            if (periodSecs <= 0) return arrivedUtc;
+            double into = arrivedUtc.TimeOfDay.TotalSeconds % periodSecs;
+            return into < periodSecs / 2 ? arrivedUtc.AddSeconds(-(into + 0.5)) : arrivedUtc;
+        }
 
         // The routine line's speech fragments for a line made of these clauses.
         internal IReadOnlyList<RoutineFragment> TestBuildRoutineFragments(string status, SpeakWhen baseWhen,

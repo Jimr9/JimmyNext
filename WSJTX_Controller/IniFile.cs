@@ -264,6 +264,9 @@ namespace WSJTX_Controller
                 encoding = DetectEncoding(bytes, out int preambleLength);
                 originalText = encoding.GetString(bytes, preambleLength, bytes.Length - preambleLength);
                 newline = DetectNewline(originalText);
+                // Never write a UTF-8 byte-order mark back: Windows does not see the first
+                // section heading behind one (see RepairDuplicateSections).
+                if (encoding is UTF8Encoding) encoding = new UTF8Encoding(false);
             }
             else
             {
@@ -310,6 +313,107 @@ namespace WSJTX_Controller
                     try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { /* best-effort cleanup only */ }
                 }
             }
+        }
+
+        // ===== Duplicate sections, 2026-10-02 =====
+        // A tester's files held "[Jimmy Next]" twice. Windows reads only the first copy, so every
+        // setting saved into the second one came back at the next start as it was before (Smart
+        // Mode always off, Options changes lost). At start each settings file is checked once and
+        // the copies merged into the first, a later copy's value winning -- that is where the
+        // saves went. The file as it was goes to Backups first.
+
+        // The merged text, or null when no section appears twice.
+        internal static string MergeDuplicateSections(string text)
+        {
+            var lines = SplitLines(text);
+            var firstEnd = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);   // section -> index past its last line
+            var firstKeys = new Dictionary<string, Dictionary<string, int>>(StringComparer.OrdinalIgnoreCase);
+            var output = new List<string>();
+            bool merged = false;
+            string section = null;
+            bool inCopy = false;
+            foreach (string line in lines)
+            {
+                string trimmed = line.Trim();
+                if (trimmed.Length >= 2 && trimmed[0] == '[' && trimmed[trimmed.Length - 1] == ']')
+                {
+                    section = trimmed.Substring(1, trimmed.Length - 2);
+                    inCopy = firstKeys.ContainsKey(section);
+                    if (inCopy) { merged = true; continue; }
+                    firstKeys[section] = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    output.Add(line);
+                    firstEnd[section] = output.Count;
+                    continue;
+                }
+                int eq = line.IndexOf('=');
+                string key = section != null && eq > 0 && trimmed.Length > 0 && trimmed[0] != ';' ? line.Substring(0, eq).Trim() : "";
+                if (!inCopy)
+                {
+                    output.Add(line);
+                    if (section == null) continue;
+                    if (key.Length > 0) firstKeys[section][key] = output.Count - 1;
+                    if (trimmed.Length > 0) firstEnd[section] = output.Count;
+                    continue;
+                }
+                if (key.Length == 0) continue; // a copy's blank lines and comments go
+                if (firstKeys[section].TryGetValue(key, out int at))
+                {
+                    output[at] = output[at].Substring(0, output[at].IndexOf('=') + 1) + line.Substring(eq + 1);
+                    continue;
+                }
+                int insertAt = firstEnd[section];
+                output.Insert(insertAt, line);
+                foreach (var keys in firstKeys.Values)
+                    foreach (var k in new List<string>(keys.Keys))
+                        if (keys[k] >= insertAt) keys[k]++;
+                foreach (var s in new List<string>(firstEnd.Keys))
+                    if (firstEnd[s] >= insertAt && s != section) firstEnd[s]++;
+                firstKeys[section][key] = insertAt;
+                firstEnd[section] = insertAt + 1;
+            }
+            if (!merged) return null;
+            // A copy at the end of the file leaves the blank line before it behind.
+            while (output.Count > 0 && output[output.Count - 1].Trim().Length == 0) output.RemoveAt(output.Count - 1);
+            return string.Join("\n", output);
+        }
+
+        // Merges duplicate sections in the settings files under dataRoot (the files there and in
+        // Profiles). Returns a line for the log, or null when every file was fine.
+        internal static string RepairDuplicateSections(string dataRoot)
+        {
+            var repaired = new List<string>();
+            string backup = System.IO.Path.Combine(dataRoot, "Backups", "before-ini-repair-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
+            foreach (string dir in new[] { dataRoot, System.IO.Path.Combine(dataRoot, "Profiles") })
+            {
+                if (!Directory.Exists(dir)) continue;
+                foreach (string file in Directory.GetFiles(dir, "*.ini"))
+                {
+                    byte[] bytes = File.ReadAllBytes(file);
+                    var encoding = DetectEncoding(bytes, out int preambleLength);
+                    string text = encoding.GetString(bytes, preambleLength, bytes.Length - preambleLength);
+                    string fixedText = MergeDuplicateSections(text);
+                    // A UTF-8 byte-order mark goes too (operator, 2026-10-02): Windows reads the
+                    // file byte by byte and does not see the first "[Section]" behind the mark, so
+                    // that section is never read, and the first save into it makes Windows add a
+                    // second copy at the end -- how "notification qso test" got [Hotkeys] twice.
+                    bool utf8Mark = preambleLength == 3;
+                    if (fixedText == null && !utf8Mark) continue;
+                    if (fixedText == null) fixedText = string.Join("\n", SplitLines(text));
+                    if (utf8Mark) encoding = new UTF8Encoding(false);
+                    string rel = file.Substring(dataRoot.Length).TrimStart('\\', '/');
+                    string saved = System.IO.Path.Combine(backup, rel);
+                    Directory.CreateDirectory(System.IO.Path.GetDirectoryName(saved));
+                    File.Copy(file, saved, true);
+                    string newline = DetectNewline(text);
+                    string tempPath = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    File.WriteAllText(tempPath, fixedText.Replace("\n", newline) + newline, encoding);
+                    File.Replace(tempPath, file, null);
+                    repaired.Add(rel);
+                }
+            }
+            if (repaired.Count == 0) return null;
+            BackupRetention.Prune(System.IO.Path.Combine(dataRoot, "Backups"), "before-ini-repair-*");
+            return $"settings: repaired {string.Join(", ", repaired)} (a section written twice, or a mark at the start that hid the first section); backup {backup}";
         }
 
         private static Encoding DetectEncoding(byte[] bytes, out int preambleLength)
@@ -368,11 +472,10 @@ namespace WSJTX_Controller
                 {
                     string name = trimmed.Substring(1, trimmed.Length - 2);
                     if (current != null) current.EndIndexExclusive = i;
-                    if (!doc.Sections.TryGetValue(name, out current))
-                    {
-                        current = new IniDocument.Section { HeaderIndex = i, EndIndexExclusive = i + 1 };
-                        doc.Sections[name] = current;
-                    }
+                    current = new IniDocument.Section { HeaderIndex = i, EndIndexExclusive = i + 1 };
+                    // A second copy of a section is never written to: Windows reads only the first
+                    // copy, so a write landing in a later one would be lost (KF4CCG, 2026-10-02).
+                    if (!doc.Sections.ContainsKey(name)) doc.Sections[name] = current;
                     continue;
                 }
                 if (current == null) continue; // content before any section header -- left alone, never a Write target

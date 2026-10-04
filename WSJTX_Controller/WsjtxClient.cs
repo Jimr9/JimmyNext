@@ -382,6 +382,8 @@ namespace WSJTX_Controller
         // "no response" line -- for the whole 20-call effort, long after the target had CQ'd and
         // moved to a different peer.
         private DateTime otherPartyForCallInProgUtc = default;
+        // When callInProg was last heard at all (any message), for RewriteRoutineForCallInProg.
+        private DateTime _callInProgHeardUtc = default;
 
         // When the station being called/worked was last heard calling CQ (operator, 2026-10-02):
         // the QSO line says "EA6AJW calling CQ, sending EN34" while that is current -- it used
@@ -1013,6 +1015,7 @@ namespace WSJTX_Controller
                 logDiagnostic: text => DebugOutput(text));
             Notify.Speech.JoinEverything = ctrl.queueSpeechExperiment;   // speech experiment (Controller.queueSpeechExperiment)
             Notify.StatusProblemChanged = (key, text) => StatusView.SetStatusProblem(key, text);
+            Notify.RoutineRewrite = RewriteRoutineForCallInProg;
             InitTargetMonitors();
             LiveQsoUploader = new LiveQsoUploadOrchestrator(
                 credentials: () => new LiveUploadCredentials
@@ -1995,6 +1998,7 @@ namespace WSJTX_Controller
             // callInProg itself changes (SetCallInProg).
             if (callInProg != null && string.Equals(deCall, callInProg, StringComparison.OrdinalIgnoreCase))
             {
+                _callInProgHeardUtc = DecodeUtcOf(dmsg);
                 if (toMyCall || idSem.IsCq)   // Stage 11 (was dmsg.IsCQ())
                 {
                     // Turned to us, or now calling CQ -> it is no longer working that other
@@ -3783,6 +3787,7 @@ namespace WSJTX_Controller
             otherPartyForCallInProg = null;
             otherPartyStage = null;
             otherPartyForCallInProgUtc = default;
+            _callInProgHeardUtc = default;
             otherPartyActivitySpeakable = false;
             // A call started by answering the station's CQ: that CQ is the current fact.
             callInProgCqUtc = default;
@@ -4975,6 +4980,8 @@ namespace WSJTX_Controller
             // also removes a latent NRE if ToCall() ever returned null here).
             bool addressedToMe = dmsg.EffectiveSemantic(myCall).AddressedToMe;
             if (!ctrl.cqOnlyRadioButton.Checked || addressedToMe) return;
+            // A station the list takes whatever it sends stays on it (see ListedWhateverItSends).
+            if (ListedWhateverItSends(dmsg.Category)) return;
 
             if (!addressedToMe && dmsg.Quality < (int)EnqueueDecodeMessage.Qualities.MEDIUM)
             {

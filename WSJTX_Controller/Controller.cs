@@ -627,6 +627,12 @@ namespace WSJTX_Controller
             // copy, unaffected by whatever profile the operator's real install has selected.
             if (!TestModeGuard.IsTestMode)
             {
+                try { _iniRepairReport = IniFile.RepairDuplicateSections(ProfilesAppDataPath()); }
+                catch (Exception ex)
+                {
+                    _iniRepairReport = "settings: a section that appeared twice could not be merged: " + ex.Message;
+                    CrashLogger.Log("IniFile.RepairDuplicateSections", ex);
+                }
                 pathFileNameExt = ResolveActiveIniPath(realPathFileNameExt, ProfilesDirectory());
                 MigrateToSharedSettings(pathFileNameExt);
             }
@@ -1197,6 +1203,11 @@ namespace WSJTX_Controller
             SharedIniNumbers.Ensure(WsjtxClient.SmartModeStationsKey, WsjtxClient.DefaultSmartModeStations);
             string wordingNote = Wording.Load(ActiveWordingPath());
             if (wordingNote != null) wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {wordingNote}");
+            if (_iniRepairReport != null)
+            {
+                wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {_iniRepairReport}");
+                _iniRepairReport = null;
+            }
             if (_sharedSettingsReport != null)
             {
                 wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {_sharedSettingsReport}");
@@ -2068,6 +2079,7 @@ namespace WSJTX_Controller
         // failure changes nothing a profile relies on (see MigrateOnce) and is tried again next
         // start; it goes to the crash log, the debug log and, once, the status line.
         private static string _sharedSettingsReport;
+        private static string _iniRepairReport; // IniFile.RepairDuplicateSections, 2026-10-02
         private static bool _sharedSettingsFailed;
 
         private static void MigrateToSharedSettings(string activeIniPath)

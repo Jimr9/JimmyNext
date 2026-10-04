@@ -909,6 +909,37 @@ namespace WSJTX_Controller
             return "";
         }
 
+        // The routine line reduced to just the station being called (operator, 2026-10-02: V26K
+        // pileup, "V 2 6 K." alone every period, or tacked on after "V 2 6 K working K 0 M V,
+        // RR73."). Said instead: nothing when its news is in the same utterance or it was heard
+        // this period (what it sent was said, or is unchanged); "{Call} not heard." after a
+        // receive period it was not heard in. Anything else on the line: untouched.
+        internal static string BareCallInProgSpeech(string boundary, string routine, IReadOnlyList<string> others,
+            string shownCall, bool heardThisPeriod)
+        {
+            if (string.IsNullOrEmpty(shownCall) || string.IsNullOrEmpty(routine)) return routine;
+            string bare = routine.Trim().TrimStart(',').Trim().TrimEnd('.').Trim();
+            if (!string.Equals(bare, shownCall, StringComparison.OrdinalIgnoreCase)) return routine;
+            if (others != null)
+                foreach (var t in others)
+                    if (t != null && t.IndexOf(shownCall, StringComparison.OrdinalIgnoreCase) >= 0) return "";
+            if (heardThisPeriod || boundary != "AfterRx") return "";
+            return Wording.Fill("Msg.SmartNotHeard", ("Call", shownCall));
+        }
+
+        private string RewriteRoutineForCallInProg(string boundary, string routine, IReadOnlyList<string> others)
+        {
+            string call = callInProg;
+            if (call == null) return routine;
+            bool heard = false;
+            if (_callInProgHeardUtc != default && trPeriod is int ms && ms > 0)
+            {
+                long p = ms * TimeSpan.TicksPerMillisecond;
+                heard = DecodeHeardUtc(DateTime.UtcNow, ms / 1000.0).Ticks / p - _callInProgHeardUtc.Ticks / p < 2;
+            }
+            return BareCallInProgSpeech(boundary, routine, others, DisplayCallsign(call, ctrl.spaceCallsignsAndGrids), heard);
+        }
+
         // Tidy a composed status line for display/speech AFTER one or more configurable clauses
         // were left out (disabled). A no-op for the default all-clauses-enabled wording, so it
         // never changes an existing status string -- it only removes the leading separator, the

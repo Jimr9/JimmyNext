@@ -1063,7 +1063,10 @@ namespace WSJTX_Controller
             if (monitor?.TargetCall == null) return null;
             bool sameRun = _quietRunSaid && _quietRunArm == monitor.ArmGeneration
                 && string.Equals(_quietRunTarget, monitor.TargetCall, StringComparison.OrdinalIgnoreCase);
-            if (sameRun && _quietRunSlot == _directLastSlotSeen) return null;                        // once per period
+            // Once per the station's own cycle -- two periods, as it sends in every other one
+            // (operator, 2026-10-02: K7GPS "still not heard." then "not heard." 3 s later, each
+            // cycle: the period ending and the start check just after it, one period apart).
+            if (sameRun && _directLastSlotSeen >= _quietRunSlot && _directLastSlotSeen - _quietRunSlot < 2) return null;
             if (sameRun && !ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod) return null;  // changes only
             _quietRunTarget = monitor.TargetCall;
             _quietRunArm = monitor.ArmGeneration;
@@ -1111,8 +1114,11 @@ namespace WSJTX_Controller
         {
             // Only the station itself being heard ends a quiet run -- another station calling it
             // (OtherPartyObserved) is not hearing it (operator, 2026-10-02: AA4SS, busy with
-            // callers, was "not heard." every period instead of "still not heard.").
-            if (obs.Kind != TargetObservationKind.SmartStartWaiting && obs.Kind != TargetObservationKind.OtherPartyObserved)
+            // callers, was "not heard." every period instead of "still not heard."). Nor is becoming
+            // ready to call after the quiet periods -- a station actually heard raises its own
+            // observation first (2026-10-02, K7GPS).
+            if (obs.Kind != TargetObservationKind.SmartStartWaiting && obs.Kind != TargetObservationKind.OtherPartyObserved
+                && obs.Kind != TargetObservationKind.SmartStartTargetAvailable)
                 EndQuietRun(obs.Target);
             switch (obs.Kind)
             {

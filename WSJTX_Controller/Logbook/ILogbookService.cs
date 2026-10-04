@@ -47,7 +47,8 @@ namespace WSJTX_Controller
         List<QsoRecord> GetRecentQsos(int limit = 10);
         QsoRecord GetQso(int id);
         List<QsoRecord> SearchByCallsign(string pattern, int limit = 200);
-        List<QsoRecord> SearchQsos(string callsignPattern, string source, string dateFrom, string dateTo, int limit = 500);
+        List<QsoRecord> SearchQsos(string callsignPattern, string source, string dateFrom, string dateTo, int limit = 500,
+            string searchField = null, string searchText = null);
         LogbookDb.UploadSyncStatus GetUploadSyncStatus(string service);
         Dictionary<int, string> GetDxccCountryNames();
         List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null);

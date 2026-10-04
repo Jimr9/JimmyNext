@@ -299,28 +299,22 @@ namespace WSJTX_Controller
                 switch (emsg.Category)
                 {
                     case CallCategory.TO_MYCALL:
-                        // Always admit — queue admission is never gated by the "Calling Me"
-                        // checkbox.  That checkbox controls only Alt+N (next-call) selection.
-                        isAdmitted = true;
-                        break;
                     case CallCategory.NEW_COUNTRY:
                     case CallCategory.NEW_COUNTRY_ON_BAND:
                     case CallCategory.ALWAYS_WANTED:
-                        isAdmitted = IsCallingEnabled(emsg.Category);
-                        break;
-                    case CallCategory.WANTED_CQ:
-                    case CallCategory.POTA:
-                    case CallCategory.SOTA:
-                        // Directed CQ: filter must be enabled AND the CQ must match the alert list.
-                        isAdmitted = IsCallingEnabled(CallCategory.WANTED_CQ) && isWantedDirected;
-                        break;
                     case CallCategory.WAS_NEEDED:
                     case CallCategory.WAS_UNCONFIRMED:
                     case CallCategory.DXCC_UNCONFIRMED:
                     case CallCategory.ZONE_NEEDED:
                     case CallCategory.STILL_NEEDED:
                     case CallCategory.STILL_UNCONFIRMED:
-                        isAdmitted = IsCallingEnabled(emsg.Category);
+                        isAdmitted = ListedWhateverItSends(emsg.Category);
+                        break;
+                    case CallCategory.WANTED_CQ:
+                    case CallCategory.POTA:
+                    case CallCategory.SOTA:
+                        // Directed CQ: filter must be enabled AND the CQ must match the alert list.
+                        isAdmitted = IsCallingEnabled(CallCategory.WANTED_CQ) && isWantedDirected;
                         break;
                     case CallCategory.DEFAULT:
                         // Ordinary CQ: filter must be enabled AND Receive-tab sub-filters must pass.
@@ -437,6 +431,32 @@ namespace WSJTX_Controller
                     DebugOutput($"{spacer}AddSelectedCall: not wanted '{deCall}' cat:{emsg.Category} reason:{notWantedReason} msgType:{isWantedMsgType} origin:{isWantedOrigin} az:{isWantedAzimuth} newBand:{classification.IsNewCallAnyBand || isWantedNewCallOnBand}");
                 }
                 return;
+            }
+        }
+
+        // Alert types listed whatever the station is sending -- only their own Call Filter decides.
+        // Shared with UpdateCallQueue (operator, 2026-10-02: with "CQ only" on, HB9EFK heard working
+        // someone was taken off the list and put straight back here, crow and all, 20 times).
+        internal bool ListedWhateverItSends(CallCategory cat)
+        {
+            switch (cat)
+            {
+                case CallCategory.TO_MYCALL:
+                    // Always admit — queue admission is never gated by the "Calling Me"
+                    // checkbox.  That checkbox controls only Alt+N (next-call) selection.
+                    return true;
+                case CallCategory.NEW_COUNTRY:
+                case CallCategory.NEW_COUNTRY_ON_BAND:
+                case CallCategory.ALWAYS_WANTED:
+                case CallCategory.WAS_NEEDED:
+                case CallCategory.WAS_UNCONFIRMED:
+                case CallCategory.DXCC_UNCONFIRMED:
+                case CallCategory.ZONE_NEEDED:
+                case CallCategory.STILL_NEEDED:
+                case CallCategory.STILL_UNCONFIRMED:
+                    return IsCallingEnabled(cat);
+                default:
+                    return false;
             }
         }
 

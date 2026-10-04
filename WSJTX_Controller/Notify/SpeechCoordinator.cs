@@ -1111,12 +1111,28 @@ namespace WSJTX_Controller
         // is due NOW alongside everything else due now -- joining it is correct, not a collision
         // (the DEFER-vs-a-*pending*-batch concern is about a NEW submission arriving while
         // something is still open/unresolved, which this method is not).
+        // Set by the owner (operator, 2026-10-02): given the boundary, the routine line about to be
+        // spoken and the other parts joining it, returns the line to speak instead ("" = none).
+        // Decided here, at the moment of speaking, because the line was composed earlier -- before
+        // this period's decodes were in (V26K: "V 2 6 K." alone while being called).
+        public Func<string, string, IReadOnlyList<string>, string> RoutineRewrite;
+
         private void ReconcileAndFlush(string boundaryName, Func<Pending, bool> routineReady, Func<Pending, bool> notificationReady)
         {
             long now = _clock.ElapsedMilliseconds;
             string routineText = TakeRoutineBucketComposed(routineReady);
             var (notifParts, notifOnSpoken) = TakeNotificationBucketParts(notificationReady);
             var (nowParts, nowOnSpoken) = TakeAllPendingNowContent("reconcile:" + boundaryName);
+            if (!string.IsNullOrEmpty(routineText) && RoutineRewrite != null)
+            {
+                var others = new List<string>();
+                foreach (var p in notifParts) others.Add(p.text);
+                foreach (var p in nowParts) others.Add(p.text);
+                string rewritten = RoutineRewrite(boundaryName, routineText, others);
+                if (rewritten != routineText)
+                    _logDiagnostic($"[RECONCILE {boundaryName}] routine \"{routineText}\" -> \"{rewritten}\"");
+                routineText = rewritten;
+            }
 
             _logDiagnostic($"[RECONCILE {boundaryName}] T={now}ms gathered: routine={(string.IsNullOrEmpty(routineText) ? "none" : "\"" + routineText + "\"")} " +
                 $"notifParts={notifParts.Count} nowParts={nowParts.Count}");

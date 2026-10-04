@@ -72,7 +72,7 @@ namespace WSJTX_Controller
                     _wc.DebugOutput($"{WsjtxClient.spacer}update stage/sequence '{msg.Message}' (was '{dmsg.Message}')");
                     msg.LastHeardUtc = dmsg.LastHeardUtc;   // carry authoritative last-heard across the re-rank
                     RemoveCall(call);
-                    return AddCall(call, msg);      //re-ranked
+                    return AddCall(call, msg, playSounds: msg.Category != dmsg.Category);      //re-ranked: sounds only if the alert changed
                 }
 
                 if (call != null && _wc.callDict.ContainsKey(call))
@@ -87,7 +87,7 @@ namespace WSJTX_Controller
                             _wc.DebugOutput($"{WsjtxClient.spacer}update priority/grid  '{msg.Message}' (was '{dmsg.Message}')");
                             msg.LastHeardUtc = dmsg.LastHeardUtc;   // carry authoritative last-heard across the re-rank
                             RemoveCall(call);
-                            return AddCall(call, msg);      //re-ranked
+                            return AddCall(call, msg, playSounds: msg.Category != dmsg.Category);      //re-ranked: sounds only if the alert changed
                         }
                     }
                 }
@@ -532,12 +532,26 @@ namespace WSJTX_Controller
             return removed;
         }
 
+        internal static bool QueueAgeExpired(DateTime lastHeardUtc, DateTime nowUtc, int periodMs, int maxPeriods)
+        {
+            long periodTicks = periodMs * TimeSpan.TicksPerMillisecond;
+            if (periodTicks <= 0) return false;
+            long decodingNow = WsjtxClient.DecodeHeardUtc(nowUtc, periodMs / 1000.0).Ticks / periodTicks;
+            return decodingNow - lastHeardUtc.Ticks / periodTicks > maxPeriods;
+        }
+
         public bool TrimCallQueue()
         {
             bool removed = false;
             var keys = new List<string>();
+            // Age in whole periods (operator, 2026-10-02: YU65AEC's crow on every CQ). This runs as
+            // a period's decodes arrive, before they are applied; measured in seconds, a station
+            // calling every other period was exactly the limit old (2 periods) at that moment --
+            // dropped, then added back by its own decode 20 ms later, sound and all. Counted from
+            // the period being decoded now, a station is dropped only once it has gone unheard
+            // for more than the limit.
+            if (_wc.trPeriod == null) return false;
             var dtNow = DateTime.UtcNow;
-            var ts = new TimeSpan(0, 0, ((int)_wc.trPeriod * _wc.ctrl.maxCallQueueAgePeriods) / 1000);    //total periods
 
             foreach (var entry in _wc.callDict)
             {
@@ -550,7 +564,7 @@ namespace WSJTX_Controller
                 var lastHeard = entry.Value.LastHeardUtc > new DateTime(2000, 1, 1)
                     ? entry.Value.LastHeardUtc
                     : entry.Value.RxDate + entry.Value.SinceMidnight;
-                if (entry.Key != _wc.callInProg && (dtNow - lastHeard) > ts && entry.Value.AutoGen)  //entry is older than wanted
+                if (entry.Key != _wc.callInProg && QueueAgeExpired(lastHeard, dtNow, _wc.trPeriod.Value, _wc.ctrl.maxCallQueueAgePeriods) && entry.Value.AutoGen)  //entry is older than wanted
                 {
                     keys.Add(entry.Key);        //collect keys to delete
                 }

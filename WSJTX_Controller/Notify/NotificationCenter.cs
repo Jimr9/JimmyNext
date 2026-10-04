@@ -70,6 +70,12 @@ namespace WSJTX_Controller
         // IJimmyStatusView.SetStatusProblem: (key, text) shows it, (key, null) clears it.
         public Action<string, string> StatusProblemChanged;
 
+        // See SpeechCoordinator.RoutineRewrite.
+        public Func<string, string, System.Collections.Generic.IReadOnlyList<string>, string> RoutineRewrite
+        {
+            set => _coordinator.RoutineRewrite = value;
+        }
+
         // Problem event -> the event that says it is fixed.
         internal static readonly Dictionary<NotificationEventType, NotificationEventType> ProblemResolvedBy =
             new Dictionary<NotificationEventType, NotificationEventType>
