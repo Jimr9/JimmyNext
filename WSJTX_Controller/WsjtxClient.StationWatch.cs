@@ -408,7 +408,9 @@ namespace WSJTX_Controller
                     ServiceSmartStartAwaitingEngagement();
                 else if (_smartStart.ConsumeEngagedWhileWaiting())
                     HandOffSmartStartWhileWaiting(enq);
-                else if (_smartStart.ConsumeReadyToStart() && _smartSwitchTo == null)
+                // A station whose turn is used up waits for the end of the pass, so one free in
+                // the same period that is not goes first (FeedTargetMonitorsPeriodComplete).
+                else if (!TurnUsedUp(_smartStart) && _smartStart.ConsumeReadyToStart())
                     ArmPendingAutoStart(_smartStart);
             }
             // The others on the list: watched the same way, after the current one (picked first,
@@ -420,13 +422,13 @@ namespace WSJTX_Controller
                 if (m.ConsumeEngagedWhileWaiting())
                 {
                     // A station answering us beats a call to another that has not gone out yet
-                    // (2026-10-05: the one just left by TrySmartTurnSwitch answering late).
+                    // (2026-10-05: the one just left by SmartTurnSwitchAtPeriodEnd answering late).
                     if (callInProg == null && !_smartStart.AwaitingEngagement && !_targetMonitorStartDispatching)
-                    { ClearPendingAutoStart(); _smartSwitchTo = null; }
+                        ClearPendingAutoStart();
                     if (MakeCurrent(m)) HandOffSmartStartWhileWaiting(enq);
                     else DropSmartStation(m, "called us during another QSO -- listed normally from now on");
                 }
-                else if (CanMakeCurrent && _smartSwitchTo == null && m.ConsumeReadyToStart() && MakeCurrent(m))
+                else if (CanMakeCurrent && !TurnUsedUp(m) && m.ConsumeReadyToStart() && MakeCurrent(m))
                     ArmPendingAutoStart(_smartStart);
             }
         }
@@ -460,7 +462,7 @@ namespace WSJTX_Controller
             try { m.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall); }
             finally { _smartStartSeeding = false; }
             TakeOffListForSmartMode(call);
-            if (CanMakeCurrent && _smartSwitchTo == null && m.ConsumeReadyToStart() && MakeCurrent(m))
+            if (CanMakeCurrent && m.ConsumeReadyToStart() && MakeCurrent(m))
                 ArmPendingAutoStart(_smartStart);
         }
 
@@ -523,28 +525,33 @@ namespace WSJTX_Controller
             foreach (var m in _smartMore) m.Stop(announce: false);
             _smartMore.Clear();
             _smartFullRefused = null;
-            _smartSwitchTo = null;
         }
 
-        // Smart Mode's list (operator, 2026-10-05, HK3TY): the station being called has had its
-        // turn -- "Calls before trying another station" calls, no answer -- and another station
-        // on the list is free right now. Stop calling, the same way a busy yield does (it stays
-        // on the list; its Repeat Limit and time limit carry on), and remember the free one.
-        // The switch itself waits one receive period (CompleteSmartTurnSwitch): that is when an
-        // answer to the call that just ended would arrive, and an answer is still worked as one.
-        // Nobody else free: nothing changes, the calling goes on.
-        private TargetMonitor _smartSwitchTo;
-
-        private void TrySmartTurnSwitch()
+        // Smart Mode's list (operator, 2026-10-05, HK3TY): a station whose turn is used up --
+        // "Calls before trying another station" calls this turn, no answer.
+        private bool TurnUsedUp(TargetMonitor m)
         {
             int turn = ctrl.smartStartCallsBeforeSwitch;
-            if (turn <= 0 || _smartSwitchTo != null || _smartStart.CallsThisTurn < turn) return;
+            return turn > 0 && m.CallsThisTurn >= turn;
+        }
+
+        // Smart Mode's list: the station being called has used up its turn, and another station
+        // on the list is free right now -- stop calling it, the way a busy yield does (it stays
+        // on the list; its Repeat Limit and time limit carry on), and call the free one. Decided
+        // at the end of the receive period after our call (KJ5DQB, 2026-10-05: deciding when our
+        // call ended and waiting a period missed a pileup station free for one slot only): an
+        // answer to that call has had its period, and the other station's state is current.
+        // Nobody else free: the calling goes on.
+        private void SmartTurnSwitchAtPeriodEnd(bool weTransmittedThisSlot)
+        {
+            if (weTransmittedThisSlot || !_smartStart.IsActive || !_smartStart.AwaitingEngagement
+                || _smartStart.EngagedUs || !TurnUsedUp(_smartStart)) return;
             DateTime now = DateTime.UtcNow;
             var next = _smartMore.FirstOrDefault(m => m.IsActive && m.ReadyToStart
                 && m.RevalidateForAutoStart(now, CurrentBandStr, mode, _directExpectedSessionToken, operatorOverride: false) == AutoStartCheck.Ok);
             if (next == null) return;
             string target = _smartStart.TargetCall;
-            DebugOutput($"{Time()} [SMART] {target} no answer after {_smartStart.CallsThisTurn} calls this turn -- standing by one period, then trying {next.TargetCall}");
+            DebugOutput($"{Time()} [SMART] {target} no answer after {_smartStart.CallsThisTurn} calls this turn -- trying {next.TargetCall}");
             if (string.Equals(callInProg, target, StringComparison.OrdinalIgnoreCase))
             {
                 RequeueAbortedCall();   // while callInProg / replyDecode are still valid
@@ -553,21 +560,9 @@ namespace WSJTX_Controller
             }
             ClearPendingAutoStart();
             _smartStart.ReturnToWaiting();
-            _smartSwitchTo = next;
+            if (MakeCurrent(next)) ArmPendingAutoStart(_smartStart);
             ShowStatus();
             StatusView.ShowMessage(Wording.Fill("Msg.SmartTryingNext", ("Call", SC(target)), ("Next", SC(next.TargetCall))), false);
-        }
-
-        // One receive period after TrySmartTurnSwitch (the first completed period we did not
-        // transmit in): if the station we left did not answer and nothing else started, the free
-        // one becomes the one worked first and is called through the usual revalidating start.
-        private void CompleteSmartTurnSwitch(bool weTransmittedThisSlot)
-        {
-            if (_smartSwitchTo == null || weTransmittedThisSlot) return;
-            var next = _smartSwitchTo;
-            _smartSwitchTo = null;
-            if (!next.IsActive || !_smartMore.Contains(next) || !CanMakeCurrent) return;
-            if (MakeCurrent(next)) ArmPendingAutoStart(_smartStart);
         }
 
         // Escape with more than one station going (operator, 2026-10-02): the first Escape stops
@@ -919,7 +914,7 @@ namespace WSJTX_Controller
             if (_stationWatch.IsActive)
                 _stationWatch.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
             PromoteNextIfIdle();
-            CompleteSmartTurnSwitch(weTransmittedThisSlot);
+            SmartTurnSwitchAtPeriodEnd(weTransmittedThisSlot);
             if (_smartStart.IsActive)
             {
                 // Operator-configurable wall-clock backstop (2026-09-13) -- checked BEFORE the
@@ -932,12 +927,17 @@ namespace WSJTX_Controller
                     _smartStart.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
                     // While awaiting engagement (already calling) the readiness machinery is dormant --
                     // OnReceivePeriodComplete won't SignalReady, but gate the consume too for clarity.
-                    if (!_smartStart.AwaitingEngagement && _smartStart.ConsumeReadyToStart() && _smartSwitchTo == null)
+                    // End of the pass: a used-up turn gives way to a listed station free now that
+                    // is not (KJ5DQB, 2026-10-05: W4DXR, ignoring us, won every tie by being first).
+                    if (!_smartStart.AwaitingEngagement
+                        && (!TurnUsedUp(_smartStart) || !_smartMore.Any(x => x.IsActive && !TurnUsedUp(x) && x.ReadyToStart))
+                        && _smartStart.ConsumeReadyToStart())
                         ArmPendingAutoStart(_smartStart);
                 }
             }
             // The others on the list: same time limit and readiness, after the current one.
-            foreach (var m in _smartMore.ToArray())
+            // Stations whose turn is not used up are offered the free slot first.
+            foreach (var m in _smartMore.OrderBy(x => TurnUsedUp(x)).ToArray())
             {
                 if (m.ExceedsTimeLimit(DateTime.UtcNow, ctrl.smartStartTimeLimitMinutes))
                 {
@@ -949,7 +949,7 @@ namespace WSJTX_Controller
                     continue;
                 }
                 m.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
-                if (CanMakeCurrent && _smartSwitchTo == null && m.ConsumeReadyToStart() && MakeCurrent(m))
+                if (CanMakeCurrent && m.ConsumeReadyToStart() && MakeCurrent(m))
                     ArmPendingAutoStart(_smartStart);
             }
         }

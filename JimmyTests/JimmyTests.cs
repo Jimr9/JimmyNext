@@ -19408,23 +19408,38 @@ static class JimmyTests
             wc.TestCancelStationWatchPendingStart();
 
             // Calls before trying another station (operator, 2026-10-05, HK3TY): after its turn with
-            // no answer, one that is free now is tried -- a receive period later, not at once.
+            // no answer, one that is free now is called -- decided at the end of the receive period
+            // after our call, so an answer to that call still wins.
             ctrl.smartStartCallsBeforeSwitch = 2;
             wc.TestTryCaptureSmartStart("HK3TY", Dq("CQ HK3TY FJ24", 40));
             wc.TestTryCaptureSmartStart("KP2B", Dq("W8TMB KP2B -05", 4));
             wc.TestSmartStartEnterAwaitingEngagement();   // calling HK3TY
             wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(110, "KP2B", "CQ KP2B FK77"));
             wc.TestSmartStartNoteCallOver();
-            wc.TestTrySmartTurnSwitch();
+            wc.TestSmartTurnSwitchAtPeriodEnd(weTransmittedThisSlot: false);
             Check("turn not over: keeps calling", wc.TestSmartStartAwaitingEngagement && wc.TestSmartStartTarget == "HK3TY", true);
             wc.TestSmartStartNoteCallOver();
-            wc.TestTrySmartTurnSwitch();
-            Check("turn over, another free: stops calling", !wc.TestSmartStartAwaitingEngagement && wc.TestSmartStartTarget == "HK3TY", true);
-            wc.TestCompleteSmartTurnSwitch(weTransmittedThisSlot: true);
-            Check("  ...not in a period we transmitted in", wc.TestSmartStartTarget == "HK3TY", true);
-            wc.TestCompleteSmartTurnSwitch(weTransmittedThisSlot: false);
-            Check("  ...then the free one is worked, the other still waits",
+            wc.TestSmartTurnSwitchAtPeriodEnd(weTransmittedThisSlot: true);
+            Check("turn over: not decided in a period we transmitted in", wc.TestSmartStartAwaitingEngagement && wc.TestSmartStartTarget == "HK3TY", true);
+            wc.TestSmartTurnSwitchAtPeriodEnd(weTransmittedThisSlot: false);
+            Check("turn over, another free: the free one is called at once, the other still waits",
                 wc.TestSmartStartTarget == "KP2B" && wc.TestAutoStartPending && wc.IsSmartModeWaitingOn("HK3TY"), true);
+
+            // A used-up turn loses a tie (KJ5DQB, 2026-10-05: W4DXR, ignoring us, was decoded first
+            // in the pass and took every free slot).
+            wc.TestClearPendingAutoStart();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, ParseDirectSnapshot(@"{
+                ""mycall"": """ + myCall + @""", ""mygrid"": """ + myGrid + @""",
+                ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 112 },
+                ""recentDecodes"": [
+                    { ""from"": ""HK3TY"", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 2100.0, ""message"": ""CQ HK3TY FJ24"" },
+                    { ""from"": ""KP2B"", ""snr"": -5, ""dtSec"": 0.1, ""freqHz"": 1100.0, ""message"": ""W1MK KP2B RR73"" } ] }"));
+            Check("a used-up turn loses a tie: the other free station is called",
+                wc.TestSmartStartTarget == "KP2B" && wc.TestAutoStartPending && wc.IsSmartModeWaitingOn("HK3TY"), true);
+            wc.TestClearPendingAutoStart();
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(114, "HK3TY", "CQ HK3TY FJ24"));
+            Check("  ...but is called when it is the only one free, with a fresh turn",
+                wc.TestSmartStartTarget == "HK3TY" && wc.TestAutoStartPending, true);
 
             // Our closing 73 first (operator, 2026-10-05, W0YRE: the call to AD9GE replaced it).
             wc.TestSetClosingOverDue(DateTime.UtcNow.AddSeconds(18), tx: true);

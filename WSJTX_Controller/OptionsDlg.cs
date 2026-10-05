@@ -706,7 +706,7 @@ namespace WSJTX_Controller
             smartStartGroup.Controls.Add(_otherStationRepliesBeforeYieldingNumeric);
 
             // Operator request (2026-10-05): after this many unanswered calls, try another station
-            // on the list that is free now (WsjtxClient.TrySmartTurnSwitch). 0 = never.
+            // on the list that is free now (WsjtxClient.SmartTurnSwitchAtPeriodEnd). 0 = never.
             smartStartGroup.Controls.Add(new System.Windows.Forms.Label
             {
                 Text     = "Calls before trying another station on the list (0 = never):",
