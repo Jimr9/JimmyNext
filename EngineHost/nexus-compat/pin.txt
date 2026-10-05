@@ -6,21 +6,23 @@
 # pin, and its "Checking a patch against a newer Nexus" section for what to do when this pin
 # is updated.
 #
-# This integration pins the newest official STABLE release tag, v1.15.0 (2026-09-26), by its
+# This integration pins the newest official STABLE release tag, v1.16.0 (2026-10-03), by its
 # exact commit. NEXUS_COMMIT is the real lock; NEXUS_TAG is the honest human reference.
 # prepare-nexus.ps1 clones --branch NEXUS_TAG --single-branch and then verifies the resolved
-# HEAD equals NEXUS_COMMIT exactly. v1.15.0 is an ANNOTATED tag (tag object 458297d7); the
+# HEAD equals NEXUS_COMMIT exactly. v1.16.0 is an ANNOTATED tag (tag object 06afa3e4); the
 # commit below is the peeled commit it points at, which is what HEAD resolves to.
 #
-# Upgraded 2026-09-28 from v1.14.0 (12efe3d2). Upstream #303 (is_call_field) is now in the base,
+# Upgraded 2026-10-04 from v1.15.0 (f47d43cc): tempo-audio-rig.patch retired -- Nexus #381's native
+# Rear/Data CAT PTT and its own RFPOWER read guard replace it; the settings and service patches
+# lost their data-PTT / RFPOWER parts. Earlier: upgraded 2026-09-28 from v1.14.0 (12efe3d2). Upstream #303 (is_call_field) is now in the base,
 # so that backport dropped out of tempo-core-message.patch; see README.md for the per-patch
 # re-assessment.
 
 NEXUS_REPO=https://github.com/kd9taw/Nexus.git
-NEXUS_TAG=v1.15.0
-NEXUS_COMMIT=f47d43cc1053b90b882785dbc95a49c32395a890
+NEXUS_TAG=v1.16.0
+NEXUS_COMMIT=21ac4c1377d65d56dd3e11c4978acce2cfa71fde
 
-# DISPOSITION: 2026-09-29 -- stay pinned AT stable v1.15.0 (main reviewed at 191 commits past it;
+# DISPOSITION: 2026-10-04 -- pinned AT stable v1.16.0 (operator approved the upgrade). Was: 2026-09-29 -- stay pinned AT stable v1.15.0 (main reviewed at 191 commits past it;
 # see README.md "Next upgrade readiness"). Was: 2026-09-28 -- pinned AT the current stable tag v1.15.0. Re-review with
 # scripts/nexus-status.ps1 at the next Nexus STABLE tag. Update this line (date + decision) at
 # every significant Jimmy Next release.

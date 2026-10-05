@@ -426,6 +426,22 @@ namespace WSJTX_Controller
 
                 SetMeta("db_version", "10");
             }
+
+            // v11 (2026-10-04, location evidence): the location LoTW CONFIRMED, kept apart from
+            // the logged location (lotw_*, from Jimmy's APP_JIMMY_LOTW_* fields); our own operating
+            // location recorded at logging (my_*, and the TQSL station location in force with its
+            // fingerprint); and the review note when location evidence conflicted. The read copy
+            // is rebuilt from Nexus, so these fill from the contacts themselves -- nothing here
+            // changes a stored contact.
+            if (ver < 11)
+            {
+                foreach (var c in new[] { "lotw_state", "lotw_cnty", "lotw_grid", "my_state", "my_cnty",
+                                          "tqsl_location", "tqsl_loc_fp", "loc_review" })
+                    Exec($"ALTER TABLE qso ADD COLUMN {c} TEXT DEFAULT '';");
+                foreach (var c in new[] { "lotw_dxcc", "lotw_cqz", "lotw_ituz", "my_dxcc", "dxcc_derived" })
+                    Exec($"ALTER TABLE qso ADD COLUMN {c} INTEGER DEFAULT 0;");
+                SetMeta("db_version", "11");
+            }
         }
 
         // ── Meta ─────────────────────────────────────────────────────────────────
@@ -469,6 +485,11 @@ namespace WSJTX_Controller
             public string RstSent, RstRcvd, Grid, Name, Comment, TxPwr;
             public string OperatorCall, StationCall, MyGrid, DedupKey;
             public string ExchangeSent, ExchangeRcvd;
+            // Our operating location as recorded at logging (2026-10-04): the TQSL station location
+            // in force and its fingerprint, and MY_ fields. TqslLocation "" = logged before this
+            // was recorded (legacy: signed with the configured location, as always).
+            public string TqslLocation, TqslLocFp, MyState, MyCnty;
+            public int MyDxcc;
         }
 
         // service is "qrz", "clublog", "lotw", or "hrdlog" (see UploadColumn). Returns QSOs never yet uploaded to that
@@ -484,7 +505,7 @@ namespace WSJTX_Controller
                     cmd.CommandText =
                         $"SELECT callsign, band, mode, qso_date, time_on, time_off, freq_hz, " +
                         $"rst_sent, rst_rcvd, grid, name, comment, tx_pwr, operator_call, station_call, my_grid, dedup_key, " +
-                        $"exchange_sent, exchange_rcvd " +
+                        $"exchange_sent, exchange_rcvd, tqsl_location, tqsl_loc_fp, my_state, my_cnty, my_dxcc " +
                         $"FROM qso WHERE {col} = '' ORDER BY qso_date, time_on LIMIT {limit};";
                     using (var r = cmd.ExecuteReader())
                     {
@@ -511,6 +532,11 @@ namespace WSJTX_Controller
                                 DedupKey     = r.IsDBNull(16) ? "" : r.GetString(16),
                                 ExchangeSent = r.IsDBNull(17) ? "" : r.GetString(17),
                                 ExchangeRcvd = r.IsDBNull(18) ? "" : r.GetString(18),
+                                TqslLocation = r.IsDBNull(19) ? "" : r.GetString(19),
+                                TqslLocFp    = r.IsDBNull(20) ? "" : r.GetString(20),
+                                MyState      = r.IsDBNull(21) ? "" : r.GetString(21),
+                                MyCnty       = r.IsDBNull(22) ? "" : r.GetString(22),
+                                MyDxcc       = r.IsDBNull(23) ? 0  : Convert.ToInt32(r.GetValue(23)),
                             });
                         }
                     }
@@ -672,14 +698,16 @@ namespace WSJTX_Controller
         public (int worked, int confirmed) WasProgress(string band = null)
         {
             string bf = BandFilter(band);
+            // The state a contact counts for: LoTW's confirmed one when LoTW gave it, else the logged one.
+            string st = RuleEngine.AwardText("state", "lotw_state");
             // COUNT(DISTINCT ...) must normalize the same way the WHERE filter does -- the raw
             // state column can hold case variants of the same state (e.g. "PA" and "Pa" both
             // resolve to Pennsylvania), which the un-normalized count previously treated as two
             // different states, inflating "worked" past the true 50-state ceiling (found
             // 2026-07-09: displayed 51/50 worked).
             return (
-                QueryScalar($"SELECT COUNT(DISTINCT UPPER(TRIM(state))) FROM qso WHERE UPPER(TRIM(state)) IN ({WasInList}){bf};"),
-                QueryScalar($"SELECT COUNT(DISTINCT UPPER(TRIM(state))) FROM qso WHERE UPPER(TRIM(state)) IN ({WasInList}) AND (lotw_qsl_rcvd='Y' OR qrz_qsl_rcvd='Y'){bf};")
+                QueryScalar($"SELECT COUNT(DISTINCT UPPER(TRIM({st}))) FROM qso WHERE UPPER(TRIM({st})) IN ({WasInList}){bf};"),
+                QueryScalar($"SELECT COUNT(DISTINCT UPPER(TRIM({st}))) FROM qso WHERE UPPER(TRIM({st})) IN ({WasInList}) AND (lotw_qsl_rcvd='Y' OR qrz_qsl_rcvd='Y'){bf};")
             );
         }
 

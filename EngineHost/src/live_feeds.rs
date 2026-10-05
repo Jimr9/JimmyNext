@@ -204,6 +204,50 @@ impl LiveFeedsCache {
         }
     }
 
+    /// "Who hears me?" (operator, 2026-10-04): every station that reported decoding the operator
+    /// in the last `window_minutes` (15 or 30), from the SAME rolling PSK Reporter window the band
+    /// advice reads -- Nexus's own `propagation::getting_out` (newest report per receiver, furthest
+    /// first, distance and direction from the grids). The store is capped by COUNT, not age, so
+    /// `coveredMinutes` says when it no longer reaches back the whole window (null = it does).
+    /// The 15-minute band-advice window is untouched.
+    pub fn getting_out_json(&self, window_minutes: i64) -> String {
+        let now = now_unix();
+        let window_minutes = window_minutes.clamp(1, 60);
+        let (spots, covered_minutes) = match self.live_spots.read() {
+            Ok(g) => {
+                let all = g.recent(now, 10 * 365 * 86_400);
+                let covered = if all.len() >= LIVE_SPOTS_CAP {
+                    all.iter().map(|s| s.time).min().map(|oldest| ((now - oldest).max(0)) / 60)
+                        .filter(|m| *m < window_minutes)
+                } else {
+                    None
+                };
+                (g.recent(now, window_minutes * 60), covered)
+            }
+            Err(_) => (Vec::new(), None),
+        };
+        let connected = self.pskr_connected.load(Ordering::Relaxed);
+        let last_event_age_secs = self
+            .pskr_last_event
+            .read()
+            .ok()
+            .and_then(|g| *g)
+            .map(|t| t.elapsed().as_secs());
+        let no_call = self.mycall.is_empty() || self.mycall == "NOCALL";
+        let go = propagation::getting_out(&self.mycall, &self.mygrid, &spots, now);
+        let payload = GettingOutPayload {
+            count: go.count,
+            max_km: go.max_km,
+            reports: go.reports,
+            window_minutes,
+            covered_minutes,
+            connected,
+            last_event_age_secs,
+            error: no_call.then(|| "No callsign set, so PSK Reporter has nothing to report.".to_string()),
+        };
+        serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    }
+
     /// Runs PropAdvisor over the current rolling PSK Reporter window + the latest cached space
     /// weather. `wx` is read from EngineHost's own SharedCache (external_data.rs) by the
     /// caller -- this module doesn't fetch space weather itself, avoiding a second fetch loop
@@ -437,6 +481,19 @@ struct BandReportPayload {
     modeled_reason: String,
     #[serde(rename = "bestRegion")]
     best_region: Option<RegionReportPayload>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GettingOutPayload {
+    count: u32,
+    max_km: u32,
+    reports: Vec<propagation::HeardMe>,
+    window_minutes: i64,
+    covered_minutes: Option<i64>,
+    connected: bool,
+    last_event_age_secs: Option<u64>,
+    error: Option<String>,
 }
 
 #[derive(serde::Serialize)]

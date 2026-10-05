@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 
@@ -15,7 +16,8 @@ namespace WSJTX_Controller
             string rstSent, string rstRcvd, string grid, string name, string comment,
             string txPwr, string operatorCall, string stationCall, string myGrid,
             string exchangeSent = "", string exchangeRcvd = "", string qsoDateOff = "",
-            string state = "", string sig = "", string sigInfo = "")
+            string state = "", string sig = "", string sigInfo = "",
+            IEnumerable<KeyValuePair<string, string>> extra = null)
         {
             var sb = new StringBuilder();
             void F(string field, string val)
@@ -47,6 +49,7 @@ namespace WSJTX_Controller
             F("srx_string", exchangeRcvd);
             F("sig", sig);
             F("sig_info", sigInfo);
+            if (extra != null) foreach (var kv in extra) F(kv.Key, kv.Value);
             sb.Append("<eor>\r\n");
             return sb.ToString();
         }

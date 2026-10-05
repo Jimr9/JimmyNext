@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -112,12 +113,6 @@ namespace WSJTX_Controller
                 LastError = "Blocked: JIMMY_TEST_DB_PATH is set (test mode) -- no real TQSL invocation allowed.";
                 return false;
             }
-            if (string.IsNullOrWhiteSpace(stationLocation))
-            {
-                LastError = "TQSL Station Location is not configured (Options > Logbook Sync).";
-                return false;
-            }
-
             string tqslPath = LocateTqsl();
             if (tqslPath == null)
             {
@@ -143,6 +138,88 @@ namespace WSJTX_Controller
                 return true;                        // nothing to do -- not a failure
             }
 
+            // Each contact is signed with the TQSL station location recorded when it was logged
+            // (2026-10-04), one TQSL run per location -- so a profile change or a restart can never
+            // send a portable contact from home. A contact whose location cannot be used as
+            // recorded is held, with the reason; contacts from before this (no location recorded)
+            // are signed with the configured location, as always.
+            var locations = TqslStationData.Load(out string loadError);
+            var batches = PlanBatches(pending, stationLocation, locations, loadError);
+            var held = batches.Where(b => b.HeldWhy != null).ToList();
+            var messages = new List<string>();
+            if (held.Count > 0)
+            {
+                var lines = held.SelectMany(b => b.Qsos.Select(q => $"{q.Callsign} {q.Band} {q.Mode} {q.QsoDate} {q.TimeOn}: {b.HeldWhy}")).ToList();
+                NexusSyncDiagnostics.WriteList("held-tqsl", "LoTW uploads held -- not signed, still pending -- because the station location recorded with them cannot be used as recorded", lines);
+                messages.AddRange(held.Select(b => $"{b.Qsos.Count} held: {b.HeldWhy}"));
+            }
+            int uploaded = 0;
+            bool allCounted = true, anyFailed = false;
+            foreach (var b in batches.Where(b => b.HeldWhy == null))
+            {
+                bool ok = await UploadBatchAsync(tqslPath, b.Location, b.Qsos, db).ConfigureAwait(false);
+                if (!ok) anyFailed = true;
+                if (LastError != null) messages.Add(batches.Count(x => x.HeldWhy == null) > 1 ? $"location '{b.Location}': {LastError}" : LastError);
+                if (LastUploadedCount.HasValue) uploaded += LastUploadedCount.Value; else allCounted = false;
+            }
+            LastUploadedCount = allCounted && !anyFailed && held.Count == 0 ? uploaded : (int?)null;
+            LastError = messages.Count > 0 ? string.Join(" ", messages.Select(m => m.TrimEnd('.') + ".")) : null;
+            return !anyFailed && held.Count < batches.Count;   // all held = nothing could go: shown as a failure, with why
+        }
+
+        internal sealed class Batch
+        {
+            public string Location;                           // the TQSL station location to sign with
+            public List<LogbookDb.PendingUploadQso> Qsos = new List<LogbookDb.PendingUploadQso>();
+            public string HeldWhy;                            // null = sign it; else why it is held
+        }
+
+        // Pending contacts grouped by the TQSL station location to sign them with, each group
+        // checked against TQSL's station data as it is now. Recorded location (stamped at logging):
+        // held when none was set, the location is gone or changed since, its callsign is not the
+        // contact's station callsign, or the station data cannot be read. No recorded location
+        // (logged before 2026-10-04): the configured location, as before.
+        internal static List<Batch> PlanBatches(List<LogbookDb.PendingUploadQso> pending, string configured,
+            Dictionary<string, TqslStationData.Location> locations, string loadError)
+        {
+            var batches = new List<Batch>();
+            Batch Get(string location, string heldWhy)
+            {
+                var b = batches.FirstOrDefault(x => x.Location == location && x.HeldWhy == heldWhy);
+                if (b == null) batches.Add(b = new Batch { Location = location, HeldWhy = heldWhy });
+                return b;
+            }
+            foreach (var q in pending)
+            {
+                string rec = (q.TqslLocation ?? "").Trim();
+                if (rec.Length == 0)
+                {
+                    string conf = (configured ?? "").Trim();
+                    Get(conf, conf.Length == 0 ? "TQSL Station Location is not configured (Options > Logbook Sync)" : null).Qsos.Add(q);
+                    continue;
+                }
+                string why = null;
+                if (rec == Controller.TqslNoLocation)
+                    why = "logged with no TQSL station location set; choose one and edit the contact, or upload it from TQSL";
+                else if (locations == null)
+                    why = $"TQSL station data could not be read ({loadError?.TrimEnd('.')})";
+                else if (!locations.TryGetValue(rec, out var loc))
+                    why = $"TQSL station location '{rec}' it was logged with no longer exists";
+                else if (loc.Call.Length > 0 && !string.Equals(loc.Call, (q.StationCall ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+                    why = $"station callsign {q.StationCall} is not the callsign of TQSL location '{rec}' ({loc.Call})";
+                else if (!string.Equals(loc.Fingerprint, q.TqslLocFp ?? "", StringComparison.Ordinal))
+                    why = $"TQSL station location '{rec}' was changed after these contacts were logged";
+                Get(rec, why).Qsos.Add(q);
+            }
+            return batches;
+        }
+
+        // One TQSL run over one station location's contacts. Sets LastError and LastUploadedCount
+        // for this batch.
+        private async Task<bool> UploadBatchAsync(string tqslPath, string stationLocation, List<LogbookDb.PendingUploadQso> pending, ILogbookService db)
+        {
+            LastError = null;
+            LastUploadedCount = null;
             var sb = new StringBuilder();
             sb.Append(AdifExporter.Header());
             foreach (var q in pending)

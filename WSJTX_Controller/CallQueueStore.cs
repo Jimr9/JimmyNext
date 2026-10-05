@@ -521,7 +521,12 @@ namespace WSJTX_Controller
             //delete keys to old decodes and sent reports
             foreach (string key in keys)
             {
-                if (!_wc.callQueue.Contains(key))
+                // A station Smart Mode is managing is kept like one on the list (operator,
+                // 2026-10-04): Smart Mode takes it OFF the list while it waits, and its CQ -- the
+                // grid and the "POTA" the contact is logged with -- was forgotten during a long
+                // wait (K5BTM, 16 min: logged with no grid and no POTA, then listed again with the
+                // frog on its next CQ POTA). Worked from the list, a station keeps all of this.
+                if (!_wc.callQueue.Contains(key) && !_wc.IsSmartModeWaitingOn(key))
                 {
                     _wc.RemoveAllCall(key);
                     removed = true;

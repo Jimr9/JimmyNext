@@ -149,6 +149,9 @@ namespace WSJTX_Controller
         // or decoded values, parsing, comparisons, the call queue, logging, or any notification
         // configuration -- only the rendered text at sites that already call those helpers.
         public bool spaceCallsignsAndGrids = true;
+        // Options > General "Display dates and times in my selected time zone" (2026-10-05). Off:
+        // displays stay UTC. See DisplayTime -- display only, nothing stored changes.
+        public bool displayInSelectedTimeZone = false;
         // Added 2026-08-19: gates UiaAlertNotificationDelivery (WSJTX_Controller/Notify/
         // NotificationDelivery.cs) -- when true, an Important-priority notification may also
         // announce via UI Automation's Notification event (RaiseAccessibleAlert) even while
@@ -174,6 +177,7 @@ namespace WSJTX_Controller
             if (IsDisposed) return;
             if (InvokeRequired) { BeginInvoke((Action)ApplyWordingToScreen); return; }
             wsjtxClient?.UpdateCallListAccessibleName(force: true);
+            _smartModeWindow?.ApplyWording();
         }
 
         internal readonly bool wordingEditorUnlocked = Environment.GetCommandLineArgs()
@@ -978,6 +982,7 @@ namespace WSJTX_Controller
                 // Default checked when the key is absent (== "False" test) so an upgrade keeps
                 // today's spaced-callsign presentation until the operator opts out.
                 spaceCallsignsAndGrids = iniFile.Read("spaceCallsignsAndGrids") != "False";
+                displayInSelectedTimeZone = iniFile.Read("displayInSelectedTimeZone") == "True";
                 announceImportantAlertsWhenFocusElsewhere = iniFile.Read("announceImportantAlertsWhenFocusElsewhere") == "True";
                 queueSpeechExperiment = iniFile.Read("queueSpeechExperiment") == "True";
                 // 2.0.58: default true (== "False" test, so a missing/blank key stays true) --
@@ -1383,7 +1388,11 @@ namespace WSJTX_Controller
             RuleLibrary.ClubLog = lookupManager.ClubLog;
             try { RuleLibrary.Load(); } catch { }
             RefreshStillNeedCache();   // must run after RuleLibrary.Load() so the saved selection resolves
-            BackfillMissingDxccWhenReady();
+            // The startup DXCC/state backfill of existing contacts is retired (operator, 2026-10-04: no
+            // historical location repair). Our own location is recorded on each NEW contact instead.
+            NexusLogbookService.OurLocationFields = OurLocationNow;
+            DisplayTime.Configure(() => Station?.DisplayTimeZone, () => displayInSelectedTimeZone);
+            NexusLogbookService.OurPark = () => Station?.MyPark;
             // The automatic logbook move at startup (Program.RunAutoMoveWithProgress) says what it
             // did, a few seconds in so it follows the startup greeting instead of cutting it off.
             if (NexusLogbookMigration.AutoMoveMessage != null)
@@ -2811,6 +2820,7 @@ namespace WSJTX_Controller
             optionsDlg?.Close();
             if (helpDlg != null) helpDlg.Close();
             _logbookWindow?.Close();
+            _smartModeWindow?.Close();
             _otaSpotsWindow?.Close();
             _notificationHistoryWindow?.Close();
             contestPollTimer?.Stop();
@@ -2858,6 +2868,15 @@ namespace WSJTX_Controller
         {
             spaceCallsignsAndGrids = on;
             iniFile?.Write("spaceCallsignsAndGrids", on.ToString());
+        }
+
+        // Options: the display time zone and whether displays use it, written at once.
+        public void SetAndPersistDisplayTimeZone(string zoneId, bool use)
+        {
+            Station.DisplayTimeZone = zoneId ?? "";
+            displayInSelectedTimeZone = use;
+            iniFile?.Write("stationDisplayTimeZone", Station.DisplayTimeZone);
+            iniFile?.Write("displayInSelectedTimeZone", use.ToString());
         }
 
         public void SetAndPersistMyContinent(string code)
@@ -3985,6 +4004,53 @@ namespace WSJTX_Controller
         // gaps are filled. On a background task that first waits (bounded) for the engine that
         // keeps the log to answer, so startup never waits on it; Still Need is refreshed
         // afterwards when anything was filled.
+        // Where WE are operating now, as ADIF fields for a new contact (2026-10-04): the active
+        // profile's state and county, our DXCC from our own callsign, and the TQSL station location
+        // in force with a fingerprint of what it says -- so the contact is later signed with that
+        // location, and a location deleted or changed meanwhile is caught before signing. When the
+        // profile and that TQSL location disagree, the contact carries a review note.
+        internal List<(string Tag, string Value)> OurLocationNow()
+        {
+            var f = new List<(string, string)>();
+            string state = (Station?.QthState ?? "").Trim().ToUpperInvariant();
+            string county = (Station?.County ?? "").Trim();
+            if (state.Length > 0) f.Add(("MY_STATE", state));
+            if (state.Length > 0 && county.Length > 0) f.Add(("MY_CNTY", $"{state},{county}"));
+            string myCall = (wsjtxClient?.myCall ?? "").Trim().ToUpperInvariant();
+            int dxcc = 0; string country = "", cont = "";
+            if (myCall.Length > 0) AdifImporter.FillEntityGaps(myCall, ref dxcc, ref country, ref cont);
+            if (dxcc > 0) f.Add(("MY_DXCC", dxcc.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+            if (country.Length > 0) f.Add(("MY_COUNTRY", country));
+
+            string locName = (tqslStationLocation ?? "").Trim();
+            f.Add(("APP_JIMMY_TQSL_LOCATION", locName.Length > 0 ? locName : TqslNoLocation));
+            if (locName.Length > 0)
+            {
+                var all = TqslStationData.Load(out string err);
+                if (all != null && all.TryGetValue(locName, out var loc))
+                {
+                    f.Add(("APP_JIMMY_TQSL_LOC_FP", loc.Fingerprint));
+                    var diffs = new List<string>();
+                    if (loc.Call.Length > 0 && myCall.Length > 0 && !string.Equals(loc.Call, myCall, StringComparison.OrdinalIgnoreCase))
+                        diffs.Add($"callsign {myCall} vs {loc.Call}");
+                    string myGrid = (wsjtxClient?.myGrid ?? "").Trim().ToUpperInvariant();
+                    int n = Math.Min(myGrid.Length, loc.Grid.Length);
+                    if (n >= 4 && !string.Equals(myGrid.Substring(0, n), loc.Grid.Substring(0, n), StringComparison.OrdinalIgnoreCase))
+                        diffs.Add($"grid {myGrid} vs {loc.Grid}");
+                    if (state.Length > 0 && loc.State.Length > 0 && !string.Equals(state, loc.State, StringComparison.OrdinalIgnoreCase))
+                        diffs.Add($"state {state} vs {loc.State}");
+                    if (diffs.Count > 0)
+                        f.Add(("APP_JIMMY_REVIEW", $"our location differs from TQSL location '{locName}': {string.Join(", ", diffs)}"));
+                }
+                else
+                    f.Add(("APP_JIMMY_TQSL_LOC_FP", TqslLocationMissing));
+            }
+            return f;
+        }
+
+        internal const string TqslNoLocation = "(none)";
+        internal const string TqslLocationMissing = "(not found)";
+
         private void BackfillMissingDxccWhenReady()
         {
             if (!NexusLogbook.Active) return;
@@ -6233,10 +6299,21 @@ namespace WSJTX_Controller
             if (_smartModeWindow == null || _smartModeWindow.IsDisposed)
             {
                 _smartModeWindow = new SmartModeWindow(this);
-                _smartModeWindow.Show(this);
+                // A window of its own, like Logbook Center: no Owner (an owned window always sits
+                // in front of Jimmy's main window and leaves Alt+Tab), closed with Jimmy on exit.
+                _smartModeWindow.FormClosed += (s, e) => _smartModeWindow = null;
+                _smartModeWindow.Show();
             }
             else
                 _smartModeWindow.Activate();
+        }
+
+        // The Smart Mode stations window's row parts, in order (its Row Order button, 2026-10-04).
+        internal List<string> SmartWindowRowOrder
+        {
+            get => ParseRowOrder(iniFile?.Read("smartWindowRowOrder"), SmartModeWindow.DefaultFields)
+                   ?? new List<string>(SmartModeWindow.DefaultFields);
+            set => iniFile?.Write("smartWindowRowOrder", string.Join(",", value));
         }
 
         internal List<WsjtxClient.SmartStationRow> SmartStationRows() =>

@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Drawing;
 using System.Windows.Forms;
 
@@ -55,6 +57,7 @@ namespace WSJTX_Controller
         // ── POTA/SOTA tab ────────────────────────────────────────────────────────
         private ListBox _potaList;
         private Label _potaStatusLabel;
+        private readonly List<OtaSpot> _potaSpots = new List<OtaSpot>();   // the spot behind each row
 
         // ── Band Conditions tab ─────────────────────────────────────────────────
         private TextBox _condHeadlineBox;
@@ -65,9 +68,25 @@ namespace WSJTX_Controller
         private ListBox _dxList;
         private Label _dxStatusLabel;
 
+        // ── Who Hears Me tab (2026-10-04) ────────────────────────────────────────
+        private TextBox _heardSummaryBox;
+        private ComboBox _heardWindowCb;
+        private ListBox _heardList;
+        private Label _heardStatusLabel;
+        private bool _heardInFlight;
+
+        // ── Contests tab (2026-10-05) ──────────────────────────────────────────
+        private ListBox _contestList;
+        private TextBox _contestStatusBox;
+        private readonly List<ContestCalendarEvent> _contestRows = new List<ContestCalendarEvent>();
+        private bool _contestInFlight;
+        private string _contestRulesText = "";
+
         // ── Space Weather tab ────────────────────────────────────────────────────
         private TextBox _wxSfiValue, _wxSsnValue, _wxKpValue, _wxAValue, _wxXrayValue;
         private TextBox _wxMufValue, _wxGScaleValue, _wxSScaleValue;
+        private TextBox _wxBzValue, _wxWindValue, _wxWindAgeValue;   // solar wind (2026-10-04)
+        private ListBox _wxHistoryList;                               // daily solar history
         private Label _wxStatusLabel;
 
         public OtaSpotsWindow(LookupManager lookupManager,
@@ -105,9 +124,11 @@ namespace WSJTX_Controller
                 Dock = DockStyle.Fill,
             };
             _tabs.TabPages.Add(BuildPotaSotaTab());
+            _tabs.TabPages.Add(BuildContestsTab());
             _tabs.TabPages.Add(BuildBandConditionsTab());
             _tabs.TabPages.Add(BuildDxSpotsTab());
             _tabs.TabPages.Add(BuildSpaceWeatherTab());
+            _tabs.TabPages.Add(BuildWhoHearsMeTab());
             // Refresh only the tab the operator just switched to (see RefreshActiveTab's own
             // comment for why -- root cause of a live JAWS pass hearing DX Spots status text
             // while sitting on the Space Weather tab).
@@ -142,9 +163,11 @@ namespace WSJTX_Controller
             switch (_tabs.SelectedIndex)
             {
                 case 0: RefreshPotaSota(); break;
-                case 1: RefreshBandConditions(); break;
-                case 2: RefreshDxSpots(); break;
-                case 3: RefreshSpaceWeather(); break;
+                case 1: RefreshContests(false); break;
+                case 2: RefreshBandConditions(); break;
+                case 3: RefreshDxSpots(); break;
+                case 4: RefreshSpaceWeather(); break;
+                case 5: RefreshWhoHearsMe(); break;
             }
         }
 
@@ -261,12 +284,31 @@ namespace WSJTX_Controller
             _potaStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
             var refreshBtn = MakeRefreshButton((s, e) => RefreshPotaSota(), "Refresh POTA and SOTA spots now");
             refreshBtn.Dock = DockStyle.Right;
+            // Optional (2026-10-04): the park the selected activator's NEXT logged contact is
+            // credited to (SIG_INFO). Nothing is chosen for you, and logging never waits for it.
+            var chooseBtn = new Button { Text = "Choose Park", AccessibleName = "Choose this park for the station", Size = new Size(100, 24), Dock = DockStyle.Right };
+            chooseBtn.Click += (s, e) => ChooseSelectedPark();
             bottom.Controls.Add(_potaStatusLabel);
+            bottom.Controls.Add(chooseBtn);
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_potaList);
             page.Controls.Add(bottom);
             return page;
+        }
+
+        private void ChooseSelectedPark()
+        {
+            int i = _potaList.SelectedIndex;
+            if (i < 0 || i >= _potaSpots.Count) { _potaStatusLabel.Text = "Select a spot first."; return; }
+            var spot = _potaSpots[i];
+            if (!string.Equals(spot.Program, "POTA", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(spot.Reference))
+            {
+                _potaStatusLabel.Text = "Only a POTA park can be chosen.";
+                return;
+            }
+            ParkChoices.Choose(spot.Activator, spot.Reference, spot.Location);
+            _potaStatusLabel.Text = $"Park {spot.Reference.Trim().ToUpperInvariant()} chosen for {spot.Activator}; it goes on that station's next logged contact.";
         }
 
         // Release-audit finding, 2026-08-20: this used to call _client.GetOtaSpots directly, ON
@@ -299,12 +341,14 @@ namespace WSJTX_Controller
                     try
                     {
                         _potaList.Items.Clear();
+                        _potaSpots.Clear();
                         if (result?.Spots != null)
                         {
                             foreach (var spot in result.Spots)
                             {
                                 var annotation = OtaSpotAnnotator.Annotate(spot.Activator, band, _logbookDb, _lookupManager, tags);
                                 _potaList.Items.Add(FormatPotaSotaRow(spot, annotation));
+                                _potaSpots.Add(spot);
                             }
                         }
                     }
@@ -466,6 +510,314 @@ namespace WSJTX_Controller
             });
         }
 
+        // ── Who Hears Me tab ─────────────────────────────────────────────────────
+        // Every station PSK Reporter says decoded you, newest report per station, furthest first
+        // (operator, 2026-10-04) -- the same feed the band advice counts, listed one by one.
+
+        // ── Contests tab: the WA7BNM calendar, read by Nexus's own adapter in EngineHost ──
+        // A calendar listing is not support: a row says what Jimmy can do for it only when Jimmy
+        // has that contest (ContestSupportLevels); every other row is a listing to read.
+
+        private TabPage BuildContestsTab()
+        {
+            var page = MakeTabPage("Contests");
+
+            _contestStatusBox = new TextBox
+            {
+                Dock = DockStyle.Top,
+                Height = 64,
+                Multiline = true,
+                ReadOnly = true,
+                ScrollBars = ScrollBars.Vertical,
+                BorderStyle = BorderStyle.None,
+                BackColor = SystemColors.Control,
+                TabStop = true,
+                TabIndex = 1,
+                AccessibleName = "Calendar status",
+                Text = "Loading...",
+            };
+
+            _contestList = MakeListBox("Contests list");
+            _contestList.TabIndex = 0;
+            _contestList.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { OpenContestDetails(); e.Handled = true; e.SuppressKeyPress = true; } };
+
+            var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 34, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            var detailsBtn = new Button { Text = "Open &Details", AccessibleName = "Open details", AutoSize = true, TabIndex = 2 };
+            detailsBtn.Click += (s, e) => OpenContestDetails();
+            var refreshBtn = new Button { Text = "&Refresh Calendar", AccessibleName = "Refresh calendar", AutoSize = true, TabIndex = 3 };
+            refreshBtn.Click += (s, e) => RefreshContests(true);
+            var rulesBtn = new Button { Text = "Check for Rules &Updates", AccessibleName = "Check for rules updates", AutoSize = true, TabIndex = 4 };
+            rulesBtn.Click += (s, e) => CheckContestRules();
+            bottom.Controls.Add(detailsBtn);
+            bottom.Controls.Add(refreshBtn);
+            bottom.Controls.Add(rulesBtn);
+
+            page.Controls.Add(_contestList);
+            page.Controls.Add(_contestStatusBox);
+            page.Controls.Add(bottom);
+            return page;
+        }
+
+        // The calendar's names for the contests Jimmy has a ruleset for, by Nexus event id.
+        private static readonly (string Match, string EventId)[] CalendarEventIds =
+        {
+            ("ARRL Field Day", "arrlfd"), ("Winter Field Day", "wfd"),
+            ("ARRL January VHF", "arrlvhf_jan"), ("ARRL June VHF", "arrlvhf_jun"), ("ARRL September VHF", "arrlvhf_sep"),
+            ("Tennessee QSO Party", "tnqp"), ("Ohio QSO Party", "ohqp"), ("California QSO Party", "cqp"),
+            ("Texas QSO Party", "txqp"), ("Illinois QSO Party", "ilqp"), ("New York QSO Party", "nyqp"),
+            ("ARRL Sweepstakes, CW", "arrlss_cw"), ("ARRL Sweepstakes, SSB", "arrlss_ssb"),
+            ("CQ Worldwide DX Contest, CW", "cqww_cw"), ("CQ Worldwide DX Contest, SSB", "cqww_ssb"), ("CQ Worldwide DX Contest, RTTY", "cqww_rtty"),
+            ("CQ WW WPX Contest, CW", "cqwpx_cw"), ("CQ WW WPX Contest, SSB", "cqwpx_ssb"),
+        };
+
+        // What Jimmy can do for a calendar listing, or null when it is only a listing.
+        internal static string JimmySupportFor(string calendarName)
+        {
+            string n = calendarName ?? "";
+            if (n.IndexOf("International Digital", StringComparison.OrdinalIgnoreCase) >= 0) return "not supported yet";
+            foreach (var (match, id) in CalendarEventIds)
+                if (n.IndexOf(match, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return ContestSupportLevels.Label(ContestSupportLevels.Get(id, eventIdKnownToNexus: true)).ToLowerInvariant();
+            return null;
+        }
+
+        // One row: "On now: ARRL September VHF Contest, Sat 2026-09-12 13:00 to Sun 2026-09-13 21:59 CDT,
+        // Jimmy: available in nexus, not yet verified in jimmy". internal: JimmyTests exercises it.
+        internal static string FormatContestRow(ContestCalendarEvent ev, DateTime nowUtc, TimeZoneInfo zone)
+        {
+            var start = DateTimeOffset.FromUnixTimeSeconds(ev.StartUnix).UtcDateTime;
+            var end = DateTimeOffset.FromUnixTimeSeconds(ev.EndUnix).UtcDateTime;
+            string onNow = start <= nowUtc && nowUtc < end ? "On now: " : "";
+            string support = JimmySupportFor(ev.Name);
+            return $"{onNow}{ev.Name}, {DisplayTime.RangeText(start, end, zone)}{(support != null ? ", Jimmy: " + support : "")}";
+        }
+
+        // The calendar's age: older than this is said to be possibly out of date.
+        internal static readonly TimeSpan CalendarStaleAfter = TimeSpan.FromHours(2);
+
+        internal static string CalendarStatusText(ContestCalendarResult r, string transportError, DateTime nowUtc, TimeZoneInfo zone)
+        {
+            string When(long unix) { var t = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime; return $"{DisplayTime.DateTimeText(t, zone)} {DisplayTime.Abbreviation(t, zone)}"; }
+            string problem = transportError ?? r?.Error;
+            if (r?.FetchedUnix == null)
+                return problem != null ? $"Contest calendar unavailable: {problem}" : "Contest calendar not read yet.";
+            var age = nowUtc - DateTimeOffset.FromUnixTimeSeconds(r.FetchedUnix.Value).UtcDateTime;
+            string read = $"Calendar read {When(r.FetchedUnix.Value)}";
+            if (problem != null) read = $"Could not refresh the calendar ({problem}). Showing the calendar read {When(r.FetchedUnix.Value)}";
+            if (age > CalendarStaleAfter) read += ", which may be out of date";
+            return $"{read}. {DisplayTime.ZoneSentence(nowUtc, zone)} Rows without a Jimmy note are calendar listings only.";
+        }
+
+        internal static string RulesStatusText(ContestRulesStatus s, DateTime nowUtc, TimeZoneInfo zone)
+        {
+            if (s == null) return "";
+            string Day(string generated) => string.IsNullOrEmpty(generated) ? "unknown" : generated.Length >= 10 ? generated.Substring(0, 10) : generated;
+            bool bundled = string.IsNullOrEmpty(s.DownloadedGenerated) || s.ActiveGenerated == s.BundledGenerated;
+            string text = $"Contest rules in use: rules year {s.RulesYear}, version {Day(s.ActiveGenerated)}{(bundled ? " (bundled)" : " (downloaded)")}.";
+            if (s.CheckedUnix > 0)
+            {
+                var t = DateTimeOffset.FromUnixTimeSeconds(s.CheckedUnix).UtcDateTime;
+                text += $" Last checked {DisplayTime.DateTimeText(t, zone)} {DisplayTime.Abbreviation(t, zone)}.";
+            }
+            if (s.WaitingForRestart)
+                text += $" Version {Day(s.DownloadedGenerated)} is downloaded and applies the next time Jimmy Next starts with no contest running.";
+            return text;
+        }
+
+        private void RefreshContests(bool refreshNow)
+        {
+            if (_contestInFlight) return;
+            _contestInFlight = true;
+            if (refreshNow) _contestStatusBox.Text = "Refreshing the contest calendar...";
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var result = _client.GetContestCalendar(refreshNow, out string error);
+                var rules = _client.GetContestRulesStatus(out _);
+                SafeBeginInvoke(() =>
+                {
+                    _contestInFlight = false;
+                    if (IsDisposed) return;
+                    var now = DateTime.UtcNow;
+                    var zone = DisplayTime.Zone;
+                    if (rules != null) _contestRulesText = RulesStatusText(rules, now, zone);
+                    var upcoming = (result?.Events ?? new List<ContestCalendarEvent>())
+                        .Where(e => DateTimeOffset.FromUnixTimeSeconds(e.EndUnix).UtcDateTime > now)
+                        .OrderBy(e => e.StartUnix).ToList();
+                    var rows = upcoming.Select(e => FormatContestRow(e, now, zone)).ToList();
+                    // Rebuilt only when something changed, so a screen reader is not interrupted.
+                    if (!rows.SequenceEqual(_contestList.Items.Cast<string>()))
+                    {
+                        int keep = _contestList.SelectedIndex;
+                        _contestList.BeginUpdate();
+                        try
+                        {
+                            _contestList.Items.Clear();
+                            _contestRows.Clear();
+                            foreach (var (row, ev) in rows.Zip(upcoming, (r, e) => (r, e))) { _contestList.Items.Add(row); _contestRows.Add(ev); }
+                        }
+                        finally { _contestList.EndUpdate(); }
+                        if (_contestList.Items.Count > 0) _contestList.SelectedIndex = Math.Max(0, Math.Min(keep, _contestList.Items.Count - 1));
+                    }
+                    string status = CalendarStatusText(result, error, now, zone) + (_contestRulesText.Length > 0 ? Environment.NewLine + _contestRulesText : "");
+                    if (_contestStatusBox.Text != status) _contestStatusBox.Text = status;
+                });
+            });
+        }
+
+        private void OpenContestDetails()
+        {
+            int i = _contestList.SelectedIndex;
+            if (i < 0 || i >= _contestRows.Count) { _contestStatusBox.Text = "Select a contest first."; return; }
+            string url = _contestRows[i].Url;
+            if (string.IsNullOrWhiteSpace(url) || !url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+            {
+                _contestStatusBox.Text = "This contest has no details link.";
+                return;
+            }
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (Exception ex) { _contestStatusBox.Text = $"Could not open the details page: {ex.Message}"; }
+        }
+
+        private void CheckContestRules()
+        {
+            _contestStatusBox.Text = "Checking for contest rules updates...";
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var before = _client.GetContestRulesStatus(out _);
+                var after = _client.CheckContestRules(out string error);
+                SafeBeginInvoke(() =>
+                {
+                    if (IsDisposed) return;
+                    var now = DateTime.UtcNow;
+                    string msg;
+                    if (error != null) msg = $"Rules check failed: {error}";
+                    else if (after.WaitingForRestart && after.DownloadedGenerated != before?.DownloadedGenerated)
+                        msg = "Newer contest rules downloaded. They apply the next time Jimmy Next starts with no contest running.";
+                    else if (after.WaitingForRestart) msg = "Newer contest rules are already downloaded and waiting for the next start.";
+                    else msg = "Contest rules are up to date.";
+                    if (after != null) _contestRulesText = RulesStatusText(after, now, DisplayTime.Zone);
+                    _contestStatusBox.Text = msg + (_contestRulesText.Length > 0 ? Environment.NewLine + _contestRulesText : "");
+                    // The answer to the operator's own button press: said once, focus comes back to the button.
+                    MessageBox.Show(this, msg, "Contest rules", MessageBoxButtons.OK, error != null ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
+                });
+            });
+        }
+
+        private TabPage BuildWhoHearsMeTab()
+        {
+            var page = MakeTabPage("Who Hears Me");
+
+            var top = new Panel { Dock = DockStyle.Top, Height = 30 };
+            _heardWindowCb = new ComboBox
+            {
+                Dock = DockStyle.Right,
+                Width = 140,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                AccessibleName = "Time window",
+                TabIndex = 1,
+            };
+            _heardWindowCb.Items.AddRange(new object[] { "Last 15 minutes", "Last 30 minutes" });
+            _heardWindowCb.SelectedIndex = 0;
+            _heardWindowCb.SelectedIndexChanged += (s, e) => RefreshWhoHearsMe();
+            _heardSummaryBox = new TextBox
+            {
+                Dock = DockStyle.Fill,
+                Multiline = true,
+                ReadOnly = true,
+                BorderStyle = BorderStyle.None,
+                BackColor = SystemColors.Control,
+                TabStop = true,
+                TabIndex = 0,
+                AccessibleName = "Summary",
+                Text = "Loading...",
+            };
+            top.Controls.Add(_heardSummaryBox);
+            top.Controls.Add(_heardWindowCb);
+
+            _heardList = MakeListBox("Stations list");
+            _heardList.TabIndex = 2;
+
+            var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
+            _heardStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
+            var refreshBtn = MakeRefreshButton((s, e) => RefreshWhoHearsMe(), "Refresh who hears me now");
+            refreshBtn.Dock = DockStyle.Right;
+            bottom.Controls.Add(_heardStatusLabel);
+            bottom.Controls.Add(refreshBtn);
+
+            page.Controls.Add(_heardList);
+            page.Controls.Add(top);
+            page.Controls.Add(bottom);
+            return page;
+        }
+
+        // One line per receiving station, every field labeled where it isn't obvious. An SNR the
+        // report didn't carry, and a distance without the station's grid, are said as unknown --
+        // never shown as 0. internal: JimmyTests exercises it.
+        internal static string FormatHeardMeRow(HeardMe h)
+        {
+            string grid = string.IsNullOrEmpty(h.Grid) ? "" : $" {h.Grid}";
+            string snr = h.Snr.HasValue ? $"{h.Snr.Value:+0;-0;0} dB" : "SNR not reported";
+            string where = string.IsNullOrEmpty(h.Grid) ? "distance unknown" : $"{h.Km:N0} km {h.Octant}";
+            return $"{h.Call}{grid}, {h.Band}, {snr}, {where}, {FormatAgeSecs(h.AgeSecs)}";
+        }
+
+        internal static string FormatHeardMeSummary(GettingOutResult r)
+        {
+            string window = $"in the last {r.WindowMinutes} minutes";
+            if (r.Count == 0) return $"No reports of your signal {window}.";
+            string who = r.Count == 1 ? "1 station heard you" : $"{r.Count} stations heard you";
+            return r.MaxKm > 0 ? $"{who} {window}, furthest {r.MaxKm:N0} km." : $"{who} {window}.";
+        }
+
+        private void RefreshWhoHearsMe()
+        {
+            if (_heardInFlight) return;
+            _heardInFlight = true;
+            int minutes = _heardWindowCb.SelectedIndex == 1 ? 30 : 15;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var result = _client.GetGettingOut(minutes, out string error);
+                SafeBeginInvoke(() =>
+                {
+                    _heardInFlight = false;
+                    if (IsDisposed) return;
+
+                    bool hadSelection = _heardList.SelectedIndex >= 0;
+                    _heardList.BeginUpdate();
+                    try
+                    {
+                        _heardList.Items.Clear();
+                        if (error == null && result?.Reports != null)
+                            foreach (var h in result.Reports) _heardList.Items.Add(FormatHeardMeRow(h));
+                    }
+                    finally
+                    {
+                        _heardList.EndUpdate();
+                    }
+                    SelectFirstItemIfNoneSelectedYet(_heardList, hadSelection);
+
+                    if (error != null)
+                    {
+                        _heardSummaryBox.Text = "";
+                        _heardStatusLabel.Text = $"(stale) -- {error}";
+                    }
+                    else if (result?.Error != null)
+                    {
+                        _heardSummaryBox.Text = "";
+                        _heardStatusLabel.Text = result.Error;
+                    }
+                    else
+                    {
+                        _heardSummaryBox.Text = FormatHeardMeSummary(result);
+                        string connected = result.Connected ? "PSK Reporter connected" : "PSK Reporter not connected";
+                        string last = result.LastEventAgeSecs != null ? $", last report {FormatAgeSecs(result.LastEventAgeSecs)}" : ", no reports yet";
+                        string covered = result.CoveredMinutes != null ? $" -- reports kept cover only the last {result.CoveredMinutes} minutes" : "";
+                        _heardStatusLabel.Text = connected + last + covered;
+                    }
+                });
+            });
+        }
+
         // ── DX Spots tab ─────────────────────────────────────────────────────────
 
         private TabPage BuildDxSpotsTab()
@@ -587,6 +939,25 @@ namespace WSJTX_Controller
             _wxMufValue = AddWxRow(panel, "Representative MUF (best long-haul):", ref y, lx, vx, fw, rh, ref tabIndex);
             _wxGScaleValue = AddWxRow(panel, "Geomagnetic storm (G-scale):", ref y, lx, vx, fw, rh, ref tabIndex);
             _wxSScaleValue = AddWxRow(panel, "Solar radiation storm (S-scale):", ref y, lx, vx, fw, rh, ref tabIndex);
+            // Solar wind from NOAA's DSCOVR feed, through Nexus's own fetcher (2026-10-04). The
+            // reading's own age is shown: a fetch that just worked can still carry an old reading.
+            _wxBzValue = AddWxRow(panel, "Solar wind Bz:", ref y, lx, vx, fw + 160, rh, ref tabIndex);
+            _wxWindValue = AddWxRow(panel, "Solar wind speed and density:", ref y, lx, vx, fw + 160, rh, ref tabIndex);
+            _wxWindAgeValue = AddWxRow(panel, "Solar wind reading:", ref y, lx, vx, fw + 160, rh, ref tabIndex);
+            // NOAA's daily solar indices, newest day first, one line per day.
+            panel.AutoScroll = true;
+            panel.Controls.Add(new Label { Text = "Daily solar history (newest first):", Location = new Point(lx, y + 6), AutoSize = true, TabStop = false });
+            y += rh;
+            _wxHistoryList = new ListBox
+            {
+                Location = new Point(lx, y + 2),
+                Size = new Size(vx + fw + 160 - lx, 120),
+                HorizontalScrollbar = true,
+                IntegralHeight = false,
+                TabIndex = tabIndex++,
+                AccessibleName = "Daily solar history",
+            };
+            panel.Controls.Add(_wxHistoryList);
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
             _wxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
@@ -639,10 +1010,14 @@ namespace WSJTX_Controller
             System.Threading.Tasks.Task.Run(() =>
             {
                 var result = _client.GetSpaceWx(out string error);
+                var wind = _client.GetSolarWind(out string windError);
+                var history = _client.GetSolarHistory(out string historyError);
                 SafeBeginInvoke(() =>
                 {
                     _wxInFlight = false;
                     if (IsDisposed) return;
+                    ShowSolarWind(wind, windError);
+                    ShowSolarHistory(history, historyError);
 
                     if (error != null || result?.Value == null)
                     {
@@ -705,6 +1080,64 @@ namespace WSJTX_Controller
                         : (result.AgeSecs != null ? $"As of {FormatAgeSecs(result.AgeSecs)}" : "");
                 });
             });
+        }
+
+        private void ShowSolarWind(SolarWindResult w, string error)
+        {
+            var (bz, wind, age) = FormatSolarWind(w, error);
+            _wxBzValue.Text = bz;
+            _wxWindValue.Text = wind;
+            _wxWindAgeValue.Text = age;
+        }
+
+        // Bz with its direction (southward -- negative -- is the one that disturbs the field);
+        // speed/density only when NOAA gave them; the reading's own age, flagged when Nexus calls
+        // it stale. internal: JimmyTests exercises it.
+        internal static (string bz, string wind, string age) FormatSolarWind(SolarWindResult w, string error)
+        {
+            if (error != null || w == null || w.BzNt == null)
+                return ("Unavailable", "Unavailable", error ?? w?.Error ?? "No reading yet");
+            float bz = w.BzNt.Value;
+            string dir = bz < 0 ? "southward" : bz > 0 ? "northward" : "neutral";
+            string bt = w.BtNt.HasValue ? $", total field {w.BtNt.Value:0.0} nT" : "";
+            string speed = w.SpeedKms.HasValue ? $"{w.SpeedKms.Value:0} km/s" : "speed not known";
+            string density = w.Density.HasValue ? $", {w.Density.Value:0.0} protons per cm³" : ", density not known";
+            string age = w.MeasuredAgeSecs.HasValue ? $"measured {FormatAgeSecs(w.MeasuredAgeSecs)}" : "measurement time not known";
+            if (w.Stale) age += " -- an old reading, not current conditions";
+            return ($"{bz:+0.0;-0.0;0.0} nT ({dir}){bt}", speed + density, age);
+        }
+
+        private void ShowSolarHistory(SolarHistoryResult h, string error)
+        {
+            bool hadSelection = _wxHistoryList.SelectedIndex >= 0;
+            var rows = FormatSolarHistory(h, error);
+            bool same = rows.Count == _wxHistoryList.Items.Count;
+            for (int i = 0; same && i < rows.Count; i++) same = (string)_wxHistoryList.Items[i] == rows[i];
+            if (same) return;   // unchanged: leave the list (and the reader's place in it) alone
+            _wxHistoryList.BeginUpdate();
+            try
+            {
+                _wxHistoryList.Items.Clear();
+                foreach (var r in rows) _wxHistoryList.Items.Add(r);
+            }
+            finally { _wxHistoryList.EndUpdate(); }
+            SelectFirstItemIfNoneSelectedYet(_wxHistoryList, hadSelection);
+        }
+
+        internal static System.Collections.Generic.List<string> FormatSolarHistory(SolarHistoryResult h, string error)
+        {
+            var rows = new System.Collections.Generic.List<string>();
+            if (error != null || h == null) { rows.Add("Unavailable: " + (error ?? "no data")); return rows; }
+            if (h.Days == null || h.Days.Length == 0) { rows.Add(h.Error != null ? "Unavailable: " + h.Error : "No data yet"); return rows; }
+            for (int i = h.Days.Length - 1; i >= 0; i--)
+            {
+                var d = h.Days[i];
+                string date = DateTimeOffset.FromUnixTimeSeconds(d.DayUnix).UtcDateTime.ToString("yyyy-MM-dd");
+                string sfi = d.Sfi.HasValue ? $"solar flux {d.Sfi.Value:0}" : "solar flux not reported";
+                string ssn = d.Ssn.HasValue ? $"sunspots {d.Ssn.Value:0}" : "sunspots not reported";
+                rows.Add($"{date}: {sfi}, {ssn}");
+            }
+            return rows;
         }
 
         // NOAA's own standard descriptor words for its 0-5 R/S/G scales (public, standard across

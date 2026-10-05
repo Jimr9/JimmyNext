@@ -376,10 +376,10 @@ struct Args {
     /// See `ptt_data_source` below for that. Jimmy's own Options > Radio tab is the accessible
     /// equivalent of WSJT-X's Radio tab "Mode" dropdown this maps to.
     plain_ssb_data_modes: bool,
-    /// When true, sets `Settings.ptt_data_source` -- WSJT-X-equivalent "Transmit Audio Source:
-    /// Data" (see that Settings field's own doc comment, and `rig::ptt_line` in Nexus). Off by
-    /// default, matching WSJT-X's own default; only relevant for a rig whose Hamlib backend
-    /// distinguishes mic/data PTT AND whose interface is wired to the rig's rear DATA/ACC port.
+    /// When true, Nexus's own "Transmit audio source (CAT PTT): Rear/Data" (#381, since Nexus
+    /// 1.16.0; was a Jimmy patch) -- see `tx_audio_source` below. Off by default, matching
+    /// WSJT-X's own default; only relevant for a rig whose interface is wired to the rig's rear
+    /// DATA/ACC port.
     /// Jimmy's own Options > Radio tab is the accessible equivalent of WSJT-X's Radio tab
     /// "Transmit Audio Source" Mic/Data radio buttons.
     ptt_data_source: bool,
@@ -1709,8 +1709,37 @@ fn handle_control_connection(
             // cell as {"DN43":"ID",...}, for Jimmy's logging: a heard grid that disagrees with the
             // callsign's mailing-address state leaves STATE blank rather than wrong.
             let _ = writeln!(stream, "{}", grid_states_json());
+        } else if line == "SOLAR_HISTORY" {
+            let _ = writeln!(stream, "{}", external_cache.solar_history_json());
+        } else if line == "SOLAR_WIND" {
+            let _ = writeln!(stream, "{}", external_cache.solar_wind_json());
+        } else if line == "CONTEST_CALENDAR" {
+            let _ = writeln!(stream, "{}", external_cache.contests_json());
+        } else if line == "CONTEST_CALENDAR_REFRESH" {
+            // A network read (up to 20 s): its own thread, like LOTW_DOWNLOAD.
+            let cache = external_cache.clone();
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                cache.refresh_contests();
+                let _ = writeln!(stream, "{}", cache.contests_json());
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            });
+            return;
+        } else if line == "CONTEST_RULES_STATUS" {
+            let _ = writeln!(stream, "{}", contest_bridge::rules_status_json(&contest_data_dir()));
+        } else if line == "CONTEST_RULES_CHECK" {
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                let _ = writeln!(stream, "{}", contest_bridge::rules_check(&contest_data_dir()));
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+            });
+            return;
         } else if line == "SPACE_WX" {
             let _ = writeln!(stream, "{}", external_cache.space_wx_json());
+        } else if let Some(v) = line.strip_prefix("GETTING_OUT") {
+            // "Who hears me?": cache-only, like BAND_CONDITIONS. Optional window in minutes.
+            let minutes = v.trim().parse::<i64>().unwrap_or(15);
+            let _ = writeln!(stream, "{}", live_feeds_cache.getting_out_json(minutes));
         } else if line == "BAND_CONDITIONS" {
             // Cache-only read (the rolling PSK Reporter window) + one PropAdvisor pass over up to
             // 13 bands -- cheap enough to run inline on this accept loop, same as SNAPSHOT/
@@ -1751,7 +1780,7 @@ fn handle_control_connection(
                 (Some(_), Err(e)) => { let _ = writeln!(stream, "ERR bad LOG_ROWS args: {e}"); }
                 (Some(_), Ok(a)) => { let _ = writeln!(stream, "{}", logbook_host::rows_json(&engine, &a)); }
             }
-        } else if let Some((name, json)) = ["LOG_EDIT ", "LOG_DELETE ", "LOG_IMPORT ", "LOG_MERGE ", "LOG_STAMP_UPLOAD "]
+        } else if let Some((name, json)) = ["LOG_EDIT ", "LOG_DELETE ", "LOG_IMPORT ", "LOG_MERGE ", "LOG_STAMP_UPLOAD ", "LOG_SET_EXTRA "]
             .iter()
             .find_map(|p| line.strip_prefix(p).map(|rest| (p.trim(), rest)))
         {
@@ -1764,6 +1793,7 @@ fn handle_control_connection(
                     "LOG_DELETE" => serde_json::from_str(json).map(|a| logbook_host::log_delete(host, &engine, a)).map_err(|e| e.to_string()),
                     "LOG_IMPORT" => serde_json::from_str(json).map(|a| logbook_host::log_import(host, &engine, a)).map_err(|e| e.to_string()),
                     "LOG_MERGE" => serde_json::from_str(json).map(|a| logbook_host::log_merge(host, &engine, a)).map_err(|e| e.to_string()),
+                    "LOG_SET_EXTRA" => serde_json::from_str(json).map(|a| logbook_host::log_set_extra(host, &engine, a)).map_err(|e| e.to_string()),
                     _ => serde_json::from_str(json).map(|a| logbook_host::log_stamp(host, &engine, a)).map_err(|e| e.to_string()),
                 },
             };
@@ -2095,6 +2125,14 @@ fn rig_name(model: u32) -> String {
     tempo_audio::rigmodels::rig_model_name(model).unwrap_or("").to_string()
 }
 
+/// Jimmy's "Transmit Audio Source: Data" as Nexus's own Rear/Data choice (#381, Nexus 1.16.0 --
+/// replaced Jimmy's tempo-audio-rig.patch). Nexus keys `T 3` (RIG_PTT_ON_DATA) only on a radio
+/// whose Hamlib driver has mic/data PTT (rigmodels::PTT_MIC_DATA_RIGS, which includes the
+/// TS-590S/SG); any other radio keys with plain `T 1`, as before the option existed.
+fn tx_audio_source(data: bool) -> String {
+    if data { tempo_app::settings::TX_AUDIO_REAR } else { tempo_app::settings::TX_AUDIO_FRONT }.to_string()
+}
+
 fn with_radio_settings(current: &Settings, a: &ApplyRadioArgs) -> Settings {
     let mut s = current.clone();
     s.audio_in = a.audio_in.clone();
@@ -2109,15 +2147,13 @@ fn with_radio_settings(current: &Settings, a: &ApplyRadioArgs) -> Settings {
     s.rigctld_port = a.rigctld_port;
     s.data_modes_plain_ssb = a.plain_ssb_data_modes;
     s.dont_set_mode = a.dont_set_mode;
-    s.ptt_data_source = a.ptt_data_source;
+    s.tx_audio_source = tx_audio_source(a.ptt_data_source);
     s.ptt_serial_port = a.ptt_serial_port.clone();
     s.split_mode = match a.split_mode.as_str() {
         "rig" => tempo_app::settings::SplitMode::Rig,
         "fakeit" => tempo_app::settings::SplitMode::FakeIt,
         _ => tempo_app::settings::SplitMode::None,
     };
-    // JIMMY COMPAT: RFPOWER never-touch, unconditionally -- a settings save can never turn it off.
-    s.disable_rfpower_probe = true;
     s
 }
 
@@ -2140,6 +2176,8 @@ fn main() {
     // could itself fault runs unprotected.
     #[cfg(windows)]
     crashlog::install();
+    // Contest rules: a downloaded file, before anything reads the rules table (2026-10-05).
+    contest_bridge::install_rules_at_startup(&contest_data_dir());
 
     // Not part of the continuous-service contract -- a quick, side-effect-free query mode so
     // Jimmy's Options dialog can populate its audio-device pickers without needing its own
@@ -2220,7 +2258,7 @@ fn main() {
         audio_out: args.output_device.clone().unwrap_or_default(),
         auto_log: false, // Jimmy owns logbook writes; the native engine must never double-log.
         data_modes_plain_ssb: args.plain_ssb_data_modes,
-        ptt_data_source: args.ptt_data_source,
+        tx_audio_source: tx_audio_source(args.ptt_data_source),
         pskreporter: args.pskreporter,
         dont_set_mode: args.dont_set_mode,
         ptt_serial_port: args.ptt_serial_port.clone(),
@@ -2273,16 +2311,12 @@ fn main() {
     };
     settings.wsjtx_udp = true;
     settings.wsjtx_udp_addr = args.jimmy_addr.clone();
-    // JIMMY COMPAT (nexus-compat patch tempo-audio-*): RFPOWER never-touch, always on,
-    // unconditionally -- not operator-configurable, no CLI flag. Set on BOTH Settings (so the
-    // per-tick Transport::from_settings rebuild keeps re-stamping the Rig-level chokepoint after
-    // any CAT reopen) and RadioConfig below (the startup seed + the RadioLoop lifetime mirror
-    // that gates the loop's own three RFPOWER call sites). Reading RFPOWER on a freshly-spawned
-    // rigctld can trip a destructive calibration-sweep bug in Hamlib's Kenwood backend
-    // (Hamlib/Hamlib#1595) on first touch; more broadly, Jimmy's policy is that a read must
-    // never be able to change anything on the radio, and the engine never adjusts the
-    // operator's transmit drive. Safe telemetry meters (watts/SWR/ALC/COMP) are unaffected.
-    settings.disable_rfpower_probe = true;
+    // RFPOWER: Nexus's own protection since 1.16.0 (operator, 2026-10-04: try the upstream
+    // approach; Jimmy's never-touch patch is retired). The power READ is never sent on the
+    // models whose Hamlib read writes the radio's power (rigmodels::hamlib_never_send -- the
+    // Kenwood family, TS-590S/SG included; Hamlib/Hamlib#1595). Nexus WRITES power only from
+    // settings Jimmy never sets: an operator power level, a per-mode cap below 100% (none for
+    // digital by default) and Tune power (None = never touch the operator's power).
 
     // Decode tab settings -- `if let Some` rather than folding these into the struct literal
     // above so an operator who hasn't touched Options at all gets Nexus's own Settings::default()
@@ -2444,17 +2478,8 @@ fn main() {
         wsjtx_addr: args.jimmy_addr,
         audio_in: args.device.unwrap_or_default(),
         audio_out: args.output_device.unwrap_or_default(),
-        ptt_data_source: args.ptt_data_source,
+        tx_audio_source: tx_audio_source(args.ptt_data_source),
         pskreporter: args.pskreporter,
-        // JIMMY COMPAT (nexus-compat patch tempo-audio-telemetry.patch): never let the radio
-        // loop's own routine telemetry poll issue an RFPOWER read at all. Always on,
-        // unconditionally -- not operator-configurable, no CLI flag -- because reading RFPOWER
-        // on a freshly-spawned rigctld process can trip a destructive calibration-sweep bug in
-        // Hamlib's Kenwood backend (Hamlib/Hamlib#1595) on first touch, dropping the operator's
-        // actual transmit power (confirmed live, twice, 2026-08-20). Jimmy's own policy is that
-        // a read must never be able to change anything on the radio -- see nexus-compat/
-        // README.md for the full story and what to do if a future Nexus revision obsoletes this.
-        disable_rfpower_probe: true,
         // RadioConfig has no ptt_serial_port field -- Transport::from_cfg (tempo-audio/service.rs)
         // deliberately seeds it empty regardless (it's a GLOBAL keying-line setting the live
         // per-tick Transport::from_settings rebuild supplies instead); Settings.ptt_serial_port
@@ -2561,23 +2586,20 @@ mod tests {
     }
 
     // APPLY_SETTINGS replaces only the radio/audio fields: everything changed live since launch
-    // (here the dial, decode depth and PSK Reporter) survives, and RFPOWER stays suppressed even
-    // if the current settings somehow had it off.
+    // (here the dial, decode depth and PSK Reporter) survives.
     #[test]
     fn apply_settings_changes_only_the_radio_fields() {
         let mut current = Settings::default();
         current.dial_mhz = 7.074;
         current.decode_depth = 1;
         current.pskreporter = true;
-        current.disable_rfpower_probe = false;
         let next = with_radio_settings(&current, &radio_args());
         assert_eq!(next.rig_model, 3073);
         assert_eq!(next.serial_port, "COM7");
         assert_eq!(next.ptt_method, "cat");
         assert_eq!(next.audio_in, "USB Audio CODEC");
-        assert!(next.dont_set_mode && next.ptt_data_source);
+        assert!(next.dont_set_mode && tempo_app::settings::tx_audio_source_is_rear(&next.tx_audio_source));
         assert!(matches!(next.split_mode, tempo_app::settings::SplitMode::FakeIt));
-        assert!(next.disable_rfpower_probe, "a settings save can never turn RFPOWER protection off");
         assert_eq!(next.dial_mhz, 7.074, "the dial the operator is on is kept");
         assert_eq!(next.decode_depth, 1);
         assert!(next.pskreporter);
@@ -2597,7 +2619,6 @@ mod tests {
         assert_eq!(rig_name(2037), "Kenwood TS-590SG");
         assert_eq!(rig_name(999_999), "", "an unknown model stamps nothing");
         assert_eq!(eng.settings().rigctld_port, 4540);
-        assert!(eng.settings().disable_rfpower_probe);
         assert_eq!(eng.settings().dial_mhz, before_dial);
         assert_eq!(eng.settings().mycall, "KB0UZT", "identity is not part of APPLY_SETTINGS");
     }

@@ -1,8 +1,8 @@
 diff --git a/src/service.rs b/src/service.rs
-index 1c08464d..f4b78711 100644
+index abc8c1ce..42f0d440 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -973,6 +973,75 @@ const CAT_PORT_CHECK_MS: f64 = 10_000.0;
+@@ -1068,6 +1068,75 @@ const CAT_PORT_CHECK_MS: f64 = 10_000.0;
  /// CI-V, which respawns its engine every tick) came straight back.
  const CAT_REOPEN_RETRY_MS: f64 = 10_000.0;
  const CAT_REOPEN_MAX_MS: f64 = 300_000.0;
@@ -78,57 +78,7 @@ index 1c08464d..f4b78711 100644
  /// Hamlib func tokens for the Expert DSP toggles, in the engine's
  /// `[nb, nr, notch, comp, vox, manual_notch]` order.
  ///
-@@ -1238,6 +1307,18 @@ pub struct RadioConfig {
-     pub tx_level: f32,
-     /// RX capture gain (≥1.0) applied to received audio before decode.
-     pub rx_gain: f32,
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X-equivalent "Transmit Audio
-+    /// Source: Data" (see `rig::ptt_line`'s doc comment) — operator-configured, off by default.
-+    /// Only meaningful for CAT PTT on a rig whose Hamlib backend supports the mic/data
-+    /// distinction AND whose interface is wired to the rig's rear DATA/ACC port.
-+    pub ptt_data_source: bool,
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch, Layer 2. When
-+    /// true, the radio loop never issues an RFPOWER drive read/write from ANY of its own call
-+    /// sites (heavy telemetry poll, per-mode power ceiling, Tune power) — belt to the Layer-1
-+    /// `Rig` chokepoint's braces. Off by default (unchanged upstream behavior); Jimmy always
-+    /// sets it on. Safe telemetry meters (`RFPOWER_METER_WATTS`/`SWR`/`ALC`/`COMP_METER`) are
-+    /// unaffected.
-+    pub disable_rfpower_probe: bool,
- }
- 
- impl Default for RadioConfig {
-@@ -1275,6 +1356,8 @@ impl Default for RadioConfig {
-             audio_out: String::new(),
-             tx_level: 0.9,
-             rx_gain: 1.0,
-+            ptt_data_source: false,
-+            disable_rfpower_probe: false,
-         }
-     }
- }
-@@ -2014,6 +2097,11 @@ impl Transport {
-             monitor_enabled: false,
-             monitor_device: String::new(),
-             monitor_level: 0.5,
-+            // A monitor radio is read-only (`PttMode::Vox`, never keys) — so mic/data PTT is
-+            // moot, and it must never emit an RFPOWER drive read/write either (JIMMY COMPAT,
-+            // nexus-compat: belt-and-suspenders — the monitor path only ever reads the dial).
-+            ptt_data_source: false,
-+            disable_rfpower_probe: true,
-         }
-     }
- }
-@@ -2075,6 +2163,9 @@ fn open_read_only(
-             rig.set_slow_transport(
-                 network || native_civ_addr(t).is_some() || t.is_slow_serial_link(),
-             );
-+            // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): stamp the RFPOWER
-+            // never-touch chokepoint on the monitor rig too — `from_profile` forces it on.
-+            rig.set_rfpower_suppressed(t.disable_rfpower_probe);
-             let ok = probe_cat(&mut rig, t).ok;
-             (rig, Some(proc), ok)
-         }
-@@ -3318,9 +3409,21 @@ struct RadioLoop {
+@@ -3434,9 +3503,21 @@ struct RadioLoop {
      /// those readers is the no-RF watch, which must never judge an over whose carrier is
      /// intermittent. See [`Self::rf_watchable`].
      cur_section_cw: bool,
@@ -153,21 +103,7 @@ index 1c08464d..f4b78711 100644
      /// An audio Rig-mode split engaged VFO B for an over — tear the rig split
      /// down once no over is pending (unless the cluster split owns VFO B).
      audio_rig_split: bool,
-@@ -3528,6 +3631,13 @@ struct RadioLoop {
-     level_supported: [Option<bool>; N_LEVELS],
-     /// Consecutive get-miss counters per extended level — same tolerance as `smeter_misses`.
-     level_misses: [u8; N_LEVELS],
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch, Layer 2 —
-+    /// mirrors `RadioConfig::disable_rfpower_probe` for this loop's whole lifetime. Gates the
-+    /// three RFPOWER drive call sites in this file (heavy telemetry poll `l RFPOWER`, per-mode
-+    /// power-ceiling `set_power`, Tune-power `set_power`) so the loop never even forms an
-+    /// RFPOWER drive command. The Layer-1 `Rig` chokepoint (rig.rs) is the belt to this
-+    /// suspenders; safe telemetry meters are untouched by both.
-+    disable_rfpower_probe: bool,
-     /// Per-TRANSMIT-meter capability, indexed by [`TX_METERS`] — the `level_supported` ladder,
-     /// and the ONE poll in this loop that had never had it.
-     ///
-@@ -3755,7 +3865,9 @@ impl RadioLoop {
+@@ -3881,7 +3962,9 @@ impl RadioLoop {
              cur_dial: 0,
              cur_md: String::new(),
              cur_section_cw: false,
@@ -178,15 +114,7 @@ index 1c08464d..f4b78711 100644
              audio_rig_split: false,
              rig_split_restore: None,
              split_detect: None,
-@@ -3807,6 +3919,7 @@ impl RadioLoop {
-             meter_feed: cfg.meter_feed.clone(),
-             level_supported: [None; N_LEVELS],
-             level_misses: [0; N_LEVELS],
-+            disable_rfpower_probe: cfg.disable_rfpower_probe,
-             tx_meter_supported: [None; N_TX_METERS],
-             tx_meter_misses: [0; N_TX_METERS],
-             tx_meter_retry_at: [0; N_TX_METERS],
-@@ -4810,11 +4923,184 @@ impl RadioLoop {
+@@ -4938,11 +5021,184 @@ impl RadioLoop {
                  if mode_changed { ", mode changed" } else { "" }
              ));
              self.last_dial = dial;
@@ -371,7 +299,7 @@ index 1c08464d..f4b78711 100644
      /// May the loop START a transmission on the active `rig` this tick?
      ///
      /// `false` in the two windows where the `Rig` handle the loop is holding is NOT the
-@@ -5066,6 +5352,10 @@ impl RadioLoop {
+@@ -5202,6 +5458,10 @@ impl RadioLoop {
                      dial as f64 / 1e6
                  ));
                  self.last_dial = dial;
@@ -382,7 +310,7 @@ index 1c08464d..f4b78711 100644
                  self.dial_fail_count = 0;
                  // ⚠️ CLEAR THE GIVE-UP ONLY FOR THE DIAL THAT WAS GIVEN UP ON. This used to clear
                  // on ANY success, which means an HF-only rig that refused 144.390 forgot the
-@@ -5128,6 +5418,12 @@ impl RadioLoop {
+@@ -5264,6 +5524,12 @@ impl RadioLoop {
                      let mut eng = engine_lock(engine);
                      if let Some(hz) = healed {
                          self.last_dial = hz;
@@ -395,7 +323,7 @@ index 1c08464d..f4b78711 100644
                          eng.observe_rig_freq(hz);
                      }
                      eng.set_rig_refused_dial(Some(mhz));
-@@ -5296,7 +5592,11 @@ impl RadioLoop {
+@@ -5432,7 +5698,11 @@ impl RadioLoop {
          self.af_gain_giveup = None;
          self.rf_gain_giveup = None;
          self.squelch_giveup = None;
@@ -408,7 +336,7 @@ index 1c08464d..f4b78711 100644
          self.audio_rig_split = false;
          self.rig_split_restore = None; // the OLD radio's split is not the new one's to restore
          self.last_rig_poll = 0.0; // poll the new rig's health/mode/S-meter immediately
-@@ -6928,7 +7228,17 @@ impl RadioLoop {
+@@ -7069,7 +7339,17 @@ impl RadioLoop {
                                  );
                              }
                          }
@@ -427,23 +355,7 @@ index 1c08464d..f4b78711 100644
                              self.last_dial = hz;
                              {
                                  let mut eng = engine_lock(engine);
-@@ -7007,7 +7317,14 @@ impl RadioLoop {
-                         // one — the K4 via QK4 Remote — doesn't time out and drop+reconnect the CAT
-                         // socket every poll. Only AFTER the dial probe answered, so a half-open link
-                         // can't eat a SECOND 2.5 s timeout on the same dead poll.
--                        if self.level_supported[LVL_RFPOWER] != Some(false) && have_budget() {
-+                        // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER
-+                        // never-touch, Layer 2 — the loop never forms the `l RFPOWER` drive
-+                        // read when suppressed (Layer 1 in rig.rs would refuse it anyway).
-+                        // The mic-gain / NR / AGC / COMP mirrors below are untouched.
-+                        if !self.disable_rfpower_probe
-+                            && self.level_supported[LVL_RFPOWER] != Some(false)
-+                            && have_budget()
-+                        {
-                             let ok = match rig.read_level("RFPOWER") {
-                                 Ok(frac) => {
-                                     // A reading this low is either a transmitter that will put
-@@ -7765,7 +8082,10 @@ impl RadioLoop {
+@@ -7949,7 +8229,10 @@ impl RadioLoop {
                          eng.remote_observe_cat(remote_read.as_ref(), Some(true));
                          eng.remote_observe_dial(remote_read.as_ref(), Some(hz));
                      }
@@ -455,33 +367,7 @@ index 1c08464d..f4b78711 100644
                          self.last_dial = hz;
                          {
                              let mut eng = engine_lock(engine);
-@@ -9472,12 +9792,19 @@ impl RadioLoop {
-                 let transmitting = self.tx_until_ms.is_some() || self.manual_ptt_applied;
-                 let changed_or_forced = force || Some(p) != self.last_rf_power;
-                 let giveup_blocked = self.rf_power_giveup == Some(p);
--                if should_command_rf_power(
--                    self.tuning_keyed,
--                    transmitting,
--                    changed_or_forced,
--                    giveup_blocked,
--                ) {
-+                // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch,
-+                // Layer 2 — the per-mode power-ceiling write is one of the two `L RFPOWER`
-+                // drive paths new since Jimmy's old Nexus baseline. Suppressed = never form it
-+                // (Layer 1 in rig.rs would no-op it anyway; upstream #126's own mid-over gate
-+                // on `transmitting` is orthogonal and still applies). Operator sets power on rig.
-+                if !self.disable_rfpower_probe
-+                    && should_command_rf_power(
-+                        self.tuning_keyed,
-+                        transmitting,
-+                        changed_or_forced,
-+                        giveup_blocked,
-+                    )
-+                {
-                     // ⚠️ THE ONE TRACE THAT WOULD HAVE ANSWERED THE FIELD REPORT. An operator
-                     // reporting the rig's power moving under them (KD9WES, FTDX-101D) sent two
-                     // machines' worth of symptoms and there was nothing on either to look at:
-@@ -9979,18 +10306,57 @@ impl RadioLoop {
+@@ -10297,18 +10580,57 @@ impl RadioLoop {
          // was not counted as a live over. Every other end-of-over site in this loop pairs
          // `tuning_keyed` with `tx_until_ms` — this was the one that did not.
          //
@@ -549,21 +435,7 @@ index 1c08464d..f4b78711 100644
              if self.audio_rig_split {
                  self.audio_rig_split = false;
                  // The cluster SPLIT-on-Work owns VFO B when active — leave it.
-@@ -10227,7 +10593,12 @@ impl RadioLoop {
-                     d.set_scope_enabled(false);
-                     d.set_data_mode(true);
-                 }
--                if let Some(p) = tune_power {
-+                // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch,
-+                // Layer 2 — Tune-power is the second new `L RFPOWER` drive path. Suppressed =
-+                // the tune keys at whatever level the operator has the rig set to (Layer 1 in
-+                // rig.rs would no-op the write anyway). Carrier reliability is unaffected: this
-+                // only skips a CAT write, it does not change the chunk-fed tune loop.
-+                if let Some(p) = tune_power.filter(|_| !self.disable_rfpower_probe) {
-                     tempo_core::applog::info(
-                         "cat",
-                         &format!(
-@@ -10570,8 +10941,14 @@ impl RadioLoop {
+@@ -10888,8 +11210,14 @@ impl RadioLoop {
                          // move the TX dial before the carrier keys (same as the
                          // boundary path).
                          let split = crate::slot::apply_tx_dial_shift(&mut eng, rig);
@@ -580,7 +452,7 @@ index 1c08464d..f4b78711 100644
                          }
                          if split.rig_split_engaged {
                              self.audio_rig_split = true;
-@@ -11189,8 +11566,15 @@ impl RadioLoop {
+@@ -11507,8 +11835,15 @@ impl RadioLoop {
              // disconnect fail-safe can't race the fresh key-up.
              self.publish_tx_intent_now();
          }
@@ -598,7 +470,7 @@ index 1c08464d..f4b78711 100644
          }
          if action.rig_split_engaged {
              self.audio_rig_split = true;
-@@ -11340,7 +11724,14 @@ impl RadioLoop {
+@@ -11658,7 +11993,14 @@ impl RadioLoop {
                      // T/R period (s), mode-driven: FT1 = 4, FT4 ≈ 8, FT8/DX1 = 15.
                      tr_period: eng.active_slot_secs().round() as u32,
                      config_name: "Default",
@@ -614,55 +486,7 @@ index 1c08464d..f4b78711 100644
                  });
                  if let Some(fd) = snap.field_day.as_ref() {
                      if fd.qso_count > station.last_fd_qsos {
-@@ -12265,6 +12656,15 @@ struct Transport {
-     monitor_enabled: bool,
-     monitor_device: String,
-     monitor_level: f32,
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): see `RadioConfig::ptt_data_source`.
-+    /// Threaded through so the per-tick `from_settings` rebuild keeps it and `finish_cat_open`
-+    /// re-stamps the Rig on every open/reopen.
-+    ptt_data_source: bool,
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): see
-+    /// `RadioConfig::disable_rfpower_probe`. Carried here (not just on the startup `RadioConfig`)
-+    /// so the per-tick `from_settings` rebuild keeps it — otherwise the first transport rebuild
-+    /// after launch would re-open the Rig with the chokepoint OFF.
-+    disable_rfpower_probe: bool,
- }
- 
- impl Transport {
-@@ -12312,6 +12712,8 @@ impl Transport {
-             monitor_enabled: false,
-             monitor_device: String::new(),
-             monitor_level: 0.5,
-+            ptt_data_source: c.ptt_data_source,
-+            disable_rfpower_probe: c.disable_rfpower_probe,
-         }
-     }
- 
-@@ -12365,6 +12767,8 @@ impl Transport {
-             monitor_enabled: s.monitor_enabled,
-             monitor_device: s.monitor_device.clone(),
-             monitor_level: s.monitor_level,
-+            ptt_data_source: s.ptt_data_source,
-+            disable_rfpower_probe: s.disable_rfpower_probe,
-         }
-     }
- 
-@@ -13281,6 +13685,13 @@ fn rigctld_launch_failed_for(mac: bool, e: &std::io::Error) -> String {
- /// silently resurrects one of them (the tests exercise the coexist branch; this shared
- /// seam is what makes them cover the spawn branch by construction).
- fn finish_cat_open(rig: &mut Rig, t: &Transport) -> CatProbe {
-+    // JIMMY COMPAT (see EngineHost/nexus-compat/README.md): the single shared tail of every
-+    // CAT open/reopen/recovery is the one place to STAMP per-rig policy so it can never be
-+    // bypassed by a freshly-constructed `Rig` — DATA/ACC PTT source, and the RFPOWER
-+    // never-touch chokepoint (Layer 1). Both are read off the `Transport`, which the per-tick
-+    // `from_settings` rebuild keeps current. Stamped BEFORE `probe_cat`'s first read.
-+    rig.set_ptt_data_source(t.ptt_data_source);
-+    rig.set_rfpower_suppressed(t.disable_rfpower_probe);
-     // READ-ONLY LAUNCH (operator-approved): the open no longer commands the rig.
-     // The set_freq/set_mode that lived here for every session before 2026-07-21 are
-     // deleted — the probe below READS the rig's own dial+mode and that read seeds the
-@@ -25838,7 +26249,13 @@ mod tests {
+@@ -28314,7 +28656,13 @@ mod tests {
  
          // ⚠️ POSITIVE CONTROL: with no carrier up, an outstanding restore DOES get written —
          // otherwise the assertion below would pass against a scene where nothing was pending.
@@ -677,7 +501,7 @@ index 1c08464d..f4b78711 100644
          let mark = log.lock().unwrap().len();
          run(&mut state, &mut rig, 0.0);
          assert!(
-@@ -25856,7 +26273,11 @@ mod tests {
+@@ -28332,7 +28680,11 @@ mod tests {
          engine.lock().unwrap().set_tune(true);
          run(&mut state, &mut rig, 200.0);
          assert!(state.tuning_keyed, "control: the tune keyed");
@@ -690,7 +514,7 @@ index 1c08464d..f4b78711 100644
          let mark = log.lock().unwrap().len();
          for i in 1..5 {
              run(&mut state, &mut rig, 200.0 + f64::from(i) * 20.0);
-@@ -25869,11 +26290,351 @@ mod tests {
+@@ -28345,11 +28697,351 @@ mod tests {
              log.lock().unwrap()
          );
          assert!(
@@ -1043,7 +867,7 @@ index 1c08464d..f4b78711 100644
      /// ⭐ TUNE POWER: a tune-up keys at its own level, and the operator's level comes back on
      /// EVERY exit path — including the ones that never reach the tune-release branch.
      ///
-@@ -26288,6 +27049,250 @@ mod tests {
+@@ -28764,6 +29456,63 @@ mod tests {
          );
      }
  
@@ -1055,193 +879,6 @@ index 1c08464d..f4b78711 100644
 +        let mut cfg = RadioConfig::default();
 +        mutate(&mut cfg);
 +        RadioLoop::new(Transport::from_cfg(&cfg), None, &cfg)
-+    }
-+
-+    /// Both transport builders carry the DATA/ACC-PTT and RFPOWER-suppression flags, so the
-+    /// per-tick `from_settings` rebuild keeps re-stamping the Rig and a reopen never loses them.
-+    #[test]
-+    fn jimmy_compat_transport_threads_ptt_data_source_and_rfpower_suppression() {
-+        let mut s = test_settings();
-+        s.ptt_data_source = true;
-+        s.disable_rfpower_probe = true;
-+        let t = Transport::from_settings(&s);
-+        assert!(t.ptt_data_source, "from_settings must carry ptt_data_source");
-+        assert!(t.disable_rfpower_probe, "from_settings must carry disable_rfpower_probe");
-+
-+        let cfg = RadioConfig {
-+            ptt_data_source: true,
-+            disable_rfpower_probe: true,
-+            ..RadioConfig::default()
-+        };
-+        let tc = Transport::from_cfg(&cfg);
-+        assert!(tc.ptt_data_source && tc.disable_rfpower_probe, "from_cfg must carry both");
-+    }
-+
-+    /// `finish_cat_open` is the single shared tail of every CAT open/reopen/recovery — it must
-+    /// STAMP the Rig with the DATA-PTT source and the RFPOWER never-touch chokepoint before the
-+    /// first read, so no freshly-built `Rig` can bypass policy.
-+    #[test]
-+    fn jimmy_compat_finish_cat_open_stamps_data_ptt_and_rfpower_suppression() {
-+        let (addr, log) = mock_rigctld_on(14_074_000, false);
-+        let mut t = cat_transport(4599, None);
-+        t.disable_rfpower_probe = true;
-+        t.ptt_data_source = true;
-+        let mut rig = Rig::rigctld(&addr);
-+        let _ = finish_cat_open(&mut rig, &t);
-+
-+        // RFPOWER drive: read refused, write silently no-op — nothing on the wire.
-+        assert!(rig.read_level("RFPOWER").is_err(), "l RFPOWER must be refused after the stamp");
-+        assert!(rig.set_power(0.4).is_ok(), "set_power must be a silent Ok after the stamp");
-+        // DATA-PTT: a CAT key emits T 3, an unkey T 0 — never T 1.
-+        let mark = log.lock().unwrap().len();
-+        let _ = rig.ptt(true);
-+        let _ = rig.ptt(false);
-+        let wire = log.lock().unwrap()[mark..].to_vec();
-+        assert!(wire.iter().any(|l| l == "T 3"), "DATA-source key must be T 3: {wire:?}");
-+        assert!(wire.iter().any(|l| l == "T 0"), "unkey must be T 0: {wire:?}");
-+        assert!(!wire.iter().any(|l| l == "T 1"), "a DATA-source rig must never emit T 1: {wire:?}");
-+        assert!(
-+            !wire.iter().any(|l| l == "l RFPOWER" || l.starts_with("L RFPOWER")),
-+            "no RFPOWER drive command may reach the wire: {wire:?}"
-+        );
-+    }
-+
-+    /// The radio loop's OWN three RFPOWER drive call sites (heavy telemetry poll `l RFPOWER`,
-+    /// per-mode power ceiling, Tune power) never form a command when the probe is disabled —
-+    /// Layer 2, belt to the Rig chokepoint's braces. Positive control: with the flag OFF the
-+    /// heavy poll DOES issue `l RFPOWER`, so this is measuring the gate, not a dead path.
-+    #[test]
-+    fn jimmy_compat_disable_rfpower_probe_keeps_all_rfpower_drive_off_the_wire() {
-+        let drive_cmds = |suppress: bool| -> Vec<String> {
-+            let engine = Arc::new(Mutex::new(Engine::new("W9XYZ", "EN37", 0)));
-+            {
-+                let mut e = engine.lock().unwrap();
-+                let mut s = e.settings().clone();
-+                s.tune_power_pct = Some(10); // arm the Tune-power write path too
-+                e.apply_settings(s);
-+                e.set_rf_power(0.8);
-+            }
-+            let (addr, log) = mock_rigctld_on(14_074_000, false);
-+            let mut rig = Rig::rigctld(&addr);
-+            let mut backend = MockBackend::new();
-+            let mut state = loop_state_cfg(|c| c.disable_rfpower_probe = suppress);
-+            let (sinks, mut ra, mut rr) = (no_sinks(), mock_reopen_audio(), mock_reopen_rig());
-+            let mut station = StationSinks::new();
-+            let mut run = |state: &mut RadioLoop, rig: &mut Rig, t: f64| {
-+                state
-+                    .step(&engine, &mut backend, rig, &sinks, t, &mut ra, &mut rr, &mut station)
-+                    .unwrap();
-+            };
-+            let mark = log.lock().unwrap().len();
-+            run(&mut state, &mut rig, 0.0);
-+            run(&mut state, &mut rig, 1_000.0); // force a heavy telemetry poll
-+            engine.lock().unwrap().set_tune(true);
-+            run(&mut state, &mut rig, 1_020.0); // key a tune → Tune-power write path
-+            for i in 1..6 {
-+                run(&mut state, &mut rig, 1_020.0 + f64::from(i) * 20.0);
-+            }
-+            let out: Vec<String> = log.lock().unwrap()[mark..]
-+                .iter()
-+                .filter(|l| l.as_str() == "l RFPOWER" || l.starts_with("L RFPOWER"))
-+                .cloned()
-+                .collect();
-+            out
-+        };
-+        assert_eq!(
-+            drive_cmds(true),
-+            Vec::<String>::new(),
-+            "suppressed: NOTHING RFPOWER-drive may reach rigctld from any loop call site"
-+        );
-+        assert!(
-+            !drive_cmds(false).is_empty(),
-+            "positive control: with the flag off the loop DOES touch RFPOWER drive"
-+        );
-+    }
-+
-+    /// JIMMY COMPAT (Nexus 44bca866 -> 93b9f012 audit): zero `L RFPOWER`/`l RFPOWER` drive
-+    /// commands reach the wire while `disable_rfpower_probe` is set, AND normal TX meter
-+    /// telemetry (SWR/ALC/RFPOWER_METER_WATTS/COMP_METER) keeps flowing at the same time — the
-+    /// suppression must be an exact-token chokepoint, never a blanket "no RFPOWER-adjacent
-+    /// traffic" one. Run long enough (matching
-+    /// `a_tune_carrier_keeps_the_transmit_meters_while_the_lead_is_healthy`'s cadence) for the
-+    /// round-robin meter poll to actually cycle, not just for the absence check to trivially
-+    /// pass on a short run that never touched a meter at all.
-+    #[test]
-+    fn jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow() {
-+        let engine = Arc::new(Mutex::new(Engine::new("W9XYZ", "EN37", 0)));
-+        {
-+            let mut e = engine.lock().unwrap();
-+            let mut s = e.settings().clone();
-+            s.tune_power_pct = Some(10); // arm the Tune-power write path too
-+            e.apply_settings(s);
-+            e.set_rf_power(0.8);
-+            e.set_tx_enabled(true);
-+            e.set_tune(true);
-+        }
-+        let (addr, log) = mock_rigctld_on(14_074_000, false);
-+        let mut rig = Rig::rigctld(&addr);
-+        let mut backend = MockBackend::new();
-+        let mut state = loop_state_cfg(|c| c.disable_rfpower_probe = true);
-+        let (sinks, mut ra, mut rr) = (no_sinks(), mock_reopen_audio(), mock_reopen_rig());
-+        let mut station = StationSinks::new();
-+        let mut run = |state: &mut RadioLoop, rig: &mut Rig, t: f64| {
-+            state
-+                .step(&engine, &mut backend, rig, &sinks, t, &mut ra, &mut rr, &mut station)
-+                .unwrap();
-+        };
-+        let mut t = 0.0;
-+        for _ in 0..3 {
-+            t += 50.0;
-+            run(&mut state, &mut rig, t);
-+        }
-+        assert!(state.tuning_keyed, "control: the tune must actually be keyed");
-+        let mark = log.lock().unwrap().len();
-+        for _ in 0..20 {
-+            t += 50.0;
-+            run(&mut state, &mut rig, t);
-+        }
-+        let wire = log.lock().unwrap()[mark..].to_vec();
-+        assert!(
-+            !wire.iter().any(|l| l == "l RFPOWER" || l.starts_with("L RFPOWER")),
-+            "suppressed: NOTHING RFPOWER-drive may reach rigctld during a Tune carrier: {wire:?}"
-+        );
-+        assert!(
-+            ["l SWR", "l ALC", "l RFPOWER_METER_WATTS", "l COMP_METER"]
-+                .iter()
-+                .any(|m| wire.iter().any(|l| l == m)),
-+            "safe TX meter telemetry must keep flowing while RFPOWER drive is suppressed: {wire:?}"
-+        );
-+
-+        // Survives CAT reconnect/reopen and any newly constructed Rig: `finish_cat_open` is the
-+        // single funnel every open/reopen/recovery path uses (see the README's "Audited upgrade"
-+        // section) — stamp two INDEPENDENT fresh `Rig` instances (each against its OWN mock
-+        // rigctld — the mock above serves one connection at a time and `rig`/`state` from the
-+        // tuning run above are still holding theirs open) from the same suppressed Transport,
-+        // simulating an initial open and a later reopen after a drop, and confirm both are
-+        // protected while telemetry stays reachable on each.
-+        let mut t1 = cat_transport(4599, None);
-+        t1.disable_rfpower_probe = true;
-+        for label in ["initial open", "reopen after drop"] {
-+            let (addr2, log2) = mock_rigctld_on(14_074_000, false);
-+            let mut fresh_rig = Rig::rigctld(&addr2);
-+            let _ = finish_cat_open(&mut fresh_rig, &t1);
-+            assert!(
-+                fresh_rig.read_level("RFPOWER").is_err(),
-+                "{label}: l RFPOWER must stay refused on every freshly-opened Rig"
-+            );
-+            assert!(
-+                fresh_rig.set_power(0.4).is_ok(),
-+                "{label}: set_power must stay a silent Ok on every freshly-opened Rig"
-+            );
-+            // A safe meter must still reach the wire on this SAME freshly-stamped Rig — the
-+            // mock's canned "RPRT 0" reply won't parse as a meter value, so this checks the
-+            // command was actually SENT (not refused like RFPOWER above), not its reply.
-+            let mark2 = log2.lock().unwrap().len();
-+            let _ = fresh_rig.read_meter_f32_within("SWR", None);
-+            let after = log2.lock().unwrap()[mark2..].to_vec();
-+            let sent = after.iter().any(|l| l == "l SWR");
-+            assert!(sent, "{label}: reading SWR must still reach the wire, unlike RFPOWER: {after:?}");
-+        }
 +    }
 +
 +    /// Do-not-set-mode: when the operator has picked WSJT-X "Mode: None", the loop issues no
@@ -1294,15 +931,3 @@ index 1c08464d..f4b78711 100644
      fn cat_transport(rigctld_port: u16, broker_self_port: Option<u16>) -> Transport {
          Transport {
              radio_label: LogLabel(radio_label("", 1035)),
-@@ -26313,6 +27318,11 @@ mod tests {
-             monitor_enabled: false,
-             monitor_device: String::new(),
-             monitor_level: 0.5,
-+            ptt_data_source: false,
-+            // Left OFF here so the upstream per-mode power-ceiling / tune-power tests that assert
-+            // an `L RFPOWER` write still exercise that path. The Jimmy-compat suppression tests
-+            // set it explicitly.
-+            disable_rfpower_probe: false,
-         }
-     }
- 

@@ -567,6 +567,7 @@ namespace WSJTX_Controller
             public string Shown;      // as the operator has callsigns shown and spoken
             public bool Current;
             public string Status;
+            public string NotHeard;   // "" when it has been heard
             public string LastHeard;
             public string Calls;
             public string OnList;
@@ -582,10 +583,14 @@ namespace WSJTX_Controller
                 if (m == null || !m.IsActive) continue;
                 bool current = ReferenceEquals(m, _smartStart);
                 bool calling = current && (m.AwaitingEngagement || string.Equals(callInProg, m.TargetCall, StringComparison.OrdinalIgnoreCase));
-                string what = calling ? (m.TargetNotHeardStreak > 0 ? $"calling, not heard after {m.TargetNotHeardStreak} calls" : "calling")
+                string what = calling ? "calling"
                     : m.BusyWithOther && !string.IsNullOrEmpty(m.ApparentPeer) ? $"waiting, working {SC(m.ApparentPeer)}"
-                    : m.SilenceCount > 0 ? $"waiting, not heard for {m.SilenceCount} {(m.SilenceCount == 1 ? "period" : "periods")}"
                     : "waiting";
+                // While calling: unanswered calls against the not-heard limit. While waiting: quiet
+                // periods (no limit applies then).
+                string notHeard = calling
+                    ? (m.TargetNotHeardStreak > 0 ? $"not heard {m.TargetNotHeardStreak} of {ctrl.smartStartMaxStandbyRounds} calls" : "")
+                    : (m.SilenceCount > 0 ? $"not heard for {m.SilenceCount} {(m.SilenceCount == 1 ? "period" : "periods")}" : "");
                 var d = m.LastUsableDecode;
                 int limitMin = ctrl.smartStartTimeLimitMinutes;
                 int onMin = (int)(now - m.ArmedAtUtc).TotalMinutes;
@@ -595,6 +600,7 @@ namespace WSJTX_Controller
                     Shown = SC(m.TargetCall),
                     Current = current,
                     Status = (current ? "current, " : "") + what,
+                    NotHeard = notHeard,
                     LastHeard = d == null || m.LastUsableDecodeUtc == default ? "not heard yet"
                         : $"{Age(now - m.LastUsableDecodeUtc)}, {d.Message}",
                     Calls = $"{m.TransmittedCallCount} of {_configuredRepeatLimit}",

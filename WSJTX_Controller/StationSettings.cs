@@ -23,6 +23,12 @@ namespace WSJTX_Controller
         public string ArrlSection { get; set; } = "";
         public string CqZone { get; set; } = "";
         public string ItuZone { get; set; } = "";
+        // Our POTA park when activating (2026-10-04): MY_SIG=POTA / MY_SIG_INFO on every contact
+        // logged while it is set. Blank = not activating. Two parks for a two-fer: "US-1234,US-5678".
+        public string MyPark { get; set; } = "";
+        // The time zone for displays when Options > General "Display dates and times in my selected
+        // time zone" is on (2026-10-05): a Windows time-zone id; blank = the computer's own.
+        public string DisplayTimeZone { get; set; } = "";
 
         public void LoadFromIni(IniFile ini)
         {
@@ -34,6 +40,8 @@ namespace WSJTX_Controller
             if (ini.KeyExists("stationArrlSection")) ArrlSection = ini.Read("stationArrlSection");
             if (ini.KeyExists("stationCqZone")) CqZone = ini.Read("stationCqZone");
             if (ini.KeyExists("stationItuZone")) ItuZone = ini.Read("stationItuZone");
+            if (ini.KeyExists("stationMyPark")) MyPark = ini.Read("stationMyPark");
+            if (ini.KeyExists("stationDisplayTimeZone")) DisplayTimeZone = ini.Read("stationDisplayTimeZone");
         }
 
         public void SaveToIni(IniFile ini)
@@ -46,6 +54,8 @@ namespace WSJTX_Controller
             ini.Write("stationArrlSection", ArrlSection);
             ini.Write("stationCqZone", CqZone);
             ini.Write("stationItuZone", ItuZone);
+            ini.Write("stationMyPark", MyPark);
+            ini.Write("stationDisplayTimeZone", DisplayTimeZone);
         }
     }
 }

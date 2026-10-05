@@ -34,7 +34,10 @@ namespace WSJTX_Controller
     // sent when exactly ONE logged contact has its call, band and mode class on that day or the day
     // either side and no other row claims it -- the only contact Nexus can pair it with. More than
     // one such contact holds it, as Jimmy's matcher skipped it as ambiguous.
-    // The header and each row sent are passed on exactly as received.
+    // The header and each row sent are passed on exactly as received -- except that a row paired
+    // with a logged contact has its STATE and COUNTRY taken out (2026-10-04): Nexus's merge fills a
+    // BLANK logged state or country from the row, and the contact keeps what was logged, blanks
+    // included. The row's location is returned in Located, for the caller to keep apart.
     public static class NexusReportPairing
     {
         public class Result
@@ -42,10 +45,34 @@ namespace WSJTX_Controller
             public string Text;                              // what to hand to Nexus
             public int Sent, Held;
             public List<string> HeldDetails = new List<string>();
+            // Each row sent that pairs with a logged contact: the contact, and the row's location fields.
+            public List<(NexusQso Logged, Dictionary<string, string> Location, string Label)> Located =
+                new List<(NexusQso, Dictionary<string, string>, string)>();
+        }
+
+        internal static readonly string[] LocationTags = { "STATE", "CNTY", "COUNTRY", "DXCC", "CQZ", "ITUZ", "GRIDSQUARE" };
+        private static readonly HashSet<string> MergeFills = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "STATE", "COUNTRY" };
+
+        // The row with the fields Nexus's merge would fill from it removed.
+        private static string WithoutMergeFills(string raw)
+        {
+            var sb = new StringBuilder();
+            int pos = 0;
+            foreach (Match fm in Field.Matches(raw))
+            {
+                if (fm.Index < pos) continue;
+                int len = int.Parse(fm.Groups[2].Value, CultureInfo.InvariantCulture);
+                int end = Math.Min(raw.Length, fm.Index + fm.Length + len);
+                if (!MergeFills.Contains(fm.Groups[1].Value)) continue;
+                sb.Append(raw, pos, fm.Index - pos);
+                pos = end;
+            }
+            sb.Append(raw, pos, raw.Length - pos);
+            return sb.ToString();
         }
 
         private sealed class Contact { public int Pos; public string Bucket, Minute; }
-        private sealed class Row { public string Raw, Bucket, Minute, Label; public long Day; public string CallBand, ModeClass; }
+        private sealed class Row { public string Raw, Bucket, Minute, Label; public long Day; public string CallBand, ModeClass; public Dictionary<string, string> Fields; }
 
         private static readonly Regex Field = new Regex(@"<([A-Za-z0-9_]+):(\d+)(?::[A-Za-z])?>", RegexOptions.Compiled);
         private static readonly Regex Eoh = new Regex(@"<eoh>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -120,7 +147,7 @@ namespace WSJTX_Controller
                 string mc = ModeClass(mode);
                 rows.Add(new Row
                 {
-                    Raw = raw, CallBand = cb, ModeClass = mc, Day = dayNo,
+                    Raw = raw, CallBand = cb, ModeClass = mc, Day = dayNo, Fields = f,
                     Bucket = Bucket(cb, mc, dayNo), Minute = $"{cb}|{(date ?? "").Trim()}{hhmm}|{mc}",
                     Label = $"{call.Trim().ToUpperInvariant()} {(band ?? "").Trim().ToLowerInvariant()} {(mode ?? "").Trim()} {(date ?? "").Trim()} {hhmm}"
                 });
@@ -178,7 +205,14 @@ namespace WSJTX_Controller
                     foreach (var x in g.Value) Hold(x.Row, why);
                     continue;
                 }
-                foreach (var x in g.Value) send.Add((x.Contact.Pos, x.Row));
+                foreach (var x in g.Value)
+                {
+                    var loc = LocationTags.Where(t => x.Row.Fields.ContainsKey(t))
+                        .ToDictionary(t => t, t => x.Row.Fields[t].Trim(), StringComparer.OrdinalIgnoreCase);
+                    result.Located.Add((logInOrder[x.Contact.Pos], loc, x.Row.Label));
+                    x.Row.Raw = WithoutMergeFills(x.Row.Raw);
+                    send.Add((x.Contact.Pos, x.Row));
+                }
             }
 
             var sb = new StringBuilder(header);

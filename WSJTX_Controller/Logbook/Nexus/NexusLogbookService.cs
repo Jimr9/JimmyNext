@@ -49,7 +49,13 @@ namespace WSJTX_Controller
             if (cqZone > 0) X("CQZ", cqZone.ToString(CultureInfo.InvariantCulture));
             if (ituZone > 0) X("ITUZ", ituZone.ToString(CultureInfo.InvariantCulture));
             X("CONT", continent); X("CNTY", county); X("DARC_DOK", darcDok); X("PFX", wpxPrefix);
-            X("SIG", sig); X("SIG_INFO", sigInfo); X("MY_SIG", mySig); X("MY_SIG_INFO", mySigInfo);
+            // A POTA park goes in Nexus's own park fields (2026-10-04): Nexus writes SIG/SIG_INFO and
+            // POTA_REF from them, a list of parks included. POTA without a park ("CQ POTA", no park
+            // chosen) has no park to put there, so SIG alone stays an ADIF field, as before.
+            bool theirPark = IsPota(sig) && !string.IsNullOrWhiteSpace(sigInfo);
+            bool myPark = IsPota(mySig) && !string.IsNullOrWhiteSpace(mySigInfo);
+            if (!theirPark) { X("SIG", sig); X("SIG_INFO", sigInfo); }
+            if (!myPark) { X("MY_SIG", mySig); X("MY_SIG_INFO", mySigInfo); }
             X("STX_STRING", exchangeSent); X("SRX_STRING", exchangeRcvd);
             X(NexusMigration.SourceTag, source); X(NexusMigration.SourceQsoIdTag, sourceQsoId);
             X(NexusMigration.ImportedAtTag, DateTime.UtcNow.ToString("o"));
@@ -62,12 +68,49 @@ namespace WSJTX_Controller
                 RstSent = Blank(rstSent), RstRcvd = Blank(rstRcvd), State = Blank(state), Country = Blank(country),
                 Dxcc = dxcc > 0 ? (uint)dxcc : (uint?)null, Grid = Blank(grid), Name = Blank(name), Comment = Blank(comment),
                 TxPower = power, Operator = Blank(operatorCall), StationCallsign = Blank(stationCall), MyGrid = Blank(myGrid),
-                Ota = new NexusOta { Iota = Blank(iota) },
+                Ota = new NexusOta
+                {
+                    Iota = Blank(iota),
+                    TheirProgram = theirPark ? "POTA" : null, TheirRef = theirPark ? sigInfo.Trim().ToUpperInvariant() : null,
+                    MyProgram = myPark ? "POTA" : null, MyRef = myPark ? mySigInfo.Trim().ToUpperInvariant() : null,
+                },
                 Extra = extra,
             };
         }
 
         private static string Blank(string s) => string.IsNullOrWhiteSpace(s) ? null : s.Trim();
+        private static bool IsPota(string sig) => string.Equals((sig ?? "").Trim(), "POTA", StringComparison.OrdinalIgnoreCase);
+
+        // ── Our operating location, recorded on every contact Jimmy Next creates (2026-10-04) ──
+        // Set by the owner: the ADIF fields of where WE are operating now (MY_STATE, MY_CNTY,
+        // MY_DXCC, MY_COUNTRY, the TQSL station location in force and its fingerprint, a review
+        // note when the profile and that location disagree) and our own park when activating.
+        // Recorded at logging, so a later profile change or restart cannot move the contact.
+        public static Func<List<(string Tag, string Value)>> OurLocationFields;
+        public static Func<string> OurPark;
+
+        internal static void StampOurLocation(NexusQso q)
+        {
+            if (q == null) return;
+            q.Extra = q.Extra ?? new List<List<string>>();
+            List<(string Tag, string Value)> fields = null;
+            try { fields = OurLocationFields?.Invoke(); } catch { }
+            foreach (var (tag, value) in fields ?? new List<(string, string)>())
+            {
+                if (string.IsNullOrEmpty(value)) continue;
+                var have = q.Extra.FirstOrDefault(e => e.Count > 1 && string.Equals(e[0], tag, StringComparison.OrdinalIgnoreCase));
+                if (have == null) q.Extra.Add(new List<string> { tag, value });
+                else if (string.Equals(tag, "APP_JIMMY_REVIEW", StringComparison.OrdinalIgnoreCase) && !have[1].Contains(value))
+                    have[1] = have[1] + "; " + value;
+            }
+            string park = null;
+            try { park = OurPark?.Invoke(); } catch { }
+            if (!string.IsNullOrWhiteSpace(park) && q.Ota != null && string.IsNullOrEmpty(q.Ota.MyRef))
+            {
+                q.Ota.MyProgram = "POTA";
+                q.Ota.MyRef = park.Trim().ToUpperInvariant();
+            }
+        }
         private static string Pad6(string t) { t = (t ?? "").Trim(); return t.Length == 4 ? t + "00" : t; }
 
         // A request id per contact: re-sending the same contact (a retry, a lost reply) names the
@@ -105,6 +148,7 @@ namespace WSJTX_Controller
             var q = ToQso(callsign, band, mode, qsoDate, timeOn, timeOff, freqHz, rstSent, rstRcvd, state, country, dxcc,
                 cqZone, grid, name, comment, txPwr, operatorCall, stationCall, myGrid, source, sourceQsoId,
                 continent, ituZone, county, iota, sig, sigInfo, mySig, mySigInfo, darcDok, wpxPrefix, exchangeSent, exchangeRcvd);
+            StampOurLocation(q);
             var reply = Log(RequestIdFor(source ?? "MANUAL", dedupKey), q, sendNow: true);
             LastLogState = reply.State == "saved" || reply.State == "already" || reply.State == "duplicate" ? reply.State : "queued";
             if (reply.State == "duplicate") return (false, false, false);
@@ -127,6 +171,10 @@ namespace WSJTX_Controller
                 G("RST_SENT"), G("RST_RCVD"), G("STATE"), G("COUNTRY"), dxcc, cqz, G("GRIDSQUARE"), G("NAME"), G("COMMENT"),
                 G("TX_PWR"), G("OPERATOR"), G("STATION_CALLSIGN"), G("MY_GRIDSQUARE"), QsoRecord.JimmyNextSource, "",
                 G("CONT"), ituz, G("CNTY"), G("IOTA"), G("SIG"), G("SIG_INFO"), G("MY_SIG"), G("MY_SIG_INFO"), "", G("PFX"), "", "");
+            foreach (var kv in f)
+                if (kv.Key.StartsWith("APP_JIMMY_", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrEmpty(kv.Value))
+                    q.Extra.Add(new List<string> { kv.Key.ToUpperInvariant(), kv.Value });
+            StampOurLocation(q);
             string reqId = RequestIdFor(LiveRequestPrefix, dedupKey);
             Log(reqId, q, sendNow: false);
             System.Threading.Tasks.Task.Run(() =>
@@ -150,6 +198,7 @@ namespace WSJTX_Controller
         public void LogContestCompletion(string reqId, NexusQso q, string contestId, string sessionInstanceId,
             List<(string Tag, string Value)> rcvdPairs)
         {
+            StampOurLocation(q);
             q.Extra.Add(new List<string> { "CONTEST_ID", contestId ?? "" });
             q.Extra.Add(new List<string> { NexusMigration.ContestSessionTag, sessionInstanceId ?? "" });
             foreach (var (tag, value) in rcvdPairs ?? new List<(string, string)>())
@@ -223,11 +272,71 @@ namespace WSJTX_Controller
                 result.Skipped = Math.Max(0, result.Skipped + result.NewlyConfirmed - gained);
                 result.NewlyConfirmed = gained;
             }
+            if (string.IsNullOrEmpty(result.Errors)) KeepDownloadedLocations(prep, source, afterRows);
             result.Held = prep.Held;
             result.HeldDetails.AddRange(prep.HeldDetails);
             NexusSyncDiagnostics.WriteList("held-" + source.ToLowerInvariant(),
                 $"{source} rows held back -- not merged, nothing changed -- because Nexus could not be sure to pair them with the right contact", prep.HeldDetails);
             return result;
+        }
+
+        // After a merge (2026-10-04): the logged location stays as logged. LoTW's confirmed
+        // location of each contact it confirmed is kept beside it, in APP_JIMMY_LOTW_* fields
+        // (STATE, CNTY, GRID, DXCC, CQZ, ITUZ) -- the evidence awards count for that contact. Every
+        // download row whose location differs from, or would have filled, the logged one is listed
+        // under NexusLog\diagnostics, so nothing it said is lost from view.
+        private static readonly (string Row, string Extra)[] LotwLocationFields =
+        {
+            ("STATE", "APP_JIMMY_LOTW_STATE"), ("CNTY", "APP_JIMMY_LOTW_CNTY"), ("GRIDSQUARE", "APP_JIMMY_LOTW_GRID"),
+            ("DXCC", "APP_JIMMY_LOTW_DXCC"), ("CQZ", "APP_JIMMY_LOTW_CQZ"), ("ITUZ", "APP_JIMMY_LOTW_ITUZ"),
+        };
+
+        private void KeepDownloadedLocations(NexusReportPairing.Result prep, string source, NexusLogRows afterRows)
+        {
+            var after = afterRows?.Error == null && afterRows != null
+                ? afterRows.Rows.Where(q => q.Id != null).GroupBy(q => q.Id).ToDictionary(g => g.Key, g => g.First())
+                : new Dictionary<string, NexusQso>();
+            var differs = new List<string>();
+            bool changed = false;
+            foreach (var (logged, loc, label) in prep.Located)
+            {
+                string V(string t) => loc.TryGetValue(t, out var v) ? v : "";
+                var notes = new List<string>();
+                void Cmp(string name, string mine, string theirs)
+                {
+                    if (theirs.Length == 0) return;
+                    if (string.IsNullOrWhiteSpace(mine)) notes.Add($"{name} blank in the log, {source} says {theirs}");
+                    else if (!string.Equals(mine.Trim(), theirs, StringComparison.OrdinalIgnoreCase)) notes.Add($"{name} {mine.Trim()} in the log, {source} says {theirs}");
+                }
+                Cmp("state", logged.State, V("STATE"));
+                Cmp("country", logged.Country, V("COUNTRY"));
+                if (logged.Dxcc.HasValue && logged.Dxcc.Value > 0) Cmp("DXCC", logged.Dxcc.Value.ToString(), V("DXCC"));
+                if (notes.Count > 0) differs.Add($"{label}: {string.Join("; ", notes)}");
+
+                // Kept for each service that now confirms the contact (2026-10-05: QRZ and eQSL too,
+                // as APP_JIMMY_QRZ_* / APP_JIMMY_EQSL_*). Awards use LoTW's; the others are kept and
+                // exported, for the record.
+                if (logged.Id == null || !after.TryGetValue(logged.Id, out var now)) continue;
+                bool confirmedHere = source == "LOTW" ? now.QslRcvd?.Lotw == true
+                    : source == "QRZ" ? now.QslRcvd?.Qrz == true
+                    : source == "EQSL" && now.QslRcvd?.Eqsl == true;
+                if (!confirmedHere) continue;
+                var set = new List<string[]>();
+                foreach (var (rowTag, lotwExtra) in LotwLocationFields)
+                {
+                    string extra = lotwExtra.Replace("APP_JIMMY_LOTW_", "APP_JIMMY_" + source + "_");
+                    string want = V(rowTag);
+                    if (want.Length > 0 && !string.Equals(now.ExtraValue(extra) ?? "", want, StringComparison.Ordinal))
+                        set.Add(new[] { extra, want });
+                }
+                if (set.Count == 0) continue;
+                var reply = Client.SetExtra(logged.Id, set);
+                if (reply.State == "saved") changed = true;
+                else differs.Add($"{label}: {source}'s confirmed location not kept -- {reply.State} {reply.Why}".Trim());
+            }
+            NexusSyncDiagnostics.WriteList("location-" + source.ToLowerInvariant(),
+                $"{source} rows whose location differs from the logged contact -- the logged location was kept", differs);
+            if (changed) NexusLogbook.Refresh();
         }
 
         public ImportResult ImportFile(string adifText, string source)

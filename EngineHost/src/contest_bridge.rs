@@ -45,6 +45,124 @@ pub fn install_call_resolver() {
     }
 }
 
+// ── Contest rules updates (2026-10-05) ───────────────────────────────────────────────────────
+// Nexus's own mechanism (src-tauri `fd_rules_download_if_newer` / `fd_rules_load_from_disk`): the
+// rules file Nexus publishes is downloaded, checked with `fd_rules::validate` and kept beside the
+// contest session; `fd_rules::install_from` makes it THE table, at engine start only (the table
+// is set once per process -- there is no live swap). So a check never changes the rules a running
+// contest is scored by. And a session that continues after a restart keeps the rules it was
+// entered with: rules_in_use records them, and a newer download waits until no session is active.
+
+const RULES_URL: &str = "https://hamradiotools.io/nexus/fd-rules.json";
+
+fn rules_file(dir: &std::path::Path) -> PathBuf { dir.join("fd-rules.json") }
+fn rules_meta_file(dir: &std::path::Path) -> PathBuf { dir.join("fd-rules.meta.json") }
+fn rules_in_use_file(dir: &std::path::Path) -> PathBuf { dir.join("fd-rules.in-use.txt") }
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+struct RulesMeta {
+    generated: String,
+    rules_year: u16,
+    checked_unix: i64,
+}
+
+fn rules_meta(dir: &std::path::Path) -> RulesMeta {
+    std::fs::read_to_string(rules_meta_file(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// At engine start, before anything reads the rules table. With no contest session active, a
+/// downloaded file newer than the bundled rules is installed. With one active, only the rules it
+/// was entered with: the downloaded file when that is what it used, else the bundled rules.
+pub fn install_rules_at_startup(dir: &std::path::Path) {
+    let text = match std::fs::read_to_string(rules_file(dir)) {
+        Ok(t) => t,
+        Err(_) => return, // nothing downloaded: the bundled rules
+    };
+    let session_active = dir.join("contest_session_instance.json").exists();
+    if session_active {
+        let in_use = std::fs::read_to_string(rules_in_use_file(dir)).unwrap_or_default();
+        let downloaded = tempo_core::fd_rules::validate(&text).map(|s| s.generated).unwrap_or_default();
+        if in_use.trim().is_empty() || in_use.trim() != downloaded {
+            eprintln!("contest_bridge: a contest session is active -- keeping the rules it was entered with");
+            return;
+        }
+    }
+    match tempo_core::fd_rules::install_from(&text) {
+        Ok(s) => eprintln!("contest_bridge: downloaded contest rules active (rules year {}, generated {})", s.rules_year, s.generated),
+        Err(e) => eprintln!("contest_bridge: downloaded contest rules not used ({e}) -- bundled rules active"),
+    }
+}
+
+/// Recorded when a session is entered: the rules it is scored by.
+fn record_rules_in_use(dir: &std::path::Path) {
+    let _ = std::fs::write(rules_in_use_file(dir), tempo_core::fd_rules::active_generated());
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RulesStatusWire {
+    rules_year: u16,
+    active_generated: String,
+    bundled_generated: String,
+    downloaded_generated: String,
+    downloaded_rules_year: u16,
+    checked_unix: i64,
+    /// A downloaded file newer than the rules in force: it applies when Jimmy Next next starts
+    /// with no contest session active.
+    waiting_for_restart: bool,
+    session_active: bool,
+}
+
+pub fn rules_status_json(dir: &std::path::Path) -> String {
+    let m = rules_meta(dir);
+    let active = tempo_core::fd_rules::active_generated().to_string();
+    let wire = RulesStatusWire {
+        rules_year: tempo_core::fd_rules::active_rules_year(),
+        bundled_generated: tempo_core::fd_rules::seed_generated().to_string(),
+        waiting_for_restart: !m.generated.is_empty() && m.generated.as_str() > active.as_str(),
+        active_generated: active,
+        downloaded_generated: m.generated,
+        downloaded_rules_year: m.rules_year,
+        checked_unix: m.checked_unix,
+        session_active: dir.join("contest_session_instance.json").exists(),
+    };
+    serde_json::to_string(&wire).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+}
+
+/// The Check for Rules Updates button: download, validate, keep if newer. Never changes the
+/// rules in force (see above). "OK <status json>" or "ERR <why>".
+pub fn rules_check(dir: &std::path::Path) -> String {
+    let text = match propagation::live::contests::fetch(RULES_URL) {
+        Ok(t) => t,
+        Err(e) => return format!("ERR could not download the contest rules: {e}"),
+    };
+    let stats = match tempo_core::fd_rules::validate(&text) {
+        Ok(s) => s,
+        Err(e) => return format!("ERR the downloaded contest rules failed their check: {e}"),
+    };
+    let now = std::time::SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    let old = rules_meta(dir);
+    let keep_file = stats.generated.as_str() >= tempo_core::fd_rules::seed_generated()
+        && (stats.generated != old.generated || !rules_file(dir).exists());
+    if keep_file {
+        let final_path = rules_file(dir);
+        let tmp = final_path.with_extension(format!("json.{}.tmp", std::process::id()));
+        if let Err(e) = std::fs::write(&tmp, &text).and_then(|_| std::fs::rename(&tmp, &final_path)) {
+            return format!("ERR could not save the contest rules: {e}");
+        }
+    }
+    let meta = if keep_file || stats.generated == old.generated {
+        RulesMeta { generated: stats.generated.clone(), rules_year: stats.rules_year, checked_unix: now }
+    } else {
+        RulesMeta { checked_unix: now, ..old }   // older than the bundled rules: nothing kept
+    };
+    let _ = std::fs::write(rules_meta_file(dir), serde_json::to_string(&meta).unwrap_or_default());
+    format!("OK {}", rules_status_json(dir))
+}
+
 /// The adapter between `propagation::dxcc` (AD1C's cty.dat) and `tempo_core::contest` -- verbatim
 /// port of Nexus's own `contest_place_call` (src-tauri/src/lib.rs), since `tempo_core` cannot
 /// depend on `propagation` itself (dependency direction) and EngineHost, like Nexus's own
@@ -554,6 +672,7 @@ impl ContestBridge {
         let session_instance_id = a.session_instance_id.clone();
         self.active = Some(a);
         self.persist_sidecar();
+        record_rules_in_use(&self.sidecar_dir);
 
         let wire = EnterOkWire { session_instance_id };
         serde_json::to_string(&wire).map_err(|e| format!("could not encode CONTEST_ENTER result: {e}"))
@@ -570,6 +689,17 @@ impl ContestBridge {
     fn apply_and_enter_mode(engine: &mut Engine, a: &ActiveSession, operator_callsign: &str) -> Result<(), String> {
         if a.run_mode != "run" && a.run_mode != "sp" {
             return Err(format!("unknown run_mode {:?} -- must be \"run\" or \"sp\"", a.run_mode));
+        }
+        // 2026-10-05: both run modes arm Nexus's Field Day FT8 sequencer, which knows one
+        // exchange -- "CQ FD" and class + section -- whatever event is picked (engine.rs's
+        // Mode::FieldDay drives it with no event check; its RTTY sequencer refuses other events
+        // the same way). Any other contest would put the Field Day exchange on the air, so it is
+        // refused here, for CONTEST_ENTER and for a restored session alike.
+        if !matches!(a.event_id.trim(), "arrlfd" | "wfd") {
+            return Err(format!(
+                "Jimmy Next cannot operate {} on the air yet: Nexus's FT8/FT4 contest sequencer sends only the Field Day exchange.",
+                a.event_id
+            ));
         }
         let mut s = engine.settings().clone();
         s.mycall = a.mycall.clone();

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Drawing;
 using System.Net;
 using System.Threading;
@@ -171,6 +172,9 @@ namespace WSJTX_Controller
         private System.Windows.Forms.CheckBox moveFocusToStatusCheckBox;
         private System.Windows.Forms.CheckBox checkForUpdatesCheckBox;
         private System.Windows.Forms.CheckBox spaceCallsignsAndGridsCheckBox;
+        private System.Windows.Forms.CheckBox _displayInZoneCheckBox;
+        private System.Windows.Forms.ComboBox _displayZoneCombo;
+        private List<(string Id, string Name)> _displayZoneEntries;
         private System.Windows.Forms.CheckBox _smartQsoStartCheckBox;
         private System.Windows.Forms.NumericUpDown _smartStartSilencePeriodsNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartBusyQuietNumeric;
@@ -510,6 +514,20 @@ namespace WSJTX_Controller
             };
             generalPanel.Controls.Add(_clockCheckCheckBox);
 
+            // 2026-10-05: off by default -- displays stay UTC. The zone itself is picked on the
+            // Station & Operator page. Display only; logged times, ADIF and Cabrillo stay UTC.
+            _displayInZoneCheckBox = new System.Windows.Forms.CheckBox
+            {
+                Text           = "Display dates and times in my selected time zone",
+                AccessibleName = "Display dates and times in my selected time zone",
+                AutoSize       = true,
+                Location       = new System.Drawing.Point(10, 218),
+                TabIndex       = 8,
+                Checked        = ctrl.displayInSelectedTimeZone,
+                Font           = font,
+            };
+            generalPanel.Controls.Add(_displayInZoneCheckBox);
+
             // "Announce important notifications when focus is elsewhere" moved to
             // Options > Notifications > Global speech behaviour (2026-09-04) so all automatic-
             // speech behaviour is configured in one place. Same Controller setting / INI key.
@@ -732,6 +750,7 @@ namespace WSJTX_Controller
             // Presentation-only; applied live (next status render) and persisted to the active
             // profile immediately. Default true if the control is somehow absent.
             ctrl.SetAndPersistSpaceCallsignsAndGrids(spaceCallsignsAndGridsCheckBox?.Checked ?? true);
+            ctrl.SetAndPersistDisplayTimeZone(ctrl.Station.DisplayTimeZone, _displayInZoneCheckBox?.Checked ?? ctrl.displayInSelectedTimeZone);
             // announceImportantAlertsWhenFocusElsewhere is applied by SaveNotificationsTab now.
             // Smart QSO Start is applied by SaveTransmitTab now (controls moved to the Transmit tab).
 
@@ -1555,6 +1574,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.TextBox _stationContestEmailTextBox;
         private System.Windows.Forms.TextBox _stationQthStateTextBox;
         private System.Windows.Forms.TextBox _stationCountyTextBox;
+        private System.Windows.Forms.TextBox _stationMyParkTextBox;
         private System.Windows.Forms.TextBox _stationArrlSectionTextBox;
         private System.Windows.Forms.TextBox _stationCqZoneTextBox;
         private System.Windows.Forms.TextBox _stationItuZoneTextBox;
@@ -2934,8 +2954,9 @@ namespace WSJTX_Controller
             _stationCqZoneTextBox.Text = ctrl.Station.CqZone;
 
             AddRow("ITU Zone:", out _stationItuZoneTextBox, "ITU Zone", 10,
-                   null, out _, null, 0);
+                   "My POTA park:", out _stationMyParkTextBox, "My POTA park when activating, optional", 10);
             _stationItuZoneTextBox.Text = ctrl.Station.ItuZone;
+            _stationMyParkTextBox.Text = ctrl.Station.MyPark;
 
             // Relocated from Options -> Receive / Auto Reply (2026-09-25 correction pass): this
             // is station/location information, so it belongs on this page with everything else
@@ -2968,6 +2989,33 @@ namespace WSJTX_Controller
                 WsjtxClient.NormalizeContinent(ctrl.wsjtxClient?.myContinent) ?? "");
             _myContinentCombo.SelectedIndex = curContinentIdx >= 0 ? curContinentIdx : 0;
             stationOperatorPanel.Controls.Add(_myContinentCombo);
+            y += 28;
+
+            // 2026-10-05: the zone displays use when Options > General "Display dates and times in
+            // my selected time zone" is on. A real Windows zone, so daylight saving is automatic.
+            var zoneLabel = new System.Windows.Forms.Label
+            {
+                Text = "Display time zone:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, y + 3),
+                Font = font,
+                TabStop = false,
+            };
+            stationOperatorPanel.Controls.Add(zoneLabel);
+            _displayZoneEntries = DisplayTime.PickerEntries();
+            _displayZoneCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(left + 150, y),
+                Size = new System.Drawing.Size(360, 21),
+                TabIndex = 11,
+                Font = font,
+                AccessibleName = "Display time zone",
+            };
+            _displayZoneCombo.Items.AddRange(_displayZoneEntries.Select(z => (object)z.Name).ToArray());
+            int zi = _displayZoneEntries.FindIndex(z => string.Equals(z.Id, ctrl.Station.DisplayTimeZone ?? "", StringComparison.OrdinalIgnoreCase));
+            _displayZoneCombo.SelectedIndex = zi >= 0 ? zi : 0;
+            stationOperatorPanel.Controls.Add(_displayZoneCombo);
             y += 28;
             y += 12;
 
@@ -3068,6 +3116,12 @@ namespace WSJTX_Controller
         // pure Jimmy-side values with no EngineHost launch-arg dependency today.
         // internal (not private): JimmyTests calls this directly to verify the relocated My
         // Continent control's save path (InternalsVisibleTo, see AssemblyInfo.Testing.cs).
+        // "us-1234, us-5678" -> "US-1234,US-5678"; anything that is not a POTA reference is dropped.
+        internal static string NormalizeParkList(string text) =>
+            string.Join(",", (text ?? "").Split(new[] { ',', ';', ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(p => p.Trim().ToUpperInvariant())
+                .Where(p => System.Text.RegularExpressions.Regex.IsMatch(p, @"^[A-Z0-9]{1,4}-\d{4,5}$")).Distinct());
+
         internal void SaveStationOperatorTab()
         {
             if (_stationOperatorCallTextBox == null) return;
@@ -3080,6 +3134,9 @@ namespace WSJTX_Controller
             ctrl.Station.ArrlSection = _stationArrlSectionTextBox.Text.Trim().ToUpperInvariant();
             ctrl.Station.CqZone = _stationCqZoneTextBox.Text.Trim();
             ctrl.Station.ItuZone = _stationItuZoneTextBox.Text.Trim();
+            ctrl.Station.MyPark = NormalizeParkList(_stationMyParkTextBox?.Text);
+            if (_displayZoneCombo != null && _displayZoneCombo.SelectedIndex >= 0 && _displayZoneEntries != null)
+                ctrl.SetAndPersistDisplayTimeZone(_displayZoneEntries[_displayZoneCombo.SelectedIndex].Id, _displayInZoneCheckBox?.Checked ?? ctrl.displayInSelectedTimeZone);
 
             // 2.0.58, relocated here 2026-09-25 (see BuildStationOperatorTab's own comment):
             // persist the operator continent selector. Stored as a 2-letter code (never a

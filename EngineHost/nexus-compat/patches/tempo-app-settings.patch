@@ -1,19 +1,11 @@
 diff --git a/src/settings.rs b/src/settings.rs
-index d5bc2789..dde41bb9 100644
+index 8bad0e90..3dd0579a 100644
 --- a/src/settings.rs
 +++ b/src/settings.rs
-@@ -1313,6 +1313,29 @@ pub struct Settings {
+@@ -1352,6 +1352,14 @@ pub struct Settings {
      /// (flat mirror — see [`RadioProfile::data_modes_plain_ssb`]). Default off.
      #[serde(default)]
      pub data_modes_plain_ssb: bool,
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X-equivalent "Transmit Audio
-+    /// Source: Data" (`rig::ptt_line`'s doc comment / WSJT-X's own `HamlibTransceiver::do_ptt`
-+    /// `back_ptt_port_` check) — sends `RIG_PTT_ON_DATA` instead of plain `RIG_PTT_ON` for CAT
-+    /// PTT. Default off, matching WSJT-X's own `TX_audio_source_front` default; only relevant
-+    /// for a rig whose Hamlib backend distinguishes mic/data PTT AND whose interface is wired
-+    /// to the rig's rear DATA/ACC port.
-+    #[serde(default)]
-+    pub ptt_data_source: bool,
 +    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): WSJT-X Radio tab "Mode: None" —
 +    /// when true, the radio loop never sends a CAT mode (`M`) command at all, for any operating
 +    /// mode (Digital/Phone/CW/RTTY/FM alike), leaving the rig exactly as the operator set it by
@@ -22,23 +14,14 @@ index d5bc2789..dde41bb9 100644
 +    /// mode-set call site already treats an empty string as "nothing to do".
 +    #[serde(default)]
 +    pub dont_set_mode: bool,
-+    /// JIMMY COMPAT (see EngineHost/nexus-compat/README.md): RFPOWER never-touch, Layer 2.
-+    /// Carried on `Settings` (not only the startup `RadioConfig`) so the per-tick
-+    /// `Transport::from_settings` rebuild keeps it and `finish_cat_open` keeps re-stamping the
-+    /// Rig-level chokepoint after any transport reopen. Default off (unchanged upstream
-+    /// behavior); Jimmy's EngineHost always sets it on. No operator override.
-+    #[serde(default)]
-+    pub disable_rfpower_probe: bool,
      /// Hold the DATA submode (FM-D on FM, USB-D/LSB-D on HF) for as long as the SSTV receiver
      /// is running, for the active radio (flat mirror — see
      /// [`RadioProfile::sstv_hold_data_submode`]). Default off.
-@@ -4117,6 +4140,9 @@ impl Default for Settings {
-             yaesu_rf_scope: false,
+@@ -4235,6 +4243,7 @@ impl Default for Settings {
              icom_data_mode: 1,
+             tx_audio_source: default_tx_audio_source(),
              data_modes_plain_ssb: false,
-+            ptt_data_source: false,
 +            dont_set_mode: false,
-+            disable_rfpower_probe: false,
              sstv_hold_data_submode: false,
              set_rig_mode: true, // force the DATA submode for digital, so sections set the rig
              operating_mode: OperatingMode::Digital, // digital obeys; phone/CW force

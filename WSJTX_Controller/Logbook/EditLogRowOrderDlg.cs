@@ -31,14 +31,25 @@ namespace WSJTX_Controller
             { "source",    "Source" },
         };
 
+        // The fields this dialog orders: the Logbook's by default, or another list's (the Smart Mode
+        // stations window, 2026-10-04) through the second constructor.
+        private readonly string[] _defaults;
+        private readonly Dictionary<string, string> _labels;
+
         private readonly CheckedListBox _listBox;
         private readonly Button _moveUpButton, _moveDownButton, _restoreDefaultButton, _okButton, _cancelButton;
 
         public List<string> SelectedFields { get; private set; }
 
         public EditLogRowOrderDlg(List<string> currentOrder)
+            : this(currentOrder, DefaultFields, FieldLabels, "Column Order", "Choose which columns to show, and their order:", "Columns") { }
+
+        public EditLogRowOrderDlg(List<string> currentOrder, string[] defaults, Dictionary<string, string> labels,
+            string title, string prompt, string listName)
         {
-            Text            = "Column Order";
+            _defaults = defaults;
+            _labels = labels;
+            Text            = title;
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox     = false;
             MinimizeBox     = false;
@@ -48,7 +59,7 @@ namespace WSJTX_Controller
 
             var lbl = new Label
             {
-                Text     = "Choose which columns to show, and their order:",
+                Text     = prompt,
                 Location = new Point(12, 10),
                 Size     = new Size(296, 16),
             };
@@ -59,7 +70,7 @@ namespace WSJTX_Controller
                 Location       = new Point(12, 30),
                 Size           = new Size(200, 210),
                 TabIndex       = 1,
-                AccessibleName = "Columns",
+                AccessibleName = listName,
                 CheckOnClick   = true,
             };
             _listBox.SelectedIndexChanged += (s, e) => UpdateMoveButtons();
@@ -95,7 +106,7 @@ namespace WSJTX_Controller
                 Size           = new Size(86, 40),
                 TabIndex       = 4,
             };
-            _restoreDefaultButton.Click += (s, e) => Populate(new List<string>(DefaultFields));
+            _restoreDefaultButton.Click += (s, e) => Populate(new List<string>(_defaults));
             Controls.Add(_restoreDefaultButton);
 
             _okButton = new Button
@@ -134,19 +145,19 @@ namespace WSJTX_Controller
                 foreach (var field in currentOrder)
                 {
                     if (string.IsNullOrWhiteSpace(field)) continue;
-                    if (!DefaultFields.Contains(field, StringComparer.OrdinalIgnoreCase)) continue;
+                    if (!_defaults.Contains(field, StringComparer.OrdinalIgnoreCase)) continue;
                     if (orderedFields.Any(f => string.Equals(f, field, StringComparison.OrdinalIgnoreCase))) continue;
                     orderedFields.Add(field);
                     selectedSet.Add(field);
                 }
             }
-            foreach (var field in DefaultFields)
+            foreach (var field in _defaults)
                 if (!orderedFields.Any(f => string.Equals(f, field, StringComparison.OrdinalIgnoreCase)))
                     orderedFields.Add(field);
 
             _listBox.Items.Clear();
             foreach (var field in orderedFields)
-                _listBox.Items.Add(new FieldItem(field), selectedSet.Contains(field));
+                _listBox.Items.Add(new FieldItem(field, _labels), selectedSet.Contains(field));
 
             if (_listBox.Items.Count > 0) _listBox.SelectedIndex = 0;
             UpdateMoveButtons();
@@ -202,9 +213,10 @@ namespace WSJTX_Controller
         private class FieldItem
         {
             public string Id { get; }
-            public FieldItem(string id) => Id = id;
+            private readonly Dictionary<string, string> _labels;
+            public FieldItem(string id, Dictionary<string, string> labels) { Id = id; _labels = labels; }
             public override string ToString() =>
-                FieldLabels.TryGetValue(Id, out var label) ? label : Id;
+                _labels.TryGetValue(Id, out var label) ? label : Id;
         }
     }
 }

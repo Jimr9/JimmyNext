@@ -464,13 +464,24 @@ namespace WSJTX_Controller
                             key = key + "|" + q.Id;
                             usedKeys.Add(key);
                         }
+                        // A row with no DXCC of its own (an import that carried none -- kept that way
+                        // in the log, 2026-10-04): the read copy works the entity out from the
+                        // callsign, as Nexus's own worked-DXCC tracking does, so awards and "new
+                        // DXCC" keep counting it. Marked dxcc_derived; the contact is not changed.
+                        int dxccNum = (int)(q.Dxcc ?? 0); string country = q.Country ?? ""; bool derived = false;
+                        if (dxccNum == 0)
+                        {
+                            string cont = "";
+                            AdifImporter.FillEntityGaps(q.Call ?? "", ref dxccNum, ref country, ref cont);
+                            derived = dxccNum > 0;
+                        }
                         var col = new Dictionary<string, object>
                         {
                             ["id"] = id, ["callsign"] = q.Call ?? "", ["band"] = (q.Band ?? "").ToLowerInvariant(), ["mode"] = q.Mode ?? "",
                             ["qso_date"] = date, ["time_on"] = timeOn, ["time_off"] = timeOff,
                             ["freq_hz"] = (long)Math.Round(q.FreqMhz * 1_000_000),
                             ["rst_sent"] = q.RstSent ?? "", ["rst_rcvd"] = q.RstRcvd ?? "",
-                            ["state"] = q.State ?? "", ["country"] = q.Country ?? "", ["dxcc"] = (long)(q.Dxcc ?? 0),
+                            ["state"] = q.State ?? "", ["country"] = country, ["dxcc"] = (long)dxccNum, ["dxcc_derived"] = derived ? 1L : 0L,
                             ["cq_zone"] = ExtraLong(q, "CQZ"), ["itu_zone"] = ExtraLong(q, "ITUZ"),
                             ["continent"] = q.ExtraValue("CONT") ?? "", ["county"] = q.ExtraValue("CNTY") ?? "",
                             ["iota"] = !string.IsNullOrEmpty(q.Ota?.Iota) ? q.Ota.Iota : (q.ExtraValue(IotaRawTag) ?? q.ExtraValue("IOTA") ?? ""),
@@ -494,6 +505,14 @@ namespace WSJTX_Controller
                             ["hrdlog_uploaded_at"] = q.ExtraValue(HrdlogUploadedTag) ?? "",
                             ["exchange_sent"] = q.ExtraValue("STX_STRING") ?? "", ["exchange_rcvd"] = q.ExtraValue("SRX_STRING") ?? "",
                             ["contest_id"] = q.ExtraValue("CONTEST_ID") ?? "", ["contest_session_id"] = q.ExtraValue(ContestSessionTag) ?? "",
+                            // 2026-10-04 location evidence (see LogbookDb v11).
+                            ["lotw_state"] = q.ExtraValue("APP_JIMMY_LOTW_STATE") ?? "", ["lotw_cnty"] = q.ExtraValue("APP_JIMMY_LOTW_CNTY") ?? "",
+                            ["lotw_grid"] = q.ExtraValue("APP_JIMMY_LOTW_GRID") ?? "", ["lotw_dxcc"] = ExtraLong(q, "APP_JIMMY_LOTW_DXCC"),
+                            ["lotw_cqz"] = ExtraLong(q, "APP_JIMMY_LOTW_CQZ"), ["lotw_ituz"] = ExtraLong(q, "APP_JIMMY_LOTW_ITUZ"),
+                            ["my_state"] = q.ExtraValue("MY_STATE") ?? "", ["my_cnty"] = q.ExtraValue("MY_CNTY") ?? "",
+                            ["my_dxcc"] = ExtraLong(q, "MY_DXCC"),
+                            ["tqsl_location"] = q.ExtraValue("APP_JIMMY_TQSL_LOCATION") ?? "", ["tqsl_loc_fp"] = q.ExtraValue("APP_JIMMY_TQSL_LOC_FP") ?? "",
+                            ["loc_review"] = q.ExtraValue("APP_JIMMY_REVIEW") ?? "",
                         };
                         using (var cmd = conn.CreateCommand())
                         {

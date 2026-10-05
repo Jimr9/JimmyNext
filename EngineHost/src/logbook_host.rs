@@ -115,6 +115,11 @@ impl LogHost {
     ) -> Result<LogHost, String> {
         // Before the log is attached, so the worked-entity index is keyed the way the store built it.
         eng.set_dxcc_resolver_shared(country_resolver());
+        // A contact keeps its country and state as logged or imported, blanks included -- an
+        // import, a merge-added contact, an upload stamp or an edit never fills them (operator,
+        // 2026-10-04: no automatic enrichment). Live contacts keep Nexus's country fill. The
+        // worked-entity index is keyed by the resolver above, not by the stored country.
+        eng.set_keep_logged_location(true);
         let kind = match opened {
             Ok(opened) => {
                 let detail = match opened.outcome {
@@ -357,6 +362,12 @@ pub struct LogEditArgs {
     pub qso: LoggedQso,
 }
 
+/// Nexus 1.16.0 (two windows on one log): the store turns a change back when another writer
+/// changed a row after this change read it, and every command that waits for its change makes it
+/// through `logwrite::until_written`, which makes it again on the rows as they now stand (up to
+/// Nexus's own PLANS). Every write below does the same (2026-10-04) -- made once, a turned-back
+/// change came back to Jimmy as "not saved". A retried edit still names its edit key, so a row
+/// someone else really changed is refused as stale, never overwritten.
 /// LOG_EDIT: Nexus's `logwrite::update_row` -- a correction, only while the row is still the
 /// version `edit_key` names. Nexus keeps what the services said (confirmations, upload stamps)
 /// through an edit (`LogOp::Edit`).
@@ -371,7 +382,7 @@ pub fn log_edit(host: &LogHost, engine: &Mutex<Engine>, args: LogEditArgs) -> Wr
     };
     let mut rec: QsoRecord = args.qso.into();
     rec.id = Some(id);
-    let (made, durability) = tempo_app::logwrite::update_row(
+    let (made, durability) = tempo_app::logwrite::until_written(|| tempo_app::logwrite::update_row(
         engine,
         id,
         &args.edit_key,
@@ -381,7 +392,7 @@ pub fn log_edit(host: &LogHost, engine: &Mutex<Engine>, args: LogEditArgs) -> Wr
             r
         },
         |_, made| made.1.is_some(),
-    );
+    ));
     drop(gate);
     match made {
         Ok(Ok(Some(true))) => after_durable(durability, serde_json::json!({ "id": args.id })),
@@ -410,13 +421,13 @@ pub fn log_delete(host: &LogHost, engine: &Mutex<Engine>, args: LogDeleteArgs) -
         Ok(id) => id,
         Err(r) => return r,
     };
-    let (made, durability) = tempo_app::logwrite::change_ops(
+    let (made, durability) = tempo_app::logwrite::until_written(|| tempo_app::logwrite::change_ops(
         engine,
         id,
         Some(&args.edit_key),
         &[tempo_core::logbook::LogOp::Delete(id)],
         "delete_qso",
-    );
+    ));
     drop(gate);
     match made {
         Ok(Ok(_)) => after_durable(durability, serde_json::json!({ "id": args.id })),
@@ -452,7 +463,7 @@ pub fn log_import(host: &LogHost, engine: &Mutex<Engine>, args: LogFileArgs) -> 
     if gate.closed {
         return WriteReply::refused("closed", None);
     }
-    let (made, durability) = tempo_app::logwrite::import_adif(engine, &text);
+    let (made, durability) = tempo_app::logwrite::until_written(|| tempo_app::logwrite::import_adif(engine, &text));
     drop(gate);
     match made {
         Ok((added, skipped, merged, total)) => after_durable(
@@ -496,11 +507,11 @@ pub fn log_merge(host: &LogHost, engine: &Mutex<Engine>, args: LogFileArgs) -> W
         return WriteReply::refused("closed", None);
     }
     let reply = match args.kind.as_str() {
-        "lotw" => match tempo_app::logwrite::merge_lotw_report(engine, &text) {
+        "lotw" => match tempo_app::logwrite::until_written(|| tempo_app::logwrite::merge_lotw_report(engine, &text)) {
             (Ok(s), d) => Ok((summary_json(&s), d)),
             (Err(e), _) => Err(e),
         },
-        "eqsl" => match tempo_app::logwrite::merge_eqsl_report(engine, &text) {
+        "eqsl" => match tempo_app::logwrite::until_written(|| tempo_app::logwrite::merge_eqsl_report(engine, &text)) {
             (Ok(s), d) => Ok((summary_json(&s), d)),
             (Err(e), _) => Err(e),
         },
@@ -511,12 +522,12 @@ pub fn log_merge(host: &LogHost, engine: &Mutex<Engine>, args: LogFileArgs) -> W
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
-            match tempo_app::logwrite::merge_lotw_own_echo(engine, &text, now) {
+            match tempo_app::logwrite::until_written(|| tempo_app::logwrite::merge_lotw_own_echo(engine, &text, now)) {
                 (Ok(n), d) => Ok((serde_json::json!({ "promoted": n }), d)),
                 (Err(e), _) => Err(e),
             }
         }
-        "qrz" => match tempo_app::logwrite::merge_qrz_report(engine, &text) {
+        "qrz" => match tempo_app::logwrite::until_written(|| tempo_app::logwrite::merge_qrz_report(engine, &text)) {
             (Ok((added, s)), d) => {
                 let mut v = summary_json(&s);
                 v["added"] = serde_json::json!(added);
@@ -545,6 +556,62 @@ pub struct LogStampArgs {
     pub when_unix: i64,
     #[serde(default)]
     pub detail: Option<String>,
+}
+
+/// LOG_SET_EXTRA's argument: Jimmy's own APP_JIMMY_ fields to set on one contact.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogSetExtraArgs {
+    pub id: String,
+    pub set: Vec<(String, String)>,
+}
+
+/// LOG_SET_EXTRA (2026-10-04): Jimmy's own `APP_JIMMY_*` fields on a contact -- e.g. the location
+/// LoTW confirmed, kept apart from the logged location. Only that namespace: a logged location,
+/// confirmation or upload field can never be written here. Made like every waited write
+/// (`until_written`), on the row as it stands, stale-safe by its edit key.
+pub fn log_set_extra(host: &LogHost, engine: &Mutex<Engine>, args: LogSetExtraArgs) -> WriteReply {
+    if args.set.iter().any(|(k, _)| !k.to_ascii_uppercase().starts_with("APP_JIMMY_")) {
+        return WriteReply::refused("error", Some("only APP_JIMMY_ fields may be set".into()));
+    }
+    let id = match parse_id(&args.id) {
+        Ok(id) => id,
+        Err(r) => return r,
+    };
+    let gate = host.writes.lock().unwrap_or_else(|e| e.into_inner());
+    if gate.closed {
+        return WriteReply::refused("closed", None);
+    }
+    let (made, durability) = tempo_app::logwrite::until_written(|| {
+        let plan = lock(engine).log_plan();
+        let key = match plan.row(id) {
+            Ok(Some(row)) => tempo_core::logbook::QsoEdit::project(&row).key(),
+            _ => String::new(),
+        };
+        tempo_app::logwrite::update_row(
+            engine,
+            id,
+            &key,
+            |r| {
+                let mut rec = r.clone();
+                for (k, v) in &args.set {
+                    rec.extra.retain(|(t, _)| !t.eq_ignore_ascii_case(k));
+                    if !v.is_empty() {
+                        rec.extra.push((k.to_ascii_uppercase(), v.clone()));
+                    }
+                }
+                rec
+            },
+            |_, made| made.1.is_some(),
+        )
+    });
+    drop(gate);
+    match made {
+        Ok(Ok(Some(true))) => after_durable(durability, serde_json::json!({ "id": args.id })),
+        Ok(Ok(_)) => WriteReply::refused("gone", None),
+        Ok(Err(r)) => refusal(r),
+        Err(e) => WriteReply::refused("error", Some(e)),
+    }
 }
 
 /// LOG_STAMP_UPLOAD: Nexus's `logwrite::stamp_push` on the contact `id`.
@@ -582,7 +649,7 @@ pub fn log_stamp(host: &LogHost, engine: &Mutex<Engine>, args: LogStampArgs) -> 
         Err(e) => return WriteReply::refused("error", Some(e)),
     };
     let status = UploadStatus { outcome, when_unix: args.when_unix, detail };
-    let (stamped, durability) = tempo_app::logwrite::stamp_push(engine, &row, service, status);
+    let (stamped, durability) = tempo_app::logwrite::until_written(|| tempo_app::logwrite::stamp_push(engine, &row, service, status.clone()));
     drop(gate);
     if !stamped {
         return WriteReply::refused("gone", None);
@@ -678,7 +745,7 @@ fn record_hrdlog_upload(host: &LogHost, engine: &Mutex<Engine>, id: tempo_core::
         if gate.closed {
             return false;
         }
-        let (made, durability) = tempo_app::logwrite::update_row(
+        let (made, durability) = tempo_app::logwrite::until_written(|| tempo_app::logwrite::update_row(
             engine,
             id,
             &key,
@@ -689,7 +756,7 @@ fn record_hrdlog_upload(host: &LogHost, engine: &Mutex<Engine>, id: tempo_core::
                 rec
             },
             |_, made| made.1.is_some(),
-        );
+        ));
         drop(gate);
         match made {
             Ok(Ok(Some(true))) => return durability.wait(DURABLE_WAIT).is_ok(),
@@ -846,7 +913,7 @@ pub fn log_upload(host: &LogHost, engine: &Mutex<Engine>, args: LogUploadArgs) -
         return serde_json::json!({ "state": "sent-not-stamped", "outcome": outcome.code(), "why": "logbook closing" });
     }
     let status = UploadStatus { outcome, when_unix: now, detail };
-    let (stamped, durability) = tempo_app::logwrite::stamp_push(engine, &row, service, status);
+    let (stamped, durability) = tempo_app::logwrite::until_written(|| tempo_app::logwrite::stamp_push(engine, &row, service, status.clone()));
     drop(gate);
     let durable = durability.wait(DURABLE_WAIT).is_ok();
     serde_json::json!({

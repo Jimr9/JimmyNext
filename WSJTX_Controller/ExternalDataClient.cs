@@ -121,6 +121,91 @@ namespace WSJTX_Controller
         public string Error { get; set; }
     }
 
+    // Mirrors EngineHost's SolarHistoryPayload / SolarWindPayload (external_data.rs, 2026-10-04):
+    // NOAA's daily solar indices and DSCOVR solar wind through Nexus's own fetchers. Every value
+    // NOAA did not give is null -- never 0.
+    public class SolarHistoryResult
+    {
+        public SolarDay[] Days { get; set; } = Array.Empty<SolarDay>();   // oldest first
+        public long? FetchedAgeSecs { get; set; }
+        public string Error { get; set; }
+    }
+
+    public class SolarDay
+    {
+        public long DayUnix { get; set; }
+        public float? Sfi { get; set; }
+        public float? Ssn { get; set; }
+    }
+
+    // The WA7BNM contest calendar (EngineHost CONTEST_CALENDAR, Nexus's own feed adapter).
+    public class ContestCalendarEvent
+    {
+        public string Name { get; set; }
+        public long StartUnix { get; set; }
+        public long EndUnix { get; set; }
+        public string Url { get; set; }
+    }
+
+    public class ContestCalendarResult
+    {
+        public List<ContestCalendarEvent> Events { get; set; } = new List<ContestCalendarEvent>();
+        public long? FetchedUnix { get; set; }   // when the list was last read successfully
+        public long? TriedUnix { get; set; }     // the newest try, good or not
+        public string Error { get; set; }        // why the newest try failed; null when it worked
+    }
+
+    // Nexus's contest rules: the version in force, the bundled one, a downloaded one.
+    public class ContestRulesStatus
+    {
+        public int RulesYear { get; set; }
+        public string ActiveGenerated { get; set; }
+        public string BundledGenerated { get; set; }
+        public string DownloadedGenerated { get; set; }
+        public int DownloadedRulesYear { get; set; }
+        public long CheckedUnix { get; set; }
+        public bool WaitingForRestart { get; set; }
+        public bool SessionActive { get; set; }
+    }
+
+    public class SolarWindResult
+    {
+        public float? BzNt { get; set; }
+        public float? BtNt { get; set; }
+        public float? SpeedKms { get; set; }
+        public float? Density { get; set; }
+        public long? MeasuredAgeSecs { get; set; }   // the READING's age, not the fetch's
+        public bool Stale { get; set; }
+        public long? FetchedAgeSecs { get; set; }
+        public string Error { get; set; }
+    }
+
+    // Mirrors EngineHost's GettingOutPayload (live_feeds.rs) -- "Who hears me?": the stations that
+    // reported decoding the operator, from Nexus's own propagation::getting_out (2026-10-04).
+    public class GettingOutResult
+    {
+        public int Count { get; set; }
+        public int MaxKm { get; set; }
+        public HeardMe[] Reports { get; set; } = Array.Empty<HeardMe>();
+        public int WindowMinutes { get; set; }
+        public int? CoveredMinutes { get; set; }   // set only when the kept reports don't reach back the whole window
+        public bool Connected { get; set; }
+        public long? LastEventAgeSecs { get; set; }
+        public string Error { get; set; }
+    }
+
+    public class HeardMe
+    {
+        public string Call { get; set; }
+        public string Grid { get; set; }
+        public string Band { get; set; }
+        public int? Snr { get; set; }              // null = not reported, never 0
+        public float BearingDeg { get; set; }
+        public int Km { get; set; }                // 0 with no grid = distance unknown
+        public string Octant { get; set; }
+        public long AgeSecs { get; set; }
+    }
+
     // Mirrors EngineHost's DxSpotPayload -- one DX-cluster/RBN telnet spot (tempo_net::cluster).
     public class DxSpot
     {
@@ -246,6 +331,61 @@ namespace WSJTX_Controller
             catch (Exception ex)
             {
                 error = $"Could not parse BAND_CONDITIONS response: {ex.Message}";
+                return null;
+            }
+        }
+
+        public SolarHistoryResult GetSolarHistory(out string error) => GetJson<SolarHistoryResult>("SOLAR_HISTORY", out error);
+        public SolarWindResult GetSolarWind(out string error) => GetJson<SolarWindResult>("SOLAR_WIND", out error);
+
+        // The calendar as EngineHost last read it (refreshed there every 15 minutes); refreshNow
+        // reads the feed first (the Refresh Calendar button), which can take up to 20 seconds.
+        public ContestCalendarResult GetContestCalendar(bool refreshNow, out string error)
+        {
+            if (!refreshNow) return GetJson<ContestCalendarResult>("CONTEST_CALENDAR", out error);
+            error = null;
+            string json = SendCommand("CONTEST_CALENDAR_REFRESH", SlowTimeoutMs);
+            if (json == null) { error = "No response from engine host."; return null; }
+            try { return JsonSerializer.Deserialize<ContestCalendarResult>(json, JsonOptions); }
+            catch (Exception ex) { error = $"Could not parse CONTEST_CALENDAR_REFRESH response: {ex.Message}"; return null; }
+        }
+
+        public ContestRulesStatus GetContestRulesStatus(out string error) => GetJson<ContestRulesStatus>("CONTEST_RULES_STATUS", out error);
+
+        // Check for Rules Updates: downloads and keeps a newer rules file; it never changes the
+        // rules in force (they change only when Jimmy Next starts with no contest running).
+        public ContestRulesStatus CheckContestRules(out string error)
+        {
+            error = null;
+            string reply = SendCommand("CONTEST_RULES_CHECK", SlowTimeoutMs);
+            if (reply == null) { error = "No response from engine host."; return null; }
+            if (reply.StartsWith("ERR ", StringComparison.Ordinal)) { error = reply.Substring(4); return null; }
+            if (!reply.StartsWith("OK ", StringComparison.Ordinal)) { error = "Unexpected reply: " + reply; return null; }
+            try { return JsonSerializer.Deserialize<ContestRulesStatus>(reply.Substring(3), JsonOptions); }
+            catch (Exception ex) { error = $"Could not parse CONTEST_RULES_CHECK response: {ex.Message}"; return null; }
+        }
+
+        private T GetJson<T>(string command, out string error) where T : class
+        {
+            error = null;
+            string json = SendCommand(command, FastTimeoutMs);
+            if (json == null) { error = "No response from engine host."; return null; }
+            try { return JsonSerializer.Deserialize<T>(json, JsonOptions); }
+            catch (Exception ex) { error = $"Could not parse {command} response: {ex.Message}"; return null; }
+        }
+
+        public GettingOutResult GetGettingOut(int windowMinutes, out string error)
+        {
+            error = null;
+            string json = SendCommand("GETTING_OUT " + windowMinutes, FastTimeoutMs);
+            if (json == null) { error = "No response from engine host."; return null; }
+            try
+            {
+                return JsonSerializer.Deserialize<GettingOutResult>(json, JsonOptions);
+            }
+            catch (Exception ex)
+            {
+                error = $"Could not parse GETTING_OUT response: {ex.Message}";
                 return null;
             }
         }

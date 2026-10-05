@@ -3072,21 +3072,57 @@ namespace WSJTX_Controller
                 : ctrl.Station.OperatorCallsign.Trim().ToUpperInvariant();
             // A POTA activator spotted on this band: the park, and the state its park is in --
             // where the station IS, not the licence's mailing address (StationLocation).
-            bool parkFound = StationLocation.TryFindActivation(call, band, out string parkRefs, out string parkState);
-            // 2026-09-30 (KE8WVB, CQ POTA on 80m, no spot found): say in the debug log why a park
-            // was or was not logged, and when the station called CQ POTA but no spot names its park,
-            // still log the program -- POTA with the park blank, for the operator to fill in.
-            // Never a guessed park.
-            if (parkFound || isPota)
-                DebugOutput($"{Time()} [PARK] {call} {band}: " + (parkFound
-                    ? $"park {parkRefs}, state {parkState ?? "(blank, not certain)"}"
-                    : "called CQ POTA, but no POTA spot for it on this band -- logged as POTA, park blank"));
+            // Their location (operator, 2026-10-04): only what establishes it. The park is the one the
+            // operator CHOSE for this station in the Spots window -- never one inferred from spots --
+            // and its state only when the park lies in one state and the grid heard does not point
+            // elsewhere (then: blank, and a review note). No park chosen: POTA with the park blank,
+            // logging never waits; the newest spot is kept only as a suggestion, apart from SIG_INFO.
+            // 2026-10-05: no park chosen -- the one park this station was spotted at (same band, last
+            // 30 minutes) is logged, marked unconfirmed, with no state from it; spotted at several:
+            // none, the candidates kept as a note. The received grid stays the grid either way. The
+            // state of a contact without a chosen park is decided with the others (AdifImporter).
+            var chosen = ParkChoices.Take(call);
+            string parkRef = chosen?.Reference;
+            string theirState = null;
+            var notes = new List<KeyValuePair<string, string>>();
+            if (chosen?.State != null)
+            {
+                if (!StationLocation.ParkStateFits(chosen.State, grid))
+                {
+                    string why = $"STATE not set: park {parkRef} is in {chosen.State}, but grid {grid} lies in {string.Join(" or ", StationLocation.GridStateSet(grid).OrderBy(x => x))}";
+                    notes.Add(new KeyValuePair<string, string>("APP_JIMMY_LOC_FROM", why));
+                    notes.Add(new KeyValuePair<string, string>("APP_JIMMY_REVIEW", why));
+                }
+                else
+                {
+                    theirState = chosen.State;
+                    notes.Add(new KeyValuePair<string, string>("APP_JIMMY_LOC_FROM", $"STATE {theirState} from park {parkRef}, chosen in the Spots window"));
+                }
+            }
+            else if (chosen == null)
+            {
+                var spotted = StationLocation.SpotParks(call, band, DateTime.UtcNow);
+                string When(OtaSpot s) => DateTimeOffset.FromUnixTimeSeconds(s.SpotTimeUnix.Value).UtcDateTime.ToString("yyyy-MM-dd HH:mm") + "Z";
+                if (spotted.Count == 1)
+                {
+                    parkRef = spotted[0].Reference.Trim().ToUpperInvariant();
+                    notes.Add(new KeyValuePair<string, string>("APP_JIMMY_PARK_FROM", $"SIG_INFO {parkRef} from a POTA spot at {When(spotted[0])}, not confirmed"));
+                }
+                else if (spotted.Count > 1)
+                    notes.Add(new KeyValuePair<string, string>("APP_JIMMY_PARK_SUGGESTED",
+                        "spotted at " + string.Join(", ", spotted.Select(s => $"{s.Reference.Trim().ToUpperInvariant()} ({When(s)})")) + "; none logged"));
+            }
+            bool pota = parkRef != null || isPota;
+            if (pota)
+                DebugOutput($"{Time()} [PARK] {call} {band}: " + (chosen != null ? $"park {parkRef} (chosen), state {theirState ?? "(decided at logging)"}"
+                    : parkRef != null ? $"park {parkRef} (from a spot, unconfirmed)"
+                    : "POTA, no park chosen or spotted -- park blank"));
             string adifRecord = AdifRecordBuilder.Build(
                 call, band, (long)(dialFrequency + txOffset), mode,
                 qsoDateOn, qsoTimeOn, qsoTimeOff, rstSent, rstRecd, grid,
                 name: "", comment: "", txPwr: RadioPower.WattsText(), operatorCall: operatorCall,
                 stationCall: myCall, myGrid: myGrid, qsoDateOff: qsoDateOff,
-                state: parkState ?? "", sig: parkFound || isPota ? "POTA" : "", sigInfo: parkRefs ?? "");
+                state: theirState ?? "", sig: pota ? "POTA" : "", sigInfo: parkRef ?? "", extra: notes);
 
             // Jimmy has every field needed to record this Jimmy-initiated QSO itself, so it does
             // so directly here rather than depending on any round trip back from the engine.
@@ -3167,7 +3203,7 @@ namespace WSJTX_Controller
             // for a contact SQLite never actually stored would itself be a false-success signal
             // (the same class of problem this whole block exists to prevent), not a separate
             // over-the-air-event exception like the TX-hold counters below.
-            if (isPota && !localWriteFailed) _potaLog.Add(call, DateTime.Now, band, mode);         //local date/time
+            if (pota && !localWriteFailed) _potaLog.Add(call, DateTime.Now, band, mode);         //local date/time
             consecCqCount = 0;
             consecTimeoutCount = 0;
             consecTxCount = 0;

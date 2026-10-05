@@ -549,19 +549,27 @@ namespace WSJTX_Controller
 
         // ── SQL fragment helpers ────────────────────────────────────────────────
 
+        // The location an award counts for a contact (2026-10-04): the location LoTW CONFIRMED when
+        // LoTW confirmed the contact with one (kept in lotw_*, apart from the logged location),
+        // otherwise the logged location. The logged fields are never changed by a confirmation.
+        internal static string AwardText(string col, string lotwCol) =>
+            $"(CASE WHEN lotw_qsl_rcvd='Y' AND TRIM({lotwCol})!='' THEN {lotwCol} ELSE {col} END)";
+        internal static string AwardNumber(string col, string lotwCol) =>
+            $"(CASE WHEN lotw_qsl_rcvd='Y' AND {lotwCol}>0 THEN {lotwCol} ELSE {col} END)";
+
         private static string GroupByExpression(RuleGroupBy g)
         {
             switch (g)
             {
-                case RuleGroupBy.Dxcc:      return "dxcc";
+                case RuleGroupBy.Dxcc:      return AwardNumber("dxcc", "lotw_dxcc");
                 case RuleGroupBy.Country:   return "country";
-                case RuleGroupBy.State:     return "UPPER(TRIM(state))";
-                case RuleGroupBy.CqZone:    return "cq_zone";
-                case RuleGroupBy.ItuZone:   return "itu_zone";
+                case RuleGroupBy.State:     return $"UPPER(TRIM({AwardText("state", "lotw_state")}))";
+                case RuleGroupBy.CqZone:    return AwardNumber("cq_zone", "lotw_cqz");
+                case RuleGroupBy.ItuZone:   return AwardNumber("itu_zone", "lotw_ituz");
                 case RuleGroupBy.Continent: return "UPPER(TRIM(continent))";
-                case RuleGroupBy.County:    return "UPPER(TRIM(county))";
-                case RuleGroupBy.Grid:      return "UPPER(TRIM(grid))";
-                case RuleGroupBy.Grid4:     return "UPPER(SUBSTR(TRIM(grid),1,4))";
+                case RuleGroupBy.County:    return $"UPPER(TRIM({AwardText("county", "lotw_cnty")}))";
+                case RuleGroupBy.Grid:      return $"UPPER(TRIM({AwardText("grid", "lotw_grid")}))";
+                case RuleGroupBy.Grid4:     return $"UPPER(SUBSTR(TRIM({AwardText("grid", "lotw_grid")}),1,4))";
                 case RuleGroupBy.Iota:      return "UPPER(TRIM(iota))";
                 case RuleGroupBy.SigInfo:   return "UPPER(TRIM(sig_info))";
                 case RuleGroupBy.DarcDok:   return "UPPER(TRIM(darc_dok))";
@@ -574,15 +582,15 @@ namespace WSJTX_Controller
         {
             switch (g)
             {
-                case RuleGroupBy.Dxcc:      whereParts.Add("dxcc > 0"); break;
+                case RuleGroupBy.Dxcc:      whereParts.Add($"{AwardNumber("dxcc", "lotw_dxcc")} > 0"); break;
                 case RuleGroupBy.Country:   whereParts.Add("country != ''"); break;
-                case RuleGroupBy.State:     whereParts.Add("TRIM(state) != ''"); break;
-                case RuleGroupBy.CqZone:    whereParts.Add("cq_zone > 0"); break;
-                case RuleGroupBy.ItuZone:   whereParts.Add("itu_zone > 0"); break;
+                case RuleGroupBy.State:     whereParts.Add($"TRIM({AwardText("state", "lotw_state")}) != ''"); break;
+                case RuleGroupBy.CqZone:    whereParts.Add($"{AwardNumber("cq_zone", "lotw_cqz")} > 0"); break;
+                case RuleGroupBy.ItuZone:   whereParts.Add($"{AwardNumber("itu_zone", "lotw_ituz")} > 0"); break;
                 case RuleGroupBy.Continent: whereParts.Add("TRIM(continent) != ''"); break;
-                case RuleGroupBy.County:    whereParts.Add("TRIM(county) != ''"); break;
-                case RuleGroupBy.Grid:      whereParts.Add("TRIM(grid) != ''"); break;
-                case RuleGroupBy.Grid4:     whereParts.Add("LENGTH(TRIM(grid)) >= 4"); break;
+                case RuleGroupBy.County:    whereParts.Add($"TRIM({AwardText("county", "lotw_cnty")}) != ''"); break;
+                case RuleGroupBy.Grid:      whereParts.Add($"TRIM({AwardText("grid", "lotw_grid")}) != ''"); break;
+                case RuleGroupBy.Grid4:     whereParts.Add($"LENGTH(TRIM({AwardText("grid", "lotw_grid")})) >= 4"); break;
                 case RuleGroupBy.Iota:      whereParts.Add("TRIM(iota) != ''"); break;
                 case RuleGroupBy.SigInfo:   whereParts.Add("TRIM(sig_info) != ''"); break;
                 case RuleGroupBy.DarcDok:   whereParts.Add("TRIM(darc_dok) != ''"); break;

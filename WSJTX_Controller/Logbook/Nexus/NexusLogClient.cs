@@ -209,6 +209,10 @@ namespace WSJTX_Controller
             Write("LOG_MERGE " + JsonSerializer.Serialize(new { path = adifPath, kind }, Json));
 
         // service: lotw | eqsl | qrz | clublog. outcome: pending | accepted | duplicate | rejected | authfail.
+        // Jimmy's own APP_JIMMY_ fields on one contact, set (a blank value removes the field).
+        public NexusWriteReply SetExtra(string id, List<string[]> set) =>
+            Write("LOG_SET_EXTRA " + JsonSerializer.Serialize(new { id, set }, Json));
+
         public NexusWriteReply StampUpload(string id, string service, string outcome, long whenUnix, string detail = null) =>
             Write("LOG_STAMP_UPLOAD " + JsonSerializer.Serialize(new { id, service, outcome, whenUnix, detail }, Json));
 

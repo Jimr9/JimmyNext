@@ -978,10 +978,11 @@ static class JimmyTests
                 File.WriteAllText(seedState, "test\n<eoh>\n" + F("CALL", "W1AW") + F("BAND", "80m") + F("MODE", "FT8") + F("QSO_DATE", "20260928") +
                     F("TIME_ON", "220000") + F("GRIDSQUARE", "FN31") + " <eor>\n");
                 client.Import(seedState);
-                new NexusLogbookService().BackfillMissingStates(call => call == "W1AW" ? "CT" : null);
-                Check("state repair: W1AW gets its state from the callsign lookup", Row("W1AW").State == "CT", true);
+                // 2026-10-04: no state is guessed for a contact -- not on import, not by a repair (retired).
+                Check("imported W1AW keeps its blank state", string.IsNullOrEmpty(Row("W1AW").State), true);
 
                 // The live path: Jimmy's own record for a completed QSO (no DXCC in it), into Nexus.
+                StationLocation.SetForTest(new Dictionary<string, string> { ["FN42"] = "MA" }, null);   // FN42 in MA only, whatever grid.dat this PC has
                 string liveAdif = AdifRecordBuilder.Build("K1ABC", "20m", 14_075_500, "FT8", "20260928", "210000", "210100",
                     "-10", "-12", "FN42", "", "", "", "KB0UZT", "KB0UZT", "EN34");
                 AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(liveAdif), QsoRecord.JimmyNextSource, null,
@@ -995,7 +996,7 @@ static class JimmyTests
                 Console.WriteLine($"  live: dxcc {live?.Dxcc}, CONT {live?.ExtraValue("CONT")}, country '{live?.Country}'");
                 Check("live-logged contact arrives with DXCC 291, continent NA and Club Log's country",
                     live != null && live.Dxcc == 291 && live.ExtraValue("CONT") == "NA" && live.Country == "UNITED STATES OF AMERICA", true);
-                Check("live-logged contact arrives with its state", live?.State == "MA", true);
+                Check("live-logged contact: callbook state, its grid agrees", live?.State == "MA" && (live?.ExtraValue("APP_JIMMY_LOC_FROM") ?? "").Contains("callbook"), true);
                 // 2026-10-04: Jimmy Next's own contact says so; its identity in Nexus is unchanged.
                 Check("live-logged contact's Source is Jimmy Next", live?.ExtraValue(NexusMigration.SourceTag) == QsoRecord.JimmyNextSource, true);
                 Check("...and its request id keeps the WSJTX: form (a retry is the same contact)",
@@ -1007,12 +1008,75 @@ static class JimmyTests
                 var imported = client.Rows().Rows.FirstOrDefault(q => q.Call == "K2XYZ");
                 Check("a one-contact WSJT-X import is not labelled Jimmy Next",
                     imported != null && imported.ExtraValue(NexusMigration.SourceTag) != QsoRecord.JimmyNextSource, true);
+
+                // Location evidence end to end (2026-10-04): imports keep blanks; a chosen park and
+                // our recorded location reach Nexus, the export and the LoTW upload batch; a LoTW
+                // merge keeps the logged location and records LoTW's beside it.
+                Check("import keeps its blank country and state", imported?.Country == null && string.IsNullOrEmpty(imported?.State), true);
+                var tqsl = TqslStationData.Parse("<StationDataFile><StationData name=\"Park\"><CALL>KB0UZT</CALL><GRIDSQUARE>DN43</GRIDSQUARE><US_STATE>ID</US_STATE></StationData></StationDataFile>");
+                NexusLogbookService.OurLocationFields = () => new List<(string, string)> { ("MY_STATE", "ID"), ("APP_JIMMY_TQSL_LOCATION", "Park"), ("APP_JIMMY_TQSL_LOC_FP", tqsl["Park"].Fingerprint) };
+                NexusLogbookService.OurPark = () => "US-1111";
+                try
+                {
+                    // The same station twice: first with the park chosen for it, then CQ POTA with none.
+                    foreach (var (time, park) in new[] { ("213000", "US-2222"), ("214500", "") })
+                    {
+                        string rec = AdifRecordBuilder.Build("K7PRK", "20m", 14_075_500, "FT8", "20260928", time, time,
+                            "-10", "-12", "DN13", "", "", "", "KB0UZT", "KB0UZT", "DN43", state: park.Length > 0 ? "ID" : "", sig: "POTA", sigInfo: park,
+                            extra: park.Length > 0 ? new[] { new KeyValuePair<string, string>("APP_JIMMY_LOC_FROM", "STATE ID from park US-2222") } : null);
+                        AdifImporter.Import(new NexusLogbookService(), AdifParser.ParseWithOrder(rec), QsoRecord.JimmyNextSource, null, null);
+                    }
+                    List<NexusQso> prk = null;
+                    for (int i = 0; i < 100 && (prk == null || prk.Count < 2); i++)
+                    {
+                        prk = client.Rows().Rows.Where(q => q.Call == "K7PRK").OrderBy(q => q.WhenUnix).ToList();
+                        if (prk.Count < 2) Thread.Sleep(100);
+                    }
+                    var withPark = prk[0]; var noPark = prk[1];
+                    Check("park contact: their park, our park and our location saved",
+                        withPark.Ota?.TheirRef == "US-2222" && withPark.State == "ID" && withPark.Ota?.MyRef == "US-1111"
+                        && withPark.ExtraValue("MY_STATE") == "ID" && withPark.ExtraValue("APP_JIMMY_TQSL_LOCATION") == "Park", true);
+                    Check("same station, no park chosen: POTA with the park blank, no state",
+                        string.IsNullOrEmpty(noPark.Ota?.TheirRef) && noPark.ExtraValue("SIG") == "POTA" && string.IsNullOrEmpty(noPark.State), true);
+
+                    string exp = Path.Combine(work, "export.adi");
+                    client.Export(exp);
+                    string expText = File.ReadAllText(exp);
+                    int at = expText.IndexOf("<CALL:5>K7PRK", StringComparison.OrdinalIgnoreCase);
+                    string expRec = at < 0 ? "" : expText.Substring(at, expText.IndexOf("<eor>", at, StringComparison.OrdinalIgnoreCase) - at);
+                    Check("export: the saved park and location go out as saved",
+                        expRec.IndexOf("<SIG_INFO:7>US-2222", StringComparison.OrdinalIgnoreCase) >= 0 && expRec.IndexOf("<MY_SIG_INFO:7>US-1111", StringComparison.OrdinalIgnoreCase) >= 0
+                        && expRec.IndexOf("<MY_STATE:2>ID", StringComparison.OrdinalIgnoreCase) >= 0 && expRec.IndexOf("<STATE:2>ID", StringComparison.OrdinalIgnoreCase) >= 0, true);
+
+                    NexusLogbook.Refresh(force: true);
+                    var pend = new NexusLogbookService().GetPendingUploads("LOTW").Where(q => q.Callsign == "K7PRK").ToList();
+                    var plan = TqslUploadClient.PlanBatches(pend, "Home", tqsl, null);
+                    Check("LoTW: both contacts sign with the location they were logged at, not the configured one",
+                        pend.Count == 2 && plan.Count == 1 && plan[0].HeldWhy == null && plan[0].Location == "Park", true);
+
+                    string F2(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+                    string report = "ARRL Logbook of the World Status Report\n<PROGRAMID:4>LoTW\n<eoh>\n" +
+                        F2("CALL", "K7PRK") + F2("BAND", "20M") + F2("MODE", "FT8") + F2("QSO_DATE", "20260928") + F2("TIME_ON", "213000") +
+                        F2("QSL_RCVD", "Y") + F2("STATE", "WY") + F2("CNTY", "WY,TETON") + F2("DXCC", "291") + " <eor>\n" +
+                        F2("CALL", "W1AW") + F2("BAND", "80M") + F2("MODE", "FT8") + F2("QSO_DATE", "20260928") + F2("TIME_ON", "220000") +
+                        F2("QSL_RCVD", "Y") + F2("STATE", "CT") + F2("COUNTRY", "UNITED STATES OF AMERICA") + " <eor>\n";
+                    var merged = new NexusLogbookService().MergeDownload(report, "LOTW");
+                    var k7 = client.Rows().Rows.Where(q => q.Call == "K7PRK").OrderBy(q => q.WhenUnix).First();
+                    var w1 = client.Rows().Rows.Single(q => q.Call == "W1AW");
+                    Console.WriteLine($"  lotw merge: {merged.Errors ?? "ok"}; K7PRK state {k7.State} lotw {k7.ExtraValue("APP_JIMMY_LOTW_STATE")}; W1AW state '{w1.State}' country '{w1.Country}' lotw {w1.ExtraValue("APP_JIMMY_LOTW_STATE")}");
+                    Check("LoTW merge: confirmed, logged state kept, LoTW's state kept beside it",
+                        k7.QslRcvd.Lotw && k7.State == "ID" && k7.ExtraValue("APP_JIMMY_LOTW_STATE") == "WY" && k7.ExtraValue("APP_JIMMY_LOTW_CNTY") == "WY,TETON", true);
+                    Check("LoTW merge: an imported blank state and country stay blank",
+                        w1.QslRcvd.Lotw && string.IsNullOrEmpty(w1.State) && w1.Country == null && w1.ExtraValue("APP_JIMMY_LOTW_STATE") == "CT", true);
+                }
+                finally { NexusLogbookService.OurLocationFields = null; NexusLogbookService.OurPark = null; }
                 client.Shutdown(token);
             }
         }
         finally
         {
             RuleLibrary.ClubLog = prevClubLog;
+            StationLocation.SetForTest(null, null);
             NexusLogbook.Reset();
             NexusLogbook.TestFolderOverride = null; NexusLogbook.TestPortOverride = null; NexusLogbook.TestForceActive = null;
         }
@@ -1617,6 +1681,10 @@ static class JimmyTests
         BareCallInProgSpeechTests();
         ImportKeepsSourceTests();
         CqTypeRowFieldTests();
+        NexusNewFeedTextTests();
+        SmartModeKeepsStationDecodesTests();
+        LocationEvidenceTests();
+        ContestCalendarAndTimeZoneTests();
         ComputerMoveTests();
         CustomizationPackageTests();
         BulkEditApplyTests();
@@ -9764,7 +9832,7 @@ static class JimmyTests
             ["CALL"] = call, ["BAND"] = "80m", ["FREQ"] = "3.573", ["MODE"] = "FT8",
             ["QSO_DATE"] = "20260710", ["TIME_ON"] = time, ["TIME_OFF"] = time,
             ["RST_SENT"] = "-10", ["RST_RCVD"] = "-14", ["GRIDSQUARE"] = "",
-            ["STATION_CALLSIGN"] = "KB0UZT", ["MY_GRIDSQUARE"] = "EN34",
+            ["STATION_CALLSIGN"] = "KB0UZT", ["MY_GRIDSQUARE"] = "EN34", ["DXCC"] = "291",
         };
         string dir = UseTestNexusLog();
         try
@@ -9776,9 +9844,10 @@ static class JimmyTests
                 AdifImporter.Import(svc, new[] { LiveFieldsNoGrid("K5KPE", "104500") }, QsoRecord.JimmyNextSource, null, null);
             }
             var queued = NexusLogbook.Outbox.Snapshot();
-            Check("resolveUsState callback wired in: no-grid QSO still gets a real state",
-                  queued.Any(e => e.Qso.State == "AR"), true);
-            Check("without the callback: no state is invented",
+            // 2026-10-05: a home call with no grid heard takes the callbook state, marked as such.
+            Check("live-logged QSO, no grid: the callbook state, with where it came from",
+                  queued.Any(e => e.Qso.State == "AR" && (e.Qso.ExtraValue("APP_JIMMY_LOC_FROM") ?? "").Contains("callbook")), true);
+            Check("without the lookup: no state is invented",
                   queued.Count(e => string.IsNullOrEmpty(e.Qso.State)) == 1, true);
         }
         finally { EndTestNexusLog(dir); }
@@ -10944,7 +11013,7 @@ static class JimmyTests
 
             // 2026-09-28 (operator): WAS_30M was missing from the per-band set. Every per-band
             // WAS award must keep shipping -- State, 50 states, that one band only.
-            foreach (string band in new[] { "160m", "80m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m" })
+            foreach (string band in new[] { "160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m" })
             {
                 string id = "WAS_" + band.ToUpperInvariant();
                 bool found = byId.TryGetValue(id, out RuleDefinition was);
@@ -17452,7 +17521,8 @@ static class JimmyTests
                     // Sync so its full sequence can be checked; there's no equivalent
                     // workaround for "a row is selected" without a real, seeded database).
                     CheckPage("Lookup and Edit", 2, new[] {
-                        "Callsign filter", "Source filter", "Date from, format year month day, optional",
+                        // Search in / Search for (field search, 2026-10-02) follow the callsign.
+                        "Callsign filter", "Search in", "Search for", "Source filter", "Date from, format year month day, optional",
                         "Date to, format year month day, optional", "Search", "Clear filters",
                         "Choose column order", "Contacts found", "Add a new QSO",
                         "Status", "Close",
@@ -19185,11 +19255,12 @@ static class JimmyTests
             CheckStr("no grid heard -> the mailing address, as before", StationLocation.ResolveState("MO", ""), "MO");
             CheckStr("grid outside the US -> blank", StationLocation.ResolveState("MO", "IO91"), null);
 
-            Check("activator spotted on this band (portable call) -> park found",
-                StationLocation.TryFindActivation("AF0EC", "20m", out string refs, out string st) && refs == "US-1234" && st == "ID", true);
-            Check("a park in two states -> park named, state left blank",
-                StationLocation.TryFindActivation("K0TWO", "20m", out string refs2, out string st2) && refs2 == "US-0001" && st2 == null, true);
-            Check("spotted on another band -> no activation", StationLocation.TryFindActivation("AF0EC", "40m", out _, out _), false);
+            // A spot is only a suggestion now (2026-10-04); the logged park is the one the operator chose.
+            CheckStr("activator spotted on this band (portable call) -> suggested park",
+                StationLocation.NewestSpotPark("AF0EC", "20m", DateTime.UtcNow)?.Reference, "US-1234");
+            Check("spotted on another band -> no suggestion", StationLocation.NewestSpotPark("AF0EC", "40m", DateTime.UtcNow) == null, true);
+            Check("spot from over 30 minutes before the contact -> no suggestion",
+                StationLocation.NewestSpotPark("AF0EC", "20m", DateTime.UtcNow.AddMinutes(40)) == null, true);
 
             StationLocation.SetForTest(null, spots);
             CheckStr("grid heard before the engine sent its table -> blank, not a guess", StationLocation.ResolveState("MO", "DN43"), null);
@@ -19365,6 +19436,221 @@ static class JimmyTests
 
     // A decode from Nexus's deeper pass, arriving just after its period ended, belongs to that
     // period -- not the next one (operator, 2026-10-02: SP1MGM listed on the wrong side).
+    // A station Smart Mode is managing keeps its decodes like one on the list (2026-10-04: K5BTM,
+    // KD7PH logged with no grid and no POTA after a long wait, then listed again).
+    static void SmartModeKeepsStationDecodesTests()
+    {
+        Console.WriteLine("\n── Smart Mode: a waiting station's CQ is kept ──");
+        var ctrl = new Controller();
+        ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+        ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+        ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        var tm = new TargetMonitor(TargetPurpose.SmartStart);
+        tm.Start("K5BTM", "20m", "FT8", "tok1");
+        typeof(WsjtxClient).GetField("_smartStart", flags).SetValue(wc, tm);
+        var old = DateTime.UtcNow.AddMinutes(-20);
+        EnqueueDecodeMessage Cq(string call) => new EnqueueDecodeMessage { Message = $"CQ POTA {call} EM34", RxDate = old.Date, SinceMidnight = old.TimeOfDay };
+        wc.allCallDict["K5BTM"] = new List<EnqueueDecodeMessage> { Cq("K5BTM") };
+        wc.allCallDict["W1XYZ"] = new List<EnqueueDecodeMessage> { Cq("W1XYZ") };
+        var store = typeof(WsjtxClient).GetField("_callQueueStore", flags).GetValue(wc);
+        store.GetType().GetMethod("TrimAllCallDict").Invoke(store, null);
+        Check("Smart Mode's station keeps its 20-minute-old CQ POTA", wc.allCallDict.ContainsKey("K5BTM"), true);
+        Check("a station nobody is managing still ages out", wc.allCallDict.ContainsKey("W1XYZ"), false);
+    }
+
+    // Location evidence (2026-10-04): a park chosen per station and used once; a confirmation
+    // download never fills the logged location; LoTW signs each contact with the location it was
+    // logged with, holding what cannot be used as recorded.
+    static void LocationEvidenceTests()
+    {
+        Console.WriteLine("\n── Location evidence: parks, downloads, TQSL locations ──");
+        var t0 = new DateTime(2026, 10, 4, 15, 0, 0, DateTimeKind.Utc);
+        ParkChoices.ClearAll();
+        ParkChoices.Choose("K5BTM", "us-1234", "US-TX", t0);
+        ParkChoices.Choose("W1XYZ/P", "US-5678", "US-ID,US-WY", t0);
+        var a = ParkChoices.Take("K5BTM/P", t0.AddMinutes(10));
+        CheckStr("park: each station keeps its own", a?.Reference + " " + a?.State, "US-1234 TX");
+        Check("park: used once", ParkChoices.Take("K5BTM", t0.AddMinutes(11)) == null, true);
+        CheckStr("park in two states: no state", ParkChoices.Peek("W1XYZ", t0)?.State ?? "(none)", "(none)");
+        Check("park: a stale choice is ignored", ParkChoices.Take("W1XYZ", t0.AddHours(3)) == null, true);
+        ParkChoices.ClearAll();
+
+        var log = new List<NexusQso> { new NexusQso { Id = "1", Call = "K5BTM", Band = "20m", Mode = "FT8",
+            WhenUnix = (ulong)new DateTimeOffset(t0).ToUnixTimeSeconds(), State = null } };
+        string F(string tag, string v) => $"<{tag}:{v.Length}>{v}";
+        string report = "<eoh>" +
+            F("CALL", "K5BTM") + F("BAND", "20m") + F("MODE", "FT8") + F("QSO_DATE", "20261004") + F("TIME_ON", "1500") +
+            F("STATE", "OK") + F("COUNTRY", "United States") + F("CNTY", "OK,Tulsa") + F("QSL_RCVD", "Y") + "<eor>" +
+            F("CALL", "N0NEW") + F("BAND", "40m") + F("MODE", "FT8") + F("QSO_DATE", "20261004") + F("TIME_ON", "1600") +
+            F("STATE", "MN") + "<eor>";
+        var prep = NexusReportPairing.Prepare(report, log);
+        string paired = prep.Text.Substring(0, prep.Text.IndexOf("<eor>"));
+        Check("download: paired row loses STATE and COUNTRY", paired.Contains("<STATE:") || paired.Contains("<COUNTRY:"), false);
+        Check("download: paired row keeps the rest", paired.Contains("<CNTY:8>OK,Tulsa") && paired.Contains("<QSL_RCVD:1>Y"), true);
+        Check("download: a contact the log lacks is passed whole", prep.Text.Contains("<STATE:2>MN"), true);
+        CheckStr("download: the paired row's location is kept apart", prep.Located.Count == 1 ? prep.Located[0].Location["STATE"] : "?", "OK");
+
+        var locs = TqslStationData.Parse("<StationDataFile><StationData name=\"Home\"><CALL>W0JR</CALL><GRIDSQUARE>EN34</GRIDSQUARE><US_STATE>MN</US_STATE></StationData>" +
+            "<StationData name=\"Park\"><CALL>W0JR</CALL><GRIDSQUARE>EN35</GRIDSQUARE><US_STATE>MN</US_STATE></StationData></StationDataFile>");
+        LogbookDb.PendingUploadQso Q(string call, string loc, string fp, string station = "W0JR") =>
+            new LogbookDb.PendingUploadQso { Callsign = call, StationCall = station, TqslLocation = loc, TqslLocFp = fp };
+        var pending = new List<LogbookDb.PendingUploadQso>
+        {
+            Q("K1AA", "", null),                                      // legacy: configured location
+            Q("K2BB", "Park", locs["Park"].Fingerprint),
+            Q("K3CC", "Home", locs["Home"].Fingerprint),
+            Q("K4DD", "Park", "old|fingerprint"),                     // location changed since
+            Q("K5EE", "Gone", "x"),                                   // location deleted
+            Q("K6FF", "Home", locs["Home"].Fingerprint, "W0JR/P"),    // callsign not the location's
+            Q("K7GG", Controller.TqslNoLocation, null),
+        };
+        var plan = TqslUploadClient.PlanBatches(pending, "Home", locs, null);
+        string Where(string call) { var b = plan.First(x => x.Qsos.Any(q => q.Callsign == call)); return b.HeldWhy == null ? b.Location : "held"; }
+        CheckStr("tqsl: legacy uses the configured location", Where("K1AA"), "Home");
+        CheckStr("tqsl: portable contact signs with its own location", Where("K2BB"), "Park");
+        Check("tqsl: one run per location", plan.Count(b => b.HeldWhy == null && b.Location == "Home") == 1
+            && plan.First(b => b.HeldWhy == null && b.Location == "Home").Qsos.Count == 2, true);
+        CheckStr("tqsl: changed location held", Where("K4DD"), "held");
+        CheckStr("tqsl: deleted location held", Where("K5EE"), "held");
+        CheckStr("tqsl: callsign mismatch held", Where("K6FF"), "held");
+        CheckStr("tqsl: no location at logging held", Where("K7GG"), "held");
+        // Their state (2026-10-05), border-aware, as grid.dat says: FN31 lies in CT and MA, DN43 in ID
+        // and OR, EM29 in MO alone.
+        try
+        {
+            StationLocation.SetForTest(null, null, new Dictionary<string, string> { ["FN31"] = "CT-MA", ["DN43"] = "ID-OR", ["EM29"] = "MO" });
+            string S(string call, int dxcc, string grid, bool pota, string cb)
+            { var d = StationLocation.TheirState(call, dxcc, grid, pota, cb); return d.State ?? "(blank)" + (d.NotSet != null ? " noted" : ""); }
+            CheckStr("state: home call, callbook agrees with the grid", S("W1AW", 291, "FN31", false, "CT"), "CT");
+            CheckStr("state: border grid, callbook is the other state", S("W1XX", 291, "FN31", false, "MA"), "MA");
+            CheckStr("state: grid elsewhere than the callbook -> blank, noted", S("K0MO", 291, "DN43", false, "MO"), "(blank) noted");
+            CheckStr("state: no grid -> the callbook", S("W1AW", 291, "", false, "CT"), "CT");
+            CheckStr("state: no callbook, grid in one state", S("K0XX", 291, "EM29", false, null), "MO");
+            CheckStr("state: portable call ignores the callbook", S("W1AW/P", 291, "FN31", false, "CT"), "(blank) noted");
+            CheckStr("state: POTA ignores the callbook, uses a one-state grid", S("K0MO", 291, "EM29", true, "CT"), "MO");
+            CheckStr("state: POTA, no grid -> blank, noted", S("K0MO", 291, "", true, "MO"), "(blank) noted");
+            CheckStr("state: Alaska by entity", S("KL7AA", 6, "", false, "WA"), "AK");
+            CheckStr("state: not a US entity -> none", S("VE3AA", 1, "FN03", false, "ON"), "(blank)");
+            Check("park on a state line fits a border grid", StationLocation.ParkStateFits("OR", "DN43"), true);
+            Check("park in another state does not", StationLocation.ParkStateFits("MO", "DN43"), false);
+
+            // No grid.dat: Nexus's table and its neighbours are only an estimate (operator, 2026-10-05).
+            StationLocation.SetForTest(new Dictionary<string, string> { ["DN43"] = "ID", ["DN33"] = "OR", ["EM29"] = "MO" }, null);
+            var est = StationLocation.TheirState("K0XX", 291, "EM29", false, null);
+            Check("estimate: one-state grid filled, labelled an estimate", est.State == "MO" && est.From.Contains("estimated"), true);
+            var cbEst = StationLocation.TheirState("K0MO", 291, "DN43", false, "MO");
+            Check("estimate: does not rule out the callbook state, says so", cbEst.State == "MO" && cbEst.From.Contains("not ruled out"), true);
+            Check("estimate: never a park conflict", StationLocation.ParkStateFits("MO", "DN43"), true);
+        }
+        finally { StationLocation.SetForTest(null, null); }
+
+        Check("tqsl: unreadable station data holds stamped, not legacy",
+            TqslUploadClient.PlanBatches(pending, "Home", null, "missing").Where(b => b.HeldWhy == null).SelectMany(b => b.Qsos).Select(q => q.Callsign).SequenceEqual(new[] { "K1AA" }), true);
+    }
+
+    // Display time zone and the contest calendar (2026-10-05): UTC by default; a real zone with its
+    // own daylight saving per instant; dates follow the conversion across midnight; a calendar
+    // listing is not support; an old or failed calendar says so.
+    static void ContestCalendarAndTimeZoneTests()
+    {
+        Console.WriteLine("\n── Display time zone and contest calendar ──");
+        var utc = TimeZoneInfo.Utc;
+        var central = TimeZoneInfo.FindSystemTimeZoneById("Central Standard Time");
+        DateTime U(int y, int mo, int d, int h, int mi) => new DateTime(y, mo, d, h, mi, 0, DateTimeKind.Utc);
+
+        CheckStr("UTC display", DisplayTime.DateTimeText(U(2026, 6, 6, 18, 0), utc) + " " + DisplayTime.Abbreviation(U(2026, 6, 6, 18, 0), utc), "Sat 2026-06-06 18:00 UTC");
+        CheckStr("summer: CDT", DisplayTime.DateTimeText(U(2026, 6, 6, 18, 0), central) + " " + DisplayTime.Abbreviation(U(2026, 6, 6, 18, 0), central), "Sat 2026-06-06 13:00 CDT");
+        CheckStr("winter: CST", DisplayTime.DateTimeText(U(2026, 1, 17, 19, 0), central) + " " + DisplayTime.Abbreviation(U(2026, 1, 17, 19, 0), central), "Sat 2026-01-17 13:00 CST");
+        CheckStr("across midnight: the date follows", DisplayTime.DateTimeText(U(2026, 6, 8, 2, 59), central), "Sun 2026-06-07 21:59");
+        CheckStr("spring forward: one minute before", DisplayTime.DateTimeText(U(2026, 3, 8, 7, 59), central) + " " + DisplayTime.Abbreviation(U(2026, 3, 8, 7, 59), central), "Sun 2026-03-08 01:59 CST");
+        CheckStr("spring forward: at the change", DisplayTime.DateTimeText(U(2026, 3, 8, 8, 0), central) + " " + DisplayTime.Abbreviation(U(2026, 3, 8, 8, 0), central), "Sun 2026-03-08 03:00 CDT");
+        CheckStr("fall back: the first 01:30 is CDT", DisplayTime.DateTimeText(U(2026, 11, 1, 6, 30), central) + " " + DisplayTime.Abbreviation(U(2026, 11, 1, 6, 30), central), "Sun 2026-11-01 01:30 CDT");
+        CheckStr("fall back: the second 01:30 is CST", DisplayTime.DateTimeText(U(2026, 11, 1, 7, 30), central) + " " + DisplayTime.Abbreviation(U(2026, 11, 1, 7, 30), central), "Sun 2026-11-01 01:30 CST");
+        CheckStr("a range over the change names each end", DisplayTime.RangeText(U(2026, 10, 31, 18, 0), U(2026, 11, 1, 23, 59), central),
+            "Sat 2026-10-31 13:00 CDT to Sun 2026-11-01 17:59 CST");
+        CheckStr("zone sentence", DisplayTime.ZoneSentence(U(2026, 6, 6, 18, 0), central), "Times are Central Daylight Time (UTC-05:00).");
+        Check("an unknown zone id falls back to the computer's", DisplayTime.SelectedZone("No/Such_Zone").Id == TimeZoneInfo.Local.Id, true);
+
+        // Off by default (UTC), and the preference is read live.
+        bool use = false; string id = "Central Standard Time";
+        DisplayTime.Configure(() => id, () => use);
+        Check("preference off: UTC", DisplayTime.Zone.Id == TimeZoneInfo.Utc.Id, true);
+        use = true;
+        Check("preference on: the selected zone", DisplayTime.Zone.Id == "Central Standard Time", true);
+        id = "";
+        Check("blank zone: the computer's", DisplayTime.Zone.Id == TimeZoneInfo.Local.Id, true);
+        DisplayTime.Configure(null, null);
+
+        // Kept across a restart: the station profile's ini.
+        string ini = Path.Combine(Path.GetTempPath(), $"jimmy-tz-{Guid.NewGuid():N}.ini");
+        try
+        {
+            var st = new StationSettings { DisplayTimeZone = "Central Standard Time" };
+            st.SaveToIni(new IniFile(ini));
+            var back = new StationSettings();
+            back.LoadFromIni(new IniFile(ini));
+            CheckStr("display zone saved and read back", back.DisplayTimeZone, "Central Standard Time");
+        }
+        finally { try { File.Delete(ini); } catch { } }
+
+        // The calendar: rows, support notes, and how old the list is.
+        var now = U(2026, 9, 12, 20, 0);
+        long X(DateTime t) => new DateTimeOffset(t).ToUnixTimeSeconds();
+        var vhf = new ContestCalendarEvent { Name = "ARRL September VHF Contest", StartUnix = X(U(2026, 9, 12, 18, 0)), EndUnix = X(U(2026, 9, 14, 2, 59)) };
+        CheckStr("calendar row: on now, Jimmy's note", OtaSpotsWindow.FormatContestRow(vhf, now, utc),
+            "On now: ARRL September VHF Contest, Sat 2026-09-12 18:00 to Mon 2026-09-14 02:59 UTC, Jimmy: available in nexus, not yet verified in jimmy");
+        Check("calendar: Field Day is automated", (OtaSpotsWindow.JimmySupportFor("ARRL Field Day") ?? "").Contains("automated"), true);
+        CheckStr("calendar: International Digital is not supported yet", OtaSpotsWindow.JimmySupportFor("ARRL International Digital Contest"), "not supported yet");
+        Check("calendar: anything else is a listing only", OtaSpotsWindow.JimmySupportFor("NCCC FT4 Sprint") == null, true);
+        var fresh = new ContestCalendarResult { FetchedUnix = X(now.AddMinutes(-10)) };
+        Check("status: fresh", OtaSpotsWindow.CalendarStatusText(fresh, null, now, utc).StartsWith("Calendar read Sat 2026-09-12 19:50 UTC. Times are UTC."), true);
+        var stale = new ContestCalendarResult { FetchedUnix = X(now.AddHours(-5)), Error = "timed out" };
+        Check("status: failed refresh says so and that it may be out of date",
+            OtaSpotsWindow.CalendarStatusText(stale, null, now, utc).Contains("Could not refresh the calendar (timed out)") &&
+            OtaSpotsWindow.CalendarStatusText(stale, null, now, utc).Contains("may be out of date"), true);
+        CheckStr("status: never read", OtaSpotsWindow.CalendarStatusText(new ContestCalendarResult { Error = "no network" }, null, now, utc), "Contest calendar unavailable: no network");
+        var rules = new ContestRulesStatus { RulesYear = 2026, ActiveGenerated = "2026-09-29T07:00:00Z", BundledGenerated = "2026-09-29T07:00:00Z", DownloadedGenerated = "2026-10-03T07:00:00Z", WaitingForRestart = true };
+        Check("rules: version in use, and a newer one waiting for a restart",
+            OtaSpotsWindow.RulesStatusText(rules, now, utc).Contains("rules year 2026, version 2026-09-29 (bundled)") &&
+            OtaSpotsWindow.RulesStatusText(rules, now, utc).Contains("Version 2026-10-03 is downloaded and applies the next time"), true);
+    }
+
+    // Who hears me, solar wind, daily solar history, Smart Mode rows (2026-10-04): missing values
+    // are said as unknown, never shown as 0; an old solar-wind reading says so.
+    static void NexusNewFeedTextTests()
+    {
+        Console.WriteLine("\n── Who hears me / solar wind / solar history text ──");
+        CheckStr("heard: full row", OtaSpotsWindow.FormatHeardMeRow(new HeardMe { Call = "VK3AA", Grid = "QF22", Band = "20m", Snr = -14, Km = 16021, Octant = "W", AgeSecs = 120 }),
+            "VK3AA QF22, 20m, -14 dB, 16,021 km W, 2m ago");
+        CheckStr("heard: no SNR, no grid", OtaSpotsWindow.FormatHeardMeRow(new HeardMe { Call = "DL1AA", Band = "40m", Km = 0, AgeSecs = 30 }),
+            "DL1AA, 40m, SNR not reported, distance unknown, 30s ago");
+        CheckStr("heard summary", OtaSpotsWindow.FormatHeardMeSummary(new GettingOutResult { Count = 12, MaxKm = 6400, WindowMinutes = 15 }),
+            "12 stations heard you in the last 15 minutes, furthest 6,400 km.");
+        CheckStr("heard summary, nobody", OtaSpotsWindow.FormatHeardMeSummary(new GettingOutResult { Count = 0, WindowMinutes = 30 }),
+            "No reports of your signal in the last 30 minutes.");
+
+        var w = OtaSpotsWindow.FormatSolarWind(new SolarWindResult { BzNt = -4.2f, BtNt = 6.1f, SpeedKms = 420, MeasuredAgeSecs = 120 }, null);
+        CheckStr("wind: Bz southward with total field", w.bz, "-4.2 nT (southward), total field 6.1 nT");
+        CheckStr("wind: density not known stays unknown", w.wind, "420 km/s, density not known");
+        CheckStr("wind: fresh reading age", w.age, "measured 2m ago");
+        var old = OtaSpotsWindow.FormatSolarWind(new SolarWindResult { BzNt = 3f, MeasuredAgeSecs = 7200, Stale = true }, null);
+        Check("wind: an old reading says so", old.age.Contains("old reading"), true);
+        CheckStr("wind: no speed is not 0", old.wind, "speed not known, density not known");
+
+        var hist = OtaSpotsWindow.FormatSolarHistory(new SolarHistoryResult { Days = new[] {
+            new SolarDay { DayUnix = 1759363200, Sfi = 140, Ssn = 110 },      // 2025-10-02
+            new SolarDay { DayUnix = 1759449600, Sfi = 145, Ssn = null } } }, null);
+        CheckStr("history: newest first", hist[0], "2025-10-03: solar flux 145, sunspots not reported");
+        CheckStr("history: older day", hist[1], "2025-10-02: solar flux 140, sunspots 110");
+
+        CheckStr("Smart Mode row: one line, every field", SmartModeWindow.RowText(new WsjtxClient.SmartStationRow {
+            Shown = "V 2 6 K", Status = "current, calling", LastHeard = "30 seconds ago, K0MV V26K RR73", Calls = "5 of 20", OnList = "12 of 20 minutes" }),
+            "V 2 6 K, current, calling, last heard 30 seconds ago, K0MV V26K RR73, calls 5 of 20, on the list 12 of 20 minutes");
+    }
+
     // The "CQ type" row field shows the CQ as received (2026-10-04).
     static void CqTypeRowFieldTests()
     {
@@ -20534,6 +20820,17 @@ static class JimmyTests
     // CQ with nobody yet in progress, the one case that clause can still fire mid-Tx even before
     // this setting exists), and that it changes NOTHING when off (default), preserving today's
     // behavior for every operator who hasn't touched this new checkbox. ───────────────────────
+    // Waits (at most ~23 s) until the clock is 8-14 s into an even 15 s FT8 period.
+    static void WaitForSecondHalfOfEvenPeriod()
+    {
+        while (true)
+        {
+            double t = DateTime.UtcNow.TimeOfDay.TotalSeconds;
+            if ((long)(t / 15) % 2 == 0 && t % 15 >= 8.0 && t % 15 < 14.0) return;
+            Thread.Sleep(50);
+        }
+    }
+
     static void SuppressReceiveNotificationsDuringTxTests()
     {
         Console.WriteLine("\n── Item 2: suppress receive-side 'available stations' summary while transmitting -- THE FIX ──");
@@ -20580,10 +20877,17 @@ static class JimmyTests
             // default since 2026-10-02 (Still Need unconfirmed off): this test is about the
             // suppress-while-transmitting setting, so the station is callable here either way.
             wc.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);
+            // The snapshot's decode is stamped with the time it arrives, and that period's parity
+            // decides its side: heard in an odd period it is on the side being transmitted on and
+            // is (rightly) not counted; in the first half of a period it belongs to the period
+            // before (WsjtxClient.DecodeHeardUtc, 2026-10-02). So it is applied in the second half
+            // of an even period, where it is on the receive side -- this test checks the setting,
+            // not the clock (it failed about half the time without this).
+            WaitForSecondHalfOfEvenPeriod();
             wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
             string textOff = fakeStatusView.LastStatusText ?? wc.TestPendingStatusText ?? "";
             Check("Setting OFF (default): the routine available-stations summary can still appear while transmitting/calling CQ -- unchanged existing behavior",
-                textOff.IndexOf("available station", StringComparison.OrdinalIgnoreCase) >= 0, true);
+                textOff.IndexOf("available station", StringComparison.OrdinalIgnoreCase) >= 0, true);
 
             // Fresh client for the ON case -- avoids any carried-over dedup/defer state from the
             // OFF render above affecting this one.
@@ -20604,6 +20908,7 @@ static class JimmyTests
             var fakeStatusView2 = new FakeStatusView();
             wc2.StatusView = fakeStatusView2;
             wc2.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);   // as above
+            WaitForSecondHalfOfEvenPeriod();
             wc2.TestApplyDirectSnapshot(myCall, myGrid, snap);
             string textOn = fakeStatusView2.LastStatusText ?? wc2.TestPendingStatusText ?? "";
             Check("THE FIX: setting ON suppresses the available-stations summary while transmitting, even while calling CQ",
@@ -27538,7 +27843,7 @@ static class JimmyTests
         {
             using (var db = new LogbookDb(tmpDb))
             {
-                CheckStr("db_version reaches 10", db.GetMeta("db_version"), "10");
+                CheckStr("db_version reaches the current version (11, 2026-10-04)", db.GetMeta("db_version"), "11");
 
                 InsertQso(db, "K5KPE", "MO", dxcc: 291, zone: 4);
                 var (id, contestId, contestSessionId, modifiedAt) = QueryContestCols(tmpDb, "K5KPE");
@@ -27550,7 +27855,7 @@ static class JimmyTests
             // Re-opening an already-migrated database must not throw and must stay at v10.
             using (var db2 = new LogbookDb(tmpDb))
             {
-                CheckStr("Re-opening an already-v10 database: version unchanged", db2.GetMeta("db_version"), "10");
+                CheckStr("Re-opening an already-v10 database: version unchanged", db2.GetMeta("db_version"), "11");
             }
         }
         finally { try { File.Delete(tmpDb); } catch { } }

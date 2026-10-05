@@ -23,10 +23,10 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use propagation::geo::maidenhead_to_latlon;
-use propagation::live::{eqsl, hamqth, lotw, pota, qrz, swpc, swpc_scales};
+use propagation::live::{contests, eqsl, hamqth, lotw, pota, qrz, solar_wind, swpc, swpc_scales};
 use propagation::model::{r_scale, SpaceWx};
 use propagation::pota::OtaSpot;
-use propagation::{representative_muf, NoaaScalesView};
+use propagation::{representative_muf, DailySolarIndices, NoaaScalesView, SolarWind};
 
 /// How often to refresh POTA/SOTA spots. Both feeds are meant for "who's on right now" --
 /// frequent enough to be useful for chasing, not so frequent it hammers a free public API.
@@ -34,6 +34,21 @@ const SPOT_REFRESH: Duration = Duration::from_secs(90);
 /// Space weather changes on the order of hours, not minutes -- SFI/Kp are reported hourly by
 /// NOAA SWPC. No value in polling faster than this.
 const SPACE_WX_REFRESH: Duration = Duration::from_secs(600);
+/// NOAA's daily solar indices change once a day; every three hours is plenty (2026-10-04).
+const SOLAR_HISTORY_REFRESH: Duration = Duration::from_secs(3 * 3600);
+/// DSCOVR solar wind updates by the minute; every five minutes keeps Bz current without
+/// hammering SWPC (2026-10-04).
+const SOLAR_WIND_REFRESH: Duration = Duration::from_secs(300);
+
+/// The contest calendar as last read: the last good list is kept through a failed refresh, with
+/// when it was read and why the newest try failed, so Jimmy can say the list is old.
+#[derive(Default)]
+struct CachedContests {
+    events: Vec<contests::ContestEvent>,
+    fetched_unix: Option<i64>,
+    tried_unix: Option<i64>,
+    error: Option<String>,
+}
 /// NOAA's R/S/G scales update on roughly the same cadence as the raw SFI/Kp/X-ray feed above --
 /// no value polling faster.
 const NOAA_SCALES_REFRESH: Duration = Duration::from_secs(600);
@@ -41,6 +56,10 @@ const NOAA_SCALES_REFRESH: Duration = Duration::from_secs(600);
 /// doc comment) -- ask for enough that a quiet day doesn't starve the feed, matching Nexus's
 /// own default expectation.
 const SOTA_SPOT_COUNT: u32 = 50;
+/// The WA7BNM contest calendar, read by Nexus's own adapter (propagation::live::contests) from
+/// the same feed its Contests pane uses, refreshed as lazily as that pane does (every 15 min).
+const CONTEST_CALENDAR_URL: &str = "https://www.contestcalendar.com/calendar.rss";
+const CONTEST_CALENDAR_REFRESH: Duration = Duration::from_secs(15 * 60);
 
 pub struct SharedCache {
     spots: RwLock<CachedSpots>,
@@ -52,6 +71,12 @@ pub struct SharedCache {
     park_locations: RwLock<std::collections::HashMap<String, String>>,
     space_wx: RwLock<CachedSpaceWx>,
     scales: RwLock<CachedScales>,
+    // Daily solar history and solar wind (operator, 2026-10-04) -- Nexus's own fetchers and
+    // parsers (propagation::live::swpc::fetch_daily_solar_indices, live::solar_wind). Kept on
+    // error like every cache here: a failed fetch leaves the last good copy, with its own dates.
+    solar_history: RwLock<Cached<DailySolarIndices>>,
+    solar_wind: RwLock<Cached<SolarWind>>,
+    contests: RwLock<CachedContests>,
     // Resolved once at construction (mirrors LiveFeedsCache's own me_latlon derivation in
     // live_feeds.rs) for the representative-MUF calculation below -- None when the grid doesn't
     // parse, in which case mufNow is simply omitted rather than guessed.
@@ -63,6 +88,18 @@ struct CachedSpots {
     spots: Vec<OtaSpot>,
     last_ok: Option<Instant>,
     last_error: Option<String>,
+}
+
+struct Cached<T> {
+    value: Option<T>,
+    last_ok: Option<Instant>,
+    last_error: Option<String>,
+}
+
+impl<T> Default for Cached<T> {
+    fn default() -> Self {
+        Self { value: None, last_ok: None, last_error: None }
+    }
 }
 
 #[derive(Default)]
@@ -86,6 +123,9 @@ impl SharedCache {
             park_locations: RwLock::new(std::collections::HashMap::new()),
             space_wx: RwLock::new(CachedSpaceWx::default()),
             scales: RwLock::new(CachedScales::default()),
+            solar_history: RwLock::new(Cached::default()),
+            solar_wind: RwLock::new(Cached::default()),
+            contests: RwLock::new(CachedContests::default()),
             me_latlon: maidenhead_to_latlon(mygrid.trim()),
         })
     }
@@ -110,6 +150,58 @@ impl SharedCache {
             cache.refresh_scales();
             std::thread::sleep(NOAA_SCALES_REFRESH);
         });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            let r = swpc::fetch_daily_solar_indices();
+            store(&cache.solar_history, r);
+            std::thread::sleep(SOLAR_HISTORY_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            let r = solar_wind::fetch_solar_wind();
+            store(&cache.solar_wind, r);
+            std::thread::sleep(SOLAR_WIND_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            cache.refresh_contests();
+            std::thread::sleep(CONTEST_CALENDAR_REFRESH);
+        });
+    }
+
+    /// Reads the calendar now (also the Refresh Calendar button). A feed that parses to nothing
+    /// is a failure, not an empty calendar: the last good list stays.
+    pub fn refresh_contests(&self) {
+        let r = contests::fetch(CONTEST_CALENDAR_URL).and_then(|xml| {
+            let events = contests::parse_contest_rss(&xml);
+            if events.is_empty() {
+                Err("the calendar feed had no contests that could be read".to_string())
+            } else {
+                Ok(events)
+            }
+        });
+        let now = now_unix();
+        let mut g = self.contests.write().unwrap_or_else(|e| e.into_inner());
+        g.tried_unix = Some(now);
+        match r {
+            Ok(events) => {
+                g.events = events;
+                g.fetched_unix = Some(now);
+                g.error = None;
+            }
+            Err(e) => g.error = Some(e),
+        }
+    }
+
+    pub fn contests_json(&self) -> String {
+        let g = self.contests.read().unwrap_or_else(|e| e.into_inner());
+        serde_json::json!({
+            "events": g.events,
+            "fetchedUnix": g.fetched_unix,
+            "triedUnix": g.tried_unix,
+            "error": g.error,
+        })
+        .to_string()
     }
 
     fn refresh_spots(&self) {
@@ -180,6 +272,42 @@ impl SharedCache {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(reference, location);
         }
+    }
+
+    /// SOLAR_HISTORY: NOAA's last ~30 days of 10.7 cm flux and sunspot number, oldest first.
+    /// A day's value NOAA did not give is null -- never 0.
+    pub fn solar_history_json(&self) -> String {
+        let g = self.solar_history.read().unwrap_or_else(|e| e.into_inner());
+        let payload = SolarHistoryPayload {
+            days: g
+                .value
+                .as_ref()
+                .map(|v| v.days.iter().map(|d| SolarDayPayload { day_unix: d.day_unix, sfi: d.sfi, ssn: d.ssn }).collect())
+                .unwrap_or_default(),
+            fetched_age_secs: g.last_ok.map(|t| t.elapsed().as_secs()),
+            error: g.last_error.clone(),
+        };
+        serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
+    }
+
+    /// SOLAR_WIND: Bz, and total field / speed / density when known (null = not known, never
+    /// 0). `measuredAgeSecs` is the reading's own age -- a recent successful FETCH can still
+    /// carry an old MEASUREMENT -- and `stale` is Nexus's own rule (SolarWind::is_stale).
+    pub fn solar_wind_json(&self) -> String {
+        let g = self.solar_wind.read().unwrap_or_else(|e| e.into_inner());
+        let now = now_unix();
+        let w = g.value.as_ref();
+        let payload = SolarWindPayload {
+            bz_nt: w.map(|w| w.bz_nt),
+            bt_nt: w.and_then(|w| w.bt_nt),
+            speed_kms: w.and_then(|w| w.speed_kms),
+            density: w.and_then(|w| w.density),
+            measured_age_secs: w.map(|w| w.age_secs(now)),
+            stale: w.map(|w| w.is_stale(now)).unwrap_or(true),
+            fetched_age_secs: g.last_ok.map(|t| t.elapsed().as_secs()),
+            error: g.last_error.clone(),
+        };
+        serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
 
     fn refresh_space_wx(&self) {
@@ -281,6 +409,48 @@ impl SharedCache {
         };
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
+}
+
+/// A fetch result into its cache: a success replaces the value; an error keeps the last good one.
+fn store<T>(slot: &RwLock<Cached<T>>, r: Result<T, String>) {
+    let mut g = slot.write().unwrap_or_else(|e| e.into_inner());
+    match r {
+        Ok(v) => {
+            g.value = Some(v);
+            g.last_ok = Some(Instant::now());
+            g.last_error = None;
+        }
+        Err(e) => g.last_error = Some(e),
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SolarDayPayload {
+    day_unix: i64,
+    sfi: Option<f32>,
+    ssn: Option<f32>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SolarHistoryPayload {
+    days: Vec<SolarDayPayload>,
+    fetched_age_secs: Option<u64>,
+    error: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SolarWindPayload {
+    bz_nt: Option<f32>,
+    bt_nt: Option<f32>,
+    speed_kms: Option<f32>,
+    density: Option<f32>,
+    measured_age_secs: Option<i64>,
+    stale: bool,
+    fetched_age_secs: Option<u64>,
+    error: Option<String>,
 }
 
 fn now_unix() -> i64 {

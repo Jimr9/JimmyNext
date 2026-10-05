@@ -100,7 +100,11 @@ namespace WSJTX_Controller
                 // contact left blank, filled from Club Log -- for the live contact and for plain
                 // imports that add contacts. (The LoTW / QRZ / eQSL downloads merge confirmations;
                 // the contacts QRZ adds carry their own DXCC.)
-                if (source != "LOTW" && source != "QRZ" && source != "EQSL")
+                // Only Jimmy Next's own contact is filled: what its callsign says (DXCC, country,
+                // continent) and its state by StationLocation.TheirState, marked with where it came
+                // from. Imports keep their location fields exactly as the file had them, blanks
+                // included (operator, 2026-10-04/05).
+                if (source == QsoRecord.JimmyNextSource)
                     foreach (var r in list) FillEntityGaps(r, resolveUsState);
                 // Jimmy Next's own live contact -- only that: a WSJT-X file import, even of one
                 // contact, is an ordinary import and keeps its own source (2026-10-04).
@@ -170,12 +174,22 @@ namespace WSJTX_Controller
             if (dxcc != dxcc0 && dxcc > 0) Set("DXCC", dxcc.ToString(System.Globalization.CultureInfo.InvariantCulture));
             if (country != country0 && !string.IsNullOrEmpty(country)) Set("COUNTRY", country);
             if (continent != continent0 && !string.IsNullOrEmpty(continent)) Set("CONT", continent.ToUpperInvariant());
-            if (string.IsNullOrEmpty(f.TryGetValue("STATE", out var st) ? st : null))
+            // STATE (2026-10-05): only when the contact has none and nothing decided it already (a
+            // chosen park sets APP_JIMMY_LOC_FROM), by StationLocation.TheirState; the field it came
+            // from goes with it, and when it stays blank, what the lookups said.
+            if (resolveUsState == null) return;
+            string Get(string tag) => f.TryGetValue(tag, out var v) ? v ?? "" : "";
+            if (Get("STATE").Trim().Length > 0 || Get("APP_JIMMY_LOC_FROM").Length > 0) return;
+            string cb = null;
+            try { cb = resolveUsState(call); } catch { }
+            var decided = StationLocation.TheirState(call, dxcc, Get("GRIDSQUARE"),
+                string.Equals(Get("SIG").Trim(), "POTA", StringComparison.OrdinalIgnoreCase), cb);
+            if (decided.State != null)
             {
-                string grid = f.TryGetValue("GRIDSQUARE", out var g) ? g : (f.TryGetValue("GRID", out var g2) ? g2 : "");
-                string state = ResolveMissingState(call, grid, resolveUsState);
-                if (state != null && state.Length <= 2) Set("STATE", state.ToUpperInvariant());
+                Set("STATE", decided.State);
+                Set("APP_JIMMY_LOC_FROM", $"STATE {decided.State} from {decided.From}");
             }
+            else if (decided.NotSet != null) Set("APP_JIMMY_STATE_LOOKUP", decided.NotSet);
         }
 
         public static string BuildDedupKey(string call, string band, string mode, string qsoDate, string timeOn)

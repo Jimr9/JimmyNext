@@ -59,6 +59,37 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Nine-patch re-assessment -- 2026-10-04 (v1.15.0 -> v1.16.0 upgrade)
+
+Pin moved to stable **v1.16.0** (`21ac4c13`, 652 commits past v1.15.0), operator approved.
+
+- **`tempo-audio-rig.patch` retired.** Both of its concerns are upstream now:
+  - **DATA/ACC PTT** -- Nexus #381's own "Transmit audio source (CAT PTT): Rear/Data"
+    (`Settings.tx_audio_source` = `"rear"`, keyed `T 3` through `PttMode::CatData`). EngineHost
+    maps Jimmy's unchanged "Transmit Audio Source: Data" option onto it (`tx_audio_source()` in
+    main.rs). Behaviour difference: upstream keys `T 3` only for a radio whose Hamlib driver has
+    mic/data PTT (`rigmodels::PTT_MIC_DATA_RIGS`, TS-590S/SG included); any other radio keys `T 1`.
+  - **RFPOWER** -- the operator chose the upstream approach. Nexus never sends the RFPOWER
+    READ to the 14 models whose Hamlib read writes the radio's power (`hamlib_never_send` /
+    `hamlib_rfpower_read_writes_power`, the Kenwood family -- Hamlib#1595). Power WRITES are
+    left to Nexus, which makes them only from settings Jimmy never sets: an operator power level
+    (`Engine::rf_power`, `None` until set), a per-mode cap below 100% (none for digital by
+    default) and Tune power (`tune_power_pct: None` = never touch). Jimmy's never-touch Layer 1
+    (rig.rs) and Layer 2 (service.rs gates) are gone. **Needs the on-air check** (connect,
+    reconnect, mode change, Tune, ATU) -- no radio was available for this upgrade.
+- **`tempo-app-settings.patch`** now adds only `dont_set_mode` (upstream's `set_rig_mode` is
+  deprecated and ignored, so "Mode: None" is still Jimmy's).
+- **`tempo-audio-service.patch`** lost its 14 data-PTT / RFPOWER hunks and the four tests that
+  covered them; the Fake-It restore, `Status.tx_message` and "Mode: None" test remain.
+- The other seven patches carry the same code at new offsets (payload checked unchanged).
+- **EngineHost:** every logbook write a command waits for goes through
+  `logwrite::until_written` (new with 1.16.0's two-windows-on-one-log store): made once, a change
+  the store turned back reached Jimmy as "not saved" -- caught by the logbook integration test.
+- Upstream bugs #399 (LoTW first sync omits `qso_qslsince`) and #400 (`take_match` pairs by list
+  position) are still open and still in 1.16.0; Jimmy's 1900-01-01 cursor and NexusReportPairing
+  stay.
+- Note: tempo-audio's service.rs tests need `--features device`; without it a filter matches none.
+
 ## Ten-patch re-assessment -- 2026-09-28 (v1.14.0 -> v1.15.0 upgrade)
 
 Re-checked against the new pin `v1.15.0` (`f47d43cc`, an ANNOTATED tag -- tag object
@@ -288,14 +319,14 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.15.0`, commit `f47d43cc`)
+## Current patches (against Nexus `v1.16.0`, commit `21ac4c13`)
 
 Ten patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream
 behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
 compatibility baseline.
 
-### `patches/tempo-app-engine.patch` -- 7 behaviors, `crates/tempo-app/src/engine.rs`
+### `patches/tempo-app-engine.patch` -- 8 behaviors, `crates/tempo-app/src/engine.rs`
 
 | Behavior | Why Jimmy needs it | What's missing / wrong upstream |
 |---|---|---|
@@ -305,6 +336,7 @@ compatibility baseline.
 | `dont_set_mode` guard in `rig_mode_effective()` | WSJT-X Radio tab "Mode: None" -- when set, the radio loop must never command the rig's mode. `rig_mode_effective()` returns `String::new()` first thing, which every mode-set call site already treats as "nothing to do". | No native "leave the mode alone" gate. |
 | Ordinary-QSO multi-answer roger (`hound_split`, added 2026-09-26) | A station answering several callers at once (MSHV multi-answer "Special MSG", WSJT-X Fox) sends our roger as the sender-less first half of a 0.1 frame, `<us> RR73; <other> <DX> -08`. Outside a Hound QSO Nexus never reattached a sender, so an ordinary QSO with such a station could NEVER complete (live 2026-09-25, K5MGY). The patch reattaches in an ordinary QSO **only** when the frame's own hashed sender (its second half) is our partner -- the frame names its sender, so this is evidence, not assumption; a bystander Fox's frame names another station and #236 stays closed. Matches WSJT-X normal mode's "dual Fox style message, possibly from MSHV" completion. Test: `an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger` beside Nexus's own #236 guard. | Reattach is gated on `hound_qso` alone. |
 | Multi-answer split provenance (`hound_split` + `Engine::last_decodes_multiplexed()`, added 2026-09-26) | During a QSO Nexus splits every 0.1 frame into two ordinary rows, so the fact that they came from ONE multi-answer transmission was lost -- Jimmy needs it (a station answering several callers is not "busy working someone else"). The patch records it AT THE SPLIT, from the original combined text (Nexus's own `fox_multiplex` shape gate), as one flag per `last_decodes` row kept in lockstep at every write site; EngineHost reads it under the snapshot's lock and sets the envelope's `multiAnswer`. Never reconstructed from snr/dt/frequency; the accessor returns empty if ever out of step (under-marks, never mis-marks). Test: extended `an_ordinary_qso_completes_on_its_own_partners_multi_answer_roger` (a look-alike row with identical measurements and split free text stay unmarked). | `hound_split` returns only the rewritten decodes; no provenance survives. |
+| `Engine::set_keep_logged_location(bool)` (added 2026-10-04) | The switch for `tempo-app-station.patch`; EngineHost turns it on when it adopts the log. | -- |
 | `Engine::set_fake_it_restore_status` + `RadioStatus.fake_it_restore_warning` / `fake_it_restore_warning_id` snapshot emit | Codex correction G (+ Audit #10): an UNRESOLVED Fake-It dial restore must reach the operator. The radio loop sets a concise string + a monotonic per-episode id while unresolved and clears both (`None`) the moment it reconciles; Jimmy dedups per `(id + session token)` so the same episode announces once even across a Direct reconnect. `None` in normal operation. | No engine-side path to surface Fake-It restore state. |
 
 **Obsoleted when:** upstream accumulates same-slot decodes across the early + boundary pass;
@@ -317,7 +349,7 @@ crates/tempo-app/src/engine.rs` (does upstream reattach an ordinary QSO's roger 
 own sender?); `grep -n "fn last_decodes_multiplexed\|fn hound_split"` (does upstream keep split
 provenance?).
 
-### `patches/tempo-app-settings.patch` -- 3 fields, `crates/tempo-app/src/settings.rs`
+### `patches/tempo-app-settings.patch` -- 1 field (`dont_set_mode`; the other two retired 2026-10-04), `crates/tempo-app/src/settings.rs`
 
 Adds `Settings.ptt_data_source`, `Settings.dont_set_mode`, and `Settings.disable_rfpower_probe`,
 all `#[serde(default)]` (off). `ptt_data_source`/`dont_set_mode` mirror WSJT-X's Radio tab
@@ -351,7 +383,27 @@ re-baseline is regenerated with `cargo test -p tempo-app --test station_identity
 regenerate_station_fixture -- --ignored` and the `watch_identity` sibling -- and is *only* the
 one new `null` field; anything else in the diff is a real change to find.
 
-### `patches/tempo-audio-rig.patch` -- DATA/ACC PTT + RFPOWER chokepoint, `crates/tempo-audio/src/rig.rs` (+ callers)
+### `patches/tempo-app-station.patch` -- a contact keeps its logged location, `crates/tempo-app/src/station.rs` (added 2026-10-04)
+
+Adds `StationCore.keep_logged_location` (default `false`, upstream behaviour). Jimmy turns it
+on, and then: a bulk append (`commit_bulk_as` -- an ADIF import, a contact a confirmation merge
+adds, rows taken in from log.adi) is not filled by `fill_with(country, state)`; a row update
+(`edit_op` -- upload stamps, `LOG_SET_EXTRA`) does not fill a blank country; and the form edit
+(`edit_ops`) keeps the stored country unless the edit corrects the callsign, when it is resolved
+again as upstream does. So imported STATE and COUNTRY stay exactly as the file had them, blanks
+included -- a resolver's guess (a mailing address, a grid's main state) is not where the station
+was operating. Found by `--nexus-upload-tests`: without the `edit_op` gate, the first upload
+stamp on an imported contact filled its blank country. The live insert (`log_qso`) keeps its
+fill. The load-time fill (`fill_loaded`) runs only when the database cannot be opened and the
+log falls back to log.adi; it is not gated. Worked/confirmed DXCC is unaffected: the hot index keys an
+entity by `dxcc_resolve(call)`, not the stored COUNTRY. A matched merge (`reconcile::apply_match`)
+also fills a blank state/country; Jimmy avoids that without a patch by removing STATE/COUNTRY
+from paired download rows (`NexusReportPairing`).
+
+**Obsoleted when:** upstream stops filling bulk appends, or offers an equivalent switch.
+**How to check:** `grep -n "keep_logged_location\|fill_with(&mut row\|fn edit_op" crates/tempo-app/src/station.rs`.
+
+### RETIRED 2026-10-04: `patches/tempo-audio-rig.patch` -- DATA/ACC PTT + RFPOWER chokepoint (see the v1.16.0 re-assessment above; kept here as history)
 
 Two concerns, both "how this `Rig` talks to the radio":
 
@@ -387,6 +439,8 @@ to forbid RFPOWER drive read/write per rig (or Hamlib #1595 is fixed in the bund
 check is a real compile error, not a false alarm.
 
 ### `patches/tempo-audio-service.patch` -- radio-loop wiring, `crates/tempo-audio/src/service.rs`
+
+Since 2026-10-04 (v1.16.0) only the Fake-It restore, `Status.tx_message` and the "Mode: None" test remain; the `ptt_data_source` / `disable_rfpower_probe` threading and RFPOWER gates described below were retired with `tempo-audio-rig.patch`.
 
 One file, one concern (the radio loop / CAT service). Carries:
 

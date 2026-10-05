@@ -236,6 +236,7 @@ namespace WSJTX_Controller
             ("Msg.SlotNotEnough", "Transmit slot analysis{For} incomplete: not enough decodes to analyze the transmit slot.", "slot analysis report, not enough decodes"),
             ("List.RawTitle", "Raw decodes", "the Raw Decodes list: its label and spoken name"),
             ("List.SpotWatchTitle", "Spot Watch", "the Spot Watch list: its label and spoken name"),
+            ("List.SmartModeTitle", "Smart Mode stations", "the Smart Mode stations window: its title and its list's spoken name"),
         };
 
         // The file's sections, by topic (operator, 2026-10-02: "so I can find things faster").
@@ -299,6 +300,7 @@ namespace WSJTX_Controller
             ["Status.Heading"] = "Status box name",
             ["List.RawTitle"] = "Raw Decodes title",
             ["List.SpotWatchTitle"] = "Spot Watch title",
+            ["List.SmartModeTitle"] = "Smart Mode window title",
             ["List.Title"] = "List title",
             ["List.TitleSpoken"] = "List spoken name",
             ["Summary.Stations.One"] = "Stations, one",
