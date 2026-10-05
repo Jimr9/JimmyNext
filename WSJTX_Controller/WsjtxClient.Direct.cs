@@ -571,6 +571,15 @@ namespace WSJTX_Controller
         //                     Completed, HaltTx, or a reconnect.
         private string _finishingCall;
 
+        // The just-logged QSO's closing over (73 / RR73) is still due or going out (operator,
+        // 2026-10-05, W0YRE: Smart Mode's call to AD9GE was sent 1 s into our 73 and replaced
+        // it). Set at a logged completion; cleared when a transmission ends, by a Halt, or once
+        // a period and a little more pass with none started (the engine had nothing more to
+        // send). While set, a Smart Mode start waits (ServicePendingAutoStart) -- held, not dropped.
+        private DateTime? _closingOverDueUntilUtc;
+        private bool ClosingOverPending =>
+            _closingOverDueUntilUtc != null && (transmitting || DateTime.UtcNow < _closingOverDueUntilUtc.Value);
+
         // Operator finding, 2026-09-13 (CT2HEX/LX1TI live session): _finishingCall had NO
         // expiration -- it protected the engine's legitimate closing-tail repeats forever,
         // however long that took. That is right for the REAL closing tail (bounded by Nexus's
@@ -1954,6 +1963,7 @@ namespace WSJTX_Controller
             // still maintained (debug/status display) but drives no automatic action.
             if (wasTransmitting && !transmitting)
             {
+                _closingOverDueUntilUtc = null;   // a closing over that was due has gone out
                 if (ctrl.freqCheckBox.Checked)
                     consecTxCount++;
                 else
@@ -2371,6 +2381,7 @@ namespace WSJTX_Controller
                     {
                         _finishingCall = justWorkedCall;
                         _finishingTailExemptedOvers = 0;   // a fresh episode gets its own full allowance
+                        _closingOverDueUntilUtc = DateTime.UtcNow.AddMilliseconds((trPeriod ?? DefaultTrPeriodMs(mode)) + 3000);
                         // Problem 1 / KB2SLO fix (Part A): mark that the finishing latch was set
                         // THIS poll tick, so the DX's own signoff decode -- which, when its RR73
                         // lands on a Jimmy TX-slot edge, is the SAME decode that just completed
@@ -3803,6 +3814,9 @@ namespace WSJTX_Controller
         // status after a plain state change like CAT dropping, exactly as a later decode tick
         // would produce it in the field.
         internal void TestShowStatus() => ShowStatus();
+        internal void TestSetClosingOverDue(DateTime? untilUtc, bool tx) { _closingOverDueUntilUtc = untilUtc; transmitting = tx; }
+        internal void TestServicePendingAutoStart() => ServicePendingAutoStart();
+        internal bool TestClosingOverPending => ClosingOverPending;
         internal void TestSetLoggedCallTx(string call, bool tx) { loggedCall = call; transmitting = tx; }
 
         // When a decode was heard, for its period (operator, 2026-10-02). Nexus decodes each

@@ -106,7 +106,7 @@ namespace WSJTX_Controller
         // DirectApplyDecodes' new-slot detection before that period's decodes are processed.
         public void OnReceivePeriodStarted() => _coordinator.OnReceivePeriodStarted();
         public void OnTransmittingChanged(bool transmitting) => _coordinator.OnPhysicalTxChanged(transmitting);
-        public void OnQsoActiveChanged(bool active) => _coordinator.OnQsoActiveChanged(active);
+        public void OnQsoActiveChanged(bool active, bool endedByLog = false) => _coordinator.OnQsoActiveChanged(active, endedByLog);
         // 2026-09-11 semantic-boundary correction: the confirmed end of ONE decode-processing
         // pass (WsjtxClient.Direct.cs's DirectApplyDecodes, called AFTER ServicePendingAutoStart)
         // -- see SpeechCoordinator.OnDecodePassComplete's own comment for why OnPeriodBoundary

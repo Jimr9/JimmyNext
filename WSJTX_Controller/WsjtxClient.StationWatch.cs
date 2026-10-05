@@ -1013,8 +1013,11 @@ namespace WSJTX_Controller
             _pendingAutoStartPollsRemaining = PendingAutoStartFinalityPolls;
         }
 
+        private bool _pendingAutoStartWaitLogged;
+
         private void ClearPendingAutoStart()
         {
+            _pendingAutoStartWaitLogged = false;
             _pendingAutoStart = null;
             _pendingAutoStartPollsRemaining = 0;
         }
@@ -1028,6 +1031,16 @@ namespace WSJTX_Controller
             if (_pendingAutoStart == null) return;
             if (!_pendingAutoStart.IsActive) { ClearPendingAutoStart(); return; }
             if (_pendingAutoStartPollsRemaining > 0) { _pendingAutoStartPollsRemaining--; return; }
+            // Our closing 73 for the QSO just logged comes first (see _closingOverDueUntilUtc);
+            // the start stays parked and goes once that over is done.
+            if (ClosingOverPending)
+            {
+                if (!_pendingAutoStartWaitLogged)
+                    DebugOutput($"{Time()} [SMART] {_pendingAutoStart.TargetCall}: waiting for our closing over to go out first");
+                _pendingAutoStartWaitLogged = true;
+                return;
+            }
+            _pendingAutoStartWaitLogged = false;
             TargetMonitor monitor = _pendingAutoStart;
             ClearPendingAutoStart();
             RequestTargetMonitorStart(monitor, operatorOverride: false);

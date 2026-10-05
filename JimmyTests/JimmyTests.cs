@@ -13327,6 +13327,20 @@ static class JimmyTests
         Check("Routine AfterRx: only the newest snapshot is spoken",
             said.Count == 1 && said[0] == "Receiving, 19 available stations", true);
 
+        // A QSO ended by logging (operator, 2026-10-05, W0YRE): the "received" line held to join
+        // our next transmission is dropped -- the logged line says it. Ended otherwise: said as before.
+        foreach (bool logged in new[] { true, false })
+        {
+            said.Clear();
+            c = NewTestCoordinator((t, imp) => said.Add(t), out var _qs, autoFire: true);
+            c.OnQsoActiveChanged(true);
+            c.SubmitRoutineComposite(new[] { new RoutineFragment { Key = "_base", Order = 0, Text = "W 0 Y R E, received +05.",
+                When = SpeakWhen.TxStart, TxStartJoin = true } }, true);
+            c.OnQsoActiveChanged(false, endedByLog: logged);
+            Check(logged ? "QSO logged: the held 'received' line is not said" : "QSO ended otherwise: the held line is still said",
+                said.Count == (logged ? 0 : 1), true);
+        }
+
         // Late status line (operator, 2026-10-05, KE8NQL): the AfterRx moment ran a quarter second
         // before "1 to you" was drawn and found nothing; that line waited a whole period. Now an
         // empty moment stays open briefly and the first status line drawn in it is spoken then.
@@ -19411,6 +19425,16 @@ static class JimmyTests
             wc.TestCompleteSmartTurnSwitch(weTransmittedThisSlot: false);
             Check("  ...then the free one is worked, the other still waits",
                 wc.TestSmartStartTarget == "KP2B" && wc.TestAutoStartPending && wc.IsSmartModeWaitingOn("HK3TY"), true);
+
+            // Our closing 73 first (operator, 2026-10-05, W0YRE: the call to AD9GE replaced it).
+            wc.TestSetClosingOverDue(DateTime.UtcNow.AddSeconds(18), tx: true);
+            for (int i = 0; i < 8; i++) wc.TestServicePendingAutoStart();
+            Check("a Smart Mode start waits while our closing 73 goes out", wc.TestAutoStartPending, true);
+            wc.TestSetClosingOverDue(DateTime.UtcNow.AddSeconds(18), tx: false);
+            Check("  ...and while it is still due", wc.TestClosingOverPending, true);
+            wc.TestSetClosingOverDue(DateTime.UtcNow.AddSeconds(-1), tx: false);
+            Check("  ...not once a period has passed with none sent", wc.TestClosingOverPending, false);
+            wc.TestSetClosingOverDue(null, tx: false);
 
             // The status line's Smart Mode part steps aside while a just-logged QSO's closing 73
             // goes out (operator, 2026-10-05: "Waiting to work W4DXR, not heard, Sending 73").

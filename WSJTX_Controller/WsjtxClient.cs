@@ -3837,7 +3837,9 @@ namespace WSJTX_Controller
             _otherPartyOverStrikeLastSlot = null;
             // Item 1: the coordinator's AfterQso timing hook -- callInProg is the active-QSO
             // signal. Idempotent: the coordinator only acts on a genuine active -> inactive edge.
-            Notify?.OnQsoActiveChanged(call != null);
+            // endedByLog: the QSO just logged (loggedCall is set before callInProg clears) -- the
+            // logged line that follows replaces any held "received ..." line (2026-10-05).
+            Notify?.OnQsoActiveChanged(call != null, endedByLog: call == null && loggedCall != null);
             UpdateDblClkTip();
             UpdateCallInProg();
         }
@@ -3934,6 +3936,7 @@ namespace WSJTX_Controller
             // safety halt) has stopped the closing exchange deliberately.
             _finishingCall = null;
             _finishingTailExemptedOvers = 0;
+            _closingOverDueUntilUtc = null;
             // UDP transport cleanup, 2026-08-18: the classic UDP path's own standard HaltTx
             // message (msg type 8, gated on udpClient2 being open) is removed -- route through
             // the control port's own HALT_TX command instead. AutoOnly is explicitly false

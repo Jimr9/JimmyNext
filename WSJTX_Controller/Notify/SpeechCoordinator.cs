@@ -1093,11 +1093,15 @@ namespace WSJTX_Controller
         }
 
         // callInProg became null / non-null.
-        public void OnQsoActiveChanged(bool active)
+        public void OnQsoActiveChanged(bool active, bool endedByLog = false)
         {
             bool ending = !active && _qsoActive;
             _qsoActive = active;
             if (!ending) return;
+            // Logged (operator, 2026-10-05, W0YRE): the "received ..." line held to join our next
+            // transmission is old news -- the logged line drawn next says it with the final 73.
+            // Said here it came a third of a second before that line ("W0YRE, received +05.").
+            if (endedByLog) DropRoutineIf(p => p.TxStartJoin && p.When == SpeakWhen.TxStart);
             if (_physicallyTransmitting) return;   // TX falling edge owns the release instead
             ReconcileAndFlush("AfterQso",
                 p => p.When == SpeakWhen.AfterQso || (p.TxStartJoin && p.When == SpeakWhen.TxStart),
