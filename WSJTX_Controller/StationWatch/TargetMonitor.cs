@@ -253,6 +253,12 @@ namespace WSJTX_Controller
         // starting is not evidence the target was heard.
         public int TargetNotHeardStreak { get; private set; }
 
+        // Smart Mode's list (operator, 2026-10-05): calls to this station since it last became the
+        // one worked first. Each turn starts at zero (BeginTurn) -- so a station Smart Mode comes
+        // back to gets a full turn again -- while TransmittedCallCount keeps the whole effort.
+        public int CallsThisTurn { get; private set; }
+        public void BeginTurn() => CallsThisTurn = 0;
+
         // True once a live decode FROM THE TARGET, of ANY kind (including one showing it working
         // another station), has been observed since the last time TargetNotHeardStreak was
         // evaluated. Set in IngestTargetDecode; consumed (read and cleared) by
@@ -338,6 +344,7 @@ namespace WSJTX_Controller
             TargetEvenParity = null;
             SilenceCount = 0;
             TransmittedCallCount = 0;
+            CallsThisTurn = 0;
             LastUsableDecode = null;
             LastUsableDecodeUtc = default;
             HasLiveTargetEvidence = false;
@@ -369,6 +376,7 @@ namespace WSJTX_Controller
             TargetEvenParity = null;
             SilenceCount = 0;
             TransmittedCallCount = 0;
+            CallsThisTurn = 0;
             LastUsableDecode = null;
             LastUsableDecodeUtc = default;
             HasLiveTargetEvidence = false;
@@ -520,6 +528,7 @@ namespace WSJTX_Controller
         {
             if (Purpose != TargetPurpose.SmartStart) return false;
             TransmittedCallCount++;
+            CallsThisTurn++;
             return repeatLimit > 0 && TransmittedCallCount >= repeatLimit;
         }
 

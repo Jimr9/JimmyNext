@@ -98,6 +98,7 @@ namespace WSJTX_Controller
         public int smartStartBusyQuietPeriods { get => Settings.SmartStartBusyQuietPeriods; set => Settings.SmartStartBusyQuietPeriods = value; }
         public int smartStartMaxStandbyRounds { get => Settings.SmartStartMaxStandbyRounds; set => Settings.SmartStartMaxStandbyRounds = value; }
         public int smartStartTimeLimitMinutes { get => Settings.SmartStartTimeLimitMinutes; set => Settings.SmartStartTimeLimitMinutes = value; }
+        public int smartStartCallsBeforeSwitch { get => Settings.SmartStartCallsBeforeSwitch; set => Settings.SmartStartCallsBeforeSwitch = value; }
         public int otherStationRepliesBeforeYielding { get => Settings.OtherStationRepliesBeforeYielding; set => Settings.OtherStationRepliesBeforeYielding = value; }
         public bool rawShowCq = true;
         public bool rawShowDirected = true;
@@ -4744,10 +4745,18 @@ namespace WSJTX_Controller
                 }
                 else
                     SendKeys.Send("{UP}");  //triggers screen reader
-                _lastAnnouncedStatusText = text;
-                _lastAnnouncedStatusTime = DateTime.UtcNow;
             }
+            (_lastAnnouncedStatusText, _lastAnnouncedStatusTime) = NextRepeatWindow(
+                _lastAnnouncedStatusText, _lastAnnouncedStatusTime, text, announced, nearImmediateRepeat, DateTime.UtcNow);
         }
+
+        // What the near-repeat gate compares the next line with. A spoken line starts the window;
+        // a line held back as a repeat restarts it, so the same words coming back moments later
+        // stay quiet too (operator, 2026-10-05, KB5YNF: "Sending 7 3" held back at transmit start,
+        // then said 1.3 s later because the window still ran from the joined line 3.9 s before).
+        internal static (string Text, DateTime Time) NextRepeatWindow(string lastText, DateTime lastTime,
+            string text, bool announced, bool heldBack, DateTime nowUtc) =>
+            announced ? (text, nowUtc) : heldBack ? (lastText, nowUtc) : (lastText, lastTime);
 
         // Pure predicate behind CoordinatedSpeak's near-duplicate gate -- factored out so it can
         // be unit-tested directly, since real OS foreground/focus state (and therefore SendKeys
@@ -4758,7 +4767,19 @@ namespace WSJTX_Controller
         // false (CoordinatedSpeak's default), so this bypass cannot be reached by accident.
         internal static bool IsNearImmediateRepeat(string candidateText, string lastAnnouncedText,
             DateTime lastAnnouncedUtc, DateTime nowUtc, TimeSpan suppressWindow, bool isDeliberateRepeat) =>
-            !isDeliberateRepeat && candidateText == lastAnnouncedText && (nowUtc - lastAnnouncedUtc) < suppressWindow;
+            !isDeliberateRepeat && (nowUtc - lastAnnouncedUtc) < suppressWindow
+            && (candidateText == lastAnnouncedText || IsTailOf(candidateText, lastAnnouncedText));
+
+        // The same words again as the END of what was just said (operator, 2026-10-05): "Sending
+        // 7 3" a moment after "W 4 H H N final 73, Logged QSO with W 4 H H N, Sending 7 3." Whole
+        // phrases only -- the tail must start after a space or punctuation.
+        private static bool IsTailOf(string candidate, string last)
+        {
+            string c = (candidate ?? "").Trim().TrimEnd('.', ' ');
+            string l = (last ?? "").Trim().TrimEnd('.', ' ');
+            return c.Length > 0 && l.Length > c.Length && l.EndsWith(c, StringComparison.Ordinal)
+                && " ,.;".IndexOf(l[l.Length - c.Length - 1]) >= 0;
+        }
 
         public void ShowMessage(string text, bool sound) => ShowMsg(text, sound);
 

@@ -180,6 +180,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown _smartStartBusyQuietNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartMaxStandbyRoundsNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartTimeLimitMinutesNumeric;
+        private System.Windows.Forms.NumericUpDown _smartStartCallsBeforeSwitchNumeric;
         private System.Windows.Forms.NumericUpDown _otherStationRepliesBeforeYieldingNumeric;
         private System.Windows.Forms.Button _rxTxFreqControlsButton;
 
@@ -557,7 +558,7 @@ namespace WSJTX_Controller
                 Text           = "Smart Mode",
                 AccessibleName = "Smart Mode",
                 Location       = new System.Drawing.Point(5, 178),
-                Size           = new System.Drawing.Size(650, 168),
+                Size           = new System.Drawing.Size(650, 196),
                 Font           = font,
                 TabStop        = false,
             };
@@ -704,6 +705,29 @@ namespace WSJTX_Controller
             };
             smartStartGroup.Controls.Add(_otherStationRepliesBeforeYieldingNumeric);
 
+            // Operator request (2026-10-05): after this many unanswered calls, try another station
+            // on the list that is free now (WsjtxClient.TrySmartTurnSwitch). 0 = never.
+            smartStartGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text     = "Calls before trying another station on the list (0 = never):",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 160),
+                Font     = font,
+                TabStop  = false,
+            });
+            _smartStartCallsBeforeSwitchNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Calls before trying another station",
+                Location       = new System.Drawing.Point(320, 157),
+                Size           = new System.Drawing.Size(50, 20),
+                TabIndex       = 5,
+                Minimum        = 0,
+                Maximum        = 20,
+                Value          = Math.Max(0, Math.Min(20, ctrl.smartStartCallsBeforeSwitch)),
+                Font           = font,
+            };
+            smartStartGroup.Controls.Add(_smartStartCallsBeforeSwitchNumeric);
+
             // Item 3 (2026-09-10): launcher for the accessible RX/TX Audio Frequency Controls
             // window. Lives here (not Options > Radio) because this tab already owns the
             // transmit-frequency mode and the frequency step in Hz -- the same context those
@@ -715,7 +739,7 @@ namespace WSJTX_Controller
                 Text           = "RX/TX Audio Frequency Controls...",
                 AccessibleName = "RX/TX Audio Frequency Controls",
                 AutoSize       = true,
-                Location       = new System.Drawing.Point(10, 352),
+                Location       = new System.Drawing.Point(10, 380),
                 TabIndex       = 5,
                 Font           = font,
             };
@@ -735,6 +759,7 @@ namespace WSJTX_Controller
             ctrl.smartStartTimeLimitMinutes = Math.Max(0, Math.Min(999, timeLimitMinutes));
             int repliesBeforeYielding = (int)(_otherStationRepliesBeforeYieldingNumeric?.Value ?? 2);
             ctrl.otherStationRepliesBeforeYielding = Math.Max(1, Math.Min(6, repliesBeforeYielding));
+            ctrl.smartStartCallsBeforeSwitch = Math.Max(0, Math.Min(20, (int)(_smartStartCallsBeforeSwitchNumeric?.Value ?? 0)));
         }
 
         private void ApplyGeneralSettings()

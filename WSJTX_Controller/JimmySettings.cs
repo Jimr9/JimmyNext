@@ -61,6 +61,12 @@ namespace WSJTX_Controller
         // a fresh Start() (arming on a target) resets it. See TargetMonitor.ArmedAtUtc.
         public int SmartStartTimeLimitMinutes { get; set; } = 0;
 
+        // Operator request (2026-10-05, HK3TY calling CQ through 20 of our calls while others on
+        // the list came free): after this many calls with no answer, Smart Mode tries another
+        // station on its list that is free right now; the one it leaves stays on the list and gets
+        // a full turn again when it comes back. 0-20; 0 = never (the default, unchanged behavior).
+        public int SmartStartCallsBeforeSwitch { get; set; } = 0;
+
         // VP5/K5UR live incident (2026-09-14): the KA1BMF active-partner-working-another guard
         // (WsjtxClient.cs) used to yield the contact the very first time it saw the partner send
         // a substantive over to someone else -- too eager for a big pileup-running DX station
@@ -142,6 +148,8 @@ namespace WSJTX_Controller
                 SmartStartMaxStandbyRounds = maxStandbyRounds;
             if (int.TryParse(ini.Read("smartStartTimeLimitMinutes"), out int timeLimitMinutes) && timeLimitMinutes >= 0 && timeLimitMinutes <= 999)
                 SmartStartTimeLimitMinutes = timeLimitMinutes;
+            if (int.TryParse(ini.Read("smartStartCallsBeforeSwitch"), out int callsBeforeSwitch) && callsBeforeSwitch >= 0 && callsBeforeSwitch <= 20)
+                SmartStartCallsBeforeSwitch = callsBeforeSwitch;
             if (int.TryParse(ini.Read("otherStationRepliesBeforeYielding"), out int repliesBeforeYielding) && repliesBeforeYielding >= 1 && repliesBeforeYielding <= 6)
                 OtherStationRepliesBeforeYielding = repliesBeforeYielding;
 
@@ -170,6 +178,7 @@ namespace WSJTX_Controller
             ini.Write("smartStartBusyQuietPeriods", SmartStartBusyQuietPeriods.ToString());
             ini.Write("smartStartMaxStandbyRounds", SmartStartMaxStandbyRounds.ToString());
             ini.Write("smartStartTimeLimitMinutes", SmartStartTimeLimitMinutes.ToString());
+            ini.Write("smartStartCallsBeforeSwitch", SmartStartCallsBeforeSwitch.ToString());
             ini.Write("otherStationRepliesBeforeYielding", OtherStationRepliesBeforeYielding.ToString());
 
             ini.Write("listFontSize", ListFontSize.ToString());

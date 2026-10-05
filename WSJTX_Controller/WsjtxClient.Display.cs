@@ -1064,6 +1064,8 @@ namespace WSJTX_Controller
         private void ShowStatus()
         {
             _clauseTextsThisRender.Clear();
+            // Read before the render's reset block clears it (see the speech timing below).
+            bool loggedThisRender = loggedCall != null;
             string status = "";
             // Shared target-activity unification (2026-09-11): null until the ONE branch that
             // can carry otherStr's fragment sets it explicitly; the finally block falls back to
@@ -2097,6 +2099,13 @@ namespace WSJTX_Controller
                 SpeakWhen baseWhen =
                     (callInProg == null && deferEligible && trPeriod != null)
                         ? SpeakWhen.AfterRx : ctrl.routineStatusSpeakWhen;
+                // A QSO logged while we are already transmitting (operator, 2026-10-05, W4HHN: the
+                // RR73 decoded a second into our next over): a receive boundary only comes after
+                // this over AND the next receive period, so "Logged QSO with W4HHN" was said 27 s
+                // after its sound. Said now instead, with what is going out -- the same line a QSO
+                // logged while receiving gets.
+                if (loggedThisRender && transmitting && (baseWhen == SpeakWhen.AfterRx || baseWhen == SpeakWhen.RxStart))
+                    baseWhen = SpeakWhen.Now;
 
                 var fragments = BuildRoutineFragments(statusForSpeech, baseWhen, ctrl.routineStatusCondition);
 

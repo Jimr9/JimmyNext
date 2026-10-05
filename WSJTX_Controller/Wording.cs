@@ -72,6 +72,7 @@ namespace WSJTX_Controller
             ("Msg.SmartModeNotHeard", "{Call} not heard after {Count} calls; Smart Mode stopped", "Smart Mode gave up: the station was not heard"),
             ("Msg.SmartDroppedNotHeard", "{Call} not heard after {Count} calls, dropped; still waiting for {StillWaiting}.", "Smart Mode dropped a station it did not hear; others still wait"),
             ("Msg.SmartDroppedTimeLimit", "{Call} time limit reached after {Minutes} {MinuteWord}, dropped; still waiting for {StillWaiting}.", "Smart Mode dropped a station on its time limit; others still wait"),
+            ("Msg.SmartTryingNext", "{Call} not answering; trying {Next}.", "Smart Mode left a station that did not answer to try a free one on its list"),
             ("Msg.SmartDroppedRepeatLimit", "{Call} repeat limit reached after {Count} calls, dropped; still waiting for {StillWaiting}.", "Smart Mode dropped a station on the repeat limit; others still wait"),
             ("Msg.SmartNotHeard", "{Call} not heard.", "Smart Mode / Station Watch: the station has gone quiet"),
             ("Msg.SmartStillNotHeard", "{Call} still not heard.", "Smart Mode / Station Watch: still quiet (a repeat)"),
@@ -91,7 +92,7 @@ namespace WSJTX_Controller
             ("Status.Watching", "Watching {Call}", "status line: Station Watch is watching a station"),
             ("Status.TargetCallingCq", "calling CQ", "the QSO line: the station you are calling was last heard calling CQ"),
             ("Msg.Still", "still", "the word marking a repeated station fact: \"K1ABC still working K2XYZ\""),
-            ("Msg.SmartModeTimeLimit", "Smart Mode time limit reached after {Minutes} {MinuteWord} calling {Call}, no contact completed", "Smart Mode gave up: its time limit"),
+            ("Msg.SmartModeTimeLimit", "{Call} time limit reached after {Minutes} {MinuteWord}; Smart Mode stopped", "Smart Mode gave up: its time limit"),
             ("Msg.MinuteOne", "minute", "the word for one minute"),
             ("Msg.MinuteMany", "minutes", "the word for several minutes"),
             ("Msg.RepeatLimit", "Repeat limit reached after {Count} calls to {Call}, no contact completed", "the repeat limit stopped calling"),
@@ -404,26 +405,16 @@ namespace WSJTX_Controller
                     File.WriteAllText(path, Template(), new UTF8Encoding(false));
                     return $"wording: {name} reorganized by topic ({_overrides.Count} own entr{(_overrides.Count == 1 ? "y" : "ies")} kept)";
                 }
-                // Entries added in a later version: appended, commented out, so the file always
-                // lists everything that can be reworded. The operator's own lines are untouched.
-                var listed = new HashSet<string>(lines.Select(l => l.TrimStart('#', ' ', '\t'))
-                    .Where(l => l.Contains("=")).Select(l => l.Substring(0, l.IndexOf('=')).Trim()), StringComparer.OrdinalIgnoreCase);
-                var missing = Known.Where(k => !listed.Contains(k.Key)).ToList();
-                if (missing.Count > 0)
+                // Kept up to date (operator, 2026-10-05): an entry added in a later version, or a '#'
+                // line still showing built-in words that have since changed, rewrites the file in
+                // section order -- each entry in its own section, every '#' line showing the words
+                // Jimmy Next really uses, the operator's own entries kept, a backup made first.
+                if (NeedsRefresh(lines))
                 {
-                    var sb = new StringBuilder();
-                    foreach (var group in missing.GroupBy(m => SectionOf(m.Key)).OrderBy(g => Array.IndexOf(Sections, g.Key)))
-                    {
-                        sb.AppendLine();
-                        sb.AppendLine("[" + group.Key + "]");
-                        foreach (var (key, def, note) in group)
-                        {
-                            sb.AppendLine();
-                            sb.AppendLine("# " + note);
-                            sb.AppendLine("# " + key + " = " + Shown(def));
-                        }
-                    }
-                    File.AppendAllText(path, sb.ToString(), new UTF8Encoding(false));
+                    File.Copy(path, path + ".before-update-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".bak", true);
+                    BackupRetention.Prune(Path.GetDirectoryName(path), Path.GetFileName(path) + ".before-*.bak");
+                    File.WriteAllText(path, Template(), new UTF8Encoding(false));
+                    return $"wording: {name} brought up to date ({_overrides.Count} own entr{(_overrides.Count == 1 ? "y" : "ies")} kept)";
                 }
                 return _overrides.Count > 0 ? $"wording: {_overrides.Count} entr{(_overrides.Count == 1 ? "y" : "ies")} from {path}" : null;
             }
@@ -433,6 +424,26 @@ namespace WSJTX_Controller
                 Changed?.Invoke();
                 return $"wording: {name} not read ({ex.Message}); built-in wording used";
             }
+        }
+
+        // True when the file lacks an entry Jimmy Next knows, or a '#' line shows words that are
+        // no longer the built-in ones -- Load then rewrites it (see there).
+        internal static bool NeedsRefresh(IEnumerable<string> lines)
+        {
+            var listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string raw in lines ?? Enumerable.Empty<string>())
+            {
+                string line = raw.Trim();
+                string body = line.TrimStart('#', ' ', '	');
+                int eq = body.IndexOf('=');
+                if (eq <= 0) continue;
+                string key = body.Substring(0, eq).Trim();
+                var known = Known.FirstOrDefault(k => k.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+                if (known.Key == null) continue;
+                listed.Add(known.Key);
+                if (line.StartsWith("#") && body.Substring(eq + 1).Trim() != Shown(known.Default)) return true;
+            }
+            return Known.Any(k => !listed.Contains(k.Key));
         }
 
         // "key = words" lines; '#' starts a comment line; unknown keys and blank words are ignored.

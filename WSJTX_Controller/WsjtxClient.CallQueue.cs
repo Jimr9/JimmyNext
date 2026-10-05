@@ -166,6 +166,10 @@ namespace WSJTX_Controller
                     // test can show definitively whether this is firing for a genuine fresh
                     // decode from the QSO partner or for stale/replayed decode data -- the
                     // existing log alone couldn't distinguish the two.
+                    // The decode line itself too (2026-10-05, HK3TY): the general one is only
+                    // written further down, past this return, so the station being called left
+                    // no SNR/DT/frequency in the log and looked unheard.
+                    if (!debugDetail) DebugOutput($"{emsg}");
                     DebugOutput($"{spacer}AddSelectedCall toCallStatus:{toCallStatus} activity:{callInProgLastActivity} msg:'{msg}' msgTime:{emsg.SinceMidnight} autoGen:{emsg.AutoGen}");
                     return;
                 }

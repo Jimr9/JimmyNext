@@ -192,6 +192,15 @@ namespace WSJTX_Controller
             new HashSet<NotificationEventType>();
 
         private bool _physicallyTransmitting;
+
+        // Late status line at the receive-cycle speaking moment (operator, 2026-10-05, KE8NQL):
+        // the AfterRx moment can run a fraction of a second before the status line carrying that
+        // period's news is drawn, find nothing, and leave "1 to you" waiting a whole period. When
+        // it speaks nothing, it stays open this long: the first AfterRx status line drawn in that
+        // time runs the same moment then (one joined utterance, as before). Closed by speaking,
+        // a transmission starting, or the next receive period.
+        internal const int LateAfterRxWindowMs = 3000;
+        private long? _lateAfterRxOpenedAtMs;
         private bool _qsoActive;
 
         // Station Watch (2.0.63): while true, every submission NOT tagged as Watch-category
@@ -912,6 +921,7 @@ namespace WSJTX_Controller
                     _pendingRoutine[key] = p;
                 }
             }
+            FlushLateAfterRx();
 
             if (speakNow)
             {
@@ -1003,6 +1013,7 @@ namespace WSJTX_Controller
 
             if (rising)
             {
+                _lateAfterRxOpenedAtMs = null;
                 DropRoutineIf(p => p.When == SpeakWhen.AfterRx || p.When == SpeakWhen.RxStart);
                 if (_pendingRoutine.Values.Any(p => p.TxStartJoin && p.When == SpeakWhen.TxStart))
                 {
@@ -1030,6 +1041,7 @@ namespace WSJTX_Controller
         // A receive period has BEGUN.
         public void OnReceivePeriodStarted()
         {
+            _lateAfterRxOpenedAtMs = null;
             if (_physicallyTransmitting)
             {
                 DropRoutineIf(p => p.When == SpeakWhen.RxStart);
@@ -1047,7 +1059,22 @@ namespace WSJTX_Controller
                 return;
             }
             long now = _clock.ElapsedMilliseconds;
-            ReconcileAndFlush("AfterRx",
+            bool spoke = ReconcileAndFlush("AfterRx",
+                p => p.When == SpeakWhen.AfterRx || IsOverdueJoin(p, now),
+                p => p.When == SpeakWhen.AfterRx);
+            _lateAfterRxOpenedAtMs = spoke ? (long?)null : now;
+        }
+
+        // A status line drawn just after an empty AfterRx moment (see LateAfterRxWindowMs): run
+        // that moment now. Called after the render's fragments were held.
+        private void FlushLateAfterRx()
+        {
+            if (_lateAfterRxOpenedAtMs == null || _physicallyTransmitting) return;
+            long now = _clock.ElapsedMilliseconds;
+            if (now - _lateAfterRxOpenedAtMs.Value > LateAfterRxWindowMs) { _lateAfterRxOpenedAtMs = null; return; }
+            if (!_pendingRoutine.Values.Any(p => p.When == SpeakWhen.AfterRx)) return;
+            _lateAfterRxOpenedAtMs = null;
+            ReconcileAndFlush("AfterRx-late",
                 p => p.When == SpeakWhen.AfterRx || IsOverdueJoin(p, now),
                 p => p.When == SpeakWhen.AfterRx);
         }
@@ -1117,7 +1144,8 @@ namespace WSJTX_Controller
         // this period's decodes were in (V26K: "V 2 6 K." alone while being called).
         public Func<string, string, IReadOnlyList<string>, string> RoutineRewrite;
 
-        private void ReconcileAndFlush(string boundaryName, Func<Pending, bool> routineReady, Func<Pending, bool> notificationReady)
+        // True when something was spoken.
+        private bool ReconcileAndFlush(string boundaryName, Func<Pending, bool> routineReady, Func<Pending, bool> notificationReady)
         {
             long now = _clock.ElapsedMilliseconds;
             string routineText = TakeRoutineBucketComposed(routineReady);
@@ -1147,7 +1175,7 @@ namespace WSJTX_Controller
             if (merged.Count == 0)
             {
                 _logDiagnostic($"[RECONCILE {boundaryName}] T={now}ms disposition=nothing-to-speak (no source had content)");
-                return;
+                return false;
             }
             string composed = ComposeMerged(merged, forceFirst: null);
             if (composed.Length == 0)
@@ -1155,13 +1183,14 @@ namespace WSJTX_Controller
                 _logDiagnostic($"[RECONCILE {boundaryName}] T={now}ms items={merged.Count} composed=\"\" disposition=nothing-to-speak (all sources blank after compose)");
                 foreach (var a in notifOnSpoken) a?.Invoke();
                 foreach (var a in nowOnSpoken) a?.Invoke();
-                return;
+                return false;
             }
 
             SpeakNow(composed, AlertCue.None);
             _logDiagnostic($"[RECONCILE {boundaryName}] T={now}ms items={merged.Count} composed=\"{composed}\" disposition=spoken nudges=1");
             foreach (var a in notifOnSpoken) a?.Invoke();
             foreach (var a in nowOnSpoken) a?.Invoke();
+            return true;
         }
 
         // Discard held routine fragments matching `pred` without speaking them (stale snapshot).

@@ -2036,6 +2036,14 @@ namespace WSJTX_Controller
                 && _smartStart.NoteCallOverCompletedAndCheckNotHeardLimit(ctrl.smartStartMaxStandbyRounds))
                 SmartStartNotHeardLimitReached();
 
+            // Smart Mode's list (2026-10-05): this station has had its turn and another is free
+            // now -- stand by and try that one (TrySmartTurnSwitch). Same edge and guard; a limit
+            // just above that ended the effort leaves the guard false.
+            if (wasTransmitting && !transmitting
+                && _smartStart.IsActive && _smartStart.AwaitingEngagement && !_smartStart.EngagedUs
+                && string.Equals(callInProg, _smartStart.TargetCall, StringComparison.OrdinalIgnoreCase))
+                TrySmartTurnSwitch();
+
             // Premature "no response" fix (see _directNoResponseAwaitingCall). A real over to the
             // call in progress just ended: arm the "no response" timing gate and clear the
             // opportunity-complete flag. ShowStatus's "no response" clause now stays quiet until
@@ -3795,6 +3803,7 @@ namespace WSJTX_Controller
         // status after a plain state change like CAT dropping, exactly as a later decode tick
         // would produce it in the field.
         internal void TestShowStatus() => ShowStatus();
+        internal void TestSetLoggedCallTx(string call, bool tx) { loggedCall = call; transmitting = tx; }
 
         // When a decode was heard, for its period (operator, 2026-10-02). Nexus decodes each
         // period twice: an early pass ending ~12 s in, and a deeper pass -- the weaker stations --
@@ -3849,6 +3858,7 @@ namespace WSJTX_Controller
         // asserts the first orphaned over is tolerated and the second one trips the halt.
         internal int TestOrphanTxOvers => _directOrphanTxOvers;
         internal string TestFinishingCall => _finishingCall;
+        internal void TestSetFinishingTx(string call, bool tx) { _finishingCall = call; transmitting = tx; }
         // Problem 1 / KB2SLO fix hooks: the recorded in-flight-slot exemption (null once
         // consumed) and whether _finishingCall was set on the current poll tick.
         internal ulong? TestDirectOrphanExemptSlot => _directOrphanExemptSlot;
@@ -3917,6 +3927,11 @@ namespace WSJTX_Controller
         // can exercise the awaiting-engagement / yield / resume logic without the async REPLY
         // round trip (the real dispatch + REPLY is covered by SmartStartStaleEvidenceTransmitSafetyTests).
         internal void TestSmartStartEnterAwaitingEngagement() => _smartStart.EnterAwaitingEngagement();
+        // Smart Mode's list turn (2026-10-05): one completed call over, then the two steps the
+        // transmit-ended edge and the next receive period run.
+        internal void TestSmartStartNoteCallOver() => _smartStart.NoteCallingOverTransmitted(0);
+        internal void TestTrySmartTurnSwitch() => TrySmartTurnSwitch();
+        internal void TestCompleteSmartTurnSwitch(bool weTransmittedThisSlot) => CompleteSmartTurnSwitch(weTransmittedThisSlot);
         // Test-only: feed one decode straight into the Station Watch / Smart Start monitors
         // (and the awaiting-engagement handling), without going through ProcessDecodeMsg's full
         // QSO classification -- lets a test drive a "target working someone else" decode while

@@ -13327,6 +13327,29 @@ static class JimmyTests
         Check("Routine AfterRx: only the newest snapshot is spoken",
             said.Count == 1 && said[0] == "Receiving, 19 available stations", true);
 
+        // Late status line (operator, 2026-10-05, KE8NQL): the AfterRx moment ran a quarter second
+        // before "1 to you" was drawn and found nothing; that line waited a whole period. Now an
+        // empty moment stays open briefly and the first status line drawn in it is spoken then.
+        said.Clear();
+        c = NewTestCoordinator((t, imp) => said.Add(t), out var lateSched, autoFire: true);
+        c.OnReceiveCycleComplete();
+        c.SubmitRoutineStatus("1 to you, K E 8 N Q L first.", true, SpeakWhen.AfterRx);
+        Check("Late status line: spoken in the same period", said.Count == 1 && said[0] == "1 to you, K E 8 N Q L first.", true);
+        c.SubmitRoutineStatus("1 to you, 1 wanted.", true, SpeakWhen.AfterRx);
+        Check("  ...once only: the next waits for the next period", said.Count == 1, true);
+        c.OnReceiveCycleComplete();            // speaks the held line
+        said.Clear();
+        c.OnReceiveCycleComplete();            // nothing to say: opens the window
+        lateSched.Advance(SpeechCoordinator.LateAfterRxWindowMs + 1);
+        c.SubmitRoutineStatus("1 wanted.", true, SpeakWhen.AfterRx);
+        Check("  ...not long after: held as before", said.Count == 0, true);
+        c.OnReceiveCycleComplete();            // speaks the held line
+        said.Clear();
+        c.OnReceiveCycleComplete();            // nothing to say: opens the window
+        c.OnPhysicalTxChanged(true);
+        c.SubmitRoutineStatus("1 wanted.", true, SpeakWhen.AfterRx);
+        Check("  ...never once a transmission has started", said.Count == 0, true);
+
         // Item 2: a pending AfterRx routine status is DROPPED when physical TX starts -- stale
         // receive status must not be spoken after transmission begins.
         c = NewCoord();
@@ -13524,6 +13547,29 @@ static class JimmyTests
                 wc.Notify.OnPeriodBoundary();   // release an AfterRx-batched "N available stations" summary if that's what it was
                 Check("Now + foreground: the routine line reaches CoordinatedSpeak", view.CoordinatedSpeakCount >= 1, true);
                 Check("Now: the spoken text is the rendered status line", view.LastSpokenText == view.LastStatusText, true);
+            }
+
+            // A QSO logged while already transmitting (operator, 2026-10-05, W4HHN): with the routine
+            // line After RX it waited through the over and the next receive period (27 s); it is
+            // said at once now. Not logging, or not transmitting, keeps After RX as before.
+            {
+                var view = new FakeStatusView { ForegroundValue = true };
+                var wc = MakeWc(view, out var ctrl);
+                ctrl.routineStatusSpeakWhen = SpeakWhen.AfterRx;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestSetLoggedCallTx("W4HHN", true);
+                wc.TestShowStatus();
+                Check("Logged while transmitting: said at once", view.CoordinatedSpeakCount >= 1, true);
+                wc.TestSetLoggedCallTx(null, false);
+
+                view = new FakeStatusView { ForegroundValue = true };
+                wc = MakeWc(view, out ctrl);
+                ctrl.routineStatusSpeakWhen = SpeakWhen.AfterRx;
+                view.CoordinatedSpeakCount = 0;
+                wc.TestSetLoggedCallTx("W4HHN", false);
+                wc.TestShowStatus();
+                Check("Logged while receiving: still waits for the end of the receive period", view.CoordinatedSpeakCount == 0, true);
+                wc.TestSetLoggedCallTx(null, false);
             }
 
             // Now + NOT foreground -> visible only, never spoken.
@@ -19345,6 +19391,37 @@ static class JimmyTests
             // One station only: Escape is the full stop, as before.
             wc.TestTryCaptureSmartStart("OM0AJ", Dq("N7DNF OM0AJ -11", 4));
             Check("one station: Escape is the full stop", wc.EscapeOneStation(out string _s2, out string _w2), false);
+            wc.TestCancelStationWatchPendingStart();
+
+            // Calls before trying another station (operator, 2026-10-05, HK3TY): after its turn with
+            // no answer, one that is free now is tried -- a receive period later, not at once.
+            ctrl.smartStartCallsBeforeSwitch = 2;
+            wc.TestTryCaptureSmartStart("HK3TY", Dq("CQ HK3TY FJ24", 40));
+            wc.TestTryCaptureSmartStart("KP2B", Dq("W8TMB KP2B -05", 4));
+            wc.TestSmartStartEnterAwaitingEngagement();   // calling HK3TY
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(110, "KP2B", "CQ KP2B FK77"));
+            wc.TestSmartStartNoteCallOver();
+            wc.TestTrySmartTurnSwitch();
+            Check("turn not over: keeps calling", wc.TestSmartStartAwaitingEngagement && wc.TestSmartStartTarget == "HK3TY", true);
+            wc.TestSmartStartNoteCallOver();
+            wc.TestTrySmartTurnSwitch();
+            Check("turn over, another free: stops calling", !wc.TestSmartStartAwaitingEngagement && wc.TestSmartStartTarget == "HK3TY", true);
+            wc.TestCompleteSmartTurnSwitch(weTransmittedThisSlot: true);
+            Check("  ...not in a period we transmitted in", wc.TestSmartStartTarget == "HK3TY", true);
+            wc.TestCompleteSmartTurnSwitch(weTransmittedThisSlot: false);
+            Check("  ...then the free one is worked, the other still waits",
+                wc.TestSmartStartTarget == "KP2B" && wc.TestAutoStartPending && wc.IsSmartModeWaitingOn("HK3TY"), true);
+
+            // The status line's Smart Mode part steps aside while a just-logged QSO's closing 73
+            // goes out (operator, 2026-10-05: "Waiting to work W4DXR, not heard, Sending 73").
+            Check("Smart Mode part on the status line while waiting", wc.WatchStateClause().Length > 0, true);
+            wc.TestSetFinishingTx("KJ5IEL", true);
+            CheckStr("  ...hidden while the last QSO's 73 is going out", wc.WatchStateClause(), "");
+            wc.TestSetFinishingTx("KJ5IEL", false);
+            Check("  ...back once that over ends", wc.WatchStateClause().Length > 0, true);
+            wc.TestSetFinishingTx(null, false);
+            wc.TestCancelStationWatchPendingStart();
+            ctrl.smartStartCallsBeforeSwitch = 0;
         }
         finally
         {
@@ -20007,6 +20084,13 @@ static class JimmyTests
             Check("file: a built-in entry stays commented", file.Contains("# Msg.SmartNotHeard = "), true);
             CheckStr("file: reading it back gives the same words",
                 Wording.Parse(file.Split('\n')).TryGetValue("Msg.Still", out var back) ? back : "", "again");
+            // Kept up to date (2026-10-05): stale '#' words or a missing entry rewrite the file once.
+            Check("up to date: the file as written needs nothing", Wording.NeedsRefresh(file.Split('\n')), false);
+            Check("up to date: own words are not stale", Wording.NeedsRefresh(file.Replace("\nMsg.Still = again", "\nMsg.Still = once more").Split('\n')), false);
+            string oldWords = file.Replace("# Msg.SmartModeTimeLimit = " + Wording.DefaultOf("Msg.SmartModeTimeLimit"),
+                "# Msg.SmartModeTimeLimit = Smart Mode time limit reached after {Minutes} {MinuteWord} calling {Call}, no contact completed");
+            Check("up to date: a '#' line with old built-in words is refreshed", oldWords != file && Wording.NeedsRefresh(oldWords.Split('\n')), true);
+            Check("up to date: a missing entry is added", Wording.NeedsRefresh(file.Split('\n').Where(l => !l.Contains("Msg.SmartTryingNext")).ToArray()), true);
             Wording.Set("Msg.Still", "still");
             Check("file: the built-in words again means not your own", Wording.IsChanged("Msg.Still"), false);
             // Silent: neither said nor shown, written as key = "".
@@ -20887,7 +20971,7 @@ static class JimmyTests
             wc.TestApplyDirectSnapshot(myCall, myGrid, snap);
             string textOff = fakeStatusView.LastStatusText ?? wc.TestPendingStatusText ?? "";
             Check("Setting OFF (default): the routine available-stations summary can still appear while transmitting/calling CQ -- unchanged existing behavior",
-                textOff.IndexOf("available station", StringComparison.OrdinalIgnoreCase) >= 0, true);
+                textOff.IndexOf("available station", StringComparison.OrdinalIgnoreCase) >= 0, true);
 
             // Fresh client for the ON case -- avoids any carried-over dedup/defer state from the
             // OFF render above affecting this one.
@@ -26902,6 +26986,32 @@ static class JimmyTests
         Check("Deliberate repeat: also not suppressed outside the window (bypass covers the inside-window case too)",
             Controller.IsNearImmediateRepeat("X", "X", now.AddSeconds(-5), now, window, isDeliberateRepeat: true),
             false);
+        // 2026-10-05 (W4HHN): the end of what was just said, said again a moment later.
+        const string joined = "W 4 H H N final 73, Logged QSO with W 4 H H N, Sending 7 3.";
+        Check("Automatic: the tail of what was just said is a repeat",
+            Controller.IsNearImmediateRepeat("Sending 7 3", joined, now.AddMilliseconds(-300), now, window, isDeliberateRepeat: false), true);
+        Check("Automatic: ...only whole phrases",
+            Controller.IsNearImmediateRepeat("7 3", "W 4 H H N final 73, Sending 7 3", now.AddMilliseconds(-300), now, window, false)
+            && !Controller.IsNearImmediateRepeat("ing 7 3", joined, now.AddMilliseconds(-300), now, window, false), true);
+        Check("Automatic: ...and not outside the window",
+            Controller.IsNearImmediateRepeat("Sending 7 3", joined, now.AddSeconds(-5), now, window, isDeliberateRepeat: false), false);
+        Check("Automatic: something longer than what was said is not a repeat",
+            Controller.IsNearImmediateRepeat(joined, "Sending 7 3", now.AddMilliseconds(-300), now, window, isDeliberateRepeat: false), false);
+        // 2026-10-05 (KB5YNF): joined line at 0 s, "Sending 7 3" held back at 2.6 s, the same again
+        // at 3.9 s -- the held-back line restarts the window, so the third stays quiet.
+        {
+            var t0 = now;
+            var last = Controller.NextRepeatWindow(null, DateTime.MinValue, joined, announced: true, heldBack: false, t0);
+            var t1 = t0.AddMilliseconds(2600);
+            bool held1 = Controller.IsNearImmediateRepeat("Sending 7 3", last.Text, last.Time, t1, window, false);
+            last = Controller.NextRepeatWindow(last.Text, last.Time, "Sending 7 3", announced: !held1, heldBack: held1, t1);
+            var t2 = t0.AddMilliseconds(3900);
+            bool held2 = Controller.IsNearImmediateRepeat("Sending 7 3", last.Text, last.Time, t2, window, false);
+            Check("Automatic: a line held back restarts the window (no second 'Sending 7 3')", held1 && held2, true);
+            last = Controller.NextRepeatWindow(last.Text, last.Time, "Sending 7 3", announced: false, heldBack: true, t2);
+            Check("Automatic: ...said again after a quiet 3 seconds",
+                Controller.IsNearImmediateRepeat("Sending 7 3", last.Text, last.Time, t2.AddSeconds(3.5), window, false), false);
+        }
 
         // Regression guard, same pattern as NotificationParkedEventTypesGuardTests: the
         // isDeliberateRepeat:true bypass must only ever be reachable from the two operator-
