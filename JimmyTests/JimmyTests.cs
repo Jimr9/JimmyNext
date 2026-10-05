@@ -20365,10 +20365,16 @@ static class JimmyTests
         CheckStr("a grid's square", LogbookDb.Grid4("en34rn"), "EN34");
         CheckStr("RR73 is not a grid", LogbookDb.Grid4("RR73"), null);
         CheckStr("a report is not a grid", LogbookDb.Grid4("-12"), null);
-        CheckStr("tune-up over, receiving", WsjtxClient.AtuFinishedMessage("1", "0"), "Tuner finished");
-        CheckStr("tune-up over, radio left in transmit (its own menu setting)", WsjtxClient.AtuFinishedMessage("1", "1"), "Tuner finished, radio still transmitting");
-        CheckStr("transmit state not read yet -> keep asking", WsjtxClient.AtuFinishedMessage("1", "?"), null);
-        CheckStr("tuner never switched in", WsjtxClient.AtuFinishedMessage("0", "0"), "The radio's tuner did not start");
+        // 2026-10-05: started only when seen (tuning reported, or transmitting); stopped on receive
+        // is never called a match; still transmitting, the SWR is said when the radio gave one.
+        // 2026-10-05: CAT cannot tell a tune-up's progress or result, so only the end of its
+        // transmit is reported -- the SWR read while the carrier was on, then receive.
+        CheckStr("tuner transmit ended, SWR read", WsjtxClient.AtuReceiveMessage("OK receive 1.1"), "SWR 1.1, radio back to receive");
+        CheckStr("tuner transmit ended, no SWR", WsjtxClient.AtuReceiveMessage("OK receive -"), "Radio back to receive");
+        CheckStr("tuner transmit ended, older engine answer", WsjtxClient.AtuReceiveMessage("OK receive"), "Radio back to receive");
+        CheckStr("tuner: the engine's own reason", WsjtxClient.AtuReceiveMessage("ERR Could not return the radio to receive, check the radio"), "Could not return the radio to receive, check the radio");
+        CheckStr("tuner: not sent", WsjtxClient.AtuReceiveMessage(null), "Could not return the radio to receive, check the radio");
+        Check("tuner backstop: 10 seconds unless set in Shared.ini", WsjtxClient.TunerHoldSeconds == 10, true);
         try
         {
             var ctrl = new Controller();
@@ -27462,6 +27468,62 @@ static class JimmyTests
                 wc.TestShowStatus();
                 wc.Notify.OnPeriodBoundary();
                 Check("5c: no gap -- the new fact still reaches the operator", SaidContains(peer), true);
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+                try { File.Delete(tmpDb); } catch { }
+            }
+        }
+
+        // ══ 5d. The station being called keeps calling CQ (operator, 2026-10-05, W4DXR) ══
+        // It was never said: Smart Mode left it to the QSO line, which left it out. Now through the
+        // tracker -- "Repeat unchanged station progress each period" on: "still calling CQ" each
+        // period; off: said once, then only when it changes.
+        foreach (bool repeatOn in new[] { true, false })
+        {
+            string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_TAU_Cq_" + Guid.NewGuid().ToString("N") + ".db");
+            string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+            try
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.routineStatusSpeakWhen = SpeakWhen.AfterRx;
+                ctrl.spaceCallsignsAndGrids = false;
+                ctrl.Notifications.RepeatUnchangedTargetActivityEachPeriod = repeatOn;
+                var _ = ctrl.Handle;
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.TestSetMode("FT8");
+                wc.cqPaused = false;
+                var fake = new FakeNotificationDelivery();
+                wc.Notify = NewTestNotificationCenter(ctrl.Notifications, fake);
+                WsjtxMessage.NegoState = WsjtxMessage.NegoStates.RECD;
+                wc.callInProg = "W4DXR";
+                DirectSnapshot Snap(ulong slot) => ParseDirectSnapshot(@"{
+                    ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""catOk"": true, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [ { ""from"": ""W4DXR"", ""snr"": -8, ""dtSec"": 0.1, ""freqHz"": 1000.0, ""message"": ""CQ W4DXR EM71"" } ] }");
+                string on = repeatOn ? "on" : "off";
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(1000));
+                Check($"5d ({on}): the station being called calling CQ is said", wc.TestOtherPartyActivitySpeakable && !wc.TestOtherPartyActivityRepeat, true);
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", Snap(1002));
+                if (repeatOn)
+                {
+                    Check("5d (on): next period, unchanged: said again, as a repeat", wc.TestOtherPartyActivitySpeakable && wc.TestOtherPartyActivityRepeat, true);
+                    lock (fake.AllText) fake.AllText.Clear();
+                    wc.TestShowStatus();
+                    wc.Notify.OnPeriodBoundary();
+                    bool still; lock (fake.AllText) still = fake.AllText.Exists(t => t.Contains("W4DXR still calling CQ"));
+                    Check("5d (on): ...with \"still\"", still, true);
+                    if (!still) lock (fake.AllText) Console.WriteLine("  5d said: [" + string.Join(" | ", fake.AllText) + "]");
+                }
+                else
+                    Check("5d (off): next period, unchanged: not said again", wc.TestOtherPartyActivitySpeakable, false);
             }
             finally
             {

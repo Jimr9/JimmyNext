@@ -3348,7 +3348,7 @@ namespace WSJTX_Controller
         // sent. A start keys the radio, so it is a TX-arm command (purged by an emergency halt).
         internal void DirectAtuCommand(string command, Action<string> onReply)
         {
-            bool arm = command == "ATU_START";
+            bool arm = command.StartsWith("ATU_START", StringComparison.Ordinal);
             if (arm && !DirectAuthorizedToArmTx(command)) { onReply?.Invoke(null); return; }
             EnqueueDirectCommand(command, resp => onReply?.Invoke(resp), isTxArm: arm);
         }

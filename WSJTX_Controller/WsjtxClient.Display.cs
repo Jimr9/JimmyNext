@@ -2011,9 +2011,16 @@ namespace WSJTX_Controller
                                     // period, or "Repeat unchanged QSO activity each period" is off
                                     // and nothing changed (otherPartyActivitySpeakable, set in
                                     // WsjtxClient.cs's ProcessDecodeMsg at classification time).
-                                    statusForSpeech = (otherStr == "" || otherPartyActivitySpeakable)
-                                        ? status
-                                        : $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{""}{txStr}{callsWaiting}{desc}{prompt}.";
+                                    // An unchanged fact said again carries "still" (the CQ of the
+                                    // station being called, 2026-10-05) -- spoken line only.
+                                    string spokenOther = otherStr;
+                                    string activeName = curCall != null ? DisplayCallsign(curCall, ctrl.spaceCallsignsAndGrids) : null;
+                                    if (otherPartyActivityRepeat && activeName != null && otherStr.StartsWith(", " + activeName + " ", StringComparison.Ordinal))
+                                        spokenOther = ", " + RepeatPhrase.Mark(otherStr.Substring(2), activeName, Wording.Get("Msg.Still"));
+                                    statusForSpeech = otherStr == "" ? status
+                                        : otherPartyActivitySpeakable
+                                            ? $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{spokenOther}{txStr}{callsWaiting}{desc}{prompt}."
+                                            : $"{curTxMode}{inProg}{cond}{curRxStr}{prevRxStr}{""}{txStr}{callsWaiting}{desc}{prompt}.";
                                 }
                             }
                             DebugOutput($"{spacer}curCall:'{curCall}' sinceMidnight:{sinceMidnight}");

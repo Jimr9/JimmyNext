@@ -400,9 +400,12 @@ namespace WSJTX_Controller
         // this flag -- it keeps rendering the current fact unconditionally, exactly as before;
         // only the SPOKEN line (statusForSpeech) consults it.
         private bool otherPartyActivitySpeakable = false;
+        // That fact is the same as the last one said for this station -- spoken with "still".
+        private bool otherPartyActivityRepeat = false;
         // Test-only: precise observation of the ordinary path's own per-decode speech decision,
         // without relying on fragile string matching against the composed status line.
         internal bool TestOtherPartyActivitySpeakable => otherPartyActivitySpeakable;
+        internal bool TestOtherPartyActivityRepeat => otherPartyActivityRepeat;
 
         // KA1BMF guard evidence counter (VP5/K5UR live incident, 2026-09-14): a big pileup-
         // running DX station can genuinely be juggling several simultaneous QSOs by hand
@@ -2007,7 +2010,14 @@ namespace WSJTX_Controller
                     otherPartyForCallInProg = null;
                     otherPartyStage = null;
                     otherPartyForCallInProgUtc = default;
-                    otherPartyActivitySpeakable = false;
+                    // The station being called is calling CQ again -- still not answering us
+                    // (operator, 2026-10-05: W4DXR CQ'd every period while we called it and none
+                    // of it was said; Smart Mode left it to this line, and this line left it out).
+                    // Through the shared tracker, so "Repeat unchanged station progress each
+                    // period" decides whether an unchanged CQ is said again ("still calling CQ").
+                    otherPartyActivityRepeat = false;
+                    otherPartyActivitySpeakable = idSem.IsCq && !toMyCall
+                        && ShouldAnnounceTargetActivity(callInProg, "", TargetObservationKind.TargetCq, "", out otherPartyActivityRepeat);
                     callInProgCqUtc = (idSem.IsCq && !toMyCall) ? DecodeUtcOf(dmsg) : default;
                     // Any message from the target back to us resets the KA1BMF evidence count --
                     // it just proved it hasn't abandoned us, whatever it was doing in between.
@@ -2043,6 +2053,7 @@ namespace WSJTX_Controller
                     bool watcherOwnsThisTarget =
                         (_smartStart.IsActive && string.Equals(_smartStart.TargetCall, callInProg, StringComparison.OrdinalIgnoreCase)) ||
                         (_stationWatch.IsActive && string.Equals(_stationWatch.TargetCall, callInProg, StringComparison.OrdinalIgnoreCase));
+                    otherPartyActivityRepeat = false;
                     if (watcherOwnsThisTarget)
                     {
                         otherPartyActivitySpeakable = false;
@@ -3825,6 +3836,7 @@ namespace WSJTX_Controller
             otherPartyForCallInProgUtc = default;
             _callInProgHeardUtc = default;
             otherPartyActivitySpeakable = false;
+            otherPartyActivityRepeat = false;
             // A call started by answering the station's CQ: that CQ is the current fact.
             callInProgCqUtc = default;
             if (call != null && replyDecode != null)
