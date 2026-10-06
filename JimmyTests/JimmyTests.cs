@@ -17495,13 +17495,19 @@ static class JimmyTests
                 {
                     categoryList.SelectedIndex = index;
                     categoryList.Focus();
+                    // A real Tab key press, through Windows' own keyboard path (operator, 2026-10-06:
+                    // live, Tab from the category list skipped Headline, Summary and Readings).
+                    var tab = System.Windows.Forms.Message.Create(categoryList.Handle, 0x0100, (IntPtr)0x09, IntPtr.Zero);
+                    categoryList.PreProcessControlMessage(ref tab);
+                    CheckStr($"{label}: a real Tab key enters the page at its first stop", TabOrderWalker.Describe(w.ActiveControl), expected[0]);
+                    categoryList.Focus();
                     var (forwardSeq, lastCtl) = TabOrderWalker.WalkReal(w, categoryList, forward: true, Step);
                     CheckStr($"{label}: Tab order", string.Join(" -> ", forwardSeq), string.Join(" -> ", expected));
                     lastCtl.Focus();
                     var (backwardSeq, _) = TabOrderWalker.WalkReal(w, lastCtl, forward: false, Step);
                     backwardSeq.Reverse();
                     CheckStr($"{label}: Shift+Tab is the mirror", string.Join(" -> ", backwardSeq),
-                        string.Join(" -> ", expected.Take(expected.Length - 1).Prepend("Spots and Conditions categories")));
+                        string.Join(" -> ", expected.Take(expected.Length - 1).Prepend("Categories")));
                 }
                 CheckPage("POTA / SOTA", 0, new[] { "Spots list", "Choose this park for the station", "Refresh POTA and SOTA spots now", "Status", "Close" });
                 CheckPage("Contests", 1, new[] { "Contests list", "Open details", "Refresh calendar", "Check for rules updates", "Calendar status", "Close" });

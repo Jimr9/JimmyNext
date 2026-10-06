@@ -110,7 +110,7 @@ namespace WSJTX_Controller
             // or shortened below to stop the repetition; standard WinForms tab/list accessible
             // behavior (TabPage.Text as the tab's own name, same as LogbookWindow.cs) does the
             // rest without fighting JAWS's normal announcements.
-            Text = "Spots & Conditions";
+            Text = "Spots and Conditions";   // "and", not "&", which screen readers skip (2026-10-06)
             FormBorderStyle = FormBorderStyle.Sizable;
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
@@ -133,7 +133,7 @@ namespace WSJTX_Controller
                 Dock = DockStyle.Left,
                 Width = 150,
                 IntegralHeight = false,
-                AccessibleName = "Spots and Conditions categories",
+                AccessibleName = "Categories",   // the window title already names it (2026-10-06)
             };
             // Pure layout host for the one page shown (see LogbookWindow's _categoryDetailHost).
             _host = new Panel { Dock = DockStyle.Fill, AccessibleName = "", AccessibleRole = AccessibleRole.None };
@@ -143,8 +143,10 @@ namespace WSJTX_Controller
             for (int i = 0; i < _pages.Length; i++)
             {
                 _pages[i].Dock = DockStyle.Fill;
-                _pages[i].AccessibleName = names[i];
-                _pages[i].AccessibleRole = AccessibleRole.Grouping;
+                // Unnamed (2026-10-06): the category list has just said the page's name; a named
+                // page said it again on the way in.
+                _pages[i].AccessibleName = "";
+                _pages[i].AccessibleRole = AccessibleRole.None;
                 _categoryListBox.Items.Add(names[i]);
             }
             Controls.Add(_host);
@@ -155,7 +157,9 @@ namespace WSJTX_Controller
             // comment for why -- root cause of a live JAWS pass hearing DX Spots status text
             // while sitting on the Space Weather tab).
             _categoryListBox.SelectedIndexChanged += (s, e) => RefreshActiveTab();
-            Shown += (s, e) => _categoryListBox.Focus();
+            // Focus is in the category list from the moment the window appears (2026-10-06): moved
+            // there in Shown, the window was announced once on opening and again on the move.
+            ActiveControl = _categoryListBox;
 
             _refreshTimer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
             _refreshTimer.Tick += (s, e) => RefreshActiveTab();
@@ -287,13 +291,17 @@ namespace WSJTX_Controller
         // is the redundancy a live JAWS pass flagged.
         private static ListBox MakeListBox(string accessibleName)
         {
-            return new ListBox
+            var lb = new ListBox
             {
                 Dock = DockStyle.Fill,
                 HorizontalScrollbar = true,
                 TabIndex = 0,
                 AccessibleName = accessibleName,
             };
+            // The first line is selected when the list is entered, never while it is filled out of
+            // view: a selection change is announced even in a list that does not have the focus.
+            lb.GotFocus += (s, e) => SelectFirstItemIfNoneSelectedYet(lb, lb.SelectedIndex >= 0);
+            return lb;
         }
 
         // Companion to MakeListBox's own comment: a ListBox's "current item" for keyboard/
@@ -398,27 +406,18 @@ namespace WSJTX_Controller
                     _potaInFlight = false;
                     if (IsDisposed) return;
 
-                    bool hadSelection = _potaList.SelectedIndex >= 0;
-                    _potaList.BeginUpdate();
-                    try
+                    var potaRows = new List<string>();
+                    _potaSpots.Clear();
+                    if (result?.Spots != null)
                     {
-                        _potaList.Items.Clear();
-                        _potaSpots.Clear();
-                        if (result?.Spots != null)
+                        foreach (var spot in result.Spots)
                         {
-                            foreach (var spot in result.Spots)
-                            {
-                                var annotation = OtaSpotAnnotator.Annotate(spot.Activator, band, _logbookDb, _lookupManager, tags);
-                                _potaList.Items.Add(FormatPotaSotaRow(spot, annotation));
-                                _potaSpots.Add(spot);
-                            }
+                            var annotation = OtaSpotAnnotator.Annotate(spot.Activator, band, _logbookDb, _lookupManager, tags);
+                            potaRows.Add(FormatPotaSotaRow(spot, annotation));
+                            _potaSpots.Add(spot);
                         }
                     }
-                    finally
-                    {
-                        _potaList.EndUpdate();
-                    }
-                    SelectFirstItemIfNoneSelectedYet(_potaList, hadSelection);
+                    SetRowsIfChanged(_potaList, potaRows);
 
                     if (error != null)
                         _potaStatusLabel.Text = $"{_potaList.Items.Count} spots (stale) -- {error}";
@@ -523,22 +522,8 @@ namespace WSJTX_Controller
                     _condInFlight = false;
                     if (IsDisposed) return;
 
-                    bool hadSelection = _condBandsList.SelectedIndex >= 0;
-                    _condBandsList.BeginUpdate();
-                    try
-                    {
-                        _condBandsList.Items.Clear();
-                        if (result?.Bands != null)
-                        {
-                            foreach (var b in result.Bands)
-                                _condBandsList.Items.Add(FormatBandConditionsRow(b));
-                        }
-                    }
-                    finally
-                    {
-                        _condBandsList.EndUpdate();
-                    }
-                    SelectFirstItemIfNoneSelectedYet(_condBandsList, hadSelection);
+                    SetRowsIfChanged(_condBandsList, result?.Bands != null
+                        ? result.Bands.Select(FormatBandConditionsRow).ToList() : new List<string>());
 
                     if (error != null)
                     {
@@ -709,19 +694,9 @@ namespace WSJTX_Controller
                         .OrderBy(e => e.StartUnix).ToList();
                     var rows = upcoming.Select(e => FormatContestRow(e, now, zone)).ToList();
                     // Rebuilt only when something changed, so a screen reader is not interrupted.
-                    if (!rows.SequenceEqual(_contestList.Items.Cast<string>()))
-                    {
-                        int keep = _contestList.SelectedIndex;
-                        _contestList.BeginUpdate();
-                        try
-                        {
-                            _contestList.Items.Clear();
-                            _contestRows.Clear();
-                            foreach (var (row, ev) in rows.Zip(upcoming, (r, e) => (r, e))) { _contestList.Items.Add(row); _contestRows.Add(ev); }
-                        }
-                        finally { _contestList.EndUpdate(); }
-                        if (_contestList.Items.Count > 0) _contestList.SelectedIndex = Math.Max(0, Math.Min(keep, _contestList.Items.Count - 1));
-                    }
+                    _contestRows.Clear();
+                    _contestRows.AddRange(upcoming);
+                    SetRowsIfChanged(_contestList, rows);
                     string status = CalendarStatusText(result, error, now, zone) + (_contestRulesText.Length > 0 ? Environment.NewLine + _contestRulesText : "");
                     if (_contestStatusBox.Text != status) _contestStatusBox.Text = status;
                 });
@@ -847,19 +822,8 @@ namespace WSJTX_Controller
                     _heardInFlight = false;
                     if (IsDisposed) return;
 
-                    bool hadSelection = _heardList.SelectedIndex >= 0;
-                    _heardList.BeginUpdate();
-                    try
-                    {
-                        _heardList.Items.Clear();
-                        if (error == null && result?.Reports != null)
-                            foreach (var h in result.Reports) _heardList.Items.Add(FormatHeardMeRow(h));
-                    }
-                    finally
-                    {
-                        _heardList.EndUpdate();
-                    }
-                    SelectFirstItemIfNoneSelectedYet(_heardList, hadSelection);
+                    SetRowsIfChanged(_heardList, error == null && result?.Reports != null
+                        ? result.Reports.Select(FormatHeardMeRow).ToList() : new List<string>());
 
                     if (error != null)
                     {
@@ -927,22 +891,8 @@ namespace WSJTX_Controller
                     _dxInFlight = false;
                     if (IsDisposed) return;
 
-                    bool hadSelection = _dxList.SelectedIndex >= 0;
-                    _dxList.BeginUpdate();
-                    try
-                    {
-                        _dxList.Items.Clear();
-                        if (result?.Spots != null)
-                        {
-                            foreach (var s in result.Spots)
-                                _dxList.Items.Add(FormatDxSpotRow(s));
-                        }
-                    }
-                    finally
-                    {
-                        _dxList.EndUpdate();
-                    }
-                    SelectFirstItemIfNoneSelectedYet(_dxList, hadSelection);
+                    SetRowsIfChanged(_dxList, result?.Spots != null
+                        ? result.Spots.Select(FormatDxSpotRow).ToList() : new List<string>());
 
                     if (error != null)
                     {
@@ -1050,11 +1000,13 @@ namespace WSJTX_Controller
             });
         }
 
-        // A list's rows replaced only when they changed, so a screen reader's place in it is kept.
+        // A list's rows replaced only when they changed. In the list being read the place is kept;
+        // a list out of focus is left with nothing selected, so a refresh says nothing (a selection
+        // change is announced even out of focus -- 2026-10-06).
         private static void SetRowsIfChanged(ListBox list, List<string> rows)
         {
             if (rows.SequenceEqual(list.Items.Cast<string>())) return;
-            bool hadSelection = list.SelectedIndex >= 0;
+            bool focused = list.Focused;
             int keep = list.SelectedIndex;
             list.BeginUpdate();
             try
@@ -1063,8 +1015,7 @@ namespace WSJTX_Controller
                 foreach (var r in rows) list.Items.Add(r);
             }
             finally { list.EndUpdate(); }
-            if (hadSelection && list.Items.Count > 0) list.SelectedIndex = Math.Min(keep, list.Items.Count - 1);
-            SelectFirstItemIfNoneSelectedYet(list, hadSelection);
+            if (focused && list.Items.Count > 0) list.SelectedIndex = keep >= 0 ? Math.Min(keep, list.Items.Count - 1) : 0;
         }
 
         // "45 seconds ago", "5 minutes ago", "2 hours ago" -- words, not "5m ago" (read "5 meters").
