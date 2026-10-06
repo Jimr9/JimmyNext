@@ -280,6 +280,31 @@ namespace WSJTX_Controller
             return result;
         }
 
+        // Club Log's download (2026-10-06): Club Log holds only the contacts uploaded to it, so the
+        // one thing it can add is a contact the log lacks. Through the pairing guard, absentOnly:
+        // a row at a logged contact is left out, one near a logged contact is held for review, and
+        // only a contact with no logged contact that day or the day either side is imported --
+        // unconfirmed. (Nexus's plain import keys on the exact second, and Club Log keeps its own
+        // seconds: 365 copies of logged contacts came in that way on 2026-10-06.)
+        public ImportResult ClubLogDownload(string adifText)
+        {
+            if (NexusLogbook.Outbox.Count > 0) NexusLogbook.Outbox.Replay(Client);
+            if (NexusLogbook.Outbox.Count > 0)
+                return new ImportResult { Errors = "Nexus logbook: contacts are still waiting to be saved; nothing was imported. Try again shortly." };
+            var rows = Client.Rows();
+            if (rows.Error != null)
+                return new ImportResult { Errors = "Nexus logbook: could not read the log to pair the download: " + rows.Error };
+            var prep = NexusReportPairing.Prepare(adifText, rows.Rows, absentOnly: true);
+            var result = prep.Sent > 0 ? ImportFile(prep.Text, "CLUBLOG") : new ImportResult();
+            result.Skipped += prep.Dropped;
+            result.Processed += prep.Dropped + prep.Held;
+            result.Held = prep.Held;
+            result.HeldDetails.AddRange(prep.HeldDetails);
+            NexusSyncDiagnostics.WriteList("held-clublog",
+                "CLUBLOG rows held back -- not imported, nothing changed -- because a contact with that station and band is logged that day or the day either side", prep.HeldDetails);
+            return result;
+        }
+
         // After a merge (2026-10-04): the logged location stays as logged. LoTW's confirmed
         // location of each contact it confirmed is kept beside it, in APP_JIMMY_LOTW_* fields
         // (STATE, CNTY, GRID, DXCC, CQZ, ITUZ) -- the evidence awards count for that contact. Every
@@ -479,6 +504,45 @@ namespace WSJTX_Controller
             return (changed, same, failed, firstError);
         }
 
+        // Bulk edit's "Mark not sent to" (operator, 2026-10-06): each contact marked not sent to each
+        // service, so that service's next upload sends it again. LoTW, QRZ, eQSL and Club Log: the
+        // contact editor's own "not sent" stamp (rejected). HRDLog: its upload time removed from the
+        // contact (APP_JIMMY_HRDLOG_UL). The services ignore a contact they already hold. ids are
+        // read-copy ids, as for BulkEdit; the read copy is rebuilt once at the end.
+        public (int Changed, int Failed, string FirstError) MarkNotSent(IEnumerable<int> ids, IEnumerable<string> services)
+        {
+            var svcs = services.ToList();
+            int changed = 0, failed = 0;
+            string firstError = null;
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            try
+            {
+                foreach (int id in ids)
+                {
+                    try
+                    {
+                        string nexusId = R(db => db.GetExtraFields(id).FirstOrDefault(e => e.Tag == "APP_NEXUS_ID").Value, null);
+                        if (string.IsNullOrEmpty(nexusId))
+                            throw new InvalidOperationException("That contact changed or was removed -- refresh and try again.");
+                        foreach (string s in svcs)
+                        {
+                            var reply = s == "hrdlog"
+                                ? Client.SetExtra(nexusId, new List<string[]> { new[] { NexusMigration.HrdlogUploadedTag, "" } })
+                                : Client.StampUpload(nexusId, s, "rejected", now);
+                            if (reply.State != "saved") throw new InvalidOperationException(EditFailure(reply));
+                        }
+                        changed++;
+                    }
+                    catch (Exception ex) { failed++; firstError = firstError ?? ex.Message; }
+                }
+            }
+            finally
+            {
+                if (changed > 0) NexusLogbook.Refresh();
+            }
+            return (changed, failed, firstError);
+        }
+
         // A full copy of the logbook (Nexus's own ADIF export, every field) -- taken before a
         // bulk edit, so the contacts as they were can always be imported back.
         public void BackupTo(string path)
@@ -561,7 +625,12 @@ namespace WSJTX_Controller
             return false;
         }
 
-        public void MarkUploaded(string dedupKey, string service, DateTime whenUtc)
+        public void MarkUploaded(string dedupKey, string service, DateTime whenUtc) =>
+            MarkUploaded(new[] { dedupKey }, service, whenUtc);
+
+        // A whole batch (a TQSL run, a Club Log batch), the read copy rebuilt once at the end --
+        // not once per contact, which took 25 minutes for a 1,563-contact LoTW upload (2026-10-05).
+        public void MarkUploaded(IEnumerable<string> dedupKeys, string service, DateTime whenUtc)
         {
             string svc = (service ?? "").ToUpperInvariant();
             // HRDLog has no Nexus upload state; while Nexus keeps the log its upload time is recorded
@@ -571,9 +640,17 @@ namespace WSJTX_Controller
             if (nexusService == null) throw new ArgumentException("Unknown upload service: " + service);
             // TQSL gives no per-contact answer: LoTW is "pending" until a LoTW download echoes it.
             string outcome = nexusService == "lotw" ? "pending" : "accepted";
-            string nexusId = NexusIdForDedupKey(dedupKey);
-            var reply = Client.StampUpload(nexusId, nexusService, outcome, new DateTimeOffset(whenUtc.ToUniversalTime()).ToUnixTimeSeconds());
-            if (reply.State == "saved") NexusLogbook.Refresh();
+            long when = new DateTimeOffset(whenUtc.ToUniversalTime()).ToUnixTimeSeconds();
+            bool saved = false;
+            try
+            {
+                foreach (string dedupKey in dedupKeys)
+                {
+                    string nexusId = NexusIdForDedupKey(dedupKey);
+                    if (Client.StampUpload(nexusId, nexusService, outcome, when).State == "saved") saved = true;
+                }
+            }
+            finally { if (saved) NexusLogbook.Refresh(); }
         }
 
         public LogbookDb.UploadSyncStatus GetUploadSyncStatus(string service) =>
@@ -688,8 +765,8 @@ namespace WSJTX_Controller
         public QsoRecord GetQso(int id) => R(db => db.GetQso(id), null);
         public List<QsoRecord> SearchByCallsign(string pattern, int limit = 200) => R(db => db.SearchByCallsign(pattern, limit), new List<QsoRecord>());
         public List<QsoRecord> SearchQsos(string callsignPattern, string source, string dateFrom, string dateTo, int limit = 500,
-            string searchField = null, string searchText = null) =>
-            R(db => db.SearchQsos(callsignPattern, source, dateFrom, dateTo, limit, searchField, searchText), new List<QsoRecord>());
+            string searchField = null, string searchText = null, int uploadFilter = -1) =>
+            R(db => db.SearchQsos(callsignPattern, source, dateFrom, dateTo, limit, searchField, searchText, uploadFilter), new List<QsoRecord>());
         public Dictionary<int, string> GetDxccCountryNames() => R(db => db.GetDxccCountryNames(), new Dictionary<int, string>());
         public List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null) =>
             R(db => db.GetAdifFieldDicts(ids, sources), new List<Dictionary<string, string>>());
@@ -718,7 +795,10 @@ namespace WSJTX_Controller
             if (NexusLogbook.Outbox.Count > 0) { why = "contacts are still waiting to be saved"; return -1; }
             var rows = Client.Rows();
             if (rows.Error != null) { why = rows.Error; return -1; }
-            var prep = NexusReportPairing.Prepare(ownReport, rows.Rows.Where(q => !q.AwardConfirmed).ToList());
+            // Rows of confirmed contacts and repeated uploads of one contact are left out, not held
+            // (2026-10-06: 241 such rows kept ~130 contacts "pending" and every sync slow).
+            var prep = NexusReportPairing.Prepare(ownReport, rows.Rows.Where(q => !q.AwardConfirmed).ToList(),
+                settled: rows.Rows.Where(q => q.AwardConfirmed).ToList(), collapseSameMinute: true);
             NexusSyncDiagnostics.WriteList("held-lotw-own",
                 "LoTW own-records rows not used to mark uploads received, because Nexus could not be sure to pair them with the right contact", prep.HeldDetails);
             if (prep.Sent == 0) return 0;

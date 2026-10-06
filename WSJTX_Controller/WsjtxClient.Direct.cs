@@ -3938,6 +3938,7 @@ namespace WSJTX_Controller
         internal void TestSmartStartNoteCallOver() => _smartStart.NoteCallingOverTransmitted(0);
         internal void TestSmartTurnSwitchAtPeriodEnd(bool weTransmittedThisSlot) => SmartTurnSwitchAtPeriodEnd(weTransmittedThisSlot);
         internal void TestClearPendingAutoStart() => ClearPendingAutoStart();
+        internal bool TestSmartListReady(string call) => _smartMore.Exists(m => m.TargetCall == call && m.ReadyToStart);
         // Test-only: feed one decode straight into the Station Watch / Smart Start monitors
         // (and the awaiting-engagement handling), without going through ProcessDecodeMsg's full
         // QSO classification -- lets a test drive a "target working someone else" decode while

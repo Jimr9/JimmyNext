@@ -26,8 +26,20 @@ namespace WSJTX_Controller
             ("notes",     "Notes, private"),
         };
 
+        // "Mark not sent to" (operator, 2026-10-06): the next upload to each checked service sends
+        // the selected contacts again (NexusLogbookService.MarkNotSent). Only "not sent" -- a wrong
+        // "sent" mark is what kept 1,116 contacts from ever reaching LoTW.
+        internal static readonly (string Service, string Label)[] NotSentServices =
+        {
+            ("lotw", "LoTW"), ("qrz", "QRZ"), ("eqsl", "eQSL"), ("clublog", "Club Log"), ("hrdlog", "HRDLog"),
+        };
+
         // field -> new value (null = clear); only the fields the operator checked.
         internal Dictionary<string, string> Changes { get; private set; }
+
+        // The services checked under "Mark not sent to" (NotSentServices' Service names).
+        internal List<string> NotSent { get; private set; }
+        private readonly List<(string Service, CheckBox Box)> _notSent = new List<(string, CheckBox)>();
 
         private readonly List<(string Field, CheckBox Box, Control Value)> _rows = new List<(string, CheckBox, Control)>();
         private readonly TextBox _status;
@@ -50,10 +62,11 @@ namespace WSJTX_Controller
             var intro = new TextBox
             {
                 Multiline = true, ReadOnly = true, BorderStyle = BorderStyle.None, BackColor = SystemColors.Control,
-                Width = 460, Height = 66, TabIndex = tab++, AccessibleName = "About bulk edit",
+                Width = 460, Height = 84, TabIndex = tab++, AccessibleName = "About bulk edit",
                 Text = $"Check each field to change on all {count} selected contacts and type its new value. " +
                        "A checked field left blank is cleared. The logbook is backed up first. " +
-                       "Changes are not sent again to QRZ, Club Log or LoTW.",
+                       "Field changes are not sent again to QRZ, Club Log or LoTW; to send contacts again, " +
+                       "check the services under Mark not sent to.",
             };
             flow.Controls.Add(intro);
 
@@ -83,6 +96,21 @@ namespace WSJTX_Controller
                 _rows.Add((field, cb, value));
             }
 
+            var notSentGroup = new GroupBox
+            {
+                Text = "Mark not sent to (the next upload sends these contacts again)",
+                AccessibleName = "Mark not sent to", AutoSize = true, TabIndex = tab++,
+            };
+            var notSentFlow = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, Dock = DockStyle.Fill, Padding = new Padding(4, 18, 4, 4) };
+            foreach (var (service, label) in NotSentServices)
+            {
+                var cb = new CheckBox { Text = label, AccessibleName = "Mark not sent to " + label, AutoSize = true, TabIndex = notSentFlow.Controls.Count };
+                notSentFlow.Controls.Add(cb);
+                _notSent.Add((service, cb));
+            }
+            notSentGroup.Controls.Add(notSentFlow);
+            flow.Controls.Add(notSentGroup);
+
             var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, TabIndex = tab++ };
             var apply = new Button { Text = "Apply...", AutoSize = true, AccessibleName = "Apply to the selected contacts" };
             apply.Click += Apply_Click;
@@ -110,10 +138,12 @@ namespace WSJTX_Controller
                 string v = value.Text.Trim();
                 changes[field] = v.Length == 0 ? null : v;
             }
-            if (changes.Count == 0) { _status.Text = "Check at least one field to change."; return; }
+            var notSent = _notSent.Where(x => x.Box.Checked).Select(x => x.Service).ToList();
+            if (changes.Count == 0 && notSent.Count == 0) { _status.Text = "Check at least one field to change, or a service to mark not sent."; return; }
             string error = Validate(changes);
             if (error != null) { _status.Text = error; return; }
             Changes = changes;
+            NotSent = notSent;
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -130,6 +160,13 @@ namespace WSJTX_Controller
         internal static string Describe(IEnumerable<string> fields)
         {
             var names = fields.Select(f => Fields.First(x => x.Field == f).Label.ToLowerInvariant()).ToList();
+            return names.Count == 1 ? names[0] : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[names.Count - 1];
+        }
+
+        // "LoTW and QRZ" -- the services checked under "Mark not sent to", by their labels.
+        internal static string DescribeNotSent(IEnumerable<string> services)
+        {
+            var names = services.Select(s => NotSentServices.First(x => x.Service == s).Label).ToList();
             return names.Count == 1 ? names[0] : string.Join(", ", names.Take(names.Count - 1)) + " and " + names[names.Count - 1];
         }
 

@@ -670,7 +670,7 @@ namespace WSJTX_Controller
                 else if (resp == null && _atuCancelRequested)
                     msg = Wording.Get("Msg.TunerNotStarted");
                 else if (resp != null && resp.StartsWith("ERR "))
-                    msg = resp.Substring(4);
+                    msg = AtuEngineMessage(resp.Substring(4));
                 else
                     msg = Wording.Get("Msg.TunerNeedsEngine");
                 ctrl.WithHotkeyOrigin(origin, () => StatusView.ShowMessage(msg, false));
@@ -739,8 +739,34 @@ namespace WSJTX_Controller
                     ? Wording.Fill("Msg.TunerSwrBackToReceive", ("Swr", swr))
                     : Wording.Get("Msg.RadioBackToReceive");
             }
-            if (resp != null && resp.StartsWith("ERR ", StringComparison.Ordinal)) return resp.Substring(4);
+            if (resp != null && resp.StartsWith("ERR ", StringComparison.Ordinal)) return AtuEngineMessage(resp.Substring(4));
             return Wording.Get("Msg.RadioNotBackToReceive");
+        }
+
+        // The engine's tuner refusals (EngineHost kenwood_atu), each said through its own wording
+        // entry so it can be reworded (operator, 2026-10-05). The built-in words are the engine's
+        // own. A reason not listed here -- e.g. Nexus's own transmit-busy reasons -- is said as sent.
+        private static readonly (string Reason, string Key, bool HasAnswer)[] AtuEngineReasons =
+        {
+            ("Starting this radio's tuner from Jimmy works only with Kenwood radios so far", "Msg.TunerKenwoodOnly", false),
+            ("Still transmitting, stop first", "Msg.TunerStillTransmitting", false),
+            ("TX locked, this frequency is outside your license privileges", "Msg.TunerTxLocked", false),
+            ("No answer from the radio", "Msg.TunerNoAnswer", false),
+            ("Unexpected tuner answer from the radio: ", "Msg.TunerUnexpectedAnswer", true),
+            ("The radio control link is not reachable", "Msg.TunerLinkDown", false),
+            ("Could not return the radio to receive, check the radio", "Msg.RadioNotBackToReceive", false),
+        };
+
+        internal static string AtuEngineMessage(string reason)
+        {
+            if (string.IsNullOrEmpty(reason)) return reason;
+            foreach (var (r, key, hasAnswer) in AtuEngineReasons)
+            {
+                if (hasAnswer && reason.StartsWith(r, StringComparison.Ordinal))
+                    return Wording.Fill(key, ("Answer", reason.Substring(r.Length)));
+                if (!hasAnswer && reason == r) return Wording.Get(key);
+            }
+            return reason;
         }
 
         // Escape / Alt+H (HaltTx): a start not yet sent is dropped by the halt ("Tuner not

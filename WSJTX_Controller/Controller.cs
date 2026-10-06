@@ -99,6 +99,7 @@ namespace WSJTX_Controller
         public int smartStartMaxStandbyRounds { get => Settings.SmartStartMaxStandbyRounds; set => Settings.SmartStartMaxStandbyRounds = value; }
         public int smartStartTimeLimitMinutes { get => Settings.SmartStartTimeLimitMinutes; set => Settings.SmartStartTimeLimitMinutes = value; }
         public int smartStartCallsBeforeSwitch { get => Settings.SmartStartCallsBeforeSwitch; set => Settings.SmartStartCallsBeforeSwitch = value; }
+        public int smartModeStations { get => Settings.SmartModeStations; set => Settings.SmartModeStations = value; }
         public int otherStationRepliesBeforeYielding { get => Settings.OtherStationRepliesBeforeYielding; set => Settings.OtherStationRepliesBeforeYielding = value; }
         public bool rawShowCq = true;
         public bool rawShowDirected = true;
@@ -1206,7 +1207,7 @@ namespace WSJTX_Controller
             Wording.Changed -= ApplyWordingToScreen;
             Wording.Changed += ApplyWordingToScreen;
             BackupRetention.EnsureSetting();
-            SharedIniNumbers.Ensure(WsjtxClient.SmartModeStationsKey, WsjtxClient.DefaultSmartModeStations);
+            SharedIniNumbers.Ensure(LogbookWindow.ListMaxKey, LogbookWindow.DefaultListMax);
             string wordingNote = Wording.Load(ActiveWordingPath());
             if (wordingNote != null) wsjtxClient.DebugOutput($"{DateTime.Now:HH:mm:ss} {wordingNote}");
             if (_iniRepairReport != null)
@@ -3651,7 +3652,7 @@ namespace WSJTX_Controller
             // there is no list to manage, and the key does nothing.
             if (keyData == hotkeyConfig[HotkeyAction.OpenSmartModeWindow] && hotkeyConfig[HotkeyAction.OpenSmartModeWindow] != Keys.None)
             {
-                if (WsjtxClient.SmartModeMaxStations > 1) OpenSmartModeWindow();
+                if (smartModeStations > 1) OpenSmartModeWindow();
                 return true;
             }
 

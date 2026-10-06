@@ -48,7 +48,7 @@ namespace WSJTX_Controller
         QsoRecord GetQso(int id);
         List<QsoRecord> SearchByCallsign(string pattern, int limit = 200);
         List<QsoRecord> SearchQsos(string callsignPattern, string source, string dateFrom, string dateTo, int limit = 500,
-            string searchField = null, string searchText = null);
+            string searchField = null, string searchText = null, int uploadFilter = -1);
         LogbookDb.UploadSyncStatus GetUploadSyncStatus(string service);
         Dictionary<int, string> GetDxccCountryNames();
         List<Dictionary<string, string>> GetAdifFieldDicts(IEnumerable<int> ids, IEnumerable<string> sources = null);
@@ -89,6 +89,7 @@ namespace WSJTX_Controller
         void SetMeta(string key, string value);
 
         void MarkUploaded(string dedupKey, string service, DateTime whenUtc);
+        void MarkUploaded(IEnumerable<string> dedupKeys, string service, DateTime whenUtc);   // one read-copy rebuild
 
         // Import-log bookkeeping (LogbookAutoSync's sync-status reporting; Logbook Center's
         // Import History display).

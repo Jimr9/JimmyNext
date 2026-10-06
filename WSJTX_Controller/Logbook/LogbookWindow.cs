@@ -119,6 +119,7 @@ namespace WSJTX_Controller
         private Button   _syncLotwFullBtn;
         private Button   _syncClubLogBtn;
         private Button   _syncEqslBtn;
+        private Button   _syncEqslFullBtn;
         private Label    _srcQrzStatusLbl;
         private Label    _srcLotwStatusLbl;
         private Label    _srcClubLogStatusLbl;
@@ -136,6 +137,7 @@ namespace WSJTX_Controller
         private Button   _editSearchBtn;
         private Button   _editClearBtn;
         private ComboBox _editFieldCb;    // "Search in": All fields, or one field (2026-10-02)
+        private ComboBox _editUploadCb;   // "Upload status": Any, or one service and state (2026-10-06)
         private TextBox  _editTextTb;     // "Search for"
         private Label    _editCountLbl;
         private ListView _editLv;
@@ -455,8 +457,8 @@ namespace WSJTX_Controller
 
             _syncLotwBtn = new Button
             {
-                Text           = "Download from LoTW",
-                AccessibleName = "Download from LoTW",
+                Text           = "Sync from LoTW",
+                AccessibleName = "Sync from LoTW, new confirmations",
                 Size           = new Size(142, 26),
                 Location       = new Point(280, y),
                 Font           = font,
@@ -488,8 +490,8 @@ namespace WSJTX_Controller
             // logbook (EqslReconciler), not a full import -- see EqslRefreshBtn_Click.
             _syncEqslBtn = new Button
             {
-                Text           = "Download from eQSL",
-                AccessibleName = "Download and reconcile eQSL confirmations",
+                Text           = "Sync from eQSL",
+                AccessibleName = "Sync from eQSL, new confirmations",
                 Size           = new Size(150, 26),
                 Location       = new Point(8, y),
                 Font           = font,
@@ -514,6 +516,22 @@ namespace WSJTX_Controller
             };
             _syncLotwFullBtn.Click += LoTWFullBtn_Click;
             header.Controls.Add(_syncLotwFullBtn);
+
+            // Sync from eQSL asks only for what arrived since the last one; this asks for the
+            // whole eQSL inbox again (operator, 2026-10-06: a "download" that silently starts
+            // where the last one stopped is misleading).
+            _syncEqslFullBtn = new Button
+            {
+                Text           = "Full eQSL Download",
+                AccessibleName = "Full eQSL download, all confirmations",
+                Size           = new Size(150, 26),
+                Location       = new Point(320, y),
+                Font           = font,
+                TabIndex       = 7,
+                Enabled        = _syncEqslBtn.Enabled,
+            };
+            _syncEqslFullBtn.Click += EqslFullBtn_Click;
+            header.Controls.Add(_syncEqslFullBtn);
             y += 34;
 
             _syncExportBtn = new Button
@@ -523,7 +541,7 @@ namespace WSJTX_Controller
                 Size           = new Size(120, 26),
                 Location       = new Point(8, y),
                 Font           = font,
-                TabIndex       = 7,
+                TabIndex       = 8,
             };
             _syncExportBtn.Click += (s, e) => ExportAdif(null);
             header.Controls.Add(_syncExportBtn);
@@ -797,6 +815,23 @@ namespace WSJTX_Controller
             _editSourceCb.SelectedIndex = 0;
             header.Controls.Add(_editSourceCb);
 
+            // Upload status (operator, 2026-10-06): one service and state, e.g. "LoTW: sent, not
+            // confirmed" -- with bulk edit's "Mark not sent to", how contacts are sent again.
+            header.Controls.Add(new Label { Text = "Upload status:", Font = font, Location = new Point(362, 11), AutoSize = true });
+            _editUploadCb = new ComboBox
+            {
+                Font           = font,
+                Location       = new Point(450, 8),
+                Size           = new Size(190, 21),
+                DropDownStyle  = ComboBoxStyle.DropDownList,
+                TabIndex       = 4,
+                AccessibleName = "Upload status",
+            };
+            _editUploadCb.Items.Add(LogbookDb.AnyUploadLabel);
+            foreach (var f in LogbookDb.UploadFilters) _editUploadCb.Items.Add(f.Label);
+            _editUploadCb.SelectedIndex = 0;
+            header.Controls.Add(_editUploadCb);
+
             var dateFromLbl = new Label { Text = "Date from:", Font = font, Location = new Point(8, 63), AutoSize = true };
             header.Controls.Add(dateFromLbl);
 
@@ -975,6 +1010,7 @@ namespace WSJTX_Controller
             _editFieldCb.SelectedIndex = 0;
             _editTextTb.Text = "";
             _editSourceCb.SelectedIndex = 0;
+            _editUploadCb.SelectedIndex = 0;
             _editDateFromTb.Text = "";
             _editDateToTb.Text = "";
             _editLv.Items.Clear();
@@ -1017,17 +1053,23 @@ namespace WSJTX_Controller
                 // EditListShown of them, and the count says so when there are more.
                 string field  = _editFieldCb.SelectedIndex > 0 ? LogbookDb.SearchFields[_editFieldCb.SelectedIndex - 1].Column : null;
                 string text   = _editTextTb.Text.Trim();
-                var found = _db.SearchQsos(call, source, dFrom, dTo, int.MaxValue, field, text);
+                int upload = _editUploadCb.SelectedIndex - 1;   // 0 = Any -> -1, no upload filter
+                var found = _db.SearchQsos(call, source, dFrom, dTo, int.MaxValue, field, text, upload);
                 _editFoundIds = found.Select(q => q.Id).ToList();
                 var results = found.Take(EditListShown).ToList();
-                _editLv.Items.Clear();
-                foreach (var q in results)
+                _editLv.BeginUpdate();
+                try
                 {
-                    var item = new ListViewItem(GetEditLogFieldValue(q, _editLogRowOrder[0])) { Tag = q.Id };
-                    for (int i = 1; i < _editLogRowOrder.Count; i++)
-                        item.SubItems.Add(GetEditLogFieldValue(q, _editLogRowOrder[i]));
-                    _editLv.Items.Add(item);
+                    _editLv.Items.Clear();
+                    foreach (var q in results)
+                    {
+                        var item = new ListViewItem(GetEditLogFieldValue(q, _editLogRowOrder[0])) { Tag = q.Id };
+                        for (int i = 1; i < _editLogRowOrder.Count; i++)
+                            item.SubItems.Add(GetEditLogFieldValue(q, _editLogRowOrder[i]));
+                        _editLv.Items.Add(item);
+                    }
                 }
+                finally { _editLv.EndUpdate(); }
                 _editCountLbl.Text = found.Count == 0
                     ? "No QSOs found."
                     : found.Count > results.Count
@@ -1187,13 +1229,22 @@ namespace WSJTX_Controller
             var nexus = (NexusLogbookService)_db;
             var ids = SelectedEditIds();
             Dictionary<string, string> changes;
+            List<string> notSent;
             using (var dlg = new BulkEditDlg(ids.Count) { Owner = this })
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK || dlg.Changes == null) return;
                 changes = dlg.Changes;
+                notSent = dlg.NotSent ?? new List<string>();
             }
-            string what = BulkEditDlg.Describe(changes.Keys);
-            const string after = "The logbook is backed up first. Changes are not sent again to QRZ, Club Log or LoTW.";
+            // "Change power watts", "Mark not sent to LoTW", or both (2026-10-06: Mark not sent to).
+            var actions = new List<string>();
+            if (changes.Count > 0) actions.Add("change " + BulkEditDlg.Describe(changes.Keys));
+            if (notSent.Count > 0) actions.Add("mark not sent to " + BulkEditDlg.DescribeNotSent(notSent));
+            string what = string.Join(" and ", actions);
+            what = char.ToUpperInvariant(what[0]) + what.Substring(1);
+            string after = notSent.Count > 0
+                ? $"The logbook is backed up first. Your next upload to {BulkEditDlg.DescribeNotSent(notSent)} sends these contacts again; contacts it already has are ignored."
+                : "The logbook is backed up first. Changes are not sent again to QRZ, Club Log or LoTW.";
             // The list shows only the newest EditListShown contacts found. With ALL of them
             // selected, the one question also asks whether every contact found is meant -- the
             // only way to reach a whole logbook. It replaces the usual confirmation, never adds one.
@@ -1205,7 +1256,7 @@ namespace WSJTX_Controller
                 var page = new TaskDialogPage
                 {
                     Caption = "Save Changes",
-                    Heading = $"Change {what} on all {_editFoundIds.Count:N0} contacts found?",
+                    Heading = $"{what} on all {_editFoundIds.Count:N0} contacts found?",
                     Text = $"The list shows only the newest {ids.Count:N0}. {after}",
                     Buttons = { all, shown, TaskDialogButton.Cancel },
                     DefaultButton = TaskDialogButton.Cancel,
@@ -1219,7 +1270,7 @@ namespace WSJTX_Controller
                 }
             }
             else if (MessageBox.Show(this,
-                    $"Change {what} on {ids.Count} contacts?\n\n{after}",
+                    $"{what} on {ids.Count} contacts?\n\n{after}",
                     "Save Changes", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
             {
                 SetStatus("Bulk edit cancelled; nothing changed.");
@@ -1242,11 +1293,21 @@ namespace WSJTX_Controller
                 string result;
                 try
                 {
-                    var (changed, same, failed, firstError) = nexus.BulkEdit(ids, q => BulkEditDlg.Apply(q, changes));
-                    result = $"Changed {changed} contact{(changed == 1 ? "" : "s")}" +
-                             (same > 0 ? $", {same} already had that value" : "") +
-                             (failed > 0 ? $", {failed} failed ({firstError})" : "") +
-                             $". Backup: {Path.GetFileName(backup)} in the Backups folder.";
+                    var parts = new List<string>();
+                    if (changes.Count > 0)
+                    {
+                        var (changed, same, failed, firstError) = nexus.BulkEdit(ids, q => BulkEditDlg.Apply(q, changes));
+                        parts.Add($"Changed {changed} contact{(changed == 1 ? "" : "s")}" +
+                                  (same > 0 ? $", {same} already had that value" : "") +
+                                  (failed > 0 ? $", {failed} failed ({firstError})" : ""));
+                    }
+                    if (notSent.Count > 0)
+                    {
+                        var (marked, failed, firstError) = nexus.MarkNotSent(ids, notSent);
+                        parts.Add($"Marked {marked} contact{(marked == 1 ? "" : "s")} not sent to {BulkEditDlg.DescribeNotSent(notSent)}" +
+                                  (failed > 0 ? $", {failed} failed ({firstError})" : ""));
+                    }
+                    result = string.Join(". ", parts) + $". Backup: {Path.GetFileName(backup)} in the Backups folder.";
                 }
                 catch (Exception ex) { result = "Bulk edit stopped: " + ex.Message + $" Backup: {Path.GetFileName(backup)} in the Backups folder."; }
                 try
@@ -1264,7 +1325,12 @@ namespace WSJTX_Controller
         }
 
         private bool _bulkRunning;
-        private const int EditListShown = 500;
+        // Every match is shown (operator, 2026-10-06: the 500-row cap hid most of a 2,600-contact
+        // log from Home/Shift+End and the arrow keys); this ceiling only guards a huge log, and is
+        // "logbookListMax" in Shared.ini, to change by hand.
+        internal const string ListMaxKey = "logbookListMax";
+        internal const int DefaultListMax = 20000;
+        private static int EditListShown => SharedIniNumbers.Read(ListMaxKey, DefaultListMax, 100, int.MaxValue);
         private List<int> _editFoundIds = new List<int>();   // every contact the last search found
 
         private void DeleteQsosBtn_Click(object sender, EventArgs e)
@@ -1461,11 +1527,11 @@ namespace WSJTX_Controller
                     _awardsClb, _awardsBandCb, _awardsShowCb, _awardsProgressLbl, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
                 };
                 case PAGE_EDITLOG: return new Control[] {
-                    _editCallTb, _editFieldCb, _editTextTb, _editSourceCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
+                    _editCallTb, _editFieldCb, _editTextTb, _editSourceCb, _editUploadCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
                     _editRowOrderBtn, _editLv, _editAddBtn, _editEditBtn, _editBulkBtn, _editDeleteBtn, _editExportBtn,
                 };
                 case PAGE_SYNC: return new Control[] {
-                    _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncClubLogBtn, _syncEqslBtn, _syncExportBtn,
+                    _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncLotwFullBtn, _syncClubLogBtn, _syncEqslBtn, _syncEqslFullBtn, _syncExportBtn,
                     _srcHistoryLv,
                 };
                 default: return null;
@@ -2022,7 +2088,8 @@ namespace WSJTX_Controller
 
                 // Only the confirmations download is merged -- see LogbookAutoSync.SyncLotwAsync.
                 // The high-water moves only after a clean merge.
-                if (await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh").ConfigureAwait(true))
+                if (await RunImportFromText(adif1, "LOTW", "LogbookLastLoTWRefresh",
+                        label: full ? "LoTW full download complete:" : "LoTW sync complete:").ConfigureAwait(true))
                     NexusLogbookService.SaveLotwHighWater(user, highWater);
                 string received = await ((NexusLogbookService)_db).LotwReceivedStepAsync(_lotwUser(), _lotwPass()).ConfigureAwait(true);
                 if (received != null) SetStatus(SetStatus_Text + "  " + received);
@@ -2066,7 +2133,7 @@ namespace WSJTX_Controller
                     SetStatus("Club Log: no records returned.");
                     return;
                 }
-                await RunImportFromText(adif, "CLUBLOG", "LogbookLastClubLogRefresh");
+                await RunImportFromText(adif, "CLUBLOG", "LogbookLastClubLogRefresh", label: "Club Log download complete:");
             }
             catch (Exception ex)
             {
@@ -2083,7 +2150,11 @@ namespace WSJTX_Controller
         // watermark, same "always incremental after the first pull" idea LoTW/QRZ/Club Log
         // already use -- but unlike them, a fresh install still does a full pull (since_unix
         // null) since there's no prior watermark yet.
-        private async void EqslRefreshBtn_Click(object sender, EventArgs e)
+        private void EqslRefreshBtn_Click(object sender, EventArgs e) => RunEqslDownload(full: false);
+        private void EqslFullBtn_Click(object sender, EventArgs e) => RunEqslDownload(full: true);
+
+        // full: the whole eQSL inbox (no since date), as a first run does.
+        private async void RunEqslDownload(bool full)
         {
             if (_db == null) { SetStatus("Database not available."); return; }
             if (string.IsNullOrWhiteSpace(_eqslUsername()) || string.IsNullOrWhiteSpace(_eqslPassword()))
@@ -2092,12 +2163,12 @@ namespace WSJTX_Controller
                 return;
             }
 
-            SetStatus("Fetching eQSL InBox…");
+            SetStatus(full ? "Fetching all eQSL confirmations…" : "Fetching new eQSL confirmations…");
             SetBusy(true);
             int logId = _db.LogImportStart("EQSL");
             try
             {
-                string lastRefresh = _ini?.Read("LogbookLastEqslRefresh");
+                string lastRefresh = full ? null : _ini?.Read("LogbookLastEqslRefresh");
                 long? sinceUnix = DateTime.TryParse(lastRefresh,
                     System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var last)
                     ? (long?)new DateTimeOffset(last.ToUniversalTime()).ToUnixTimeSeconds()
@@ -2125,7 +2196,7 @@ namespace WSJTX_Controller
                 _db.LogImportFinish(logId, processed, 0, result.Matched, 0, skippedTotal, note);
                 _ini?.Write("LogbookLastEqslRefresh", DateTime.UtcNow.ToString("o"));
 
-                SetStatus($"eQSL reconcile complete: {result}");
+                SetStatus($"{(full ? "eQSL full download complete" : "eQSL sync complete")}: {result}");
 
                 if (_activePage == _syncPanel) PopulateSync();
             }
@@ -2170,7 +2241,8 @@ namespace WSJTX_Controller
         }
 
         // Returns true for a clean import (no errors) -- what a download's checkpoint waits for.
-        private async Task<bool> RunImportFromText(string adifText, string source, string metaKey, bool detected = false)
+        // label: the status line's opening words ("LoTW sync complete:"); null = "<SOURCE> import complete:".
+        private async Task<bool> RunImportFromText(string adifText, string source, string metaKey, bool detected = false, string label = null)
         {
             SetBusy(true);
             int logId = _db.LogImportStart(source);
@@ -2200,7 +2272,7 @@ namespace WSJTX_Controller
                 if (metaKey != null && string.IsNullOrWhiteSpace(result.Errors))
                     _ini?.Write(metaKey, DateTime.UtcNow.ToString("o"));
 
-                string sourceLabel = detected ? $"Detected source: {source}." : $"{source} import complete:";
+                string sourceLabel = detected ? $"Detected source: {source}." : label ?? $"{source} import complete:";
                 SetStatus($"{sourceLabel} {result.NewQsos:N0} new, {result.NewlyConfirmed:N0} newly confirmed, {result.Corrected:N0} corrected, {result.Skipped:N0} unchanged{result.UnmatchedText}.");
 
                 if (!string.IsNullOrWhiteSpace(result.Errors))
@@ -2383,6 +2455,7 @@ namespace WSJTX_Controller
             _syncClubLogBtn.Enabled = !busy && !string.IsNullOrWhiteSpace(_clubLogEmail()) &&
                                        !string.IsNullOrWhiteSpace(_clubLogPassword()) && !string.IsNullOrWhiteSpace(_clubLogCallsign());
             _syncEqslBtn.Enabled    = !busy && !string.IsNullOrWhiteSpace(_eqslUsername()) && !string.IsNullOrWhiteSpace(_eqslPassword());
+            _syncEqslFullBtn.Enabled = _syncEqslBtn.Enabled;
         }
 
         private string SetStatus_Text;

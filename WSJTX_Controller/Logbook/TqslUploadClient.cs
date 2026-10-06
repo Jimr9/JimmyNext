@@ -330,7 +330,7 @@ namespace WSJTX_Controller
                 switch (ClassifyFinalStatus(code))
                 {
                     case FinalStatusOutcome.MarkAllUploaded:
-                        foreach (var q in pending) db.MarkUploaded(q.DedupKey, "LOTW", DateTime.UtcNow);
+                        db.MarkUploaded(pending.Select(q => q.DedupKey), "LOTW", DateTime.UtcNow);
                         // Code 0 is unambiguous: every submitted pending record was signed and
                         // saved/uploaded, so the pending count IS the uploaded count.
                         LastUploadedCount = pending.Count;

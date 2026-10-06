@@ -117,7 +117,9 @@ namespace WSJTX_Controller
                     return new ImportResult { Processed = 1, NewQsos = 1 };
                 }
                 string text = NexusLogbookService.ToAdifText(list, source);
-                return source == "LOTW" || source == "QRZ" ? nexus.MergeDownload(text, source) : nexus.ImportFile(text, source);
+                return source == "LOTW" || source == "QRZ" ? nexus.MergeDownload(text, source)
+                     : source == "CLUBLOG" ? nexus.ClubLogDownload(text)
+                     : nexus.ImportFile(text, source);
             }
         }
 

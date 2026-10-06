@@ -181,6 +181,7 @@ namespace WSJTX_Controller
         private System.Windows.Forms.NumericUpDown _smartStartMaxStandbyRoundsNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartTimeLimitMinutesNumeric;
         private System.Windows.Forms.NumericUpDown _smartStartCallsBeforeSwitchNumeric;
+        private System.Windows.Forms.NumericUpDown _smartModeStationsNumeric;
         private System.Windows.Forms.NumericUpDown _otherStationRepliesBeforeYieldingNumeric;
         private System.Windows.Forms.Button _rxTxFreqControlsButton;
 
@@ -558,7 +559,7 @@ namespace WSJTX_Controller
                 Text           = "Smart Mode",
                 AccessibleName = "Smart Mode",
                 Location       = new System.Drawing.Point(5, 178),
-                Size           = new System.Drawing.Size(650, 196),
+                Size           = new System.Drawing.Size(650, 224),
                 Font           = font,
                 TabStop        = false,
             };
@@ -728,6 +729,29 @@ namespace WSJTX_Controller
             };
             smartStartGroup.Controls.Add(_smartStartCallsBeforeSwitchNumeric);
 
+            // How many stations the list holds (operator, 2026-10-06: per profile, in Options; was
+            // set by hand in Shared.ini). 1 = one station at a time, no list.
+            smartStartGroup.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text     = "Stations Smart Mode waits for (1 = one at a time):",
+                AutoSize = true,
+                Location = new System.Drawing.Point(10, 188),
+                Font     = font,
+                TabStop  = false,
+            });
+            _smartModeStationsNumeric = new System.Windows.Forms.NumericUpDown
+            {
+                AccessibleName = "Smart Mode stations",
+                Location       = new System.Drawing.Point(320, 185),
+                Size           = new System.Drawing.Size(50, 20),
+                TabIndex       = 6,
+                Minimum        = 1,
+                Maximum        = 10,
+                Value          = Math.Max(1, Math.Min(10, ctrl.smartModeStations)),
+                Font           = font,
+            };
+            smartStartGroup.Controls.Add(_smartModeStationsNumeric);
+
             // Item 3 (2026-09-10): launcher for the accessible RX/TX Audio Frequency Controls
             // window. Lives here (not Options > Radio) because this tab already owns the
             // transmit-frequency mode and the frequency step in Hz -- the same context those
@@ -739,7 +763,7 @@ namespace WSJTX_Controller
                 Text           = "RX/TX Audio Frequency Controls...",
                 AccessibleName = "RX/TX Audio Frequency Controls",
                 AutoSize       = true,
-                Location       = new System.Drawing.Point(10, 380),
+                Location       = new System.Drawing.Point(10, 408),
                 TabIndex       = 5,
                 Font           = font,
             };
@@ -760,6 +784,7 @@ namespace WSJTX_Controller
             int repliesBeforeYielding = (int)(_otherStationRepliesBeforeYieldingNumeric?.Value ?? 2);
             ctrl.otherStationRepliesBeforeYielding = Math.Max(1, Math.Min(6, repliesBeforeYielding));
             ctrl.smartStartCallsBeforeSwitch = Math.Max(0, Math.Min(20, (int)(_smartStartCallsBeforeSwitchNumeric?.Value ?? 0)));
+            ctrl.smartModeStations = Math.Max(1, Math.Min(10, (int)(_smartModeStationsNumeric?.Value ?? WsjtxClient.DefaultSmartModeStations)));
         }
 
         private void ApplyGeneralSettings()

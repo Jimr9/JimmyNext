@@ -1106,6 +1106,8 @@ fn grid_states_json() -> &'static str {
     })
 }
 
+// The "ERR ..." texts below are matched word for word by Jimmy (WsjtxClient.AtuEngineMessage,
+// 2026-10-05) so each can be reworded in Wording.txt -- change one here, change it there too.
 fn kenwood_atu(engine: &Arc<Mutex<Engine>>, cmd: &str) -> String {
     const KENWOOD_BACKEND: u32 = 2;
     let (port, model) = {

@@ -1630,6 +1630,7 @@ static class JimmyTests
         SortCallsNeverDivergesQueueFromDictKeysTests();
         AdvancedTxListDoesNotResurrectStaleEntriesTests();
         LogbookWindowKeyboardTraversalBaselineTests();
+        SpotsWindowKeyboardTraversalTests();
         OptionsDlgKeyboardTraversalBaselineTests();
         RxTxFrequencyModeReplyTests();
         EmergencyHaltTxConfirmationTests();
@@ -8642,15 +8643,15 @@ static class JimmyTests
         try
         {
             Check("G0 -> Quiet (G has no official NOAA word at 0; Jimmy Next's own concise label)",
-                OtaSpotsWindow.FormatNoaaScale('G', 0) == "G0 - Quiet", true);
+                OtaSpotsWindow.FormatNoaaScale('G', 0) == "G0, quiet", true);
             Check("S0 -> None (S's own concise label at 0, distinct wording from G0)",
-                OtaSpotsWindow.FormatNoaaScale('S', 0) == "S0 - None", true);
+                OtaSpotsWindow.FormatNoaaScale('S', 0) == "S0, none", true);
             Check("G1 -> Minor (NOAA's own standard word)",
-                OtaSpotsWindow.FormatNoaaScale('G', 1) == "G1 - Minor", true);
+                OtaSpotsWindow.FormatNoaaScale('G', 1) == "G1, minor", true);
             Check("G3 -> Strong",
-                OtaSpotsWindow.FormatNoaaScale('G', 3) == "G3 - Strong", true);
+                OtaSpotsWindow.FormatNoaaScale('G', 3) == "G3, strong", true);
             Check("S5 -> Extreme",
-                OtaSpotsWindow.FormatNoaaScale('S', 5) == "S5 - Extreme", true);
+                OtaSpotsWindow.FormatNoaaScale('S', 5) == "S5, extreme", true);
         }
         catch (Exception ex)
         {
@@ -17475,6 +17476,44 @@ static class JimmyTests
     // bb1a7a0 itself actually produces (verified via `git diff bb1a7a0` against every
     // Build*Page method, not guessed), so a future change that reintroduces the regression
     // fails here instead of needing another live report.
+    // Spots & Conditions (Alt+G) laid out like Logbook Center (operator, 2026-10-06): category
+    // list, each page's explicit Tab order, Status last on the page, then Close -- and Shift+Tab
+    // the exact mirror.
+    static void SpotsWindowKeyboardTraversalTests()
+    {
+        Console.WriteLine("\n── Spots & Conditions: keyboard traversal ──");
+        TabOrderWalker.OnSTA(() =>
+        {
+            using (var w = new OtaSpotsWindow(null, null, null))
+            {
+                w.Show();
+                var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+                var categoryList = (System.Windows.Forms.ListBox)typeof(OtaSpotsWindow).GetField("_categoryListBox", flags).GetValue(w);
+                var processTabKey = typeof(OtaSpotsWindow).GetMethod("ProcessTabKey", flags);
+                bool Step(bool fwd) => (bool)processTabKey.Invoke(w, new object[] { fwd });
+                void CheckPage(string label, int index, string[] expected)
+                {
+                    categoryList.SelectedIndex = index;
+                    categoryList.Focus();
+                    var (forwardSeq, lastCtl) = TabOrderWalker.WalkReal(w, categoryList, forward: true, Step);
+                    CheckStr($"{label}: Tab order", string.Join(" -> ", forwardSeq), string.Join(" -> ", expected));
+                    lastCtl.Focus();
+                    var (backwardSeq, _) = TabOrderWalker.WalkReal(w, lastCtl, forward: false, Step);
+                    backwardSeq.Reverse();
+                    CheckStr($"{label}: Shift+Tab is the mirror", string.Join(" -> ", backwardSeq),
+                        string.Join(" -> ", expected.Take(expected.Length - 1).Prepend("Spots and Conditions categories")));
+                }
+                CheckPage("POTA / SOTA", 0, new[] { "Spots list", "Choose this park for the station", "Refresh POTA and SOTA spots now", "Status", "Close" });
+                CheckPage("Contests", 1, new[] { "Contests list", "Open details", "Refresh calendar", "Check for rules updates", "Calendar status", "Close" });
+                CheckPage("Band Conditions", 2, new[] { "Headline", "Bands list", "Refresh band conditions now", "Status", "Close" });
+                CheckPage("DX Spots", 3, new[] { "Spots list", "Refresh DX spots now", "Status", "Close" });
+                CheckPage("Space Weather", 4, new[] { "Readings", "Daily solar history, newest first", "Refresh space weather now", "Status", "Close" });
+                CheckPage("Who Hears Me", 5, new[] { "Summary", "Time window", "Stations list", "Refresh who hears me now", "Status", "Close" });
+                w.Close();
+            }
+        });
+    }
+
     static void LogbookWindowKeyboardTraversalBaselineTests()
     {
         Console.WriteLine("\n── Logbook: keyboard traversal matches the bb1a7a0 baseline ──");
@@ -17582,14 +17621,15 @@ static class JimmyTests
                     // workaround for "a row is selected" without a real, seeded database).
                     CheckPage("Lookup and Edit", 2, new[] {
                         // Search in / Search for (field search, 2026-10-02) follow the callsign.
-                        "Callsign filter", "Search in", "Search for", "Source filter", "Date from, format year month day, optional",
+                        "Callsign filter", "Search in", "Search for", "Source filter", "Upload status", "Date from, format year month day, optional",
                         "Date to, format year month day, optional", "Search", "Clear filters",
                         "Choose column order", "Contacts found", "Add a new QSO",
                         "Status", "Close",
                     });
                     CheckPage("Sync", 3, new[] {
-                        "Import ADIF file", "Download from QRZ Logbook", "Download from LoTW",
-                        "Download from Club Log", "Download and reconcile eQSL confirmations",
+                        "Import ADIF file", "Download from QRZ Logbook", "Sync from LoTW, new confirmations",
+                        "Full LoTW download, all confirmations", "Download from Club Log",
+                        "Sync from eQSL, new confirmations", "Full eQSL download, all confirmations",
                         "Export all QSOs to ADIF file", "Import history", "Status", "Close",
                     });
 
@@ -19461,6 +19501,19 @@ static class JimmyTests
             wc.TestSetFinishingTx(null, false);
             wc.TestCancelStationWatchPendingStart();
             ctrl.smartStartCallsBeforeSwitch = 0;
+
+            // A listed station unheard for many periods is not made the one worked (operator,
+            // 2026-10-05: ER1BF, "free" after one quiet period, kept taking S79VU's place, was
+            // refused at the call and said "still not heard" each time).
+            wc.TestTryCaptureSmartStart("OM0AJ", Dq("CQ OM0AJ JN88", 40));
+            wc.TestTryCaptureSmartStart("YU1EU", Dq("W2BCC YU1EU -05", 4));
+            wc.TestSmartStartEnterAwaitingEngagement();   // calling OM0AJ
+            for (ulong slot = 300; slot < 330; slot++) wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(slot));
+            Check("  (the quiet listed station is marked free by its silence)", wc.TestSmartListReady("YU1EU"), true);
+            wc.TestApplyDirectSnapshot(myCall, myGrid, Snap(331, "OM0AJ", "N7DNF OM0AJ -11"));   // busy: Smart Mode stands by
+            Check("a listed station not heard for a long time is not made the one worked",
+                wc.TestSmartStartTarget == "OM0AJ" && wc.IsSmartModeWaitingOn("YU1EU"), true);
+            wc.TestCancelStationWatchPendingStart();
         }
         finally
         {
@@ -19609,6 +19662,35 @@ static class JimmyTests
         Check("download: a contact the log lacks is passed whole", prep.Text.Contains("<STATE:2>MN"), true);
         CheckStr("download: the paired row's location is kept apart", prep.Located.Count == 1 ? prep.Located[0].Location["STATE"] : "?", "OK");
 
+        // LoTW own records (2026-10-06): a contact uploaded twice, and a confirmed contact's own row
+        // nearby, no longer hold the unconfirmed contact back.
+        ulong At(int min) => (ulong)new DateTimeOffset(t0.AddMinutes(min)).ToUnixTimeSeconds();
+        var open = new List<NexusQso> { new NexusQso { Id = "2", Call = "KD2LNW", Band = "20m", Mode = "FT8", WhenUnix = At(0) } };
+        var done = new List<NexusQso> { new NexusQso { Id = "3", Call = "KD2LNW", Band = "20m", Mode = "FT8", WhenUnix = At(2), AwardConfirmed = true } };
+        string Own(string time) => F("CALL", "KD2LNW") + F("BAND", "20m") + F("MODE", "FT8") + F("QSO_DATE", "20261004") + F("TIME_ON", time) + "<eor>";
+        string own = "<eoh>" + Own("1500") + Own("1500") + Own("1502");
+        var before = NexusReportPairing.Prepare(own, open);
+        var after = NexusReportPairing.Prepare(own, open, settled: done, collapseSameMinute: true);
+        Check("own records: without the options all three are held", before.Held == 3 && before.Sent == 0, true);
+        Check("own records: one row sent for the twice-uploaded contact, the confirmed one's row left out",
+            after.Sent == 1 && after.Held == 0 && after.Dropped == 2, true);
+
+        // Club Log's download (2026-10-06: 365 copies came in by Nexus's exact-second import): a
+        // logged contact is left out, a near one held, only a contact the log lacks is added --
+        // without Club Log's confirmation flags.
+        string Cl(string call, string mode, string time) => F("CALL", call) + F("BAND", "20m") + F("MODE", mode) + F("QSO_DATE", "20261004") +
+            F("TIME_ON", time) + F("LOTW_QSL_RCVD", "Y") + "<eor>";
+        var logged = new List<NexusQso>
+        {
+            new NexusQso { Id = "4", Call = "KV2J", Band = "20m", Mode = "FT8", WhenUnix = At(0) + 30 },
+            new NexusQso { Id = "5", Call = "9A2CD", Band = "20m", Mode = "FT4", WhenUnix = At(10) },
+        };
+        var cl = NexusReportPairing.Prepare("<eoh>" + Cl("KV2J", "FT8", "150000") + Cl("9A2CD", "MFSK", "1510") + Cl("KV2J", "FT8", "1503") +
+            Cl("N0NEW", "FT8", "1520"), logged, absentOnly: true);
+        Check("Club Log: logged contacts left out (other seconds, MFSK for FT4), a near one held, the missing one added",
+            cl.Dropped == 2 && cl.Held == 1 && cl.Sent == 1 && cl.Text.Contains("N0NEW"), true);
+        Check("Club Log: an added contact carries no confirmation", cl.Text.Contains("LOTW_QSL_RCVD"), false);
+
         var locs = TqslStationData.Parse("<StationDataFile><StationData name=\"Home\"><CALL>W0JR</CALL><GRIDSQUARE>EN34</GRIDSQUARE><US_STATE>MN</US_STATE></StationData>" +
             "<StationData name=\"Park\"><CALL>W0JR</CALL><GRIDSQUARE>EN35</GRIDSQUARE><US_STATE>MN</US_STATE></StationData></StationDataFile>");
         LogbookDb.PendingUploadQso Q(string call, string loc, string fp, string station = "W0JR") =>
@@ -19749,12 +19831,27 @@ static class JimmyTests
             "No reports of your signal in the last 30 minutes.");
 
         var w = OtaSpotsWindow.FormatSolarWind(new SolarWindResult { BzNt = -4.2f, BtNt = 6.1f, SpeedKms = 420, MeasuredAgeSecs = 120 }, null);
-        CheckStr("wind: Bz southward with total field", w.bz, "-4.2 nT (southward), total field 6.1 nT");
-        CheckStr("wind: density not known stays unknown", w.wind, "420 km/s, density not known");
-        CheckStr("wind: fresh reading age", w.age, "measured 2m ago");
+        CheckStr("wind: Bz southward with total field", w.bz, "-4.2 nanotesla, southward, total field 6.1 nanotesla");
+        CheckStr("wind: density not known stays unknown", w.wind, "420 kilometers per second, density not known");
+        CheckStr("wind: fresh reading age", w.age, "measured 2 minutes ago");
         var old = OtaSpotsWindow.FormatSolarWind(new SolarWindResult { BzNt = 3f, MeasuredAgeSecs = 7200, Stale = true }, null);
         Check("wind: an old reading says so", old.age.Contains("old reading"), true);
         CheckStr("wind: no speed is not 0", old.wind, "speed not known, density not known");
+
+        var wxRows = OtaSpotsWindow.FormatSpaceWeatherRows(new SpaceWxResult
+        {
+            Value = new SpaceWx { Sfi = 152.4f, Ssn = 118f, Kp = 2.33f, AIndex = 7f, XrayLong = 1.2e-6f, XrayClass = "C", RScale = 0 },
+            MufNow = 21.36f,
+            Scales = new NoaaScales { GScale = 0, GScaleTomorrow = 1, SScale = 0 },
+        }, null, new SolarWindResult { BzNt = -4.2f, SpeedKms = 420, Density = 5.2f, MeasuredAgeSecs = 300 }, null);
+        CheckStr("space weather: every reading one plain line",
+            string.Join(" | ", wxRows),
+            "Solar flux 152 | Sunspot number 118 | K index 2.3 | A index 7 | X-ray C class, radio blackout R0, none | " +
+            "Long-haul MUF 21.4 megahertz | Geomagnetic storm G0, quiet, tomorrow G1, minor | Radiation storm S0, none | " +
+            "Solar wind Bz -4.2 nanotesla, southward | Solar wind 420 kilometers per second, 5.2 protons per cubic centimeter | " +
+            "Solar wind measured 5 minutes ago");
+        Check("space weather: nothing in brackets, no scientific notation",
+            wxRows.Any(r => r.Contains("(") || r.Contains("e-") || r.Contains("W/m")), false);
 
         var hist = OtaSpotsWindow.FormatSolarHistory(new SolarHistoryResult { Days = new[] {
             new SolarDay { DayUnix = 1759363200, Sfi = 140, Ssn = 110 },      // 2025-10-02
@@ -19871,6 +19968,25 @@ static class JimmyTests
                 bool refused = false;
                 try { db.SearchQsos(null, null, null, null, 500, "callsign; DROP TABLE qso", "x"); } catch (ArgumentException) { refused = true; }
                 Check("only listed fields can be searched", refused, true);
+
+                // Upload status filter (operator, 2026-10-05: find the contacts LoTW never got).
+                void U(string call, string lotwUp, string lotwRcvd, string hrdUp) => SeedQso(db, new Dictionary<string, object>
+                {
+                    ["callsign"] = call, ["band"] = "40m", ["mode"] = "FT8", ["qso_date"] = "20260901", ["time_on"] = "1200",
+                    ["source"] = "MANUAL", ["lotw_uploaded_at"] = lotwUp, ["lotw_qsl_rcvd"] = lotwRcvd, ["hrdlog_uploaded_at"] = hrdUp,
+                });
+                U("AA1AA", "", "", "2026-09-01");
+                U("BB1BB", "2026-09-01", "", "");
+                U("CC1CC", "2026-09-01", "Y", "");
+                int F(string label) => Array.FindIndex(LogbookDb.UploadFilters, f => f.Label == label);
+                string ByStatus(string label) => Calls(db.SearchQsos(null, null, "20260901", "20260901", 500, null, null, F(label)));
+                Check("LoTW: not sent", ByStatus("LoTW: not sent") == "AA1AA", true);
+                Check("LoTW: sent, not confirmed", ByStatus("LoTW: sent, not confirmed") == "BB1BB", true);
+                Check("LoTW: confirmed", ByStatus("LoTW: confirmed") == "CC1CC", true);
+                Check("HRDLog: sent", ByStatus("HRDLog: sent") == "AA1AA", true);
+                Check("upload status labels are unique",
+                    LogbookDb.UploadFilters.Select(f => f.Label).Distinct().Count() == LogbookDb.UploadFilters.Length, true);
+                Check("bulk edit names the services", BulkEditDlg.DescribeNotSent(new[] { "lotw", "qrz", "clublog" }) == "LoTW, QRZ and Club Log", true);
             }
         }
         finally { try { File.Delete(tmpDb); } catch { } }
@@ -20235,6 +20351,8 @@ static class JimmyTests
     static void CustomizationPackageTests()
     {
         Console.WriteLine("\n── Customization package ──");
+        Check("Smart Mode's station count travels with calls and operating (per profile since 2026-10-06)",
+            CustomizationPackage.PartOf("smartModeStations") == CustomizationParts.Operating, true);
         string dir = Path.Combine(Path.GetTempPath(), "jimmy_custpkg_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(dir);
         try
@@ -20375,6 +20493,13 @@ static class JimmyTests
         CheckStr("tuner: the engine's own reason", WsjtxClient.AtuReceiveMessage("ERR Could not return the radio to receive, check the radio"), "Could not return the radio to receive, check the radio");
         CheckStr("tuner: not sent", WsjtxClient.AtuReceiveMessage(null), "Could not return the radio to receive, check the radio");
         Check("tuner backstop: 10 seconds unless set in Shared.ini", WsjtxClient.TunerHoldSeconds == 10, true);
+        // The engine's refusals go through wording entries (2026-10-05); unknown ones as sent.
+        Wording.SetForTest(Wording.Parse(new[] { "Msg.TunerStillTransmitting = Stop sending first", "Msg.TunerUnexpectedAnswer = Odd answer {Answer}" }));
+        CheckStr("tuner refusal reworded", WsjtxClient.AtuEngineMessage("Still transmitting, stop first"), "Stop sending first");
+        CheckStr("tuner refusal with the radio's answer", WsjtxClient.AtuEngineMessage("Unexpected tuner answer from the radio: ?;"), "Odd answer ?;");
+        CheckStr("tuner refusal not reworded: built-in words", WsjtxClient.AtuEngineMessage("No answer from the radio"), "No answer from the radio");
+        CheckStr("tuner refusal not listed: said as sent", WsjtxClient.AtuEngineMessage("Tuning is busy elsewhere"), "Tuning is busy elsewhere");
+        Wording.SetForTest(null);
         try
         {
             var ctrl = new Controller();
@@ -27520,8 +27645,7 @@ static class JimmyTests
                     wc.Notify.OnPeriodBoundary();
                     bool still; lock (fake.AllText) still = fake.AllText.Exists(t => t.Contains("W4DXR still calling CQ"));
                     Check("5d (on): ...with \"still\"", still, true);
-                    if (!still) lock (fake.AllText) Console.WriteLine("  5d said: [" + string.Join(" | ", fake.AllText) + "]");
-                }
+                    if (!still) lock (fake.AllText) Console.WriteLine("  5d said: [" + string.Join(" | ", fake.AllText) + "]");                }
                 else
                     Check("5d (off): next period, unchanged: not said again", wc.TestOtherPartyActivitySpeakable, false);
             }

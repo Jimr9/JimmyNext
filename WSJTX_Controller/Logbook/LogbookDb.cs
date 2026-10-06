@@ -941,12 +941,49 @@ namespace WSJTX_Controller
         };
         internal const string AllFieldsLabel = "All fields";
 
+        // Upload status search (operator, 2026-10-06): one service and its state. Club Log and
+        // HRDLog keep no confirmations, so they have "not sent" and "sent" only. With bulk edit's
+        // "Mark not sent to", it finds e.g. contacts marked sent to LoTW that LoTW never confirmed.
+        internal const string AnyUploadLabel = "Any";
+        internal static readonly (string Label, string Uploaded, string Confirmed, string State)[] UploadFilters =
+        {
+            ("LoTW: not sent", "lotw_uploaded_at", null, "notsent"),
+            ("LoTW: sent, not confirmed", "lotw_uploaded_at", "lotw_qsl_rcvd", "sentunconfirmed"),
+            ("LoTW: confirmed", "lotw_uploaded_at", "lotw_qsl_rcvd", "confirmed"),
+            ("QRZ: not sent", "qrz_uploaded_at", null, "notsent"),
+            ("QRZ: sent, not confirmed", "qrz_uploaded_at", "qrz_qsl_rcvd", "sentunconfirmed"),
+            ("QRZ: confirmed", "qrz_uploaded_at", "qrz_qsl_rcvd", "confirmed"),
+            ("eQSL: not sent", "eqsl_uploaded_at", null, "notsent"),
+            ("eQSL: sent, not confirmed", "eqsl_uploaded_at", "eqsl_qsl_rcvd", "sentunconfirmed"),
+            ("eQSL: confirmed", "eqsl_uploaded_at", "eqsl_qsl_rcvd", "confirmed"),
+            ("Club Log: not sent", "clublog_uploaded_at", null, "notsent"),
+            ("Club Log: sent", "clublog_uploaded_at", null, "sent"),
+            ("HRDLog: not sent", "hrdlog_uploaded_at", null, "notsent"),
+            ("HRDLog: sent", "hrdlog_uploaded_at", null, "sent"),
+        };
+
+        // The SQL condition for UploadFilters[index]; null for a bad index.
+        internal static string UploadFilterSql(int index)
+        {
+            if (index < 0 || index >= UploadFilters.Length) return null;
+            var (_, up, conf, state) = UploadFilters[index];
+            switch (state)
+            {
+                case "notsent":         return $"IFNULL({up},'') = ''";
+                case "sent":            return $"IFNULL({up},'') <> ''";
+                case "sentunconfirmed": return $"IFNULL({up},'') <> '' AND IFNULL({conf},'') <> 'Y'";
+                case "confirmed":       return $"IFNULL({conf},'') = 'Y'";
+                default:                return null;
+            }
+        }
+
         // callsignPattern/source/dateFrom/dateTo are all optional (null/blank = no filter).
         // dateFrom/dateTo are inclusive, expected in qso_date's own YYYYMMDD form.
         // searchText (optional): found anywhere in searchField (a SearchFields column), or in the
         // callsign or any SearchFields column when searchField is null. Capitals do not matter.
         public List<QsoRecord> SearchQsos(string callsignPattern, string source,
-            string dateFrom, string dateTo, int limit = 500, string searchField = null, string searchText = null)
+            string dateFrom, string dateTo, int limit = 500, string searchField = null, string searchText = null,
+            int uploadFilter = -1)
         {
             lock (_lock)
             {
@@ -986,6 +1023,12 @@ namespace WSJTX_Controller
                         where.Add("(" + string.Join(" OR ", cols.Select(c => $"IFNULL({c},'') LIKE @text ESCAPE '\\'")) + ")");
                         string t = searchText.Trim().Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
                         cmd.Parameters.AddWithValue("@text", "%" + t + "%");
+                    }
+                    if (uploadFilter >= 0)
+                    {
+                        string upload = UploadFilterSql(uploadFilter);
+                        if (upload == null) throw new ArgumentException("Unknown upload status filter: " + uploadFilter);
+                        where.Add("(" + upload + ")");
                     }
                     string whereClause = where.Count > 0 ? "WHERE " + string.Join(" AND ", where) : "";
                     cmd.CommandText =

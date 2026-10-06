@@ -14,9 +14,8 @@ namespace WSJTX_Controller
     // JAWS but not NVDA -- a live-tested, still-open WinForms accessibility gap, live-NVDA
     // finding 2026-08-24) -- natively keyboard-navigable (arrow keys move between rows, Tab/
     // Shift+Tab between controls, full row text read by JAWS/NVDA out of the box) without any
-    // custom accessibility infrastructure. TabControl itself is a standard WinForms control with
-    // full built-in keyboard support (Ctrl+Tab / Ctrl+Shift+Tab between tabs, arrow keys within
-    // the tab strip).
+    // custom accessibility infrastructure. Pages are chosen from a category list, as in Logbook
+    // Center and Options (2026-10-06; it was a TabControl, Ctrl+Tab between tabs).
     //
     // Non-modal (Show(), not ShowDialog()) and left open across a session, same pattern as
     // LogbookWindow -- an operator chasing activity wants this visible alongside normal
@@ -28,7 +27,14 @@ namespace WSJTX_Controller
     // -- no new business logic lives in this file.
     public class OtaSpotsWindow : Form
     {
-        private readonly TabControl _tabs;
+        // Same arrangement as Logbook Center and Options (operator, 2026-10-06): a category list,
+        // one page shown at a time, each page's Tab order given explicitly (_pageOrder, used by
+        // ProcessTabKey), and a Close button last.
+        private readonly ListBox _categoryListBox;
+        private readonly Panel _host;
+        private readonly Button _closeBtn;
+        private readonly Panel[] _pages;
+        private readonly Dictionary<Panel, Control[]> _pageOrder = new Dictionary<Panel, Control[]>();
         private readonly System.Windows.Forms.Timer _refreshTimer;
 
         private readonly ExternalDataClient _client = new ExternalDataClient();
@@ -56,23 +62,23 @@ namespace WSJTX_Controller
 
         // ── POTA/SOTA tab ────────────────────────────────────────────────────────
         private ListBox _potaList;
-        private Label _potaStatusLabel;
+        private TextBox _potaStatusLabel;
         private readonly List<OtaSpot> _potaSpots = new List<OtaSpot>();   // the spot behind each row
 
         // ── Band Conditions tab ─────────────────────────────────────────────────
         private TextBox _condHeadlineBox;
         private ListBox _condBandsList;
-        private Label _condStatusLabel;
+        private TextBox _condStatusLabel;
 
         // ── DX Spots tab ─────────────────────────────────────────────────────────
         private ListBox _dxList;
-        private Label _dxStatusLabel;
+        private TextBox _dxStatusLabel;
 
         // ── Who Hears Me tab (2026-10-04) ────────────────────────────────────────
         private TextBox _heardSummaryBox;
         private ComboBox _heardWindowCb;
         private ListBox _heardList;
-        private Label _heardStatusLabel;
+        private TextBox _heardStatusLabel;
         private bool _heardInFlight;
 
         // ── Contests tab (2026-10-05) ──────────────────────────────────────────
@@ -83,11 +89,9 @@ namespace WSJTX_Controller
         private string _contestRulesText = "";
 
         // ── Space Weather tab ────────────────────────────────────────────────────
-        private TextBox _wxSfiValue, _wxSsnValue, _wxKpValue, _wxAValue, _wxXrayValue;
-        private TextBox _wxMufValue, _wxGScaleValue, _wxSScaleValue;
-        private TextBox _wxBzValue, _wxWindValue, _wxWindAgeValue;   // solar wind (2026-10-04)
-        private ListBox _wxHistoryList;                               // daily solar history
-        private Label _wxStatusLabel;
+        private ListBox _wxReadingsList;   // one plain-language line per reading (2026-10-06)
+        private ListBox _wxHistoryList;    // daily solar history
+        private TextBox _wxStatusLabel;
 
         public OtaSpotsWindow(LookupManager lookupManager,
             Func<System.Collections.Generic.Dictionary<string, WsjtxClient.ActiveAwardTag>> activeAwardTags,
@@ -116,24 +120,42 @@ namespace WSJTX_Controller
             KeyPreview = true;
             KeyDown += (s, e) => { if (e.KeyCode == Keys.Escape) Close(); if (e.KeyCode == Keys.F5) RefreshActiveTab(); };
 
-            // No custom AccessibleName -- TabControl's default accessible behavior (JAWS
-            // announces each TabPage's own Text as you switch) is exactly right here, same
-            // convention as LogbookWindow.cs's own TabControl.
-            _tabs = new TabControl
+            // The window's own Close button, last in every page's Tab order.
+            var closePanel = new Panel { Dock = DockStyle.Bottom, Height = 30, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            _closeBtn = new Button { Text = "Close", Dock = DockStyle.Right, Width = 70, AccessibleName = "Close" };
+            _closeBtn.Click += (s, e) => Close();
+            closePanel.Controls.Add(_closeBtn);
+
+            // Category list -- same role as Logbook Center's: "Spots and Conditions categories,
+            // POTA / SOTA, 1 of 6" on entry; Up/Down switches the page.
+            _categoryListBox = new ListBox
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Left,
+                Width = 150,
+                IntegralHeight = false,
+                AccessibleName = "Spots and Conditions categories",
             };
-            _tabs.TabPages.Add(BuildPotaSotaTab());
-            _tabs.TabPages.Add(BuildContestsTab());
-            _tabs.TabPages.Add(BuildBandConditionsTab());
-            _tabs.TabPages.Add(BuildDxSpotsTab());
-            _tabs.TabPages.Add(BuildSpaceWeatherTab());
-            _tabs.TabPages.Add(BuildWhoHearsMeTab());
-            // Refresh only the tab the operator just switched to (see RefreshActiveTab's own
+            // Pure layout host for the one page shown (see LogbookWindow's _categoryDetailHost).
+            _host = new Panel { Dock = DockStyle.Fill, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+
+            string[] names = { "POTA / SOTA", "Contests", "Band Conditions", "DX Spots", "Space Weather", "Who Hears Me" };
+            _pages = new[] { BuildPotaSotaTab(), BuildContestsTab(), BuildBandConditionsTab(), BuildDxSpotsTab(), BuildSpaceWeatherTab(), BuildWhoHearsMeTab() };
+            for (int i = 0; i < _pages.Length; i++)
+            {
+                _pages[i].Dock = DockStyle.Fill;
+                _pages[i].AccessibleName = names[i];
+                _pages[i].AccessibleRole = AccessibleRole.Grouping;
+                _categoryListBox.Items.Add(names[i]);
+            }
+            Controls.Add(_host);
+            Controls.Add(_categoryListBox);
+            Controls.Add(closePanel);
+            CategoryListNav.Wire(_categoryListBox, _host, _pages.Cast<Control>().ToList());
+            // Refresh only the page the operator just switched to (see RefreshActiveTab's own
             // comment for why -- root cause of a live JAWS pass hearing DX Spots status text
             // while sitting on the Space Weather tab).
-            _tabs.SelectedIndexChanged += (s, e) => RefreshActiveTab();
-            Controls.Add(_tabs);
+            _categoryListBox.SelectedIndexChanged += (s, e) => RefreshActiveTab();
+            Shown += (s, e) => _categoryListBox.Focus();
 
             _refreshTimer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
             _refreshTimer.Tick += (s, e) => RefreshActiveTab();
@@ -160,7 +182,7 @@ namespace WSJTX_Controller
         // goes stale server-side just because the UI stopped polling a tab nobody's looking at.
         private void RefreshActiveTab()
         {
-            switch (_tabs.SelectedIndex)
+            switch (_categoryListBox.SelectedIndex)
             {
                 case 0: RefreshPotaSota(); break;
                 case 1: RefreshContests(false); break;
@@ -186,12 +208,51 @@ namespace WSJTX_Controller
 
         // ── Shared helpers ───────────────────────────────────────────────────────
 
-        // No AccessibleName override -- TabPage's default accessible name is its own Text
-        // (the tab caption already read when switching tabs), so a second, longer restatement
-        // here was pure repetition (see the constructor's own comment).
-        private static TabPage MakeTabPage(string title)
+        // One page; its name is set by the constructor, read once when the page is chosen.
+        private static Panel MakeTabPage(string title) => new Panel();
+
+        // A page's status line: a read-only text box, so Tab reaches it and a screen reader reads
+        // it (a Label is never a Tab stop) -- last on its page, as in Logbook Center.
+        private static TextBox MakeStatusBox() => new TextBox
         {
-            return new TabPage(title);
+            Dock = DockStyle.Fill,
+            ReadOnly = true,
+            BorderStyle = BorderStyle.None,
+            BackColor = SystemColors.Control,
+            AccessibleName = "Status",
+            Text = "Loading...",
+        };
+
+        // -- Tab order --
+        // Each page's controls in the order Tab visits them; the category list before, Close
+        // after -- the same Form-level override Logbook Center uses (see its ProcessTabKey for
+        // why: a Dock=Fill list must be added before its header, and WinForms' own walk then
+        // visits controls in add order, not the order meant).
+        protected override bool ProcessTabKey(bool forward)
+        {
+            int page = _categoryListBox?.SelectedIndex ?? -1;
+            if (page < 0 || page >= _pages.Length || !_pageOrder.TryGetValue(_pages[page], out var order)) return base.ProcessTabKey(forward);
+            Control active = ActiveControl;
+            if (active == _categoryListBox)
+                return forward ? (FirstSelectable(order, 0, 1) ?? _closeBtn).Focus() : _closeBtn.Focus();
+            if (active == _closeBtn)
+                return forward ? _categoryListBox.Focus() : (FirstSelectable(order, order.Length - 1, -1) ?? _categoryListBox).Focus();
+            int idx = Array.IndexOf(order, active);
+            if (idx >= 0)
+            {
+                int step = forward ? 1 : -1;
+                Control next = FirstSelectable(order, idx + step, step);
+                if (next != null) return next.Focus();
+                return forward ? _closeBtn.Focus() : _categoryListBox.Focus();
+            }
+            return base.ProcessTabKey(forward);
+        }
+
+        private static Control FirstSelectable(Control[] order, int start, int step)
+        {
+            for (int i = start; i >= 0 && i < order.Length; i += step)
+                if (order[i] != null && order[i].CanSelect) return order[i];
+            return null;
         }
 
         private static Button MakeRefreshButton(EventHandler onClick, string accessibleName)
@@ -275,13 +336,13 @@ namespace WSJTX_Controller
 
         // ── POTA/SOTA tab ────────────────────────────────────────────────────────
 
-        private TabPage BuildPotaSotaTab()
+        private Panel BuildPotaSotaTab()
         {
             var page = MakeTabPage("POTA / SOTA");
             _potaList = MakeListBox("Spots list");
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _potaStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
+            _potaStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshPotaSota(), "Refresh POTA and SOTA spots now");
             refreshBtn.Dock = DockStyle.Right;
             // Optional (2026-10-04): the park the selected activator's NEXT logged contact is
@@ -294,6 +355,7 @@ namespace WSJTX_Controller
 
             page.Controls.Add(_potaList);
             page.Controls.Add(bottom);
+            _pageOrder[page] = new Control[] { _potaList, chooseBtn, refreshBtn, _potaStatusLabel };
             return page;
         }
 
@@ -399,7 +461,7 @@ namespace WSJTX_Controller
 
         // ── Band Conditions tab ──────────────────────────────────────────────────
 
-        private TabPage BuildBandConditionsTab()
+        private Panel BuildBandConditionsTab()
         {
             var page = MakeTabPage("Band Conditions");
 
@@ -419,7 +481,7 @@ namespace WSJTX_Controller
             _condBandsList = MakeListBox("Bands list");
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _condStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
+            _condStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshBandConditions(), "Refresh band conditions now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_condStatusLabel);
@@ -428,6 +490,7 @@ namespace WSJTX_Controller
             page.Controls.Add(_condBandsList);
             page.Controls.Add(_condHeadlineBox);
             page.Controls.Add(bottom);
+            _pageOrder[page] = new Control[] { _condHeadlineBox, _condBandsList, refreshBtn, _condStatusLabel };
             return page;
         }
 
@@ -518,7 +581,7 @@ namespace WSJTX_Controller
         // A calendar listing is not support: a row says what Jimmy can do for it only when Jimmy
         // has that contest (ContestSupportLevels); every other row is a listing to read.
 
-        private TabPage BuildContestsTab()
+        private Panel BuildContestsTab()
         {
             var page = MakeTabPage("Contests");
 
@@ -555,6 +618,7 @@ namespace WSJTX_Controller
             page.Controls.Add(_contestList);
             page.Controls.Add(_contestStatusBox);
             page.Controls.Add(bottom);
+            _pageOrder[page] = new Control[] { _contestList, detailsBtn, refreshBtn, rulesBtn, _contestStatusBox };
             return page;
         }
 
@@ -703,7 +767,7 @@ namespace WSJTX_Controller
             });
         }
 
-        private TabPage BuildWhoHearsMeTab()
+        private Panel BuildWhoHearsMeTab()
         {
             var page = MakeTabPage("Who Hears Me");
 
@@ -738,7 +802,7 @@ namespace WSJTX_Controller
             _heardList.TabIndex = 2;
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _heardStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
+            _heardStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshWhoHearsMe(), "Refresh who hears me now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_heardStatusLabel);
@@ -747,6 +811,7 @@ namespace WSJTX_Controller
             page.Controls.Add(_heardList);
             page.Controls.Add(top);
             page.Controls.Add(bottom);
+            _pageOrder[page] = new Control[] { _heardSummaryBox, _heardWindowCb, _heardList, refreshBtn, _heardStatusLabel };
             return page;
         }
 
@@ -820,13 +885,13 @@ namespace WSJTX_Controller
 
         // ── DX Spots tab ─────────────────────────────────────────────────────────
 
-        private TabPage BuildDxSpotsTab()
+        private Panel BuildDxSpotsTab()
         {
             var page = MakeTabPage("DX Spots");
             _dxList = MakeListBox("Spots list");
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _dxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
+            _dxStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshDxSpots(), "Refresh DX spots now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_dxStatusLabel);
@@ -834,6 +899,7 @@ namespace WSJTX_Controller
 
             page.Controls.Add(_dxList);
             page.Controls.Add(bottom);
+            _pageOrder[page] = new Control[] { _dxList, refreshBtn, _dxStatusLabel };
             return page;
         }
 
@@ -919,75 +985,32 @@ namespace WSJTX_Controller
 
         // ── Space Weather tab ────────────────────────────────────────────────────
 
-        private TabPage BuildSpaceWeatherTab()
+        private Panel BuildSpaceWeatherTab()
         {
             var page = MakeTabPage("Space Weather");
-            var panel = new Panel { Dock = DockStyle.Fill };
 
-            int lx = 16, vx = 180, y = 16, rh = 26, fw = 200, tabIndex = 0;
-            _wxSfiValue = AddWxRow(panel, "Solar Flux Index (SFI):", ref y, lx, vx, fw, rh, ref tabIndex);
-            _wxSsnValue = AddWxRow(panel, "Sunspot Number (SSN):", ref y, lx, vx, fw, rh, ref tabIndex);
-            _wxKpValue = AddWxRow(panel, "Planetary K-index (Kp):", ref y, lx, vx, fw, rh, ref tabIndex);
-            _wxAValue = AddWxRow(panel, "Planetary A-index:", ref y, lx, vx, fw, rh, ref tabIndex);
-            _wxXrayValue = AddWxRow(panel, "X-ray flux (long):", ref y, lx, vx, fw, rh, ref tabIndex);
-            // Three additions Nexus already computes/fetches but Jimmy Next wasn't surfacing
-            // (investigated 2026-08-17 -- see RefreshSpaceWeather's own comment for exactly what
-            // each one is and isn't): a representative long-haul MUF, and NOAA's own G
-            // (geomagnetic storm) and S (solar radiation storm) scales. NOAA's R (radio
-            // blackout) scale is deliberately not duplicated -- X-ray flux above already carries
-            // it (same NOAA definition, same raw reading).
-            _wxMufValue = AddWxRow(panel, "Representative MUF (best long-haul):", ref y, lx, vx, fw, rh, ref tabIndex);
-            _wxGScaleValue = AddWxRow(panel, "Geomagnetic storm (G-scale):", ref y, lx, vx, fw, rh, ref tabIndex);
-            _wxSScaleValue = AddWxRow(panel, "Solar radiation storm (S-scale):", ref y, lx, vx, fw, rh, ref tabIndex);
-            // Solar wind from NOAA's DSCOVR feed, through Nexus's own fetcher (2026-10-04). The
-            // reading's own age is shown: a fetch that just worked can still carry an old reading.
-            _wxBzValue = AddWxRow(panel, "Solar wind Bz:", ref y, lx, vx, fw + 160, rh, ref tabIndex);
-            _wxWindValue = AddWxRow(panel, "Solar wind speed and density:", ref y, lx, vx, fw + 160, rh, ref tabIndex);
-            _wxWindAgeValue = AddWxRow(panel, "Solar wind reading:", ref y, lx, vx, fw + 160, rh, ref tabIndex);
-            // NOAA's daily solar indices, newest day first, one line per day.
-            panel.AutoScroll = true;
-            panel.Controls.Add(new Label { Text = "Daily solar history (newest first):", Location = new Point(lx, y + 6), AutoSize = true, TabStop = false });
-            y += rh;
-            _wxHistoryList = new ListBox
-            {
-                Location = new Point(lx, y + 2),
-                Size = new Size(vx + fw + 160 - lx, 120),
-                HorizontalScrollbar = true,
-                IntegralHeight = false,
-                TabIndex = tabIndex++,
-                AccessibleName = "Daily solar history",
-            };
-            panel.Controls.Add(_wxHistoryList);
+            // Every reading is one line of a list, in plain words (operator, 2026-10-06: eleven
+            // separate read-only boxes, each named after a label with brackets in it, and values
+            // like "1.2e-6 W/m²", read oddly) -- arrowed through like every other list here.
+            _wxReadingsList = MakeListBox("Readings");
+
+            var historyPanel = new Panel { Dock = DockStyle.Bottom, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            _wxHistoryList = MakeListBox("Daily solar history, newest first");
+            historyPanel.Controls.Add(_wxHistoryList);
+            historyPanel.Controls.Add(new Label { Text = "Daily solar history (newest first):", Dock = DockStyle.Top, Height = 20, TabStop = false });
 
             var bottom = new Panel { Dock = DockStyle.Bottom, Height = 30 };
-            _wxStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, AccessibleName = "Status", Text = "Loading..." };
+            _wxStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshSpaceWeather(), "Refresh space weather now");
             refreshBtn.Dock = DockStyle.Right;
             bottom.Controls.Add(_wxStatusLabel);
             bottom.Controls.Add(refreshBtn);
 
-            page.Controls.Add(panel);
+            page.Controls.Add(_wxReadingsList);
+            page.Controls.Add(historyPanel);
             page.Controls.Add(bottom);
+            _pageOrder[page] = new Control[] { _wxReadingsList, _wxHistoryList, refreshBtn, _wxStatusLabel };
             return page;
-        }
-
-        private TextBox AddWxRow(Panel panel, string labelText, ref int y, int lx, int vx, int fw, int rh, ref int tabIndex)
-        {
-            var lbl = new Label { Text = labelText, Location = new Point(lx, y + 3), Size = new Size(vx - lx - 4, rh - 4), TabStop = false };
-            var val = new TextBox
-            {
-                Location = new Point(vx, y + 1),
-                Size = new Size(fw, rh - 4),
-                ReadOnly = true,
-                BorderStyle = BorderStyle.None,
-                BackColor = SystemColors.Control,
-                TabIndex = tabIndex++,
-                AccessibleName = labelText.TrimEnd(':'),
-            };
-            panel.Controls.Add(lbl);
-            panel.Controls.Add(val);
-            y += rh;
-            return val;
         }
 
         // Root cause of a live JAWS pass finding A-index/X-ray always reading "0.0"/"0.0e+0"
@@ -1016,78 +1039,86 @@ namespace WSJTX_Controller
                 {
                     _wxInFlight = false;
                     if (IsDisposed) return;
-                    ShowSolarWind(wind, windError);
+                    SetRowsIfChanged(_wxReadingsList, FormatSpaceWeatherRows(result, error, wind, windError));
                     ShowSolarHistory(history, historyError);
-
-                    if (error != null || result?.Value == null)
-                    {
-                        _wxSfiValue.Text = _wxSsnValue.Text = _wxKpValue.Text = _wxAValue.Text = _wxXrayValue.Text = "Unavailable";
-                        _wxMufValue.Text = _wxGScaleValue.Text = _wxSScaleValue.Text = "Unavailable";
-                        _wxStatusLabel.Text = error ?? result?.LastError ?? "No data yet.";
-                        return;
-                    }
-
-                    var wx = result.Value;
-                    _wxSfiValue.Text = wx.Sfi.ToString("0.0");
-                    // Ssn is genuinely optional in Nexus's own model (no R12 feed currently
-                    // wired -- "consumers derive it from SFI" per SpaceWx's own doc comment) --
-                    // "Unavailable" is accurate here, not a zero standing in for a missing
-                    // reading.
-                    _wxSsnValue.Text = wx.Ssn.HasValue ? wx.Ssn.Value.ToString("0.0") : "Unavailable";
-                    _wxKpValue.Text = wx.Kp.ToString("0.0");
-                    _wxAValue.Text = wx.AIndex.ToString("0.0");
-                    // NOAA flare-class letter + R-scale (radio-blackout risk, 0-5) are Nexus's
-                    // own existing classifications of this same raw reading (SpaceWx::
-                    // xray_class()/propagation::model::r_scale()), not a Jimmy Next
-                    // interpretation -- surfaced alongside the raw value since a bare
-                    // "1.0e-7 W/m²" means little to most operators on its own.
-                    string flareClass = string.IsNullOrEmpty(wx.XrayClass) ? "" : $" ({wx.XrayClass}-class, R{wx.RScale})";
-                    _wxXrayValue.Text = wx.XrayLong.ToString("0.0e+0") + " W/m²" + flareClass;
-
-                    // Nexus's own representative MUF: the ring-max controlling MUF over 8
-                    // evenly-spaced long-haul (~9000 km) directions from the operator's own grid
-                    // -- NOT a specific DX path, and NOT an observed reading; it's a classical
-                    // foF2 x obliquity model driven by the same SFI above (propagation::
-                    // predict::representative_muf, investigated 2026-08-17). The row LABEL
-                    // ("best long-haul") carries that caveat, so the value itself stays a plain
-                    // number -- kept concise for JAWS rather than repeating the caveat on every
-                    // read. Null (not zero) when the operator's grid isn't set/valid.
-                    _wxMufValue.Text = result.MufNow.HasValue
-                        ? $"{result.MufNow.Value:0.0} MHz"
-                        : "Unavailable (My Grid not set)";
-
-                    // NOAA's own G/S scales (a separate SWPC product, fetched independently --
-                    // see NoaaScales's own comment for why R isn't duplicated here).
-                    // Scales==null on a fetch that hasn't succeeded yet is reported plainly, not
-                    // as a numeric 0 that would read as a real "all quiet" measurement.
-                    if (result.Scales != null)
-                    {
-                        _wxGScaleValue.Text = FormatNoaaScale('G', result.Scales.GScale) +
-                            (result.Scales.GScaleTomorrow != result.Scales.GScale
-                                ? $" -- tomorrow {FormatNoaaScale('G', result.Scales.GScaleTomorrow)}"
-                                : "");
-                        _wxSScaleValue.Text = FormatNoaaScale('S', result.Scales.SScale);
-                    }
-                    else
-                    {
-                        _wxGScaleValue.Text = _wxSScaleValue.Text = result.ScalesLastError != null
-                            ? "Unavailable"
-                            : "Loading...";
-                    }
-
-                    _wxStatusLabel.Text = result.LastError != null
-                        ? $"Feed warning: {result.LastError}"
-                        : (result.AgeSecs != null ? $"As of {FormatAgeSecs(result.AgeSecs)}" : "");
+                    _wxStatusLabel.Text = error != null || result?.Value == null
+                        ? error ?? result?.LastError ?? "No data yet."
+                        : result.LastError != null
+                            ? $"Feed warning: {result.LastError}"
+                            : (result.AgeSecs != null ? $"As of {AgeWords(result.AgeSecs.Value)}" : "");
                 });
             });
         }
 
-        private void ShowSolarWind(SolarWindResult w, string error)
+        // A list's rows replaced only when they changed, so a screen reader's place in it is kept.
+        private static void SetRowsIfChanged(ListBox list, List<string> rows)
         {
-            var (bz, wind, age) = FormatSolarWind(w, error);
-            _wxBzValue.Text = bz;
-            _wxWindValue.Text = wind;
-            _wxWindAgeValue.Text = age;
+            if (rows.SequenceEqual(list.Items.Cast<string>())) return;
+            bool hadSelection = list.SelectedIndex >= 0;
+            int keep = list.SelectedIndex;
+            list.BeginUpdate();
+            try
+            {
+                list.Items.Clear();
+                foreach (var r in rows) list.Items.Add(r);
+            }
+            finally { list.EndUpdate(); }
+            if (hadSelection && list.Items.Count > 0) list.SelectedIndex = Math.Min(keep, list.Items.Count - 1);
+            SelectFirstItemIfNoneSelectedYet(list, hadSelection);
+        }
+
+        // "45 seconds ago", "5 minutes ago", "2 hours ago" -- words, not "5m ago" (read "5 meters").
+        internal static string AgeWords(long secs)
+        {
+            if (secs < 60) return secs == 1 ? "1 second ago" : $"{Math.Max(0, secs)} seconds ago";
+            long m = secs / 60;
+            if (m < 60) return m == 1 ? "1 minute ago" : $"{m} minutes ago";
+            long h = m / 60;
+            return h == 1 ? "1 hour ago" : $"{h} hours ago";
+        }
+
+        // The Space Weather readings, one plain line each (2026-10-06). Numbers without needless
+        // decimals; units said in words; NOAA's scale words; nothing in brackets. The facts are
+        // Nexus's own (SFI, Kp, A, X-ray class and R scale, its representative long-haul MUF from
+        // the operator's grid, NOAA's G and S scales, DSCOVR solar wind) -- only the wording is here.
+        // internal: JimmyTests exercises it.
+        internal static List<string> FormatSpaceWeatherRows(SpaceWxResult result, string error, SolarWindResult wind, string windError)
+        {
+            var rows = new List<string>();
+            if (error != null || result?.Value == null)
+                rows.Add("Space weather not available: " + (error ?? result?.LastError ?? "no data yet"));
+            else
+            {
+                var wx = result.Value;
+                rows.Add($"Solar flux {wx.Sfi:0}");
+                rows.Add(wx.Ssn.HasValue ? $"Sunspot number {wx.Ssn.Value:0}" : "Sunspot number not available");
+                rows.Add($"K index {wx.Kp:0.#}");
+                rows.Add($"A index {wx.AIndex:0}");
+                rows.Add(string.IsNullOrEmpty(wx.XrayClass)
+                    ? "X-ray level not available"
+                    : $"X-ray {wx.XrayClass} class, radio blackout {FormatNoaaScale('R', wx.RScale)}");
+                rows.Add(result.MufNow.HasValue
+                    ? $"Long-haul MUF {result.MufNow.Value:0.#} megahertz"
+                    : "Long-haul MUF not available, set My Grid in Options");
+                if (result.Scales != null)
+                {
+                    string tomorrow = result.Scales.GScaleTomorrow != result.Scales.GScale
+                        ? $", tomorrow {FormatNoaaScale('G', result.Scales.GScaleTomorrow)}" : "";
+                    rows.Add($"Geomagnetic storm {FormatNoaaScale('G', result.Scales.GScale)}{tomorrow}");
+                    rows.Add($"Radiation storm {FormatNoaaScale('S', result.Scales.SScale)}");
+                }
+                else
+                {
+                    string why = result.ScalesLastError != null ? "not available" : "loading";
+                    rows.Add("Geomagnetic storm " + why);
+                    rows.Add("Radiation storm " + why);
+                }
+            }
+            var (bz, speed, age) = FormatSolarWind(wind, windError);
+            rows.Add("Solar wind Bz " + bz);
+            rows.Add("Solar wind " + speed);
+            rows.Add("Solar wind " + age);
+            return rows;
         }
 
         // Bz with its direction (southward -- negative -- is the one that disturbs the field);
@@ -1096,33 +1127,19 @@ namespace WSJTX_Controller
         internal static (string bz, string wind, string age) FormatSolarWind(SolarWindResult w, string error)
         {
             if (error != null || w == null || w.BzNt == null)
-                return ("Unavailable", "Unavailable", error ?? w?.Error ?? "No reading yet");
+                return ("not available", "speed not available", "reading: " + (error ?? w?.Error ?? "none yet"));
             float bz = w.BzNt.Value;
             string dir = bz < 0 ? "southward" : bz > 0 ? "northward" : "neutral";
-            string bt = w.BtNt.HasValue ? $", total field {w.BtNt.Value:0.0} nT" : "";
-            string speed = w.SpeedKms.HasValue ? $"{w.SpeedKms.Value:0} km/s" : "speed not known";
-            string density = w.Density.HasValue ? $", {w.Density.Value:0.0} protons per cm³" : ", density not known";
-            string age = w.MeasuredAgeSecs.HasValue ? $"measured {FormatAgeSecs(w.MeasuredAgeSecs)}" : "measurement time not known";
-            if (w.Stale) age += " -- an old reading, not current conditions";
-            return ($"{bz:+0.0;-0.0;0.0} nT ({dir}){bt}", speed + density, age);
+            string bt = w.BtNt.HasValue ? $", total field {w.BtNt.Value:0.#} nanotesla" : "";
+            string speed = w.SpeedKms.HasValue ? $"{w.SpeedKms.Value:0} kilometers per second" : "speed not known";
+            string density = w.Density.HasValue ? $", {w.Density.Value:0.#} protons per cubic centimeter" : ", density not known";
+            string age = w.MeasuredAgeSecs.HasValue ? $"measured {AgeWords(w.MeasuredAgeSecs.Value)}" : "measurement time not known";
+            if (w.Stale) age += ", an old reading, not current conditions";
+            return ($"{bz:0.#} nanotesla, {dir}{bt}", speed + density, age);
         }
 
-        private void ShowSolarHistory(SolarHistoryResult h, string error)
-        {
-            bool hadSelection = _wxHistoryList.SelectedIndex >= 0;
-            var rows = FormatSolarHistory(h, error);
-            bool same = rows.Count == _wxHistoryList.Items.Count;
-            for (int i = 0; same && i < rows.Count; i++) same = (string)_wxHistoryList.Items[i] == rows[i];
-            if (same) return;   // unchanged: leave the list (and the reader's place in it) alone
-            _wxHistoryList.BeginUpdate();
-            try
-            {
-                _wxHistoryList.Items.Clear();
-                foreach (var r in rows) _wxHistoryList.Items.Add(r);
-            }
-            finally { _wxHistoryList.EndUpdate(); }
-            SelectFirstItemIfNoneSelectedYet(_wxHistoryList, hadSelection);
-        }
+        private void ShowSolarHistory(SolarHistoryResult h, string error) =>
+            SetRowsIfChanged(_wxHistoryList, FormatSolarHistory(h, error));
 
         internal static System.Collections.Generic.List<string> FormatSolarHistory(SolarHistoryResult h, string error)
         {
@@ -1158,7 +1175,7 @@ namespace WSJTX_Controller
                 case 5: word = "Extreme"; break;
                 default: word = scale == 'G' ? "Quiet" : "None"; break;
             }
-            return $"{scale}{level} - {word}";
+            return $"{scale}{level}, {word.ToLowerInvariant()}";
         }
     }
 }

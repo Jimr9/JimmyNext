@@ -67,6 +67,11 @@ namespace WSJTX_Controller
         // a full turn again when it comes back. 0-20; 0 = never (the default, unchanged behavior).
         public int SmartStartCallsBeforeSwitch { get; set; } = 0;
 
+        // How many stations Smart Mode's list holds, 1-10 (operator, 2026-10-02; per profile and in
+        // Options since 2026-10-06, so a contest profile can keep 1 and a DX profile 5). A profile
+        // without its own value takes the one set by hand in Shared.ini before then, else 3.
+        public int SmartModeStations { get; set; } = WsjtxClient.DefaultSmartModeStations;
+
         // VP5/K5UR live incident (2026-09-14): the KA1BMF active-partner-working-another guard
         // (WsjtxClient.cs) used to yield the contact the very first time it saw the partner send
         // a substantive over to someone else -- too eager for a big pileup-running DX station
@@ -150,6 +155,9 @@ namespace WSJTX_Controller
                 SmartStartTimeLimitMinutes = timeLimitMinutes;
             if (int.TryParse(ini.Read("smartStartCallsBeforeSwitch"), out int callsBeforeSwitch) && callsBeforeSwitch >= 0 && callsBeforeSwitch <= 20)
                 SmartStartCallsBeforeSwitch = callsBeforeSwitch;
+            SmartModeStations = int.TryParse(ini.Read(WsjtxClient.SmartModeStationsKey), out int stations) && stations >= 1 && stations <= 10
+                ? stations
+                : SharedIniNumbers.Read(WsjtxClient.SmartModeStationsKey, WsjtxClient.DefaultSmartModeStations, 1, 10);
             if (int.TryParse(ini.Read("otherStationRepliesBeforeYielding"), out int repliesBeforeYielding) && repliesBeforeYielding >= 1 && repliesBeforeYielding <= 6)
                 OtherStationRepliesBeforeYielding = repliesBeforeYielding;
 
@@ -179,6 +187,7 @@ namespace WSJTX_Controller
             ini.Write("smartStartMaxStandbyRounds", SmartStartMaxStandbyRounds.ToString());
             ini.Write("smartStartTimeLimitMinutes", SmartStartTimeLimitMinutes.ToString());
             ini.Write("smartStartCallsBeforeSwitch", SmartStartCallsBeforeSwitch.ToString());
+            ini.Write(WsjtxClient.SmartModeStationsKey, SmartModeStations.ToString());
             ini.Write("otherStationRepliesBeforeYielding", OtherStationRepliesBeforeYielding.ToString());
 
             ini.Write("listFontSize", ListFontSize.ToString());

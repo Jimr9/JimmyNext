@@ -256,7 +256,10 @@ namespace WSJTX_Controller
         // pending set is sent as a single batch upload here.
         private async Task CatchUpClubLog(ILogbookService db)
         {
-            var pending = db.GetPendingUploads("CLUBLOG");
+            // Every pending contact in ONE upload (2026-10-06): putlogs.php is Club Log's whole-log
+            // API ("even hundreds of thousands of QSOs"), and it blocks repeated small uploads --
+            // the default 1000-row page made a re-upload of a whole log three Alt+U presses.
+            var pending = db.GetPendingUploads("CLUBLOG", limit: int.MaxValue);
             if (pending.Count == 0) return;
             DebugOutput($"{Time()} Club Log upload catch-up: {pending.Count} pending QSO(s).");
 
@@ -276,7 +279,7 @@ namespace WSJTX_Controller
 
             if (ok)
             {
-                foreach (var q in pending) db.MarkUploaded(q.DedupKey, "CLUBLOG", DateTime.UtcNow);
+                db.MarkUploaded(pending.Select(q => q.DedupKey), "CLUBLOG", DateTime.UtcNow);
                 // Refresh the Sync Status numbers too -- see the same comment in CatchUpQrz.
                 ctrl.BeginInvoke(new Action(() =>
                 {

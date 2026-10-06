@@ -44,6 +44,7 @@ namespace WSJTX_Controller
         {
             public string Text;                              // what to hand to Nexus
             public int Sent, Held;
+            public int Dropped;                              // settled / repeated rows left out (own-records report)
             public List<string> HeldDetails = new List<string>();
             // Each row sent that pairs with a logged contact: the contact, and the row's location fields.
             public List<(NexusQso Logged, Dictionary<string, string> Location, string Label)> Located =
@@ -53,8 +54,18 @@ namespace WSJTX_Controller
         internal static readonly string[] LocationTags = { "STATE", "CNTY", "COUNTRY", "DXCC", "CQZ", "ITUZ", "GRIDSQUARE" };
         private static readonly HashSet<string> MergeFills = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "STATE", "COUNTRY" };
 
+        // Club Log's own view of a confirmation (operator, 2026-10-06): a contact Club Log adds is
+        // added unconfirmed -- LoTW, QRZ and eQSL downloads say what is confirmed, from the source.
+        private static readonly HashSet<string> ConfirmationTags = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "QSL_RCVD", "QSL_RCVD_VIA", "QSLRDATE", "LOTW_QSL_RCVD", "LOTW_QSLRDATE", "EQSL_QSL_RCVD", "EQSL_QSLRDATE",
+            "QRZCOM_QSO_DOWNLOAD_STATUS", "QRZCOM_QSO_DOWNLOAD_DATE", "CREDIT_GRANTED", "CREDIT_SUBMITTED",
+        };
+
         // The row with the fields Nexus's merge would fill from it removed.
-        private static string WithoutMergeFills(string raw)
+        private static string WithoutMergeFills(string raw) => WithoutTags(raw, MergeFills);
+
+        private static string WithoutTags(string raw, HashSet<string> tags)
         {
             var sb = new StringBuilder();
             int pos = 0;
@@ -63,7 +74,7 @@ namespace WSJTX_Controller
                 if (fm.Index < pos) continue;
                 int len = int.Parse(fm.Groups[2].Value, CultureInfo.InvariantCulture);
                 int end = Math.Min(raw.Length, fm.Index + fm.Length + len);
-                if (!MergeFills.Contains(fm.Groups[1].Value)) continue;
+                if (!tags.Contains(fm.Groups[1].Value)) continue;
                 sb.Append(raw, pos, fm.Index - pos);
                 pos = end;
             }
@@ -93,7 +104,18 @@ namespace WSJTX_Controller
 
         private static string Bucket(string callBand, string modeClass, long day) => $"{callBand}|{modeClass}|{day}";
 
-        public static Result Prepare(string text, IReadOnlyList<NexusQso> logInOrder, bool nearbyUnique = false)
+        // LoTW's own-records report only (PromoteLotwReceived), 2026-10-06:
+        //   settled: contacts outside logInOrder (already award-confirmed). A row at one of their
+        //     minutes, and at no contact in logInOrder, is that contact's own record -- nothing to
+        //     do, so it is dropped, not held.
+        //   collapseSameMinute: several rows at one contact's minute are that contact uploaded more
+        //     than once (LoTW keeps a re-upload whose details differ) -- one is sent, the rest dropped.
+        // absentOnly (Club Log's download, 2026-10-06): Club Log holds only what was uploaded to it,
+        //   so only a contact the log does not hold at all is sent -- added unconfirmed (its
+        //   confirmation fields taken out). A row at a logged contact is left out (Dropped).
+        public static Result Prepare(string text, IReadOnlyList<NexusQso> logInOrder, bool nearbyUnique = false,
+                                     IReadOnlyList<NexusQso> settled = null, bool collapseSameMinute = false,
+                                     bool absentOnly = false)
         {
             text = text ?? "";
             var m = Eoh.Match(text);
@@ -116,6 +138,12 @@ namespace WSJTX_Controller
                 if (!byMinute.TryGetValue(c.Minute + "|" + ModeClass(q.Mode), out var ml)) byMinute[c.Minute + "|" + ModeClass(q.Mode)] = ml = new List<Contact>();
                 ml.Add(c);
                 callBandDays.Add($"{cb}|{ModeClass(q.Mode)}|{day}");
+            }
+            var settledMinutes = new HashSet<string>();
+            foreach (var q in settled ?? new List<NexusQso>())
+            {
+                var when = DateTimeOffset.FromUnixTimeSeconds((long)q.WhenUnix).UtcDateTime;
+                settledMinutes.Add($"{(q.Call ?? "").Trim().ToUpperInvariant()}|{(q.Band ?? "").Trim().ToLowerInvariant()}|{when:yyyyMMddHHmm}|{ModeClass(q.Mode)}");
             }
 
             // The download's rows, as received.
@@ -163,6 +191,7 @@ namespace WSJTX_Controller
             {
                 if (r.Day == long.MinValue) { Hold(r, "no valid date"); continue; }
                 byMinute.TryGetValue(r.Minute, out var at);
+                if (absentOnly && at != null && at.Count > 0) { result.Dropped++; continue; }   // already logged
                 if (at != null && at.Count > 1) { Hold(r, "more than one logged contact at this minute"); continue; }
                 if (at != null && at.Count == 1)
                 {
@@ -171,6 +200,7 @@ namespace WSJTX_Controller
                     g.Add((r, c));
                     continue;
                 }
+                if (settledMinutes.Contains(r.Minute)) { result.Dropped++; continue; }
                 if (nearbyUnique)
                 {
                     var cands = new List<Contact>();
@@ -189,12 +219,20 @@ namespace WSJTX_Controller
                             callBandDays.Contains($"{r.CallBand}|{r.ModeClass}|{r.Day - 1}") ||
                             callBandDays.Contains($"{r.CallBand}|{r.ModeClass}|{r.Day + 1}");
                 if (near) { Hold(r, "no logged contact at this minute, but others with this station and band that day or the day either side"); continue; }
+                if (absentOnly) r.Raw = WithoutTags(r.Raw, ConfirmationTags);
                 send.Add((int.MaxValue, r)); // a contact the log does not hold at all
             }
 
             foreach (var g in matched)
             {
                 var inLog = contacts[g.Key];
+                if (collapseSameMinute)
+                {
+                    var one = g.Value.GroupBy(x => x.Contact).Select(x => x.First()).ToList();
+                    result.Dropped += g.Value.Count - one.Count;
+                    g.Value.Clear();
+                    g.Value.AddRange(one);
+                }
                 var taken = g.Value.Select(x => x.Contact).ToList();
                 bool dup = taken.Distinct().Count() != taken.Count;
                 bool prefix = !dup && new HashSet<Contact>(taken).SetEquals(inLog.Take(taken.Count));

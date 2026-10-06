@@ -17,7 +17,7 @@ namespace WSJTX_Controller
         private TargetMonitor _smartStart = new TargetMonitor(TargetPurpose.SmartStart);
 
         // Smart Mode's waiting list (operator, 2026-10-02): up to SmartModeMaxStations stations --
-        // "smartModeStations" in Shared.ini, 3 unless changed by hand (1 to 10). At 1, a new pick
+        // the profile's "smartModeStations" (Options > Smart Mode since 2026-10-06), 3 unless changed (1 to 10). At 1, a new pick
         // replaces the station Smart Mode was waiting for (the old Smart Mode); above 1, a new pick
         // is added, and refused once the list is full until one is done or Escaped.
         // _smartStart is the one worked first -- everything below about "the target" is about
@@ -28,7 +28,7 @@ namespace WSJTX_Controller
         private readonly List<TargetMonitor> _smartMore = new List<TargetMonitor>();
         internal const string SmartModeStationsKey = "smartModeStations";
         internal const int DefaultSmartModeStations = 3;
-        internal static int SmartModeMaxStations => SharedIniNumbers.Read(SmartModeStationsKey, DefaultSmartModeStations, 1, 10);
+        private int SmartModeMaxStations => Math.Max(1, Math.Min(10, ctrl.smartModeStations));
         // Escape took one station off; the next Escape stops Smart Mode altogether.
         private bool _smartEscapeTookOne;
         // The last station refused because the list was full -- said once, not on every re-issue.
@@ -428,7 +428,7 @@ namespace WSJTX_Controller
                     if (MakeCurrent(m)) HandOffSmartStartWhileWaiting(enq);
                     else DropSmartStation(m, "called us during another QSO -- listed normally from now on");
                 }
-                else if (CanMakeCurrent && !TurnUsedUp(m) && m.ConsumeReadyToStart() && MakeCurrent(m))
+                else if (CanMakeCurrent && !TurnUsedUp(m) && m.ConsumeReadyToStart() && CallableNow(m) && MakeCurrent(m))
                     ArmPendingAutoStart(_smartStart);
             }
         }
@@ -462,7 +462,7 @@ namespace WSJTX_Controller
             try { m.SeedSelectedDecode(dmsg, DateTime.UtcNow, myCall); }
             finally { _smartStartSeeding = false; }
             TakeOffListForSmartMode(call);
-            if (CanMakeCurrent && m.ConsumeReadyToStart() && MakeCurrent(m))
+            if (CanMakeCurrent && m.ConsumeReadyToStart() && CallableNow(m) && MakeCurrent(m))
                 ArmPendingAutoStart(_smartStart);
         }
 
@@ -535,6 +535,13 @@ namespace WSJTX_Controller
             return turn > 0 && m.CallsThisTurn >= turn;
         }
 
+        // A listed station Smart Mode could call right now -- the same check the call itself
+        // makes before it goes out. Only such a station is made the one worked first (operator,
+        // 2026-10-05: ER1BF, unheard for minutes, was "free" after one quiet period, taken from
+        // S79VU every minute, refused at the call and announced "still not heard" each time).
+        private bool CallableNow(TargetMonitor m) =>
+            m.RevalidateForAutoStart(DateTime.UtcNow, CurrentBandStr, mode, _directExpectedSessionToken, operatorOverride: false) == AutoStartCheck.Ok;
+
         // Smart Mode's list: the station being called has used up its turn, and another station
         // on the list is free right now -- stop calling it, the way a busy yield does (it stays
         // on the list; its Repeat Limit and time limit carry on), and call the free one. Decided
@@ -546,9 +553,7 @@ namespace WSJTX_Controller
         {
             if (weTransmittedThisSlot || !_smartStart.IsActive || !_smartStart.AwaitingEngagement
                 || _smartStart.EngagedUs || !TurnUsedUp(_smartStart)) return;
-            DateTime now = DateTime.UtcNow;
-            var next = _smartMore.FirstOrDefault(m => m.IsActive && m.ReadyToStart
-                && m.RevalidateForAutoStart(now, CurrentBandStr, mode, _directExpectedSessionToken, operatorOverride: false) == AutoStartCheck.Ok);
+            var next = _smartMore.FirstOrDefault(m => m.IsActive && m.ReadyToStart && CallableNow(m));
             if (next == null) return;
             string target = _smartStart.TargetCall;
             DebugOutput($"{Time()} [SMART] {target} no answer after {_smartStart.CallsThisTurn} calls this turn -- trying {next.TargetCall}");
@@ -949,7 +954,7 @@ namespace WSJTX_Controller
                     continue;
                 }
                 m.OnReceivePeriodComplete(slot, evenSlot, CurrentBandStr, mode, _directExpectedSessionToken, weTransmittedThisSlot);
-                if (CanMakeCurrent && m.ConsumeReadyToStart() && MakeCurrent(m))
+                if (CanMakeCurrent && m.ConsumeReadyToStart() && CallableNow(m) && MakeCurrent(m))
                     ArmPendingAutoStart(_smartStart);
             }
         }
