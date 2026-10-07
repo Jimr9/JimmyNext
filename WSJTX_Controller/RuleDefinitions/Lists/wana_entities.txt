@@ -1,0 +1,52 @@
+; RAC Worked All North America -- RAC's list of 50 entities (last updated 2023-06-18), as DXCC numbers.
+; https://www.rac.ca/mivahih/2023/10/WANA-EntityList.pdf
+289       ; United Nations HQ
+82        ; Jamaica
+62        ; Barbados
+60        ; Bahamas
+70        ; Cuba
+211       ; Sable I.
+252       ; St. Paul I.
+79        ; Guadeloupe
+516       ; Saint Barthelemy
+84        ; Martinique
+36        ; Clipperton I.
+277       ; St. Pierre & Miquelon
+213       ; Saint Martin
+78        ; Haiti
+72        ; Dominican Republic
+216       ; San Andres & Providencia
+88        ; Panama
+80        ; Honduras
+77        ; Grenada
+97        ; St. Lucia
+95        ; Dominica
+98        ; St. Vincent
+291       ; United States of America
+105       ; Guantanamo Bay
+6         ; Alaska
+182       ; Navassa I.
+285       ; US Virgin Is.
+202       ; Puerto Rico
+43        ; Desecheo I.
+237       ; Greenland
+519       ; Saba & St. Eustatius
+518       ; St. Maarten
+76        ; Guatemala
+308       ; Costa Rica
+37        ; Cocos I.
+94        ; Antigua & Barbuda
+66        ; Belize
+249       ; St. Kitts & Nevis
+1         ; Canada
+12        ; Anguilla
+96        ; Montserrat
+65        ; British Virgin Is.
+89        ; Turks & Caicos Is.
+64        ; Bermuda
+50        ; Mexico
+204       ; Revillagigedo
+86        ; Nicaragua
+74        ; El Salvador
+17        ; Aves I.
+69        ; Cayman Is.

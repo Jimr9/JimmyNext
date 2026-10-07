@@ -103,6 +103,7 @@ namespace WSJTX_Controller
         private ComboBox _awardsBandCb;
         private ComboBox _awardsShowCb;
         private TextBox  _awardsProgressLbl;
+        private TextBox  _awardsAboutTb;   // what the award counts and what to check yourself (2026-10-06)
         private ListView _awardsLv;
         private Button   _awardsManageBtn;
         private Button   _awardsRefreshBtn;
@@ -600,7 +601,7 @@ namespace WSJTX_Controller
             // header (before the list in Tab order) and buttonRow (after it) -- both Dock=Top, so
             // the buttons sit above the list on screen but are reached after it, as before.
             // AccessibleName=""/AccessibleRole=None -- pure layout containers, see MakePage().
-            var header = new Panel { Dock = DockStyle.Top, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            var header = new Panel { Dock = DockStyle.Top, Height = 214, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
             header.Controls.Add(new Label { Text = "Awards:", Font = font, Location = new Point(8, 10), AutoSize = true });
 
@@ -698,7 +699,28 @@ namespace WSJTX_Controller
             };
             header.Controls.Add(_awardsProgressLbl);
 
-            var buttonRow = new Panel { Dock = DockStyle.Top, Height = 32, TabIndex = 6, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            // What the award counts (accepted confirmations, basis), what Jimmy does not check, and
+            // the one short notice that the sponsor decides (2026-10-06). Read once, on Tab.
+            _awardsAboutTb = new TextBox
+            {
+                Text           = "",
+                Font           = font,
+                Location       = new Point(8, 149),
+                Size           = new Size(680, 60),
+                Anchor         = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right,
+                Multiline      = true,
+                WordWrap       = true,
+                ReadOnly       = true,
+                ScrollBars     = ScrollBars.Vertical,
+                BorderStyle    = BorderStyle.None,
+                BackColor      = SystemColors.Control,
+                TabStop        = true,
+                TabIndex       = 5,
+                AccessibleName = "About this award",
+            };
+            header.Controls.Add(_awardsAboutTb);
+
+            var buttonRow = new Panel { Dock = DockStyle.Top, Height = 32, TabIndex = 7, AccessibleName = "", AccessibleRole = AccessibleRole.None };
             _awardsManageBtn = new Button
             {
                 Text           = "Manage Rule Definitions...",
@@ -724,7 +746,7 @@ namespace WSJTX_Controller
 
             _awardsLv = MakeListView(font);
             _awardsLv.Dock = DockStyle.Fill;
-            _awardsLv.TabIndex = 5;
+            _awardsLv.TabIndex = 6;
             _awardsLv.AccessibleName = "Award details";
 
             // header added before buttonRow so it stacks above it.
@@ -1524,7 +1546,7 @@ namespace WSJTX_Controller
                     _statUploadQrzTb, _statUploadClubLogTb, _statUploadLotwTb, _statUploadHrdLogTb, _dashRecentLv,
                 };
                 case PAGE_AWARDS: return new Control[] {
-                    _awardsClb, _awardsBandCb, _awardsShowCb, _awardsProgressLbl, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
+                    _awardsClb, _awardsBandCb, _awardsShowCb, _awardsProgressLbl, _awardsAboutTb, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
                 };
                 case PAGE_EDITLOG: return new Control[] {
                     _editCallTb, _editFieldCb, _editTextTb, _editSourceCb, _editUploadCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
@@ -1734,6 +1756,8 @@ namespace WSJTX_Controller
             int idx = _awardsClb.SelectedIndex;
             if (idx < 0 || idx >= _awardsDefs.Count) return;
             var def = _awardsDefs[idx];
+            string about = AboutText(def);
+            if (_awardsAboutTb.Text != about) _awardsAboutTb.Text = about;
 
             // Only the bands that mean something for this award (a band-restricted award can never
             // be evaluated "as" another band -- RuleEngine.ResolveBandsForEvaluation); rebuilt only
@@ -1784,15 +1808,10 @@ namespace WSJTX_Controller
                 return;
             }
 
-            // Target=All is ALWAYS Worked-based, never overridable (RuleEngine.FinishGrouped's
-            // own comment) -- RuleEngine gates its completion on Worked regardless of
-            // Confirmation, so this must match or the summary line could show a "Complete!"
-            // that disagrees with a smaller confirmed count. Count/Levels honor the
-            // definition's own Basis (defaults to Worked; opt into Confirmed via Basis=
-            // CONFIRMED, e.g. DXCC Honor Roll) -- whichever ISN'T the basis is still shown as
-            // an informational side-note when it differs (e.g. some items worked but not yet
-            // confirmed via LoTW/QRZ, or vice versa for a Confirmed-basis award).
-            bool basisIsConfirmed = def.Target != RuleTargetType.All && def.Basis == RuleBasis.Confirmed;
+            // The award's own basis: worked (personal goals) or confirmed by an accepted source
+            // (sponsor awards, checklists too since 2026-10-06). The other count is a side note
+            // when it differs.
+            bool basisIsConfirmed = def.Basis == RuleBasis.Confirmed;
             string basisLabel = basisIsConfirmed ? "confirmed" : "worked";
             int basis      = basisIsConfirmed ? result.Confirmed : result.Worked;
             int sideValue  = basisIsConfirmed ? result.Worked    : result.Confirmed;
@@ -1839,7 +1858,6 @@ namespace WSJTX_Controller
 
         private void BuildAwardColumns(RuleDefinition def)
         {
-            bool showWorkedCol = def.Target == RuleTargetType.All && def.GroupBy != RuleGroupBy.None;
             bool showBandsCol  = def.GroupBy != RuleGroupBy.None;
             string itemHeader  = def.GroupBy == RuleGroupBy.None ? "Endorsement" : GroupByHeader(def.GroupBy);
 
@@ -1848,9 +1866,62 @@ namespace WSJTX_Controller
                 _awardsLv.Columns.Add("Country", 170);
             if (showBandsCol)
                 _awardsLv.Columns.Add("Band(s) worked", 150);
-            if (showWorkedCol)
-                _awardsLv.Columns.Add("Worked", 70);
-            _awardsLv.Columns.Add(def.Confirmation == RuleConfirmation.None ? "Logged" : "Confirmed", 90);
+            _awardsLv.Columns.Add("Status", 260);
+        }
+
+        // "About this award": what counts, the accepted confirmations, what Jimmy does not check,
+        // and -- for a sponsor's award -- that the sponsor decides. Personal goals say they are yours.
+        internal static string AboutText(RuleDefinition def)
+        {
+            bool personal = string.Equals(def.Sponsor, "Personal", StringComparison.OrdinalIgnoreCase)
+                            || (def.Category ?? "").StartsWith("Personal", StringComparison.OrdinalIgnoreCase);
+            string counts = def.Basis == RuleBasis.Confirmed
+                ? $"Counts contacts confirmed by {RuleConfirmationSources.Describe(def)}."
+                : def.Confirmation == RuleConfirmation.None
+                    ? "Counts worked contacts."
+                    : $"Counts worked contacts; confirmations by {RuleConfirmationSources.Describe(def)} are shown.";
+            var parts = new List<string> { counts };
+            if (!string.IsNullOrWhiteSpace(def.Description)) parts.Add(def.Description.Trim());
+            if (!string.IsNullOrWhiteSpace(def.ManualChecks)) parts.Add("Not checked by Jimmy: " + def.ManualChecks.Trim());
+            parts.Add(personal
+                ? "A personal goal, not an award."
+                : "Jimmy tracks your progress from your log and may be incomplete or wrong; the sponsor decides eligibility and issues the award.");
+            return string.Join(" ", parts);
+        }
+
+        // Which channels confirmed an item, by name, and which of them the award accepts.
+        private static (List<string> Accepted, List<string> Others) ConfirmedBy(RuleDefinition def, RuleResult r, string value)
+        {
+            var accepted = RuleConfirmationSources.Accepted(def);
+            if (def.Confirmation == RuleConfirmation.Both) accepted = new List<string> { RuleConfirmationSources.Lotw, RuleConfirmationSources.Qrz };
+            var acc = new List<string>();
+            var other = new List<string>();
+            void Add(List<string> items, string source)
+            {
+                if (items == null || !items.Contains(value, StringComparer.OrdinalIgnoreCase)) return;
+                (accepted.Contains(source) ? acc : other).Add(RuleConfirmationSources.Label(source));
+            }
+            Add(r.LotwConfirmedItems, RuleConfirmationSources.Lotw);
+            Add(r.QrzConfirmedItems, RuleConfirmationSources.Qrz);
+            Add(r.CardConfirmedItems, RuleConfirmationSources.Card);
+            // An AG eQSL is named once: "eQSL (AG)" when the award takes AG eQSLs, else as plain eQSL.
+            bool ag = r.EqslAgConfirmedItems != null && r.EqslAgConfirmedItems.Contains(value, StringComparer.OrdinalIgnoreCase);
+            if (ag && accepted.Contains(RuleConfirmationSources.EqslAg)) acc.Add(RuleConfirmationSources.Label(RuleConfirmationSources.EqslAg));
+            else Add(r.EqslConfirmedItems, RuleConfirmationSources.Eqsl);
+            return (acc, other);
+        }
+
+        // One item's status: still to work; worked (and what confirmed it); or confirmed by the
+        // accepted sources named.
+        internal static string ItemStatus(RuleDefinition def, RuleResult r, string value, bool worked, bool confirmed)
+        {
+            if (!worked) return "Still to work";
+            if (def.Confirmation == RuleConfirmation.None) return "Worked";
+            var (acc, others) = ConfirmedBy(def, r, value);
+            if (confirmed && acc.Count > 0) return "Confirmed: " + string.Join(", ", acc);
+            if (confirmed) return "Confirmed";
+            string notAccepted = others.Count > 0 ? $"; {string.Join(", ", others)} not accepted for this award" : "";
+            return (def.Basis == RuleBasis.Confirmed ? "Worked, awaiting confirmation" : "Worked, not confirmed") + notAccepted;
         }
 
         // Renders the per-item checklist (states/entities/zones/etc.) and, when the
@@ -1859,7 +1930,6 @@ namespace WSJTX_Controller
         // why this is a plain row rather than a native ListView group).
         private void BuildAwardRows(RuleDefinition def, RuleResult result)
         {
-            bool showWorkedCol   = def.Target == RuleTargetType.All && def.GroupBy != RuleGroupBy.None;
             bool showBandsCol    = def.GroupBy != RuleGroupBy.None;
             bool hasEndorsements = result.Endorsements != null && result.Endorsements.Count > 0;
 
@@ -1867,8 +1937,6 @@ namespace WSJTX_Controller
             {
                 var worked    = new HashSet<string>(result.WorkedItems    ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 var confirmed = new HashSet<string>(result.ConfirmedItems ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-                var lotwConfirmed = new HashSet<string>(result.LotwConfirmedItems ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
-                var qrzConfirmed  = new HashSet<string>(result.QrzConfirmedItems  ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 Dictionary<int, string> dxccNames =
                     def.GroupBy == RuleGroupBy.Dxcc ? _db.GetDxccCountryNames() : null;
 
@@ -1888,24 +1956,13 @@ namespace WSJTX_Controller
                         row.SubItems.Add(name ?? "");
                     }
 
-                    bool isWorked    = worked.Contains(value);
-                    bool isConfirmed = confirmed.Contains(value);
                     if (showBandsCol)
                     {
                         List<string> bands;
                         row.SubItems.Add(result.WorkedBands != null && result.WorkedBands.TryGetValue(value, out bands)
                             ? string.Join(", ", bands) : "—");
                     }
-                    if (showWorkedCol)
-                        row.SubItems.Add(isWorked ? "Yes" : "—");
-                    // Falls back to a plain "Confirmed" (rather than misreporting "—") if this
-                    // rule's Confirmation ever matches a service beyond LoTW/QRZ that isn't
-                    // broken out here yet (see Next Build TODO item 1 -- Club Log/eQSL/eQTH).
-                    bool viaLotwOrQrz = lotwConfirmed.Contains(value) || qrzConfirmed.Contains(value);
-                    string confirmedText = !isConfirmed ? (isWorked ? "Not confirmed" : "—")
-                        : viaLotwOrQrz ? ConfirmedText(lotwConfirmed.Contains(value), qrzConfirmed.Contains(value))
-                        : "Confirmed";
-                    row.SubItems.Add(confirmedText);
+                    row.SubItems.Add(ItemStatus(def, result, value, worked.Contains(value), confirmed.Contains(value)));
 
                     _awardsLv.Items.Add(row);
                 }
@@ -1927,11 +1984,10 @@ namespace WSJTX_Controller
 
                     if (def.GroupBy == RuleGroupBy.Dxcc) row.SubItems.Add("");
                     if (showBandsCol) row.SubItems.Add("");
-                    if (showWorkedCol) row.SubItems.Add(end.Worked.ToString());
 
                     string status = def.Target == RuleTargetType.Levels
                         ? (end.Tier ?? "—")
-                        : (end.Completed ? "Yes" : "No");
+                        : (end.Completed ? "Complete" : $"{end.Worked} worked, {end.Confirmed} confirmed");
                     row.SubItems.Add(status);
 
                     _awardsLv.Items.Add(row);
@@ -1981,12 +2037,12 @@ namespace WSJTX_Controller
             _awardsLv.Columns.Add(itemHeader, 150);
             if (def.GroupBy == RuleGroupBy.Dxcc)
                 _awardsLv.Columns.Add("Country", 200);
-            _awardsLv.Columns.Add("Status", 120);
+            _awardsLv.Columns.Add("Status", 260);
 
             Dictionary<int, string> dxccNames =
                 def.GroupBy == RuleGroupBy.Dxcc ? _db.GetDxccCountryNames() : null;
 
-            foreach (var value in result.StillNeeded)
+            void AddRow(string value, string status)
             {
                 var item = new ListViewItem(value);
                 if (dxccNames != null)
@@ -1996,11 +2052,17 @@ namespace WSJTX_Controller
                     if (int.TryParse(value, out dxccNum)) dxccNames.TryGetValue(dxccNum, out name);
                     item.SubItems.Add(name ?? "");
                 }
-                item.SubItems.Add("Not yet worked");
+                item.SubItems.Add(status);
                 _awardsLv.Items.Add(item);
             }
+            foreach (var value in result.StillNeeded) AddRow(value, "Still to work");
+            var awaiting = result.AwaitingConfirmation ?? new List<string>();
+            foreach (var value in awaiting) AddRow(value, ItemStatus(def, result, value, true, false));
 
-            _awardsProgressLbl.Text = $"{result.StillNeeded.Count} {itemHeader.ToLowerInvariant()} still needed." + AwardSummaryTail(def, band);
+            string item_ = itemHeader.ToLowerInvariant();
+            _awardsProgressLbl.Text = (awaiting.Count > 0
+                ? $"{result.StillNeeded.Count} {item_} still to work, {awaiting.Count} worked and awaiting confirmation."
+                : $"{result.StillNeeded.Count} {item_} still to work.") + AwardSummaryTail(def, band);
         }
 
         // ── Import handlers ───────────────────────────────────────────────────────
@@ -2190,10 +2252,9 @@ namespace WSJTX_Controller
                 var result = await Task.Run(() => EqslReconciler.Reconcile(_db, adif)).ConfigureAwait(true);
                 int processed = result.Matched + result.AlreadyConfirmed + result.Ambiguous + result.Unmatched + result.Skipped;
                 int skippedTotal = result.AlreadyConfirmed + result.Ambiguous + result.Unmatched + result.Skipped;
-                string note = result.Ambiguous > 0
-                    ? $"{result.Ambiguous} ambiguous match(es) skipped (never guessed)."
-                    : "";
-                _db.LogImportFinish(logId, processed, 0, result.Matched, 0, skippedTotal, note);
+                // Cards held for review are not errors (2026-10-06: the history said "Errors: 1" for
+                // them); they are on the status line and listed in NexusLog\diagnostics.
+                _db.LogImportFinish(logId, processed, 0, result.Matched, 0, skippedTotal, "");
                 _ini?.Write("LogbookLastEqslRefresh", DateTime.UtcNow.ToString("o"));
 
                 SetStatus($"{(full ? "eQSL full download complete" : "eQSL sync complete")}: {result}");

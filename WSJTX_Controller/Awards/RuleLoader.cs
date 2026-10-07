@@ -92,6 +92,7 @@ namespace WSJTX_Controller
         // AppData folder exists, it's the user's to manage -- never overwritten.
         private static void SeedIfMissing()
         {
+            ReplaceStockSet(ShippedRulesFolder, RulesFolder, BackupsFolder);
             if (Directory.Exists(RulesFolder))
             {
                 AddNewStockAwards();
@@ -110,6 +111,73 @@ namespace WSJTX_Controller
         // deletes stays deleted. Missing Lists files (universe data, not a choice) are copied
         // whenever absent. Existing files are never overwritten.
         internal const string StockAwardsAddedFile = "stock-awards-added.txt";
+
+        // ── Replacing the whole award set (2026-10-06) ──────────────────────────────────────
+        // The shipped folder carries StockVersionFile. When the installed set's differs, the
+        // installed folder is copied to Backups once, and the shipped set -- definitions and lists
+        // -- takes its place whole: superseded awards disappear, and custom or edited ones are
+        // not kept active (operator: nobody depends on them yet; the backup has them). Award
+        // progress is computed from the logbook every time, so nothing else moves; checked
+        // awards keep their place by Id. Interrupt-safe: the new set is built beside the old one
+        // ("<folder>.new") and swapped in with two renames; the next start finishes or undoes a
+        // swap that was cut short.
+        internal const string StockVersionFile = "stock-awards-version.txt";
+
+        private static string BackupsFolder => Path.Combine(Path.GetDirectoryName(LookupManager.DataRoot) ?? LookupManager.DataRoot, "Backups");
+
+        internal static string VersionOf(string folder)
+        {
+            try
+            {
+                string f = Path.Combine(folder, StockVersionFile);
+                return File.Exists(f) ? File.ReadAllText(f).Trim() : null;
+            }
+            catch { return null; }
+        }
+
+        // Returns the backup folder made, or null when nothing was replaced.
+        internal static string ReplaceStockSet(string shippedFolder, string rulesFolder, string backupsRoot)
+        {
+            string newDir = rulesFolder + ".new", oldDir = rulesFolder + ".old";
+            try
+            {
+                // Finish or undo a swap cut short.
+                if (!Directory.Exists(rulesFolder) && Directory.Exists(oldDir))
+                {
+                    if (Directory.Exists(newDir) && VersionOf(newDir) != null) Directory.Move(newDir, rulesFolder);
+                    else Directory.Move(oldDir, rulesFolder);
+                }
+                if (Directory.Exists(rulesFolder))
+                {
+                    if (Directory.Exists(newDir)) Directory.Delete(newDir, true);
+                    if (Directory.Exists(oldDir)) Directory.Delete(oldDir, true);
+                }
+
+                string shippedVersion = VersionOf(shippedFolder);
+                if (shippedVersion == null || !Directory.Exists(rulesFolder) || VersionOf(rulesFolder) == shippedVersion) return null;
+
+                string backup = Path.Combine(backupsRoot, $"RuleDefinitions-before-awards-{Safe(shippedVersion)}-{DateTime.Now:yyyyMMdd-HHmmss}");
+                CopyDirectory(rulesFolder, backup);
+
+                CopyDirectory(shippedFolder, newDir);
+                // Every shipped award counts as added, so AddNewStockAwards never re-adds one later.
+                File.WriteAllLines(Path.Combine(newDir, StockAwardsAddedFile),
+                    Directory.GetFiles(shippedFolder, "*.ini").Select(Path.GetFileName));
+                Directory.Move(rulesFolder, oldDir);
+                Directory.Move(newDir, rulesFolder);
+                Directory.Delete(oldDir, true);
+                BackupRetention.Prune(backupsRoot, "RuleDefinitions-before-awards-*");
+                LogErrors(new List<string> { $"Award set replaced with version {shippedVersion}; the previous set is in {backup}." });
+                return backup;
+            }
+            catch (Exception ex)
+            {
+                LogErrors(new List<string> { "Replacing the award set failed (the previous set stays in use): " + ex.Message });
+                return null;
+            }
+        }
+
+        private static string Safe(string s) => new string(s.Select(c => char.IsLetterOrDigit(c) || c == '.' || c == '-' ? c : '_').ToArray());
 
         internal static void AddNewStockAwards() => AddNewStockAwards(ShippedRulesFolder, RulesFolder);
 
@@ -217,14 +285,15 @@ namespace WSJTX_Controller
             // of them confirms. The five original words keep exactly their meaning.
             var tokens = SplitList(confirmStr).Select(t => t.ToUpperInvariant()).Distinct().ToList();
             bool isList = tokens.Count > 1 ||
-                          (tokens.Count == 1 && (tokens[0] == RuleConfirmationSources.Eqsl || tokens[0] == RuleConfirmationSources.Card));
+                          (tokens.Count == 1 && (tokens[0] == RuleConfirmationSources.Eqsl || tokens[0] == RuleConfirmationSources.EqslAg
+                                                 || tokens[0] == RuleConfirmationSources.Card));
             if (isList)
             {
                 var unknown = tokens.Where(t => !RuleConfirmationSources.All.Contains(t)).ToList();
                 if (unknown.Count > 0)
                 {
                     error = $"[Confirmation] Requires='{confirmStr}': '{string.Join(",", unknown)}' is not a confirmation source. " +
-                            "Supported sources: LOTW, QRZ, EQSL, CARD.";
+                            "Supported sources: LOTW, QRZ, EQSL, EQSL_AG, CARD.";
                     return null;
                 }
                 confirmation = RuleConfirmation.Sources;
@@ -233,7 +302,7 @@ namespace WSJTX_Controller
             else if (!Enum.TryParse(confirmStr, true, out confirmation) || confirmation == RuleConfirmation.Sources)
             {
                 error = $"[Confirmation] Requires='{confirmStr}' is not recognized. Supported: ANY, LOTW, QRZ, BOTH, NONE, " +
-                        "or a list of sources from LOTW, QRZ, EQSL, CARD (e.g. LOTW,CARD).";
+                        "or a list of sources from LOTW, QRZ, EQSL, EQSL_AG, CARD (e.g. LOTW,CARD).";
                 return null;
             }
 
@@ -252,12 +321,19 @@ namespace WSJTX_Controller
                 error = $"[Target] Basis='{basisStr}' is not recognized. Supported: WORKED, CONFIRMED.";
                 return null;
             }
-            if (basis == RuleBasis.Confirmed && targetType == RuleTargetType.All)
+            if (basis == RuleBasis.Confirmed && confirmation == RuleConfirmation.None)
             {
-                error = "[Target] Basis=CONFIRMED is not supported with Type=ALL -- a checklist-style award " +
-                        "always tracks Worked for completion (see FinishGrouped's own comment); use Type=COUNT " +
-                        "or LEVELS for a confirmation-gated award.";
+                error = "[Target] Basis=CONFIRMED needs [Confirmation] Requires= to name the accepted sources.";
                 return null;
+            }
+            foreach (var key in new[] { "DateFrom", "DateTo" })
+            {
+                string v = file.Get("Match", key);
+                if (!string.IsNullOrWhiteSpace(v) && RuleEngine.CompactDateTime(v, key == "DateTo") == null)
+                {
+                    error = $"[Match] {key}='{v}' is not a date (yyyy-MM-dd) or a UTC date and time (yyyy-MM-dd HHmm).";
+                    return null;
+                }
             }
 
             int threshold = 0;
@@ -330,6 +406,11 @@ namespace WSJTX_Controller
                 Sig             = file.Get("Match", "Sig"),
                 DateFrom        = file.Get("Match", "DateFrom"),
                 DateTo          = file.Get("Match", "DateTo"),
+                ExcludeBands    = SplitList(file.Get("Match", "ExcludeBands")),
+                DxccIn          = SplitList(file.Get("Match", "DxccIn")),
+                ExcludeCallsigns = SplitList(file.Get("Match", "ExcludeCallsigns")),
+                DcCountsAsMaryland = IsYes(file.Get("Match", "DcCountsAsMaryland", "N")),
+                ManualChecks    = file.Get("Award", "ManualChecks", ""),
                 Confirmation    = confirmation,
                 ConfirmationSources = confirmationSources,
                 Target          = targetType,
@@ -348,6 +429,10 @@ namespace WSJTX_Controller
 
             return def;
         }
+
+        private static bool IsYes(string s) =>
+            s.Equals("Y", StringComparison.OrdinalIgnoreCase) || s.Equals("Yes", StringComparison.OrdinalIgnoreCase)
+            || s.Equals("True", StringComparison.OrdinalIgnoreCase);
 
         private static List<string> SplitList(string s) =>
             string.IsNullOrWhiteSpace(s)

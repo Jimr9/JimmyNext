@@ -1,40 +1,24 @@
-; Route 66 On The Air (R66OTA) -- 2026 event, 27th annual, 100th anniversary of Route 66.
-; Organizer: Citrus Belt Amateur Radio Club (CBARC) / W6JBT, San Bernardino, CA.
-; Event window: 2026-09-12 0001 UTC through 2026-09-20 2359 UTC.
-; Sources cross-checked 2026-09-12: w6jbt.org's own participating-clubs page, route66ota.com
-; (W6C = San Bernardino/CBARC confirmed identically on both), and independent research that
-; additionally cross-referenced Oklahoma ARRL's own local confirmation for W6J/W6K/W6L.
-;
-; KNOWN DISCREPANCY, left unresolved rather than silently "fixed": some 2026 event publicity
-; describes 24 or 25 participating stations, but the explicit published callsign list both
-; research passes independently arrived at is this 23-callsign set. Do not invent additional
-; callsigns to reconcile that gap -- if a genuine 24th/25th station's callsign surfaces from
-; an authoritative source, add it then.
-;
-; Year-specific: 2025's roster included W6U and W6V -- neither is in the 2026 list. Do not
-; carry forward a prior year's callsign on the assumption it still participates.
-;
-; callsign  ; city/location (informational only -- matching uses the callsign alone)
-W6A         ; Santa Monica, CA -- Westside Amateur Radio Club
-W6B         ; Los Angeles, CA -- Westside Amateur Radio Club
-W6C         ; San Bernardino, CA -- Citrus Belt Amateur Radio Club (route66ota.com's live station)
-W6D         ; Victorville, CA -- Citrus Belt Amateur Radio Club
-W6E         ; Barstow, CA -- Barstow Amateur Radio Club
-W6F         ; Kingman, AZ -- Hualapai Amateur Radio Club
-W6G         ; Flagstaff, AZ -- Northern Arizona DX Association
-W6H         ; Albuquerque, NM -- Albuquerque DX Association
-W6I         ; Amarillo, TX -- Panhandle Amateur Radio Club
-W6J         ; Elk City / western OK -- confirmed via OK ARRL
-W6K         ; Oklahoma City, OK -- confirmed via OK ARRL
-W6L         ; Tulsa / eastern OK -- confirmed via OK ARRL
-W6M         ; Tribune, KS -- Western Kansas Amateur Radio Club
-W6N         ; Joplin, MO -- Joplin Amateur Radio Club
-W6O         ; Lebanon, MO
-W6P         ; St. Louis, MO -- St. Louis Amateur Radio Club
-W6Q         ; Chicago, IL -- Six Meter Club of Chicago
-W6R         ; Springfield, MO -- Southwest Missouri Amateur Radio Club
-W6S         ; Arizona Rover
-W6T         ; Arizona Rover
-W6W         ; Rover / special Route 66 station
-W6Y         ; Rover / special Route 66 station -- precise 2026 role not independently confirmed
-W6Z         ; Special Route 66 station
+; Route 66 On The Air 2026 -- the 22 participating stations as listed live on w6jbt.org (reviewed 2026-10-06).
+; W6Y was a 2025 station and is not in the 2026 list.
+W6A       ; 2026 station
+W6B       ; 2026 station
+W6C       ; 2026 station
+W6D       ; 2026 station
+W6E       ; 2026 station
+W6F       ; 2026 station
+W6G       ; 2026 station
+W6H       ; 2026 station
+W6I       ; 2026 station
+W6J       ; 2026 station
+W6K       ; 2026 station
+W6L       ; 2026 station
+W6M       ; 2026 station
+W6N       ; 2026 station
+W6O       ; 2026 station
+W6P       ; 2026 station
+W6Q       ; 2026 station
+W6R       ; 2026 station
+W6S       ; 2026 station
+W6T       ; 2026 station
+W6W       ; 2026 station
+W6Z       ; 2026 station

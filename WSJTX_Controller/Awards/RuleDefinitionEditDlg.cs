@@ -34,7 +34,7 @@ namespace WSJTX_Controller
         // ── Confirmation & Target tab ────────────────────────────────────────
         private ComboBox _confirmationCb, _targetTypeCb;
         // Confirmation Requires = Sources: which channels confirm (D1, 2026-09-28).
-        private CheckBox _srcLotwCb, _srcQrzCb, _srcEqslCb, _srcCardCb;
+        private CheckBox _srcLotwCb, _srcQrzCb, _srcEqslCb, _srcEqslAgCb, _srcCardCb;
         private NumericUpDown _thresholdNum;
         private TextBox _levelsTb;
         private Label _thresholdLbl, _levelsLbl, _levelsHintLbl;
@@ -52,8 +52,8 @@ namespace WSJTX_Controller
                 ? (existing != null ? $"New Rule Definition (from {existing.Name})" : "New Rule Definition")
                 : $"Edit Rule Definition — {existing.Name}";
             StartPosition   = FormStartPosition.CenterParent;
-            MinimumSize     = new Size(560, 480);
-            Size            = new Size(600, 540);
+            MinimumSize     = new Size(600, 480);
+            Size            = new Size(640, 540);
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox     = true;
             MinimizeBox     = false;
@@ -234,7 +234,7 @@ namespace WSJTX_Controller
         private void UpdateSourcesEnabled()
         {
             bool on = (string)_confirmationCb.SelectedItem == RuleConfirmation.Sources.ToString();
-            foreach (var cb in new[] { _srcLotwCb, _srcQrzCb, _srcEqslCb, _srcCardCb })
+            foreach (var cb in new[] { _srcLotwCb, _srcQrzCb, _srcEqslCb, _srcEqslAgCb, _srcCardCb })
                 if (cb != null) cb.Enabled = on;
         }
 
@@ -270,6 +270,7 @@ namespace WSJTX_Controller
             _srcQrzCb  = Source("QRZ", "QRZ confirms", 250);
             _srcEqslCb = Source("eQSL", "eQSL confirms", 310);
             _srcCardCb = Source("Paper card", "Paper card confirms", 375);
+            _srcEqslAgCb = Source("eQSL (AG)", "eQSL from an Authenticity Guaranteed sender confirms", 470);
             y += 32;
 
             page.Controls.Add(MakeLabel("Target Type:", 10, y));
@@ -375,6 +376,7 @@ namespace WSJTX_Controller
             _srcQrzCb.Checked  = sources.Contains(RuleConfirmationSources.Qrz);
             _srcEqslCb.Checked = sources.Contains(RuleConfirmationSources.Eqsl);
             _srcCardCb.Checked = sources.Contains(RuleConfirmationSources.Card);
+            _srcEqslAgCb.Checked = sources.Contains(RuleConfirmationSources.EqslAg);
             UpdateSourcesEnabled();
             _targetTypeCb.SelectedItem   = (d?.Target ?? RuleTargetType.Count).ToString();
             _thresholdNum.Value          = Math.Max(1, d?.Threshold ?? 1);
@@ -456,6 +458,7 @@ namespace WSJTX_Controller
                 if (_srcQrzCb.Checked)  confirmationSources.Add(RuleConfirmationSources.Qrz);
                 if (_srcEqslCb.Checked) confirmationSources.Add(RuleConfirmationSources.Eqsl);
                 if (_srcCardCb.Checked) confirmationSources.Add(RuleConfirmationSources.Card);
+                if (_srcEqslAgCb.Checked) confirmationSources.Add(RuleConfirmationSources.EqslAg);
                 if (confirmationSources.Count == 0)
                 {
                     MessageBox.Show(this, "Tick at least one confirmation source when Confirmation Requires is Sources.",
@@ -494,6 +497,16 @@ namespace WSJTX_Controller
                 Endorsements    = (endBands.Count > 0 || endModes.Count > 0)
                                     ? new RuleEndorsements { Bands = endBands, Modes = endModes }
                                     : null,
+                // Not on this dialog: kept as the award had them (2026-10-06 -- saving used to drop
+                // Basis and an Honor Roll-style dynamic threshold).
+                Basis           = (_original ?? _prefill)?.Basis ?? RuleBasis.Worked,
+                ThresholdFrom   = (_original ?? _prefill)?.ThresholdFrom,
+                ThresholdOffset = (_original ?? _prefill)?.ThresholdOffset ?? 0,
+                ExcludeBands    = new List<string>((_original ?? _prefill)?.ExcludeBands ?? new List<string>()),
+                DxccIn          = new List<string>((_original ?? _prefill)?.DxccIn ?? new List<string>()),
+                ExcludeCallsigns = new List<string>((_original ?? _prefill)?.ExcludeCallsigns ?? new List<string>()),
+                DcCountsAsMaryland = (_original ?? _prefill)?.DcCountsAsMaryland ?? false,
+                ManualChecks    = (_original ?? _prefill)?.ManualChecks,
             };
 
             string path = _original?.SourceFile ?? Path.Combine(RuleLoader.RulesFolder, id + ".ini");

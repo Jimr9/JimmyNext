@@ -53,6 +53,17 @@ namespace WSJTX_Controller
         // if it's confirmed via a service not yet tracked here (see Next Build TODO item 1).
         public List<string> LotwConfirmedItems;
         public List<string> QrzConfirmedItems;
+        // 2026-10-06: the other channels, each separate -- an eQSL confirmation, one from an AG
+        // sender, and a paper card. Informational like the two above; the accepted ones are in
+        // ConfirmedItems.
+        public List<string> EqslConfirmedItems;
+        public List<string> EqslAgConfirmedItems;
+        public List<string> CardConfirmedItems;
+
+        // A confirmed-basis checklist (Target=All, Basis=Confirmed): items worked but not yet
+        // confirmed by an accepted source -- still needed for completion, but not to WORK again
+        // (StillNeeded, which hunting and live tags use, stays worked-based). Null otherwise.
+        public List<string> AwaitingConfirmation;
 
         // Item -> distinct bands it was worked on (band-ordered, low to high), for UI display
         // ("which band(s) did I work this station/entity/etc. on"). GroupBy != None only.
@@ -237,7 +248,7 @@ namespace WSJTX_Controller
 
             var whereParts = new List<string>();
             var parms = new List<SQLiteParameter>();
-            AddGroupByFilter(def.GroupBy, whereParts);
+            AddGroupByFilter(def, whereParts);
 
             var bands = ResolveBandsForEvaluation(def.Bands, bandOverride);
             if (bands.Count > 0)
@@ -250,6 +261,19 @@ namespace WSJTX_Controller
                     parms.Add(new SQLiteParameter(p, bands[i].ToLowerInvariant()));
                 }
                 whereParts.Add($"band IN ({string.Join(",", names)})");
+            }
+            for (int i = 0; i < def.ExcludeBands.Count; i++)
+            {
+                whereParts.Add($"LOWER(band) != @xband{i}");
+                parms.Add(new SQLiteParameter($"@xband{i}", def.ExcludeBands[i].ToLowerInvariant()));
+            }
+            var dxccIn = def.DxccIn.Select(d => int.TryParse(d, out int n) ? n : -1).Where(n => n > 0).ToList();
+            if (dxccIn.Count > 0)
+                whereParts.Add($"{DxccExpression(def)} IN ({string.Join(",", dxccIn)})");
+            for (int i = 0; i < def.ExcludeCallsigns.Count; i++)
+            {
+                whereParts.Add($"UPPER(callsign) NOT LIKE @xcall{i} ESCAPE '\\'");
+                parms.Add(new SQLiteParameter($"@xcall{i}", WildcardToLike(def.ExcludeCallsigns[i])));
             }
 
             var modes = modeOverride != null ? new List<string> { modeOverride } : def.Modes;
@@ -267,7 +291,7 @@ namespace WSJTX_Controller
 
             if (!string.IsNullOrWhiteSpace(def.CallsignPattern))
             {
-                whereParts.Add("UPPER(callsign) LIKE @callPattern");
+                whereParts.Add("UPPER(callsign) LIKE @callPattern ESCAPE '\\'");
                 parms.Add(new SQLiteParameter("@callPattern", WildcardToLike(def.CallsignPattern)));
             }
 
@@ -277,15 +301,18 @@ namespace WSJTX_Controller
                 parms.Add(new SQLiteParameter("@sig", def.Sig.ToUpperInvariant()));
             }
 
+            // Dates compare as UTC yyyyMMddHHmm (a date alone is the whole day): an event window
+            // like "2026-07-01 1300" to "2026-07-08 0400" counts to the minute (2026-10-06).
+            const string when = "(qso_date || SUBSTR(IFNULL(time_on,'') || '0000', 1, 4))";
             if (!string.IsNullOrWhiteSpace(def.DateFrom))
             {
-                whereParts.Add("qso_date >= @dateFrom");
-                parms.Add(new SQLiteParameter("@dateFrom", CompactDate(def.DateFrom)));
+                whereParts.Add($"{when} >= @dateFrom");
+                parms.Add(new SQLiteParameter("@dateFrom", CompactDateTime(def.DateFrom, false)));
             }
             if (!string.IsNullOrWhiteSpace(def.DateTo))
             {
-                whereParts.Add("qso_date <= @dateTo");
-                parms.Add(new SQLiteParameter("@dateTo", CompactDate(def.DateTo)));
+                whereParts.Add($"{when} <= @dateTo");
+                parms.Add(new SQLiteParameter("@dateTo", CompactDateTime(def.DateTo, true)));
             }
 
             string where = whereParts.Count > 0 ? "WHERE " + string.Join(" AND ", whereParts) : "";
@@ -295,7 +322,7 @@ namespace WSJTX_Controller
             else if (def.GroupBy == RuleGroupBy.Prefix)
                 EvaluatePrefixGroup(def, conn, where, parms, confirmExpr, universe, limitTo, result);
             else
-                EvaluateGrouped(def, conn, GroupByExpression(def.GroupBy), where, parms, confirmExpr, universe, limitTo, result);
+                EvaluateGrouped(def, conn, GroupByExpression(def), where, parms, confirmExpr, universe, limitTo, result);
 
             // Dynamic Target=Count threshold (def.ThresholdFrom set, e.g. Honor Roll) --
             // resolved independently of the grouped query above, right before it's consumed.
@@ -349,17 +376,14 @@ namespace WSJTX_Controller
         {
             var workedSet    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var confirmedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var lotwSet      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var qrzSet       = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sources      = new Evidence();
             var bandsByItem   = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
 
             using (var cmd = conn.CreateCommand())
             {
                 cmd.CommandText =
                     $"SELECT {groupExpr} AS g, MAX(CASE WHEN {confirmExpr} THEN 1 ELSE 0 END) AS conf, " +
-                    $"GROUP_CONCAT(DISTINCT band) AS bands, " +
-                    $"MAX(CASE WHEN lotw_qsl_rcvd='Y' THEN 1 ELSE 0 END) AS lotwConf, " +
-                    $"MAX(CASE WHEN qrz_qsl_rcvd='Y' THEN 1 ELSE 0 END) AS qrzConf " +
+                    $"GROUP_CONCAT(DISTINCT band) AS bands, {Evidence.Columns} " +
                     $"FROM qso {where} GROUP BY g;";
                 foreach (var p in parms) cmd.Parameters.Add(p);
                 using (var r = cmd.ExecuteReader())
@@ -372,13 +396,12 @@ namespace WSJTX_Controller
                         workedSet.Add(g);
                         if (!r.IsDBNull(1) && Convert.ToInt32(r.GetValue(1)) != 0) confirmedSet.Add(g);
                         if (!r.IsDBNull(2)) bandsByItem[g] = OrderBands(r.GetString(2).Split(','));
-                        if (!r.IsDBNull(3) && Convert.ToInt32(r.GetValue(3)) != 0) lotwSet.Add(g);
-                        if (!r.IsDBNull(4) && Convert.ToInt32(r.GetValue(4)) != 0) qrzSet.Add(g);
+                        sources.Read(r, 3, g);
                     }
                 }
             }
 
-            FinishGrouped(def, workedSet, confirmedSet, lotwSet, qrzSet, bandsByItem, universe, limitTo, result);
+            FinishGrouped(def, workedSet, confirmedSet, sources, bandsByItem, universe, limitTo, result);
         }
 
         // GroupBy=Prefix is computed in C# (see WpxPrefixOf), so it can't use the
@@ -390,13 +413,12 @@ namespace WSJTX_Controller
         {
             var workedSet    = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var confirmedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var lotwSet      = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var qrzSet       = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var sources      = new Evidence();
             var bandsByItem  = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
 
             using (var cmd = conn.CreateCommand())
             {
-                cmd.CommandText = $"SELECT callsign, wpx_prefix, ({confirmExpr}), band, lotw_qsl_rcvd, qrz_qsl_rcvd FROM qso {where};";
+                cmd.CommandText = $"SELECT callsign, wpx_prefix, ({confirmExpr}), band, {Evidence.Columns} FROM qso {where};";
                 foreach (var p in parms) cmd.Parameters.Add(p);
                 using (var r = cmd.ExecuteReader())
                 {
@@ -420,14 +442,13 @@ namespace WSJTX_Controller
                                 set.Add(band);
                             }
                         }
-                        if (!r.IsDBNull(4) && r.GetString(4) == "Y") lotwSet.Add(pfx);
-                        if (!r.IsDBNull(5) && r.GetString(5) == "Y") qrzSet.Add(pfx);
+                        sources.Read(r, 4, pfx);
                     }
                 }
             }
 
             var orderedBandsByItem = bandsByItem.ToDictionary(kv => kv.Key, kv => OrderBands(kv.Value), StringComparer.OrdinalIgnoreCase);
-            FinishGrouped(def, workedSet, confirmedSet, lotwSet, qrzSet, orderedBandsByItem, universe, limitTo, result);
+            FinishGrouped(def, workedSet, confirmedSet, sources, orderedBandsByItem, universe, limitTo, result);
         }
 
         // Canonical low-to-high band order (matches AdifImporter's frequency-ascending band
@@ -447,8 +468,7 @@ namespace WSJTX_Controller
                  .ToList();
 
         private static void FinishGrouped(
-            RuleDefinition def, HashSet<string> workedSet, HashSet<string> confirmedSet,
-            HashSet<string> lotwSet, HashSet<string> qrzSet,
+            RuleDefinition def, HashSet<string> workedSet, HashSet<string> confirmedSet, Evidence sources,
             Dictionary<string, List<string>> bandsByItem,
             HashSet<string> universe, HashSet<string> limitTo, RuleResult result)
         {
@@ -458,12 +478,9 @@ namespace WSJTX_Controller
             {
                 workedSet    = new HashSet<string>(workedSet,    StringComparer.OrdinalIgnoreCase);
                 confirmedSet = new HashSet<string>(confirmedSet, StringComparer.OrdinalIgnoreCase);
-                lotwSet      = new HashSet<string>(lotwSet,      StringComparer.OrdinalIgnoreCase);
-                qrzSet       = new HashSet<string>(qrzSet,       StringComparer.OrdinalIgnoreCase);
                 workedSet.IntersectWith(limitTo);
                 confirmedSet.IntersectWith(limitTo);
-                lotwSet.IntersectWith(limitTo);
-                qrzSet.IntersectWith(limitTo);
+                sources.IntersectWith(limitTo);
             }
 
             // For a checklist-style (ALL) award, "worked"/"confirmed" should reflect
@@ -474,36 +491,35 @@ namespace WSJTX_Controller
             {
                 workedSet    = new HashSet<string>(workedSet,    StringComparer.OrdinalIgnoreCase);
                 confirmedSet = new HashSet<string>(confirmedSet, StringComparer.OrdinalIgnoreCase);
-                lotwSet      = new HashSet<string>(lotwSet,      StringComparer.OrdinalIgnoreCase);
-                qrzSet       = new HashSet<string>(qrzSet,       StringComparer.OrdinalIgnoreCase);
                 workedSet.IntersectWith(universe);
                 confirmedSet.IntersectWith(universe);
-                lotwSet.IntersectWith(universe);
-                qrzSet.IntersectWith(universe);
+                sources.IntersectWith(universe);
             }
 
             result.Worked    = workedSet.Count;
             result.Confirmed = confirmedSet.Count;
             result.WorkedItems    = workedSet.OrderBy(w => w, StringComparer.OrdinalIgnoreCase).ToList();
             result.ConfirmedItems = confirmedSet.OrderBy(w => w, StringComparer.OrdinalIgnoreCase).ToList();
-            result.LotwConfirmedItems = lotwSet.OrderBy(w => w, StringComparer.OrdinalIgnoreCase).ToList();
-            result.QrzConfirmedItems  = qrzSet.OrderBy(w => w, StringComparer.OrdinalIgnoreCase).ToList();
+            result.LotwConfirmedItems   = Sorted(sources.Lotw);
+            result.QrzConfirmedItems    = Sorted(sources.Qrz);
+            result.EqslConfirmedItems   = Sorted(sources.Eqsl);
+            result.EqslAgConfirmedItems = Sorted(sources.EqslAg);
+            result.CardConfirmedItems   = Sorted(sources.Card);
             result.WorkedBands    = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var item in workedSet)
                 if (bandsByItem.TryGetValue(item, out var bands))
                     result.WorkedBands[item] = bands;
 
-            // StillNeeded is always worked-based -- a station drops off the needed list as
-            // soon as it's logged, not once it's separately confirmed via LoTW/QRZ. Confirmed/
-            // ConfirmedItems are still tracked above (via the real confirmExpr) purely as an
-            // informational annotation the Awards tab shows per item; Confirmation never gates
-            // completion for a Target=All Rule Definition, regardless of its Requires= setting
-            // (a Count/Levels award MAY opt into confirmation-gated completion via Basis=
-            // CONFIRMED -- see ApplyTarget and RuleBasis's own comment -- but Target=All's
-            // checklist semantics are deliberately never overridable this way).
+            // StillNeeded is always worked-based -- a station drops off the needed list as soon as
+            // it's logged, so hunting and live tags never chase a station already worked. A
+            // confirmed-basis checklist's completion is ApplyTarget's; what it still waits for
+            // (worked, no accepted confirmation yet) is AwaitingConfirmation.
             if (def.Target == RuleTargetType.All && universe != null)
             {
                 result.StillNeeded = universe.Where(u => !workedSet.Contains(u)).OrderBy(u => u).ToList();
+                if (def.Basis == RuleBasis.Confirmed)
+                    result.AwaitingConfirmation = universe.Where(u => workedSet.Contains(u) && !confirmedSet.Contains(u))
+                        .OrderBy(u => u).ToList();
             }
 
             // Independent of Target/StillNeeded above -- see the field's own comment on
@@ -523,14 +539,16 @@ namespace WSJTX_Controller
         private static void ApplyTarget(RuleDefinition def, RuleResult result, HashSet<string> universe, int effectiveThreshold)
         {
             result.EffectiveThreshold = effectiveThreshold;
-            int basis = (def.Target != RuleTargetType.All && def.Basis == RuleBasis.Confirmed)
-                ? result.Confirmed : result.Worked;
+            int basis = def.Basis == RuleBasis.Confirmed ? result.Confirmed : result.Worked;
 
             switch (def.Target)
             {
                 case RuleTargetType.All:
+                    // Worked basis: every item worked. Confirmed basis: every item confirmed by an
+                    // accepted source -- working everything is not completion (2026-10-06).
                     if (universe != null)
-                        result.Completed = result.StillNeeded != null && result.StillNeeded.Count == 0;
+                        result.Completed = result.StillNeeded != null && result.StillNeeded.Count == 0
+                            && (def.Basis != RuleBasis.Confirmed || (result.AwaitingConfirmation?.Count ?? 0) == 0);
                     break;
 
                 case RuleTargetType.Count:
@@ -552,45 +570,74 @@ namespace WSJTX_Controller
         // The location an award counts for a contact (2026-10-04): the location LoTW CONFIRMED when
         // LoTW confirmed the contact with one (kept in lotw_*, apart from the logged location),
         // otherwise the logged location. The logged fields are never changed by a confirmation.
-        internal static string AwardText(string col, string lotwCol) =>
-            $"(CASE WHEN lotw_qsl_rcvd='Y' AND TRIM({lotwCol})!='' THEN {lotwCol} ELSE {col} END)";
-        internal static string AwardNumber(string col, string lotwCol) =>
-            $"(CASE WHEN lotw_qsl_rcvd='Y' AND {lotwCol}>0 THEN {lotwCol} ELSE {col} END)";
+        internal static string AwardText(string col, string lotwCol) => AwardText(col, lotwCol, true);
+        internal static string AwardNumber(string col, string lotwCol) => AwardNumber(col, lotwCol, true);
 
-        private static string GroupByExpression(RuleGroupBy g)
+        // useLotw = false: the logged location only -- an award that does not accept LoTW never
+        // counts a contact where LoTW says it was (RuleDefinition.UsesLotwLocation).
+        internal static string AwardText(string col, string lotwCol, bool useLotw) => useLotw
+            ? $"(CASE WHEN lotw_qsl_rcvd='Y' AND TRIM({lotwCol})!='' THEN {lotwCol} ELSE {col} END)" : col;
+        internal static string AwardNumber(string col, string lotwCol, bool useLotw) => useLotw
+            ? $"(CASE WHEN lotw_qsl_rcvd='Y' AND {lotwCol}>0 THEN {lotwCol} ELSE {col} END)" : col;
+
+        private static string DxccExpression(RuleDefinition def) => AwardNumber("dxcc", "lotw_dxcc", def.UsesLotwLocation);
+
+        // The state an award counts; "DC" as "MD" where the sponsor says so (ARRL WAS, QRZ US).
+        private static string StateExpression(RuleDefinition def)
         {
-            switch (g)
+            string st = $"UPPER(TRIM({AwardText("state", "lotw_state", def.UsesLotwLocation)}))";
+            return def.DcCountsAsMaryland ? $"(CASE WHEN {st}='DC' THEN 'MD' ELSE {st} END)" : st;
+        }
+
+        // A county is its state AND its name (2026-10-06): "Washington" in Oregon and in Utah are two
+        // counties. ADIF CNTY is "ST,Name"; a bare name takes the contact's state. Spaces trimmed.
+        private static string CountyExpression(RuleDefinition def)
+        {
+            string c = $"UPPER(TRIM({AwardText("county", "lotw_cnty", def.UsesLotwLocation)}))";
+            string st = $"UPPER(TRIM({AwardText("state", "lotw_state", def.UsesLotwLocation)}))";
+            return $"(CASE WHEN {c} GLOB '[A-Z][A-Z],*' THEN REPLACE({c}, ', ', ',') WHEN {st} != '' THEN {st} || ',' || {c} ELSE '' END)";
+        }
+
+        // A grid counts only if it is a real Maidenhead locator: field letters A-R, square digits.
+        private static string GridText(RuleDefinition def) => $"UPPER(TRIM({AwardText("grid", "lotw_grid", def.UsesLotwLocation)}))";
+        private static string ValidGrid4(string g) => $"SUBSTR({g},1,4) GLOB '[A-R][A-R][0-9][0-9]'";
+
+        private static string GroupByExpression(RuleDefinition def)
+        {
+            bool l = def.UsesLotwLocation;
+            switch (def.GroupBy)
             {
-                case RuleGroupBy.Dxcc:      return AwardNumber("dxcc", "lotw_dxcc");
+                case RuleGroupBy.Dxcc:      return DxccExpression(def);
                 case RuleGroupBy.Country:   return "country";
-                case RuleGroupBy.State:     return $"UPPER(TRIM({AwardText("state", "lotw_state")}))";
-                case RuleGroupBy.CqZone:    return AwardNumber("cq_zone", "lotw_cqz");
-                case RuleGroupBy.ItuZone:   return AwardNumber("itu_zone", "lotw_ituz");
+                case RuleGroupBy.State:     return StateExpression(def);
+                case RuleGroupBy.CqZone:    return AwardNumber("cq_zone", "lotw_cqz", l);
+                case RuleGroupBy.ItuZone:   return AwardNumber("itu_zone", "lotw_ituz", l);
                 case RuleGroupBy.Continent: return "UPPER(TRIM(continent))";
-                case RuleGroupBy.County:    return $"UPPER(TRIM({AwardText("county", "lotw_cnty")}))";
-                case RuleGroupBy.Grid:      return $"UPPER(TRIM({AwardText("grid", "lotw_grid")}))";
-                case RuleGroupBy.Grid4:     return $"UPPER(SUBSTR(TRIM({AwardText("grid", "lotw_grid")}),1,4))";
+                case RuleGroupBy.County:    return CountyExpression(def);
+                case RuleGroupBy.Grid:      return GridText(def);
+                case RuleGroupBy.Grid4:     return $"SUBSTR({GridText(def)},1,4)";
                 case RuleGroupBy.Iota:      return "UPPER(TRIM(iota))";
                 case RuleGroupBy.SigInfo:   return "UPPER(TRIM(sig_info))";
                 case RuleGroupBy.DarcDok:   return "UPPER(TRIM(darc_dok))";
                 case RuleGroupBy.Callsign:  return "callsign";
-                default: throw new InvalidOperationException("GroupByExpression not applicable for " + g);
+                default: throw new InvalidOperationException("GroupByExpression not applicable for " + def.GroupBy);
             }
         }
 
-        private static void AddGroupByFilter(RuleGroupBy g, List<string> whereParts)
+        private static void AddGroupByFilter(RuleDefinition def, List<string> whereParts)
         {
-            switch (g)
+            bool l = def.UsesLotwLocation;
+            switch (def.GroupBy)
             {
-                case RuleGroupBy.Dxcc:      whereParts.Add($"{AwardNumber("dxcc", "lotw_dxcc")} > 0"); break;
+                case RuleGroupBy.Dxcc:      whereParts.Add($"{DxccExpression(def)} > 0"); break;
                 case RuleGroupBy.Country:   whereParts.Add("country != ''"); break;
-                case RuleGroupBy.State:     whereParts.Add($"TRIM({AwardText("state", "lotw_state")}) != ''"); break;
-                case RuleGroupBy.CqZone:    whereParts.Add($"{AwardNumber("cq_zone", "lotw_cqz")} > 0"); break;
-                case RuleGroupBy.ItuZone:   whereParts.Add($"{AwardNumber("itu_zone", "lotw_ituz")} > 0"); break;
+                case RuleGroupBy.State:     whereParts.Add($"{StateExpression(def)} != ''"); break;
+                case RuleGroupBy.CqZone:    whereParts.Add($"{AwardNumber("cq_zone", "lotw_cqz", l)} > 0"); break;
+                case RuleGroupBy.ItuZone:   whereParts.Add($"{AwardNumber("itu_zone", "lotw_ituz", l)} > 0"); break;
                 case RuleGroupBy.Continent: whereParts.Add("TRIM(continent) != ''"); break;
-                case RuleGroupBy.County:    whereParts.Add($"TRIM({AwardText("county", "lotw_cnty")}) != ''"); break;
-                case RuleGroupBy.Grid:      whereParts.Add($"TRIM({AwardText("grid", "lotw_grid")}) != ''"); break;
-                case RuleGroupBy.Grid4:     whereParts.Add($"LENGTH(TRIM({AwardText("grid", "lotw_grid")})) >= 4"); break;
+                case RuleGroupBy.County:    whereParts.Add($"{CountyExpression(def)} GLOB '[A-Z][A-Z],?*'"); break;
+                case RuleGroupBy.Grid:      whereParts.Add($"{ValidGrid4(GridText(def))}"); break;
+                case RuleGroupBy.Grid4:     whereParts.Add($"{ValidGrid4(GridText(def))}"); break;
                 case RuleGroupBy.Iota:      whereParts.Add("TRIM(iota) != ''"); break;
                 case RuleGroupBy.SigInfo:   whereParts.Add("TRIM(sig_info) != ''"); break;
                 case RuleGroupBy.DarcDok:   whereParts.Add("TRIM(darc_dok) != ''"); break;
@@ -599,6 +646,53 @@ namespace WSJTX_Controller
                     // None: no filter.
             }
         }
+
+        // ── Confirmation evidence, one channel at a time ─────────────────────────
+        // A paper card: Nexus's card flag, carried in the read copy as a QSL_RCVD=Y extra. An AG
+        // eQSL: an eQSL confirmation AND the sender's AG mark, which Jimmy keeps on the contact as
+        // APP_JIMMY_EQSL_AG (from eQSL's EQSL_AG / APP_EQSL_AG -- NexusLogbookService.KeepEqslAg).
+        internal const string EqslAgTag = "APP_JIMMY_EQSL_AG";
+        private const string CardExpr = "EXISTS(SELECT 1 FROM qso_extra_field e WHERE e.qso_id=qso.id AND e.tag_name='QSL_RCVD' AND e.tag_value='Y')";
+        private static readonly string EqslAgExpr =
+            $"(eqsl_qsl_rcvd='Y' AND EXISTS(SELECT 1 FROM qso_extra_field e WHERE e.qso_id=qso.id AND e.tag_name='{EqslAgTag}' AND e.tag_value='Y'))";
+
+        private static string SourceExpression(string source)
+        {
+            switch (source)
+            {
+                case RuleConfirmationSources.Lotw: return "lotw_qsl_rcvd='Y'";
+                case RuleConfirmationSources.Qrz: return "qrz_qsl_rcvd='Y'";
+                case RuleConfirmationSources.Eqsl: return "eqsl_qsl_rcvd='Y'";
+                case RuleConfirmationSources.EqslAg: return EqslAgExpr;
+                case RuleConfirmationSources.Card: return CardExpr;
+                default: return "0";
+            }
+        }
+
+        // Which channels confirmed each item, kept apart.
+        private sealed class Evidence
+        {
+            public static readonly string Columns = string.Join(", ",
+                new[] { RuleConfirmationSources.Lotw, RuleConfirmationSources.Qrz, RuleConfirmationSources.Eqsl,
+                        RuleConfirmationSources.EqslAg, RuleConfirmationSources.Card }
+                .Select(src => $"MAX(CASE WHEN {SourceExpression(src)} THEN 1 ELSE 0 END)"));
+            public HashSet<string> Lotw = New(), Qrz = New(), Eqsl = New(), EqslAg = New(), Card = New();
+            private static HashSet<string> New() => new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            public void Read(SQLiteDataReader r, int first, string item)
+            {
+                var sets = new[] { Lotw, Qrz, Eqsl, EqslAg, Card };
+                for (int i = 0; i < sets.Length; i++)
+                    if (!r.IsDBNull(first + i) && Convert.ToInt64(r.GetValue(first + i)) != 0) sets[i].Add(item);
+            }
+
+            public void IntersectWith(HashSet<string> keep)
+            {
+                foreach (var set in new[] { Lotw, Qrz, Eqsl, EqslAg, Card }) set.IntersectWith(keep);
+            }
+        }
+
+        private static List<string> Sorted(HashSet<string> set) => set.OrderBy(w => w, StringComparer.OrdinalIgnoreCase).ToList();
 
         private static string ConfirmationExpression(RuleDefinition def)
         {
@@ -611,15 +705,7 @@ namespace WSJTX_Controller
                     // extra -- NexusMigration.Rebuild). Jimmy's own database never stores QSL_RCVD
                     // (its importers consume it), so on it CARD matches nothing -- it can never
                     // inflate a total.
-                    var parts = new List<string>();
-                    foreach (var s in def.ConfirmationSources)
-                    {
-                        if (s == RuleConfirmationSources.Lotw) parts.Add("lotw_qsl_rcvd='Y'");
-                        else if (s == RuleConfirmationSources.Qrz) parts.Add("qrz_qsl_rcvd='Y'");
-                        else if (s == RuleConfirmationSources.Eqsl) parts.Add("eqsl_qsl_rcvd='Y'");
-                        else if (s == RuleConfirmationSources.Card)
-                            parts.Add("EXISTS(SELECT 1 FROM qso_extra_field e WHERE e.qso_id=qso.id AND e.tag_name='QSL_RCVD' AND e.tag_value='Y')");
-                    }
+                    var parts = def.ConfirmationSources.Select(SourceExpression).Where(x => x != "0").ToList();
                     return parts.Count == 0 ? "0" : "(" + string.Join(" OR ", parts) + ")";
                 }
                 case RuleConfirmation.Lotw: return "lotw_qsl_rcvd='Y'";
@@ -631,14 +717,19 @@ namespace WSJTX_Controller
         }
 
         private static string WildcardToLike(string pattern) =>
-            pattern.Trim().ToUpperInvariant().Replace("*", "%").Replace("?", "_");
+            pattern.Trim().ToUpperInvariant().Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_")
+                   .Replace("*", "%").Replace("?", "_");
 
-        // Accepts "YYYY-MM-DD" (or an already-compact "YYYYMMDD") and returns the
-        // compact form qso_date is stored in.
-        private static string CompactDate(string iso)
+        // "yyyy-MM-dd" or "yyyy-MM-dd HHmm" (UTC; "HH:mm" too) -> yyyyMMddHHmm, the form EvaluateCore
+        // compares; a date alone is 0000 as a start, 2359 as an end. Null when it is neither.
+        internal static string CompactDateTime(string text, bool isEnd)
         {
-            string digits = new string(iso.Where(char.IsDigit).ToArray());
-            return digits.Length >= 8 ? digits.Substring(0, 8) : digits;
+            string digits = new string((text ?? "").Where(char.IsDigit).ToArray());
+            if (digits.Length != 8 && digits.Length != 12) return null;
+            if (!DateTime.TryParseExact(digits.Substring(0, 8), "yyyyMMdd", null, System.Globalization.DateTimeStyles.None, out _)) return null;
+            if (digits.Length == 8) return digits + (isEnd ? "2359" : "0000");
+            int hh = int.Parse(digits.Substring(8, 2)), mm = int.Parse(digits.Substring(10, 2));
+            return hh < 24 && mm < 60 ? digits : null;
         }
 
         // ── WPX-style prefix derivation ─────────────────────────────────────────

@@ -872,7 +872,15 @@ namespace WSJTX_Controller
             Confirmation = d.Confirmation,
             ConfirmationSources = new List<string>(d.ConfirmationSources),
             Target = d.Target,
+            Basis = d.Basis,
             Threshold = d.Threshold,
+            ThresholdFrom = d.ThresholdFrom,
+            ThresholdOffset = d.ThresholdOffset,
+            ExcludeBands = new List<string>(d.ExcludeBands),
+            DxccIn = new List<string>(d.DxccIn),
+            ExcludeCallsigns = new List<string>(d.ExcludeCallsigns),
+            DcCountsAsMaryland = d.DcCountsAsMaryland,
+            ManualChecks = d.ManualChecks,
             Levels = d.Levels.Select(l => new RuleLevel { Name = l.Name, Threshold = l.Threshold }).ToList(),
             Endorsements = d.Endorsements == null ? null : new RuleEndorsements
             {

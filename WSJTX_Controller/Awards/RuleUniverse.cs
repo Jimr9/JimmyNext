@@ -33,6 +33,10 @@ namespace WSJTX_Controller
         // (e.g. some sub-Antarctic islands) are classified there.
         public static readonly string[] Continents = { "NA", "SA", "EU", "AF", "AS", "OC", "AN" };
 
+        // The six inhabited continents WAC and QRZ World Continents ask for (2026-10-06): Antarctica
+        // is not one of them and can never stand in for another.
+        public static readonly string[] SixContinents = { "NA", "SA", "EU", "AF", "AS", "OC" };
+
         public static string[] CqZones =>
             Enumerable.Range(1, 40).Select(z => z.ToString()).ToArray();
 
@@ -98,6 +102,8 @@ namespace WSJTX_Controller
                 return new HashSet<string>(CaProvinces, cmp);
             if (universe.Equals("CONTINENTS", StringComparison.OrdinalIgnoreCase))
                 return new HashSet<string>(Continents, cmp);
+            if (universe.Equals("SIX_CONTINENTS", StringComparison.OrdinalIgnoreCase))
+                return new HashSet<string>(SixContinents, cmp);
             if (universe.Equals("CQ_ZONES", StringComparison.OrdinalIgnoreCase))
                 return new HashSet<string>(CqZones, cmp);
             if (universe.Equals("ITU_ZONES", StringComparison.OrdinalIgnoreCase))

@@ -25,6 +25,7 @@ namespace WSJTX_Controller
             sb.AppendLine($"Enabled={(def.Enabled ? "Y" : "N")}");
             sb.AppendLine($"Description={def.Description}");
             if (!string.IsNullOrEmpty(def.Website)) sb.AppendLine($"Website={def.Website}");
+            if (!string.IsNullOrEmpty(def.ManualChecks)) sb.AppendLine($"ManualChecks={def.ManualChecks}");
             sb.AppendLine();
 
             sb.AppendLine("[Match]");
@@ -37,6 +38,10 @@ namespace WSJTX_Controller
             if (!string.IsNullOrWhiteSpace(def.Sig)) sb.AppendLine($"Sig={def.Sig}");
             if (!string.IsNullOrWhiteSpace(def.DateFrom)) sb.AppendLine($"DateFrom={def.DateFrom}");
             if (!string.IsNullOrWhiteSpace(def.DateTo)) sb.AppendLine($"DateTo={def.DateTo}");
+            if (def.ExcludeBands.Count > 0) sb.AppendLine($"ExcludeBands={string.Join(",", def.ExcludeBands)}");
+            if (def.DxccIn.Count > 0) sb.AppendLine($"DxccIn={string.Join(",", def.DxccIn)}");
+            if (def.ExcludeCallsigns.Count > 0) sb.AppendLine($"ExcludeCallsigns={string.Join(",", def.ExcludeCallsigns)}");
+            if (def.DcCountsAsMaryland) sb.AppendLine("DcCountsAsMaryland=Y");
             sb.AppendLine();
 
             sb.AppendLine("[Confirmation]");
@@ -47,9 +52,7 @@ namespace WSJTX_Controller
 
             sb.AppendLine("[Target]");
             sb.AppendLine($"Type={def.Target}");
-            // Basis defaults to WORKED and is only meaningful for Count/Levels (RuleLoader
-            // rejects Basis=CONFIRMED with Type=ALL); omitted when default to keep an ordinary
-            // award's file exactly as plain as before this existed.
+            // Basis defaults to WORKED; omitted then, to keep an ordinary award's file plain.
             if (def.Basis != RuleBasis.Worked)
                 sb.AppendLine($"Basis={def.Basis}");
             if (def.Target == RuleTargetType.Count)

@@ -49,6 +49,10 @@ namespace WSJTX_Controller
             // Each row sent that pairs with a logged contact: the contact, and the row's location fields.
             public List<(NexusQso Logged, Dictionary<string, string> Location, string Label)> Located =
                 new List<(NexusQso, Dictionary<string, string>, string)>();
+            // Each row sent that pairs with a logged contact, with all its fields as received -- what
+            // a download says about that contact beyond what Nexus's merge keeps (eQSL's AG mark).
+            public List<(NexusQso Logged, Dictionary<string, string> Fields)> Paired =
+                new List<(NexusQso, Dictionary<string, string>)>();
         }
 
         internal static readonly string[] LocationTags = { "STATE", "CNTY", "COUNTRY", "DXCC", "CQZ", "ITUZ", "GRIDSQUARE" };
@@ -248,6 +252,7 @@ namespace WSJTX_Controller
                     var loc = LocationTags.Where(t => x.Row.Fields.ContainsKey(t))
                         .ToDictionary(t => t, t => x.Row.Fields[t].Trim(), StringComparer.OrdinalIgnoreCase);
                     result.Located.Add((logInOrder[x.Contact.Pos], loc, x.Row.Label));
+                    result.Paired.Add((logInOrder[x.Contact.Pos], x.Row.Fields));
                     x.Row.Raw = WithoutMergeFills(x.Row.Raw);
                     send.Add((x.Contact.Pos, x.Row));
                 }

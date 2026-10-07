@@ -1,4 +1,4 @@
-; 13 Colonies Special Event -- the 3 bonus stations (not required for Clean Sweep).
-WM3PEN   ; Bonus: Independence National Historical Park
-GB13COL  ; Bonus: United Kingdom tie-in station
-TM13COL  ; Bonus: France tie-in station
+; 13 Colonies Special Event 2026 -- the three bonus stations (13colonies.us, reviewed 2026-10-06).
+WM3PEN    ; Philadelphia
+GB13COL   ; Great Britain
+TM13COL   ; France

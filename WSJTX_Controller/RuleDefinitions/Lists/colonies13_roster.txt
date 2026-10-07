@@ -1,16 +1,14 @@
-; 13 Colonies Special Event -- the 13 official colony station callsigns.
-; Clean Sweep requires all 13. Bonus stations (not required for Clean Sweep):
-; WM3PEN, GB13COL, TM13COL.
-K2A   ; New Hampshire
-K2B   ; Virginia
-K2C   ; Rhode Island
-K2D   ; Connecticut
-K2E   ; New York
-K2F   ; Massachusetts
-K2G   ; Pennsylvania
-K2H   ; Maryland
-K2I   ; South Carolina
-K2J   ; New Jersey
-K2K   ; North Carolina
-K2L   ; Georgia
-K2M   ; Delaware
+; 13 Colonies Special Event 2026 -- the 13 colony stations (13colonies.us, reviewed 2026-10-06).
+K2A       ; New York
+K2B       ; Virginia
+K2C       ; Rhode Island
+K2D       ; Connecticut
+K2E       ; Delaware
+K2F       ; Maryland
+K2G       ; Georgia
+K2H       ; Massachusetts
+K2I       ; New Jersey
+K2J       ; North Carolina
+K2K       ; New Hampshire
+K2L       ; South Carolina
+K2M       ; Pennsylvania

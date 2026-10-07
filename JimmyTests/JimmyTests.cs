@@ -1444,6 +1444,7 @@ static class JimmyTests
         RuleEngineWorkedBandsTests();
         RuleEngineCountTargetStillNeededTests();
         RuleLoaderShippedAwardsParseTests();
+        AwardUpdateTests();
         RuleLoaderAddsNewStockAwardsTests();
         RuleLoaderBasisAndDynamicThresholdTests();
         RuleEngineDynamicThresholdAndBasisTests();
@@ -10974,6 +10975,193 @@ static class JimmyTests
         }
     }
 
+    // ── Award update, 2026-10-06: evidence kept apart, confirmed checklists, geography, events,
+    // eQSL AG, and replacing the whole stock set. Small synthetic logs only, never a real one.
+    static void AwardUpdateTests()
+    {
+        Console.WriteLine("\n── Awards 2026-10-06: sources, checklists, geography, AG, replacement ──");
+        string dir = Path.Combine(Path.GetTempPath(), "JimmyTest_Awards_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string rules = Path.GetDirectoryName(FindRepoFile(Path.Combine("WSJTX_Controller", "RuleDefinitions", "WAS.ini")) ?? "");
+            if (string.IsNullOrEmpty(rules)) { Console.WriteLine("  SKIP  AwardUpdateTests -- repo RuleDefinitions not found"); return; }
+            RuleDefinition Stock(string file) => RuleLoader.ParseAndValidate(Path.Combine(rules, file), out _);
+            RuleDefinition Def(string body)
+            {
+                string f = Path.Combine(dir, Guid.NewGuid().ToString("N") + ".ini");
+                File.WriteAllText(f, "[Award]\nId=T\nName=T\nFormatVersion=1\n" + body);
+                var d = RuleLoader.ParseAndValidate(f, out string err);
+                if (d == null) Console.WriteLine("    (load error: " + err + ")");
+                return d;
+            }
+
+            // Every shipped award loads, Ids are unique, personal band goals stay worked-based.
+            var all = Directory.GetFiles(rules, "*.ini").Select(f => RuleLoader.ParseAndValidate(f, out _)).ToList();
+            Check("every shipped award loads", all.All(d => d != null), true);
+            Check("shipped Ids are unique", all.Where(d => d != null).Select(d => d.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() == all.Count, true);
+            var personal = new[] { "160M", "80M", "60M", "40M", "30M", "20M", "17M", "15M", "12M", "10M", "6M" }.Select(b => Stock($"WAS_{b}.ini")).ToList();
+            Check("all 11 personal band goals ship, 60m included, each worked-based on its own band",
+                personal.All(d => d != null && d.Basis == RuleBasis.Worked && d.Target == RuleTargetType.All && d.Bands.Count == 1), true);
+            Check("a shipped version marks the set", RuleLoader.VersionOf(rules) != null, true);
+            Check("the replay-test award still ships", File.Exists(Path.Combine(rules, "_ReplayTestAward.ini")), true);
+            var wana = File.ReadAllLines(Path.Combine(rules, "Lists", "wana_entities.txt")).Where(l => l.Trim().Length > 0 && !l.StartsWith(";")).ToList();
+            Check("WANA list: RAC's 50 entities, each once", wana.Count == 50 && wana.Select(l => l.Split(';')[0].Trim()).Distinct().Count() == 50, true);
+
+            // A small log. Entity numbers stand for distinct DXCC entities.
+            string dbPath = Path.Combine(dir, "log.db");
+            using (var db = new LogbookDb(dbPath))
+            {
+                var conn = (System.Data.SQLite.SQLiteConnection)typeof(LogbookDb)
+                    .GetField("_conn", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(db);
+                int next = 1;
+                int Q(string call, int dxcc, string date = "20260801", string time = "1200", string band = "20m", string state = "",
+                      string lotw = "", string qrz = "", string eqsl = "", string county = "", string grid = "", string cont = "",
+                      string lotwState = "", string lotwUploaded = "")
+                {
+                    int id = next++;
+                    SeedQso(db, new Dictionary<string, object>
+                    {
+                        ["id"] = id, ["callsign"] = call, ["band"] = band, ["mode"] = "FT8", ["qso_date"] = date, ["time_on"] = time,
+                        ["dxcc"] = dxcc, ["state"] = state, ["county"] = county, ["grid"] = grid, ["continent"] = cont,
+                        ["lotw_qsl_rcvd"] = lotw, ["qrz_qsl_rcvd"] = qrz, ["eqsl_qsl_rcvd"] = eqsl, ["lotw_state"] = lotwState,
+                        ["lotw_uploaded_at"] = lotwUploaded, ["source"] = "TEST",
+                        ["dedup_key"] = $"{call}|{band}|FT8|{date}|{time}|{id}",
+                    });
+                    return id;
+                }
+                void Extra(int id, string tag, string value)
+                {
+                    using (var cmd = conn.CreateCommand())
+                    {
+                        cmd.CommandText = "INSERT INTO qso_extra_field (qso_id, tag_name, tag_value, ordinal) VALUES (@i,@t,@v,0);";
+                        cmd.Parameters.AddWithValue("@i", id); cmd.Parameters.AddWithValue("@t", tag); cmd.Parameters.AddWithValue("@v", value);
+                        cmd.ExecuteNonQuery();
+                    }
+                }
+
+                // Evidence, one channel each: 101 QRZ only, 102 LoTW only, 103 paper only, 104 eQSL only,
+                // 105 uploaded to LoTW but unconfirmed, 106 eQSL + AG Y, 107 eQSL + AG N, 108 AG Y without a
+                // confirmation, 109 eQSL with AG unknown, 110 LoTW and QRZ both.
+                Q("A1", 101, qrz: "Y"); Q("A2", 102, lotw: "Y"); Extra(Q("A3", 103), "QSL_RCVD", "Y");
+                Q("A4", 104, eqsl: "Y"); Q("A5", 105, lotwUploaded: "2026-08-02T00:00:00Z");
+                Extra(Q("A6", 106, eqsl: "Y"), RuleEngine.EqslAgTag, "Y"); Extra(Q("A7", 107, eqsl: "Y"), RuleEngine.EqslAgTag, "N");
+                Extra(Q("A8", 108), RuleEngine.EqslAgTag, "Y"); Q("A9", 109, eqsl: "Y"); Q("A10", 110, lotw: "Y", qrz: "Y");
+            }
+            string Items(RuleResult r) => string.Join(",", r.ConfirmedItems ?? new List<string>());
+            var arrl = RuleEngine.Evaluate(Stock("DXCC.ini"), dbPath);
+            CheckStr("ARRL DXCC: only LoTW and paper confirm", Items(arrl), "102,103,110");
+            var qrzDx = RuleEngine.Evaluate(Stock("QRZ_DXWorld.ini"), dbPath);
+            CheckStr("QRZ DX World: only QRZ confirms (a LoTW flag is not QRZ credit)", Items(qrzDx), "101,110");
+            var rac = RuleEngine.Evaluate(Def("[Match]\nGroupBy=Dxcc\n[Confirmation]\nRequires=CARD,LOTW,QRZ,EQSL_AG\n[Target]\nType=COUNT\nBasis=CONFIRMED\nThreshold=1\n"), dbPath);
+            CheckStr("RAC sources: card, LoTW, QRZ, and eQSL only with AG yes (not N, not unknown, not AG alone)", Items(rac), "101,102,103,106,110");
+            Check("an upload is never a confirmation", !arrl.ConfirmedItems.Contains("105") && arrl.WorkedItems.Contains("105"), true);
+            CheckStr("each channel kept apart: card", string.Join(",", arrl.CardConfirmedItems), "103");
+            CheckStr("each channel kept apart: AG eQSL", string.Join(",", arrl.EqslAgConfirmedItems), "106");
+
+            // eQSL AG from a download: explicit Y or N replaces, U or nothing leaves it.
+            string Ag(params (string, string)[] f) => NexusLogbookService.EqslAgOf(f.ToDictionary(x => x.Item1, x => x.Item2, StringComparer.OrdinalIgnoreCase));
+            Check("AG: EQSL_AG=Y and N are explicit", Ag(("EQSL_AG", "Y")) == "Y" && Ag(("EQSL_AG", "N")) == "N", true);
+            Check("AG: U, or no AG field, changes nothing", Ag(("EQSL_AG", "U")) == null && Ag(("CALL", "K1A")) == null, true);
+            Check("AG: the legacy APP_EQSL_AG=Y counts; its absence is not a no", Ag(("APP_EQSL_AG", "Y")) == "Y" && Ag(("EQSL_QSL_RCVD", "Y")) == null, true);
+
+            // Checklists: 49 states confirmed and one only worked -- the ARRL award is not complete,
+            // the personal 20m goal is, and the last state is not "still to work" for hunting.
+            string db2 = Path.Combine(dir, "states.db");
+            using (var db = new LogbookDb(db2))
+            {
+                int id = 1;
+                foreach (var st in RuleUniverse.Us50States)
+                    SeedQso(db, new Dictionary<string, object> { ["id"] = id++, ["callsign"] = "W" + st, ["band"] = "20m", ["mode"] = "FT8",
+                        ["qso_date"] = "20260801", ["time_on"] = "1200", ["dxcc"] = 291, ["state"] = st == "MD" ? "DC" : st,
+                        ["lotw_qsl_rcvd"] = st == "WY" ? "" : "Y", ["source"] = "TEST", ["dedup_key"] = "s" + st });
+                // A Canadian province code never fills a US state, and 60m never counts for ARRL.
+                SeedQso(db, new Dictionary<string, object> { ["id"] = id++, ["callsign"] = "VE3X", ["band"] = "20m", ["mode"] = "FT8",
+                    ["qso_date"] = "20260801", ["time_on"] = "1300", ["dxcc"] = 1, ["state"] = "WY", ["lotw_qsl_rcvd"] = "Y", ["source"] = "TEST", ["dedup_key"] = "ve" });
+                SeedQso(db, new Dictionary<string, object> { ["id"] = id++, ["callsign"] = "W7WY", ["band"] = "60m", ["mode"] = "FT8",
+                    ["qso_date"] = "20260801", ["time_on"] = "1400", ["dxcc"] = 291, ["state"] = "WY", ["lotw_qsl_rcvd"] = "Y", ["source"] = "TEST", ["dedup_key"] = "60" });
+            }
+            var was = RuleEngine.Evaluate(Stock("WAS.ini"), db2);
+            Check("ARRL WAS: 49 confirmed + 1 worked is not complete", !was.Completed && was.Confirmed == 49 && was.Worked == 50, true);
+            CheckStr("...Wyoming awaits confirmation (a VE WY and a 60m contact do not confirm it)", string.Join(",", was.AwaitingConfirmation), "WY");
+            Check("...and is not still to WORK (hunting stays worked-based)", was.StillNeeded.Count == 0, true);
+            Check("DC counts as Maryland where the sponsor says so", was.WorkedItems.Contains("MD"), true);
+            var goal = RuleEngine.Evaluate(Stock("WAS_20M.ini"), db2);
+            Check("personal 20m goal completes on worked", goal.Completed, true);
+
+            // Geography: counties are state + name; grids must be real; six continents only;
+            // a QRZ award uses the logged location, an ARRL award the LoTW-confirmed one.
+            string db3 = Path.Combine(dir, "geo.db");
+            using (var db = new LogbookDb(db3))
+            {
+                int id = 1;
+                void G(string call, int dxcc, string state, string county, string grid, string cont, string lotw = "Y", string qrz = "Y", string lotwState = "")
+                    => SeedQso(db, new Dictionary<string, object> { ["id"] = id, ["callsign"] = call, ["band"] = "20m", ["mode"] = "FT8",
+                        ["qso_date"] = "20260801", ["time_on"] = $"{1000 + id:0000}", ["dxcc"] = dxcc, ["state"] = state, ["county"] = county,
+                        ["grid"] = grid, ["continent"] = cont, ["lotw_qsl_rcvd"] = lotw, ["qrz_qsl_rcvd"] = qrz, ["lotw_state"] = lotwState,
+                        ["source"] = "TEST", ["dedup_key"] = "g" + id++ });
+                G("W7A", 291, "OR", "OR,Washington", "CN85", "NA");
+                G("W7B", 291, "UT", "UT,Washington", "DN47", "NA");
+                G("W7C", 291, "OR", "Lane", "cn84ab", "NA");
+                G("VE3A", 1, "ON", "ON,Washington", "ZZ99", "NA");
+                G("KC4A", 13, "", "", "EN3", "AN");
+                G("W1A", 291, "MA", "", "FN42", "NA", lotwState: "ME");
+            }
+            var counties = RuleEngine.Evaluate(Stock("QRZ_USCounties.ini"), db3);
+            CheckStr("counties: same name in two states are two; a bare name takes the state; Canada is not a US county",
+                string.Join("|", counties.WorkedItems), "OR,LANE|OR,WASHINGTON|UT,WASHINGTON");
+            var grids = RuleEngine.Evaluate(Stock("QRZ_GridSquared.ini"), db3);
+            CheckStr("grids: six characters count as four; ZZ99 and EN3 do not count", string.Join(",", grids.WorkedItems), "CN84,CN85,DN47,FN42");
+            var wac = RuleEngine.Evaluate(Stock("WAC.ini"), db3);
+            Check("six continents: Antarctica is not one of them", wac.UniverseSize == 6 && !wac.WorkedItems.Contains("AN"), true);
+            var qrzUs = RuleEngine.Evaluate(Stock("QRZ_US_Award.ini"), db3);
+            var arrlWas = RuleEngine.Evaluate(Stock("WAS.ini"), db3);
+            Check("location: QRZ counts the logged MA, ARRL the LoTW-confirmed ME",
+                qrzUs.WorkedItems.Contains("MA") && !qrzUs.WorkedItems.Contains("ME") && arrlWas.WorkedItems.Contains("ME") && !arrlWas.WorkedItems.Contains("MA"), true);
+
+            // Events: the UTC window counts to the minute; excluded calls never count.
+            string db4 = Path.Combine(dir, "event.db");
+            using (var db = new LogbookDb(db4))
+            {
+                int id = 1;
+                void E(string call, string date, string time) => SeedQso(db, new Dictionary<string, object> { ["id"] = id, ["callsign"] = call,
+                    ["band"] = "20m", ["mode"] = "FT8", ["qso_date"] = date, ["time_on"] = time, ["dxcc"] = 291, ["source"] = "TEST", ["dedup_key"] = "e" + id++ });
+                E("K2A", "20260701", "1259"); E("K2B", "20260701", "1300"); E("K2C", "20260708", "040000"); E("K2D", "20260708", "0401");
+                E("VE0ABC", "20260801", "1200"); E("K1ABC/MM", "20260801", "1200"); E("K1ABC", "20260801", "1200");
+            }
+            var col = RuleEngine.Evaluate(Def("[Match]\nGroupBy=Callsign\nDateFrom=2026-07-01 1300\nDateTo=2026-07-08 0400\n[Confirmation]\nRequires=NONE\n[Target]\nType=COUNT\nThreshold=1\n"), db4);
+            CheckStr("event window: 1259 out, 1300 in, 0400 in, 0401 out", string.Join(",", col.WorkedItems), "K2B,K2C");
+            var excl = RuleEngine.Evaluate(Def("[Match]\nGroupBy=Callsign\nDateFrom=2026-08-01\nExcludeCallsigns=VE0*,*/MM\n[Confirmation]\nRequires=NONE\n[Target]\nType=COUNT\nThreshold=1\n"), db4);
+            CheckStr("VE0 and /MM excluded", string.Join(",", excl.WorkedItems), "K1ABC");
+
+            // Replacing the stock set: backup, whole replacement, version, no second run, recovery.
+            string shipped = Path.Combine(dir, "shipped"), mine = Path.Combine(dir, "mine"), backups = Path.Combine(dir, "Backups");
+            Directory.CreateDirectory(Path.Combine(shipped, "Lists")); Directory.CreateDirectory(Path.Combine(mine, "Lists"));
+            File.WriteAllText(Path.Combine(shipped, "NEW.ini"), "new"); File.WriteAllText(Path.Combine(shipped, "Lists", "l.txt"), "new list");
+            File.WriteAllText(Path.Combine(shipped, RuleLoader.StockVersionFile), "2026-10-06");
+            File.WriteAllText(Path.Combine(mine, "OLD.ini"), "old"); File.WriteAllText(Path.Combine(mine, "MyOwn.ini"), "custom");
+            File.WriteAllText(Path.Combine(mine, "Lists", "l.txt"), "old list");
+            string bk = RuleLoader.ReplaceStockSet(shipped, mine, backups);
+            Check("replace: the old folder is backed up, custom award included",
+                bk != null && File.Exists(Path.Combine(bk, "MyOwn.ini")) && File.Exists(Path.Combine(bk, "OLD.ini")), true);
+            Check("replace: only the new set is active, lists too",
+                File.Exists(Path.Combine(mine, "NEW.ini")) && !File.Exists(Path.Combine(mine, "OLD.ini")) && !File.Exists(Path.Combine(mine, "MyOwn.ini"))
+                && File.ReadAllText(Path.Combine(mine, "Lists", "l.txt")) == "new list", true);
+            Check("replace: done once (same version, nothing more)", RuleLoader.ReplaceStockSet(shipped, mine, backups) == null, true);
+            // Cut short after the old folder moved aside: the next start finishes with the new set...
+            Directory.Move(mine, mine + ".old"); Directory.CreateDirectory(mine + ".new");
+            File.WriteAllText(Path.Combine(mine + ".new", RuleLoader.StockVersionFile), "2026-10-06"); File.WriteAllText(Path.Combine(mine + ".new", "NEW.ini"), "new");
+            RuleLoader.ReplaceStockSet(shipped, mine, backups);
+            Check("interrupted swap: finished with the complete new set", File.Exists(Path.Combine(mine, "NEW.ini")) && !Directory.Exists(mine + ".old") && !Directory.Exists(mine + ".new"), true);
+            // ...or, when the new set was not complete, goes back to the old one.
+            Directory.Move(mine, mine + ".old"); Directory.CreateDirectory(mine + ".new");
+            RuleLoader.ReplaceStockSet(shipped, mine, backups);
+            Check("interrupted copy: the previous set is put back", File.Exists(Path.Combine(mine, "NEW.ini")) && !Directory.Exists(mine + ".new"), true);
+        }
+        catch (Exception ex) { Check("AwardUpdateTests threw: " + ex.Message, false, true); }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
     static void RuleLoaderShippedAwardsParseTests()
     {
         Console.WriteLine("\n── RuleLoader: shipped RuleDefinitions all parse ──");
@@ -11088,14 +11276,13 @@ static class JimmyTests
             Check("ThresholdFrom with no ThresholdOffset: parses, defaults to 0",
                   noOffset != null && noOffset.ThresholdOffset == 0, true);
 
-            // THE GUARD: Basis=CONFIRMED with Type=ALL is rejected -- a checklist-style award's
-            // completion is never confirmation-gated (see FinishGrouped's own comment). This
-            // check runs before Type=ALL's own Universe requirement, so a missing Universe=
-            // here is not what's being tested -- confirmed by the specific error text below.
-            string basisAllErr;
-            var basisAll = RuleLoader.ParseAndValidate(Write("Type=ALL\nBasis=CONFIRMED\n"), out basisAllErr);
-            Check("Basis=CONFIRMED + Type=ALL: rejected", basisAll == null, true);
-            Check("...with a specific reason", !string.IsNullOrEmpty(basisAllErr) && basisAllErr.Contains("CONFIRMED"), true);
+            // Basis=CONFIRMED with Type=ALL: rejected until 2026-10-06. Since then it is allowed: an official checklist (ARRL WAS, QRZ US Award)
+            // completes only when every item is confirmed.
+            string basisAllPath = Write("Type=ALL\nBasis=CONFIRMED\n");
+            File.WriteAllText(basisAllPath, File.ReadAllText(basisAllPath).Replace("GroupBy=Dxcc", "GroupBy=CqZone\nUniverse=CQ_ZONES"));
+            var basisAll = RuleLoader.ParseAndValidate(basisAllPath, out string basisAllErr);
+            Check("Basis=CONFIRMED + Type=ALL: accepted" + (basisAllErr != null ? $" ({basisAllErr})" : ""),
+                basisAll?.Basis == RuleBasis.Confirmed && basisAll.Target == RuleTargetType.All, true);
 
             // Unrecognized Basis value: rejected, not silently defaulted.
             string badBasisErr;
@@ -17615,7 +17802,7 @@ static class JimmyTests
                     });
                     // Awards and Still Need are one page since 2026-10-01.
                     CheckPage("Awards", 1, new[] {
-                        "Awards", "Band filter", "Show", "Award progress summary", "Award details",
+                        "Awards", "Band filter", "Show", "Award progress summary", "About this award", "Award details",
                         "Manage Rule Definitions", "Refresh award progress", "Status", "Close",
                     });
                     // Edit/Delete/Export are correctly skipped here: they start Enabled=false

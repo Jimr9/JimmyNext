@@ -22,7 +22,7 @@ namespace WSJTX_Controller
 
             public override string ToString() =>
                 $"{Matched} newly confirmed, {AlreadyConfirmed} already confirmed, " +
-                $"{Ambiguous} ambiguous (skipped), {Unmatched} not found locally, {Skipped} not a confirmation record";
+                $"{Ambiguous} held for review, {Unmatched} not in your log, {Skipped} not a confirmation record";
         }
 
         public static Result Reconcile(ILogbookService db, string adifText)

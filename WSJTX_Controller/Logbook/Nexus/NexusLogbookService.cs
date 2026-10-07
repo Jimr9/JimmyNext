@@ -273,11 +273,50 @@ namespace WSJTX_Controller
                 result.NewlyConfirmed = gained;
             }
             if (string.IsNullOrEmpty(result.Errors)) KeepDownloadedLocations(prep, source, afterRows);
+            if (string.IsNullOrEmpty(result.Errors) && source == "EQSL") KeepEqslAg(prep);
             result.Held = prep.Held;
             result.HeldDetails.AddRange(prep.HeldDetails);
             NexusSyncDiagnostics.WriteList("held-" + source.ToLowerInvariant(),
                 $"{source} rows held back -- not merged, nothing changed -- because Nexus could not be sure to pair them with the right contact", prep.HeldDetails);
             return result;
+        }
+
+        // eQSL Authenticity Guaranteed, per contact (2026-10-06): the sender's AG mark from an eQSL
+        // download, kept on the contact as APP_JIMMY_EQSL_AG = Y or N -- apart from whether an eQSL
+        // confirmation was received (awards that take AG eQSLs need both). eQSL's InBox (revised
+        // 2025-10-12) sends ADIF EQSL_AG (Y, N, or U = unknown) on every confirmed card, and the
+        // older APP_EQSL_AG=Y only for AG senders. An explicit Y or N replaces what was kept; U, or
+        // no AG field at all, leaves it as it was -- a download that says nothing never erases a
+        // known mark, and a missing legacy tag is not a "no". Rows Nexus could not pair are held
+        // (NexusReportPairing), so no contact gets another's mark.
+        internal static string EqslAgOf(Dictionary<string, string> fields)
+        {
+            if (fields == null) return null;
+            if (fields.TryGetValue("EQSL_AG", out var ag))
+            {
+                ag = (ag ?? "").Trim().ToUpperInvariant();
+                if (ag == "Y" || ag == "N") return ag;
+            }
+            return fields.TryGetValue("APP_EQSL_AG", out var legacy) && (legacy ?? "").Trim().Equals("Y", StringComparison.OrdinalIgnoreCase)
+                ? "Y" : null;
+        }
+
+        private void KeepEqslAg(NexusReportPairing.Result prep)
+        {
+            var wanted = new Dictionary<string, (NexusQso Q, string Ag)>();
+            foreach (var (logged, fields) in prep.Paired)
+            {
+                string ag = EqslAgOf(fields);
+                if (ag != null && !string.IsNullOrEmpty(logged?.Id)) wanted[logged.Id] = (logged, ag);
+            }
+            bool changed = false;
+            foreach (var (q, ag) in wanted.Values)
+            {
+                if (q.ExtraValue(RuleEngine.EqslAgTag) == ag) continue;
+                try { if (Client.SetExtra(q.Id, new List<string[]> { new[] { RuleEngine.EqslAgTag, ag } }).State == "saved") changed = true; }
+                catch { }
+            }
+            if (changed) NexusLogbook.Refresh();
         }
 
         // Club Log's download (2026-10-06): Club Log holds only the contacts uploaded to it, so the
