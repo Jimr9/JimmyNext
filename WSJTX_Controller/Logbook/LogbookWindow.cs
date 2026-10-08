@@ -1734,7 +1734,7 @@ namespace WSJTX_Controller
             {
                 _awardsClb.Enabled = true;
                 foreach (var d in _awardsDefs)
-                    _awardsClb.Items.Add(d.Name, RuleEngine.SupportsLiveTag(d) && _activeAwardRuleIds.Contains(d.Id));
+                    _awardsClb.Items.Add(d.ListName, RuleEngine.SupportsLiveTag(d) && _activeAwardRuleIds.Contains(d.Id));   // its short name, if it has one
                 int idx = prevId != null ? _awardsDefs.FindIndex(d => d.Id == prevId) : -1;
                 _awardsClb.SelectedIndex = idx >= 0 ? idx : 0;
             }
@@ -1885,6 +1885,8 @@ namespace WSJTX_Controller
                     ? "Counts worked contacts."
                     : $"Counts worked contacts; confirmations by {RuleConfirmationSources.Describe(def)} are shown.";
             var parts = new List<string> { counts };
+            // The list shows the short name when there is one, so the full name is said here.
+            if (!string.Equals(def.ListName, def.Name, StringComparison.Ordinal)) parts.Insert(0, def.Name.Trim() + ".");
             if (!string.IsNullOrWhiteSpace(def.Description)) parts.Add(def.Description.Trim());
             if (!string.IsNullOrWhiteSpace(def.ManualChecks)) parts.Add("Not checked by Jimmy: " + def.ManualChecks.Trim());
             parts.Add(personal

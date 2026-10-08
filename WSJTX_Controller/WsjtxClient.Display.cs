@@ -815,7 +815,7 @@ namespace WSJTX_Controller
             string sota = (d.Category == CallCategory.SOTA || _awardTagger.IsSotaCall(d)) ? F("Fact.Sota") : "";
             string always = d.Category == CallCategory.ALWAYS_WANTED ? F("Fact.AlwaysWanted") : "";
             string tag = (d.Category == CallCategory.STILL_NEEDED || d.Category == CallCategory.STILL_UNCONFIRMED)
-                ? _awardTagger.CategoryTag(d) : "";
+                ? _awardTagger.StatusTag(d) : "";   // the award's own status name and choice (2026-10-08)
             return (cls.Country ?? "", string.IsNullOrEmpty(grid) ? "" : DisplayGrid(grid, ctrl.spaceCallsignsAndGrids),
                 newDxcc, newGrid, pota, sota, always, string.IsNullOrEmpty(tag) ? "" : ", " + tag);
         }

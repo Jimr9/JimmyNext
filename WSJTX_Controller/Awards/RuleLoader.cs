@@ -391,6 +391,10 @@ namespace WSJTX_Controller
             {
                 Id              = id,
                 Name            = name,
+                // Optional names and status choice (2026-10-08); absent = Name, shown.
+                ShortName       = file.Get("Award", "ShortName", "").Trim(),
+                StatusName      = file.Get("Award", "StatusName", "").Trim(),
+                ShowInStatus    = !new[] { "N", "No", "False" }.Contains(file.Get("Award", "ShowInStatus", "Y").Trim(), StringComparer.OrdinalIgnoreCase),
                 Sponsor         = file.Get("Award", "Sponsor", ""),
                 Category        = file.Get("Award", "Category", ""),
                 FormatVersion   = formatVersion,

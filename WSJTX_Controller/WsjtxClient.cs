@@ -892,6 +892,9 @@ namespace WSJTX_Controller
         {
             public string          RuleId;
             public string          RuleName;
+            public string          ShortName;      // blank = RuleName (the award's own setting)
+            public string          StatusName;     // blank = ShortName, then RuleName
+            public bool            ShowInStatus = true;
             public RuleGroupBy     GroupBy;
             public HashSet<string> Set;              // still-needed (never worked); Target=All only
             public HashSet<string> UnconfirmedSet;    // worked but not confirmed; any Target type
@@ -4890,9 +4893,13 @@ namespace WSJTX_Controller
         // case (Priority itself doesn't distinguish them -- see DeriveCategory()'s comment on
         // Category being separate from Priority). Reuses CategoryTag() rather than a separate
         // naming scheme so the status bar never disagrees with what the row itself displays.
-        private Dictionary<string, int> SnapshotNeededAwardCounts(HashSet<string> visibleCalls)
+        // Grouped by award and state, not by the words (2026-10-08): two awards given the same
+        // short name keep their own counts. Each entry: the tag text and its count, in first-seen order.
+        private List<KeyValuePair<string, int>> SnapshotNeededAwardCounts(HashSet<string> visibleCalls)
         {
             var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var texts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var order = new List<string>();
             IEnumerable<string> calls = visibleCalls;
             if (calls == null) calls = callDict.Keys;
 
@@ -4905,11 +4912,11 @@ namespace WSJTX_Controller
 
                 string tag = _awardTagger.CategoryTag(d);
                 if (string.IsNullOrEmpty(tag)) continue;
-                int n;
-                counts.TryGetValue(tag, out n);
-                counts[tag] = n + 1;
+                string key = d.Category + "|" + (d.MatchedAwardRuleId ?? tag);
+                if (!counts.TryGetValue(key, out int n)) { order.Add(key); texts[key] = tag; }
+                counts[key] = n + 1;
             }
-            return counts;
+            return order.Select(k => new KeyValuePair<string, int>(texts[k], counts[k])).ToList();
         }
 
         private string PeekVisibleCall(out EnqueueDecodeMessage dmsg, HashSet<string> visibleCalls)

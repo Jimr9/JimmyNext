@@ -22,8 +22,9 @@
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-use propagation::geo::maidenhead_to_latlon;
-use propagation::live::{contests, eqsl, hamqth, lotw, pota, qrz, solar_wind, swpc, swpc_scales};
+use propagation::geo::{haversine_km, maidenhead_to_latlon};
+use propagation::kc2g::parse_kc2g_stations;
+use propagation::live::{contests, dxped, eqsl, hamqth, lotw, pota, qrz, solar_wind, swpc, swpc_scales};
 use propagation::model::{r_scale, SpaceWx};
 use propagation::pota::OtaSpot;
 use propagation::{representative_muf, DailySolarIndices, NoaaScalesView, SolarWind};
@@ -36,6 +37,17 @@ const SPOT_REFRESH: Duration = Duration::from_secs(90);
 const SPACE_WX_REFRESH: Duration = Duration::from_secs(600);
 /// NOAA's daily solar indices change once a day; every three hours is plenty (2026-10-04).
 const SOLAR_HISTORY_REFRESH: Duration = Duration::from_secs(3 * 3600);
+/// GOES X-ray, on its own (operator, 2026-10-08): a flare's radio blackout reaches the operator
+/// within about a minute instead of waiting up to ten for the SFI/Kp refresh above -- Nexus's own
+/// 60-second "fast lane" (propagation::live::swpc::fetch_xray_now), one small request.
+const XRAY_REFRESH: Duration = Duration::from_secs(60);
+/// KC2G's ionosonde network (operator, 2026-10-08): measured MUF/foF2 per station. Most
+/// stations report every 5-15 minutes; reading the whole list every ten is plenty.
+const KC2G_STATIONS_URL: &str = "https://prop.kc2g.com/api/stations.json";
+const IONOSONDE_REFRESH: Duration = Duration::from_secs(600);
+/// DXpedition calendars (NG3K, with Club Log's on-air list), 2026-10-08: Nexus's own fetch
+/// keeps them 30 minutes and serves its last good list through an outage; asking every 30.
+const DXPEDITION_REFRESH: Duration = Duration::from_secs(1800);
 /// DSCOVR solar wind updates by the minute; every five minutes keeps Bz current without
 /// hammering SWPC (2026-10-04).
 const SOLAR_WIND_REFRESH: Duration = Duration::from_secs(300);
@@ -76,6 +88,11 @@ pub struct SharedCache {
     // error like every cache here: a failed fetch leaves the last good copy, with its own dates.
     solar_history: RwLock<Cached<DailySolarIndices>>,
     solar_wind: RwLock<Cached<SolarWind>>,
+    // The fast-lane X-ray flux (W/m², GOES long band), its own age and error -- separate from
+    // space_wx's, so the other readings keep their own ages.
+    xray: RwLock<Cached<f32>>,
+    ionosondes: RwLock<Cached<Vec<Ionosonde>>>,
+    dxpeditions: RwLock<Cached<Vec<propagation::dxped::DxpeditionPlan>>>,
     contests: RwLock<CachedContests>,
     // Resolved once at construction (mirrors LiveFeedsCache's own me_latlon derivation in
     // live_feeds.rs) for the representative-MUF calculation below -- None when the grid doesn't
@@ -125,6 +142,9 @@ impl SharedCache {
             scales: RwLock::new(CachedScales::default()),
             solar_history: RwLock::new(Cached::default()),
             solar_wind: RwLock::new(Cached::default()),
+            xray: RwLock::new(Cached::default()),
+            ionosondes: RwLock::new(Cached::default()),
+            dxpeditions: RwLock::new(Cached::default()),
             contests: RwLock::new(CachedContests::default()),
             me_latlon: maidenhead_to_latlon(mygrid.trim()),
         })
@@ -162,6 +182,22 @@ impl SharedCache {
             store(&cache.solar_wind, r);
             std::thread::sleep(SOLAR_WIND_REFRESH);
         });
+        // Its own thread, one request at a time (never overlapping), off every radio path.
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            store(&cache.xray, swpc::fetch_xray_now());
+            std::thread::sleep(XRAY_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            store(&cache.dxpeditions, dxped::fetch_plans());
+            std::thread::sleep(DXPEDITION_REFRESH);
+        });
+        let cache = self.clone();
+        std::thread::spawn(move || loop {
+            store(&cache.ionosondes, fetch_ionosondes());
+            std::thread::sleep(IONOSONDE_REFRESH);
+        });
         let cache = self.clone();
         std::thread::spawn(move || loop {
             cache.refresh_contests();
@@ -191,6 +227,22 @@ impl SharedCache {
             }
             Err(e) => g.error = Some(e),
         }
+    }
+
+    /// DXPEDITIONS: the announced operations as Nexus read them. NG3K gives dates only, which
+    /// Nexus turns into midnight UTC; Club Log's on-air list moves a start or end to "now" plus
+    /// or minus an hour, never to midnight -- so a date that is not midnight is said to be Club
+    /// Log's, not announced, and the announced end day is the whole day (Nexus's end is its first
+    /// second). `checkedAgeSecs` is when Jimmy last asked, not proof the source changed then.
+    pub fn dxpeditions_json(&self) -> String {
+        let g = self.dxpeditions.read().unwrap_or_else(|e| e.into_inner());
+        let plans: Option<Vec<serde_json::Value>> = g.value.as_ref().map(|plans| plans.iter().map(dxpedition_wire).collect());
+        serde_json::json!({
+            "plans": plans,
+            "checkedAgeSecs": g.last_ok.map(|t| t.elapsed().as_secs()),
+            "error": g.last_error,
+        })
+        .to_string()
     }
 
     pub fn contests_json(&self) -> String {
@@ -398,6 +450,39 @@ impl SharedCache {
             s_scale: s.s,
         });
 
+        // The fast-lane X-ray, classified by Nexus's own rules exactly as SpaceWxWire's is. Its
+        // age counts from the last SUCCESSFUL read: a failed refresh keeps the old reading and
+        // its age, with the error beside it.
+        let xray_guard = self.xray.read().unwrap_or_else(|e| e.into_inner());
+        let xray = xray_guard.value.map(XrayWire::from_flux);
+        let xray_age_secs = xray_guard.last_ok.map(|t| t.elapsed().as_secs());
+
+        // Ionosondes: nearest first when My Grid gives a place, else by name. Each reading's age
+        // counts from its own measurement time, so it grows while the list sits in the cache;
+        // no time in the feed stays "not known", never "just now".
+        let iono_guard = self.ionosondes.read().unwrap_or_else(|e| e.into_inner());
+        let now = now_unix();
+        let mut ionosondes: Vec<IonosondeWire> = iono_guard
+            .value
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|st| IonosondeWire {
+                name: st.name.as_deref(),
+                code: st.code.as_deref(),
+                lat: st.lat,
+                lon: st.lon,
+                muf_mhz: st.muf_mhz,
+                fof2_mhz: st.fof2_mhz,
+                measured_age_secs: st.measured_unix.map(|t| (now - t).max(0)),
+                distance_km: self.me_latlon.map(|me| haversine_km(me, (st.lat, st.lon)).round()),
+            })
+            .collect();
+        ionosondes.sort_by(|a, b| match (a.distance_km, b.distance_km) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(std::cmp::Ordering::Equal),
+            _ => a.name.unwrap_or("").cmp(b.name.unwrap_or("")),
+        });
+
         let payload = SpaceWxPayload {
             value: wire.as_ref(),
             age_secs,
@@ -406,6 +491,12 @@ impl SharedCache {
             scales,
             scales_age_secs,
             scales_last_error: scales_guard.last_error.as_deref(),
+            xray,
+            xray_age_secs,
+            xray_last_error: xray_guard.last_error.as_deref(),
+            ionosondes: iono_guard.value.as_ref().map(|_| ionosondes),
+            ionosondes_age_secs: iono_guard.last_ok.map(|t| t.elapsed().as_secs()),
+            ionosondes_last_error: iono_guard.last_error.as_deref(),
         };
         serde_json::to_string(&payload).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}"))
     }
@@ -548,6 +639,114 @@ struct NoaaScalesWire {
 /// specific path). scales/scalesAgeSecs/scalesLastError mirror value/ageSecs/lastError's own
 /// shape but for the separate NOAA R/S/G product, since it can succeed or fail independently of
 /// the raw SFI/Kp/X-ray fetch (see refresh_scales's own comment).
+/// One DXpedition as Jimmy gets it (see SharedCache::dxpeditions_json).
+fn dxpedition_wire(p: &propagation::dxped::DxpeditionPlan) -> serde_json::Value {
+    const DAY: i64 = 86_400;
+    let start_announced = p.start_unix.rem_euclid(DAY) == 0;
+    let end_announced = p.end_unix.rem_euclid(DAY) == 0;
+    serde_json::json!({
+        "call": p.call,
+        "entity": p.entity,
+        "grid": p.grid,
+        "startUnix": if start_announced { Some(p.start_unix) } else { None },
+        "endUnix": if end_announced { Some(p.end_unix + DAY - 1) } else { None },   // the whole end day
+        "onAirPerClubLog": !start_announced || !end_announced,
+        "bands": p.bands.iter().map(|b| b.label()).collect::<Vec<_>>(),
+        "modes": p.modes,
+        "ft8Mode": p.ft8_mode,
+        "website": p.website,
+    })
+}
+
+/// One KC2G ionosonde: Nexus's own parse of its reading (position, MUF, foF2), plus the station's
+/// name and code from the same reply -- Nexus's MufStation leaves them out -- and when the
+/// reading was measured, None when the feed gave no readable time (Nexus would call that age 0).
+#[derive(Clone, Debug, PartialEq)]
+struct Ionosonde {
+    name: Option<String>,
+    code: Option<String>,
+    lat: f64,
+    lon: f64,
+    muf_mhz: Option<f64>,
+    fof2_mhz: Option<f64>,
+    measured_unix: Option<i64>,
+}
+
+/// One request to KC2G (Nexus's own HTTPS fetch, live::contests::fetch, takes any address), then
+/// each station read by Nexus's parse_kc2g_stations -- one at a time so its name and code stay
+/// with it. A reply with no readable stations is a failure, so the last good list stays.
+fn fetch_ionosondes() -> Result<Vec<Ionosonde>, String> {
+    let body = contests::fetch(KC2G_STATIONS_URL)?;
+    let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| format!("KC2G reply not readable: {e}"))?;
+    let list = parse_ionosondes(&v);
+    if list.is_empty() { Err("KC2G sent no stations".to_string()) } else { Ok(list) }
+}
+
+fn parse_ionosondes(v: &serde_json::Value) -> Vec<Ionosonde> {
+    // Nexus's parser gives age 0 for a missing or unreadable time; a real time's age follows the
+    // `now` it is given. Two far-apart `now`s tell them apart, and give the measurement time.
+    const T1: i64 = 4_000_000_000;
+    v.as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let one = serde_json::Value::Array(vec![item.clone()]);
+                    let a = parse_kc2g_stations(&one, T1).pop()?;
+                    let b = parse_kc2g_stations(&one, T1 + 1).pop()?;
+                    let text = |k: &str| {
+                        item.get("station")
+                            .and_then(|s| s.get(k))
+                            .and_then(|x| x.as_str())
+                            .map(|x| x.trim().to_string())
+                            .filter(|x| !x.is_empty())
+                    };
+                    Some(Ionosonde {
+                        name: text("name"),
+                        code: text("code"),
+                        lat: a.lat,
+                        lon: a.lon,
+                        muf_mhz: a.muf_mhz,
+                        fof2_mhz: a.fof2_mhz,
+                        measured_unix: (b.age_secs != a.age_secs).then(|| T1 - a.age_secs),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IonosondeWire<'a> {
+    name: Option<&'a str>,
+    code: Option<&'a str>,
+    lat: f64,
+    lon: f64,
+    muf_mhz: Option<f64>,
+    fof2_mhz: Option<f64>,
+    measured_age_secs: Option<i64>,
+    distance_km: Option<f64>,
+}
+
+/// The fast-lane X-ray reading: the same three facts SpaceWxWire gives for its own X-ray.
+#[derive(serde::Serialize)]
+struct XrayWire {
+    #[serde(rename = "xrayLong")]
+    xray_long: f32,
+    #[serde(rename = "xrayClass")]
+    xray_class: String,
+    #[serde(rename = "rScale")]
+    r_scale: u8,
+}
+
+impl XrayWire {
+    fn from_flux(flux: f32) -> Self {
+        let wx = SpaceWx { xray_long: flux, ..SpaceWx::default() };
+        Self { xray_long: flux, xray_class: wx.xray_class().to_string(), r_scale: r_scale(flux) }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct SpaceWxPayload<'a> {
     value: Option<&'a SpaceWxWire>,
@@ -562,6 +761,18 @@ struct SpaceWxPayload<'a> {
     scales_age_secs: Option<u64>,
     #[serde(rename = "scalesLastError")]
     scales_last_error: Option<&'a str>,
+    // The fast-lane X-ray (2026-10-08); absent from older hosts, which Jimmy treats as "none".
+    xray: Option<XrayWire>,
+    #[serde(rename = "xrayAgeSecs")]
+    xray_age_secs: Option<u64>,
+    #[serde(rename = "xrayLastError")]
+    xray_last_error: Option<&'a str>,
+    // KC2G ionosondes (2026-10-08): null until first read; absent from older hosts.
+    ionosondes: Option<Vec<IonosondeWire<'a>>>,
+    #[serde(rename = "ionosondesAgeSecs")]
+    ionosondes_age_secs: Option<u64>,
+    #[serde(rename = "ionosondesLastError")]
+    ionosondes_last_error: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -652,6 +863,101 @@ mod space_wx_wire_tests {
             v["scales"].get("rScale").is_none() && v["scales"].get("r").is_none(),
             "R must not be duplicated from the NOAA scales fetch: {json}"
         );
+    }
+
+    // KC2G ionosondes (2026-10-08): Nexus's parse per station plus name/code; a missing time is
+    // "not known", never age 0; ages grow from the measurement time; nearest first with a grid.
+    #[test]
+    fn ionosondes_keep_name_code_and_an_honest_measurement_time() {
+        let v: serde_json::Value = serde_json::from_str(r#"[
+            {"mufd": 28.8, "fof2": 8.6, "time": "2026-10-08T09:10:01",
+             "station": {"name": "Austin, TX, USA", "code": "AU930", "latitude": "30.4", "longitude": "262.3"}},
+            {"mufd": null, "fof2": "6.1", "time": "garbled",
+             "station": {"name": "Boulder, CO, USA", "code": "BC840", "latitude": "40.0", "longitude": "254.7"}},
+            {"mufd": 20.0, "station": {"latitude": "51.7", "longitude": "-1.3"}},
+            {"mufd": 25.0, "station": {"name": "No position", "code": "XX000"}}
+        ]"#).unwrap();
+        let list = parse_ionosondes(&v);
+        assert_eq!(list.len(), 3, "a station with no position is dropped: {list:?}");
+        let austin = &list[0];
+        assert_eq!((austin.name.as_deref(), austin.code.as_deref()), (Some("Austin, TX, USA"), Some("AU930")));
+        assert!((austin.lon + 97.7).abs() < 0.01, "longitude 262.3 is 97.7 west (Nexus's normalizing): {}", austin.lon);
+        assert_eq!(austin.measured_unix, Some(1_791_450_601), "2026-10-08T09:10:01 UTC");
+        assert_eq!(list[1].measured_unix, None, "a garbled time is not known, not 'just now'");
+        assert_eq!((list[1].muf_mhz, list[1].fof2_mhz), (None, Some(6.1)), "null MUF stays null; a string foF2 is read");
+        assert_eq!((list[2].name.as_deref(), list[2].measured_unix), (None, None), "no name, no time");
+
+        let cache = SharedCache::new("EM10");   // Austin's grid
+        store(&cache.ionosondes, Ok(list));
+        let json = cache.space_wx_json();
+        let w: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let first = &w["ionosondes"][0];
+        assert_eq!(first["code"], "AU930", "nearest first: {json}");
+        assert!(first["distanceKm"].as_f64().unwrap() < 200.0, "{json}");
+        assert!(first["measuredAgeSecs"].as_i64().unwrap() > 0, "age counted from the measurement: {json}");
+        assert!(w["ionosondes"][1]["measuredAgeSecs"].is_null() || w["ionosondes"][2]["measuredAgeSecs"].is_null(), "{json}");
+        assert!(json.contains("\"mufMhz\"") && json.contains("\"fof2Mhz\"") && json.contains("\"ionosondesAgeSecs\""), "camelCase: {json}");
+    }
+
+    // DXpeditions (2026-10-08): announced dates kept, the whole end day counted, Club Log's moved
+    // dates said to be Club Log's, bands as "20m", an unannounced mode left empty.
+    #[test]
+    fn dxpeditions_keep_announced_dates_and_mark_club_log_moves() {
+        use propagation::dxped::DxpeditionPlan;
+        let oct7 = 1_791_331_200; // 2026-10-07 00:00 UTC
+        let plan = |call: &str, start: i64, end: i64| DxpeditionPlan {
+            call: call.into(), entity: "Solomon Is".into(), grid: None, start_unix: start, end_unix: end,
+            bands: vec![propagation::Band::B20, propagation::Band::B6], modes: vec!["FT8".into()], ft8_mode: None,
+            most_wanted_rank: None, website: Some("https://solomon2026.com/".into()),
+        };
+        let cache = SharedCache::new("EN52");
+        store(&cache.dxpeditions, Ok(vec![
+            plan("H49A", oct7, oct7 + 14 * 86_400),
+            plan("3Y0J", oct7 + 5 * 86_400 - 3600 - 17, oct7 + 30 * 86_400),   // Club Log moved the start
+        ]));
+        let v: serde_json::Value = serde_json::from_str(&cache.dxpeditions_json()).unwrap();
+        let a = &v["plans"][0];
+        assert_eq!(a["startUnix"], oct7);
+        assert_eq!(a["endUnix"], oct7 + 15 * 86_400 - 1, "the whole end day");
+        assert_eq!(a["onAirPerClubLog"], false);
+        assert_eq!(a["bands"], serde_json::json!(["20m", "6m"]));
+        assert_eq!(a["website"], "https://solomon2026.com/");
+        let b = &v["plans"][1];
+        assert!(b["startUnix"].is_null() && b["onAirPerClubLog"] == true, "a moved start is Club Log's: {b}");
+        assert!(v["checkedAgeSecs"].as_u64().is_some());
+    }
+
+    // Manual, real network (like tests/external_data_live_check.rs):
+    //   cargo test --release --bin jimmy-engine-host ionosondes_live -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn ionosondes_live_reach_kc2g() {
+        let list = fetch_ionosondes().expect("KC2G fetch failed");
+        let named = list.iter().filter(|s| s.name.is_some()).count();
+        let timed = list.iter().filter(|s| s.measured_unix.is_some()).count();
+        println!("KC2G: {} stations, {} named, {} with a time; first: {:?}", list.len(), named, timed, list.first());
+        assert!(list.len() > 10 && named > 0 && timed > 0);
+    }
+
+    // The fast-lane X-ray (2026-10-08): its own camelCase fields, Nexus's own class and R, and
+    // a failed refresh keeps the last good reading and its age, with the error beside it.
+    #[test]
+    fn space_wx_json_carries_the_fast_lane_xray_with_its_own_age_and_error() {
+        let cache = SharedCache::new("EN52");
+        let json = cache.space_wx_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v["xray"].is_null() && v["xrayAgeSecs"].is_null(), "nothing read yet: {json}");
+
+        store(&cache.xray, Ok(2.0e-5));   // M2
+        store(&cache.xray, Err("timeout".to_string()));
+        let json = cache.space_wx_json();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["xray"]["xrayClass"], "M", "got: {json}");
+        assert_eq!(v["xray"]["rScale"], 1, "M2 is R1: {json}");
+        assert!(v["xray"]["xrayLong"].as_f64().unwrap() > 1.9e-5, "got: {json}");
+        assert!(v["xrayAgeSecs"].as_u64().is_some(), "the last good reading keeps its age: {json}");
+        assert_eq!(v["xrayLastError"], "timeout", "got: {json}");
+        assert!(!json.contains("xray_long") && !json.contains("last_error"), "camelCase only: {json}");
     }
 }
 

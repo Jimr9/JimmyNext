@@ -4233,6 +4233,9 @@ namespace WSJTX_Controller
                     {
                         RuleId         = ruleId,
                         RuleName       = def.Name,
+                        ShortName      = def.ShortName,
+                        StatusName     = def.StatusName,
+                        ShowInStatus   = def.ShowInStatus,
                         GroupBy        = def.GroupBy,
                         Set            = result.StillNeeded != null
                             ? new HashSet<string>(result.StillNeeded, StringComparer.OrdinalIgnoreCase)

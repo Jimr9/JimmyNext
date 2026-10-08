@@ -1525,6 +1525,7 @@ static class JimmyTests
         A6ClassificationParityTests();
         DirectModePlumbingParityTests();
         StillUnconfirmedReachesQueueTests();
+        UnconfirmedAreaAdmissionTests();
         NarrationTextStructuredPayloadTests();
         DirectDtoStage3SnapshotFieldsTests();
         DirectDtoStage4DecodeSemanticsTests();
@@ -1694,6 +1695,7 @@ static class JimmyTests
         SupportLinkTests();
         SupportServiceTests();
         PasswordRevealTests();
+        AwardNamesTests();
         BulkEditApplyTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
@@ -3701,6 +3703,81 @@ static class JimmyTests
         catch (Exception ex)
         {
             Console.WriteLine($"  FAIL  StillUnconfirmedReachesQueueTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
+    }
+
+    // An area worked but not confirmed (2026-10-08): a station there that was worked on this
+    // band before is admitted again when "Unconf" calling is on -- the already-worked gate used
+    // to let only Needed through. Off: still rejected. Just logged: still rejected. A callsign
+    // award still wants its own callsign only. Real pipeline, like StillUnconfirmedReachesQueueTests.
+    static void UnconfirmedAreaAdmissionTests()
+    {
+        Console.WriteLine("\n── Unconfirmed area: a station worked before is admitted ──");
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_UnconfArea_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            // W9NEED worked on 20m, unconfirmed: already worked on the band the decode comes in
+            // on. K4YT's confirmed 20m QSO keeps 291 from being a new country on 20m.
+            using (var db = new LogbookDb(tmpDb))
+            {
+                InsertQso(db, "W9NEED", "", dxcc: 291, zone: 5, band: "20m");
+                InsertQso(db, "K4YT",   "", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
+            }
+            WsjtxClient MakeClient(bool unconfOn, RuleGroupBy groupBy, string unconfItem)
+            {
+                var ctrl = new Controller();
+                ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+                ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+                ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.replyDxCheckBox.Checked = true;
+                ctrl.replyLocalCheckBox.Checked = true;
+                var lookupManager = new LookupManager();
+                lookupManager.RegisterProviderFirst(new TestFixtureLookupProvider());
+                lookupManager.Initialize(useLookupData: true, qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                    lotwEnabled: true, lotwDays: 1, clubLogAppKey: null, clubLogDays: 1, fccUlsEnabled: false);
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.lookupManager = lookupManager;
+                wc.activeAwardTags["AREA"] = new WsjtxClient.ActiveAwardTag
+                {
+                    RuleId = "AREA", RuleName = "Area award", GroupBy = groupBy,
+                    Set = new HashSet<string>(), UnconfirmedSet = new HashSet<string> { unconfItem },
+                };
+                if (unconfOn) wc.Ranker.callingEnabled.Add(WsjtxClient.CallCategory.STILL_UNCONFIRMED);
+                return wc;
+            }
+            bool Queued(WsjtxClient wc, string call)
+            {
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": 3000 },
+                    ""recentDecodes"": [ { ""from"": """ + call + @""", ""snr"": -10, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": ""CQ " + call + @" EM63"" } ] }"));
+                return wc.TestCallQueueString.Contains(call);
+            }
+
+            Check("area unconfirmed, Unconf on: a station worked on this band before is admitted",
+                Queued(MakeClient(true, RuleGroupBy.Dxcc, "291"), "W9NEED"), true);
+            Check("Unconf off: still rejected as already worked",
+                Queued(MakeClient(false, RuleGroupBy.Dxcc, "291"), "W9NEED"), false);
+            var justLogged = MakeClient(true, RuleGroupBy.Dxcc, "291");
+            justLogged.logList.Add("W9NEED");
+            Check("just logged this session: still rejected (no endless repeat calls)", Queued(justLogged, "W9NEED"), false);
+            Check("a callsign award wants its own callsign only: another call is not admitted",
+                Queued(MakeClient(true, RuleGroupBy.Callsign, "W1AAA"), "W9NEED"), false);
+            Check("...and its own callsign is",
+                Queued(MakeClient(true, RuleGroupBy.Callsign, "W9NEED"), "W9NEED"), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  UnconfirmedAreaAdmissionTests threw: {ex.GetType().Name}: {ex.Message}");
             failed++;
         }
         finally
@@ -8708,6 +8785,28 @@ static class JimmyTests
                 noScales.Scales == null, true);
             Check("MufNow stays null (not a fabricated 0.0) when the grid isn't resolvable",
                 noScales.MufNow.HasValue, false);
+            Check("no fast-lane X-ray fields (older EngineHost): Xray stays null", noScales.Xray == null && noScales.XrayAgeSecs == null, true);
+
+            // The fast-lane X-ray (2026-10-08), as EngineHost's XrayWire/SpaceWxPayload write it.
+            var fast = System.Text.Json.JsonSerializer.Deserialize<SpaceWxResult>(
+                "{\"value\":null,\"xray\":{\"xrayLong\":2e-5,\"xrayClass\":\"M\",\"rScale\":1},\"xrayAgeSecs\":40,\"xrayLastError\":\"timeout\"}", options);
+            var dx = System.Text.Json.JsonSerializer.Deserialize<DxpeditionsResult>(
+                "{\"plans\":[{\"call\":\"3Y0J\",\"entity\":\"Bouvet\",\"grid\":null,\"startUnix\":null,\"endUnix\":1794787199," +
+                "\"onAirPerClubLog\":true,\"bands\":[\"20m\"],\"modes\":[],\"ft8Mode\":\"SuperFox\",\"website\":null}],\"checkedAgeSecs\":12,\"error\":null}", options);
+            Check("DXpeditions deserialize from EngineHost's names: a moved start null, no mode empty, SuperFox",
+                dx.Plans?.Length == 1 && dx.Plans[0].StartUnix == null && dx.Plans[0].EndUnix == 1794787199 && dx.Plans[0].OnAirPerClubLog
+                && dx.Plans[0].Modes.Length == 0 && dx.Plans[0].Ft8Mode == "SuperFox" && dx.CheckedAgeSecs == 12, true);
+            Check("DXpeditions not read yet: plans null, not an empty calendar",
+                System.Text.Json.JsonSerializer.Deserialize<DxpeditionsResult>("{\"plans\":null,\"checkedAgeSecs\":null,\"error\":\"timeout\"}", options).Plans == null, true);
+            var withIono = System.Text.Json.JsonSerializer.Deserialize<SpaceWxResult>(
+                "{\"value\":null,\"ionosondes\":[{\"name\":\"Austin, TX, USA\",\"code\":\"AU930\",\"lat\":30.4,\"lon\":-97.7," +
+                "\"mufMhz\":28.8,\"fof2Mhz\":null,\"measuredAgeSecs\":null,\"distanceKm\":120.0}],\"ionosondesAgeSecs\":30,\"ionosondesLastError\":null}", options);
+            Check("ionosondes deserialize from EngineHost's names; nulls stay null",
+                withIono.Ionosondes?.Length == 1 && withIono.Ionosondes[0].Code == "AU930" && withIono.Ionosondes[0].MufMhz == 28.8
+                && withIono.Ionosondes[0].Fof2Mhz == null && withIono.Ionosondes[0].MeasuredAgeSecs == null && withIono.IonosondesAgeSecs == 30, true);
+            Check("fast-lane X-ray deserializes: class, R, age, error",
+                fast.Xray != null && fast.Xray.XrayClass == "M" && fast.Xray.RScale == 1 && fast.Xray.XrayLong > 1.9e-5f
+                && fast.XrayAgeSecs == 40 && fast.XrayLastError == "timeout", true);
         }
         catch (Exception ex)
         {
@@ -17711,8 +17810,9 @@ static class JimmyTests
                 CheckPage("Contests", 1, new[] { "Contests list", "Open details", "Refresh calendar", "Check for rules updates", "Calendar status", "Close" });
                 CheckPage("Band Conditions", 2, new[] { "Headline", "Bands list", "Refresh band conditions now", "Status", "Close" });
                 CheckPage("DX Spots", 3, new[] { "Spots list", "Refresh DX spots now", "Status", "Close" });
-                CheckPage("Space Weather", 4, new[] { "Readings", "Daily solar history, newest first", "Refresh space weather now", "Status", "Close" });
+                CheckPage("Space Weather", 4, new[] { "Readings", "Ionosondes, measured MUF", "Daily solar history, newest first", "Refresh space weather now", "Status", "Close" });
                 CheckPage("Who Hears Me", 5, new[] { "Summary", "Time window", "Stations list", "Refresh who hears me now", "Status", "Close" });
+                CheckPage("DXpeditions", 6, new[] { "Show", "Needed only", "DXpeditions list", "Open website", "Refresh DXpeditions", "Status", "Close" });
                 w.Close();
             }
         });
@@ -20074,6 +20174,101 @@ static class JimmyTests
         Check("space weather: nothing in brackets, no scientific notation",
             wxRows.Any(r => r.Contains("(") || r.Contains("e-") || r.Contains("W/m")), false);
 
+        // The fast-lane X-ray (2026-10-08): the minute-by-minute reading wins over the 10-minute
+        // one; an old one says so; an older EngineHost (no fields) shows the combined one; the
+        // other rows and the status keep their own ages.
+        var combined = new SpaceWx { Sfi = 152.4f, Kp = 2f, XrayClass = "C", RScale = 0 };
+        var fresh = new SpaceWxResult { Value = combined, AgeSecs = 400, Xray = new XrayNow { XrayClass = "M", RScale = 1 }, XrayAgeSecs = 40 };
+        CheckStr("x-ray: the minute reading, not the 10-minute one", OtaSpotsWindow.FormatXrayRow(fresh), "X-ray M class, radio blackout R1, minor");
+        CheckStr("x-ray: its own age in the status line", OtaSpotsWindow.FormatXrayStatus(fresh), "X-ray 40 seconds ago");
+        var stale = new SpaceWxResult { Value = combined, Xray = new XrayNow { XrayClass = "M", RScale = 1 }, XrayAgeSecs = 900, XrayLastError = "timeout" };
+        Check("x-ray: an old reading says so; the failed refresh keeps its age and says why",
+            OtaSpotsWindow.FormatXrayRow(stale).EndsWith("an old reading, not updating")
+            && OtaSpotsWindow.FormatXrayStatus(stale) == "X-ray 15 minutes ago, not updating: timeout", true);
+        var blip = new SpaceWxResult { Value = combined, Xray = new XrayNow { XrayClass = "M", RScale = 1 }, XrayAgeSecs = 70, XrayLastError = "timeout" };
+        Check("x-ray: one missed minute is not called old", !OtaSpotsWindow.FormatXrayRow(blip).Contains("old")
+            && OtaSpotsWindow.FormatXrayStatus(blip) == "X-ray 1 minute ago", true);
+        var olderHost = new SpaceWxResult { Value = combined, AgeSecs = 400 };
+        Check("x-ray: an older engine (no fast reading) shows the combined one, nothing added",
+            OtaSpotsWindow.FormatXrayRow(olderHost) == "X-ray C class, radio blackout R0, none" && OtaSpotsWindow.FormatXrayStatus(olderHost) == "", true);
+        Check("x-ray: the other rows are unchanged by it",
+            OtaSpotsWindow.FormatSpaceWeatherRows(fresh, null, null, null)[0] == "Solar flux 152", true);
+
+        // DXpeditions (2026-10-08): announced dates in UTC with the whole end day, Club Log's
+        // on-air word said as such, no announced mode kept, needs from the log or "not known".
+        long oct7 = 1791331200, day = 86400;   // 2026-10-07 00:00 UTC
+        var h49a = new DxpeditionPlan { Call = "H49A", Entity = "Solomon Is", StartUnix = oct7, EndUnix = oct7 + 15 * day - 1,
+            Bands = new[] { "20m", "6m" }, Modes = new[] { "CW", "SSB", "FT8" }, Ft8Mode = "FoxHound", Website = "https://solomon2026.com/" };
+        var cw = new DxpeditionPlan { Call = "VP2V/K1ABC", Entity = "British Virgin Is", StartUnix = oct7 + 30 * day, EndUnix = oct7 + 37 * day - 1, Bands = new[] { "40m" }, Modes = new[] { "CW" } };
+        var noMode = new DxpeditionPlan { Call = "T30XX", Entity = "W Kiribati", StartUnix = oct7 + 20 * day, EndUnix = oct7 + 25 * day - 1 };
+        var clubLog = new DxpeditionPlan { Call = "3Y0J", Entity = "Bouvet", OnAirPerClubLog = true, EndUnix = oct7 + 40 * day - 1, Modes = new[] { "FT8" } };
+        long lastDay = oct7 + 14 * day + 23 * 3600;   // October 21, 23:00 UTC -- still inside
+        var dxccs = new Dictionary<string, int> { ["H49A"] = 185, ["VP2V/K1ABC"] = 65, ["T30XX"] = 301, ["3Y0J"] = 24 };
+        Func<string, int> dxccOf = c => dxccs.TryGetValue(c, out int n) ? n : 0;
+        Func<int, string, bool> worked = (dxcc, band) => dxcc == 185 && (band == null || band == "20m") || dxcc == 65;   // Solomons worked on 20m only; BVI everywhere
+        var needH49a = OtaSpotsWindow.AssessDxpedition(h49a, dxccOf, worked, true);
+        CheckStr("dxped row: active on its last announced day, dates UTC, Fox and Hound, needed on the band not worked",
+            OtaSpotsWindow.FormatDxpeditionRow(h49a, needH49a, lastDay),
+            "H49A, Solomon Is, active now, October 7 to October 21 UTC, 20m 6m, CW SSB FT8, Fox and Hound, needed on 6m");
+        Check("dxped: the day after the end is not active", OtaSpotsWindow.DxpeditionActive(h49a, oct7 + 15 * day), false);
+        CheckStr("dxped row: Club Log's on-air word, not announced dates",
+            OtaSpotsWindow.FormatDxpeditionRow(clubLog, OtaSpotsWindow.AssessDxpedition(clubLog, dxccOf, worked, true), lastDay),
+            "3Y0J, Bouvet, on the air per Club Log, announced to November 15 UTC, bands not announced, FT8, new DXCC");
+        var unknownCall = new DxpeditionPlan { Call = "XX9?", Entity = "Somewhere", StartUnix = oct7, EndUnix = oct7 + day - 1 };
+        Check("dxped: a call whose entity can't be told, or a log still loading: needs not known (not needed, not worked)",
+            !OtaSpotsWindow.AssessDxpedition(unknownCall, dxccOf, worked, true).Known
+            && !OtaSpotsWindow.AssessDxpedition(h49a, dxccOf, worked, false).Known
+            && OtaSpotsWindow.FormatDxpeditionRow(unknownCall, OtaSpotsWindow.AssessDxpedition(unknownCall, dxccOf, worked, true), lastDay).EndsWith(", needs not known"), true);
+        var all = new[] { h49a, cw, noMode, clubLog, unknownCall }.Select(pl => (pl, OtaSpotsWindow.AssessDxpedition(pl, dxccOf, worked, true))).ToList();
+        string Calls((List<DxpeditionPlan> Plans, List<OtaSpotsWindow.DxpeditionNeed> Needs, int UnknownHidden) r) => string.Join(" ", r.Plans.Select(pl => pl.Call));
+        CheckStr("dxped: active now", Calls(OtaSpotsWindow.SelectDxpeditions(all, 0, false, lastDay)), "H49A 3Y0J");
+        CheckStr("dxped: upcoming, FT8/FT4 first, then no mode announced, then the rest", Calls(OtaSpotsWindow.SelectDxpeditions(all, 1, false, lastDay)), "T30XX VP2V/K1ABC");
+        var neededOnly = OtaSpotsWindow.SelectDxpeditions(all, 2, true, lastDay);
+        Check("dxped: needed only keeps known needs, drops worked and counts the unknown it left out",
+            Calls(neededOnly) == "H49A 3Y0J T30XX" && neededOnly.UnknownHidden == 1, true);
+
+        // Ionosondes (2026-10-08): name or position (never a made-up name), "not reported" for a
+        // missing reading, "not known" for a missing time, the last day's readings first.
+        var iono = OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new[] {
+            new Ionosonde { Name = "Austin, TX, USA", Code = "AU930", Lat = 30.4, Lon = -97.7, MufMhz = 28.83, Fof2Mhz = 8.6, MeasuredAgeSecs = 202 * 86400L, DistanceKm = 120 },
+            new Ionosonde { Name = "Boulder, CO, USA", Code = "BC840", Lat = 40, Lon = -105.3, MufMhz = null, Fof2Mhz = 6.1, MeasuredAgeSecs = 600, DistanceKm = 1250 },
+            new Ionosonde { Lat = 51.7, Lon = -1.3, MufMhz = 20, Fof2Mhz = null, MeasuredAgeSecs = null, DistanceKm = 7400 } } }, null);
+        CheckStr("ionosondes: recent first, a missing MUF said, the position when there is no name, old and unknown times said",
+            string.Join(" | ", iono),
+            "Boulder, CO, USA: MUF not reported, foF2 6.1 megahertz, 1,250 kilometers, measured 10 minutes ago, BC840 | " +
+            "Austin, TX, USA: MUF 28.8 megahertz, foF2 8.6 megahertz, 120 kilometers, measured 202 days ago, AU930 | " +
+            "Station near 51.7 north, 1.3 west: MUF 20 megahertz, foF2 not reported, 7,400 kilometers, measurement time not known");
+        Check("ionosondes: no grid means no distance, the list still there",
+            OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new[] { new Ionosonde { Name = "Austin", MufMhz = 20, MeasuredAgeSecs = 60 } } }, null)[0]
+            == "Austin: MUF 20 megahertz, foF2 not reported, measured 1 minute ago", true);
+        Check("ionosondes: loading, failed, empty, older host",
+            OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult(), null)[0] == "Ionosonde readings loading"
+            && OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { IonosondesLastError = "timeout" }, null)[0] == "Ionosonde readings not available: timeout"
+            && OtaSpotsWindow.FormatIonosondeRows(new SpaceWxResult { Ionosondes = new Ionosonde[0] }, null)[0] == "No ionosonde readings", true);
+        Check("ionosondes: the modeled long-haul MUF row is still there",
+            OtaSpotsWindow.FormatSpaceWeatherRows(new SpaceWxResult { Value = new SpaceWx { Sfi = 100 }, MufNow = 21f }, null, null, null)
+                .Contains("Long-haul MUF 21 megahertz"), true);
+
+        // Sunspots (2026-10-08): the newest daily count with its date when the reading has none.
+        var days = new SolarHistoryResult { Days = new[] {
+            new SolarDay { DayUnix = 1759708800, Ssn = 58 },     // 2025-10-06
+            new SolarDay { DayUnix = 1759795200, Ssn = 78 },     // 2025-10-07
+            new SolarDay { DayUnix = 1759881600, Ssn = null } } };
+        CheckStr("sunspots: the newest daily count, dated", OtaSpotsWindow.FormatSunspotRow(null, days), "Sunspot number 78, daily count for October 7");
+        CheckStr("sunspots: a current reading still wins", OtaSpotsWindow.FormatSunspotRow(120f, days), "Sunspot number 120");
+        CheckStr("sunspots: none anywhere", OtaSpotsWindow.FormatSunspotRow(null, null), "Sunspot number not available");
+
+        // A list left with a line selected keeps its rows (rewriting it was read out while the
+        // operator was in another list); one never entered is filled as before.
+        var left = new System.Windows.Forms.ListBox();
+        left.Items.AddRange(new object[] { "a", "b", "c" });
+        left.SelectedIndex = 2;
+        OtaSpotsWindow.SetRowsIfChanged(left, new List<string> { "a", "b", "d" });
+        var never = new System.Windows.Forms.ListBox();
+        OtaSpotsWindow.SetRowsIfChanged(never, new List<string> { "x" });
+        Check("a list left with a line selected waits; an untouched one fills",
+            (string)left.Items[2] == "c" && left.SelectedIndex == 2 && never.Items.Count == 1, true);
+
         var hist = OtaSpotsWindow.FormatSolarHistory(new SolarHistoryResult { Days = new[] {
             new SolarDay { DayUnix = 1759363200, Sfi = 140, Ssn = 110 },      // 2025-10-02
             new SolarDay { DayUnix = 1759449600, Sfi = 145, Ssn = null } } }, null);
@@ -20954,6 +21149,80 @@ static class JimmyTests
 
     // "Show password" (2026-10-08): shows what was typed while checked, hides it again after, and
     // sits straight after the box in Tab order.
+    // Names per award (2026-10-08): Short name for the list, labels and speech; Status name and
+    // "show in status" for the calling/working status only; old files unchanged; two awards with
+    // the same short name keep their own counts.
+    static void AwardNamesTests()
+    {
+        Console.WriteLine("\n── Award short and status names ──");
+        string dir = Path.Combine(Path.GetTempPath(), "JimmyTest_AwardNames_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string was = FindRepoFile(Path.Combine("WSJTX_Controller", "RuleDefinitions", "WAS.ini"));
+            if (was == null) { Console.WriteLine("  SKIP  AwardNamesTests -- repo RuleDefinitions not found"); return; }
+            var legacy = RuleLoader.ParseAndValidate(was, out _);
+            Check("an older file: no short or status name, shown in status, list uses Name",
+                string.IsNullOrEmpty(legacy.ShortName) && string.IsNullOrEmpty(legacy.StatusName) && legacy.ShowInStatus && legacy.ListName == legacy.Name, true);
+            legacy.ShortName = "States";
+            legacy.StatusName = "WAS";
+            legacy.ShowInStatus = false;
+            string saved = Path.Combine(dir, "WAS.ini");
+            RuleWriter.Save(legacy, saved);
+            var back = RuleLoader.ParseAndValidate(saved, out string err);
+            Check("saved and read back: short name, status name, hidden from status",
+                err == null && back.ShortName == "States" && back.StatusName == "WAS" && !back.ShowInStatus && back.ListName == "States", true);
+            var copy = RuleDefinitionManagerDlg.CloneDefinition(back);
+            Check("a copy keeps them", copy.ShortName == "States" && copy.StatusName == "WAS" && !copy.ShowInStatus, true);
+
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            var tagger = new AwardTagger(wc);
+            WsjtxClient.ActiveAwardTag Tag(string id, string name, string shortName = null, string status = null, bool show = true) =>
+                new WsjtxClient.ActiveAwardTag { RuleId = id, RuleName = name, ShortName = shortName, StatusName = status, ShowInStatus = show,
+                    Set = new HashSet<string>(), UnconfirmedSet = new HashSet<string>() };
+            EnqueueDecodeMessage Msg(string id, bool needed = true) => new EnqueueDecodeMessage
+                { MatchedAwardRuleId = id, Category = needed ? WsjtxClient.CallCategory.STILL_NEEDED : WsjtxClient.CallCategory.STILL_UNCONFIRMED };
+
+            wc.activeAwardTags["WAS"] = Tag("WAS", "Worked All States");
+            wc.activeAwardTags["CUST"] = Tag("CUST", "Thirteen Colonies Special Event");
+            Check("no names set: WAS keeps its short wording, a custom award its full name, status the same",
+                tagger.CategoryTag(Msg("WAS")) == "WAS Needed" && tagger.CategoryTag(Msg("CUST")) == "Thirteen Colonies Special Event Needed"
+                && tagger.StatusTag(Msg("CUST")) == tagger.CategoryTag(Msg("CUST")), true);
+
+            wc.activeAwardTags["WAS"] = Tag("WAS", "Worked All States", "States");
+            wc.activeAwardTags["CUST"] = Tag("CUST", "Thirteen Colonies Special Event", "Colonies", "13 Col");
+            Check("short names: in labels for built-in and custom awards; status name in the status only",
+                tagger.CategoryTag(Msg("WAS")) == "States Needed" && tagger.StatusTag(Msg("WAS")) == "States Needed"
+                && tagger.CategoryTag(Msg("CUST", false)) == "Colonies Unconf" && tagger.StatusTag(Msg("CUST", false)) == "13 Col Unconf", true);
+
+            wc.activeAwardTags["CUST"] = Tag("CUST", "Thirteen Colonies Special Event", "Colonies", null, show: false);
+            Check("not shown in status: gone from the status, still in the label",
+                tagger.StatusTag(Msg("CUST")) == "" && tagger.CategoryTag(Msg("CUST")) == "Colonies Needed", true);
+
+            // Two awards given the same short name: two counts, not one merged.
+            wc.activeAwardTags["A1"] = Tag("A1", "Award One", "Same");
+            wc.activeAwardTags["A2"] = Tag("A2", "Award Two", "Same");
+            wc.callDict["K1AAA"] = Msg("A1"); wc.callDict["K1BBB"] = Msg("A2"); wc.callDict["K1CCC"] = Msg("A2");
+            var counts = (List<KeyValuePair<string, int>>)typeof(WsjtxClient).GetMethod("SnapshotNeededAwardCounts",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).Invoke(wc, new object[] { null });
+            CheckStr("same short name, separate counts", string.Join("; ", counts.Select(kv => $"{kv.Value} {kv.Key}")), "1 Same Needed; 2 Same Needed");
+
+            var aboutDef = new RuleDefinition { Name = "Thirteen Colonies Special Event", ShortName = "Colonies" };
+            Check("the full name stays in the award's details", LogbookWindow.AboutText(aboutDef).StartsWith("Thirteen Colonies Special Event."), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  AwardNamesTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
     static void PasswordRevealTests()
     {
         Console.WriteLine("\n── Show password ──");

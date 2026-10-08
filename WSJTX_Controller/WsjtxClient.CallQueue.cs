@@ -278,7 +278,13 @@ namespace WSJTX_Controller
 
                 bool isNewDxccCategory = emsg.Category == CallCategory.NEW_COUNTRY
                                         || emsg.Category == CallCategory.NEW_COUNTRY_ON_BAND;
-                bool isStillNeededByActiveAward = _awardTagger.MatchedAwardRuleId(emsg) != null;
+                // 2026-10-08: also an area an active award has worked but not confirmed (Maine
+                // worked via W1AAA, never confirmed): any station there can confirm it, including
+                // one worked on this band before -- when "Unconf" calling is on. A callsign award
+                // still matches only its own callsigns (AwardMatcher); just-logged stays out above.
+                bool isStillNeededByActiveAward = _awardTagger.MatchedAwardRuleId(emsg) != null
+                    || (Ranker.callingEnabled.Contains(CallCategory.STILL_UNCONFIRMED)
+                        && _awardTagger.MatchedUnconfirmedAwardRuleId(emsg) != null);
                 if (AwardMatcher.ShouldRejectAlreadyWorked(
                         admitNewOnBand, isPota, isNewDxccCategory, isStillNeededByActiveAward))
                 {

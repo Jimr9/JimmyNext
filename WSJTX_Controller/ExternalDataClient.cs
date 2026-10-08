@@ -74,6 +74,67 @@ namespace WSJTX_Controller
         public NoaaScales Scales { get; set; }
         public long? ScalesAgeSecs { get; set; }
         public string ScalesLastError { get; set; }
+        // The fast-lane X-ray (2026-10-08): EngineHost reads GOES X-ray every minute on its own,
+        // so a flare's radio blackout shows within about a minute rather than with the 10-minute
+        // SFI/Kp reading above. Its own age (from the last good read) and error. All null from an
+        // older EngineHost, which then shows Value's X-ray as before.
+        public XrayNow Xray { get; set; }
+        public long? XrayAgeSecs { get; set; }
+        public string XrayLastError { get; set; }
+        // KC2G's ionosondes (2026-10-08): measured MUF and foF2 per station, nearest first when
+        // My Grid is set. Null until EngineHost has read the list (and from older hosts).
+        public Ionosonde[] Ionosondes { get; set; }
+        public long? IonosondesAgeSecs { get; set; }
+        public string IonosondesLastError { get; set; }
+    }
+
+    // DXpedition calendars (2026-10-08), as EngineHost's dxpeditions_json sends them: Nexus's
+    // NG3K + Club Log plans. Plans null until first read. CheckedAgeSecs is when Jimmy last
+    // asked -- not proof the calendar itself changed then.
+    public class DxpeditionsResult
+    {
+        public DxpeditionPlan[] Plans { get; set; }
+        public long? CheckedAgeSecs { get; set; }
+        public string Error { get; set; }
+    }
+
+    // StartUnix/EndUnix: the announced dates (midnight UTC; the end covers its whole day), null
+    // when Club Log's on-air list moved them (OnAirPerClubLog). Modes empty = none announced.
+    public class DxpeditionPlan
+    {
+        public string Call { get; set; }
+        public string Entity { get; set; }
+        public string Grid { get; set; }
+        public long? StartUnix { get; set; }
+        public long? EndUnix { get; set; }
+        public bool OnAirPerClubLog { get; set; }
+        public string[] Bands { get; set; } = Array.Empty<string>();
+        public string[] Modes { get; set; } = Array.Empty<string>();
+        public string Ft8Mode { get; set; }
+        public string Website { get; set; }
+    }
+
+    // One ionosonde as EngineHost sends it: Nexus's reading plus the station's name and code
+    // from KC2G. MeasuredAgeSecs null = KC2G gave no readable time (never "just now");
+    // DistanceKm null = My Grid not set.
+    public class Ionosonde
+    {
+        public string Name { get; set; }
+        public string Code { get; set; }
+        public double Lat { get; set; }
+        public double Lon { get; set; }
+        public double? MufMhz { get; set; }
+        public double? Fof2Mhz { get; set; }
+        public long? MeasuredAgeSecs { get; set; }
+        public double? DistanceKm { get; set; }
+    }
+
+    // Same three facts as SpaceWx's own X-ray (Nexus's flux, class and R scale).
+    public class XrayNow
+    {
+        public float XrayLong { get; set; }
+        public string XrayClass { get; set; }
+        public int RScale { get; set; }
     }
 
     // Mirrors EngineHost's RegionReportPayload (live_feeds.rs) -- the strongest region on a
@@ -340,6 +401,8 @@ namespace WSJTX_Controller
 
         // The calendar as EngineHost last read it (refreshed there every 15 minutes); refreshNow
         // reads the feed first (the Refresh Calendar button), which can take up to 20 seconds.
+        public DxpeditionsResult GetDxpeditions(out string error) => GetJson<DxpeditionsResult>("DXPEDITIONS", out error);
+
         public ContestCalendarResult GetContestCalendar(bool refreshNow, out string error)
         {
             if (!refreshNow) return GetJson<ContestCalendarResult>("CONTEST_CALENDAR", out error);

@@ -24,6 +24,8 @@ namespace WSJTX_Controller
 
         // ── General tab ──────────────────────────────────────────────────────
         private TextBox _idTb, _nameTb, _sponsorTb, _categoryTb, _websiteTb;
+        private TextBox _shortNameTb, _statusNameTb;
+        private CheckBox _showInStatusCb;
         private TextBox _descriptionTb;
         private CheckBox _enabledCb;
 
@@ -123,6 +125,35 @@ namespace WSJTX_Controller
             page.Controls.Add(MakeLabel("Name:", 10, y));
             _nameTb = new TextBox { Location = new Point(140, y - 3), Size = new Size(380, 20), TabIndex = tab++, AccessibleName = "Rule Name" };
             page.Controls.Add(_nameTb);
+            y += 28;
+
+            // Names per award (2026-10-08): optional, each falling back as its hint says.
+            page.Controls.Add(MakeLabel("Short name:", 10, y));
+            _shortNameTb = new TextBox
+            {
+                Location = new Point(140, y - 3), Size = new Size(160, 20), TabIndex = tab++, AccessibleName = "Short name",
+                AccessibleDescription = "For the award list, labels and speech. Blank uses Name.",
+            };
+            page.Controls.Add(_shortNameTb);
+            page.Controls.Add(MakeLabel("Lists and speech; blank uses Name", 310, y));
+            y += 28;
+
+            page.Controls.Add(MakeLabel("Status name:", 10, y));
+            _statusNameTb = new TextBox
+            {
+                Location = new Point(140, y - 3), Size = new Size(160, 20), TabIndex = tab++, AccessibleName = "Status name",
+                AccessibleDescription = "For the calling and working status. Blank uses Short name, then Name.",
+            };
+            page.Controls.Add(_statusNameTb);
+            page.Controls.Add(MakeLabel("Status; blank uses Short name", 310, y));
+            y += 28;
+
+            _showInStatusCb = new CheckBox
+            {
+                Text = "Show in calling and working status", Location = new Point(10, y), AutoSize = true, TabIndex = tab++,
+                AccessibleName = "Show in calling and working status", Checked = true,
+            };
+            page.Controls.Add(_showInStatusCb);
             y += 28;
 
             page.Controls.Add(MakeLabel("Sponsor:", 10, y));
@@ -354,6 +385,9 @@ namespace WSJTX_Controller
             // user is about to choose for a brand-new rule.
             _idTb.Text          = _isNew ? "" : (d?.Id ?? "");
             _nameTb.Text        = d?.Name ?? "";
+            _shortNameTb.Text   = d?.ShortName ?? "";
+            _statusNameTb.Text  = d?.StatusName ?? "";
+            _showInStatusCb.Checked = d?.ShowInStatus ?? true;
             _sponsorTb.Text     = d?.Sponsor ?? "";
             _categoryTb.Text    = d?.Category ?? "";
             _websiteTb.Text     = d?.Website ?? "";
@@ -474,6 +508,9 @@ namespace WSJTX_Controller
             {
                 Id              = id,
                 Name            = _nameTb.Text.Trim(),
+                ShortName       = _shortNameTb.Text.Trim(),
+                StatusName      = _statusNameTb.Text.Trim(),
+                ShowInStatus    = _showInStatusCb.Checked,
                 Sponsor         = _sponsorTb.Text.Trim(),
                 Category        = _categoryTb.Text.Trim(),
                 FormatVersion   = RuleLoader.SupportedFormatVersion,

@@ -19,6 +19,9 @@ namespace WSJTX_Controller
             sb.AppendLine("[Award]");
             sb.AppendLine($"Id={def.Id}");
             sb.AppendLine($"Name={def.Name}");
+            if (!string.IsNullOrWhiteSpace(def.ShortName)) sb.AppendLine($"ShortName={def.ShortName.Trim()}");
+            if (!string.IsNullOrWhiteSpace(def.StatusName)) sb.AppendLine($"StatusName={def.StatusName.Trim()}");
+            if (!def.ShowInStatus) sb.AppendLine("ShowInStatus=N");
             sb.AppendLine($"Sponsor={def.Sponsor}");
             sb.AppendLine($"Category={def.Category}");
             sb.AppendLine($"FormatVersion={(def.FormatVersion > 0 ? def.FormatVersion : RuleLoader.SupportedFormatVersion)}");

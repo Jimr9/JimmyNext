@@ -226,25 +226,51 @@ namespace WSJTX_Controller
                 case WsjtxClient.CallCategory.DXCC_UNCONFIRMED:    return Wording.Get("Tag.DxccUnconf");
                 case WsjtxClient.CallCategory.ZONE_NEEDED:         return Wording.Get("Tag.ZoneNeeded");
                 case WsjtxClient.CallCategory.STILL_NEEDED:
-                    if (d.MatchedAwardRuleId == "WAS") return Wording.Get("Tag.WasNeeded");
-                    if (d.MatchedAwardRuleId == "WAZ") return Wording.Get("Tag.ZoneNeeded");
-                    return Wording.Fill("Tag.AwardNeeded", ("Award", AwardDisplayName(d)));
                 case WsjtxClient.CallCategory.STILL_UNCONFIRMED:
-                    if (d.MatchedAwardRuleId == "WAS")  return Wording.Get("Tag.WasUnconf");
-                    if (d.MatchedAwardRuleId == "DXCC") return Wording.Get("Tag.DxccUnconf");
-                    return Wording.Fill("Tag.AwardUnconf", ("Award", AwardDisplayName(d)));
+                    return AwardTag(d, Tag(d)?.ShortName);
                 default:                               return "";
             }
         }
+
+        // The award's tag for the calling/working status (2026-10-08): its Status name, else its
+        // Short name, else as in the list -- or nothing when the award is set not to show in the
+        // status. Only the status wording; matching, ranking and every other label are unchanged.
+        public string StatusTag(EnqueueDecodeMessage d)
+        {
+            if (d.Category != WsjtxClient.CallCategory.STILL_NEEDED && d.Category != WsjtxClient.CallCategory.STILL_UNCONFIRMED)
+                return CategoryTag(d);
+            var tag = Tag(d);
+            if (tag != null && !tag.ShowInStatus) return "";
+            string name = !string.IsNullOrWhiteSpace(tag?.StatusName) ? tag.StatusName : tag?.ShortName;
+            return AwardTag(d, name);
+        }
+
+        // "<name> Needed" / "<name> Unconf". WAS, WAZ and DXCC keep their own short wording
+        // (WAS Needed, Zone Needed, DXCC Unconf) unless the award was given a name of its own.
+        private string AwardTag(EnqueueDecodeMessage d, string ownName)
+        {
+            bool needed = d.Category == WsjtxClient.CallCategory.STILL_NEEDED;
+            if (string.IsNullOrWhiteSpace(ownName))
+            {
+                if (needed && d.MatchedAwardRuleId == "WAS") return Wording.Get("Tag.WasNeeded");
+                if (needed && d.MatchedAwardRuleId == "WAZ") return Wording.Get("Tag.ZoneNeeded");
+                if (!needed && d.MatchedAwardRuleId == "WAS") return Wording.Get("Tag.WasUnconf");
+                if (!needed && d.MatchedAwardRuleId == "DXCC") return Wording.Get("Tag.DxccUnconf");
+            }
+            string award = string.IsNullOrWhiteSpace(ownName) ? AwardDisplayName(d) : ownName.Trim();
+            return Wording.Fill(needed ? "Tag.AwardNeeded" : "Tag.AwardUnconf", ("Award", award));
+        }
+
+        private WsjtxClient.ActiveAwardTag Tag(EnqueueDecodeMessage d) =>
+            !string.IsNullOrEmpty(d.MatchedAwardRuleId) && _wc.activeAwardTags.TryGetValue(d.MatchedAwardRuleId, out var tag) ? tag : null;
 
         // Looks up the display name of whichever active award this message matched
         // (stashed on the message by DeriveCategory/CheckAwardAlert), falling back to a
         // generic label if the rule can't be found (e.g. unchecked between match and display).
         public string AwardDisplayName(EnqueueDecodeMessage d)
         {
-            WsjtxClient.ActiveAwardTag tag;
-            if (!string.IsNullOrEmpty(d.MatchedAwardRuleId) && _wc.activeAwardTags.TryGetValue(d.MatchedAwardRuleId, out tag))
-                return tag.RuleName;
+            var tag = Tag(d);
+            if (tag != null) return string.IsNullOrWhiteSpace(tag.ShortName) ? tag.RuleName : tag.ShortName.Trim();
             return "Still";
         }
     }

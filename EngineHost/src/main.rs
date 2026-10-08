@@ -1749,6 +1749,8 @@ fn handle_control_connection(
             let _ = writeln!(stream, "{}", external_cache.solar_history_json());
         } else if line == "SOLAR_WIND" {
             let _ = writeln!(stream, "{}", external_cache.solar_wind_json());
+        } else if line == "DXPEDITIONS" {
+            let _ = writeln!(stream, "{}", external_cache.dxpeditions_json());
         } else if line == "CONTEST_CALENDAR" {
             let _ = writeln!(stream, "{}", external_cache.contests_json());
         } else if line == "CONTEST_CALENDAR_REFRESH" {

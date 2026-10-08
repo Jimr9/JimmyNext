@@ -80,6 +80,14 @@ namespace WSJTX_Controller
     {
         public string Id;
         public string Name;
+        // Names per award (2026-10-08), each optional: ShortName for the checked list, the
+        // live labels and announcements (blank = Name); StatusName for the calling/working
+        // status (blank = ShortName, then Name); ShowInStatus = false leaves the award out of
+        // that status only -- tracking, ranking and every other label are unchanged.
+        public string ShortName;
+        public string StatusName;
+        public bool   ShowInStatus = true;
+        public string ListName => string.IsNullOrWhiteSpace(ShortName) ? Name : ShortName.Trim();
         public string Sponsor;
         public string Category;
         public int    FormatVersion;

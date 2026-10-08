@@ -58,7 +58,7 @@ namespace WSJTX_Controller
         // starting while a slow one is still out (a mashed Refresh button, or a timer tick
         // landing mid-fetch) -- same reasoning as WsjtxClient.Direct.cs's _directPollInFlight.
         // See RefreshPotaSota's own comment for the full "why this exists at all" writeup.
-        private bool _potaInFlight, _condInFlight, _dxInFlight, _wxInFlight;
+        private bool _potaInFlight, _condInFlight, _dxInFlight, _wxInFlight, _dxpedInFlight;
 
         // ── POTA/SOTA tab ────────────────────────────────────────────────────────
         private ListBox _potaList;
@@ -90,6 +90,7 @@ namespace WSJTX_Controller
 
         // ── Space Weather tab ────────────────────────────────────────────────────
         private ListBox _wxReadingsList;   // one plain-language line per reading (2026-10-06)
+        private ListBox _wxIonoList;       // KC2G ionosondes, measured MUF (2026-10-08)
         private ListBox _wxHistoryList;    // daily solar history
         private TextBox _wxStatusLabel;
 
@@ -138,8 +139,8 @@ namespace WSJTX_Controller
             // Pure layout host for the one page shown (see LogbookWindow's _categoryDetailHost).
             _host = new Panel { Dock = DockStyle.Fill, AccessibleName = "", AccessibleRole = AccessibleRole.None };
 
-            string[] names = { "POTA / SOTA", "Contests", "Band Conditions", "DX Spots", "Space Weather", "Who Hears Me" };
-            _pages = new[] { BuildPotaSotaTab(), BuildContestsTab(), BuildBandConditionsTab(), BuildDxSpotsTab(), BuildSpaceWeatherTab(), BuildWhoHearsMeTab() };
+            string[] names = { "POTA / SOTA", "Contests", "Band Conditions", "DX Spots", "Space Weather", "Who Hears Me", "DXpeditions" };
+            _pages = new[] { BuildPotaSotaTab(), BuildContestsTab(), BuildBandConditionsTab(), BuildDxSpotsTab(), BuildSpaceWeatherTab(), BuildWhoHearsMeTab(), BuildDxpeditionsTab() };
             for (int i = 0; i < _pages.Length; i++)
             {
                 _pages[i].Dock = DockStyle.Fill;
@@ -194,6 +195,7 @@ namespace WSJTX_Controller
                 case 3: RefreshDxSpots(); break;
                 case 4: RefreshSpaceWeather(); break;
                 case 5: RefreshWhoHearsMe(); break;
+                case 6: RefreshDxpeditions(); break;
             }
         }
 
@@ -300,9 +302,19 @@ namespace WSJTX_Controller
             };
             // The first line is selected when the list is entered, never while it is filled out of
             // view: a selection change is announced even in a list that does not have the focus.
-            lb.GotFocus += (s, e) => SelectFirstItemIfNoneSelectedYet(lb, lb.SelectedIndex >= 0);
+            lb.GotFocus += (s, e) =>
+            {
+                // Rows that waited while the operator was elsewhere (SetRowsIfChanged) go in now,
+                // in place, as the list is entered.
+                if (_waitingRows.TryGetValue(lb, out var waiting)) { _waitingRows.Remove(lb); SetRowsIfChanged(lb, waiting); }
+                SelectFirstItemIfNoneSelectedYet(lb, lb.SelectedIndex >= 0);
+            };
             return lb;
         }
+
+        // A list's new rows held back while it is out of focus with a line still selected.
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, List<string>> _waitingRows =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, List<string>>();
 
         // Companion to MakeListBox's own comment: a ListBox's "current item" for keyboard/
         // screen-reader purposes is just SelectedIndex, but Items.Clear()+Add() (every Refresh
@@ -809,6 +821,181 @@ namespace WSJTX_Controller
             return r.MaxKm > 0 ? $"{who} {window}, furthest {r.MaxKm:N0} km." : $"{who} {window}.";
         }
 
+        // ── DXpeditions (2026-10-08) ─────────────────────────────────────────────
+        // The announced DXpeditions (NG3K, with Club Log's on-air list) from Nexus's own fetch,
+        // with Jimmy's own worked-entity rules for what is needed. Calendar only: no frequency,
+        // and nothing here ever tunes the radio. "Active now" = inside the announced dates (or on
+        // the air per Club Log, said as such) -- not proof the operation is heard.
+
+        private ListBox _dxpedList;
+        private ComboBox _dxpedShowCb;
+        private CheckBox _dxpedNeededCb;
+        private TextBox _dxpedStatusBox;
+        private readonly List<DxpeditionPlan> _dxpedRows = new List<DxpeditionPlan>();
+
+        private Panel BuildDxpeditionsTab()
+        {
+            var page = MakeTabPage("DXpeditions");
+            var top = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 32, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            top.Controls.Add(new Label { Text = "Show:", AutoSize = true, Margin = new Padding(3, 8, 3, 3) });
+            _dxpedShowCb = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 130, AccessibleName = "Show" };
+            _dxpedShowCb.Items.AddRange(new object[] { "Active now", "Upcoming", "All" });
+            _dxpedShowCb.SelectedIndex = 0;
+            _dxpedShowCb.SelectedIndexChanged += (s, e) => RefreshDxpeditions();
+            _dxpedNeededCb = new CheckBox { Text = "Needed only", AccessibleName = "Needed only", AutoSize = true, Margin = new Padding(10, 6, 3, 3) };
+            _dxpedNeededCb.CheckedChanged += (s, e) => RefreshDxpeditions();
+            top.Controls.Add(_dxpedShowCb);
+            top.Controls.Add(_dxpedNeededCb);
+
+            _dxpedList = MakeListBox("DXpeditions list");
+            _dxpedList.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { OpenDxpeditionWebsite(); e.Handled = true; e.SuppressKeyPress = true; } };
+
+            var bottom = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 34, FlowDirection = FlowDirection.LeftToRight, WrapContents = false };
+            var websiteBtn = new Button { Text = "Open &Website", AccessibleName = "Open website", AutoSize = true };
+            websiteBtn.Click += (s, e) => OpenDxpeditionWebsite();
+            var refreshBtn = new Button { Text = "&Refresh", AccessibleName = "Refresh DXpeditions", AutoSize = true };
+            refreshBtn.Click += (s, e) => RefreshDxpeditions();
+            bottom.Controls.Add(websiteBtn);
+            bottom.Controls.Add(refreshBtn);
+            _dxpedStatusBox = MakeStatusBox();
+            _dxpedStatusBox.Dock = DockStyle.Bottom;
+
+            page.Controls.Add(_dxpedList);
+            page.Controls.Add(top);
+            page.Controls.Add(bottom);
+            page.Controls.Add(_dxpedStatusBox);   // added last: docks lowest, under the buttons, as Tab reaches it
+            _pageOrder[page] = new Control[] { _dxpedShowCb, _dxpedNeededCb, _dxpedList, websiteBtn, refreshBtn, _dxpedStatusBox };
+            return page;
+        }
+
+        // What Jimmy's log says about one operation: Known = false when its entity can't be told
+        // from its callsign or the log is still loading -- never guessed needed or not.
+        internal sealed class DxpeditionNeed
+        {
+            public bool Known;
+            public bool NewDxcc;
+            public List<string> NeededBands = new List<string>();
+            public bool Needed => Known && (NewDxcc || NeededBands.Count > 0);
+        }
+
+        // The same worked-entity rule the call list uses (ClassificationEngine: HasWorkedDxcc by
+        // entity, overall and per band), the entity from the offline lookup of the callsign.
+        internal static DxpeditionNeed AssessDxpedition(DxpeditionPlan p, Func<string, int> dxccOf, Func<int, string, bool> workedDxcc, bool logReady)
+        {
+            var need = new DxpeditionNeed();
+            int dxcc = 0;
+            try { dxcc = dxccOf(p?.Call ?? ""); } catch { }
+            if (!logReady || dxcc <= 0) return need;
+            need.Known = true;
+            need.NewDxcc = !workedDxcc(dxcc, null);
+            foreach (string band in p.Bands ?? Array.Empty<string>())
+                if (!workedDxcc(dxcc, band)) need.NeededBands.Add(band);
+            return need;
+        }
+
+        internal static bool DxpeditionActive(DxpeditionPlan p, long nowUnix) =>
+            p.OnAirPerClubLog || (p.StartUnix.HasValue && p.EndUnix.HasValue && p.StartUnix.Value <= nowUnix && nowUnix <= p.EndUnix.Value);
+
+        internal static bool DxpeditionUpcoming(DxpeditionPlan p, long nowUnix) =>
+            !p.OnAirPerClubLog && p.StartUnix.HasValue && p.StartUnix.Value > nowUnix;
+
+        // FT8/FT4 announcements first, then those that announced no mode, then the rest; within
+        // each, by start date.
+        internal static int DxpeditionModeRank(DxpeditionPlan p)
+        {
+            var modes = p.Modes ?? Array.Empty<string>();
+            if (modes.Any(m => m.Equals("FT8", StringComparison.OrdinalIgnoreCase) || m.Equals("FT4", StringComparison.OrdinalIgnoreCase))) return 0;
+            return modes.Length == 0 ? 1 : 2;
+        }
+
+        // One row: "H49A, Solomon Is, active now, October 7 to October 21 UTC, 20m 6m, FT8 CW SSB, new DXCC".
+        internal static string FormatDxpeditionRow(DxpeditionPlan p, DxpeditionNeed need, long nowUnix)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string Day(long unix) => DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime.ToString("MMMM d", inv);
+            string when;
+            if (p.OnAirPerClubLog)
+                when = "on the air per Club Log" + (p.EndUnix.HasValue ? $", announced to {Day(p.EndUnix.Value)} UTC" : "");
+            else if (p.StartUnix.HasValue && p.EndUnix.HasValue)
+                when = (DxpeditionActive(p, nowUnix) ? "active now, " : p.EndUnix.Value < nowUnix ? "ended, " : "")
+                       + $"{Day(p.StartUnix.Value)} to {Day(p.EndUnix.Value)} UTC";
+            else when = "dates not known";
+            string bands = p.Bands?.Length > 0 ? string.Join(" ", p.Bands) : "bands not announced";
+            string modes = p.Modes?.Length > 0 ? string.Join(" ", p.Modes) : "mode not announced";
+            string fox = string.IsNullOrEmpty(p.Ft8Mode) ? "" : p.Ft8Mode == "FoxHound" ? ", Fox and Hound"
+                : p.Ft8Mode == "SuperFox" ? ", SuperFox" : ", " + p.Ft8Mode;
+            string needed = !need.Known ? ", needs not known"
+                : need.NewDxcc ? ", new DXCC"
+                : need.NeededBands.Count > 0 ? ", needed on " + string.Join(" ", need.NeededBands)
+                : ", worked";
+            string entity = string.IsNullOrWhiteSpace(p.Entity) ? "" : ", " + p.Entity.Trim();
+            return $"{p.Call}{entity}, {when}, {bands}, {modes}{fox}{needed}";
+        }
+
+        // The rows for a Show choice (0 Active now, 1 Upcoming, 2 All) and Needed only. Returns
+        // the plans shown and how many were left out only because their needs are not known.
+        internal static (List<DxpeditionPlan> Plans, List<DxpeditionNeed> Needs, int UnknownHidden) SelectDxpeditions(
+            IEnumerable<(DxpeditionPlan Plan, DxpeditionNeed Need)> all, int show, bool neededOnly, long nowUnix)
+        {
+            var chosen = all.Where(x => show == 2 || (show == 0 ? DxpeditionActive(x.Plan, nowUnix) : DxpeditionUpcoming(x.Plan, nowUnix))).ToList();
+            int unknownHidden = neededOnly ? chosen.Count(x => !x.Need.Known) : 0;
+            if (neededOnly) chosen = chosen.Where(x => x.Need.Needed).ToList();
+            chosen = chosen.OrderBy(x => DxpeditionModeRank(x.Plan)).ThenBy(x => x.Plan.StartUnix ?? long.MaxValue).ThenBy(x => x.Plan.Call).ToList();
+            return (chosen.Select(x => x.Plan).ToList(), chosen.Select(x => x.Need).ToList(), unknownHidden);
+        }
+
+        private void RefreshDxpeditions()
+        {
+            if (_dxpedInFlight) return;
+            _dxpedInFlight = true;
+            int show = _dxpedShowCb.SelectedIndex;
+            bool neededOnly = _dxpedNeededCb.Checked;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                var result = _client.GetDxpeditions(out string error);
+                long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                bool logReady = NexusLogbook.LogReady;
+                var assessed = (result?.Plans ?? Array.Empty<DxpeditionPlan>())
+                    .Where(pl => !string.IsNullOrWhiteSpace(pl?.Call))
+                    .Select(pl => (pl, AssessDxpedition(pl, c => _lookupManager?.BuildOffline(c)?.Dxcc ?? 0,
+                        (dxcc, band) => _logbookDb != null && _logbookDb.HasWorkedDxcc(dxcc, band), logReady && _logbookDb != null)))
+                    .ToList();
+                var picked = SelectDxpeditions(assessed, show, neededOnly, now);
+                SafeBeginInvoke(() =>
+                {
+                    _dxpedInFlight = false;
+                    if (IsDisposed) return;
+                    var rows = picked.Plans.Select((pl, i) => FormatDxpeditionRow(pl, picked.Needs[i], now)).ToList();
+                    if (rows.Count == 0)
+                        rows.Add(result?.Plans == null ? "DXpeditions " + (error ?? result?.Error ?? "loading")
+                            : show == 0 ? "No DXpeditions active now" : show == 1 ? "No upcoming DXpeditions" : "No DXpeditions announced");
+                    _dxpedRows.Clear();
+                    _dxpedRows.AddRange(picked.Plans);
+                    SetRowsIfChanged(_dxpedList, rows);
+                    string status = error != null ? "Could not read the DXpeditions: " + error
+                        : result?.CheckedAgeSecs == null ? (result?.Error != null ? "DXpedition calendars unavailable: " + result.Error : "DXpedition calendars not read yet.")
+                        : $"Calendars from NG3K and Club Log, checked {AgeWords(result.CheckedAgeSecs.Value)}" + (result.Error != null ? $"; the last check failed: {result.Error}" : "") + ".";
+                    if (picked.UnknownHidden > 0) status += $" {picked.UnknownHidden} not shown because their needs are not known.";
+                    if (!logReady) status += " The logbook is still loading; needs are not known yet.";
+                    if (_dxpedStatusBox.Text != status) _dxpedStatusBox.Text = status;
+                });
+            });
+        }
+
+        private void OpenDxpeditionWebsite()
+        {
+            int i = _dxpedList.SelectedIndex;
+            if (i < 0 || i >= _dxpedRows.Count) { _dxpedStatusBox.Text = "Select a DXpedition first."; return; }
+            string url = _dxpedRows[i].Website;
+            if (string.IsNullOrWhiteSpace(url) || !(url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) || url.StartsWith("http://", StringComparison.OrdinalIgnoreCase)))
+            {
+                _dxpedStatusBox.Text = $"{_dxpedRows[i].Call} has no website in the calendar.";
+                return;
+            }
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true }); }
+            catch (Exception ex) { _dxpedStatusBox.Text = $"Could not open the website: {ex.Message}"; }
+        }
+
         private void RefreshWhoHearsMe()
         {
             if (_heardInFlight) return;
@@ -944,6 +1131,12 @@ namespace WSJTX_Controller
             // like "1.2e-6 W/m²", read oddly) -- arrowed through like every other list here.
             _wxReadingsList = MakeListBox("Readings");
 
+            // Measured MUF from KC2G's ionosondes (2026-10-08), under the readings' modeled one.
+            var ionoPanel = new Panel { Dock = DockStyle.Bottom, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
+            _wxIonoList = MakeListBox("Ionosondes, measured MUF");
+            ionoPanel.Controls.Add(_wxIonoList);
+            ionoPanel.Controls.Add(new Label { Text = "Ionosondes, measured MUF (recent first, nearest first):", Dock = DockStyle.Top, Height = 20, TabStop = false });
+
             var historyPanel = new Panel { Dock = DockStyle.Bottom, Height = 150, AccessibleName = "", AccessibleRole = AccessibleRole.None };
             _wxHistoryList = MakeListBox("Daily solar history, newest first");
             historyPanel.Controls.Add(_wxHistoryList);
@@ -957,9 +1150,10 @@ namespace WSJTX_Controller
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_wxReadingsList);
+            page.Controls.Add(ionoPanel);      // docks above the history
             page.Controls.Add(historyPanel);
             page.Controls.Add(bottom);
-            _pageOrder[page] = new Control[] { _wxReadingsList, _wxHistoryList, refreshBtn, _wxStatusLabel };
+            _pageOrder[page] = new Control[] { _wxReadingsList, _wxIonoList, _wxHistoryList, refreshBtn, _wxStatusLabel };
             return page;
         }
 
@@ -989,13 +1183,16 @@ namespace WSJTX_Controller
                 {
                     _wxInFlight = false;
                     if (IsDisposed) return;
-                    SetRowsIfChanged(_wxReadingsList, FormatSpaceWeatherRows(result, error, wind, windError));
+                    SetRowsIfChanged(_wxReadingsList, FormatSpaceWeatherRows(result, error, wind, windError, history));
+                    SetRowsIfChanged(_wxIonoList, FormatIonosondeRows(result, error));
                     ShowSolarHistory(history, historyError);
-                    _wxStatusLabel.Text = error != null || result?.Value == null
+                    string status = error != null || result?.Value == null
                         ? error ?? result?.LastError ?? "No data yet."
                         : result.LastError != null
                             ? $"Feed warning: {result.LastError}"
                             : (result.AgeSecs != null ? $"As of {AgeWords(result.AgeSecs.Value)}" : "");
+                    string xray = error == null ? FormatXrayStatus(result) : "";
+                    _wxStatusLabel.Text = xray.Length == 0 ? status : status.Length == 0 ? xray : status + "; " + xray;
                 });
             });
         }
@@ -1003,10 +1200,20 @@ namespace WSJTX_Controller
         // A list's rows replaced only when they changed. In the list being read the place is kept;
         // a list out of focus is left with nothing selected, so a refresh says nothing (a selection
         // change is announced even out of focus -- 2026-10-06).
-        private static void SetRowsIfChanged(ListBox list, List<string> rows)
+        // 2026-10-08: a list the operator was on and left still has a line selected, and rewriting
+        // it was read out while they were in another list (the Space Weather readings, heard from
+        // the history list). Its new rows wait, silently, until the list is entered again.
+        // internal: JimmyTests exercises it.
+        internal static void SetRowsIfChanged(ListBox list, List<string> rows)
         {
-            if (rows.SequenceEqual(list.Items.Cast<string>())) return;
+            if (rows.SequenceEqual(list.Items.Cast<string>())) { _waitingRows.Remove(list); return; }
             bool focused = list.Focused;
+            if (!focused && list.SelectedIndex >= 0)
+            {
+                _waitingRows.AddOrUpdate(list, rows);
+                return;
+            }
+            _waitingRows.Remove(list);
             int keep = list.SelectedIndex;
             list.BeginUpdate();
             try
@@ -1033,7 +1240,8 @@ namespace WSJTX_Controller
         // Nexus's own (SFI, Kp, A, X-ray class and R scale, its representative long-haul MUF from
         // the operator's grid, NOAA's G and S scales, DSCOVR solar wind) -- only the wording is here.
         // internal: JimmyTests exercises it.
-        internal static List<string> FormatSpaceWeatherRows(SpaceWxResult result, string error, SolarWindResult wind, string windError)
+        internal static List<string> FormatSpaceWeatherRows(SpaceWxResult result, string error, SolarWindResult wind, string windError,
+            SolarHistoryResult history = null)
         {
             var rows = new List<string>();
             if (error != null || result?.Value == null)
@@ -1042,12 +1250,10 @@ namespace WSJTX_Controller
             {
                 var wx = result.Value;
                 rows.Add($"Solar flux {wx.Sfi:0}");
-                rows.Add(wx.Ssn.HasValue ? $"Sunspot number {wx.Ssn.Value:0}" : "Sunspot number not available");
+                rows.Add(FormatSunspotRow(wx.Ssn, history));
                 rows.Add($"K index {wx.Kp:0.#}");
                 rows.Add($"A index {wx.AIndex:0}");
-                rows.Add(string.IsNullOrEmpty(wx.XrayClass)
-                    ? "X-ray level not available"
-                    : $"X-ray {wx.XrayClass} class, radio blackout {FormatNoaaScale('R', wx.RScale)}");
+                rows.Add(FormatXrayRow(result));
                 rows.Add(result.MufNow.HasValue
                     ? $"Long-haul MUF {result.MufNow.Value:0.#} megahertz"
                     : "Long-haul MUF not available, set My Grid in Options");
@@ -1070,6 +1276,80 @@ namespace WSJTX_Controller
             rows.Add("Solar wind " + speed);
             rows.Add("Solar wind " + age);
             return rows;
+        }
+
+        // Nexus leaves the current reading's sunspot number empty (its desktop fills it from a
+        // separate predicted-cycle feed EngineHost does not read), so the row said "not available"
+        // every time while the daily history below had NOAA's real count (2026-10-08). The newest
+        // daily count, with its date, when there is no current one.
+        internal static string FormatSunspotRow(float? current, SolarHistoryResult history)
+        {
+            if (current.HasValue) return $"Sunspot number {current.Value:0}";
+            var day = history?.Days?.Where(d => d.Ssn.HasValue).OrderByDescending(d => d.DayUnix).FirstOrDefault();
+            if (day == null) return "Sunspot number not available";
+            var date = DateTimeOffset.FromUnixTimeSeconds(day.DayUnix).UtcDateTime;
+            return $"Sunspot number {day.Ssn.Value:0}, daily count for {date.ToString("MMMM d", System.Globalization.CultureInfo.InvariantCulture)}";
+        }
+
+        // One line per ionosonde (2026-10-08): where it is (KC2G's name, else its position -- no
+        // name is ever made up), its measured MUF and foF2 (or "not reported"), how far, and how
+        // old the measurement is ("measurement time not known" when KC2G gave none). Readings
+        // from the last day first, each group nearest first (EngineHost's order); a station whose
+        // last reading is months old stays listed, saying so.
+        internal const long IonosondeRecentSecs = 24 * 3600;
+
+        internal static List<string> FormatIonosondeRows(SpaceWxResult result, string error)
+        {
+            var list = result?.Ionosondes;
+            if (error != null || list == null)
+                return new List<string> { "Ionosonde readings " + (error != null || result?.IonosondesLastError != null
+                    ? "not available: " + (error ?? result.IonosondesLastError) : "loading") };
+            if (list.Length == 0) return new List<string> { "No ionosonde readings" };
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            string Mhz(double? v, string what) => v.HasValue ? $"{what} {v.Value.ToString("0.#", inv)} megahertz" : $"{what} not reported";
+            string Where(Ionosonde s) => !string.IsNullOrWhiteSpace(s.Name) ? s.Name.Trim()
+                : $"Station near {Math.Abs(s.Lat).ToString("0.#", inv)} {(s.Lat >= 0 ? "north" : "south")}, " +
+                  $"{Math.Abs(s.Lon).ToString("0.#", inv)} {(s.Lon >= 0 ? "east" : "west")}";
+            bool Recent(Ionosonde s) => s.MeasuredAgeSecs.HasValue && s.MeasuredAgeSecs.Value <= IonosondeRecentSecs;
+            return list.Select((s, i) => (s, i)).OrderBy(x => Recent(x.s) ? 0 : 1).ThenBy(x => x.i).Select(x =>
+            {
+                var s = x.s;
+                string dist = s.DistanceKm.HasValue ? $", {s.DistanceKm.Value.ToString("#,0", inv)} kilometers" : "";
+                string age = s.MeasuredAgeSecs.HasValue ? "measured " + LongAgeWords(s.MeasuredAgeSecs.Value) : "measurement time not known";
+                string code = string.IsNullOrWhiteSpace(s.Code) ? "" : ", " + s.Code.Trim();
+                return $"{Where(s)}: {Mhz(s.MufMhz, "MUF")}, {Mhz(s.Fof2Mhz, "foF2")}{dist}, {age}{code}";
+            }).ToList();
+        }
+
+        // AgeWords, and days past two days ("202 days ago", not "4848 hours ago").
+        internal static string LongAgeWords(long secs) =>
+            secs >= 48 * 3600 ? $"{secs / 86400} days ago" : AgeWords(secs);
+
+        // The fast-lane X-ray reading is over this old: said in its row.
+        internal const long XrayOldSecs = 5 * 60;
+
+        // The X-ray row (2026-10-08): the minute-by-minute reading when EngineHost has one, else
+        // the one that came with the other readings. No age in the row itself -- the page re-reads
+        // every 15 seconds, and a row that changes is read out again while the operator is on it;
+        // the age goes in the status line, and the row says only when the reading has gone old.
+        internal static string FormatXrayRow(SpaceWxResult result)
+        {
+            var fast = result?.Xray;
+            string cls = fast != null ? fast.XrayClass : result?.Value?.XrayClass;
+            int r = fast != null ? fast.RScale : result?.Value?.RScale ?? 0;
+            if (string.IsNullOrEmpty(cls)) return "X-ray level not available";
+            bool old = fast != null && (result.XrayAgeSecs ?? long.MaxValue) > XrayOldSecs;
+            return $"X-ray {cls} class, radio blackout {FormatNoaaScale('R', r)}" + (old ? ", an old reading, not updating" : "");
+        }
+
+        // The status line's X-ray part: its own age, and why it is not updating when it isn't.
+        internal static string FormatXrayStatus(SpaceWxResult result)
+        {
+            if (result?.Xray == null) return result?.XrayLastError != null ? "X-ray not updating: " + result.XrayLastError : "";
+            string age = result.XrayAgeSecs != null ? "X-ray " + AgeWords(result.XrayAgeSecs.Value) : "";
+            return result.XrayLastError != null && (result.XrayAgeSecs ?? long.MaxValue) > XrayOldSecs
+                ? age + ", not updating: " + result.XrayLastError
+                : age;
         }
 
         // Bz with its direction (southward -- negative -- is the one that disturbs the field);

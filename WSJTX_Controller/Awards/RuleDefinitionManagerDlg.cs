@@ -854,6 +854,9 @@ namespace WSJTX_Controller
         {
             Id = d.Id,
             Name = d.Name,
+            ShortName = d.ShortName,
+            StatusName = d.StatusName,
+            ShowInStatus = d.ShowInStatus,
             Sponsor = d.Sponsor,
             Category = d.Category,
             FormatVersion = d.FormatVersion,

@@ -34,3 +34,26 @@ fn space_wx_fetch_reaches_the_real_api() {
     println!("SFI={} Kp={} A={} Xray={:.2e}", wx.sfi, wx.kp, wx.a_index, wx.xray_long);
     assert!(wx.sfi > 0.0, "SFI should be a real positive value, got {}", wx.sfi);
 }
+
+// DXpedition calendars (2026-10-08): Nexus's NG3K + Club Log fetch. Announced dates are
+// midnight UTC; any that is not was moved by Club Log's on-air list.
+#[test]
+#[ignore]
+fn dxpedition_plans_reach_the_real_calendars() {
+    let plans = propagation::live::dxped::fetch_plans().expect("DXpedition fetch failed");
+    let moved = plans.iter().filter(|p| p.start_unix % 86_400 != 0 || p.end_unix % 86_400 != 0).count();
+    let ft8 = plans.iter().filter(|p| p.modes.iter().any(|m| m == "FT8" || m == "FT4")).count();
+    let no_mode = plans.iter().filter(|p| p.modes.is_empty()).count();
+    println!("DXpeditions: {} plans, {} with FT8/FT4, {} with no mode given, {} moved by Club Log; first: {:?}",
+        plans.len(), ft8, no_mode, moved, plans.first().map(|p| (&p.call, &p.entity, &p.website)));
+    assert!(!plans.is_empty());
+}
+
+// The one-minute X-ray fast lane (2026-10-08): Nexus's standalone GOES long-band fetch.
+#[test]
+#[ignore]
+fn xray_now_fetch_reaches_the_real_api() {
+    let flux = propagation::live::swpc::fetch_xray_now().expect("X-ray fetch failed");
+    println!("X-ray now: {flux:.2e} W/m2");
+    assert!(flux > 0.0 && flux < 1e-2, "a real GOES long-band flux, got {flux}");
+}
