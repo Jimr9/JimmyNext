@@ -6,6 +6,13 @@ namespace WSJTX_Controller
 {
     internal sealed class SupportReportDlg : Form
     {
+        private static bool IsEmail(string s)
+        {
+            if (string.IsNullOrWhiteSpace(s) || s.Length > 254 || s.Contains(" ")) return false;
+            try { return new System.Net.Mail.MailAddress(s).Address == s && s.IndexOf('.', s.IndexOf('@')) > 0; }
+            catch { return false; }
+        }
+
         private readonly TextBox  _callsignTextBox;
         private readonly TextBox  _nameTextBox;
         private readonly TextBox  _emailTextBox;
@@ -39,7 +46,7 @@ namespace WSJTX_Controller
             int y = 12;
 
             // ---- Callsign ----
-            var lblCallsign = new Label { Text = "Callsign (optional)", Location = new Point(lx, y), AutoSize = true };
+            var lblCallsign = new Label { Text = "Callsign (needed to send)", Location = new Point(lx, y), AutoSize = true };
             y += 18;
             _callsignTextBox = new TextBox
             {
@@ -53,7 +60,7 @@ namespace WSJTX_Controller
             y += 32;
 
             // ---- Name ----
-            var lblName = new Label { Text = "Name (optional)", Location = new Point(lx, y), AutoSize = true };
+            var lblName = new Label { Text = "Name (needed to send)", Location = new Point(lx, y), AutoSize = true };
             y += 18;
             _nameTextBox = new TextBox
             {
@@ -61,11 +68,12 @@ namespace WSJTX_Controller
                 Size           = new Size(fw, 22),
                 AccessibleName = "Name",
                 TabIndex       = tab++,
+                Text           = SupportLocal.SenderName,   // the last request's, if any
             };
             y += 32;
 
             // ---- Email ----
-            var lblEmail = new Label { Text = "Email address (optional)", Location = new Point(lx, y), AutoSize = true };
+            var lblEmail = new Label { Text = "Email address (needed to send)", Location = new Point(lx, y), AutoSize = true };
             y += 18;
             _emailTextBox = new TextBox
             {
@@ -73,6 +81,7 @@ namespace WSJTX_Controller
                 Size           = new Size(fw, 22),
                 AccessibleName = "Email address",
                 TabIndex       = tab++,
+                Text           = SupportLocal.SenderEmail,
             };
             y += 32;
 
@@ -178,7 +187,7 @@ namespace WSJTX_Controller
             };
             _uploadRadio = new RadioButton
             {
-                Text     = "Send to KB0UZT (opens the upload page)",
+                Text     = "Send to KB0UZT",
                 Location = new Point(10, 18),
                 AutoSize = true,
                 Checked  = true,
@@ -243,6 +252,28 @@ namespace WSJTX_Controller
                     MessageBoxIcon.Warning);
                 _descTextBox.Focus();
                 return;
+            }
+            // Sending (2026-10-07): the support service needs a base callsign, a name and an email
+            // address to answer; saving only needs none of them.
+            if (Upload && !SupportService.Available)
+            {
+                MessageBox.Show("Sending is not available in this copy of Jimmy Next. Choose Save to my computer only.",
+                    "Create Support Report", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                _uploadRadio.Focus();
+                return;
+            }
+            if (Upload)
+            {
+                string problem = SupportService.BaseCallsign(Callsign) == null ? "Enter your callsign to send the report."
+                    : PersonName.Length == 0 || PersonName.Length > 120 ? "Enter your name to send the report."
+                    : !IsEmail(Email) ? "Enter a valid email address to send the report, so KB0UZT can answer."
+                    : null;
+                if (problem != null)
+                {
+                    MessageBox.Show(problem, "Create Support Report", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    (SupportService.BaseCallsign(Callsign) == null ? _callsignTextBox : PersonName.Length == 0 || PersonName.Length > 120 ? _nameTextBox : _emailTextBox).Focus();
+                    return;
+                }
             }
             DialogResult = DialogResult.OK;
         }

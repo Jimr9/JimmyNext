@@ -318,6 +318,7 @@ namespace WSJTX_Controller
                 decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
                 appearancePanel, stationOperatorPanel, profilesPanel
             };
+            AddSupportCategories(categoryPanels);   // Support / Support Helper, when switched on (OptionsDlg.Support.cs)
             CategoryListNav.Wire(_categoryListBox, _categoryDetailHost, categoryPanels);
 
             // Accessibility fix, 2026-09-17: every NumericUpDown here is a composite control --
@@ -886,6 +887,11 @@ namespace WSJTX_Controller
             _setupNextButton.Click += (s, e) => ShowSetupStep(_setupStep + 1);
             Controls.Add(_setupBackButton);
             Controls.Add(_setupNextButton);
+            // Tab as on screen: Back, Next, Finish, Cancel (added last, they would follow Cancel).
+            _setupBackButton.TabIndex = okButton.TabIndex;
+            _setupNextButton.TabIndex = okButton.TabIndex + 1;
+            okButton.TabIndex += 2;
+            cancelButton.TabIndex += 2;
             okButton.Text = "&Finish";
             okButton.AccessibleName = "Finish";
             Shown += (s, e) => ShowSetupStep(0);
@@ -6347,6 +6353,7 @@ namespace WSJTX_Controller
                 AccessibleName = "QRZ Logbook API key",
             };
             qrzLogbookBox.Controls.Add(_qrzLogbookApiKeyTb);
+            PasswordReveal.Attach(_qrzLogbookApiKeyTb);
 
             var qrzDescLbl = MakeWrapLabel(
                 "Downloads QSOs you've already logged to your QRZ online logbook (Logbook > Sync tab). " +
@@ -6437,6 +6444,7 @@ namespace WSJTX_Controller
                 AccessibleName = "LoTW password for logbook download",
             };
             lotwLogbookBox.Controls.Add(_lotwLogbookPassTb);
+            PasswordReveal.Attach(_lotwLogbookPassTb);
 
             var lotwDescLbl = MakeWrapLabel(
                 "Downloads your confirmed QSOs from LoTW (Logbook > Sync tab). Separate feature from LoTW " +
@@ -6559,6 +6567,7 @@ namespace WSJTX_Controller
                 AccessibleName = "Club Log Application Password for upload",
             };
             clUploadBox.Controls.Add(_clubLogUploadPasswordTb);
+            PasswordReveal.Attach(_clubLogUploadPasswordTb);
             y += 24;
 
             clUploadBox.Controls.Add(MakeLabel("Callsign:", 10, y + 3, font));
@@ -6666,6 +6675,7 @@ namespace WSJTX_Controller
                 AccessibleName = "HRDLog.net upload code",
             };
             hrdLogBox.Controls.Add(_hrdLogUploadCodeTb);
+            PasswordReveal.Attach(_hrdLogUploadCodeTb);
             y += 27;
 
             hrdLogBox.Controls.Add(MakeWrapLabel(
@@ -6734,6 +6744,7 @@ namespace WSJTX_Controller
                 AccessibleName = "eQSL.cc password",
             };
             eqslBox.Controls.Add(_eqslPasswordTb);
+            PasswordReveal.Attach(_eqslPasswordTb);
 
             eqslBox.Controls.Add(MakeWrapLabel(
                 "Uploads QSOs to your eQSL.cc account using your normal eQSL.cc login and password.",
@@ -6837,6 +6848,7 @@ namespace WSJTX_Controller
                 AccessibleName = "QRZ password",
             };
             qrzBox.Controls.Add(_qrzPasswordTb);
+            PasswordReveal.Attach(_qrzPasswordTb);
 
             qrzBox.Controls.Add(MakeLabel("Cache (days):", 10, 94, font));
             _qrzCacheDaysNum = new System.Windows.Forms.NumericUpDown
@@ -7154,6 +7166,7 @@ namespace WSJTX_Controller
                 AccessibleName = "HamQTH password",
             };
             hamQthBox.Controls.Add(_hamQthPasswordTb);
+            PasswordReveal.Attach(_hamQthPasswordTb);
 
             hamQthBox.Controls.Add(MakeLabel("Cache (days):", 10, 94, font));
             _hamQthCacheDaysNum = new System.Windows.Forms.NumericUpDown

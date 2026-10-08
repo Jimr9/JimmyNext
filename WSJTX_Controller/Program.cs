@@ -24,6 +24,10 @@ namespace WSJTX_Controller
         // while still needed.
         private static System.Threading.Mutex _singleInstanceMutex;
 
+        // A support setup link this start was opened with, for the main window to offer once
+        // (Controller.OfferSupportLink); taken by the first window that shows.
+        internal static string PendingSupportLink;
+
         private static void PreviewUpdateDialog()
         {
             UpdateInfo info = Task.Run(UpdateChecker.FetchLatestReleaseAsync).GetAwaiter().GetResult();
@@ -139,11 +143,29 @@ namespace WSJTX_Controller
                 return;
             }
 
+            // A support setup link (SupportLink): handed to the Jimmy Next already running, if any,
+            // instead of starting a second one; otherwise kept for the window to offer once it is up.
+            string link = SupportLink.FromArgs(Environment.GetCommandLineArgs());
+            if (link != null && SupportLink.Parse(link) == null)
+            {
+                MessageBox.Show("That support setup link is not complete. Ask your helper to send it again.", "Jimmy Next",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                link = null;
+            }
+
             if (System.Diagnostics.Process.GetProcessesByName(System.IO.Path.GetFileNameWithoutExtension(System.Reflection.Assembly.GetEntryAssembly().Location)).Count() > 1)
             {
+                if (link != null)
+                {
+                    if (!SupportLink.SendToRunning(link))
+                        MessageBox.Show("Jimmy Next is running but could not take the setup link. Open the link again in a moment.", "Jimmy Next",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
                 MessageBox.Show("An instance of this application is already running.");
                 return;
             }
+            PendingSupportLink = link;
             if (System.Diagnostics.Process.GetProcessesByName("WSJTX_Controller").Count() > 0)
             {
                 MessageBox.Show("Jimmy and Otto can't run at the same time.\n\nClose Otto before running Jimmy.");
@@ -166,6 +188,16 @@ namespace WSJTX_Controller
                 NexusLogbookMigration.RunInteractive();
                 return;
             }
+            // Support (2026-10-07): the private switches are remembered; a link opened while this
+            // program runs reaches the main window of the moment.
+            SupportLocal.ApplySwitches(cmdArgs);
+            if (SupportLocal.ShowSupport) SupportLink.RegisterForDebugBuild();
+            SupportLink.Listen(l =>
+            {
+                var window = Controller.Current;
+                if (window != null) window.ReceiveSupportLink(l);
+                else PendingSupportLink = l;   // between windows (a profile switch): the next one offers it
+            });
             try
             {
                 Application.EnableVisualStyles();

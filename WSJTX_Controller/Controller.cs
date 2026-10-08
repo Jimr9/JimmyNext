@@ -455,6 +455,7 @@ namespace WSJTX_Controller
             // change to this form's own layout, Alt-key handling, or MinimumSize/ResetWindowSize
             // math at all.
             KeyPreview = true;
+            InitSupport();   // setup links reach this window (Controller.Support.cs)
 
             //timers
             mainLoopTimer = new System.Windows.Forms.Timer();
@@ -2206,14 +2207,56 @@ namespace WSJTX_Controller
             }
         }
 
+        // A name a named profile may have: not the (Default) label, and usable as a file name.
+        internal static bool IsUsableProfileName(string name) =>
+            !string.IsNullOrWhiteSpace(name) && name == name.Trim()
+            && !string.Equals(name, DefaultProfileDisplayName, StringComparison.OrdinalIgnoreCase)
+            && name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0;
+
+        // Copies the settings in effect now to the named profile (overwriting it): its ini, its
+        // companion contest ini and, when the current profile has its own, its wording. Returns the
+        // new profile's ini path, or null when there is no active settings file.
+        private string CopyCurrentSettingsToProfile(string name)
+        {
+            string dir = ProfilesDirectory();
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+            string destPath = dir + "\\" + name + ".ini";
+
+            // Flush every setting to the LIVE ini file first (the exact, unchanged save path
+            // a clean close already uses) so the copy below reflects the true current
+            // configuration, not whatever was last written on an earlier close/Options-save.
+            SaveAllSettingsToIniFile();
+            if (iniFile == null) return null;
+            File.Copy(iniFile.FilePath, destPath, overwrite: true);
+
+            // Nexus contesting foundation: the companion contest ini (per-contest saved
+            // entry defaults) is named after and lives beside the profile ini it belongs
+            // to -- copy it too so "Save Profile As" carries a profile's contest defaults
+            // forward the same way it already carries every other setting. Not an error if
+            // the source profile has never entered a contest (file simply doesn't exist yet).
+            string srcContestIni = ContestConfigStore.CompanionPathFor(iniFile.FilePath);
+            string destContestIni = ContestConfigStore.CompanionPathFor(destPath);
+            if (!string.IsNullOrEmpty(srcContestIni) && File.Exists(srcContestIni))
+                File.Copy(srcContestIni, destContestIni, overwrite: true);
+
+            // The profile's own wording goes with it; shared wording stays shared.
+            string ownWording = ActiveWordingPath();
+            if (!string.Equals(ownWording, SharedWordingPath(), StringComparison.OrdinalIgnoreCase))
+            {
+                Wording.Save();
+                Directory.CreateDirectory(Path.GetDirectoryName(ProfileWordingPath(name)));
+                File.Copy(ownWording, ProfileWordingPath(name), overwrite: true);
+            }
+            return destPath;
+        }
+
         // internal (not private): called from OptionsDlg's Profiles tab button.
         internal void SaveProfileAs_Click()
         {
             string name = PromptForText("Save Current Configuration As Profile", "Profile name:", "");
             if (string.IsNullOrWhiteSpace(name)) return;
             name = name.Trim();
-            if (string.Equals(name, DefaultProfileDisplayName, StringComparison.OrdinalIgnoreCase)
-                || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            if (!IsUsableProfileName(name))
             {
                 MessageBox.Show(this, $"'{name}' is not a valid profile name.", "Invalid Name",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -2222,9 +2265,7 @@ namespace WSJTX_Controller
 
             try
             {
-                string dir = ProfilesDirectory();
-                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                string destPath = dir + "\\" + name + ".ini";
+                string destPath = ProfilesDirectory() + "\\" + name + ".ini";
                 if (File.Exists(destPath))
                 {
                     var confirm = MessageBox.Show(this, $"A profile named '{name}' already exists. Overwrite it?",
@@ -2232,35 +2273,11 @@ namespace WSJTX_Controller
                     if (confirm != DialogResult.Yes) return;
                 }
 
-                // Flush every setting to the LIVE ini file first (the exact, unchanged save path
-                // a clean close already uses) so the copy below reflects the true current
-                // configuration, not whatever was last written on an earlier close/Options-save.
-                SaveAllSettingsToIniFile();
-                if (iniFile == null)
+                if (CopyCurrentSettingsToProfile(name) == null)
                 {
                     MessageBox.Show(this, "No active settings file to save from.", "Save Profile Failed",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                     return;
-                }
-                File.Copy(iniFile.FilePath, destPath, overwrite: true);
-
-                // Nexus contesting foundation: the companion contest ini (per-contest saved
-                // entry defaults) is named after and lives beside the profile ini it belongs
-                // to -- copy it too so "Save Profile As" carries a profile's contest defaults
-                // forward the same way it already carries every other setting. Not an error if
-                // the source profile has never entered a contest (file simply doesn't exist yet).
-                string srcContestIni = ContestConfigStore.CompanionPathFor(iniFile.FilePath);
-                string destContestIni = ContestConfigStore.CompanionPathFor(destPath);
-                if (!string.IsNullOrEmpty(srcContestIni) && File.Exists(srcContestIni))
-                    File.Copy(srcContestIni, destContestIni, overwrite: true);
-
-                // The profile's own wording goes with it; shared wording stays shared.
-                string ownWording = ActiveWordingPath();
-                if (!string.Equals(ownWording, SharedWordingPath(), StringComparison.OrdinalIgnoreCase))
-                {
-                    Wording.Save();
-                    Directory.CreateDirectory(Path.GetDirectoryName(ProfileWordingPath(name)));
-                    File.Copy(ownWording, ProfileWordingPath(name), overwrite: true);
                 }
 
                 ShowMsg(Wording.Fill("Msg.ProfileSaved", ("Profile", name)), false);
@@ -2417,6 +2434,7 @@ namespace WSJTX_Controller
                     var pkg = CustomizationPackage.FromProfile(iniFile.FilePath,
                         ActiveWordingPath(), parts, NotificationSounds.SoundsFolder,
                         NotificationSounds.UserSoundsFolder);
+                    pkg.ProfileName = ActiveNamedProfile();   // offered as the destination on import
                     pkg.Save(sfd.FileName);
                     ShowMsg(Wording.Fill("Msg.CustomizationsExported", ("Parts", CustomizationPackage.Describe(parts))), false);
                 }
@@ -2428,9 +2446,14 @@ namespace WSJTX_Controller
             }
         }
 
-        // Options > Profiles' Import button. Reads a package, lets the operator choose which of its
-        // parts to take, backs up the active profile and wording file, applies the parts to the
-        // active profile and reloads it (the radio and audio settings are never touched).
+        // Options > Profiles' Import button. Reads a package and lets the operator choose the profile
+        // it goes into -- the current one, or the named profile it was exported from (2026-10-07;
+        // a new one starts as a copy of the current settings) -- and which of its parts to take.
+        // One question then says everything that will happen (skipped hotkeys, own sounds
+        // replaced) before anything changes; the destination profile and its wording are backed up
+        // if chosen, the parts applied, and the result reported. Into the current profile the
+        // window then reopens; into another, the current profile stays loaded. The radio and audio
+        // settings are never touched.
         internal void ImportCustomizations_Click()
         {
             string file;
@@ -2454,11 +2477,40 @@ namespace WSJTX_Controller
                 return;
             }
 
+            var offered = pkg.Parts & ~CustomizationParts.Wording;   // wording only travels with notifications
+            if (offered == CustomizationParts.None)
+            {
+                MessageBox.Show(this, "Could not import that file: it holds nothing to import.", "Import Customizations",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Where it goes: the current profile, or the named profile the file came from. The name
+            // is the one written in the file (never the file's own name), and only if it is usable.
+            string current = ActiveProfileDisplayName();
+            string target = current, note = "";
+            string named = pkg.ProfileName?.Trim();
+            if (named == null)
+                note = " The file names no profile, so it goes into the current one.";
+            else if (!IsUsableProfileName(named))
+                note = " The profile name in the file can't be used, so it goes into the current one.";
+            else if (!string.Equals(named, current, StringComparison.OrdinalIgnoreCase))
+            {
+                string existing = ListNamedProfiles().FirstOrDefault(n => string.Equals(n, named, StringComparison.OrdinalIgnoreCase));
+                var choices = new List<string> { $"Current profile, {current}",
+                    existing != null ? $"{existing}, named in the file" : $"{named}, a new profile named in the file" };
+                string pick = PromptForChoice("Import Customizations", "Import into which profile?", choices);
+                if (pick == null) return;
+                if (pick == choices[1]) target = existing ?? named;
+            }
+            bool intoCurrent = target == current;
+            string targetIni = intoCurrent ? null : Path.Combine(ProfilesDirectory(), target + ".ini");
+            bool isNew = !intoCurrent && !File.Exists(targetIni);
+
             bool makeBackup = true;   // the operator's choice, checked by default (2026-10-01)
-            var parts = PromptForParts("Import Customizations", "Choose what to import into the current profile.",
-                pkg.Parts & ~CustomizationParts.Wording,
-                pkg.Parts & (CustomizationParts.Notifications | CustomizationParts.Sounds),
-                "Back up my current settings first", ref makeBackup);
+            var parts = PromptForParts("Import Customizations", $"Choose what to import into profile '{target}'." + note,
+                offered, offered,   // everything the file really holds starts checked (2026-10-07)
+                intoCurrent ? "Back up my current settings first" : $"Back up profile '{target}' first", ref makeBackup);
             if (parts == CustomizationParts.None) return;
             if (parts.HasFlag(CustomizationParts.Notifications)) parts |= pkg.Parts & CustomizationParts.Wording;
 
@@ -2466,44 +2518,86 @@ namespace WSJTX_Controller
             // would leave the other on its default key, which may clash too -- and the rest is
             // (operator, 2026-10-02).
             var clashes = parts.HasFlag(CustomizationParts.Hotkeys) ? pkg.HotkeyClashes() : new List<string>();
+            string clashText = "Hotkeys are not imported: the file gives more than one action the same key.\n" + string.Join("\n", clashes);
             if (clashes.Count > 0)
             {
                 parts &= ~CustomizationParts.Hotkeys;
-                MessageBox.Show(this,
-                    "The hotkeys in this file are not imported: it gives more than one action the same key.\n\n" +
-                    string.Join("\n", clashes) +
-                    (parts == CustomizationParts.None ? "" : "\n\nThe other parts you chose are still imported."),
-                    "Import Customizations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                if (parts == CustomizationParts.None) return;
+                if (parts == CustomizationParts.None)
+                {
+                    MessageBox.Show(this, clashText, "Import Customizations", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
             }
 
-            string profile = ActiveProfileDisplayName();
-            var confirm = MessageBox.Show(this,
-                $"Import {CustomizationPackage.Describe(parts)} into profile '{profile}'? " +
-                (makeBackup ? "Your current settings are backed up first. " : "No backup is made. ") + "The window then reopens with the imported settings; the radio stays connected.",
-                "Import Customizations", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-            if (confirm != DialogResult.Yes) return;
+            // Everything that will happen, in one question, before anything changes.
+            string dataFolder = ProfilesAppDataPath();
+            var replaced = parts.HasFlag(CustomizationParts.Sounds)
+                ? pkg.SoundsReplaced(dataFolder, NotificationSounds.SoundsFolder) : new List<string>();
+            var question = new System.Text.StringBuilder($"Import {CustomizationPackage.Describe(parts)} into profile '{target}'?");
+            if (isNew) question.Append(" It is a new profile, made from a copy of your current settings.");
+            else if (!intoCurrent) question.Append(" It already exists; only those parts of it change.");
+            if (clashes.Count > 0) question.Append("\n\n").Append(clashText);
+            if (replaced.Count > 0)
+                question.Append($"\n\nThis replaces {(replaced.Count == 1 ? "one of your own sounds" : $"{replaced.Count} of your own sounds")}, " +
+                    $"which every profile uses: {string.Join(", ", replaced)}.");
+            if (pkg.Ignored > 0)
+                question.Append($"\n\n{pkg.Ignored} {(pkg.Ignored == 1 ? "entry" : "entries")} in the file can't be imported and {(pkg.Ignored == 1 ? "is" : "are")} left out.");
+            question.Append("\n\n").Append(makeBackup ? "A backup is made first. " : "No backup is made. ")
+                    .Append(intoCurrent ? "The window then reopens; the radio stays connected." : $"You stay on profile '{current}'.");
+            if (MessageBox.Show(this, question.ToString(), "Import Customizations", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
 
+            bool created = false;
+            string backup = null;
             try
             {
                 SaveAllSettingsToIniFile();   // this session's changes are kept, and in the backup
                 if (iniFile == null) throw new InvalidOperationException("no active settings file");
-                string dataFolder = ProfilesAppDataPath();
-                string backup = makeBackup
-                    ? CustomizationPackage.Backup(iniFile.FilePath, ActiveWordingPath(), Path.Combine(dataFolder, "Backups"),
-                        "import", CustomizationPackage.Describe(parts), profile)
+                if (isNew)
+                {
+                    created = true;   // set first: a copy that fails partway is cleaned up too
+                    CopyCurrentSettingsToProfile(target);
+                }
+                var ini = intoCurrent ? iniFile : new IniFile(targetIni);
+                // Imported wording replaces the destination's wording: into the current profile,
+                // the wording in effect (its own, else the shared); into another, that profile's
+                // own -- made now if it had none -- so the shared wording never changes for it.
+                string wordingPath = intoCurrent ? ActiveWordingPath() : ProfileWordingPath(target);
+                backup = makeBackup
+                    ? CustomizationPackage.Backup(ini.FilePath, wordingPath, Path.Combine(dataFolder, "Backups"),
+                        "import", CustomizationPackage.Describe(parts), target)
                     : null;
-                // Imported wording replaces the wording in effect: the profile's own, else the shared.
-                pkg.ApplyTo(iniFile, parts, dataFolder, NotificationSounds.SoundsFolder, backup, wordingPath: ActiveWordingPath());
-                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} customizations imported ({CustomizationPackage.Describe(parts)}) from '{file}' into '{profile}'; backup: {backup ?? "none (operator's choice)"}");
+                if (!intoCurrent && parts.HasFlag(CustomizationParts.Wording)) Directory.CreateDirectory(Path.GetDirectoryName(wordingPath));
+                pkg.ApplyTo(ini, parts, dataFolder, NotificationSounds.SoundsFolder, backup, wordingPath: wordingPath);
+                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} customizations imported ({CustomizationPackage.Describe(parts)}) from '{file}' into '{target}'{(isNew ? " (new profile)" : "")}; backup: {backup ?? "none (operator's choice)"}");
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, $"Could not import customizations: {ex.Message}", "Import Customizations",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} customizations import into '{target}' failed: {ex.Message}");
+                if (created)   // a half-made new profile is not kept
+                    try
+                    {
+                        File.Delete(targetIni);
+                        string contestIni = ContestConfigStore.CompanionPathFor(targetIni);
+                        if (!string.IsNullOrEmpty(contestIni) && File.Exists(contestIni)) File.Delete(contestIni);
+                        if (File.Exists(ProfileWordingPath(target))) File.Delete(ProfileWordingPath(target));
+                    }
+                    catch { }
+                MessageBox.Show(this, $"Could not import customizations: {ex.Message}" +
+                    (backup != null ? "\n\nUndo an Import puts back anything already changed." : ""),
+                    "Import Customizations", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
+            string done = $"Imported {CustomizationPackage.Describe(parts)} into profile '{target}'.";
+            if (!intoCurrent)
+            {
+                MessageBox.Show(this, done + $" You are still on profile '{current}'.", "Import Customizations",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            MessageBox.Show(this, done + " The window now reopens.", "Import Customizations",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
             // The imported settings are on disk; closing must not write this window's older copy
             // over them. Reloading picks them up (engine handed over, as a profile switch does).
             _suppressSettingsSaveOnExit = true;
@@ -2680,7 +2774,7 @@ namespace WSJTX_Controller
                     ? "Choose a password for the file. Your logins are locked with it; you need it on the other computer."
                     : "The password chosen when the file was made:";
                 var label = new Label { Text = intro, Location = new Point(10, 10), Size = new Size(360, 32) };
-                var pw = new TextBox { Location = new Point(10, 46), Width = 360, UseSystemPasswordChar = true, AccessibleName = "Password" };
+                var pw = new TextBox { Location = new Point(10, 46), Width = 250, UseSystemPasswordChar = true, AccessibleName = "Password" };
                 dlg.Controls.Add(label);
                 dlg.Controls.Add(pw);
                 TextBox again = null;
@@ -2688,12 +2782,14 @@ namespace WSJTX_Controller
                 if (export)
                 {
                     dlg.Controls.Add(new Label { Text = "Password again:", Location = new Point(10, 76), AutoSize = true });
-                    again = new TextBox { Location = new Point(10, 94), Width = 360, UseSystemPasswordChar = true, AccessibleName = "Password again" };
+                    again = new TextBox { Location = new Point(10, 94), Width = 250, UseSystemPasswordChar = true, AccessibleName = "Password again" };
                     radio = new CheckBox { Text = "Include radio and decode engine settings", Location = new Point(10, 124), AutoSize = true,
                         AccessibleName = "Include radio and decode engine settings" };
                     dlg.Controls.Add(again);
                     dlg.Controls.Add(radio);
                 }
+                if (again != null) PasswordReveal.Attach(pw, again);   // one check box shows both
+                else PasswordReveal.Attach(pw);
                 int by = export ? 160 : 76;
                 var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(210, by), Width = 75 };
                 var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(295, by), Width = 75 };
@@ -2743,13 +2839,15 @@ namespace WSJTX_Controller
                 MinimizeBox = false,
                 MaximizeBox = false,
                 ShowInTaskbar = false,
-                ClientSize = new Size(360, 90 + (shown.Count + (extraOption != null ? 1 : 0)) * 26),
             })
             {
-                var label = new Label { Text = prompt, Location = new Point(10, 10), Size = new Size(340, 32) };
+                // Tall enough for the whole prompt (an import's can run to three lines).
+                int labelHeight = Math.Max(32, TextRenderer.MeasureText(prompt, dlg.Font, new Size(340, 0), TextFormatFlags.WordBreak).Height);
+                dlg.ClientSize = new Size(360, 58 + labelHeight + (shown.Count + (extraOption != null ? 1 : 0)) * 26);
+                var label = new Label { Text = prompt, Location = new Point(10, 10), Size = new Size(340, labelHeight) };
                 dlg.Controls.Add(label);
                 var boxes = new List<(CheckBox Box, CustomizationParts Part)>();
-                int y = 46;
+                int y = 14 + labelHeight;
                 foreach (var p in shown)
                 {
                     string name = CustomizationPackage.Describe(p);

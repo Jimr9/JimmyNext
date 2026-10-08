@@ -100,7 +100,7 @@ namespace WSJTX_Controller
             ctrl.HelpClosed();
         }
 
-        private void supportReportButton_Click(object sender, EventArgs e)
+        private async void supportReportButton_Click(object sender, EventArgs e)
         {
             string prefill = null;
             try { prefill = ctrl.wsjtxClient?.myCall; } catch { }
@@ -109,11 +109,12 @@ namespace WSJTX_Controller
             if (dlg.ShowDialog() != DialogResult.OK) return;
 
             string confirmText =
-                "Jimmy Next will create a support report ZIP. Next you choose where to save it.\n\n" +
+                (dlg.Upload
+                    ? "Jimmy Next will create a support report and send it to KB0UZT with your callsign, name and email. A copy is kept on this computer.\n\n"
+                    : "Jimmy Next will create a support report ZIP. Next you choose where to save it.\n\n") +
                 "It contains your description, your Jimmy Next folder (settings with passwords removed, " +
                 "logs" + (dlg.IncludeLogbook ? ", your logbook" : "") + ") and Windows information.\n\n" +
-                (dlg.Upload ? "Nothing is sent until you upload it on the page that opens.\n\n" : "") +
-                "Create the report?";
+                (dlg.Upload ? "Send the report?" : "Create the report?");
 
             if (MessageBox.Show(confirmText, "Create Support Report",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question,
@@ -123,7 +124,11 @@ namespace WSJTX_Controller
             // 2.0.81: the operator chooses where it is saved (not everyone uses Downloads);
             // Enter keeps the offered place and name. Remembered for the rest of the session.
             string offered = SupportReportBuilder.DefaultZipPath();
-            string zipPath;
+            string zipPath = offered;
+            // Sending (2026-10-07): no Save dialog -- the copy goes in the usual place (the name
+            // carries the date and time, so it never replaces another) and the ticket message
+            // says where it is.
+            if (!dlg.Upload)
             using (var save = new SaveFileDialog
             {
                 Title            = "Save support report",
@@ -135,8 +140,8 @@ namespace WSJTX_Controller
             {
                 if (save.ShowDialog(this) != DialogResult.OK) return;
                 zipPath = save.FileName;
+                _lastSupportFolder = Path.GetDirectoryName(zipPath);
             }
-            _lastSupportFolder = Path.GetDirectoryName(zipPath);
 
             var result = SupportReportBuilder.Build(
                 ctrl,
@@ -145,7 +150,7 @@ namespace WSJTX_Controller
 
             if (result.Success)
             {
-                SupportReportDelivery.Deliver(this, dlg.Upload, result.ZipPath);
+                await SupportReportDelivery.Deliver(this, dlg.Upload, result.ZipPath, dlg.Callsign, dlg.PersonName, dlg.Email, supportReportButton);
             }
             else
             {

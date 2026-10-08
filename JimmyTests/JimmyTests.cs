@@ -1689,10 +1689,16 @@ static class JimmyTests
         ContestCalendarAndTimeZoneTests();
         ComputerMoveTests();
         CustomizationPackageTests();
+        CustomizationImportDestinationTests();
+        SupportPackageTests();
+        SupportLinkTests();
+        SupportServiceTests();
+        PasswordRevealTests();
         BulkEditApplyTests();
         RawDecodesSideLabelReflectsTxFirstTests();
         FinalQsoLoggedAndSendingAnnounceTogetherTests();
         ReportClockStatusTests();
+        ClockStatusWordingTests();
         SuppressReceiveNotificationsDuringTxTests();
         ResolveActiveIniPathTests();
         ActiveIniFilePathTests();
@@ -8895,6 +8901,11 @@ static class JimmyTests
                 Check("Options has no Basic page any more", list.Items.Contains("Basic"), false);
                 Check("...and starts at General", (string)list.Items[0] == "General", true);
                 dlg.EnterSetupMode();
+                int Tab(string name) => ((System.Windows.Forms.Control)t.GetField(name,
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance).GetValue(dlg)).TabIndex;
+                Check("setup buttons: Tab goes Back, Next, Finish, Cancel, after the page",
+                    Tab("_categoryDetailHost") < Tab("_setupBackButton") && Tab("_setupBackButton") < Tab("_setupNextButton")
+                    && Tab("_setupNextButton") < Tab("okButton") && Tab("okButton") < Tab("cancelButton"), true);
                 // On screen the window's Load builds every Options page, then the setup pages; here
                 // only Station & Operator and Decode Engine (the full Load needs the Hotkeys setup,
                 // and the Radio page lists COM ports, which this test build cannot) -- the Radio
@@ -17812,9 +17823,9 @@ static class JimmyTests
                     // credentials passed to the constructor above, which cover that case for
                     // Sync so its full sequence can be checked; there's no equivalent
                     // workaround for "a row is selected" without a real, seeded database).
-                    CheckPage("Lookup and Edit", 2, new[] {
-                        // Search in / Search for (field search, 2026-10-02) follow the callsign.
-                        "Callsign filter", "Search in", "Search for", "Source filter", "Upload status", "Date from, format year month day, optional",
+                    CheckPage("Logbook", 2, new[] {
+                        // As on screen (2026-10-07): row 1, then Search in / Search for, then the dates.
+                        "Callsign filter", "Source filter", "Upload status", "Search in", "Search for", "Date from, format year month day, optional",
                         "Date to, format year month day, optional", "Search", "Clear filters",
                         "Choose column order", "Contacts found", "Add a new QSO",
                         "Status", "Close",
@@ -17825,6 +17836,23 @@ static class JimmyTests
                         "Sync from eQSL, new confirmations", "Full eQSL download, all confirmations",
                         "Export all QSOs to ADIF file", "Import history", "Status", "Close",
                     });
+
+                    // Logbook and Sync (2026-10-07): Tab reads the page as it sits on screen --
+                    // left to right along a row, then the next row down.
+                    foreach (int page in new[] { 2, 3 })
+                    {
+                        categoryList.SelectedIndex = page;
+                        categoryList.Focus();
+                        var stops = new List<System.Windows.Forms.Control>();
+                        for (int i = 0; i < 40 && StepViaProcessTabKey(true) && TabOrderWalker.Describe(lw.ActiveControl) != "Status"; i++)
+                            stops.Add(lw.ActiveControl);
+                        var at = stops.Select(c => c.Parent.PointToScreen(c.Location)).ToList();
+                        var outOfPlace = Enumerable.Range(1, Math.Max(0, at.Count - 1))
+                            .Where(i => Math.Abs(at[i].Y - at[i - 1].Y) < 8 ? at[i].X <= at[i - 1].X : at[i].Y < at[i - 1].Y)
+                            .Select(i => TabOrderWalker.Describe(stops[i])).ToList();
+                        CheckStr($"{categoryList.Items[page]}: Tab follows the screen, left to right, top to bottom",
+                            stops.Count > 3 ? string.Join(", ", outOfPlace) : "too few stops", "");
+                    }
 
                     // Up/Down Arrow while the category list has focus must NOT move focus into
                     // the page -- the same "arrow-key category switch never jumps into the page"
@@ -20364,6 +20392,26 @@ static class JimmyTests
             var old = CustomizationPackage.ReadBackupInfo(dir, baseIni, profiles, wording);
             Check("an older backup is still understood", old.Profile == "Contest" && old.IniPath == ini && old.WordingPath == wording
                 && old.When != default, true);
+
+            // Into a profile with no wording of its own (2026-10-07): the import makes it, the undo
+            // removes it (kept in the undo's backup), and the shared wording is never removed.
+            string own = Path.Combine(profiles, "Wording", "Contest.txt");
+            string made = CustomizationPackage.Backup(ini, own, backups, "import", "notifications", "Contest");
+            Directory.CreateDirectory(Path.GetDirectoryName(own));
+            File.WriteAllText(own, "imported");
+            var madeInfo = CustomizationPackage.ReadBackupInfo(made, baseIni, profiles, wording);
+            string undo2 = CustomizationPackage.Backup(madeInfo.IniPath, madeInfo.WordingPath, backups, "undo", null, "Contest", prune: false);
+            CustomizationPackage.RestoreBackup(madeInfo, sounds, undo2);
+            Check("a wording file the import made is removed; the undo keeps a copy",
+                !File.Exists(own) && File.ReadAllText(Path.Combine(undo2, "Contest.txt")) == "imported", true);
+            var undoInfo = CustomizationPackage.ReadBackupInfo(undo2, baseIni, profiles, wording);
+            CustomizationPackage.RestoreBackup(undoInfo, sounds, null);
+            Check("undoing that undo brings it back", File.Exists(own) && File.ReadAllText(own) == "imported", true);
+            File.Delete(wording);
+            string sharedMade = CustomizationPackage.Backup(baseIni, wording, backups, "import", "notifications", "");
+            File.WriteAllText(wording, "shared");
+            CustomizationPackage.RestoreBackup(CustomizationPackage.ReadBackupInfo(sharedMade, baseIni, profiles, wording), sounds, null);
+            Check("the shared wording is never removed", File.Exists(wording), true);
         }
         finally { try { Directory.Delete(root, true); } catch { } }
     }
@@ -20627,6 +20675,317 @@ static class JimmyTests
                 && !File.Exists(Path.Combine(data, "Sounds", "blip.wav")) && File.Exists(Path.Combine(backup, "receiver.ini")), true);
         }
         finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // Import (2026-10-07): the file names the profile it came from, every part it really holds is
+    // offered, sounds alone don't reset sound settings, own sounds about to be replaced are named
+    // first, and importing into another profile gives it its own wording.
+    static void CustomizationImportDestinationTests()
+    {
+        Console.WriteLine("\n── Customization import: destination and contents ──");
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy_custdest_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            var src = new IniFile(Path.Combine(dir, "sender.ini"));
+            src.Write("notifyTemplate_CallingMe", "{Call} calls");
+            string wording = Path.Combine(dir, "Wording.txt");
+            File.WriteAllText(wording, "Side.RX1 = RX even");
+            var pkg = CustomizationPackage.FromProfile(src.FilePath, wording, CustomizationParts.Notifications | CustomizationParts.Wording,
+                null, Path.Combine(dir, "nosuchfolder"));
+            pkg.ProfileName = "Contest";
+            string named = Path.Combine(dir, "named.zip"), legacy = Path.Combine(dir, "legacy.zip");
+            pkg.Save(named);
+            pkg.ProfileName = null;
+            pkg.Save(legacy);
+            Check("the profile name travels; a file without one has none",
+                CustomizationPackage.Load(named).ProfileName == "Contest" && CustomizationPackage.Load(legacy).ProfileName == null, true);
+            Check("profile names: (Default), path characters and padding can't be used",
+                Controller.IsUsableProfileName("Contest") && !Controller.IsUsableProfileName("(default)")
+                && !Controller.IsUsableProfileName("..\\x") && !Controller.IsUsableProfileName(" Contest")
+                && !Controller.IsUsableProfileName(""), true);
+
+            // A hand-made file: its list claims hotkeys and calls it doesn't hold, a forbidden key,
+            // and sound files only.
+            string hand = Path.Combine(dir, "hand.zip");
+            using (var z = System.IO.Compression.ZipFile.Open(hand, System.IO.Compression.ZipArchiveMode.Create))
+            {
+                void Add(string n, string t) { using (var w = new StreamWriter(z.CreateEntry(n).Open())) w.Write(t); }
+                Add("Jimmy Next customizations.txt", "format=1\r\nparts=Sounds, Hotkeys, Operating\r\n");
+                Add("settings.ini", "[Settings]\r\nradioComPort=COM9\r\n");
+                Add("Sounds/crow.wav", "theirs");
+                Add("Sounds/same.wav", "same");
+            }
+            var h = CustomizationPackage.Load(hand);
+            Check("only what the file really holds is offered (sound files alone count as sounds)",
+                h.Parts == CustomizationParts.Sounds && h.Ignored == 1, true);
+
+            string data = Path.Combine(dir, "data"), sounds = Path.Combine(data, "Sounds");
+            Directory.CreateDirectory(sounds);
+            File.WriteAllText(Path.Combine(sounds, "crow.wav"), "mine");
+            File.WriteAllText(Path.Combine(sounds, "same.wav"), "same");
+            CheckStr("my own sound about to be replaced is named first (an identical one is not)",
+                string.Join(",", h.SoundsReplaced(data, null)), "crow.wav");
+            var dst = new IniFile(Path.Combine(dir, "receiver.ini"));
+            dst.Write("soundFile_Logged", "echo.wav");
+            h.ApplyTo(dst, CustomizationParts.Sounds, data);
+            Check("sound files alone: they arrive, my sound settings stay",
+                File.ReadAllText(Path.Combine(sounds, "crow.wav")) == "theirs" && new IniFile(dst.FilePath).Read("soundFile_Logged") == "echo.wav", true);
+
+            // Into another profile: its own wording, the shared wording untouched.
+            string profiles = Path.Combine(dir, "Profiles"), own = Path.Combine(profiles, "Wording", "Contest.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(own));
+            File.WriteAllText(Path.Combine(data, "Wording.txt"), "shared");
+            var contest = new IniFile(Path.Combine(profiles, "Contest.ini"));
+            CustomizationPackage.Load(named).ApplyTo(contest, CustomizationParts.Notifications | CustomizationParts.Wording, data, wordingPath: own);
+            Check("into another profile: its own wording and notifications, the shared wording unchanged",
+                File.ReadAllText(own) == "Side.RX1 = RX even" && File.ReadAllText(Path.Combine(data, "Wording.txt")) == "shared"
+                && new IniFile(contest.FilePath).Read("notifyTemplate_CallingMe") == "{Call} calls", true);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // Support settings (2026-10-07): the whole configuration travels except sound devices,
+    // secrets, the shared station and logins, window places and remembered state; installing
+    // keeps those of the computer it lands on; a bad or unsafe file changes nothing.
+    static void SupportPackageTests()
+    {
+        Console.WriteLine("\n── Support settings: what travels, installing, checking ──");
+        Check("travels: radio, CAT, PTT port, notifications, calls",
+            new[] { "radioComPort", "radioPttSerialPort", "radioPttMethod", "radioBaudRate", "notifyTemplate_X", "wantedCalls", "decodeDepth" }.All(SupportPackage.Travels), true);
+        Check("stays home: sound devices, passwords and keys, station and logins, windows, remembered state, support's own",
+            new[] { "nativeEngineAudioDevice", "nativeEngineAudioOutputDevice", "qrzPassword", "qrzLogbookApiKey", "nativeEngineMyCall",
+                    "lotwLogbookUser", "profileOnly_Station", "windowPosX", "radioLastBandIdx", "LogbookLastQrzRefresh",
+                    "supportPackageRevision", "activeProfile" }.Any(SupportPackage.Travels), false);
+
+        string dir = Path.Combine(Path.GetTempPath(), "jimmy_supportpkg_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            string section = CustomizationPackage.MainSection;
+            var helper = new IniFile(Path.Combine(dir, "helper.ini"));
+            helper.Write("radioComPort", "COM7");
+            helper.Write("radioPttSerialPort", "COM8");
+            helper.Write("radioBaudRate", "38400");
+            helper.Write("nativeEngineAudioDevice", "Helper Speakers");
+            helper.Write("qrzPassword", "helper-secret");
+            helper.Write("nativeEngineMyCall", "KB0UZT");
+            helper.Write("windowPosX", "40");
+            helper.Write("Help", "123", "Hotkeys");
+            string wording = Path.Combine(dir, "Wording.txt");
+            File.WriteAllText(wording, "Side.RX1 = RX even");
+            var pkg = SupportPackage.FromProfile(helper.FilePath, wording, null, Path.Combine(dir, "nosounds"), "KD4DC", "KB0UZT", 3);
+            byte[] zip = pkg.ToZip();
+            var back = SupportPackage.Load(zip);
+            Check("metadata travels: recipient, maker, revision, time, version",
+                back.Recipient == "KD4DC" && back.Exporter == "KB0UZT" && back.Revision == 3 && !string.IsNullOrEmpty(back.ExportedUtc)
+                && back.AppVersion == pkg.AppVersion, true);
+            Check("the helper's sound device, password, callsign and window never leave",
+                back.Settings.ContainsKey("nativeEngineAudioDevice") || back.Settings.ContainsKey("qrzPassword")
+                || back.Settings.ContainsKey("nativeEngineMyCall") || back.Settings.ContainsKey("windowPosX")
+                || Encoding.UTF8.GetString(zip).Contains("helper-secret"), false);
+            Check("radio settings, hotkeys and wording travel",
+                back.Settings["radioComPort"] == "COM7" && back.Settings["radioBaudRate"] == "38400" && back.Hotkeys["Help"] == "123"
+                && back.WordingText == "Side.RX1 = RX even", true);
+
+            // Installing at the recipient's: their own sound device, password and callsign stay; the
+            // CAT port is the one they chose, the PTT port kept as theirs.
+            var mine = new IniFile(Path.Combine(dir, "recipient.ini"));
+            mine.Write("nativeEngineAudioDevice", "My USB Codec");
+            mine.Write("qrzPassword", "mine");
+            mine.Write("nativeEngineMyCall", "KD4DC");
+            mine.Write("radioComPort", "COM3");
+            mine.Write("radioPttSerialPort", "COM4");
+            mine.Write("rawShowGrid", "True");   // a setting the package leaves out goes back to its default
+            back.Apply(mine, Path.Combine(dir, "data"), null, Path.Combine(dir, "data", "Wording.txt"), null,
+                new Dictionary<string, string> { ["radioComPort"] = "COM5", ["radioPttSerialPort"] = null });
+            var after = new IniFile(mine.FilePath);
+            Check("install: my sound device, password and callsign stay",
+                after.Read("nativeEngineAudioDevice") == "My USB Codec" && after.Read("qrzPassword") == "mine" && after.Read("nativeEngineMyCall") == "KD4DC", true);
+            Check("install: CAT port as chosen, PTT port kept, the rest as the helper set it",
+                after.Read("radioComPort") == "COM5" && after.Read("radioPttSerialPort") == "COM4" && after.Read("radioBaudRate") == "38400"
+                && string.IsNullOrEmpty(after.Read("rawShowGrid")) && after.Read("Help", "Hotkeys") == "123"
+                && File.ReadAllText(Path.Combine(dir, "data", "Wording.txt")) == "Side.RX1 = RX even", true);
+
+            // Files that are not support settings, or not safe, are refused before anything changes.
+            byte[] Zip(params (string Name, string Text)[] entries)
+            {
+                using (var ms = new MemoryStream())
+                {
+                    using (var z = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
+                        foreach (var (n, t) in entries) using (var w = new StreamWriter(z.CreateEntry(n).Open())) w.Write(t);
+                    return ms.ToArray();
+                }
+            }
+            string Refused(byte[] b) { try { SupportPackage.Load(b); return "accepted"; } catch (InvalidDataException ex) { return ex.Message; } }
+            const string manifest = "Jimmy Next support settings.txt";
+            Check("refused: not a zip, not support settings, a newer format, an unsafe name, no settings",
+                Refused(Encoding.UTF8.GetBytes("hello")) == "it is not a zip file"
+                && Refused(Zip(("x.txt", "x"))).Contains("not a Jimmy Next support settings file")
+                && Refused(Zip((manifest, "format=9"), ("settings.ini", "[Settings]\nradioComPort=COM1"))).Contains("newer version")
+                && Refused(Zip((manifest, "format=1"), ("settings.ini", "[Settings]\nradioComPort=COM1"), ("../evil.wav", "x"))).Contains("unsafe")
+                && Refused(Zip((manifest, "format=1"), ("settings.ini", "[Settings]\nqrzPassword=x"))).Contains("no settings"), true);
+            var hand = SupportPackage.Load(Zip((manifest, "format=1\nrecipient=KD4DC\nrevision=2"),
+                ("settings.ini", "[Settings]\nradioComPort=COM1\nqrzPassword=x\nnativeEngineAudioDevice=Theirs\n")));
+            Check("a hand-made file can't bring a password or sound device (left out and counted)",
+                hand.Settings.Count == 1 && hand.Ignored == 2 && hand.Revision == 2, true);
+            var details = hand.Details("W1AW", 5, null);
+            Check("review warns: another station's settings, older than the revision installed",
+                details.Any(l => l.Contains("KD4DC's settings") && l.Contains("W1AW")) && details.Any(l => l.Contains("older than revision 5")), true);
+        }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+    }
+
+    // Setup links (2026-10-07): only the exact form is taken.
+    static void SupportLinkTests()
+    {
+        Console.WriteLine("\n── Support setup links ──");
+        const string code = "0123ABCD-4567EF01-89AB2345-CDEF6789";
+        string link = SupportLink.Make("kd4dc/p", code);
+        CheckStr("made from the base callsign", link, "jimmynext-support://profile?callsign=KD4DC&code=" + code);
+        var p = SupportLink.Parse(link);
+        Check("read back", p != null && p.Value.Callsign == "KD4DC" && p.Value.Code == code, true);
+        Check("refused: another scheme, another action, an extra field, a slash callsign, a bad code, a path",
+            new[]
+            {
+                "https://profile?callsign=KD4DC&code=" + code,
+                "jimmynext-support://delete?callsign=KD4DC&code=" + code,
+                "jimmynext-support://profile?callsign=KD4DC&code=" + code + "&run=x",
+                "jimmynext-support://profile?callsign=KD4DC/P&code=" + code,
+                "jimmynext-support://profile?callsign=KD4DC&code=123",
+                "jimmynext-support://profile/x?callsign=KD4DC&code=" + code,
+            }.Any(l => SupportLink.Parse(l) != null), false);
+        Check("found among the program's arguments", SupportLink.FromArgs(new[] { "Jimmy Next.exe", link }) == link
+            && SupportLink.FromArgs(new[] { "Jimmy Next.exe", "--support" }) == null, true);
+    }
+
+    // The service client (2026-10-07) against a fake server: the key and helper login go only in
+    // headers, the helper login only on helper actions, and the server's answers become plain results.
+    static void SupportServiceTests()
+    {
+        Console.WriteLine("\n── Support service client ──");
+        var seen = new List<(System.Net.Http.HttpMethod Method, string Url, Dictionary<string, string> Headers, string Body)>();
+        Func<HttpRequestMessageLike, (int Status, string Type, byte[] Body)> reply = null;
+        SupportService.TestKey = "test-key-0123456789abcdefghij";
+        SupportService.TestHandler = () => new FakeSupportServer((req, body) =>
+        {
+            var headers = req.Headers.ToDictionary(h => h.Key, h => string.Join(",", h.Value), StringComparer.OrdinalIgnoreCase);
+            seen.Add((req.Method, req.RequestUri.ToString(), headers, body));
+            return reply(new HttpRequestMessageLike { Body = body });
+        });
+        string folder = Path.Combine(Path.GetTempPath(), "jimmy_supportlocal_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            SupportService.Result Run(Func<SupportService, CancellationToken, Task<SupportService.Result>> f, SupportService svc = null) =>
+                f(svc ?? new SupportService(), CancellationToken.None).GetAwaiter().GetResult();
+
+            reply = _ => (200, "application/zip", new byte[] { 80, 75, 5, 6 });
+            var r = Run((s, ct) => s.DownloadProfile("KD4DC", "0123ABCD-4567EF01-89AB2345-CDEF6789", false, ct));
+            var req = seen.Last();
+            Check("recipient download: POST, key in a header, code in the body, nothing in the URL, no helper login",
+                r.Ok && r.Bytes.Length == 4 && req.Method == System.Net.Http.HttpMethod.Post && req.Url == SupportService.Url
+                && req.Headers["X-Jimmy-Key"] == SupportService.TestKey && !req.Headers.ContainsKey("X-Jimmy-Helper")
+                && req.Body.Contains("download_code=0123ABCD") && req.Headers["User-Agent"].StartsWith("JimmyNext/"), true);
+
+            reply = _ => (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true,\"profiles\":[{\"callsign\":\"KD4DC\",\"revision\":\"abc\",\"bytes\":2048,\"modified_utc\":\"2026-10-07T12:00:00+00:00\"}]}"));
+            var helper = new SupportService { HelperUser = "claude", HelperPassword = "pw with space " };
+            r = Run((s, ct) => s.ListProfiles(ct), helper);
+            req = seen.Last();
+            Check("helper list: username uppercased, password as typed, both only in headers",
+                r.Ok && SupportService.Profiles(r).Single().Revision == "abc" && req.Headers["X-Jimmy-Helper-User"] == "CLAUDE"
+                && req.Headers["X-Jimmy-Helper"] == "pw with space " && !req.Body.Contains("pw"), true);
+            Check("no helper login: nothing is sent", Run((s, ct) => s.ListProfiles(ct)).Code == "helper_login" && seen.Count == 2, true);
+
+            reply = _ => (409, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"code\":\"profile_exists\",\"filename\":\"KD4DC.zip\",\"revision\":\"r1\"}"));
+            r = Run((s, ct) => s.UploadProfile("KD4DC", new byte[] { 1 }, null, ct), helper);
+            Check("upload to an existing file: the server's question and revision come back, no overwrite asked",
+                !r.Ok && r.Code == "profile_exists" && r.Get("revision") == "r1" && !seen.Last().Body.Contains("overwrite"), true);
+            reply = _ => (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true,\"download_code\":\"0123ABCD-4567EF01-89AB2345-CDEF6789\"}"));
+            r = Run((s, ct) => s.UploadProfile("KD4DC", new byte[] { 1 }, "r1", ct), helper);
+            Check("after Yes: overwrite with that revision", r.Ok && seen.Last().Body.Contains("overwrite") && seen.Last().Body.Contains("r1"), true);
+            Check("an upload is laid out as a browser sends it: quoted names, one plain file name (the host's firewall refused .NET's own)",
+                seen.Last().Body.Contains("name=\"callsign\"") && seen.Last().Body.Contains("name=\"profile\"; filename=\"KD4DC.zip\"")
+                && !seen.Last().Body.Contains("filename*"), true);
+            reply = _ => (400, "text/html", Encoding.UTF8.GetBytes("<html><head><title>400 Bad Request</title></head><body>Mod_Security</body></html>"));
+            Check("a host page's title is named, the page is not",
+                Run((s, ct) => s.UploadProfile("KD4DC", new byte[] { 1 }, null, ct), helper).Error.Contains("HTTP 400, 400 Bad Request"), true);
+
+            reply = _ => (403, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"code\":\"download_code_required\",\"error\":\"A valid download code is required.\"}"));
+            Check("a wrong code is told apart", Run((s, ct) => s.DownloadProfile("KD4DC", "x", false, ct)).Code == "download_code_required", true);
+            reply = _ => (403, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"Valid helper username and password required.\"}"));
+            r = Run((s, ct) => s.ListSupport(ct), helper);
+            Check("a refused helper login says so", r.Error.Contains("helper username or password") && r.Code == "helper_login", true);
+            reply = _ => (403, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"Access denied.\"}"));
+            r = Run((s, ct) => s.ListSupport(ct), helper);
+            Check("a refused app key is not blamed on the helper login",
+                r.Error.Contains("built-in support key") && !r.Error.Contains("username") && r.Code == null, true);
+            reply = _ => (406, "text/html", Encoding.UTF8.GetBytes("<html>Not Acceptable</html>"));
+            r = Run((s, ct) => s.SubmitSupport("KD4DC", "Jim", "a@b.co", "r.zip", new byte[] { 1 }, ct));
+            Check("a host page is never shown as it is", !r.Ok && r.Error.Contains("HTTP 406") && !r.Error.Contains("<html>"), true);
+            reply = _ => (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true,\"ticket\":\"KD4DC-20261007-120000-0123456789abcdef\"}"));
+            r = Run((s, ct) => s.SubmitSupport("KD4DC", "Jim", "a@b.co", "r.zip", new byte[] { 1 }, ct));
+            Check("support request: sent without a helper login, ticket returned",
+                r.Ok && r.Get("ticket").StartsWith("KD4DC-") && !seen.Last().Headers.ContainsKey("X-Jimmy-Helper"), true);
+
+            // Saved codes and the helper password are protected on disk and blanked by the report rules.
+            SupportLocal.TestFolder = folder;
+            SupportLocal.SetCode("KD4DC/P", "0123abcd-4567ef01-89ab2345-cdef6789");
+            SupportLocal.HelperPassword = "pw";
+            string onDisk = File.ReadAllText(Path.Combine(folder, "support.ini"));
+            Check("codes and the helper password are stored protected, never as typed",
+                SupportLocal.Code("KD4DC") == "0123ABCD-4567EF01-89AB2345-CDEF6789" && SupportLocal.HelperPassword == "pw"
+                && !onDisk.Contains("0123ABCD") && !onDisk.Contains("=pw"), true);
+            Check("their setting names are ones the support report blanks",
+                SupportReportBuilder.IsSecretSetting("downloadToken_KD4DC") && SupportReportBuilder.IsSecretSetting("helperPassword"), true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SupportServiceTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+        finally
+        {
+            SupportService.TestHandler = null;
+            SupportService.TestKey = null;
+            SupportLocal.TestFolder = null;
+            try { Directory.Delete(folder, true); } catch { }
+        }
+    }
+
+    // "Show password" (2026-10-08): shows what was typed while checked, hides it again after, and
+    // sits straight after the box in Tab order.
+    static void PasswordRevealTests()
+    {
+        Console.WriteLine("\n── Show password ──");
+        var panel = new System.Windows.Forms.Panel();
+        var dots = new System.Windows.Forms.TextBox { PasswordChar = '●', TabIndex = 3 };
+        var system = new System.Windows.Forms.TextBox { UseSystemPasswordChar = true, TabIndex = 4 };
+        panel.Controls.Add(dots);
+        panel.Controls.Add(system);
+        var show = PasswordReveal.Attach(dots, system);
+        show.Checked = true;
+        bool shown = dots.PasswordChar == '\0' && !system.UseSystemPasswordChar;
+        show.Checked = false;
+        Check("checked shows both boxes, unchecked hides them again", shown && dots.PasswordChar == '●' && system.UseSystemPasswordChar, true);
+        Check("right after the password in Tab order", show.Parent == panel && show.TabIndex == dots.TabIndex
+            && panel.Controls.GetChildIndex(show) > panel.Controls.GetChildIndex(dots) && show.AccessibleName == "Show password", true);
+    }
+
+    sealed class HttpRequestMessageLike { public string Body; }
+
+    // A fake support server: hands each request (and its body as text) to `answer`.
+    sealed class FakeSupportServer : System.Net.Http.HttpMessageHandler
+    {
+        private readonly Func<System.Net.Http.HttpRequestMessage, string, (int Status, string Type, byte[] Body)> _answer;
+        public FakeSupportServer(Func<System.Net.Http.HttpRequestMessage, string, (int, string, byte[])> answer) => _answer = answer;
+        protected override async Task<System.Net.Http.HttpResponseMessage> SendAsync(System.Net.Http.HttpRequestMessage request, CancellationToken ct)
+        {
+            string body = request.Content == null ? "" : await request.Content.ReadAsStringAsync();
+            var (status, type, bytes) = _answer(request, body);
+            var response = new System.Net.Http.HttpResponseMessage((HttpStatusCode)status) { Content = new System.Net.Http.ByteArrayContent(bytes) };
+            response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(type);
+            return response;
+        }
     }
 
     // TIME_ON is when the station was handed to the contact (2026-09-30, WB8JUI: answered at
@@ -21260,6 +21619,47 @@ static class JimmyTests
         }
     }
 
+    // Alt+Y wording (2026-10-07): an offset that rounds to zero is "on time", never "0.00 seconds
+    // fast"; the age is Nexus's own (left out when it gives none); the signal estimate is never
+    // "-0.0".
+    static void ClockStatusWordingTests()
+    {
+        Console.WriteLine("\n── Alt+Y: clock wording ──");
+        try
+        {
+            var ctrl = new Controller();
+            ctrl.callCqOptionsButton = new System.Windows.Forms.Button { Visible = false };
+            ctrl.ignoreWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            ctrl.minSnrNumUpDown = new System.Windows.Forms.NumericUpDown { Minimum = -30, Maximum = 20, Value = -24 };
+            ctrl.removeOnWeakSnrCheckBox = new System.Windows.Forms.CheckBox();
+            var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+            ulong slot = 9000;
+            string Say(string clock, double dt = 0.0)
+            {
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + (slot++) + (clock.Length > 0 ? ", " + clock : "") + @" },
+                    ""recentDecodes"": " + ClockDecodesJson(dt) + " }"));
+                return wc.ClockStatusText();
+            }
+            CheckStr("zero: on time", Say(@"""clockOffsetMs"": 0, ""clockAgeSecs"": 30"), "Clock on time by time server, checked under a minute ago");
+            CheckStr("1 ms fast: on time, not 0.00 fast", Say(@"""clockOffsetMs"": 1, ""clockAgeSecs"": 30"), "Clock on time by time server, checked under a minute ago");
+            CheckStr("4 ms slow: on time", Say(@"""clockOffsetMs"": -4, ""clockAgeSecs"": 59"), "Clock on time by time server, checked under a minute ago");
+            CheckStr("5 ms fast: rounds up, 0.01 fast", Say(@"""clockOffsetMs"": 5, ""clockAgeSecs"": 60"), "Clock 0.01 seconds fast, corrected by time server, checked 1 minute ago");
+            CheckStr("120 ms slow, 3 minutes old", Say(@"""clockOffsetMs"": -120, ""clockAgeSecs"": 200"), "Clock 0.12 seconds slow, corrected by time server, checked 3 minutes ago");
+            CheckStr("no age from Nexus: left out", Say(@"""clockOffsetMs"": 250"), "Clock 0.25 seconds fast, corrected by time server");
+            CheckStr("on time, no age: left out", Say(@"""clockOffsetMs"": 2"), "Clock on time by time server");
+            CheckStr("too far to correct", Say(@"""clockGrossMs"": 75300"), "Clock 75.30 seconds fast, too far to correct, set the computer clock");
+            wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);   // no earlier signal samples
+            Say("", -0.04); Say("", -0.04);
+            CheckStr("signals: a tiny negative estimate is 0.0, not -0.0", Say("", -0.04), "Clock 0.0 seconds by signals, good, no time server");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  ClockStatusWordingTests threw: {ex.GetType().Name}: {ex.Message}");
+            failed++;
+        }
+    }
+
     // ── Item 2, 2026-08-24 (operator request): "while transmitting, transmit-related speech can
     // take priority and receive-side notifications are suppressed until receiving resumes" --
     // proves the new opt-in setting actually gates the "N available stations" summary while
@@ -21719,6 +22119,8 @@ static class JimmyTests
             Put("Data/FccUls/fcc.dat", "lookup");
             Put("Data/ClubLog/clublog_key.txt", "secret");
             Put("Data/nexus-logbook-auto-move.txt", "auto move: failed");
+            Put("Support/support.ini", "[x]\nhelperUser=KB0UZT\n");   // support's private folder (2026-10-07)
+            Put("Support/last-installed.zip", "settings");
 
             Dictionary<string, string> Run(bool includeLogbook)
             {
@@ -21742,6 +22144,8 @@ static class JimmyTests
                 && with.ContainsKey("JimmyNextFolder/Data/Logbook/jimmy.db"), true);
             Check("lookup data left out", with.ContainsKey("JimmyNextFolder/Data/FccUls/fcc.dat"), false);
             Check("key file left out", with.Keys.Any(k => k.Contains("clublog_key")), false);
+            Check("support's private folder left out (codes, helper login, saved settings)",
+                with.Keys.Any(k => k.Contains("JimmyNextFolder/Support/")), false);
             Check("listing names every file", with.ContainsKey("jimmy_folder_listing.txt")
                 && with["jimmy_folder_listing.txt"].Contains("Data/FccUls/fcc.dat"), true);
 

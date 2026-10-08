@@ -45,6 +45,12 @@
     <None Include="App.config" />
   </ItemGroup>
 
+  <!-- Support service access key (SupportService.cs): built in when the builder has the private,
+       git-ignored SupportService.key file; without it the support features say so. -->
+  <ItemGroup Condition="Exists('SupportService.key')">
+    <EmbeddedResource Include="SupportService.key" LogicalName="SupportService.key" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- Notification sounds: every .wav dropped in Resources\Sounds\ ships (JimmyNext.wxs
          harvests that folder); no per-file entry needed. -->

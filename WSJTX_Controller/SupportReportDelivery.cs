@@ -1,50 +1,57 @@
 using System;
-using System.Diagnostics;
+using System.IO;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace WSJTX_Controller
 {
-    // 2.0.81: getting a support report to KB0UZT. Upload = KB0UZT's Dropbox file request (a page
-    // that only accepts files -- nobody sending can see or download anything in the folder);
-    // otherwise the report stays in Downloads, as before.
+    // Getting a support report to KB0UZT. Since 2026-10-07 it is sent from inside Jimmy Next to the
+    // support service (SupportService) with the sender's callsign, name and email, and the
+    // service's ticket number is shown once it has the report. The report stays saved where the
+    // operator chose either way, so a failed send loses nothing. A failed send is tried again only
+    // when the operator says so (a send that timed out may have arrived; trying again then makes a
+    // second ticket, which is harmless).
     internal static class SupportReportDelivery
     {
-        internal const string UploadUrl = "https://www.dropbox.com/request/p7h185fnh24sqrhhkm36";
-
         private const string Title = "Support Report";
 
-        public static void Deliver(IWin32Window owner, bool upload, string zipPath)
+        public static async Task Deliver(IWin32Window owner, bool upload, string zipPath, string callsign, string name, string email, Control busy)
         {
             if (!upload)
             {
-                MessageBox.Show(owner, $"Support report saved:\n{zipPath}", Title,
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(owner, $"Support report saved:\n{zipPath}", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-
-            // The page can't be filled in by a program, so the report's location goes on the
-            // clipboard for the operator to paste into the page's file box. Said BEFORE the
-            // browser opens, so the instructions are not hidden behind it.
-            bool copied = TryCopy(zipPath);
-            string how = copied
-                ? "Its location is copied. On the upload page, choose Add files, press Control V to paste, press Enter, then Upload."
-                : $"On the upload page, choose Add files and open:\n{zipPath}\nthen Upload.";
-            MessageBox.Show(owner, "Report saved. " + how + "\n\nPress OK to open the upload page.", Title,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            if (!TryOpen(UploadUrl))
-                MessageBox.Show(owner, $"Could not open the upload page:\n{UploadUrl}\n\nYour report is saved:\n{zipPath}", Title,
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-        }
-
-        private static bool TryCopy(string text)
-        {
-            try { Clipboard.SetText(text); return true; } catch { return false; }
-        }
-
-        private static bool TryOpen(string url)
-        {
-            try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); return true; }
-            catch { return false; }
+            if (!SupportService.Available)
+            {
+                MessageBox.Show(owner, SupportService.NotAvailable + $" Your report is saved:\n{zipPath}", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(zipPath); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(owner, $"Could not read the saved report to send it: {ex.Message}\n\n{zipPath}", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string call = SupportService.BaseCallsign(callsign);
+            while (true)
+            {
+                var r = await Controller.RunSupportBusy(busy, ct => new SupportService().SubmitSupport(call, name, email, Path.GetFileName(zipPath), bytes, ct));
+                if (r.Ok && !string.IsNullOrEmpty(r.Get("ticket")))
+                {
+                    try { SupportLocal.SenderName = name; SupportLocal.SenderEmail = email; } catch { }
+                    MessageBox.Show(owner,
+                        $"Support request sent. Your ticket number is {r.Get("ticket")}.\n\nThe report is also saved on this computer:\n{zipPath}\n\n" +
+                        "Press Control C to copy this message.",
+                        Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                if (MessageBox.Show(owner,
+                        $"The report was not sent: {r.Error}\n\nIt is saved on this computer:\n{zipPath}\n\nTry sending it again?",
+                        Title, MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Retry)
+                    return;
+            }
         }
     }
 }

@@ -679,6 +679,8 @@ namespace WSJTX_Controller
                 string action;
                 if (LookupFolders.Any(f => rel.StartsWith(f + "/", StringComparison.OrdinalIgnoreCase)))
                     action = "skipped: downloadable lookup data";
+                else if (rel.StartsWith(SupportLocal.FolderName + "/", StringComparison.OrdinalIgnoreCase))
+                    action = "skipped: support codes, login and saved support settings (private)";
                 else if (!IsSettingsFile(rel) && IsSecretFile(rel))   // settings files are blanked below instead
                     action = "skipped: may hold a key or password";
                 else if (!includeLogbook && IsLogbookFile(rel))

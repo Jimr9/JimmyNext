@@ -162,6 +162,7 @@ namespace WSJTX_Controller
         private const int PAGE_AWARDS    = 1;
         // Lookup and Edit Log are one page since 2026-10-01 ("Lookup and Edit"): the Edit Log
         // filters already searched by callsign exactly as Lookup did, so Lookup only duplicated it.
+        // Named "Logbook" since 2026-10-07.
         private const int PAGE_EDITLOG   = 2;
         private const int PAGE_SYNC      = 3;
 
@@ -325,7 +326,7 @@ namespace WSJTX_Controller
             BuildEditLogPage(font, hfont);
             BuildSyncPage(font, hfont);
 
-            string[] pageNames  = { "My Log", "Awards", "Lookup and Edit", "Sync" };
+            string[] pageNames  = { "My Log", "Awards", "Logbook", "Sync" };
             Panel[]  pagePanels = { _myLogPanel, _awardsPanel, _editLogPanel, _syncPanel };
             for (int i = 0; i < pageNames.Length; i++)
             {
@@ -432,6 +433,10 @@ namespace WSJTX_Controller
             _syncPanel = MakePage();
             var header = new Panel { Dock = DockStyle.Top, AccessibleName = "", AccessibleRole = AccessibleRole.None };
             int y = 8;
+            // Each service's normal and full download sit side by side (2026-10-07), so the
+            // layout reads in Tab order: Import, QRZ, LoTW, Full LoTW; Club Log, eQSL, Full eQSL;
+            // Export -- left to right, top to bottom (PageOrder).
+            int row1 = y, row2 = y + 34;
 
             _syncImportBtn = new Button
             {
@@ -473,9 +478,9 @@ namespace WSJTX_Controller
                 Text           = "Download from Club Log",
                 AccessibleName = "Download from Club Log",
                 Size           = new Size(160, 26),
-                Location       = new Point(428, y),
+                Location       = new Point(8, row2),
                 Font           = font,
-                TabIndex       = 4,
+                TabIndex       = 5,
                 Enabled        = !string.IsNullOrWhiteSpace(_clubLogEmail()) &&
                                   !string.IsNullOrWhiteSpace(_clubLogPassword()) &&
                                   !string.IsNullOrWhiteSpace(_clubLogCallsign()),
@@ -485,18 +490,16 @@ namespace WSJTX_Controller
             header.Controls.AddRange(new Control[] { _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncClubLogBtn });
             y += 34;
 
-            // Own row: the first row (Import/QRZ/LoTW/Club Log) is already close to this
-            // window's MinimumSize width (720) -- a 5th button on the same row would clip
-            // when resized down. Only a match-only reconciliation against Jimmy's local
-            // logbook (EqslReconciler), not a full import -- see EqslRefreshBtn_Click.
+            // Only a match-only reconciliation against Jimmy's local logbook (EqslReconciler),
+            // not a full import -- see EqslRefreshBtn_Click.
             _syncEqslBtn = new Button
             {
                 Text           = "Sync from eQSL",
                 AccessibleName = "Sync from eQSL, new confirmations",
                 Size           = new Size(150, 26),
-                Location       = new Point(8, y),
+                Location       = new Point(174, row2),
                 Font           = font,
-                TabIndex       = 5,
+                TabIndex       = 6,
                 Enabled        = !string.IsNullOrWhiteSpace(_eqslUsername()) && !string.IsNullOrWhiteSpace(_eqslPassword()),
             };
             _syncEqslBtn.Click += EqslRefreshBtn_Click;
@@ -510,9 +513,9 @@ namespace WSJTX_Controller
                 Text           = "Full LoTW Download",
                 AccessibleName = "Full LoTW download, all confirmations",
                 Size           = new Size(150, 26),
-                Location       = new Point(164, y),
+                Location       = new Point(428, row1),
                 Font           = font,
-                TabIndex       = 6,
+                TabIndex       = 4,
                 Enabled        = _syncLotwBtn.Enabled,
             };
             _syncLotwFullBtn.Click += LoTWFullBtn_Click;
@@ -526,7 +529,7 @@ namespace WSJTX_Controller
                 Text           = "Full eQSL Download",
                 AccessibleName = "Full eQSL download, all confirmations",
                 Size           = new Size(150, 26),
-                Location       = new Point(320, y),
+                Location       = new Point(330, row2),
                 Font           = font,
                 TabIndex       = 7,
                 Enabled        = _syncEqslBtn.Enabled,
@@ -800,7 +803,7 @@ namespace WSJTX_Controller
                 Location       = new Point(70, 34),
                 Size           = new Size(170, 21),
                 DropDownStyle  = ComboBoxStyle.DropDownList,
-                TabIndex       = 2,
+                TabIndex       = 4,
                 AccessibleName = "Search in",
             };
             _editFieldCb.Items.Add(LogbookDb.AllFieldsLabel);
@@ -814,7 +817,7 @@ namespace WSJTX_Controller
                 Font           = font,
                 Location       = new Point(274, 34),
                 Size           = new Size(140, 20),
-                TabIndex       = 3,
+                TabIndex       = 5,
                 AccessibleName = "Search for",
             };
             _editTextTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
@@ -829,7 +832,7 @@ namespace WSJTX_Controller
                 Location       = new Point(244, 8),
                 Size           = new Size(110, 21),
                 DropDownStyle  = ComboBoxStyle.DropDownList,
-                TabIndex       = 4,
+                TabIndex       = 2,
                 AccessibleName = "Source filter",
             };
             _editSourceCb.Items.Add("(Any)");
@@ -846,7 +849,7 @@ namespace WSJTX_Controller
                 Location       = new Point(450, 8),
                 Size           = new Size(190, 21),
                 DropDownStyle  = ComboBoxStyle.DropDownList,
-                TabIndex       = 4,
+                TabIndex       = 3,
                 AccessibleName = "Upload status",
             };
             _editUploadCb.Items.Add(LogbookDb.AnyUploadLabel);
@@ -862,7 +865,7 @@ namespace WSJTX_Controller
                 Font           = font,
                 Location       = new Point(70, 60),
                 Size           = new Size(80, 20),
-                TabIndex       = 5,
+                TabIndex       = 6,
                 AccessibleName = "Date from, format year month day, optional",
             };
             _editDateFromTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
@@ -876,7 +879,7 @@ namespace WSJTX_Controller
                 Font           = font,
                 Location       = new Point(176, 60),
                 Size           = new Size(80, 20),
-                TabIndex       = 6,
+                TabIndex       = 7,
                 AccessibleName = "Date to, format year month day, optional",
             };
             _editDateToTb.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; DoEditSearch(); } };
@@ -889,7 +892,7 @@ namespace WSJTX_Controller
                 Font           = font,
                 Location       = new Point(264, 59),
                 Size           = new Size(70, 23),
-                TabIndex       = 7,
+                TabIndex       = 8,
             };
             _editSearchBtn.Click += (s, e) => DoEditSearch();
             header.Controls.Add(_editSearchBtn);
@@ -901,7 +904,7 @@ namespace WSJTX_Controller
                 Font           = font,
                 Location       = new Point(340, 59),
                 Size           = new Size(70, 23),
-                TabIndex       = 8,
+                TabIndex       = 9,
             };
             _editClearBtn.Click += (s, e) => ClearEditLog();
             header.Controls.Add(_editClearBtn);
@@ -923,7 +926,7 @@ namespace WSJTX_Controller
                 Font           = font,
                 Location       = new Point(416, 59),
                 Size           = new Size(90, 23),
-                TabIndex       = 9,
+                TabIndex       = 10,
             };
             _editRowOrderBtn.Click += RowOrderBtn_Click;
             header.Controls.Add(_editRowOrderBtn);
@@ -1549,7 +1552,8 @@ namespace WSJTX_Controller
                     _awardsClb, _awardsBandCb, _awardsShowCb, _awardsProgressLbl, _awardsAboutTb, _awardsLv, _awardsManageBtn, _awardsRefreshBtn,
                 };
                 case PAGE_EDITLOG: return new Control[] {
-                    _editCallTb, _editFieldCb, _editTextTb, _editSourceCb, _editUploadCb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
+                    // As on screen (2026-10-07): Callsign, Source, Upload status; Search in, for; dates.
+                    _editCallTb, _editSourceCb, _editUploadCb, _editFieldCb, _editTextTb, _editDateFromTb, _editDateToTb, _editSearchBtn, _editClearBtn,
                     _editRowOrderBtn, _editLv, _editAddBtn, _editEditBtn, _editBulkBtn, _editDeleteBtn, _editExportBtn,
                 };
                 case PAGE_SYNC: return new Control[] {
@@ -2398,7 +2402,7 @@ namespace WSJTX_Controller
             else if (_activePage == _syncPanel)      PopulateSync();
         }
 
-        // Ctrl+F: the Lookup and Edit page's callsign filter.
+        // Ctrl+F: the Logbook page's callsign filter.
         private void GoToLookup()
         {
             _categoryListBox.SelectedIndex = PAGE_EDITLOG;

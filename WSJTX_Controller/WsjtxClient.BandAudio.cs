@@ -1150,20 +1150,32 @@ namespace WSJTX_Controller
             var c = _nexusClock;
             string owner = string.IsNullOrWhiteSpace(c?.ClockOwnerNote) ? "" : ", " + c.ClockOwnerNote.Trim();
             // The offset leads every answer (operator request, 2026-09-28) so it is heard first.
+            // Hundredths of a second; one that rounds to 0.00 is "on time", never "0.00 seconds
+            // fast" (2026-10-07).
+            string Seconds(long ms) => (Math.Abs(ms) / 1000.0).ToString("F2", inv);
             string FastSlow(long ms) =>
-                Wording.Fill(ms >= 0 ? "Msg.ClockFast" : "Msg.ClockSlow", ("Seconds", (Math.Abs(ms) / 1000.0).ToString("F2", inv)));
+                Wording.Fill(ms >= 0 ? "Msg.ClockFast" : "Msg.ClockSlow", ("Seconds", Seconds(ms)));
             if (c?.ClockGrossMs != null)
                 return Wording.Fill("Msg.ClockTooFar", ("Offset", FastSlow(c.ClockGrossMs.Value))) + owner;
             if (c?.ClockOffsetMs != null)
             {
-                int age = c.ClockAgeSecs ?? 0;
-                string when = age < 60 ? Wording.Get("Msg.ClockCheckedNow")
+                // Nexus's last check, not one made now -- its age as Nexus gives it, or left out
+                // when Nexus gives none.
+                int? age = c.ClockAgeSecs;
+                string when = age == null ? ""
+                    : age < 60 ? Wording.Get("Msg.ClockCheckedNow")
                     : age / 60 == 1 ? Wording.Get("Msg.ClockCheckedMinute")
                     : Wording.Fill("Msg.ClockCheckedMinutes", ("Minutes", (age / 60).ToString()));
-                return Wording.Fill("Msg.ClockCorrected", ("Offset", FastSlow(c.ClockOffsetMs.Value)), ("When", when)) + owner;
+                long ms = c.ClockOffsetMs.Value;
+                string text = Seconds(ms) == "0.00"
+                    ? Wording.Fill("Msg.ClockOnTime", ("When", when))
+                    : Wording.Fill("Msg.ClockCorrected", ("Offset", FastSlow(ms)), ("When", when));
+                if (when.Length == 0) text = text.TrimEnd().TrimEnd(',').TrimEnd();
+                return text + owner;
             }
             if (_recentDt.Count < ClockDtMinSamples) return Wording.Get("Msg.ClockNotMeasured");
-            string est = timeOffset.ToString("+0.0;-0.0;0.0", inv);
+            double rounded = Math.Round(timeOffset, 1, MidpointRounding.AwayFromZero);
+            string est = (rounded == 0 ? 0.0 : rounded).ToString("+0.0;-0.0;0.0", inv);   // never "-0.0"
             return Wording.Fill(_clockWasAcceptable == false ? "Msg.ClockSignalsBad" : "Msg.ClockSignalsGood", ("Seconds", est));
         }
 

@@ -85,3 +85,7 @@ EngineHost/.nexus-src-info.json
 
 # build.bat's captured output log, not source
 build_out.txt
+
+# Support service access key: a one-line private file each builder creates from the PHP
+# config (never committed). Without it the support features say they are not available.
+WSJTX_Controller/SupportService.key

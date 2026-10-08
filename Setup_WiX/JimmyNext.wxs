@@ -90,6 +90,7 @@
       <ComponentRef Id="DesktopShortcutComp" />
       <ComponentRef Id="StartMenuShortcutComp" />
       <ComponentRef Id="EngineCrashDumpsComp" />
+      <ComponentRef Id="SupportLinkComp" />
     </Feature>
 
     <!-- Pre-warm Windows Defender's scan of jimmy-engine-host.exe during install, not the
@@ -298,6 +299,20 @@
         <RegistryValue Name="DumpFolder" Type="expandable" Value="%LOCALAPPDATA%\Jimmy Next\CrashDumps" KeyPath="yes" />
         <RegistryValue Name="DumpCount" Type="integer" Value="5" />
         <RegistryValue Name="DumpType" Type="integer" Value="1" />
+      </RegistryKey>
+    </Component>
+  </Fragment>
+
+  <!-- ── Support setup links ───────────────────────────────────────────── -->
+  <Fragment>
+    <!-- jimmynext-support://profile?callsign=...&code=... opens Jimmy Next (SupportLink.cs), which
+         asks before remembering the code or fetching anything. The link is handed to the program
+         as data ("%1"), never run as a command. Removed on uninstall. -->
+    <Component Id="SupportLinkComp" Directory="INSTALLFOLDER" Bitness="always64">
+      <RegistryKey Root="HKLM" Key="SOFTWARE\Classes\jimmynext-support" ForceDeleteOnUninstall="yes">
+        <RegistryValue Type="string" Value="URL:Jimmy Next support setup link" KeyPath="yes" />
+        <RegistryValue Name="URL Protocol" Type="string" Value="" />
+        <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLFOLDER]Jimmy Next.exe&quot; &quot;%1&quot;" />
       </RegistryKey>
     </Component>
   </Fragment>

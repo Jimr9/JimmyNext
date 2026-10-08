@@ -43,10 +43,15 @@ namespace WSJTX_Controller
         private const string SoundsPrefix = "Sounds/";
         private const string SettingsSection = "Settings";
         private const string HotkeysSection = "Hotkeys";
-        private const long MaxSoundBytes = 10L * 1024 * 1024;
-        private const long MaxTextBytes = 2L * 1024 * 1024;
+        internal const long MaxSoundBytes = 10L * 1024 * 1024;
+        internal const long MaxTextBytes = 2L * 1024 * 1024;
 
         internal CustomizationParts Parts;
+        // The named profile it was exported from (null: (Default), or a file from before 2026-10-07).
+        // Only ever offered as a destination after the caller checks it is a usable profile name.
+        internal string ProfileName;
+        // Entries in the file that were not taken (not allowed, unreadable, or not a sound file).
+        internal int Ignored;
         internal readonly Dictionary<string, string> Settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         internal readonly Dictionary<string, string> Hotkeys = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         internal string WordingText;
@@ -60,7 +65,7 @@ namespace WSJTX_Controller
         private static readonly string[] ContestKeys =
             { "class", "runMode", "categoryOperator", "categoryPower", "categoryAssisted", "categoryStation" };
 
-        private static bool IsContestId(string id) =>
+        internal static bool IsContestId(string id) =>
             !string.IsNullOrEmpty(id) && id.Length <= 40 && id.All(c => char.IsLetterOrDigit(c) || c == '_' || c == '-');
 
         private static void TakeContests(Dictionary<string, Dictionary<string, string>> ini, Dictionary<string, Dictionary<string, string>> into)
@@ -135,7 +140,7 @@ namespace WSJTX_Controller
                        string.Join(", ", g.Select(kv => Enum.TryParse(kv.Key, out HotkeyAction a) && HotkeyConfig.DisplayNames.TryGetValue(a, out var n) ? n : kv.Key)))
                    .ToList();
 
-        private static bool IsHotkeyEntry(string key, string value) =>
+        internal static bool IsHotkeyEntry(string key, string value) =>
             Enum.TryParse(key, false, out HotkeyAction _) && int.TryParse(value, out _);
 
         // "notifications and sounds" -- the wording file is never named (it travels with the
@@ -199,7 +204,7 @@ namespace WSJTX_Controller
         // A sound setting as it travels: a bare file name, the file itself added to the package --
         // found where Jimmy Next would play it from (a full path, the operator's own sounds
         // folder, then the shipped sounds).
-        private static string PortableSound(string value, string installSoundsFolder, string userSoundsFolder, Dictionary<string, byte[]> files)
+        internal static string PortableSound(string value, string installSoundsFolder, string userSoundsFolder, Dictionary<string, byte[]> files)
         {
             if (string.IsNullOrWhiteSpace(value)) return "";
             string name = Path.GetFileName(value);
@@ -212,7 +217,7 @@ namespace WSJTX_Controller
             return name;
         }
 
-        private static void AddSoundFile(string path, Dictionary<string, byte[]> files)
+        internal static void AddSoundFile(string path, Dictionary<string, byte[]> files)
         {
             try
             {
@@ -232,6 +237,7 @@ namespace WSJTX_Controller
                     "Jimmy Next customizations\r\n" +
                     $"format={FormatVersion}\r\n" +
                     $"parts={Parts}\r\n" +
+                    (string.IsNullOrWhiteSpace(ProfileName) ? "" : $"profile={ProfileName.Trim()}\r\n") +
                     $"made by={Assembly.GetExecutingAssembly().GetName().Name} {System.Diagnostics.FileVersionInfo.GetVersionInfo(Assembly.GetExecutingAssembly().Location).FileVersion}\r\n" +
                     "Holds no radio, audio, station, login or window settings.\r\n");
                 var sb = new StringBuilder();
@@ -265,7 +271,7 @@ namespace WSJTX_Controller
             File.Move(temp, zipPath);
         }
 
-        private static void AddText(ZipArchive zip, string name, string text)
+        internal static void AddText(ZipArchive zip, string name, string text)
         {
             var e = zip.CreateEntry(name);
             using (var w = new StreamWriter(e.Open(), new UTF8Encoding(false))) w.Write(text);
@@ -293,7 +299,8 @@ namespace WSJTX_Controller
                 info.TryGetValue("parts", out string partsText);
                 Enum.TryParse(partsText ?? "", out CustomizationParts parts);
 
-                var pkg = new CustomizationPackage();
+                info.TryGetValue("profile", out string profileName);
+                var pkg = new CustomizationPackage { ProfileName = string.IsNullOrWhiteSpace(profileName) ? null : profileName };
                 var settings = zip.GetEntry(SettingsEntry);
                 if (settings != null)
                 {
@@ -303,10 +310,12 @@ namespace WSJTX_Controller
                         {
                             var part = PartOf(kv.Key);
                             if (part != CustomizationParts.None && parts.HasFlag(part)) pkg.Settings[kv.Key] = kv.Value;
+                            else pkg.Ignored++;
                         }
                     if (parts.HasFlag(CustomizationParts.Hotkeys) && ini.TryGetValue(HotkeysSection, out var hk))
                         foreach (var kv in hk)
                             if (IsHotkeyEntry(kv.Key, kv.Value)) pkg.Hotkeys[kv.Key] = kv.Value;
+                            else pkg.Ignored++;
                 }
                 var contests = zip.GetEntry(ContestsEntry);
                 if (parts.HasFlag(CustomizationParts.ContestCategories) && contests != null)
@@ -316,9 +325,9 @@ namespace WSJTX_Controller
                 if (parts.HasFlag(CustomizationParts.Sounds))
                     foreach (var e in zip.Entries)
                     {
-                        if (!e.FullName.StartsWith(SoundsPrefix, StringComparison.OrdinalIgnoreCase) || e.Length > MaxSoundBytes) continue;
-                        string name = SafeFileName(e.FullName.Substring(SoundsPrefix.Length));
-                        if (name == null) continue;
+                        if (!e.FullName.StartsWith(SoundsPrefix, StringComparison.OrdinalIgnoreCase) || e.FullName.EndsWith("/")) continue;
+                        string name = e.Length > MaxSoundBytes ? null : SafeFileName(e.FullName.Substring(SoundsPrefix.Length));
+                        if (name == null) { pkg.Ignored++; continue; }
                         using (var s = e.Open())
                         using (var ms = new MemoryStream()) { s.CopyTo(ms); pkg.SoundFiles[name] = ms.ToArray(); }
                     }
@@ -328,19 +337,20 @@ namespace WSJTX_Controller
                 foreach (var key in pkg.Settings.Keys) pkg.Parts |= PartOf(key);
                 if (pkg.Hotkeys.Count > 0) pkg.Parts |= CustomizationParts.Hotkeys;
                 if (pkg.Contests.Count > 0) pkg.Parts |= CustomizationParts.ContestCategories;
+                if (pkg.SoundFiles.Count > 0) pkg.Parts |= CustomizationParts.Sounds;
                 if (pkg.Parts == CustomizationParts.None) throw new InvalidDataException("it holds nothing to import");
                 return pkg;
             }
         }
 
-        private static string ReadText(ZipArchiveEntry e)
+        internal static string ReadText(ZipArchiveEntry e)
         {
             if (e.Length > MaxTextBytes) throw new InvalidDataException($"'{e.Name}' is too large");
             using (var r = new StreamReader(e.Open(), Encoding.UTF8)) return r.ReadToEnd();
         }
 
         // A bare .wav file name, or null.
-        private static string SafeFileName(string name)
+        internal static string SafeFileName(string name)
         {
             name = Path.GetFileName((name ?? "").Replace('\\', '/').Split('/').Last());
             if (string.IsNullOrWhiteSpace(name) || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) return null;
@@ -371,6 +381,7 @@ namespace WSJTX_Controller
                 "profile=" + (profile ?? ""),
                 "ini=" + (iniPath ?? ""),
                 "wording=" + (wordingPath ?? ""),
+                "wordingExisted=" + File.Exists(wordingPath),   // False: an import made it, an undo removes it
                 "contest=" + (contestIni ?? ""),
             }, new UTF8Encoding(false));
             if (prune) BackupRetention.Prune(backupsRoot, $"before-{kind}-*");
@@ -384,6 +395,9 @@ namespace WSJTX_Controller
         {
             public string Dir, Kind, Parts, Profile, IniPath, WordingPath, ContestPath;
             public DateTime When;
+            // A profile's own wording file that did not exist yet (2026-10-07): the import made it,
+            // so putting the backup back removes it and the profile uses the shared wording again.
+            public bool WordingCreated;
         }
 
         // Reads a backup's note. A backup from before the note existed (2026-10-02) is worked out
@@ -410,8 +424,13 @@ namespace WSJTX_Controller
                         case "ini": info.IniPath = v; break;
                         case "wording": info.WordingPath = v; break;
                         case "contest": info.ContestPath = v; break;
+                        case "wordingExisted": info.WordingCreated = v == "False"; break;
                     }
                 }
+                // Only ever a profile's own wording file -- the shared one is never removed.
+                if (string.IsNullOrEmpty(info.WordingPath)
+                    || string.Equals(info.WordingPath, sharedWordingPath, StringComparison.OrdinalIgnoreCase))
+                    info.WordingCreated = false;
             }
             else
             {
@@ -455,6 +474,12 @@ namespace WSJTX_Controller
             Put(info.IniPath);
             Put(info.WordingPath);
             Put(info.ContestPath);
+            if (info.WordingCreated && File.Exists(info.WordingPath))
+            {
+                if (saveCurrentTo != null && !File.Exists(Path.Combine(saveCurrentTo, Path.GetFileName(info.WordingPath))))
+                    File.Copy(info.WordingPath, Path.Combine(saveCurrentTo, Path.GetFileName(info.WordingPath)));
+                File.Delete(info.WordingPath);
+            }
             string backupSounds = Path.Combine(info.Dir, "Sounds");
             if (Directory.Exists(backupSounds))
             {
@@ -490,17 +515,12 @@ namespace WSJTX_Controller
                 Directory.CreateDirectory(soundsDir);
                 foreach (var kv in SoundFiles)
                 {
-                    string shipped = installSoundsFolder == null ? null : Path.Combine(installSoundsFolder, kv.Key);
-                    if (shipped != null && File.Exists(shipped) && File.ReadAllBytes(shipped).SequenceEqual(kv.Value)) continue;
+                    if (!SoundNeedsWriting(kv.Key, kv.Value, soundsDir, installSoundsFolder)) continue;
                     string dest = Path.Combine(soundsDir, kv.Key);
-                    if (File.Exists(dest))
+                    if (File.Exists(dest) && backupDir != null)
                     {
-                        if (File.ReadAllBytes(dest).SequenceEqual(kv.Value)) continue;
-                        if (backupDir != null)
-                        {
-                            Directory.CreateDirectory(Path.Combine(backupDir, "Sounds"));
-                            File.Copy(dest, Path.Combine(backupDir, "Sounds", kv.Key), true);
-                        }
+                        Directory.CreateDirectory(Path.Combine(backupDir, "Sounds"));
+                        File.Copy(dest, Path.Combine(backupDir, "Sounds", kv.Key), true);
                     }
                     File.WriteAllBytes(dest, kv.Value);
                 }
@@ -512,7 +532,8 @@ namespace WSJTX_Controller
             {
                 foreach (var part in new[] { CustomizationParts.Notifications, CustomizationParts.Sounds, CustomizationParts.ListDisplay, CustomizationParts.Operating, CustomizationParts.BandFrequencies })
                 {
-                    if (!chosen.HasFlag(part)) continue;
+                    // A part the file holds no settings for (sound files only) leaves mine as they are.
+                    if (!chosen.HasFlag(part) || !Settings.Keys.Any(k => PartOf(k) == part)) continue;
                     if (main != null)
                         foreach (var key in main.Keys.Where(k => PartOf(k) == part).ToList()) ini.DeleteKey(key);
                     foreach (var kv in Settings.Where(s => PartOf(s.Key) == part))
@@ -539,6 +560,26 @@ namespace WSJTX_Controller
                 }
                 batch.Commit();
             }
+        }
+
+        // A sound file is written unless it is a shipped sound already here or the same as the one
+        // in the sounds folder.
+        internal static bool SoundNeedsWriting(string name, byte[] bytes, string soundsDir, string installSoundsFolder)
+        {
+            string shipped = installSoundsFolder == null ? null : Path.Combine(installSoundsFolder, name);
+            if (shipped != null && File.Exists(shipped) && File.ReadAllBytes(shipped).SequenceEqual(bytes)) return false;
+            string dest = Path.Combine(soundsDir, name);
+            return !File.Exists(dest) || !File.ReadAllBytes(dest).SequenceEqual(bytes);
+        }
+
+        // The operator's own sound files (every profile shares the sounds folder) that importing
+        // the sounds would replace with different ones -- named before anything is applied.
+        internal List<string> SoundsReplaced(string dataFolder, string installSoundsFolder)
+        {
+            string soundsDir = Path.Combine(dataFolder, "Sounds");
+            return SoundFiles.Where(kv => File.Exists(Path.Combine(soundsDir, kv.Key))
+                                          && SoundNeedsWriting(kv.Key, kv.Value, soundsDir, installSoundsFolder))
+                             .Select(kv => kv.Key).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
         }
 
         // section -> key -> value, the way Windows reads an ini: '[' starts a section, ';' a
