@@ -4,7 +4,7 @@
   <Networking>Disable</Networking>
   <MappedFolders>
     <MappedFolder>
-      <HostFolder>C:\claude\jimmy_next_nexus_integ\Setup_WiX\InstallTest</HostFolder>
+      <HostFolder>C:\claude\JimmyNext\Setup_WiX\InstallTest</HostFolder>
       <SandboxFolder>C:\InstallTest</SandboxFolder>
       <ReadOnly>false</ReadOnly>
     </MappedFolder>

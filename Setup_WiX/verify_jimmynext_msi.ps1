@@ -6,7 +6,7 @@
     Jimmy Next side-by-side product (different ProductName/File id/paths).
 #>
 param(
-    [string]$MsiPath = "C:\claude\jimmy_next\Setup_WiX\JimmyNext.msi"
+    [string]$MsiPath = (Join-Path $PSScriptRoot "Release\JimmyNext.msi")
 )
 
 $ErrorActionPreference = "Stop"

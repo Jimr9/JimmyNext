@@ -10339,7 +10339,7 @@ static class JimmyTests
 
     static void VerifyClubLogEquivalence()
     {
-        string listsFolder = @"C:\claude\Jimmy\WSJTX_Controller\bin\Debug\RuleDefinitions\Lists";
+        string listsFolder = Path.Combine(Path.GetDirectoryName(FindRepoFile(Path.Combine("WSJTX_Controller", "RuleDefinitions", "WAS.ini")) ?? ""), "Lists");
         Directory.CreateDirectory(ClubLogVerifyCacheDir);
 
         // CA_PROVINCES needs no Club Log data at all.

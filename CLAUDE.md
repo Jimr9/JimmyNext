@@ -33,7 +33,7 @@
 
 ## Release Versioning
 
-This repo (c:\claude\jimmy_next) builds and releases Jimmy Next, a separate product from
+This repo (C:\claude\JimmyNext) builds and releases Jimmy Next, a separate product from
 production Jimmy: its own AssemblyName ("Jimmy Next"), its own WiX UpgradeCode, its own
 GitHub repo (Jimr9/JimmyNext) for update checks, and its own site (blindsea.com/jimmy20).
 Never touch production Jimmy's repo, installer, or blindsea.com/jimmy site from here.
