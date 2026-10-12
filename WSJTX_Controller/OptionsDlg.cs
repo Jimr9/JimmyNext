@@ -2972,6 +2972,7 @@ namespace WSJTX_Controller
                    "Grid Locator:", out _engineMyGridTextBox, "Grid Locator", 2);
             _engineMyCallTextBox.Text = ctrl.NativeEngine.MyCall;
             _engineMyGridTextBox.Text = ctrl.NativeEngine.MyGrid;
+            _engineMyGridTextBox.CharacterCasing = CharacterCasing.Upper;
 
             AddRow("Operator Callsign:", out _stationOperatorCallTextBox, "Operator Callsign", 3,
                    "Operator Name:", out _stationOperatorNameTextBox, "Operator Name", 4);
@@ -3094,7 +3095,45 @@ namespace WSJTX_Controller
             openContestingBtn.Click += (s, e) => ctrl.OpenContestingWindow();
             stationOperatorPanel.Controls.Add(openContestingBtn);
 
-            AddProfileOnlyCheckBox("Station", _engineMyCallTextBox, _engineMyCallTextBox.Left, font, _engineMyCallTextBox, _engineMyGridTextBox);
+            // Licence class (2026-10-12): directly under the callsign and grid it belongs with, and
+            // above their "This profile only" box. Put in after the rest of the page is laid out:
+            // everything below moves down one row and one place later in the Tab order.
+            int licenseTop = _engineMyCallTextBox.Bottom + 7;
+            foreach (System.Windows.Forms.Control c in stationOperatorPanel.Controls)
+            {
+                if (c.Top >= licenseTop) c.Top += 28;
+                if (c.TabIndex > _engineMyGridTextBox.TabIndex) c.TabIndex++;
+            }
+            stationOperatorPanel.Controls.Add(new System.Windows.Forms.Label
+            {
+                Text = "License class:",
+                AutoSize = true,
+                Location = new System.Drawing.Point(left, licenseTop + 3),
+                Font = font,
+                TabStop = false,
+            });
+            _licenseClassCombo = new System.Windows.Forms.ComboBox
+            {
+                DropDownStyle = System.Windows.Forms.ComboBoxStyle.DropDownList,
+                Location = new System.Drawing.Point(_engineMyCallTextBox.Left, licenseTop),
+                Size = new System.Drawing.Size(360, 21),
+                TabIndex = _engineMyGridTextBox.TabIndex + 1,
+                Font = font,
+                AccessibleName = "License class",
+                AccessibleDescription = "With a United States class chosen, Jimmy Next will not transmit on a frequency outside that class. Novice and Advanced classes and other countries' rules are not included; choose Outside the United States or Not set and no limits are applied. This is an aid; you remain responsible for where you transmit.",
+            };
+            _licenseClassCombo.Items.AddRange(StationSettings.LicenseClassNames);
+            _licenseClassCombo.SelectedIndex = System.Math.Max(0, System.Array.IndexOf(StationSettings.LicenseClassValues, ctrl.Station.LicenseClass ?? ""));
+            stationOperatorPanel.Controls.Add(_licenseClassCombo);
+
+            AddProfileOnlyCheckBox("Station", _licenseClassCombo, _engineMyCallTextBox.Left, font, _engineMyCallTextBox, _engineMyGridTextBox);
+            if (_profileOnlyCbs.TryGetValue("Station", out var stationOnly))
+                stationOnly.CheckedChanged += (s, e) =>
+                {
+                    if (stationOnly.Checked) return;   // back to the shared class, like the callsign and grid
+                    string shared = StationSettings.NormalizeLicenseClass(SharedSettings.SharedPlain(ctrl.SettingsIni, "stationLicenseClass"));
+                    _licenseClassCombo.SelectedIndex = System.Math.Max(0, System.Array.IndexOf(StationSettings.LicenseClassValues, shared));
+                };
             AddProfileOnlyCheckBox("Operator", _stationContestEmailTextBox, _engineMyCallTextBox.Left, font, _stationOperatorNameTextBox, _stationContestEmailTextBox);
         }
 
@@ -3103,6 +3142,7 @@ namespace WSJTX_Controller
         // tab order following it. Unchecked, the group's fields show and save the values every
         // profile shares; unticking shows the shared values again. Applied on OK, before any
         // setting is saved (ApplyProfileOnlyChoices). `fields` are in SharedSettings.KeysOf order.
+        private System.Windows.Forms.ComboBox _licenseClassCombo;
         private readonly Dictionary<string, System.Windows.Forms.CheckBox> _profileOnlyCbs =
             new Dictionary<string, System.Windows.Forms.CheckBox>();
 
@@ -3144,7 +3184,7 @@ namespace WSJTX_Controller
         {
             switch (group)
             {
-                case "Station": return "Callsign and grid";
+                case "Station": return "Callsign, grid and license class";
                 case "Operator": return "Operator name and contest email";
                 case "QrzLookup": return "QRZ lookup login";
                 case "QrzLogbook": return "QRZ logbook key";
@@ -3191,6 +3231,19 @@ namespace WSJTX_Controller
             ctrl.Station.CqZone = _stationCqZoneTextBox.Text.Trim();
             ctrl.Station.ItuZone = _stationItuZoneTextBox.Text.Trim();
             ctrl.Station.MyPark = NormalizeParkList(_stationMyParkTextBox?.Text);
+            // Licence class: a change goes to the running engine at once, which stops transmitting
+            // first and does not start again by itself. No engine running: the next start has it.
+            if (_licenseClassCombo != null && _licenseClassCombo.SelectedIndex >= 0)
+            {
+                string chosen = StationSettings.LicenseClassValues[_licenseClassCombo.SelectedIndex];
+                if (chosen != (ctrl.Station.LicenseClass ?? ""))
+                {
+                    string engineBefore = ctrl.Station.EngineLicenseClass;
+                    ctrl.Station.LicenseClass = chosen;
+                    if (ctrl.Station.EngineLicenseClass != engineBefore && !ctrl.TryApplyLicenseClassLive())
+                        ctrl.ApplyEngineMode();   // not taken live (no engine yet, or an older one): start it with the new class
+                }
+            }
             if (_displayZoneCombo != null && _displayZoneCombo.SelectedIndex >= 0 && _displayZoneEntries != null)
                 ctrl.SetAndPersistDisplayTimeZone(_displayZoneEntries[_displayZoneCombo.SelectedIndex].Id, _displayInZoneCheckBox?.Checked ?? ctrl.displayInSelectedTimeZone);
 
@@ -7882,37 +7935,10 @@ namespace WSJTX_Controller
             return c.Value.IsKnownColor ? c.Value.Name : $"RGB {c.Value.R}, {c.Value.G}, {c.Value.B}";
         }
 
-        // Standard Maidenhead locator casing: field (first 2 chars) uppercase letters,
-        // square (next 2) digits, subsquare (last 2, if present) lowercase letters -- so a
-        // grid typed in any case (or all upper/lower) displays and stores in the
-        // conventional form, matching what real over-the-air FT8 grid exchanges expect.
-        // Malformed input (wrong length/non-alpha where a letter belongs) is returned
-        // unchanged, uppercased only -- not this dialog's job to validate grid syntax.
-        private static string FormatGridSquare(string grid)
-        {
-            if (string.IsNullOrEmpty(grid)) return grid;
-            if (grid.Length != 4 && grid.Length != 6) return grid.ToUpperInvariant();
-
-            char[] c = grid.ToCharArray();
-            for (int i = 0; i < 2; i++)
-            {
-                if (!char.IsLetter(c[i])) return grid.ToUpperInvariant();
-                c[i] = char.ToUpperInvariant(c[i]);
-            }
-            for (int i = 2; i < 4; i++)
-            {
-                if (!char.IsDigit(c[i])) return grid.ToUpperInvariant();
-            }
-            if (grid.Length == 6)
-            {
-                for (int i = 4; i < 6; i++)
-                {
-                    if (!char.IsLetter(c[i])) return grid.ToUpperInvariant();
-                    c[i] = char.ToLowerInvariant(c[i]);
-                }
-            }
-            return new string(c);
-        }
+        // The station grid is stored in capitals, all of it (operator, 2026-10-09: EN34RN, as the
+        // contact editor and the logbook show it) -- it used to lower-case the last two letters
+        // (EN34rn), so Options and the editor disagreed. Both spell the same locator.
+        private static string FormatGridSquare(string grid) => NativeEngineSettings.NormalizeGrid(grid);
 
         // Turns the rig model combo's selected display text ("Kenwood TS-590SG (2037)", or the
         // "(currently configured: X)" fallback for an unlisted value) back into the raw Hamlib

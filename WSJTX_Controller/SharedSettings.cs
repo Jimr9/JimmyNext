@@ -23,7 +23,7 @@ namespace WSJTX_Controller
 
         internal static readonly (string Group, string[] Keys)[] Groups =
         {
-            ("Station",      new[] { "nativeEngineMyCall", "nativeEngineMyGrid" }),
+            ("Station",      new[] { "nativeEngineMyCall", "nativeEngineMyGrid", "stationLicenseClass" }),
             ("Operator",     new[] { "stationOperatorName", "stationContestEmail" }),
             ("QrzLookup",    new[] { "qrzUsername", "qrzPassword" }),
             ("QrzLogbook",   new[] { "qrzLogbookApiKey" }),

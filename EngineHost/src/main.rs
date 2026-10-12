@@ -394,6 +394,10 @@ struct Args {
     /// WSJT-X's own default of Data/Pkt. When on, the radio loop never sends a CAT mode
     /// command at all, for any operating mode -- the operator's own manual rig setting stands.
     dont_set_mode: bool,
+    /// The operator's licence class (2026-10-12): "technician", "general" or "extra" turn on
+    /// Nexus's own transmit lockout for United States privileges (Settings.license_class,
+    /// Engine::tx_allowed); anything else, or absent, is Nexus's Open -- no lockout.
+    license_class: String,
     /// SO2R: separate serial port for RTS/DTR PTT when it differs from the CAT port -- sets
     /// Settings.ptt_serial_port. Empty (default) = key on the same port as CAT.
     ptt_serial_port: String,
@@ -549,6 +553,7 @@ fn parse_args() -> Args {
     let mut ptt_data_source = false;
     let mut pskreporter = false;
     let mut dont_set_mode = false;
+    let mut license_class = String::new();
     let mut ptt_serial_port = String::new();
     let mut split_mode = "none".to_string();
     let mut control_port: u16 = 58239;
@@ -603,6 +608,11 @@ fn parse_args() -> Args {
             "--ptt-data-source" => ptt_data_source = true,
             "--pskreporter" => pskreporter = true,
             "--dont-set-mode" => dont_set_mode = true,
+            "--license-class" => {
+                if let Some(v) = it.next() {
+                    license_class = v;
+                }
+            }
             "--ptt-serial-port" => ptt_serial_port = it.next().unwrap_or(ptt_serial_port),
             "--split-mode" => split_mode = it.next().unwrap_or(split_mode),
             "--control-port" => {
@@ -690,6 +700,7 @@ fn parse_args() -> Args {
         ptt_data_source,
         pskreporter,
         dont_set_mode,
+        license_class,
         ptt_serial_port,
         split_mode,
         control_port,
@@ -1561,6 +1572,16 @@ fn handle_control_connection(
                     let _ = writeln!(stream, "ERR bad APPLY_SETTINGS args: {e}");
                 }
             }
+        } else if let Some(v) = line.strip_prefix("SET_LICENSE_CLASS ") {
+            // The operator's licence class changed in Options (2026-10-12). Transmit is halted
+            // first and stays off -- a class is never changed under a transmission, and nothing
+            // re-arms it here. Then Nexus's own setter; its gate (Engine::tx_allowed) judges every
+            // later transmit against the new class. Answers the gate's verdict for the dial as
+            // it stands.
+            let mut eng = engine.lock().unwrap_or_else(|e| e.into_inner());
+            eng.halt_tx();
+            eng.set_license_class(v.trim());
+            let _ = writeln!(stream, "OK {}", if eng.tx_allowed() { "allowed" } else { "locked" });
         } else if let Some(v) = line.strip_prefix("SET_CLOCK_CHECK ") {
             // Nexus's internet time check, changed on the running engine (2026-09-29): the same
             // Settings.clock_check Nexus's own settings save changes through apply_settings. Its
@@ -2171,6 +2192,18 @@ fn tx_audio_source(data: bool) -> String {
     if data { tempo_app::settings::TX_AUDIO_REAR } else { tempo_app::settings::TX_AUDIO_FRONT }.to_string()
 }
 
+/// Jimmy's licence class word as Nexus's own LicenseClass, by the same rule as Nexus's
+/// Engine::set_license_class: the three United States classes, anything else Open (no lockout).
+fn license_class(word: &str) -> tempo_app::settings::LicenseClass {
+    use tempo_app::settings::LicenseClass;
+    match word.trim().to_ascii_lowercase().as_str() {
+        "technician" => LicenseClass::Technician,
+        "general" => LicenseClass::General,
+        "extra" => LicenseClass::Extra,
+        _ => LicenseClass::Open,
+    }
+}
+
 fn with_radio_settings(current: &Settings, a: &ApplyRadioArgs) -> Settings {
     let mut s = current.clone();
     s.audio_in = a.audio_in.clone();
@@ -2299,6 +2332,7 @@ fn main() {
         tx_audio_source: tx_audio_source(args.ptt_data_source),
         pskreporter: args.pskreporter,
         dont_set_mode: args.dont_set_mode,
+        license_class: license_class(&args.license_class),
         ptt_serial_port: args.ptt_serial_port.clone(),
         split_mode: match args.split_mode.as_str() {
             "rig" => tempo_app::settings::SplitMode::Rig,
@@ -2654,6 +2688,45 @@ mod tests {
         assert_eq!(next.dial_mhz, 7.074, "the dial the operator is on is kept");
         assert_eq!(next.decode_depth, 1);
         assert!(next.pskreporter);
+    }
+
+    // Jimmy's licence class word reaches Nexus's own class, and Nexus's own gate then judges a
+    // real Engine (no radio attached): a Technician is locked out of 20 m FT8 on every path --
+    // slot transmit and Tune -- and is let back in on 10 m; a General is allowed on 20 m; "open",
+    // nothing, or a word Nexus has no rules for means no lockout.
+    #[test]
+    fn license_class_reaches_the_engines_own_transmit_gate() {
+        use tempo_app::settings::LicenseClass;
+        assert_eq!(license_class("Technician "), LicenseClass::Technician);
+        assert_eq!(license_class("general"), LicenseClass::General);
+        assert_eq!(license_class("extra"), LicenseClass::Extra);
+        for none in ["", "open", "advanced", "novice"] {
+            assert_eq!(license_class(none), LicenseClass::Open, "{none:?} applies no limits");
+        }
+
+        let mut eng = Engine::new("KB0UZT", "EN34", 0);
+        eng.set_tier(tempo_app::dto::Tier::Ft8);
+        eng.set_frequency(14.074, "20m", "USB");
+        eng.set_tx_enabled(true);
+        assert!(eng.tx_allowed(), "no class set: no lockout");
+
+        eng.halt_tx();
+        eng.set_license_class("technician");
+        assert!(!eng.tx_allowed(), "a Technician has no 20 m privileges");
+        assert!(!eng.tx_enabled(), "the change left transmit off");
+        eng.set_tx_enabled(true);
+        eng.broadcast("CQ KB0UZT EN34");
+        assert!(eng.poll_tx(0).is_empty(), "no over is made outside the class");
+        eng.set_tune(true);
+        assert!(!eng.tuning(), "Tune is refused outside the class");
+
+        eng.set_frequency(28.074, "10m", "USB");
+        assert!(eng.tx_allowed(), "a Technician may use 10 m FT8");
+        eng.set_frequency(14.074, "20m", "USB");
+        eng.set_license_class("general");
+        assert!(eng.tx_allowed(), "a General may use 20 m FT8");
+        eng.set_license_class("open");
+        assert!(eng.tx_allowed(), "outside the United States: no limits applied");
     }
 
     // Applied to a real Engine, the change is visible in its settings and nothing else moved.

@@ -1,8 +1,8 @@
 diff --git a/src/service.rs b/src/service.rs
-index abc8c1ce..42f0d440 100644
+index c2386cd26..28f940c3f 100644
 --- a/src/service.rs
 +++ b/src/service.rs
-@@ -1068,6 +1068,75 @@ const CAT_PORT_CHECK_MS: f64 = 10_000.0;
+@@ -1106,6 +1106,75 @@ const CAT_PORT_CHECK_MS: f64 = 10_000.0;
  /// CI-V, which respawns its engine every tick) came straight back.
  const CAT_REOPEN_RETRY_MS: f64 = 10_000.0;
  const CAT_REOPEN_MAX_MS: f64 = 300_000.0;
@@ -78,7 +78,7 @@ index abc8c1ce..42f0d440 100644
  /// Hamlib func tokens for the Expert DSP toggles, in the engine's
  /// `[nb, nr, notch, comp, vox, manual_notch]` order.
  ///
-@@ -3434,9 +3503,21 @@ struct RadioLoop {
+@@ -3584,9 +3653,21 @@ struct RadioLoop {
      /// those readers is the no-RF watch, which must never judge an over whose carrier is
      /// intermittent. See [`Self::rf_watchable`].
      cur_section_cw: bool,
@@ -103,7 +103,7 @@ index abc8c1ce..42f0d440 100644
      /// An audio Rig-mode split engaged VFO B for an over — tear the rig split
      /// down once no over is pending (unless the cluster split owns VFO B).
      audio_rig_split: bool,
-@@ -3881,7 +3962,9 @@ impl RadioLoop {
+@@ -4034,7 +4115,9 @@ impl RadioLoop {
              cur_dial: 0,
              cur_md: String::new(),
              cur_section_cw: false,
@@ -114,7 +114,7 @@ index abc8c1ce..42f0d440 100644
              audio_rig_split: false,
              rig_split_restore: None,
              split_detect: None,
-@@ -4938,11 +5021,184 @@ impl RadioLoop {
+@@ -5205,11 +5288,184 @@ impl RadioLoop {
                  if mode_changed { ", mode changed" } else { "" }
              ));
              self.last_dial = dial;
@@ -299,7 +299,7 @@ index abc8c1ce..42f0d440 100644
      /// May the loop START a transmission on the active `rig` this tick?
      ///
      /// `false` in the two windows where the `Rig` handle the loop is holding is NOT the
-@@ -5202,6 +5458,10 @@ impl RadioLoop {
+@@ -5469,6 +5725,10 @@ impl RadioLoop {
                      dial as f64 / 1e6
                  ));
                  self.last_dial = dial;
@@ -310,7 +310,7 @@ index abc8c1ce..42f0d440 100644
                  self.dial_fail_count = 0;
                  // ⚠️ CLEAR THE GIVE-UP ONLY FOR THE DIAL THAT WAS GIVEN UP ON. This used to clear
                  // on ANY success, which means an HF-only rig that refused 144.390 forgot the
-@@ -5264,6 +5524,12 @@ impl RadioLoop {
+@@ -5531,6 +5791,12 @@ impl RadioLoop {
                      let mut eng = engine_lock(engine);
                      if let Some(hz) = healed {
                          self.last_dial = hz;
@@ -323,7 +323,7 @@ index abc8c1ce..42f0d440 100644
                          eng.observe_rig_freq(hz);
                      }
                      eng.set_rig_refused_dial(Some(mhz));
-@@ -5432,7 +5698,11 @@ impl RadioLoop {
+@@ -5699,7 +5965,11 @@ impl RadioLoop {
          self.af_gain_giveup = None;
          self.rf_gain_giveup = None;
          self.squelch_giveup = None;
@@ -336,7 +336,7 @@ index abc8c1ce..42f0d440 100644
          self.audio_rig_split = false;
          self.rig_split_restore = None; // the OLD radio's split is not the new one's to restore
          self.last_rig_poll = 0.0; // poll the new rig's health/mode/S-meter immediately
-@@ -7069,7 +7339,17 @@ impl RadioLoop {
+@@ -7431,7 +7701,17 @@ impl RadioLoop {
                                  );
                              }
                          }
@@ -355,7 +355,7 @@ index abc8c1ce..42f0d440 100644
                              self.last_dial = hz;
                              {
                                  let mut eng = engine_lock(engine);
-@@ -7949,7 +8229,10 @@ impl RadioLoop {
+@@ -8428,7 +8708,10 @@ impl RadioLoop {
                          eng.remote_observe_cat(remote_read.as_ref(), Some(true));
                          eng.remote_observe_dial(remote_read.as_ref(), Some(hz));
                      }
@@ -367,7 +367,7 @@ index abc8c1ce..42f0d440 100644
                          self.last_dial = hz;
                          {
                              let mut eng = engine_lock(engine);
-@@ -10297,18 +10580,57 @@ impl RadioLoop {
+@@ -10880,18 +11163,57 @@ impl RadioLoop {
          // was not counted as a live over. Every other end-of-over site in this loop pairs
          // `tuning_keyed` with `tx_until_ms` — this was the one that did not.
          //
@@ -435,7 +435,7 @@ index abc8c1ce..42f0d440 100644
              if self.audio_rig_split {
                  self.audio_rig_split = false;
                  // The cluster SPLIT-on-Work owns VFO B when active — leave it.
-@@ -10888,8 +11210,14 @@ impl RadioLoop {
+@@ -11494,8 +11816,14 @@ impl RadioLoop {
                          // move the TX dial before the carrier keys (same as the
                          // boundary path).
                          let split = crate::slot::apply_tx_dial_shift(&mut eng, rig);
@@ -452,7 +452,7 @@ index abc8c1ce..42f0d440 100644
                          }
                          if split.rig_split_engaged {
                              self.audio_rig_split = true;
-@@ -11507,8 +11835,15 @@ impl RadioLoop {
+@@ -12126,8 +12454,15 @@ impl RadioLoop {
              // disconnect fail-safe can't race the fresh key-up.
              self.publish_tx_intent_now();
          }
@@ -470,7 +470,7 @@ index abc8c1ce..42f0d440 100644
          }
          if action.rig_split_engaged {
              self.audio_rig_split = true;
-@@ -11658,7 +11993,14 @@ impl RadioLoop {
+@@ -12277,7 +12612,14 @@ impl RadioLoop {
                      // T/R period (s), mode-driven: FT1 = 4, FT4 ≈ 8, FT8/DX1 = 15.
                      tr_period: eng.active_slot_secs().round() as u32,
                      config_name: "Default",
@@ -486,7 +486,7 @@ index abc8c1ce..42f0d440 100644
                  });
                  if let Some(fd) = snap.field_day.as_ref() {
                      if fd.qso_count > station.last_fd_qsos {
-@@ -28314,7 +28656,13 @@ mod tests {
+@@ -29155,7 +29497,13 @@ mod tests {
  
          // ⚠️ POSITIVE CONTROL: with no carrier up, an outstanding restore DOES get written —
          // otherwise the assertion below would pass against a scene where nothing was pending.
@@ -501,7 +501,7 @@ index abc8c1ce..42f0d440 100644
          let mark = log.lock().unwrap().len();
          run(&mut state, &mut rig, 0.0);
          assert!(
-@@ -28332,7 +28680,11 @@ mod tests {
+@@ -29173,7 +29521,11 @@ mod tests {
          engine.lock().unwrap().set_tune(true);
          run(&mut state, &mut rig, 200.0);
          assert!(state.tuning_keyed, "control: the tune keyed");
@@ -514,7 +514,7 @@ index abc8c1ce..42f0d440 100644
          let mark = log.lock().unwrap().len();
          for i in 1..5 {
              run(&mut state, &mut rig, 200.0 + f64::from(i) * 20.0);
-@@ -28345,11 +28697,351 @@ mod tests {
+@@ -29186,11 +29538,351 @@ mod tests {
              log.lock().unwrap()
          );
          assert!(
@@ -867,7 +867,7 @@ index abc8c1ce..42f0d440 100644
      /// ⭐ TUNE POWER: a tune-up keys at its own level, and the operator's level comes back on
      /// EVERY exit path — including the ones that never reach the tune-release branch.
      ///
-@@ -28764,6 +29456,63 @@ mod tests {
+@@ -29605,6 +30297,63 @@ mod tests {
          );
      }
  

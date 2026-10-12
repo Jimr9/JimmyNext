@@ -1,5 +1,5 @@
 diff --git a/src/rigctld_proc.rs b/src/rigctld_proc.rs
-index f725238d..43cee373 100644
+index f725238d3..43cee373a 100644
 --- a/src/rigctld_proc.rs
 +++ b/src/rigctld_proc.rs
 @@ -3040,6 +3040,14 @@ mod tests {

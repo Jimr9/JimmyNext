@@ -86,10 +86,15 @@ namespace WSJTX_Controller
         // operator left it; the engine falls back to the system default at runtime, and the saved
         // name resolves again once the device reappears. Do not "helpfully" persist the
         // system-default fallback over a stored name.
+        // The station grid in one form everywhere: trimmed, all capitals (EN34RN). A grid saved
+        // by an earlier version as EN34rn reads back in capitals, so new contacts and the
+        // contact editor agree without the operator saving Options again.
+        internal static string NormalizeGrid(string grid) => (grid ?? "").Trim().ToUpperInvariant();
+
         public void LoadFromIni(IniFile ini)
         {
             if (ini.KeyExists("nativeEngineMyCall")) MyCall = ini.Read("nativeEngineMyCall");
-            if (ini.KeyExists("nativeEngineMyGrid")) MyGrid = ini.Read("nativeEngineMyGrid");
+            if (ini.KeyExists("nativeEngineMyGrid")) MyGrid = NormalizeGrid(ini.Read("nativeEngineMyGrid"));
             if (ini.KeyExists("nativeEngineAudioDevice")) AudioInputDevice = ini.Read("nativeEngineAudioDevice");
             if (ini.KeyExists("nativeEngineAudioOutputDevice")) AudioOutputDevice = ini.Read("nativeEngineAudioOutputDevice");
             if (ini.KeyExists("radioInputMasterLevelPercent")

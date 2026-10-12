@@ -1205,6 +1205,19 @@ namespace WSJTX_Controller
         // session latch additionally covers a Direct transport/engine reconnect having reset
         // _lastCatOk back to null in between (ConnectDirectEngine). A clean startup (no outage
         // ever observed) announces nothing.
+        private ulong _lastSlotKeyRefusedAt, _lastSlotUnkeyFailedAt;
+        private void AnnounceSlotRefusal(DirectSlotRefusal refusal, ref ulong lastAt, string title, string what)
+        {
+            if (refusal == null || refusal.At == 0 || refusal.At == lastAt) return;
+            lastAt = refusal.At;
+            string why = string.IsNullOrWhiteSpace(refusal.Why) ? "" : $" ({refusal.Why.Trim()})";
+            DebugOutput($"{Time()} [RADIO] {what}{why}; transmit stopped by the engine");
+            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, title, $"{what}{why}. Transmit is stopped."));
+        }
+        // Tests: the same call DirectApplyStatus makes for a refused key.
+        internal void TestAnnounceKeyRefused(DirectSlotRefusal refusal) =>
+            AnnounceSlotRefusal(refusal, ref _lastSlotKeyRefusedAt, "Radio did not transmit", "The radio did not go into transmit");
+
         private void ApplyCatHealthNotification(bool? catOk, string catDetail)
         {
             if (!catOk.HasValue || _lastCatOk == catOk) return;
@@ -1351,6 +1364,14 @@ namespace WSJTX_Controller
                     _lastAnnouncedFakeItEpisodeToken = snap.SessionToken;
                 }
             }
+            // Nexus 1.17: the radio refused the key, or the unkey, of an over. The engine stopped
+            // transmitting on its own (radio.TxEnabled, reconciled below, turns Jimmy's side
+            // off); this says why, once per event -- the event's own time is its identity, so
+            // the same one is not repeated on every poll or after a reconnect.
+            AnnounceSlotRefusal(radio.SlotKeyRefused, ref _lastSlotKeyRefusedAt,
+                "Radio did not transmit", "The radio did not go into transmit");
+            AnnounceSlotRefusal(radio.SlotUnkeyFailed, ref _lastSlotUnkeyFailedAt,
+                "Radio did not return to receive", "The radio did not return to receive");
             // No `else` that wipes the remembered identity: a resolved episode (warn == null)
             // is silent, and leaving the last-announced id in place is what stops the SAME
             // still-unresolved episode re-announcing after a transport reconnect. The next
@@ -1366,6 +1387,8 @@ namespace WSJTX_Controller
             // therefore its SWR reading -- exists independently of it; Jimmy no longer runs any
             // separate CAT session), so this now also protects operators under
             // RadioControlMode.WsjtxCat, which the old RigctldClient-based polling never could.
+            ApplyTxLock(radio.TxAllowed);
+
             bool swrOver = ctrl.Radio.HaltTxOnHighSwr && radio.TxSwr.HasValue
                            && radio.TxSwr.Value > ctrl.Radio.SwrHaltThreshold;
             if (swrOver && !_swrOverThreshold)
@@ -3021,9 +3044,57 @@ namespace WSJTX_Controller
             // _directAuthenticated = true immediately whenever expectedSessionToken is empty --
             // see its own comment), so this OR is redundant there; it only matters for this
             // no-Connect-yet edge case.
-            if (string.IsNullOrEmpty(_directExpectedSessionToken) || _directAuthenticated) return true;
-            DebugOutput($"{Time()} [DIRECT] refusing to send '{what}' -- session not yet authenticated");
-            return false;
+            if (!string.IsNullOrEmpty(_directExpectedSessionToken) && !_directAuthenticated)
+            {
+                DebugOutput($"{Time()} [DIRECT] refusing to send '{what}' -- session not yet authenticated");
+                return false;
+            }
+            // The engine's own transmit lock (2026-10-12, radio.TxAllowed in the last status):
+            // outside the operator's licence class on this frequency, or a radio in split whose
+            // transmit frequency is not known. The engine would refuse or stay silent; say why
+            // here instead, for every way of starting a transmission (CQ, reply, enable, Tune,
+            // tuner). Stopping transmit is never gated.
+            if (_directTxLocked)
+            {
+                DebugOutput($"{Time()} [DIRECT] refusing to send '{what}' -- transmit is locked on this frequency");
+                AnnounceTxLocked(force: true);
+                return false;
+            }
+            return true;
+        }
+
+        private bool _directTxLocked;
+        private DateTime _txLockedSaidUtc = DateTime.MinValue;
+        internal bool TestTxLocked => _directTxLocked;
+
+        // With a licence class set the lock is its privileges; with none it can only be the
+        // engine's other reason, a split it cannot see.
+        internal string TxLockedMessage() =>
+            ctrl.Station.EngineLicenseClass.Length > 0
+                ? Wording.Fill("Msg.TxLockedLicense", ("Class", ctrl.Station.LicenseClassName))
+                : Wording.Get("Msg.TxLockedSplit");
+
+        // Said when the operator tries to transmit (force), and once when a frequency change
+        // locks a transmission that was under way -- never on every status.
+        private void AnnounceTxLocked(bool force)
+        {
+            if (!force && (DateTime.UtcNow - _txLockedSaidUtc).TotalSeconds < 5) return;
+            _txLockedSaidUtc = DateTime.UtcNow;
+            Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Error, Wording.Get("Msg.TxLockedTitle"), TxLockedMessage()));
+        }
+
+        // Each status: remember the lock; if it begins while Jimmy has transmit on, stop (the
+        // engine is already silent) and say why once.
+        internal void ApplyTxLock(bool txAllowed)
+        {
+            bool locked = !txAllowed;
+            bool began = locked && !_directTxLocked;
+            _directTxLocked = locked;
+            if (began && (txEnabled || tuning))
+            {
+                HaltTx();
+                AnnounceTxLocked(force: true);
+            }
         }
 
         public void DirectSendReply(string dxcall, string dxgrid, string replyMsg, int? replySnr, double? dxFreqHz, Action<bool> onComplete = null)
@@ -4480,6 +4551,23 @@ namespace WSJTX_Controller
         // refuse to do anything, since Jimmy's stale belief said Tx was already enabled. See
         // DirectApplyStatus's own reconciliation of this field for the fix.
         public bool TxEnabled { get; set; }
+        // Nexus 1.17 (tempo-app/src/dto.rs RadioStatus.slot_key_refused / slot_unkey_failed):
+        // the radio did not accept the key, or the unkey, of an FT8/FT4 over. The engine has
+        // already halted transmit; absent until it happens, cleared when transmit is enabled
+        // again. DirectApplyStatus announces each once.
+        public DirectSlotRefusal SlotKeyRefused { get; set; }
+        public DirectSlotRefusal SlotUnkeyFailed { get; set; }
+        // Whether the operator's licence class permits transmitting on the current frequency
+        // (RadioStatus.tx_allowed). True when no class is set, and when an older engine does not
+        // send it.
+        public bool TxAllowed { get; set; } = true;
+    }
+
+    // When (Unix seconds) and what the radio link answered, in its own words.
+    internal class DirectSlotRefusal
+    {
+        public ulong At { get; set; }
+        public string Why { get; set; }
     }
 
     internal class DirectDecodeRow

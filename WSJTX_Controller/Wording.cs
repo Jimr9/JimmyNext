@@ -152,6 +152,9 @@ namespace WSJTX_Controller
             ("Msg.WatchNotActive", "Station Watch is not active", "Station Watch status: off"),
             ("Msg.WatchWaiting", "Waiting for another decode from {Call}", "Station Watch waiting"),
             ("Msg.LogbookReady", "Logbook ready", "the logbook finished loading"),
+            ("Msg.TxLockedTitle", "Transmit locked", "heading when transmit is refused on this frequency"),
+            ("Msg.TxLockedLicense", "This frequency is outside the privileges of your license class, {Class}. Jimmy Next will not transmit here.", "transmit refused by the license class set in Options, Station and Operator"),
+            ("Msg.TxLockedSplit", "The radio is in split and its transmit frequency is not known. Jimmy Next will not transmit until it is.", "transmit refused because the radio reports split"),
             ("Msg.LogbookLoading", "Logbook loading; new-station alerts paused", "the logbook is loading"),
             ("Msg.LogbookSyncError", "Logbook auto-sync error: {Error}", "logbook auto-sync failed"),
             ("Msg.ProfileSaved", "Profile '{Profile}' saved.", "a profile was saved"),
@@ -347,6 +350,9 @@ namespace WSJTX_Controller
         // Raised whenever the words change (the file read at start, an edit in the wording
         // editor) -- what shows words on screen once, like the list titles, refreshes on it.
         internal static event Action Changed;
+        // Tests: how many of the listeners belong to this object.
+        internal static int ChangedListenersFor(object target) =>
+            Changed == null ? 0 : Changed.GetInvocationList().Count(d => ReferenceEquals(d.Target, target));
 
         // Writes the whole file in section order: changed entries as "key = words", the rest
         // commented out. Returns null, or why it could not be written.

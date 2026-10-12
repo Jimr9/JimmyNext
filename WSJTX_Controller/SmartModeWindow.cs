@@ -82,6 +82,7 @@ namespace WSJTX_Controller
             _timer.Tick += (s, e) => RefreshRows();
             Load += (s, e) => { RefreshRows(); _timer.Start(); _list.Focus(); };
             FormClosed += (s, e) => { _timer.Stop(); _timer.Dispose(); };
+            Disposed += (s, e) => _listFont?.Dispose();   // the list's own font (ApplyListLook)
         }
 
         // The title from the wording file (List.SmartModeTitle), again after the file changes.
@@ -96,9 +97,11 @@ namespace WSJTX_Controller
         // The look of Jimmy Next's own station lists (Options > Appearance): bold Consolas at the
         // chosen size, the list colours and the alternating row shade. Drawing only -- each row's
         // text, which the screen reader reads, is unchanged.
+        private Font _listFont;
         private void ApplyListLook(JimmySettings st)
         {
             var font = new Font("Consolas", st.ListFontSize, FontStyle.Bold);
+            _listFont = font;
             _list.Font = font;
             _list.BackColor = st.ListBackColor;
             _list.ForeColor = st.ListForeColor;

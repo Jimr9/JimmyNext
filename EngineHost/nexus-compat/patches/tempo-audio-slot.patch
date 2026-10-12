@@ -1,5 +1,5 @@
 diff --git a/src/slot.rs b/src/slot.rs
-index a0b4d487..cc592c94 100644
+index b76c8ca05..97ed6166e 100644
 --- a/src/slot.rs
 +++ b/src/slot.rs
 @@ -93,18 +93,41 @@ pub struct SlotAction {
@@ -123,7 +123,7 @@ index a0b4d487..cc592c94 100644
                  rig_split_engaged: false,
              }
          }
-@@ -287,7 +341,7 @@ pub fn slot_tx_phase(
+@@ -374,7 +428,7 @@ pub fn slot_tx_phase(
                  did_rx,
                  rx_frame,
                  tx_this_slot: false,
@@ -132,7 +132,7 @@ index a0b4d487..cc592c94 100644
                  rig_split_engaged: split.rig_split_engaged,
              };
          }
-@@ -333,7 +387,7 @@ pub fn slot_tx_phase(
+@@ -420,7 +474,7 @@ pub fn slot_tx_phase(
              did_rx,
              rx_frame,
              tx_this_slot: true,
@@ -141,7 +141,7 @@ index a0b4d487..cc592c94 100644
              rig_split_engaged: split.rig_split_engaged,
          }
      } else {
-@@ -344,7 +398,7 @@ pub fn slot_tx_phase(
+@@ -431,7 +485,7 @@ pub fn slot_tx_phase(
              did_rx,
              rx_frame,
              tx_this_slot: false,
@@ -150,7 +150,7 @@ index a0b4d487..cc592c94 100644
              rig_split_engaged: false,
          }
      }
-@@ -991,12 +1045,54 @@ mod tests {
+@@ -1087,12 +1141,54 @@ mod tests {
          );
      }
  
@@ -210,7 +210,7 @@ index a0b4d487..cc592c94 100644
          let mut eng = Engine::new("W9XYZ", "EN37", 0);
          eng.set_tier(tempo_app::dto::Tier::Ft8);
          let mut st = eng.settings().clone();
-@@ -1005,30 +1101,118 @@ mod tests {
+@@ -1101,31 +1197,118 @@ mod tests {
          eng.set_tx_enabled(true);
          eng.set_tx_offset(750.0); // f0 1750, dial -1000
          eng.broadcast("CQ W9XYZ EN37");
@@ -230,8 +230,9 @@ index a0b4d487..cc592c94 100644
 -            false,
 -            None,
 -            None,
+-            false,
 -        );
-+        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None, false);
  
          assert!(act.tx_this_slot, "the CQ keyed");
 -        assert_eq!(
@@ -260,7 +261,7 @@ index a0b4d487..cc592c94 100644
 +        let mut backend = MockBackend::new();
 +        let mut rx = RxRing::new();
 +
-+        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None, false);
 +
 +        assert!(act.tx_this_slot, "the CQ still keyed — normal operation is preserved");
 +        assert!(act.fake_it_shift.is_none(), "FAIL CLOSED: no shift armed without a fresh physical dial");
@@ -283,7 +284,7 @@ index a0b4d487..cc592c94 100644
 +        let mut backend = MockBackend::new();
 +        let mut rx = RxRing::new();
 +
-+        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++        let act = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None, false);
 +
 +        let shift = act.fake_it_shift.expect("an ambiguous shift STILL owes a reconciliation");
 +        assert_eq!(shift.original_hz, 14_074_000);
@@ -308,7 +309,7 @@ index a0b4d487..cc592c94 100644
 +        let mut backend = MockBackend::new();
 +        let mut rx = RxRing::new();
 +
-+        let _ = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++        let _ = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None, false);
 +
 +        let sent = log.lock().unwrap().clone();
 +        assert!(sent.iter().any(|l| l.starts_with("S 1")), "frequency split still engages: {sent:?}");
@@ -336,7 +337,7 @@ index a0b4d487..cc592c94 100644
 +        let mut backend = MockBackend::new();
 +        let mut rx = RxRing::new();
 +
-+        let _ = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None);
++        let _ = slot_tx_phase(&mut eng, &mut rig, &mut backend, &mut rx, 0, 1000.0, false, None, None, false);
 +
 +        let sent = log.lock().unwrap().clone();
 +        assert!(sent.iter().any(|l| l.starts_with('X')), "the TX-VFO mode IS set with dont_set_mode off: {sent:?}");

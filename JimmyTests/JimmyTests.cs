@@ -1665,6 +1665,8 @@ static class JimmyTests
         SetupReadinessTests();
         StationLocationTests();
         RadioPowerAndExportHeaderTests();
+        ResourceCleanupTests();
+        LicenseClassTests();
         SharedSettingsTests();
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
@@ -21427,6 +21429,85 @@ static class JimmyTests
         finally { try { Directory.Delete(dir, true); } catch { } }
     }
 
+    // Handoff 24 (2026-10-12): a closed main window is no longer held by the static wording
+    // event, and the completed-contact keys stay bounded without losing the retry or the
+    // "already logged" answer.
+    static void ResourceCleanupTests()
+    {
+        Console.WriteLine("\n── Resource cleanup: wording listener, completed-contact keys ──");
+        var first = new Controller();
+        first.SubscribeWording();
+        first.SubscribeWording();
+        Check("a window listens for wording changes once", Wording.ChangedListenersFor(first) == 1, true);
+        var second = new Controller();
+        second.SubscribeWording();
+        first.Dispose();
+        Check("a disposed window is no longer listening", Wording.ChangedListenersFor(first) == 0, true);
+        Check("...and the next window still is, once", Wording.ChangedListenersFor(second) == 1, true);
+        second.Dispose();
+        second.Dispose();
+        Check("disposing twice is harmless", Wording.ChangedListenersFor(second) == 0, true);
+
+        var ctrl = new Controller();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        Check("a new contact is claimed", wc.TestClaimLiveLoggedQso("K1ABC|20m|FT8|20261012|010000"), true);
+        wc.TestReleaseLiveLoggedQso("K1ABC|20m|FT8|20261012|010000");
+        Check("a failed write can be tried again", wc.TestClaimLiveLoggedQso("K1ABC|20m|FT8|20261012|010000"), true);
+        wc.TestCommitLiveLoggedQso("K1ABC|20m|FT8|20261012|010000");
+        Check("a written contact is not written again", wc.TestClaimLiveLoggedQso("K1ABC|20m|FT8|20261012|010000"), false);
+        Check("a contact claimed but not yet written", wc.TestClaimLiveLoggedQso("W9PENDING|20m|FT8|20261012|010100"), true);
+        for (int i = 0; i < WsjtxClient.LiveLoggedQsoKeysMax * 3; i++)
+            wc.TestCommitLiveLoggedQso($"N{i}XYZ|20m|FT8|20261013|{i:D6}");
+        Check("many contacts later the keys held stay bounded", wc.TestLiveLoggedQsoKeyCount <= WsjtxClient.LiveLoggedQsoKeysMax + 1, true);
+        Check("the newest written contact is still known", wc.TestClaimLiveLoggedQso($"N{WsjtxClient.LiveLoggedQsoKeysMax * 3 - 1}XYZ|20m|FT8|20261013|{WsjtxClient.LiveLoggedQsoKeysMax * 3 - 1:D6}"), false);
+        wc.TestCommitLiveLoggedQso("W9PENDING|20m|FT8|20261012|010100");
+        Check("the contact that was waiting was never dropped and is now written", wc.TestClaimLiveLoggedQso("W9PENDING|20m|FT8|20261012|010100"), false);
+        wc.TestCommitLiveLoggedQso("W9PENDING|20m|FT8|20261012|010100");
+        Check("committing the same contact twice does not count it twice", wc.TestLiveLoggedQsoKeyCount <= WsjtxClient.LiveLoggedQsoKeysMax + 1, true);
+        ctrl.Dispose();
+    }
+
+    // Handoff 23 (2026-10-12): the licence class setting, who owns it, how it reaches the engine,
+    // and what Jimmy does when the engine's lock is on. The lock itself is Nexus's, proven with
+    // a real engine in EngineHost's license_class_reaches_the_engines_own_transmit_gate.
+    static void LicenseClassTests()
+    {
+        Console.WriteLine("\n── Licence class: setting, ownership, engine argument, transmit lock ──");
+        CheckStr("a class is stored in lower case", StationSettings.NormalizeLicenseClass(" General "), "general");
+        CheckStr("an unknown word is 'not set', never a guessed class", StationSettings.NormalizeLicenseClass("advanced"), "");
+        var st = new StationSettings();
+        CheckStr("not set: the engine gets no class", st.EngineLicenseClass, "");
+        st.LicenseClass = "open";
+        CheckStr("outside the United States: the engine gets no class", st.EngineLicenseClass, "");
+        st.LicenseClass = "technician";
+        CheckStr("a United States class goes to the engine as it is", st.EngineLicenseClass, "technician");
+        CheckStr("...and has a readable name", st.LicenseClassName, "United States, Technician");
+        CheckStr("the class is kept with the station callsign and grid", SharedSettings.GroupOf("stationLicenseClass"), "Station");
+        Check("a support package never carries a licence class", SupportPackage.Travels("stationLicenseClass"), false);
+
+        var radio = new RadioSettings { Mode = RadioControlMode.HamlibRigctld, RigModel = "2037", ComPort = "COM4", BaudRate = "115200" };
+        string Args(string cls, bool launch) =>
+            NativeEngineClient.BuildArgs("KB0UZT", "EN34", "Mic A", 2237, "Speakers", radio, null, false, null, "tok", 7, null, 60, false, radioAndAudio: launch, licenseClass: cls);
+        Check("the engine is started with the class", Args("general", true).Contains("--license-class general"), true);
+        Check("no class: no argument", Args("", true).Contains("--license-class"), false);
+        Check("an engine started with another class is never kept for this profile", Args("general", false) == Args("extra", false), false);
+
+        var ctrl = new Controller();
+        var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+        Check("transmit starts unlocked", wc.TestTxLocked, false);
+        wc.ApplyTxLock(txAllowed: false);
+        Check("the engine's lock is remembered", wc.TestTxLocked, true);
+        ctrl.Station.LicenseClass = "technician";
+        Check("with a class set the message names it", wc.TxLockedMessage().Contains("United States, Technician"), true);
+        ctrl.Station.LicenseClass = "";
+        Check("with none set it is the split reason, not a licence", wc.TxLockedMessage().Contains("split") && !wc.TxLockedMessage().Contains("license"), true);
+        wc.ApplyTxLock(txAllowed: true);
+        Check("...and released when the engine allows transmit again", wc.TestTxLocked, false);
+        var snap = ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""EN34"", ""radio"": { ""dialMhz"": 14.074 } }");
+        Check("an older engine that does not report the lock means unlocked", snap.Radio.TxAllowed, true);
+        ctrl.Dispose();
+    }
+
     static void RadioPowerAndExportHeaderTests()
     {
         Console.WriteLine("\n── Logged power and export header ──");
@@ -21459,6 +21540,18 @@ static class JimmyTests
             CheckStr("rigctld's raw answer ends in a NUL, no newline -> read at once", RadioPower.ReadRawReply(ms), "PC050;");
         Check("TS-590SG (2037) is Kenwood-family, X6100 (3087) is not",
             RadioPower.IsKenwoodFamily("2037") && !RadioPower.IsKenwoodFamily("3087"), true);
+        // Ticket KB0UZT-20261009: Hamlib lists the X6100 (and every Xiegu radio) as 100 W maximum,
+        // so its conversion made a full 10 W setting 100 W.
+        Check("X6100 at full setting is 10 W, whatever Hamlib's table says", RadioPower.WattsFromSetting("3087", 1.0, 100000) == 10, true);
+        Check("X6100 at half setting is 5 W", RadioPower.WattsFromSetting("3087", 0.5, 50000) == 5, true);
+        Check("G90 at full setting is 20 W", RadioPower.WattsFromSetting("3088", 1.0, 100000) == 20, true);
+        Check("a radio with no single rated power stays unknown", RadioPower.WattsFromSetting("1045", 1.0, 100000).HasValue, false);
+        Check("another radio still uses Hamlib's conversion", RadioPower.WattsFromSetting("3073", 0.5, 50000) == 50, true);
+        Check("...and is unknown when Hamlib gives none", RadioPower.WattsFromSetting("3073", 0.5, null).HasValue, false);
+        Check("a setting too small to be a whole watt is unknown, never 0", RadioPower.WattsFromSetting("3087", 0.01, null).HasValue, false);
+        CheckStr("the station grid is kept in capitals", NativeEngineSettings.NormalizeGrid(" en34rn "), "EN34RN");
+        CheckStr("...a four-character grid too", NativeEngineSettings.NormalizeGrid("En34"), "EN34");
+        CheckStr("...and nothing stays nothing", NativeEngineSettings.NormalizeGrid(null), "");
         string header = NexusLogbookService.AdifExportHeader();
         Check("export header: program Jimmy Next, a version, a creation time, <EOH>",
             header.Contains("<PROGRAMID:10>Jimmy Next") && header.Contains("<PROGRAMVERSION:") && header.Contains("<CREATED_TIMESTAMP:15>") && header.EndsWith("<EOH>"), true);

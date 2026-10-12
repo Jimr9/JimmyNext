@@ -163,6 +163,7 @@ $PatchTargets = @{
     "tempo-fast-sys-build.patch"                 = "crates\tempo-fast-sys"
     "tempo-core-message.patch"                   = "crates\tempo-core"
     "tempo-core-inbox.patch"                     = "crates\tempo-core"
+    "propagation-solar-wind.patch"               = "crates\propagation"
 }
 
 # patch.exe writes "checking file ..." to stdout but any warning/failure detail to stderr;

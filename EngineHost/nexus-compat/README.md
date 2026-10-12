@@ -59,6 +59,40 @@ stay pinned; do NOT import `main`. What the next stable upgrade needs:
   SET_CLOCK_CHECK uses Nexus's public `apply_settings` + `clear_clock_offset(true)`; ATU_STATUS
   reads PTT with Nexus's `Rig::read_ptt`. Both are public API -- check they still exist.
 
+## Eleven-patch re-assessment -- 2026-10-12 (v1.16.0 -> v1.17.0 upgrade)
+
+Pin moved to stable **v1.17.0** (`177e0b94`, 364 commits past v1.16.0; annotated tag object
+`5646d2dd`). `main` was reviewed at `4b72d5a2` (592 commits past 1.17.0) and NOT imported; one
+named fix was taken from it. Each patch's "How to check" was run against the pristine v1.17.0
+files.
+
+- **All ten patches KEEP.** None of their behaviours exists in 1.17.0: `process_decodes` still
+  overwrites the last rows, there is no live PSK Reporter setter, no `dont_set_mode`, no
+  `keep_logged_location`, `Msg::parse("CQ W1AW")` is still asserted `Msg::Other`, the two Windows
+  test and build problems are unchanged, and the Fake-It restore is still a bare
+  `fake_it_restore: Option<u64>` taken at teardown with no reconciliation and no status.
+- **Nine re-applied with offsets only** (payload checked identical, md5 of the `+`/`-` lines).
+- **`tempo-audio-slot.patch`: one test hunk re-anchored.** `slot_tx_phase` gained a tenth
+  argument (a waveform the caller already built, so the build is off the engine lock); the
+  Jimmy tests now pass `false` for it. Production hunks unchanged.
+- **New: `propagation-solar-wind.patch`** = upstream `main` commit `bdb832e4` (merge `9fe65c37`),
+  unchanged, less its CHANGELOG lines. NOAA's `products/solar-wind` feeds return 404; this reads
+  the real-time `rtsw` feeds and only the spacecraft NOAA marks active. Jimmy's SOLAR_WIND command
+  uses that fetcher, so Bz, Bt, speed and density work again. **Delete this patch at the first
+  stable release that contains `bdb832e4`** (check: `grep -n rtsw crates/propagation/src/live/solar_wind.rs`).
+- **Fake-It on `main`:** main documents a fix for dial drift after overs. It is not in 1.17.0, and
+  Jimmy's verified restore stays. Re-read main's slot/service restore paths against the service
+  and slot patches at the next stable release before shrinking either.
+- **Inherited from 1.17.0, no patch:** a refused or failed CAT key/unkey halts transmit
+  (`RadioStatus.slot_key_refused` / `slot_unkey_failed`) -- Jimmy announces each once
+  (`WsjtxClient.AnnounceSlotRefusal`); a rig's own split is put back as it was; clock repair is
+  never started unasked. The licence gate (`Engine::tx_allowed`, `Settings.license_class`) is now
+  set from Jimmy (`--license-class`, `SET_LICENSE_CLASS`).
+- **Logbook store:** `tempo-core/src/logbook/sqlite.rs` is unchanged from 1.16.0
+  (`SCHEMA_VERSION` 1 in both), so a 1.16 and a 1.17 engine read the same database.
+- **Not adopted:** contest, club, remote, Flex/Icom-LAN and UI work on `main`; upstream's
+  nearest-time confirmation pairing (#400, main only) -- Jimmy's NexusReportPairing stays.
+
 ## Nine-patch re-assessment -- 2026-10-04 (v1.15.0 -> v1.16.0 upgrade)
 
 Pin moved to stable **v1.16.0** (`21ac4c13`, 652 commits past v1.15.0), operator approved.
@@ -144,7 +178,7 @@ count decreases as upstream matures; nothing here is superseded at v1.14.0.
 
 ## Current pin
 
-`pin.txt` points at the **newest official stable release tag, `v1.15.0`**, by its exact commit:
+`pin.txt` points at the **newest official stable release tag** by its exact commit (see pin.txt for the current one; the block below is the v1.15.0 example):
 
 ```
 NEXUS_TAG=v1.15.0
@@ -319,9 +353,9 @@ backoff only changes *when* that funnel runs, not whether it runs. See
 `jimmy_compat_rfpower_write_protection_survives_reopen_and_new_rigs_while_meters_flow` in
 `service.rs`'s test module for the regression proof.
 
-## Current patches (against Nexus `v1.16.0`, commit `21ac4c13`)
+## Current patches (against Nexus `v1.17.0`, commit `177e0b94`)
 
-Ten patches, **one source file each** (`prepare-nexus.ps1` and the `patches/` directory are
+Eleven patches -- the ten below, **one source file each**, plus `propagation-solar-wind.patch` (see the 2026-10-12 re-assessment above) -- (`prepare-nexus.ps1` and the `patches/` directory are
 the source of truth; the ten are itemised in the `###` sections below). Jimmy's downstream
 behavior these preserve is the **Jimmy Next 2.0.55 operator experience** -- that is the
 compatibility baseline.

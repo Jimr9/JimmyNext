@@ -181,6 +181,18 @@ namespace WSJTX_Controller
             wsjtxClient?.UpdateCallListAccessibleName(force: true);
             _smartModeWindow?.ApplyWording();
         }
+        // Wording.Changed is static: until it is removed it keeps this window alive after a
+        // profile switch or an import reopens a new one (2026-10-12). Removed when the window
+        // has closed (Controller_FormClosed) and, for a window that never got that far, when
+        // it is disposed. A cancelled close leaves it in place.
+        internal void SubscribeWording()
+        {
+            Wording.Changed -= ApplyWordingToScreen;
+            Wording.Changed += ApplyWordingToScreen;
+            Disposed -= UnsubscribeWording;
+            Disposed += UnsubscribeWording;
+        }
+        private void UnsubscribeWording(object sender, EventArgs e) => Wording.Changed -= ApplyWordingToScreen;
 
         internal readonly bool wordingEditorUnlocked = Environment.GetCommandLineArgs()
             .Any(a => string.Equals(a, "--wording", StringComparison.OrdinalIgnoreCase));
@@ -1205,8 +1217,7 @@ namespace WSJTX_Controller
             // List titles and side names follow the wording whenever it changes -- at load and on
             // every wording-editor edit (2026-10-02: they used to refresh only on a transmit-side
             // change or at connect, so a changed title could keep its old name).
-            Wording.Changed -= ApplyWordingToScreen;
-            Wording.Changed += ApplyWordingToScreen;
+            SubscribeWording();
             BackupRetention.EnsureSetting();
             SharedIniNumbers.Ensure(LogbookWindow.ListMaxKey, LogbookWindow.DefaultListMax);
             string wordingNote = Wording.Load(ActiveWordingPath());
@@ -3331,6 +3342,7 @@ namespace WSJTX_Controller
         private void Controller_FormClosed(object sender, FormClosedEventArgs e)
         {
             StopAllTimers(this);
+            Wording.Changed -= ApplyWordingToScreen;
             wsjtxClient?.StopTimersForClose();
             RadioPower.Reset(); // the next window's radio is read afresh
         }
@@ -5304,6 +5316,7 @@ namespace WSJTX_Controller
             // necessarily this exact call).
             var workingFrequenciesSnapshot = WsjtxClient.BuildWorkingFrequencyEntries(Frequencies);
             bool pskReporterSnapshot = wsjtx != null && wsjtx.usePskReporter;
+            string licenseClassSnapshot = Station.EngineLicenseClass;
 
             // Launch() (specifically Process.Start()) runs on a background thread -- Process.Start()
             // for a new, unsigned exe is well known to be able to block synchronously on real-time
@@ -5325,7 +5338,7 @@ namespace WSJTX_Controller
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, pskReporterSnapshot,
                     dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
-                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly);
+                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly, licenseClassSnapshot);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-
@@ -5365,7 +5378,7 @@ namespace WSJTX_Controller
             string wanted = NativeEngineClient.BuildArgs(NativeEngine.MyCall, NativeEngine.MyGrid, NativeEngine.AudioInputDevice, jimmyPort,
                 NativeEngine.AudioOutputDevice, Radio, Decode, wsjtxClient != null && wsjtxClient.usePskReporter, dxClusterAddress, null,
                 (int)timeoutNumUpDown.Value, WsjtxClient.BuildWorkingFrequencyEntries(Frequencies),
-                NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, radioAndAudio: false, logbookOnly: !RadioSetUp);
+                NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, radioAndAudio: false, logbookOnly: !RadioSetUp, licenseClass: Station.EngineLicenseClass);
             if (TestModeGuard.IsTestMode || !client.Running || client.LaunchKey != wanted)
             {
                 wsjtxClient?.DebugOutput("[NativeEngine] profile switch: engine settings differ -- restarting the engine");
@@ -5456,6 +5469,19 @@ namespace WSJTX_Controller
             var client = nativeEngineClient;
             if (client == null || !client.Running || !client.SetClockCheckLive(NativeEngine.ClockCheck)) return false;
             wsjtxClient?.DebugOutput($"[NativeEngine] internet time check {(NativeEngine.ClockCheck ? "on" : "off")} applied live (no restart)");
+            return true;
+        }
+
+        // Options > Station & Operator's licence class, on the running engine: the engine stops
+        // transmitting first and stays stopped (SET_LICENSE_CLASS). False: none running, or it
+        // did not accept -- the caller restarts the engine, which starts with the new class.
+        public bool TryApplyLicenseClassLive()
+        {
+            if (TestModeGuard.IsTestMode) return false;
+            var client = nativeEngineClient;
+            if (client == null || !client.Running || !client.SetLicenseClassLive(Station.EngineLicenseClass)) return false;
+            client.InvalidateLaunchKey();   // started with another class: a later profile switch restarts it
+            wsjtxClient?.DebugOutput($"[NativeEngine] licence class '{Station.LicenseClass}' applied live (transmit stopped first, no restart)");
             return true;
         }
 
@@ -7522,6 +7548,11 @@ namespace WSJTX_Controller
         {
             var font = new Font("Consolas", Settings.ListFontSize, FontStyle.Bold);
             int itemHeight = TextRenderer.MeasureText("Ag", font).Height + 2;
+            // This window owns the one font its five lists share: the font it replaces is disposed
+            // once every list has the new one (below), and the last one when the window is disposed.
+            Font replaced = _listFont;
+            _listFont = font;
+            if (replaced == null) Disposed += (s, e) => { _listFont?.Dispose(); _listFont = null; };
 
             ListBox[] lists = { callListBox, logListBox, advTx1ListBox, advTx2ListBox, advRawListBox };
             foreach (var lb in lists)
@@ -7536,7 +7567,9 @@ namespace WSJTX_Controller
 
             foreach (var lb in lists)
                 lb.Invalidate();
+            replaced?.Dispose();
         }
+        private Font _listFont;
 
         // Per-category alert colors (Options > Appearance) only apply to the lists that carry
         // a CallCategory per row -- callListBox/advRawListBox/advTx1ListBox/advTx2ListBox.

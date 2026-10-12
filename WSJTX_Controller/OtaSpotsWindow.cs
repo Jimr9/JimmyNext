@@ -166,7 +166,10 @@ namespace WSJTX_Controller
             _refreshTimer.Tick += (s, e) => RefreshActiveTab();
 
             Load += (s, e) => { RefreshActiveTab(); _refreshTimer.Start(); };
-            FormClosed += (s, e) => { _refreshTimer.Stop(); _logbookDb?.Dispose(); };
+            // Disposed as well as stopped (2026-10-12): this timer has no components container to
+            // dispose it. A fetch still in flight comes back through SafeBeginInvoke, which does
+            // nothing once the window is disposed, and nothing restarts the timer.
+            FormClosed += (s, e) => { _refreshTimer.Stop(); _refreshTimer.Dispose(); _logbookDb?.Dispose(); };
         }
 
         // Root cause of a live JAWS pass hearing "500 spots -- last spot 0s ago -- add a DX

@@ -22,8 +22,12 @@ namespace WSJTX_Controller
     //    a power calibration sweep that leaves the radio at 5 W (Hamlib/Hamlib#1595; confirmed
     //    on a TS-590SG with Hamlib 4.7.1 on 2026-08-20 and again 2026-09-29; Nexus issue #381
     //    is the same symptom on a TS-590S).
-    //  - Other radios: Hamlib's `l RFPOWER` (the setting, 0.0-1.0) and `\power2mW` for the model
-    //    (a 10 W X6100 at 50% is 5 W).
+    //  - Other radios: Hamlib's `l RFPOWER` (the setting, 0.0-1.0) and `\power2mW` for the model.
+    //  - Radios whose Hamlib table is wrong (2026-10-12, ticket KB0UZT-20261009): Hamlib 4.7.1
+    //    lists every Xiegu radio, and the mcHF, as "High power: 100 W" with no conversion of its
+    //    own (`rigctl -m 3087 -u`), so `\power2mW` turned an X6100 set to its full 10 W into
+    //    100 W. For those the setting is multiplied by the maker's rated maximum instead
+    //    (RatedMaxWatts), or left unknown where no one figure is right.
     //
     // A reading belongs to the radio and profile it was read from (release blocker 2026-09-29): a
     // profile switch (Reset) or a different radio clears it, a reply that arrives after the
@@ -58,7 +62,7 @@ namespace WSJTX_Controller
             {
                 try
                 {
-                    int? watts = kenwood ? AskKenwoodWatts(host, port, out string detail) : AskWatts(host, port, hz, out detail);
+                    int? watts = kenwood ? AskKenwoodWatts(host, port, out string detail) : AskWatts(host, port, hz, radio.RigModel, out detail);
                     if (!Accept(gen, key, watts)) { debug?.Invoke($"[POWER] reply from the previous radio dropped ({detail})"); return; }
                     debug?.Invoke($"[POWER] {(watts.HasValue ? watts + " W" : "unknown")} ({detail})");
                 }
@@ -114,6 +118,41 @@ namespace WSJTX_Controller
         internal static bool IsKenwoodFamily(string rigModel) =>
             int.TryParse((rigModel ?? "").Trim(), out int m) && m / 1000 == 2;
 
+        // Hamlib models whose transmit-power table is wrong (all say 2 W to 100 W): the maker's
+        // rated maximum in watts, which the radio's power setting is a fraction of. 0 = no single
+        // figure is right (the mcHF is built for several powers): the power stays unknown.
+        private static readonly System.Collections.Generic.Dictionary<int, int> RatedMaxWatts = new System.Collections.Generic.Dictionary<int, int>
+        {
+            { 3076, 20 },   // Xiegu X108G
+            { 3087, 10 },   // Xiegu X6100
+            { 3088, 20 },   // Xiegu G90
+            { 3089, 5 },    // Xiegu X5105
+            { 3091, 8 },    // Xiegu X6200
+            { 1045, 0 },    // mcHF
+        };
+
+        // Watts for a power setting (0.0-1.0): the rated maximum for a model Hamlib has wrong,
+        // else Hamlib's own conversion (milliwatts). Null = unknown; never zero.
+        internal static int? WattsFromSetting(string rigModel, double fraction, double? hamlibMilliwatts)
+        {
+            if (fraction <= 0 || fraction > 1) return null;
+            double watts;
+            if (int.TryParse((rigModel ?? "").Trim(), out int m) && RatedMaxWatts.TryGetValue(m, out int max))
+            {
+                if (max <= 0) return null;
+                watts = fraction * max;
+            }
+            else
+            {
+                if (!hamlibMilliwatts.HasValue || hamlibMilliwatts.Value <= 0) return null;
+                watts = hamlibMilliwatts.Value / 1000.0;
+            }
+            int rounded = (int)Math.Round(watts, MidpointRounding.AwayFromZero);
+            return rounded > 0 ? rounded : (int?)null;
+        }
+        internal static bool HasRatedMax(string rigModel) =>
+            int.TryParse((rigModel ?? "").Trim(), out int m) && RatedMaxWatts.ContainsKey(m);
+
         // "PC100;" -> 100 (watts); null for anything else.
         internal static int? ParseKenwoodPc(string reply)
         {
@@ -164,7 +203,7 @@ namespace WSJTX_Controller
         }
 
         // `l RFPOWER` (the setting as a fraction), then `\power2mW <fraction> <Hz> USB` (milliwatts).
-        private static int? AskWatts(string host, int port, long hz, out string detail)
+        private static int? AskWatts(string host, int port, long hz, string rigModel, out string detail)
         {
             detail = "";
             using (var client = new TcpClient())
@@ -185,10 +224,15 @@ namespace WSJTX_Controller
                     string level = Ask("l RFPOWER");
                     if (!double.TryParse(level, NumberStyles.Float, CultureInfo.InvariantCulture, out double fraction) || fraction <= 0 || fraction > 1)
                     { detail = $"setting: {level}"; return null; }
+                    if (HasRatedMax(rigModel))
+                    {
+                        detail = $"setting {fraction:0.###}, model {rigModel}: rated maximum used, Hamlib's table is wrong";
+                        return WattsFromSetting(rigModel, fraction, null);
+                    }
                     string mw = Ask($"\\power2mW {fraction.ToString("0.###", CultureInfo.InvariantCulture)} {hz} USB");
                     detail = $"setting {fraction:0.###}, power2mW {mw}";
-                    if (!double.TryParse(mw, NumberStyles.Float, CultureInfo.InvariantCulture, out double milliwatts) || milliwatts <= 0) return null;
-                    return (int)Math.Round(milliwatts / 1000.0);
+                    if (!double.TryParse(mw, NumberStyles.Float, CultureInfo.InvariantCulture, out double milliwatts)) return null;
+                    return WattsFromSetting(rigModel, fraction, milliwatts);
                 }
             }
         }

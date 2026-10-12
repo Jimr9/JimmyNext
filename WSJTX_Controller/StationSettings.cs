@@ -29,6 +29,34 @@ namespace WSJTX_Controller
         // The time zone for displays when Options > General "Display dates and times in my selected
         // time zone" is on (2026-10-05): a Windows time-zone id; blank = the computer's own.
         public string DisplayTimeZone { get; set; } = "";
+        // The operator's licence class (2026-10-12), for the engine's transmit lockout: ""
+        // (not set, no limits), "technician", "general", "extra" (United States classes, the
+        // ones Nexus has rules for) or "open" (outside the United States: no limits applied).
+        // Kept with the station callsign: shared by every profile unless the profile has its own
+        // callsign and grid (SharedSettings "Station"), and never carried in a support package.
+        public string LicenseClass { get; set; } = "";
+
+        internal static readonly string[] LicenseClassValues = { "", "technician", "general", "extra", "open" };
+        internal static readonly string[] LicenseClassNames =
+        {
+            "Not set, no transmit limits",
+            "United States, Technician",
+            "United States, General",
+            "United States, Amateur Extra",
+            "Outside the United States, no limits applied",
+        };
+        internal static string NormalizeLicenseClass(string value)
+        {
+            string v = (value ?? "").Trim().ToLowerInvariant();
+            return System.Array.IndexOf(LicenseClassValues, v) >= 0 ? v : "";
+        }
+        // The word the engine is given: one of its three classes, or "" for no lockout.
+        internal string EngineLicenseClass =>
+            LicenseClass == "technician" || LicenseClass == "general" || LicenseClass == "extra" ? LicenseClass : "";
+        internal string LicenseClassName
+        {
+            get { int i = System.Array.IndexOf(LicenseClassValues, LicenseClass ?? ""); return LicenseClassNames[i < 0 ? 0 : i]; }
+        }
 
         public void LoadFromIni(IniFile ini)
         {
@@ -42,6 +70,7 @@ namespace WSJTX_Controller
             if (ini.KeyExists("stationItuZone")) ItuZone = ini.Read("stationItuZone");
             if (ini.KeyExists("stationMyPark")) MyPark = ini.Read("stationMyPark");
             if (ini.KeyExists("stationDisplayTimeZone")) DisplayTimeZone = ini.Read("stationDisplayTimeZone");
+            if (ini.KeyExists("stationLicenseClass")) LicenseClass = NormalizeLicenseClass(ini.Read("stationLicenseClass"));
         }
 
         public void SaveToIni(IniFile ini)
@@ -56,6 +85,7 @@ namespace WSJTX_Controller
             ini.Write("stationItuZone", ItuZone);
             ini.Write("stationMyPark", MyPark);
             ini.Write("stationDisplayTimeZone", DisplayTimeZone);
+            ini.Write("stationLicenseClass", LicenseClass);
         }
     }
 }

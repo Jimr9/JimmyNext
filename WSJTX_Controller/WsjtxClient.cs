@@ -559,8 +559,27 @@ namespace WSJTX_Controller
         private void MarkLiveLoggedQsoCommitted(string dedupKey)
         {
             if (string.IsNullOrEmpty(dedupKey)) return;
+            bool wasCommitted = _liveLoggedQsoKeys.TryGetValue(dedupKey, out bool c) && c;
             _liveLoggedQsoKeys[dedupKey] = true;
+            if (wasCommitted) return;
+            // Bounded (2026-10-12): the set used to grow for the window's whole life. A key names
+            // one contact by call, band, mode and its START time, and a repeat trigger for it comes
+            // within the same exchange (the completed 73 is seen for some seconds; an early-RRR
+            // log is followed by its 73) -- never hundreds of contacts later. So only the oldest
+            // COMMITTED keys are dropped, in the order they were committed; a claimed-but-not-
+            // written key is never in this queue and is never dropped. The logbook itself still
+            // refuses a second row with the same key.
+            _liveLoggedQsoOrder.Enqueue(dedupKey);
+            while (_liveLoggedQsoOrder.Count > LiveLoggedQsoKeysMax)
+                _liveLoggedQsoKeys.Remove(_liveLoggedQsoOrder.Dequeue());
         }
+        internal const int LiveLoggedQsoKeysMax = 500;
+        private readonly Queue<string> _liveLoggedQsoOrder = new Queue<string>();
+        // Tests: the three steps RequestLog takes, and how many keys are held.
+        internal bool TestClaimLiveLoggedQso(string key) => ClaimLiveLoggedQso(key);
+        internal void TestReleaseLiveLoggedQso(string key) => ReleaseFailedLiveLoggedQsoClaim(key);
+        internal void TestCommitLiveLoggedQso(string key) => MarkLiveLoggedQsoCommitted(key);
+        internal int TestLiveLoggedQsoKeyCount => _liveLoggedQsoKeys.Count;
         private static uint defaultAudioOffset = 1500;
 
         public const int maxQueueLines = 8, maxQueueWidth = 19, maxLogWidth = 9;
