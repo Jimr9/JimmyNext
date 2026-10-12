@@ -68,7 +68,7 @@ namespace WSJTX_Controller
             int tab = 0;
             p.Controls.Add(InfoText(
                 "Support settings are a complete setup a helper made for your station. Getting them shows what they are; " +
-                "nothing changes until you choose Install. Your sound devices, logins and station callsign are always kept.", 8, 44));
+                "nothing changes until you choose Install. Your logins and station callsign are always kept; your radio ports and sound devices stay as they are unless you choose others when installing.", 8, 44));
             string call = ctrl.MyBaseCallsign();
             p.Controls.Add(new Label
             {
@@ -134,7 +134,7 @@ namespace WSJTX_Controller
             refresh.Click += async (s, e) => await RefreshServerProfiles(refresh);
             p.Controls.Add(refresh);
             y += 32;
-            _serverProfilesList = HelperList("Server support settings", new[] { ("Callsign", 110), ("Updated (UTC)", 150), ("Size", 80) }, y, ref tab);
+            _serverProfilesList = HelperList("Server support settings", new[] { ("Callsign", 110), ("Updated", 170), ("Size", 80) }, y, ref tab);
             p.Controls.Add(_serverProfilesList);
             y += 112;
             p.Controls.Add(new Label { Text = "Callsign:", Location = new Point(8, y + 3), AutoSize = true, Font = SupportFont });
@@ -172,7 +172,7 @@ namespace WSJTX_Controller
             refreshRequests.Click += async (s, e) => await RefreshSupportRequests(refreshRequests);
             p.Controls.Add(refreshRequests);
             y += 32;
-            _supportRequestsList = HelperList("Support requests", new[] { ("Callsign", 80), ("Name", 110), ("Email", 150), ("Sent (UTC)", 130), ("Size", 70) }, y, ref tab);
+            _supportRequestsList = HelperList("Support requests", new[] { ("Callsign", 75), ("Type", 100), ("Name", 100), ("Email", 130), ("Sent", 150), ("Size", 60) }, y, ref tab);
             p.Controls.Add(_supportRequestsList);
             y += 112;
             var saveReport = SupportButton("Save Report...", "Save report", 8, y, 140, ref tab);
@@ -261,9 +261,15 @@ namespace WSJTX_Controller
             return call;
         }
 
-        private static string When(string utc) =>
-            DateTime.TryParse(utc, CultureInfo.InvariantCulture, DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var t)
-                ? t.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture) : utc;
+        // A server time the way this computer shows times (Options, Station and Operator's display
+        // time zone, when that preference is on; else UTC), with the zone said: "2026-10-09 04:15 CDT".
+        private static string When(string utc)
+        {
+            var t = SupportNames.ParseUtc(utc);
+            if (t == null) return utc;
+            string text = SupportNames.TimeText(t.Value);   // "2026-10-09 04-15 CDT", as in file names
+            return text.Substring(0, 13) + ":" + text.Substring(14);
+        }
 
         private static string SizeText(long bytes) => bytes >= 1048576 ? $"{bytes / 1048576.0:0.0} MB" : $"{Math.Max(1, bytes / 1024)} KB";
 
@@ -384,13 +390,13 @@ namespace WSJTX_Controller
                 if (r.Code != "profile_exists") { HelperFailed($"upload {call}'s settings", r); return; }
                 // On the server already: replaced only on Yes; a file changed since the question asks again.
                 string question = askedOnce
-                    ? $"{call}.zip changed on the server since you were asked. Replace it now?"
-                    : $"Replace {call}.zip on the server?";
+                    ? $"{call}'s support settings changed on the server since you were asked. Replace them now?"
+                    : $"{call} already has support settings on the server. Replace them?";
                 if (MessageBox.Show(this, question, "Support Helper", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
                     return;
                 askedOnce = true;
                 replaceRevision = r.Get("revision");
-                if (string.IsNullOrEmpty(replaceRevision)) { HelperFailed($"replace {call}.zip", new SupportService.Result { Error = "the server did not say which file it holds." }); return; }
+                if (string.IsNullOrEmpty(replaceRevision)) { HelperFailed($"replace {call}'s support settings", new SupportService.Result { Error = "the server did not say which file it holds." }); return; }
             }
         }
 
@@ -492,7 +498,7 @@ namespace WSJTX_Controller
             _supportRequests = SupportService.Requests(r);
             _supportRequestsList.Items.Clear();
             foreach (var q in _supportRequests)
-                _supportRequestsList.Items.Add(new ListViewItem(new[] { q.Callsign, q.Name, q.Email, When(q.SubmittedUtc), SizeText(q.Bytes) }));
+                _supportRequestsList.Items.Add(new ListViewItem(new[] { q.Callsign, SupportNames.TypeLabel(q.Category), q.Name, q.Email, When(q.SubmittedUtc), SizeText(q.Bytes) }));
             if (!r.Ok) ListNote(_supportRequestsList, "Could not read the list: " + r.Error);
             else if (_supportRequests.Count == 0) ListNote(_supportRequestsList, "No support requests.");
             if (!r.Ok && !quiet) HelperFailed("read the support requests", r);
@@ -516,7 +522,9 @@ namespace WSJTX_Controller
             using (var sfd = new SaveFileDialog
             {
                 Title = "Save support report",
-                FileName = r.FileName ?? q.FileName ?? q.Ticket + ".zip",
+                // Who, what kind and when it was sent -- never the server's ticket string, and
+                // never the time of this download.
+                FileName = SupportRequestFileName(q),
                 InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
                 OverwritePrompt = true,
             })
@@ -526,6 +534,15 @@ namespace WSJTX_Controller
                 catch (Exception ex) { MessageBox.Show(this, "Could not save the report: " + ex.Message, "Support Helper", MessageBoxButtons.OK, MessageBoxIcon.Warning); return; }
             }
             MessageBox.Show(this, "Report saved. It stays on the server until you delete it.", "Support Helper", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        internal static string SupportRequestFileName(SupportService.SupportRequest q)
+        {
+            string ext = Path.GetExtension(q.FileName ?? "");
+            if (ext != ".zip" && ext != ".txt" && ext != ".log") ext = ".zip";
+            var sent = SupportNames.ParseUtc(q.SubmittedUtc);
+            return sent == null ? (q.Ticket ?? "support report") + ext
+                : SupportNames.Report(q.Callsign, q.Category, q.Name, q.Email, sent.Value) + ext;
         }
 
         private async void DeleteSupportRequest(Control busy)

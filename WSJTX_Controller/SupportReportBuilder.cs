@@ -50,22 +50,24 @@ namespace WSJTX_Controller
             var result = new SupportReportResult();
             try
             {
-                string infoVer   = GetInfoVersion();
-                string safeVer   = infoVer.Replace("/", "-").Replace("\\", "-").Replace(":", "").Replace(" ", "_");
-                string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                // The program's own name ("Jimmy Next" -> "JimmyNext"), never a hard-coded "Jimmy".
-                string appName   = (Assembly.GetExecutingAssembly().GetName().Name ?? "Jimmy").Replace(" ", "");
-                string zipName   = $"{appName}_{safeVer}_support_{timestamp}.zip";
-                string outputDir = GetOutputDir();
-                string zipPath   = string.IsNullOrEmpty(zipPathChosen) ? Path.Combine(outputDir, zipName) : zipPathChosen;
+                string zipPath   = string.IsNullOrEmpty(zipPathChosen) ? DefaultZipPath(callsign, problemType, name, email) : zipPathChosen;
 
                 // Capture diagnostic snapshot on the UI thread before any I/O
                 WsjtxDiagData diag = null;
                 try { diag = ctrl?.wsjtxClient?.GetDiagnosticData(); } catch { }
-
-                // Read log files before building the report so the report can
-                // accurately reflect which files were actually included in the ZIP.
-                var logResults = CollectLogFiles();
+                // What goes in beside the report text (2026-10-12): the current settings, the
+                // last few days of logs, the current rules and wording, and -- when the operator
+                // includes the logbook -- one copy of it made by the engine itself. Decided first,
+                // so the report text can say exactly which log files are in the ZIP.
+                string dataRoot = GetLogDir();
+                string iniPath = GetIniPath();
+                var plan = PlanFocusedData(dataRoot, includeLogbook, iniPath, DateTime.Now);
+                var logResults = plan.Where(f => f.Kind == "log" && f.Include).Select(f => new LogFileResult
+                {
+                    Path = Path.Combine(dataRoot, f.Rel.Replace('/', '\\')),
+                    Data = f.Include ? new byte[1] : null,
+                    Error = f.Include ? null : f.Note,
+                }).ToList();
 
                 using (var fs = new FileStream(zipPath, FileMode.Create, FileAccess.Write))
                 using (var zip = new ZipArchive(fs, ZipArchiveMode.Create, leaveOpen: false, entryNameEncoding: Encoding.UTF8))
@@ -74,7 +76,6 @@ namespace WSJTX_Controller
                                                     problemType, description, steps, logResults);
                     AddTextEntry(zip, "jimmy_support_report.txt", report);
 
-                    string iniPath = GetIniPath();
                     if (File.Exists(iniPath))
                     {
                         string redacted = RedactIni(iniPath);
@@ -94,28 +95,8 @@ namespace WSJTX_Controller
                         AddTextEntry(zip, "jimmy_settings_contests.ini", File.ReadAllText(contestIniPath));
                     }
 
-                    // 2.0.80 (W0CAS, operator: "zip up that folder so we have everything - passwords"):
-                    // the whole Jimmy Next folder under JimmyNextFolder/, with a listing of every file
-                    // and what was done with it -- so a report never again lacks the one file needed
-                    // (that report lacked the logbook-move reports).
-                    try { AddDataFolder(zip, GetLogDir(), includeLogbook); }
-                    catch (Exception ex) { AddTextEntry(zip, "jimmy_folder_listing.txt", "Folder copy failed: " + ex.Message); }
-
-                    // Only create ZIP entries for files that were successfully read.
-                    // This prevents 0-byte ghost entries when a read fails.
-                    foreach (var lr in logResults)
-                    {
-                        if (lr.Data != null && lr.Data.Length > 0)
-                        {
-                            try
-                            {
-                                var entry = zip.CreateEntry(Path.GetFileName(lr.Path), CompressionLevel.Optimal);
-                                using (var dest = entry.Open())
-                                    dest.Write(lr.Data, 0, lr.Data.Length);
-                            }
-                            catch { /* skip on ZIP write failure */ }
-                        }
-                    }
+                    try { AddFocusedData(zip, dataRoot, plan, includeLogbook, EngineLogbookExport); }
+                    catch (Exception ex) { AddTextEntry(zip, "00_START_HERE.txt", "The data folder could not be collected: " + ex.Message); }
                 }
 
                 result.Success = true;
@@ -555,7 +536,7 @@ namespace WSJTX_Controller
 
             int included = 0;
             foreach (var lr in logResults) if (lr.Included) included++;
-            sb.AppendLine($"Found {logResults.Count} log file(s) (up to 5 most recent attempted). {included} included in ZIP:");
+            sb.AppendLine($"{included} recent log file(s) are in the ZIP, under JimmyNextFolder (a very large one as its newest part; 00_START_HERE.txt has the details):");
             sb.AppendLine();
 
             foreach (var lr in logResults)
@@ -662,54 +643,304 @@ namespace WSJTX_Controller
             return name.EndsWith(".ini") || name.Contains(".ini.");
         }
 
-        internal static void AddDataFolder(ZipArchive zip, string root, bool includeLogbook)
-        {
-            var listing = new StringBuilder();
-            listing.AppendLine("Jimmy Next folder: " + root);
-            listing.AppendLine($"Logbook included: {(includeLogbook ? "yes" : "no (operator's choice)")}");
-            listing.AppendLine("Every file, its size and date, and what the report did with it.");
-            listing.AppendLine();
-            if (!Directory.Exists(root)) { AddTextEntry(zip, "jimmy_folder_listing.txt", listing + "(folder not found)"); return; }
+        // ── Focused contents (2026-10-12) ─────────────────────────────────────────────────
+        // The report used to carry the whole Jimmy Next folder: a 65 MB ZIP of 501 files, most
+        // of it old backups and the same log and logbook several times over. It now carries a
+        // standard set that serves any kind of problem without guessing its cause:
+        //   - the current settings, shared settings, wording and rules (passwords blanked);
+        //   - the logs written in the last two days (three files at most), and of a very large
+        //     one its newest 20 MB -- a long session writes one file for days, so "recent" goes
+        //     by when a file was last written, not by the date in its name, and a report made
+        //     just after midnight still has the evening before;
+        //   - the small error summaries (crashes, rule errors, TQSL errors) and the logbook-move
+        //     reports;
+        //   - with "Include my logbook": ONE copy of the logbook, exported by the engine that
+        //     owns it (Nexus's own export; the note beside it says how many very recent changes
+        //     it lacks), the contacts still waiting to be saved, Jimmy's own logbook notes, the
+        //     last three days of sync notes and the newest automatic backup (what the log was
+        //     before the latest changes). The live database files are never copied: taken while
+        //     the engine writes them, a copy lacked recent contacts.
+        // Left out, and counted in the inventory: old backups, other profiles, settings and
+        // wording backups, the database and its working files, crash dumps (listed by name),
+        // downloaded lookup data, older logs, and the private Support folder.
+        // 00_START_HERE.txt says what is in the ZIP and where to look; it lists every file put
+        // in, every file that could not be read, and totals of what was left out and why.
 
-            foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+        internal sealed class FocusedFile
+        {
+            public string Rel;        // path under the Jimmy Next folder, '/' separated
+            public long Size;
+            public DateTime Written;
+            public bool Include;
+            public long TailBytes;    // > 0: only the newest this-many bytes go in
+            public bool Redact;       // a settings file: passwords blanked
+            public string Kind;       // log, settings, rules, logbook, summary, other
+            public string Note;       // why it is in, or why not
+        }
+
+        internal const long LogTailBytes = 20L * 1024 * 1024;
+        internal const int RecentLogFiles = 3;
+        private const long SmallFileBytes = 1024 * 1024;
+        private const long LogbookFileBytes = 64L * 1024 * 1024;
+
+        private static bool IsBackupName(string name) =>
+            name.EndsWith(".bak", StringComparison.OrdinalIgnoreCase) || name.IndexOf(".before-", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".part", StringComparison.OrdinalIgnoreCase);
+
+        // Every file in the folder and what the report does with it. Pure (no file is opened),
+        // so the choice can be tested and the report text can describe it before the ZIP is made.
+        internal static List<FocusedFile> PlanFocusedData(string root, bool includeLogbook, string activeIniPath, DateTime now)
+        {
+            var files = new List<FocusedFile>();
+            if (!Directory.Exists(root)) return files;
+            foreach (string file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
             {
-                string rel = file.Substring(root.Length).TrimStart('\\', '/').Replace('\\', '/');
-                long size = 0; DateTime when = DateTime.MinValue;
-                try { var fi = new FileInfo(file); size = fi.Length; when = fi.LastWriteTime; } catch { }
-                string action;
-                if (LookupFolders.Any(f => rel.StartsWith(f + "/", StringComparison.OrdinalIgnoreCase)))
-                    action = "skipped: downloadable lookup data";
-                else if (rel.StartsWith(SupportLocal.FolderName + "/", StringComparison.OrdinalIgnoreCase))
-                    action = "skipped: support codes, login and saved support settings (private)";
-                else if (!IsSettingsFile(rel) && IsSecretFile(rel))   // settings files are blanked below instead
-                    action = "skipped: may hold a key or password";
-                else if (!includeLogbook && IsLogbookFile(rel))
-                    action = "skipped: logbook (not included by the operator's choice)";
-                else if (size > MaxFolderFileBytes)
-                    action = "skipped: larger than 25 MB";
-                else
-                {
-                    try
-                    {
-                        string entryName = "JimmyNextFolder/" + rel;
-                        if (IsSettingsFile(rel))
-                        {
-                            AddTextEntry(zip, entryName, RedactIni(file));
-                            action = "included, passwords blanked";
-                        }
-                        else
-                        {
-                            byte[] data = ReadFileSafe(file);
-                            var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
-                            using (var dest = entry.Open()) dest.Write(data, 0, data.Length);
-                            action = "included";
-                        }
-                    }
-                    catch (Exception ex) { action = "not readable: " + ex.Message; }
-                }
-                listing.AppendLine($"{rel}\t{size:N0} bytes\t{when:yyyy-MM-dd HH:mm:ss}\t{action}");
+                var f = new FocusedFile { Rel = file.Substring(root.Length).TrimStart('\\', '/').Replace('\\', '/') };
+                try { var fi = new FileInfo(file); f.Size = fi.Length; f.Written = fi.LastWriteTime; } catch { }
+                files.Add(f);
             }
-            AddTextEntry(zip, "jimmy_folder_listing.txt", listing.ToString());
+            files = files.OrderBy(f => f.Rel, StringComparer.OrdinalIgnoreCase).ToList();
+
+            string activeRel = null;
+            try
+            {
+                string full = Path.GetFullPath(activeIniPath ?? "");
+                string rootFull = Path.GetFullPath(root).TrimEnd('\\') + "\\";
+                if (full.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase)) activeRel = full.Substring(rootFull.Length).Replace('\\', '/');
+            }
+            catch { }
+            string activeProfileName = activeRel == null ? null : Path.GetFileNameWithoutExtension(activeRel);
+
+            // The recent logs: the newest-written, at most three, each written within two days.
+            var recentLogs = new HashSet<string>(files
+                .Where(f => f.Rel.IndexOf('/') < 0 && f.Rel.StartsWith("log_", StringComparison.OrdinalIgnoreCase)
+                            && f.Rel.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) && f.Rel.Length > 8 && char.IsDigit(f.Rel[4]))
+                .OrderByDescending(f => f.Written).Take(RecentLogFiles)
+                .Where((f, i) => i == 0 || (now - f.Written).TotalHours <= 48)
+                .Select(f => f.Rel), StringComparer.OrdinalIgnoreCase);
+            // The newest automatic logbook backup, and the sync notes of the last three days.
+            string newestBackup = files.Where(f => f.Rel.StartsWith("Data/NexusLog/backups/", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(f => f.Written).Select(f => f.Rel).FirstOrDefault();
+
+            foreach (var f in files)
+            {
+                string rel = f.Rel, name = Path.GetFileName(rel);
+                bool top = rel.IndexOf('/') < 0;
+                void In(string kind, string note, bool redact = false, long tail = 0) { f.Include = true; f.Kind = kind; f.Note = note; f.Redact = redact; f.TailBytes = tail; }
+                void Out(string kind, string note) { f.Include = false; f.Kind = kind; f.Note = note; }
+
+                if (rel.StartsWith(SupportLocal.FolderName + "/", StringComparison.OrdinalIgnoreCase))
+                    Out("private", "support codes, login and saved support settings (private)");
+                else if (LookupFolders.Any(d => rel.StartsWith(d + "/", StringComparison.OrdinalIgnoreCase)))
+                    Out("lookup", "downloadable lookup data");
+                else if (rel.StartsWith("CrashDumps/", StringComparison.OrdinalIgnoreCase))
+                    Out("crashdump", "crash dump (listed only; ask for it if needed)");
+                else if (rel.StartsWith("Backups/", StringComparison.OrdinalIgnoreCase) || rel.StartsWith("Profiles-backup-", StringComparison.OrdinalIgnoreCase)
+                         || rel.StartsWith("Data/NexusLog-backup-", StringComparison.OrdinalIgnoreCase))
+                    Out("backup", "old backup");
+                else if (rel.StartsWith("Data/Logbook/", StringComparison.OrdinalIgnoreCase))
+                    Out("logbook", "the old logbook from before the move to Nexus");
+                else if (rel.StartsWith("Data/NexusLog/", StringComparison.OrdinalIgnoreCase))
+                {
+                    string sub = rel.Substring("Data/NexusLog/".Length);
+                    if (sub.StartsWith("projection/", StringComparison.OrdinalIgnoreCase)) Out("logbook", "rebuildable read copy of the logbook");
+                    else if (sub.StartsWith("backups/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!includeLogbook) Out("logbook", "logbook (not included by the operator's choice)");
+                        else if (rel == newestBackup && f.Size <= LogbookFileBytes) In("logbook", "the newest automatic logbook backup: the log before its latest changes");
+                        else Out("backup", "older automatic logbook backup");
+                    }
+                    else if (sub.StartsWith("diagnostics/", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (!includeLogbook) Out("logbook", "logbook sync notes (not included by the operator's choice)");
+                        else if ((now - f.Written).TotalDays <= 3 && f.Size <= SmallFileBytes) In("logbook", "logbook sync note from the last three days");
+                        else Out("old", "older logbook sync note");
+                    }
+                    else if (name.Equals("migration-report.txt", StringComparison.OrdinalIgnoreCase) || name.Equals("ACTIVE", StringComparison.OrdinalIgnoreCase))
+                        In("summary", "the logbook move's own report");
+                    else if (name.Equals("outbox.json", StringComparison.OrdinalIgnoreCase) || name.Equals("jimmy-meta.json", StringComparison.OrdinalIgnoreCase)
+                             || name.Equals("log.adi.scrubbed", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (includeLogbook && f.Size <= LogbookFileBytes) In("logbook", name.StartsWith("outbox", StringComparison.OrdinalIgnoreCase) ? "contacts still waiting to be saved" : "Jimmy Next's own logbook notes");
+                        else Out("logbook", includeLogbook ? "too large" : "logbook (not included by the operator's choice)");
+                    }
+                    else if (IsLogbookFile(rel) || name.StartsWith("log.", StringComparison.OrdinalIgnoreCase))
+                        Out("logbook", includeLogbook ? "the logbook's own files; the engine's export is included instead" : "logbook (not included by the operator's choice)");
+                    else if (f.Size <= SmallFileBytes && !IsBackupName(name)) In("other", "logbook folder note");
+                    else Out("old", "not needed");
+                }
+                else if (IsBackupName(name))
+                    Out("backup", "backup of a settings or wording file");
+                else if (!IsSettingsFile(rel) && IsSecretFile(rel))
+                    Out("private", "may hold a key or password");
+                else if (top && recentLogs.Contains(rel))
+                    In("log", f.Size > LogTailBytes ? $"recent log, newest {LogTailBytes / 1048576} MB of {f.Size / 1048576.0:0.0} MB" : "recent log", tail: f.Size > LogTailBytes ? LogTailBytes : 0);
+                else if (top && rel.StartsWith("log_", StringComparison.OrdinalIgnoreCase) && char.IsDigit(rel.Length > 4 ? rel[4] : 'x'))
+                    Out("log", "older log");
+                else if (top && rel.StartsWith("log_", StringComparison.OrdinalIgnoreCase))
+                    In("summary", f.Size > SmallFileBytes ? "error summary, newest 1 MB" : "error summary", tail: f.Size > SmallFileBytes ? SmallFileBytes : 0);
+                else if (rel.StartsWith("Profiles/", StringComparison.OrdinalIgnoreCase))
+                {
+                    // The active profile's settings are in the ZIP already (jimmy_settings_redacted.ini);
+                    // its own wording file goes in, other profiles do not.
+                    bool wording = rel.StartsWith("Profiles/Wording/", StringComparison.OrdinalIgnoreCase);
+                    if (activeRel != null && string.Equals(rel, activeRel, StringComparison.OrdinalIgnoreCase)) Out("settings", "the active profile: in the ZIP as jimmy_settings_redacted.ini");
+                    else if (wording && activeProfileName != null && Path.GetFileNameWithoutExtension(name).Equals(activeProfileName, StringComparison.OrdinalIgnoreCase)) In("settings", "the active profile's wording");
+                    else if (activeProfileName != null && Path.GetFileNameWithoutExtension(name).Equals(activeProfileName, StringComparison.OrdinalIgnoreCase) && !IsSettingsFile(rel) && f.Size <= SmallFileBytes) In("settings", "the active profile's companion file");
+                    else Out("profile", "another profile (not the one in use)");
+                }
+                else if (rel.StartsWith("Data/RuleDefinitions/", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (f.Size <= SmallFileBytes) In("rules", "current award rule or list"); else Out("old", "larger than 1 MB");
+                }
+                else if (IsSettingsFile(rel))
+                {
+                    if (activeRel != null && string.Equals(rel, activeRel, StringComparison.OrdinalIgnoreCase)) Out("settings", "the active settings: in the ZIP as jimmy_settings_redacted.ini");
+                    else if (name.Equals(SharedSettings.FileName, StringComparison.OrdinalIgnoreCase)) Out("settings", "in the ZIP as jimmy_settings_shared_redacted.ini");
+                    else if (top) In("settings", "base settings, passwords blanked", redact: true);
+                    else Out("profile", "settings not in use");
+                }
+                else if ((top || rel.StartsWith("Data/", StringComparison.OrdinalIgnoreCase) && rel.IndexOf('/', 5) < 0) && f.Size <= SmallFileBytes)
+                    In("other", top && name.Equals("Wording.txt", StringComparison.OrdinalIgnoreCase) ? "current wording" : "current file");
+                else
+                    Out("old", "not part of the standard set");
+            }
+            return files;
+        }
+
+        // The engine's own export of the whole logbook to `path`. Null when it worked; else why
+        // not. `lacking` = recent changes the file does not hold yet (still being saved, or held).
+        internal static string EngineLogbookExport(string path, out string lacking)
+        {
+            lacking = null;
+            try
+            {
+                if (!NexusLogbook.Active || !NexusLogbook.Moved) return "the logbook is not kept by the engine on this computer";
+                var reply = NexusLogbook.Client.Export(path);
+                if (reply.State != "saved" || !File.Exists(path))
+                    return $"the engine did not export it ({reply.State}{(string.IsNullOrEmpty(reply.Why) ? "" : ": " + reply.Why)})";
+                if (reply.Saving > 0 || reply.Held > 0) lacking = $"{reply.Saving} recent change(s) still being saved and {reply.Held} held by the logbook are not in it";
+                return null;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
+
+        internal delegate string LogbookExporter(string path, out string lacking);
+
+        internal static void AddFocusedData(ZipArchive zip, string root, List<FocusedFile> plan, bool includeLogbook, LogbookExporter export)
+        {
+            var failed = new List<string>();
+            foreach (var f in plan.Where(x => x.Include))
+            {
+                string full = Path.Combine(root, f.Rel.Replace('/', '\\'));
+                try
+                {
+                    string entryName = "JimmyNextFolder/" + f.Rel;
+                    if (f.Redact) AddTextEntry(zip, entryName, RedactIni(full));
+                    else
+                    {
+                        byte[] data = f.TailBytes > 0 ? ReadTailSafe(full, f.TailBytes) : ReadFileSafe(full);
+                        var entry = zip.CreateEntry(entryName, CompressionLevel.Optimal);
+                        using (var dest = entry.Open()) dest.Write(data, 0, data.Length);
+                    }
+                }
+                catch (Exception ex) { f.Include = false; f.Note = "not readable: " + ex.Message; failed.Add(f.Rel + ": " + ex.Message); }
+            }
+
+            // The logbook: one copy, made by its owner. If the engine cannot (not running, say),
+            // the ADIF file it keeps beside the database, and the note says which it is.
+            string logbookLine;
+            if (!includeLogbook) logbookLine = "Logbook: not included (the operator's choice). Nothing from the logbook folder but the move reports is here.";
+            else
+            {
+                string tmp = Path.Combine(Path.GetTempPath(), "JimmySupportLog_" + Guid.NewGuid().ToString("N") + ".adi");
+                try
+                {
+                    string lacking = null;
+                    string why = export == null ? "no engine" : export(tmp, out lacking);
+                    if (why == null)
+                    {
+                        byte[] data = ReadFileSafe(tmp);
+                        var entry = zip.CreateEntry("Logbook/logbook-export.adi", CompressionLevel.Optimal);
+                        using (var dest = entry.Open()) dest.Write(data, 0, data.Length);
+                        logbookLine = "Logbook: Logbook/logbook-export.adi -- the whole logbook as the engine exported it at " + DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss") + " UTC"
+                                      + (lacking == null ? "; nothing was waiting." : "; " + lacking + ".");
+                    }
+                    else
+                    {
+                        string mirror = Path.Combine(root, "Data", "NexusLog", "log.adi");
+                        if (File.Exists(mirror))
+                        {
+                            byte[] data = ReadFileSafe(mirror);
+                            var entry = zip.CreateEntry("Logbook/log.adi", CompressionLevel.Optimal);
+                            using (var dest = entry.Open()) dest.Write(data, 0, data.Length);
+                            logbookLine = $"Logbook: Logbook/log.adi -- the ADIF copy the engine keeps beside its database, last written {File.GetLastWriteTimeUtc(mirror):yyyy-MM-dd HH:mm:ss} UTC. "
+                                          + $"NOT a fresh export ({why}); a contact made after that time may be missing.";
+                        }
+                        else logbookLine = $"Logbook: could NOT be included ({why}), and there is no ADIF copy beside the database.";
+                    }
+                }
+                catch (Exception ex) { logbookLine = "Logbook: could NOT be included: " + ex.Message; failed.Add("logbook: " + ex.Message); }
+                finally { try { File.Delete(tmp); } catch { } }
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine("JIMMY NEXT SUPPORT REPORT -- START HERE");
+            sb.AppendLine();
+            sb.AppendLine("jimmy_support_report.txt    what the sender wrote, version, Windows, radio and operating state");
+            sb.AppendLine("jimmy_settings_redacted.ini the profile in use, passwords blanked (shared and contest settings beside it)");
+            sb.AppendLine("JimmyNextFolder/log_*.txt   the recent diagnostic logs; newest activity is at the end of each");
+            sb.AppendLine("JimmyNextFolder/            the rest of the current files from the Jimmy Next folder, listed below");
+            sb.AppendLine(logbookLine);
+            sb.AppendLine();
+            sb.AppendLine("Folder: " + root);
+            sb.AppendLine();
+            sb.AppendLine("INCLUDED");
+            foreach (var f in plan.Where(x => x.Include))
+                sb.AppendLine($"  {f.Rel}\t{f.Size:N0} bytes\t{f.Written:yyyy-MM-dd HH:mm}\t{f.Note}");
+            if (failed.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("COULD NOT BE READ (wanted, but missing from this report)");
+                foreach (string line in failed) sb.AppendLine("  " + line);
+            }
+            sb.AppendLine();
+            sb.AppendLine("LEFT OUT (count, total size, reason)");
+            foreach (var g in plan.Where(x => !x.Include && !(x.Note ?? "").StartsWith("not readable")).GroupBy(x => x.Note).OrderByDescending(g => g.Sum(x => x.Size)))
+                sb.AppendLine($"  {g.Count(),5} file(s)\t{g.Sum(x => x.Size) / 1048576.0,9:0.0} MB\t{g.Key}");
+            var dumps = plan.Where(x => x.Kind == "crashdump").OrderByDescending(x => x.Written).Take(10).ToList();
+            if (dumps.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("CRASH DUMPS ON THIS COMPUTER (not included)");
+                foreach (var f in dumps) sb.AppendLine($"  {f.Rel}\t{f.Size / 1048576.0:0.0} MB\t{f.Written:yyyy-MM-dd HH:mm}");
+            }
+            var otherProfiles = plan.Where(x => x.Kind == "profile").Select(x => x.Rel).ToList();
+            if (otherProfiles.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("OTHER PROFILES (names only): " + string.Join(", ", otherProfiles.Select(Path.GetFileName)));
+            }
+            AddTextEntry(zip, "00_START_HERE.txt", sb.ToString());
+        }
+
+        // The newest `max` bytes of a file, from the start of a line.
+        private static byte[] ReadTailSafe(string path, long max)
+        {
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            {
+                if (fs.Length > max) fs.Seek(-max, SeekOrigin.End);
+                using (var ms = new MemoryStream())
+                {
+                    fs.CopyTo(ms);
+                    byte[] all = ms.ToArray();
+                    int start = fs.Length > max ? Array.IndexOf(all, (byte)'\n') + 1 : 0;
+                    if (start <= 0 || start >= all.Length) return all;
+                    byte[] tail = new byte[all.Length - start];
+                    Buffer.BlockCopy(all, start, tail, 0, tail.Length);
+                    return tail;
+                }
+            }
         }
 
         // -----------------------------------------------------------------------
@@ -724,25 +955,6 @@ namespace WSJTX_Controller
                 byte[] data = Encoding.UTF8.GetBytes(text);
                 stream.Write(data, 0, data.Length);
             }
-        }
-
-        private static List<LogFileResult> CollectLogFiles()
-        {
-            var results = new List<LogFileResult>();
-            string logDir = GetLogDir();
-            if (!Directory.Exists(logDir)) return results;
-
-            var logs = Directory.GetFiles(logDir, "log_*.txt")
-                                .OrderByDescending(File.GetLastWriteTime)
-                                .Take(5);
-            foreach (var lf in logs)
-            {
-                var lr = new LogFileResult { Path = lf };
-                try   { lr.Data  = ReadFileSafe(lf); }
-                catch (Exception ex) { lr.Error = ex.Message; }
-                results.Add(lr);
-            }
-            return results;
         }
 
         // FileShare.ReadWrite allows reading the active log even while WsjtxClient
@@ -765,12 +977,10 @@ namespace WSJTX_Controller
         // -----------------------------------------------------------------------
 
         // 2.0.81: the default place and name the Save As box offers (not everyone uses Downloads).
-        internal static string DefaultZipPath()
-        {
-            string infoVer = GetInfoVersion().Replace("/", "-").Replace("\\", "-").Replace(":", "").Replace(" ", "_");
-            string appName = (Assembly.GetExecutingAssembly().GetName().Name ?? "Jimmy").Replace(" ", "");
-            return Path.Combine(GetOutputDir(), $"{appName}_{infoVer}_support_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
-        }
+        // 2026-10-12: named for who sent it, what kind it is and when (SupportNames.Report), and
+        // never the name of a file that is already there.
+        internal static string DefaultZipPath(string callsign, string problemType, string name, string email) =>
+            SupportNames.Unique(GetOutputDir(), SupportNames.Report(callsign, problemType, name, email, DateTime.UtcNow), ".zip");
 
         private static string GetOutputDir()
         {

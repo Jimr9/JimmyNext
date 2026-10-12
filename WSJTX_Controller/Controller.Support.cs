@@ -177,7 +177,10 @@ namespace WSJTX_Controller
                 var pkg = SupportPackage.FromProfile(iniFile.FilePath, ActiveWordingPath(), NotificationSounds.SoundsFolder,
                     NotificationSounds.UserSoundsFolder, me, me, 1);
                 SupportPackage.SaveBytes(pkg.ToZip(), SupportLocal.MyDefaultsPath);
-                MessageBox.Show(this, "Your current settings are saved as your defaults.", SupportTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                // With them, this computer's radio ports and sound devices as they are now, so
+                // Restore my defaults puts back this setup and not another computer's ports.
+                SupportLocal.SaveLocalChoices(SupportLocal.MyDefaultsPath, CurrentLocalChoices());
+                MessageBox.Show(this, "Your current settings are saved as your defaults, with this computer's radio ports and sound devices.", SupportTitle, MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
@@ -205,32 +208,73 @@ namespace WSJTX_Controller
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            ReviewAndInstallSupport(pkg, null, what, null);
+            ReviewAndInstallSupport(pkg, null, what, null, SupportLocal.LoadLocalChoices(path), lastInstalled);
+        }
+
+        // This computer's own radio ports, baud rate and sound devices, as saved in the profile.
+        private Dictionary<string, string> CurrentLocalChoices()
+        {
+            var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string key in SupportLocalChoice.Keys) d[key] = iniFile?.Read(key) ?? "";
+            return d;
         }
 
         // The review (what it is, warnings, the radio ports to use here), then -- only on Install --
         // the backup, the settings, and the window reopened. downloaded: kept as the "last
         // installed" copy once installed.
-        private void ReviewAndInstallSupport(SupportPackage pkg, byte[] downloaded, string what, int? installedRevision)
+        // baseline: this computer's own ports and devices recorded with the copy being restored
+        // (null for a download, and for a copy saved before they were recorded).
+        // restoringLastInstalled: the confirmed choices then refresh that copy's record.
+        private void ReviewAndInstallSupport(SupportPackage pkg, byte[] downloaded, string what, int? installedRevision,
+            Dictionary<string, string> baseline = null, bool restoringLastInstalled = false)
         {
             string dataFolder = ProfilesAppDataPath();
             var details = pkg.Details(MyBaseCallsign(), installedRevision, pkg.SoundsReplaced(dataFolder, NotificationSounds.SoundsFolder));
             string profile = ActiveProfileDisplayName();
-            Dictionary<string, string> ports;
-            using (var dlg = new SupportInstallDlg(what, details, pkg, iniFile, profile))
+
+            // What this computer has. Listing only: no port is opened and nothing is sent to a
+            // radio. A list that cannot be read is "could not check", never "there are none".
+            IList<string> ports = null, audioIn = null, audioOut = null;
+            try { ports = System.IO.Ports.SerialPort.GetPortNames().OrderBy(x => x.Length).ThenBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(); } catch { }
+            if (!TestModeGuard.IsTestMode)
+            {
+                bool engineSessionActive = nativeEngineClient != null && nativeEngineClient.Running;
+                try { var l = NativeEngineClient.ListAudioDevices(engineSessionActive); if (l != null && l.Count > 0) audioIn = l; } catch { }
+                try { var l = NativeEngineClient.ListOutputAudioDevices(engineSessionActive); if (l != null && l.Count > 0) audioOut = l; } catch { }
+            }
+            var choices = SupportLocalChoice.Plan(pkg.Settings, key => iniFile?.Read(key), baseline, ports, audioIn, audioOut, Radio?.RigModel);
+
+            Dictionary<string, string> chosen;
+            using (var dlg = new SupportInstallDlg(what, details, profile, choices))
             {
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                ports = dlg.Ports;
+                chosen = dlg.Chosen;
             }
+            // A port setting with no choice shown (not needed by these settings): this computer's stays.
+            foreach (var (key, _) in SupportPackage.PortSettings) if (!chosen.ContainsKey(key)) chosen[key] = null;
+            if (!chosen.ContainsKey(SupportLocalChoice.Baud)) chosen[SupportLocalChoice.Baud] = null;
+            bool localSaved = true;
             try
             {
                 SaveAllSettingsToIniFile();   // this session's settings are what the backup keeps
                 if (iniFile == null) throw new InvalidOperationException("no active settings file");
                 string backup = CustomizationPackage.Backup(iniFile.FilePath, ActiveWordingPath(), Path.Combine(dataFolder, "Backups"),
                     "import", what.ToLowerInvariant(), profile);
-                pkg.Apply(iniFile, dataFolder, NotificationSounds.SoundsFolder, ActiveWordingPath(), backup, ports);
-                if (downloaded != null) SupportPackage.SaveBytes(downloaded, SupportLocal.LastInstalledPath);
+                pkg.Apply(iniFile, dataFolder, NotificationSounds.SoundsFolder, ActiveWordingPath(), backup, chosen);
                 wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} support: {what} (for {pkg.Recipient ?? "-"}, revision {pkg.Revision}) installed into '{profile}'; backup: {backup}");
+                // Only now, installed: the copy for an offline restore, and this computer's own
+                // ports and devices as just confirmed. My defaults is never touched here.
+                try
+                {
+                    if (downloaded != null) SupportPackage.SaveBytes(downloaded, SupportLocal.LastInstalledPath);
+                    if (downloaded != null || restoringLastInstalled)
+                        SupportLocal.SaveLocalChoices(SupportLocal.LastInstalledPath, CurrentLocalChoices());
+                }
+                catch (Exception ex)
+                {
+                    localSaved = false;
+                    wsjtxClient?.DebugOutput($"{DateTime.Now:HH:mm:ss} support: the local copy for a later restore was not saved: {ex.Message}");
+                }
             }
             catch (Exception ex)
             {
@@ -239,8 +283,10 @@ namespace WSJTX_Controller
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
-            MessageBox.Show(this, $"{what} installed into profile '{profile}'. The window now reopens.", SupportTitle,
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, $"{what} installed into profile '{profile}'." +
+                    (localSaved ? "" : " The copy kept on this computer for Restore last installed support settings could not be saved, so that restore is not up to date.") +
+                    " The window now reopens.", SupportTitle,
+                MessageBoxButtons.OK, localSaved ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
             _suppressSettingsSaveOnExit = true;   // the installed settings are on disk; see ImportCustomizations_Click
             SwitchProfileInPlace();
         }
@@ -327,16 +373,18 @@ namespace WSJTX_Controller
         }
     }
 
-    // The review before installing support settings: what they are, any warnings, and the radio
-    // ports to use on this computer (port numbers differ between computers, so the operator
-    // chooses; a port the settings name that this computer does not have is never swapped for
-    // another without being shown). Install is the only button that changes anything.
+    // The review before installing support settings: what they are, any warnings, and this
+    // computer's own radio ports, baud rate and sound devices (SupportLocalChoice) -- for each,
+    // what the settings carry, what this computer has now, and the choice that WILL be used.
+    // Nothing is opened, tuned or keyed here, and Cancel or Escape changes nothing. Install is
+    // the only button that changes anything, and it does nothing while a needed choice is empty.
     internal sealed class SupportInstallDlg : Form
     {
-        internal Dictionary<string, string> Ports { get; } = new Dictionary<string, string>();
-        private readonly List<(string Key, ComboBox Box, List<string> Values)> _choices = new List<(string, ComboBox, List<string>)>();
+        // Setting key -> the value to write, or null to keep this computer's own.
+        internal Dictionary<string, string> Chosen { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private readonly List<(SupportLocalChoice Choice, ComboBox Box)> _rows = new List<(SupportLocalChoice, ComboBox)>();
 
-        internal SupportInstallDlg(string what, List<string> details, SupportPackage pkg, IniFile current, string profile)
+        internal SupportInstallDlg(string what, List<string> details, string profile, List<SupportLocalChoice> choices)
         {
             Text = what;
             FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -346,66 +394,55 @@ namespace WSJTX_Controller
 
             var lines = new List<string>(details)
             {
-                $"Installing replaces the settings of profile '{profile}', except your sound devices, logins and station callsign. " +
-                "A backup is made first; Undo an Import puts it back."
+                $"Installing replaces the settings of profile '{profile}', except your logins and station callsign. " +
+                "Your radio ports, baud rate and sound devices stay as they are unless you choose others below. " +
+                "A backup is made first; Undo an Import puts it back.",
             };
-            string[] local = new string[0];
-            try { local = System.IO.Ports.SerialPort.GetPortNames().OrderBy(p => p.Length).ThenBy(p => p, StringComparer.OrdinalIgnoreCase).ToArray(); } catch { }
+            foreach (var c in choices) lines.Add(c.Name + ": " + c.Comparison());
 
             var info = new TextBox
             {
                 ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, TabStop = true,
-                Text = string.Join("\r\n", lines), Location = new Point(10, 10), Size = new Size(460, 150),
+                Text = string.Join("\r\n", lines), Location = new Point(10, 10), Size = new Size(560, 170),
                 AccessibleName = "About these settings", TabIndex = 0,
             };
             Controls.Add(info);
-            int y = 170, tab = 1;
-            foreach (var (key, name) in SupportPackage.PortSettings)
+            int y = 190, tab = 1;
+            foreach (var c in choices)
             {
-                if (!pkg.Settings.TryGetValue(key, out string theirs) || string.IsNullOrWhiteSpace(theirs)) continue;
-                string mine = current?.Read(key) ?? "";
-                var values = new List<string> { null };
                 var box = new ComboBox
                 {
-                    DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(150, y - 3), Width = 320,
-                    AccessibleName = name, TabIndex = tab++,
+                    DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(190, y - 3), Width = 380,
+                    AccessibleName = c.Name, AccessibleDescription = c.Comparison(), TabIndex = tab++,
                 };
-                box.Items.Add(string.IsNullOrEmpty(mine) ? "Keep mine (none set)" : $"Keep mine ({mine})");
-                foreach (string p in local)
-                {
-                    values.Add(p);
-                    box.Items.Add(string.Equals(p, theirs, StringComparison.OrdinalIgnoreCase) ? $"{p}, as in the settings" : p);
-                }
-                bool here = local.Contains(theirs, StringComparer.OrdinalIgnoreCase);
-                box.SelectedIndex = here ? values.FindIndex(v => string.Equals(v, theirs, StringComparison.OrdinalIgnoreCase)) : 0;
-                Controls.Add(new Label { Text = name + ":", Location = new Point(10, y), AutoSize = true });
+                foreach (var o in c.Options) box.Items.Add(o.Text);
+                box.SelectedIndex = Math.Max(0, Math.Min(c.Default, c.Options.Count - 1));
+                Controls.Add(new Label { Text = c.Name + ":", Location = new Point(10, y), AutoSize = true });
                 Controls.Add(box);
-                _choices.Add((key, box, values));
+                _rows.Add((c, box));
                 y += 28;
-                if (!here)
-                {
-                    string note = $"The settings use {theirs}, which this computer does not have. Choose the port your radio is on.";
-                    var noteBox = new TextBox
-                    {
-                        ReadOnly = true, BorderStyle = BorderStyle.None, Text = note, Location = new Point(10, y), Width = 460,
-                        AccessibleName = name + " note", TabIndex = tab++, BackColor = SystemColors.Control,
-                    };
-                    Controls.Add(noteBox);
-                    y += 24;
-                }
             }
-            var install = new Button { Text = "&Install", Location = new Point(310, y + 6), Width = 75, TabIndex = tab++, AccessibleName = "Install" };
-            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(395, y + 6), Width = 75, TabIndex = tab++ };
+            var install = new Button { Text = "&Install", Location = new Point(410, y + 6), Width = 75, TabIndex = tab++, AccessibleName = "Install" };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(495, y + 6), Width = 75, TabIndex = tab++ };
             install.Click += (s, e) =>
             {
-                foreach (var (key, _) in SupportPackage.PortSettings) Ports[key] = null;   // a port the settings leave out: mine stays
-                foreach (var (key, box, values) in _choices) Ports[key] = values[Math.Max(0, box.SelectedIndex)];
+                // Checked before anything is touched: the first choice that cannot work is said,
+                // and the cursor goes to it.
+                foreach (var (c, box) in _rows)
+                {
+                    string problem = c.Problem(Math.Max(0, box.SelectedIndex));
+                    if (problem == null) continue;
+                    MessageBox.Show(this, problem + " Nothing was changed.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    box.Focus();
+                    return;
+                }
+                foreach (var (c, box) in _rows) Chosen[c.Key] = c.Options[Math.Max(0, box.SelectedIndex)].Value;
                 DialogResult = DialogResult.OK;
             };
             Controls.Add(install);
             Controls.Add(cancel);
             CancelButton = cancel;   // Enter in the text above does not install; Install is pressed on purpose
-            ClientSize = new Size(480, y + 40);
+            ClientSize = new Size(580, y + 40);
             ActiveControl = info;
         }
     }

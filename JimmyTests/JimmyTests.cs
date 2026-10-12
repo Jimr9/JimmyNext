@@ -1667,6 +1667,8 @@ static class JimmyTests
         RadioPowerAndExportHeaderTests();
         ResourceCleanupTests();
         LicenseClassTests();
+        SupportReportDraftTests();
+        SupportLocalChoiceTests();
         SharedSettingsTests();
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
@@ -21117,12 +21119,21 @@ static class JimmyTests
             Check("a refused app key is not blamed on the helper login",
                 r.Error.Contains("built-in support key") && !r.Error.Contains("username") && r.Code == null, true);
             reply = _ => (406, "text/html", Encoding.UTF8.GetBytes("<html>Not Acceptable</html>"));
-            r = Run((s, ct) => s.SubmitSupport("KD4DC", "Jim", "a@b.co", "r.zip", new byte[] { 1 }, ct));
+            r = Run((s, ct) => s.SubmitSupport("KD4DC", "Jim", "a@b.co", "Bug", new byte[] { 1 }, ct));
             Check("a host page is never shown as it is", !r.Ok && r.Error.Contains("HTTP 406") && !r.Error.Contains("<html>"), true);
             reply = _ => (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true,\"ticket\":\"KD4DC-20261007-120000-0123456789abcdef\"}"));
-            r = Run((s, ct) => s.SubmitSupport("KD4DC", "Jim", "a@b.co", "r.zip", new byte[] { 1 }, ct));
+            r = Run((s, ct) => s.SubmitSupport("KD4DC", "Jim", "a@b.co", "Bug", new byte[] { 1 }, ct));
             Check("support request: sent without a helper login, ticket returned",
                 r.Ok && r.Get("ticket").StartsWith("KD4DC-") && !seen.Last().Headers.ContainsKey("X-Jimmy-Helper"), true);
+            Check("...with its type as a field of its own, and the file under one plain name",
+                seen.Last().Body.Contains("name=\"category\"") && seen.Last().Body.Contains("Bug")
+                && seen.Last().Body.Contains("name=\"report\"; filename=\"report.zip\""), true);
+            reply = _ => (200, "application/json", Encoding.UTF8.GetBytes(
+                "{\"ok\":true,\"requests\":[{\"ticket\":\"KD4DC-20261007-120000-0123456789abcdef\",\"callsign\":\"KD4DC\",\"name\":\"Jim\",\"email\":\"a@b.co\",\"category\":\"Accessibility\",\"submitted_utc\":\"2026-10-07T12:00:00+00:00\",\"filename\":\"KD4DC-20261007-120000-0123456789abcdef.zip\",\"bytes\":10,\"revision\":\"r\"}," +
+                "{\"ticket\":\"KD4DC-20261006-120000-0123456789abcdef\",\"callsign\":\"KD4DC\",\"name\":\"Jim\",\"email\":\"a@b.co\",\"submitted_utc\":\"2026-10-06T12:00:00+00:00\",\"filename\":\"KD4DC-20261006-120000-0123456789abcdef.zip\",\"bytes\":10,\"revision\":\"r\"}]}"));
+            var listed = SupportService.Requests(Run((s, ct) => s.ListSupport(ct), helper));
+            Check("the helper's list carries each request's type; one from before types existed has none",
+                listed.Count == 2 && listed[0].Category == "Accessibility" && listed[1].Category == "", true);
 
             // Saved codes and the helper password are protected on disk and blanked by the report rules.
             SupportLocal.TestFolder = folder;
@@ -21448,7 +21459,7 @@ static class JimmyTests
         second.Dispose();
         Check("disposing twice is harmless", Wording.ChangedListenersFor(second) == 0, true);
 
-        var ctrl = new Controller();
+        var ctrl = NewMinimalCtrl();
         var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
         Check("a new contact is claimed", wc.TestClaimLiveLoggedQso("K1ABC|20m|FT8|20261012|010000"), true);
         wc.TestReleaseLiveLoggedQso("K1ABC|20m|FT8|20261012|010000");
@@ -21492,7 +21503,7 @@ static class JimmyTests
         Check("no class: no argument", Args("", true).Contains("--license-class"), false);
         Check("an engine started with another class is never kept for this profile", Args("general", false) == Args("extra", false), false);
 
-        var ctrl = new Controller();
+        var ctrl = NewMinimalCtrl();
         var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
         Check("transmit starts unlocked", wc.TestTxLocked, false);
         wc.ApplyTxLock(txAllowed: false);
@@ -21506,6 +21517,149 @@ static class JimmyTests
         var snap = ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""EN34"", ""radio"": { ""dialMhz"": 14.074 } }");
         Check("an older engine that does not report the lock means unlocked", snap.Radio.TxAllowed, true);
         ctrl.Dispose();
+    }
+
+    // Handoff 18 (2026-10-12): the support report form's draft. (That it no longer blocks the
+    // other windows is a keyboard check on the real program, not something this can show.)
+    static void SupportReportDraftTests()
+    {
+        Console.WriteLine("\n── Support report form: the draft is kept, and asked about ──");
+        var ctrl = NewMinimalCtrl();
+        SupportReportDlg.KeptDraft = null;
+        var form = new SupportReportDlg(ctrl, "KB0UZT");
+        Check("an untouched form has nothing to lose", form.HasDraft, false);
+        form.TestType("The list went quiet", "");
+        Check("a description typed is a draft", form.HasDraft, true);
+        form.CloseForOwner(keepDraft: false);
+        Check("closing with the program keeps nothing", SupportReportDlg.KeptDraft == null, true);
+
+        form = new SupportReportDlg(ctrl, "KB0UZT");
+        form.TestType("The list went quiet", "Open Alt+G\r\nPress Tab");
+        form.CloseForOwner(keepDraft: true);
+        Check("a profile switch keeps what was typed", SupportReportDlg.KeptDraft != null, true);
+        var again = new SupportReportDlg(ctrl, "K1ABC");
+        var d = again.Snapshot();
+        CheckStr("...and the next form opens with the description", d.Description, "The list went quiet");
+        CheckStr("...the steps, lines and all", d.Steps, "Open Alt+G\r\nPress Tab");
+        CheckStr("...and the callsign that was on the form", d.Callsign, "KB0UZT");
+        Check("...and the kept copy is used once", SupportReportDlg.KeptDraft == null, true);
+        again.CloseForOwner(keepDraft: false);
+        var empty = new SupportReportDlg(ctrl, "KB0UZT");
+        empty.CloseForOwner(keepDraft: true);
+        Check("an empty form leaves nothing behind", SupportReportDlg.KeptDraft == null, true);
+        ctrl.Dispose();
+    }
+
+    // Handoff 17 (2026-10-12): this computer's own radio ports, baud rate and sound devices when
+    // support settings are installed -- what is offered, what is chosen by default, what is
+    // refused, and the local record that lets an offline restore put back the setup installed.
+    static void SupportLocalChoiceTests()
+    {
+        Console.WriteLine("\n── Support install: this computer's ports, baud rate and sound devices ──");
+        var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["radioControlMode"] = "HamlibRigctld", ["radioRigModel"] = "2037", ["radioComPort"] = "COM5", ["radioBaudRate"] = "115200",
+            ["radioPttMethod"] = "Cat",
+        };
+        var mine = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["radioComPort"] = "COM3", ["radioBaudRate"] = "38400", ["radioPttSerialPort"] = "",
+            ["nativeEngineAudioDevice"] = "Microphone (USB Audio CODEC)", ["nativeEngineAudioOutputDevice"] = "Speakers (USB Audio CODEC)",
+        };
+        string Mine(string k) => mine.TryGetValue(k, out string v) ? v : "";
+        var ports = new List<string> { "COM3", "COM5" };
+        var ins = new List<string> { "Microphone (USB Audio CODEC)", "Microphone (Realtek)" };
+        var outs = new List<string> { "Speakers (USB Audio CODEC)", "Speakers (Realtek)" };
+        SupportLocalChoice One(List<SupportLocalChoice> l, string key) => l.FirstOrDefault(c => c.Key == key);
+
+        var plan = SupportLocalChoice.Plan(settings, Mine, null, ports, ins, outs, "2037");
+        var cat = One(plan, SupportLocalChoice.CatPort);
+        Check("the CAT port shows the settings' port and mine", cat.Comparison().Contains("The settings use COM5.") && cat.Comparison().Contains("This computer uses COM3."), true);
+        CheckStr("my port stays by default, though this computer also has the settings' COM5", cat.Effective(cat.Default), "COM3");
+        Check("the settings' port is offered, marked", cat.Options.Any(o => o.Text == "COM5, as in the settings" && o.Value == "COM5"), true);
+        var baud = One(plan, SupportLocalChoice.Baud);
+        CheckStr("the same radio model: my baud rate stays", baud.Effective(baud.Default), "38400");
+        Check("...and the settings' rate is one choice away", baud.Options[1].Value == "115200" && baud.Options[1].Text.Contains("As in the settings"), true);
+        Check("CAT keying: no PTT port is asked for", One(plan, SupportLocalChoice.PttPort) == null, true);
+        var input = One(plan, SupportLocalChoice.AudioIn);
+        Check("sound input: not part of the settings, mine kept", input.Comparison().Contains("not part of support settings") && input.Effective(input.Default) == "Microphone (USB Audio CODEC)", true);
+        Check("nothing is refused when everything needed is set", plan.All(c => c.Problem(c.Default) == null), true);
+
+        plan = SupportLocalChoice.Plan(settings, Mine, null, ports, ins, outs, "3087");
+        baud = One(plan, SupportLocalChoice.Baud);
+        Check("a different radio model: the settings' baud rate is chosen, and said", baud.Effective(baud.Default) == "115200" && (baud.Note ?? "").Contains("different radio model"), true);
+
+        // A fresh computer: nothing set, the settings' COM5 exists here.
+        plan = SupportLocalChoice.Plan(settings, k => "", null, ports, ins, outs, "");
+        cat = One(plan, SupportLocalChoice.CatPort);
+        Check("fresh setup: 'none set' is not a port, and Install is refused until one is chosen",
+            cat.Options[0].Text == "Keep mine: none set" && cat.Default == 0 && cat.Problem(0) != null && cat.Problem(2) == null, true);
+        input = One(plan, SupportLocalChoice.AudioIn);
+        Check("fresh setup: the sound devices must be chosen too", input.Problem(input.Default) != null && input.Problem(1) == null, true);
+        var explicitBlank = new Dictionary<string, string>(settings, StringComparer.OrdinalIgnoreCase) { ["radioBaudRate"] = "" };
+        Check("a blank baud rate in the settings is the driver's default, said so",
+            One(SupportLocalChoice.Plan(explicitBlank, Mine, null, ports, ins, outs, "2037"), SupportLocalChoice.Baud).Comparison().Contains("driver's default rate"), true);
+        var noBaud = new Dictionary<string, string>(settings, StringComparer.OrdinalIgnoreCase); noBaud.Remove("radioBaudRate");
+        Check("a baud rate the settings leave out is 'not included'",
+            One(SupportLocalChoice.Plan(noBaud, Mine, null, ports, ins, outs, "2037"), SupportLocalChoice.Baud).Comparison().Contains("do not include it"), true);
+
+        // Modes that need no serial port.
+        var external = new Dictionary<string, string>(settings, StringComparer.OrdinalIgnoreCase) { ["radioUseExternalRigctld"] = "True" };
+        plan = SupportLocalChoice.Plan(external, k => "", null, ports, ins, outs, "");
+        Check("an external rigctld: no CAT port or baud rate is asked for", One(plan, SupportLocalChoice.CatPort) == null && One(plan, SupportLocalChoice.Baud) == null, true);
+        var noRadio = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["radioRigModel"] = "" };
+        plan = SupportLocalChoice.Plan(noRadio, k => "", null, ports, ins, outs, "");
+        Check("no radio in the settings: nothing is required", plan.All(c => c.Problem(c.Default) == null), true);
+        var rts = new Dictionary<string, string>(settings, StringComparer.OrdinalIgnoreCase) { ["radioPttMethod"] = "SerialRts", ["radioPttSerialPort"] = "COM9" };
+        plan = SupportLocalChoice.Plan(rts, Mine, null, ports, ins, outs, "2037");
+        var ptt = One(plan, SupportLocalChoice.PttPort);
+        Check("serial PTT: the PTT port is asked for, mine (the CAT port) kept, the missing COM9 said",
+            ptt != null && ptt.Options[0].Text == "Keep mine: the CAT port" && ptt.Problem(ptt.Default) == null && (ptt.Note ?? "").Contains("no COM9"), true);
+
+        // The lists could not be read: "could not check", never "there are none".
+        plan = SupportLocalChoice.Plan(settings, Mine, null, null, null, null, "2037");
+        cat = One(plan, SupportLocalChoice.CatPort);
+        Check("ports could not be listed: my saved port is still accepted, and it says the list could not be read",
+            cat.Problem(cat.Default) == null && (cat.Note ?? "").Contains("could not be listed") && !cat.Options[0].Text.Contains("not available"), true);
+        plan = SupportLocalChoice.Plan(settings, Mine, null, new List<string> { "COM5" }, ins, outs, "2037");
+        Check("my saved port is not here now: it says so, and is still mine to keep",
+            One(plan, SupportLocalChoice.CatPort).Options[0].Text == "Keep mine: COM3, not available now", true);
+
+        // An offline restore: the setup actually installed comes back, not the helper's ports.
+        var baseline = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["radioComPort"] = "COM5", ["radioBaudRate"] = "9600", ["nativeEngineAudioDevice"] = "Microphone (Realtek)", ["nativeEngineAudioOutputDevice"] = "Speakers (Gone)",
+        };
+        plan = SupportLocalChoice.Plan(settings, Mine, baseline, ports, ins, outs, "2037");
+        CheckStr("restore: the port it was installed with is chosen", One(plan, SupportLocalChoice.CatPort).Effective(One(plan, SupportLocalChoice.CatPort).Default), "COM5");
+        CheckStr("restore: and its baud rate", One(plan, SupportLocalChoice.Baud).Effective(One(plan, SupportLocalChoice.Baud).Default), "9600");
+        CheckStr("restore: and its sound input", One(plan, SupportLocalChoice.AudioIn).Effective(One(plan, SupportLocalChoice.AudioIn).Default), "Microphone (Realtek)");
+        var output = One(plan, SupportLocalChoice.AudioOut);
+        Check("restore: a device that is gone is said, and mine is offered instead of pretending",
+            output.Effective(output.Default) == "Speakers (USB Audio CODEC)" && (output.Note ?? "").Contains("Speakers (Gone), which is not available now"), true);
+
+        // The local record beside a saved copy.
+        string folder = Path.Combine(Path.GetTempPath(), "JimmySupportLocal_" + Guid.NewGuid().ToString("N"));
+        string keepFolder = SupportLocal.TestFolder;
+        try
+        {
+            SupportLocal.TestFolder = folder;
+            Check("a copy saved before this existed has no record", SupportLocal.LoadLocalChoices(SupportLocal.LastInstalledPath) == null, true);
+            SupportLocal.SaveLocalChoices(SupportLocal.LastInstalledPath, mine);
+            SupportLocal.SaveLocalChoices(SupportLocal.MyDefaultsPath, baseline);
+            var back = SupportLocal.LoadLocalChoices(SupportLocal.LastInstalledPath);
+            Check("the record comes back as saved", back != null && back["radioComPort"] == "COM3" && back["nativeEngineAudioDevice"] == "Microphone (USB Audio CODEC)" && back["radioPttSerialPort"] == "", true);
+            Check("my defaults and last installed keep separate records", SupportLocal.LoadLocalChoices(SupportLocal.MyDefaultsPath)["radioComPort"] == "COM5", true);
+            Check("the record is a file of its own in the private Support folder, not in the zip",
+                File.Exists(Path.Combine(folder, "last-installed.local.ini")) && !File.Exists(SupportLocal.LastInstalledPath), true);
+        }
+        finally
+        {
+            SupportLocal.TestFolder = keepFolder;
+            try { Directory.Delete(folder, true); } catch { }
+        }
+        Check("sound devices still never travel in support settings",
+            SupportPackage.Travels("nativeEngineAudioDevice") || SupportPackage.Travels("nativeEngineAudioOutputDevice"), false);
     }
 
     static void RadioPowerAndExportHeaderTests()
@@ -22464,31 +22618,64 @@ static class JimmyTests
     // operator leaves "Include my logbook" checked; the logbook-move reports always. ──
     static void SupportReportFolderTests()
     {
-        Console.WriteLine("\n── Support report: whole Jimmy Next folder -- THE FIX ──");
+        Console.WriteLine("\n── Support report: focused contents and readable names (handoffs 26, 27) ──");
         string root = Path.Combine(Path.GetTempPath(), "JimmySupportFolder_" + Guid.NewGuid().ToString("N"));
         try
         {
-            void Put(string rel, string text)
+            var now = new DateTime(2026, 10, 12, 0, 20, 0);   // just after midnight
+            void Put(string rel, string text, DateTime? written = null)
             {
                 string f = Path.Combine(root, rel.Replace('/', '\\'));
                 Directory.CreateDirectory(Path.GetDirectoryName(f));
                 File.WriteAllText(f, text);
+                File.SetLastWriteTime(f, written ?? now.AddMinutes(-5));
             }
             Put("Jimmy Next.ini", "[General]\nmyCall=K0XYZ\nqrzPassword=hunter2\n");
+            Put("Jimmy Next.ini.before-fix.bak", "[General]\nold=1\n");
+            Put("Shared.ini", "[General]\nnativeEngineMyCall=K0XYZ\n");
+            Put("Wording.txt", "Msg.LogbookReady = Log ready");
+            Put("Wording.txt.before-update-20261005-113140.bak", "old wording");
+            Put("Profiles/field day.ini", "[General]\nmyCall=K0XYZ\nlotwLogbookPass=secret9\n");
+            Put("Profiles/other radio.ini", "[General]\nmyCall=K0XYZ\n");
+            Put("Profiles/Wording/field day.txt", "Msg.LogbookReady = Ready");
+            Put("Profiles/Wording/other radio.txt", "other wording");
+            Put("log_10-11-2026.txt", "line one\nline two\n", now.AddHours(-1));          // yesterday's file, written in the last hour
+            Put("log_10-9-2026.txt", "a long session\n", now.AddHours(-30));
+            Put("log_10-8-2026.txt", "three days back\n", now.AddHours(-70));
+            Put("log_9-12-2026.txt", "a month back\n", now.AddDays(-30));
+            Put("log_crashes.txt", "crash at 01:00\n", now.AddDays(-11));
+            Put("pota.txt", "");
+            Put("CrashDumps/jimmy-engine-host.exe.1234.dmp", "dump");
+            Put("Backups/NexusLog-before-fix3-20261006-012519/log.sqlite3", "old contacts");
+            Put("Profiles-backup-before-shared-20260929-195641/default.ini", "[General]\n");
             Put("Data/NexusLog/migration-report.txt", "move failed: reason");
+            Put("Data/NexusLog/ACTIVE", "moved");
             Put("Data/NexusLog/log.sqlite3", "contacts");
-            Put("Data/Logbook/jimmy.db", "old contacts");
+            Put("Data/NexusLog/log.sqlite3-wal", "recent contacts");
+            Put("Data/NexusLog/log.adi", "<CALL:5>K1ABC<EOR>");
+            Put("Data/NexusLog/log.adi.pre-sqlite", "<CALL:5>K1ABC<EOR>");
+            Put("Data/NexusLog/outbox.json", "[]");
+            Put("Data/NexusLog/jimmy-meta.json", "{}");
+            Put("Data/NexusLog/projection/p-1.db", "read copy");
+            Put("Data/NexusLog/backups/log-20261010-001214.adi", "older backup", now.AddDays(-2));
+            Put("Data/NexusLog/backups/log-20261011-004816.adi", "newest backup", now.AddHours(-20));
+            Put("Data/NexusLog/diagnostics/held-tqsl-20261011.txt", "held K1ABC", now.AddHours(-10));
+            Put("Data/NexusLog/diagnostics/held-tqsl-20260928.txt", "held long ago", now.AddDays(-14));
+            Put("Data/Logbook/logbook.db", "old contacts");
             Put("Data/FccUls/fcc.dat", "lookup");
             Put("Data/ClubLog/clublog_key.txt", "secret");
+            Put("Data/RuleDefinitions/was.ini", "[Rule]\nName=WAS\n");
+            Put("Data/RuleDefinitions/Lists/states.txt", "MN\n");
             Put("Data/nexus-logbook-auto-move.txt", "auto move: failed");
-            Put("Support/support.ini", "[x]\nhelperUser=KB0UZT\n");   // support's private folder (2026-10-07)
+            Put("Support/support.ini", "[x]\nhelperUser=KB0UZT\n");
             Put("Support/last-installed.zip", "settings");
 
-            Dictionary<string, string> Run(bool includeLogbook)
+            string active = Path.Combine(root, "Profiles", "field day.ini");
+            Dictionary<string, string> Run(bool includeLogbook, SupportReportBuilder.LogbookExporter export)
             {
                 var ms = new MemoryStream();
                 using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Create, true))
-                    SupportReportBuilder.AddDataFolder(zip, root, includeLogbook);
+                    SupportReportBuilder.AddFocusedData(zip, root, SupportReportBuilder.PlanFocusedData(root, includeLogbook, active, now), includeLogbook, export);
                 ms.Position = 0;
                 var d = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                 using (var zip = new System.IO.Compression.ZipArchive(ms, System.IO.Compression.ZipArchiveMode.Read))
@@ -22496,25 +22683,83 @@ static class JimmyTests
                         using (var r = new StreamReader(e.Open())) d[e.FullName] = r.ReadToEnd();
                 return d;
             }
+            string Exported(string path, out string lacking) { lacking = "1 recent change(s) still being saved and 0 held by the logbook are not in it"; File.WriteAllText(path, "<CALL:5>K1ABC<EOR><CALL:5>K2NEW<EOR>"); return null; }
+            string NoEngine(string path, out string lacking) { lacking = null; return "the engine is not running"; }
 
-            var with = Run(true);
-            Check("settings included", with.ContainsKey("JimmyNextFolder/Jimmy Next.ini"), true);
-            Check("settings: password blanked", with["JimmyNextFolder/Jimmy Next.ini"].Contains("hunter2"), false);
-            Check("move reports included", with.ContainsKey("JimmyNextFolder/Data/NexusLog/migration-report.txt")
-                && with.ContainsKey("JimmyNextFolder/Data/nexus-logbook-auto-move.txt"), true);
-            Check("logbook included when checked", with.ContainsKey("JimmyNextFolder/Data/NexusLog/log.sqlite3")
-                && with.ContainsKey("JimmyNextFolder/Data/Logbook/jimmy.db"), true);
-            Check("lookup data left out", with.ContainsKey("JimmyNextFolder/Data/FccUls/fcc.dat"), false);
-            Check("key file left out", with.Keys.Any(k => k.Contains("clublog_key")), false);
-            Check("support's private folder left out (codes, helper login, saved settings)",
-                with.Keys.Any(k => k.Contains("JimmyNextFolder/Support/")), false);
-            Check("listing names every file", with.ContainsKey("jimmy_folder_listing.txt")
-                && with["jimmy_folder_listing.txt"].Contains("Data/FccUls/fcc.dat"), true);
+            var with = Run(true, Exported);
+            string F(string rel) => "JimmyNextFolder/" + rel;
+            string start = with["00_START_HERE.txt"];
+            Check("base settings included, password blanked", with.ContainsKey(F("Jimmy Next.ini")) && !with[F("Jimmy Next.ini")].Contains("hunter2"), true);
+            Check("current wording and the active profile's wording included", with.ContainsKey(F("Wording.txt")) && with.ContainsKey(F("Profiles/Wording/field day.txt")), true);
+            Check("settings and wording backups left out", with.Keys.Any(k => k.Contains(".bak")), false);
+            Check("another profile and its wording left out, named in the inventory",
+                !with.ContainsKey(F("Profiles/other radio.ini")) && !with.ContainsKey(F("Profiles/Wording/other radio.txt")) && start.Contains("other radio.ini"), true);
+            Check("the active profile is not copied twice (it is the redacted settings entry)", with.ContainsKey(F("Profiles/field day.ini")), false);
+            Check("no password of any profile is anywhere in the ZIP", with.Values.Any(v => v.Contains("secret9") || v.Contains("hunter2")), false);
+            Check("the log written in the last hour is in, though its name is yesterday's", with.ContainsKey(F("log_10-11-2026.txt")), true);
+            Check("a log last written 30 hours ago is in (a long session)", with.ContainsKey(F("log_10-9-2026.txt")), true);
+            Check("logs from three days and a month back are left out", with.ContainsKey(F("log_10-8-2026.txt")) || with.ContainsKey(F("log_9-12-2026.txt")), false);
+            Check("each log is in the ZIP once", with.Keys.Count(k => k.EndsWith("log_10-11-2026.txt")) == 1, true);
+            Check("the crash summary is in, the crash dump only listed", with.ContainsKey(F("log_crashes.txt")) && !with.Keys.Any(k => k.EndsWith(".dmp")) && start.Contains("jimmy-engine-host.exe.1234.dmp"), true);
+            Check("old backups left out", with.Keys.Any(k => k.Contains("Backups/") || k.Contains("Profiles-backup-")), false);
+            Check("current rules and lists included", with.ContainsKey(F("Data/RuleDefinitions/was.ini")) && with.ContainsKey(F("Data/RuleDefinitions/Lists/states.txt")), true);
+            Check("move reports included", with.ContainsKey(F("Data/NexusLog/migration-report.txt")) && with.ContainsKey(F("Data/nexus-logbook-auto-move.txt")), true);
+            Check("lookup data, key file and the private Support folder left out",
+                with.Keys.Any(k => k.Contains("FccUls") || k.Contains("clublog_key") || k.Contains("JimmyNextFolder/Support/")), false);
+            Check("the logbook is the engine's export, once", with.ContainsKey("Logbook/logbook-export.adi") && with["Logbook/logbook-export.adi"].Contains("K2NEW"), true);
+            Check("the live database, its working files and read copy are never copied",
+                with.Keys.Any(k => k.Contains("log.sqlite3") || k.Contains("projection/") || k.EndsWith("log.adi") || k.Contains("pre-sqlite") || k.Contains("Data/Logbook/")), false);
+            Check("waiting contacts and Jimmy's logbook notes are in", with.ContainsKey(F("Data/NexusLog/outbox.json")) && with.ContainsKey(F("Data/NexusLog/jimmy-meta.json")), true);
+            Check("only the newest automatic backup is in", with.ContainsKey(F("Data/NexusLog/backups/log-20261011-004816.adi")) && !with.ContainsKey(F("Data/NexusLog/backups/log-20261010-001214.adi")), true);
+            Check("recent sync notes in, old ones out", with.ContainsKey(F("Data/NexusLog/diagnostics/held-tqsl-20261011.txt")) && !with.ContainsKey(F("Data/NexusLog/diagnostics/held-tqsl-20260928.txt")), true);
+            Check("start-here says what the logbook copy is and what it lacks", start.Contains("Logbook/logbook-export.adi") && start.Contains("1 recent change(s) still being saved"), true);
+            Check("start-here totals what was left out, with reasons", start.Contains("LEFT OUT") && start.Contains("old backup") && start.Contains("older log"), true);
 
-            var without = Run(false);
-            Check("logbook left out when unchecked", without.ContainsKey("JimmyNextFolder/Data/NexusLog/log.sqlite3")
-                || without.ContainsKey("JimmyNextFolder/Data/Logbook/jimmy.db"), false);
-            Check("move report still included when unchecked", without.ContainsKey("JimmyNextFolder/Data/NexusLog/migration-report.txt"), true);
+            var fallback = Run(true, NoEngine);
+            Check("no engine: the ADIF copy beside the database, and it says so",
+                fallback.ContainsKey("Logbook/log.adi") && fallback["00_START_HERE.txt"].Contains("NOT a fresh export"), true);
+
+            var without = Run(false, Exported);
+            Check("logbook unchecked: no contact data of any kind",
+                without.Keys.Any(k => k.StartsWith("Logbook/") || k.Contains("outbox") || k.Contains("jimmy-meta") || k.Contains("/backups/") || k.Contains("/diagnostics/") || k.Contains("log.adi") || k.Contains("sqlite")), false);
+            Check("...the move report is still there", without.ContainsKey(F("Data/NexusLog/migration-report.txt")), true);
+            Check("...and start-here says the logbook was the operator's choice", without["00_START_HERE.txt"].Contains("not included (the operator's choice)"), true);
+
+            // A very large log: its newest part only, from the start of a line.
+            Put("log_10-12-2026.txt", string.Concat(Enumerable.Repeat("0123456789 an early line\n", 60000)) + "the last line\n", now.AddMinutes(-1));
+            var plan = SupportReportBuilder.PlanFocusedData(root, true, active, now);
+            var big = plan.First(x => x.Rel == "log_10-12-2026.txt");
+            Check("a log under the limit goes in whole", big.Include && big.TailBytes == 0, true);
+
+            // Names (handoff 26).
+            var utc = new DateTime(2026, 10, 9, 9, 15, 20, DateTimeKind.Utc);
+            var central = TimeZoneInfo.FindSystemTimeZoneById("Central Standard Time");
+            CheckStr("a report is named for who, what kind and when, in the display zone",
+                SupportNames.Report("kb0uzt", "Bug / Problem", "Jim Ruby", "kb0uzt@example.com", utc, central),
+                "KB0UZT - Bug - Jim Ruby - kb0uzt@example.com - 2026-10-09 04-15 CDT");
+            CheckStr("...in UTC when that is how times are shown",
+                SupportNames.Report("KB0UZT", "Feature Request", "Jim Ruby", "kb0uzt@example.com", utc, TimeZoneInfo.Utc),
+                "KB0UZT - Feature Request - Jim Ruby - kb0uzt@example.com - 2026-10-09 09-15 UTC");
+            CheckStr("...winter time is standard time", SupportNames.TimeText(new DateTime(2026, 12, 9, 9, 15, 0, DateTimeKind.Utc), central), "2026-12-09 03-15 CST");
+            CheckStr("the four types have short names", string.Join("|", new[] { "Bug / Problem", "Feature Request", "Accessibility", "Question / Other", "" }.Select(SupportNames.TypeLabel)),
+                "Bug|Feature Request|Accessibility|Question|Report");
+            string odd = SupportNames.Report("K1ABC", "Question / Other", "A/B: \"Jo\" <x>|y?*  ", new string('e', 80) + "@example.com", utc, TimeZoneInfo.Utc);
+            Check("characters a file name cannot hold are removed and long parts shortened",
+                odd.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && odd.Contains(" - Question - A B Jo x y - ") && odd.Length < 160, true);
+            CheckStr("a save-only report with no sender details still has a name",
+                SupportNames.Report("", "Accessibility", "", "", utc, TimeZoneInfo.Utc), "Jimmy Next support - Accessibility - 2026-10-09 09-15 UTC");
+            CheckStr("uploaded settings: who they are for and when they were uploaded",
+                SupportNames.Profile("kb0uzt", utc, central), "KB0UZT - Updated 2026-10-09 04-15 CDT");
+            string first = SupportNames.Unique(root, "KB0UZT - Bug - x", ".zip");
+            File.WriteAllText(first, "one");
+            string second = SupportNames.Unique(root, "KB0UZT - Bug - x", ".zip");
+            Check("two reports in the same minute never replace each other", first != second && second.EndsWith("KB0UZT - Bug - x (2).zip"), true);
+            var q = new SupportService.SupportRequest { Ticket = "KB0UZT-20261009-091520-f41ccfee82ae8d80", Callsign = "KB0UZT", Name = "Jim Ruby", Email = "kb0uzt@example.com", Category = "Bug", SubmittedUtc = "2026-10-09T09:15:20+00:00", FileName = "KB0UZT-20261009-091520-f41ccfee82ae8d80.zip" };
+            string saved = OptionsDlg.SupportRequestFileName(q);
+            Check("a helper's saved copy is named readably, by when it was SENT, without the ticket",
+                saved.StartsWith("KB0UZT - Bug - Jim Ruby - kb0uzt@example.com - 2026-10-09 ") && saved.EndsWith(".zip") && !saved.Contains("f41ccfee"), true);
+            q.Category = "";
+            Check("an old report with no type reads 'Report'", OptionsDlg.SupportRequestFileName(q).Contains(" - Report - "), true);
         }
         catch (Exception ex)
         {

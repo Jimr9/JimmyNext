@@ -20,7 +20,6 @@ namespace WSJTX_Controller
         // roughly three times (Show, the tick's own Activate(), Load's old Activate()). Focus it
         // exactly once, on first activation.
         private bool _initialFocusDone;
-        private static string _lastSupportFolder;   // where the last support report was saved, this session
 
         public HelpDlg(Controller co, string c, string t)
         {
@@ -100,67 +99,9 @@ namespace WSJTX_Controller
             ctrl.HelpClosed();
         }
 
-        private async void supportReportButton_Click(object sender, EventArgs e)
-        {
-            string prefill = null;
-            try { prefill = ctrl.wsjtxClient?.myCall; } catch { }
-
-            var dlg = new SupportReportDlg(prefill) { Owner = this };
-            if (dlg.ShowDialog() != DialogResult.OK) return;
-
-            string confirmText =
-                (dlg.Upload
-                    ? "Jimmy Next will create a support report and send it to KB0UZT with your callsign, name and email. A copy is kept on this computer.\n\n"
-                    : "Jimmy Next will create a support report ZIP. Next you choose where to save it.\n\n") +
-                "It contains your description, your Jimmy Next folder (settings with passwords removed, " +
-                "logs" + (dlg.IncludeLogbook ? ", your logbook" : "") + ") and Windows information.\n\n" +
-                (dlg.Upload ? "Send the report?" : "Create the report?");
-
-            if (MessageBox.Show(confirmText, "Create Support Report",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Question,
-                    MessageBoxDefaultButton.Button2) != DialogResult.Yes)
-                return;
-
-            // 2.0.81: the operator chooses where it is saved (not everyone uses Downloads);
-            // Enter keeps the offered place and name. Remembered for the rest of the session.
-            string offered = SupportReportBuilder.DefaultZipPath();
-            string zipPath = offered;
-            // Sending (2026-10-07): no Save dialog -- the copy goes in the usual place (the name
-            // carries the date and time, so it never replaces another) and the ticket message
-            // says where it is.
-            if (!dlg.Upload)
-            using (var save = new SaveFileDialog
-            {
-                Title            = "Save support report",
-                Filter           = "ZIP file (*.zip)|*.zip",
-                FileName         = Path.GetFileName(offered),
-                InitialDirectory = _lastSupportFolder ?? Path.GetDirectoryName(offered),
-                OverwritePrompt  = true,
-            })
-            {
-                if (save.ShowDialog(this) != DialogResult.OK) return;
-                zipPath = save.FileName;
-                _lastSupportFolder = Path.GetDirectoryName(zipPath);
-            }
-
-            var result = SupportReportBuilder.Build(
-                ctrl,
-                dlg.Callsign, dlg.PersonName, dlg.Email,
-                dlg.ProblemType, dlg.Description, dlg.Steps, dlg.IncludeLogbook, zipPath);
-
-            if (result.Success)
-            {
-                await SupportReportDelivery.Deliver(this, dlg.Upload, result.ZipPath, dlg.Callsign, dlg.PersonName, dlg.Email, supportReportButton);
-            }
-            else
-            {
-                MessageBox.Show(
-                    $"Could not create support report:\n{result.Error}",
-                    "Support Report Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-            }
-        }
+        // The report form is the main window's, not Help's (2026-10-12): closing or reopening
+        // Help never closes it, and pressing this again brings the same form forward.
+        private void supportReportButton_Click(object sender, EventArgs e) => ctrl.OpenSupportReport();
 
         private void HelpDlg_Activated(object sender, EventArgs e)
         {

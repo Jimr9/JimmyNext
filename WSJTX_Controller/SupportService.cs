@@ -110,8 +110,13 @@ namespace WSJTX_Controller
         internal Task<Result> DeleteSupport(string ticket, string revision, CancellationToken ct) =>
             Post("delete_support", Fields(("ticket", ticket), ("confirm", "yes"), ("expected_revision", revision)), null, true, false, ct);
 
-        internal Task<Result> SubmitSupport(string callsign, string name, string email, string fileName, byte[] report, CancellationToken ct) =>
-            Post("support", Fields(("callsign", callsign), ("name", name), ("email", email)), ("report", fileName, report), false, false, ct);
+        // category: the form's problem type as its short word (SupportNames.TypeLabel), so a
+        // helper can tell a bug from a feature request without opening the report. An older
+        // server ignores it. The file goes up under a plain fixed name (the host's firewall
+        // refuses anything else in the upload header, see Multipart); the server names what it
+        // stores, and readable names are made on each computer that shows one (SupportNames).
+        internal Task<Result> SubmitSupport(string callsign, string name, string email, string category, byte[] report, CancellationToken ct) =>
+            Post("support", Fields(("callsign", callsign), ("name", name), ("email", email), ("category", category)), ("report", "report.zip", report), false, false, ct);
 
         private static List<(string, string)> Fields(params (string Name, string Value)[] f) =>
             f.Where(x => x.Value != null).Select(x => (x.Name, x.Value)).ToList();
@@ -284,7 +289,8 @@ namespace WSJTX_Controller
         // ── Server lists ────────────────────────────────────────────────────────────────────
 
         internal sealed class ServerProfile { public string Callsign, Revision, ModifiedUtc; public long Bytes; }
-        internal sealed class SupportRequest { public string Ticket, Callsign, Name, Email, SubmittedUtc, FileName, Revision; public long Bytes; }
+        // Category: "" from a server or a report that predates it (shown as "Report").
+        internal sealed class SupportRequest { public string Ticket, Callsign, Name, Email, Category, SubmittedUtc, FileName, Revision; public long Bytes; }
 
         internal static List<ServerProfile> Profiles(Result r) =>
             Items(r, "profiles").Select(e => new ServerProfile
@@ -296,6 +302,7 @@ namespace WSJTX_Controller
             Items(r, "requests").Select(e => new SupportRequest
             {
                 Ticket = Str(e, "ticket"), Callsign = Str(e, "callsign"), Name = Str(e, "name"), Email = Str(e, "email"),
+                Category = Str(e, "category"),
                 SubmittedUtc = Str(e, "submitted_utc"), FileName = Str(e, "filename"), Revision = Str(e, "revision"), Bytes = Num(e, "bytes"),
             }).Where(q => !string.IsNullOrEmpty(q.Ticket)).ToList();
 

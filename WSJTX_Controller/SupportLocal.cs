@@ -23,6 +23,45 @@ namespace WSJTX_Controller
         internal static string MyDefaultsPath => Path.Combine(Folder, "my-defaults.zip");
         internal static string LastInstalledPath => Path.Combine(Folder, "last-installed.zip");
 
+        // Beside each saved copy, this computer's own radio port, baud rate, PTT port and sound
+        // devices as they were when it was saved or installed (2026-10-12). Local only: the zip
+        // is the same shareable file as before and never holds a sound device; this record stays
+        // in the Support folder, which no report, package or export includes. A copy saved
+        // before this existed has none -- then this computer's present devices are offered.
+        internal static string LocalChoicesPath(string zipPath) => Path.ChangeExtension(zipPath, ".local.ini");
+
+        internal static void SaveLocalChoices(string zipPath, System.Collections.Generic.IDictionary<string, string> values)
+        {
+            Directory.CreateDirectory(Folder);
+            string path = LocalChoicesPath(zipPath);
+            var lines = new System.Collections.Generic.List<string> { "[Local]" };
+            foreach (string key in SupportLocalChoice.Keys)
+                if (values.TryGetValue(key, out string v)) lines.Add(key + "=" + (v ?? "").Replace("\r", " ").Replace("\n", " "));
+            File.WriteAllLines(path + ".new", lines, new System.Text.UTF8Encoding(false));
+            if (File.Exists(path)) File.Delete(path);
+            File.Move(path + ".new", path);
+        }
+
+        // Null when there is no record (an older saved copy), never a guess.
+        internal static System.Collections.Generic.Dictionary<string, string> LoadLocalChoices(string zipPath)
+        {
+            try
+            {
+                string path = LocalChoicesPath(zipPath);
+                if (!File.Exists(path)) return null;
+                var d = new System.Collections.Generic.Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (string line in File.ReadAllLines(path))
+                {
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string key = line.Substring(0, eq).Trim();
+                    if (Array.IndexOf(SupportLocalChoice.Keys, key) >= 0) d[key] = line.Substring(eq + 1).Trim();
+                }
+                return d;
+            }
+            catch { return null; }
+        }
+
         private static IniFile Ini()
         {
             Directory.CreateDirectory(Folder);

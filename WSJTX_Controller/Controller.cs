@@ -2903,6 +2903,22 @@ namespace WSJTX_Controller
 
         private void Controller_FormClosing(object sender, FormClosingEventArgs e)
         {
+            // A support report still being written (or made) would be lost with the program:
+            // ask, and stay open on No. Not on a profile switch -- there the program goes on and
+            // what was typed is kept for the next time the form is opened (CloseForOwner below).
+            var report = _supportReportWindow;
+            if (report != null && !report.IsDisposed && !ReopenForProfile && e.CloseReason == CloseReason.UserClosing
+                && (report.HasDraft || report.Submitting))
+            {
+                if (MessageBox.Show(this, report.Submitting
+                            ? "A support report is being made. Close Jimmy Next anyway?"
+                            : "A support report is open and has not been sent. Close Jimmy Next and discard it?",
+                        "Jimmy Next", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                {
+                    e.Cancel = true;
+                    return;
+                }
+            }
             // Normally the final flush of every setting to the active .ini. Skipped only when the
             // operator unticked "Save current configuration first" on a profile switch -- see
             // _suppressSettingsSaveOnExit. Everything below (upload wait, CloseComm/engine halt)
@@ -2930,6 +2946,7 @@ namespace WSJTX_Controller
             CloseComm();
             optionsDlg?.Close();
             if (helpDlg != null) helpDlg.Close();
+            _supportReportWindow?.CloseForOwner(keepDraft: ReopenForProfile);
             _logbookWindow?.Close();
             _smartModeWindow?.Close();
             _otaSpotsWindow?.Close();
@@ -4539,6 +4556,27 @@ namespace WSJTX_Controller
                     wsjtxClient?.DebugChanged();
             }
         }
+        // The support report form: one per main window, not owned (so it never sits in front
+        // of the main window), kept until the operator closes it or sends the report. Opening it
+        // again brings the same form, with what was typed, to the front.
+        private SupportReportDlg _supportReportWindow;
+        internal SupportReportDlg SupportReportWindowForTest => _supportReportWindow;
+        internal void OpenSupportReport()
+        {
+            if (_supportReportWindow != null && !_supportReportWindow.IsDisposed)
+            {
+                if (_supportReportWindow.WindowState == FormWindowState.Minimized) _supportReportWindow.WindowState = FormWindowState.Normal;
+                _supportReportWindow.Activate();
+                return;
+            }
+            string prefill = null;
+            try { prefill = wsjtxClient?.myCall; } catch { }
+            var window = new SupportReportDlg(this, prefill);
+            window.FormClosed += (s, e) => { if (_supportReportWindow == window) _supportReportWindow = null; };
+            _supportReportWindow = window;
+            window.Show();
+        }
+
         public void HelpClosed()
         {
             initialConnFaultTimer.Start();

@@ -1,11 +1,34 @@
 using System;
 using System.Drawing;
+using System.IO;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace WSJTX_Controller
 {
+    // The support report form. Since 2026-10-12 it does not block the rest of Jimmy Next (ticket
+    // KB0UZT-20261008): it is a window of its own (Controller.OpenSupportReport keeps the one
+    // instance), so the operator can leave it open, look at the main window, Options, Spots or
+    // the Logbook, and come back to everything as it was typed. Nothing is built or sent until
+    // OK is pressed and the question after it is answered Yes; then this window makes the
+    // report itself and closes when that worked. Closing it with something typed asks first.
+    // A profile switch closes every window: what was typed is then kept (KeptDraft) and comes
+    // back the next time Create Support Report is opened in this run of the program.
     internal sealed class SupportReportDlg : Form
     {
+        internal sealed class Draft
+        {
+            public string Callsign, Name, Email, Description, Steps;
+            public int ProblemType;
+            public bool IncludeLogbook, Upload;
+        }
+        internal static Draft KeptDraft;
+        private static string _lastSupportFolder;   // where the last save-only report went, this session
+
+        private readonly Controller _ctrl;
+        private Button _okButton;
+        private bool _submitting, _done, _closingForOwner;
+
         private static bool IsEmail(string s)
         {
             if (string.IsNullOrWhiteSpace(s) || s.Length > 254 || s.Contains(" ")) return false;
@@ -31,14 +54,17 @@ namespace WSJTX_Controller
         public bool Upload => _uploadRadio.Checked;
         private RadioButton _uploadRadio;
 
-        public SupportReportDlg(string prefillCallsign)
+        public SupportReportDlg(Controller ctrl, string prefillCallsign)
         {
+            _ctrl           = ctrl;
             Text            = "Create Support Report";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox     = false;
-            MinimizeBox     = false;
-            ShowInTaskbar   = false;
-            StartPosition   = FormStartPosition.CenterParent;
+            // Its own window: on the taskbar and in Alt+Tab, and it can be minimized. No Owner --
+            // an owned window stays in front of the main window (Controller.OpenLogbookWindow).
+            MinimizeBox     = true;
+            ShowInTaskbar   = true;
+            StartPosition   = FormStartPosition.CenterScreen;
 
             const int lx = 12;
             const int fw = 450;
@@ -168,7 +194,7 @@ namespace WSJTX_Controller
             y += 26;
             var hintPrivacy = new Label
             {
-                Text      = "Settings, logs and Jimmy Next's folder are included; passwords and logins are never included.",
+                Text      = "Current settings and recent logs are included; passwords and logins are never included.",
                 Location  = new Point(lx, y),
                 Size      = new Size(fw, 16),
                 Font      = new Font(SystemFonts.DefaultFont.FontFamily, 7.5f),
@@ -214,6 +240,7 @@ namespace WSJTX_Controller
                 TabIndex = tab++,
             };
             okButton.Click += OkButton_Click;
+            _okButton = okButton;
 
             var cancelButton = new Button
             {
@@ -221,8 +248,8 @@ namespace WSJTX_Controller
                 Size         = new Size(80, 26),
                 Location     = new Point(lx + 90, y),
                 TabIndex     = tab++,
-                DialogResult = DialogResult.Cancel,
             };
+            cancelButton.Click += (s, e) => Close();   // Escape too; asks first when something is typed
 
             Controls.AddRange(new Control[]
             {
@@ -239,6 +266,61 @@ namespace WSJTX_Controller
             AcceptButton = okButton;
             CancelButton = cancelButton;
             ClientSize   = new Size(fw + 26, y + 26 + 12);
+
+            // What was being typed when a profile switch closed the window.
+            var kept = KeptDraft;
+            KeptDraft = null;
+            if (kept != null)
+            {
+                _callsignTextBox.Text = kept.Callsign;
+                _nameTextBox.Text = kept.Name;
+                _emailTextBox.Text = kept.Email;
+                if (kept.ProblemType >= 0 && kept.ProblemType < _problemTypeCombo.Items.Count) _problemTypeCombo.SelectedIndex = kept.ProblemType;
+                _descTextBox.Text = kept.Description;
+                _stepsTextBox.Text = kept.Steps;
+                _includeLogbookCheckBox.Checked = kept.IncludeLogbook;
+                (kept.Upload ? _uploadRadio : saveRadio).Checked = true;
+            }
+            FormClosing += OnFormClosing;
+        }
+
+        // Something the operator would lose: a description or steps typed and not yet sent.
+        internal bool HasDraft => !_done && (_descTextBox.Text.Trim().Length > 0 || _stepsTextBox.Text.Trim().Length > 0);
+        internal bool Submitting => _submitting;
+
+        internal Draft Snapshot() => new Draft
+        {
+            Callsign = _callsignTextBox.Text, Name = _nameTextBox.Text, Email = _emailTextBox.Text,
+            ProblemType = _problemTypeCombo.SelectedIndex, Description = _descTextBox.Text, Steps = _stepsTextBox.Text,
+            IncludeLogbook = _includeLogbookCheckBox.Checked, Upload = _uploadRadio.Checked,
+        };
+
+        // Tests: type into the form.
+        internal void TestType(string description, string steps) { _descTextBox.Text = description; _stepsTextBox.Text = steps; }
+
+        // The main window is closing. keepDraft (a profile switch: the program goes on) keeps
+        // what was typed for the next time the form is opened; otherwise it was already asked
+        // about (Controller_FormClosing) and goes with the program.
+        internal void CloseForOwner(bool keepDraft)
+        {
+            if (keepDraft && HasDraft) KeptDraft = Snapshot();
+            _closingForOwner = true;
+            Close();
+        }
+
+        private void OnFormClosing(object sender, FormClosingEventArgs e)
+        {
+            if (_closingForOwner || _done || e.CloseReason != CloseReason.UserClosing) return;
+            if (_submitting)
+            {
+                MessageBox.Show(this, "The report is being made. Please wait until it has finished.", Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                e.Cancel = true;
+                return;
+            }
+            if (!HasDraft) return;
+            if (MessageBox.Show(this, "Close this support report and discard what you typed?", Text,
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                e.Cancel = true;
         }
 
         private void OkButton_Click(object sender, EventArgs e)
@@ -275,7 +357,74 @@ namespace WSJTX_Controller
                     return;
                 }
             }
-            DialogResult = DialogResult.OK;
+            _ = SubmitAsync();
+        }
+
+        // OK, after validation: the question, the place to save (save only), the report, and
+        // sending it. The fields are read ONCE, here, so what is sent is what was on screen when
+        // OK was pressed. OK is off while this runs, so a second press cannot send it twice; the
+        // rest of Jimmy Next stays usable. Anything that stops short of a finished report leaves
+        // the window open with everything typed.
+        private async Task SubmitAsync()
+        {
+            if (_submitting || _done) return;
+            var d = Snapshot();
+            string callsign = d.Callsign.Trim(), name = d.Name.Trim(), email = d.Email.Trim();
+            string type = ProblemType, description = d.Description.Trim(), steps = d.Steps.Trim();
+
+            string confirmText =
+                (d.Upload
+                    ? "Jimmy Next will create a support report and send it to KB0UZT with your callsign, name and email. A copy is kept on this computer.\n\n"
+                    : "Jimmy Next will create a support report ZIP. Next you choose where to save it.\n\n") +
+                "It contains your description, your current settings with passwords removed, the last few days of logs" +
+                (d.IncludeLogbook ? ", a copy of your logbook" : "") + " and Windows information.\n\n" +
+                (d.Upload ? "Send the report?" : "Create the report?");
+            if (MessageBox.Show(this, confirmText, Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+                return;
+
+            // The operator chooses where a save-only report goes (2.0.81); a sent one keeps its
+            // copy in the usual place, and the message afterwards says where.
+            string offered = SupportReportBuilder.DefaultZipPath(callsign, type, name, email);
+            string zipPath = offered;
+            if (!d.Upload)
+                using (var save = new SaveFileDialog
+                {
+                    Title            = "Save support report",
+                    Filter           = "ZIP file (*.zip)|*.zip",
+                    FileName         = Path.GetFileName(offered),
+                    InitialDirectory = _lastSupportFolder ?? Path.GetDirectoryName(offered),
+                    OverwritePrompt  = true,
+                })
+                {
+                    if (save.ShowDialog(this) != DialogResult.OK) return;
+                    zipPath = save.FileName;
+                    _lastSupportFolder = Path.GetDirectoryName(zipPath);
+                }
+
+            _submitting = true;
+            _okButton.Enabled = false;
+            bool finished = false;
+            try
+            {
+                var result = SupportReportBuilder.Build(_ctrl, callsign, name, email, type, description, steps, d.IncludeLogbook, zipPath);
+                if (!result.Success)
+                {
+                    MessageBox.Show(this, $"Could not create support report:\n{result.Error}", "Support Report Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                finished = await SupportReportDelivery.Deliver(this, d.Upload, result.ZipPath, callsign, name, email, type, null);
+            }
+            finally
+            {
+                _submitting = false;
+                if (!IsDisposed)
+                {
+                    _okButton.Enabled = true;
+                    if (finished) { _done = true; Close(); }
+                }
+            }
         }
     }
 }

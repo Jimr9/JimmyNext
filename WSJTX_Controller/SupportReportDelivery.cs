@@ -15,42 +15,45 @@ namespace WSJTX_Controller
     {
         private const string Title = "Support Report";
 
-        public static async Task Deliver(IWin32Window owner, bool upload, string zipPath, string callsign, string name, string email, Control busy)
+        // True when the report is finished with -- saved (save only), or sent. False leaves the
+        // form open with what was typed: it could not be sent, and the operator chose not to try
+        // again (the ZIP is still saved, and the message says where).
+        public static async Task<bool> Deliver(IWin32Window owner, bool upload, string zipPath, string callsign, string name, string email, string problemType, Control busy)
         {
             if (!upload)
             {
                 MessageBox.Show(owner, $"Support report saved:\n{zipPath}", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                return true;
             }
             if (!SupportService.Available)
             {
                 MessageBox.Show(owner, SupportService.NotAvailable + $" Your report is saved:\n{zipPath}", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                return false;
             }
             byte[] bytes;
             try { bytes = File.ReadAllBytes(zipPath); }
             catch (Exception ex)
             {
                 MessageBox.Show(owner, $"Could not read the saved report to send it: {ex.Message}\n\n{zipPath}", Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
+                return false;
             }
             string call = SupportService.BaseCallsign(callsign);
             while (true)
             {
-                var r = await Controller.RunSupportBusy(busy, ct => new SupportService().SubmitSupport(call, name, email, Path.GetFileName(zipPath), bytes, ct));
-                if (r.Ok && !string.IsNullOrEmpty(r.Get("ticket")))
+                var r = await Controller.RunSupportBusy(busy, ct => new SupportService().SubmitSupport(call, name, email, SupportNames.TypeLabel(problemType), bytes, ct));
+                if (r.Ok)
                 {
                     try { SupportLocal.SenderName = name; SupportLocal.SenderEmail = email; } catch { }
                     MessageBox.Show(owner,
-                        $"Support request sent. Your ticket number is {r.Get("ticket")}.\n\nThe report is also saved on this computer:\n{zipPath}\n\n" +
+                        $"Support request sent.\n\nThe report is also saved on this computer:\n{zipPath}\n\n" +
                         "Press Control C to copy this message.",
                         Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
+                    return true;
                 }
                 if (MessageBox.Show(owner,
                         $"The report was not sent: {r.Error}\n\nIt is saved on this computer:\n{zipPath}\n\nTry sending it again?",
                         Title, MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Retry)
-                    return;
+                    return false;
             }
         }
     }
