@@ -318,6 +318,7 @@ namespace WSJTX_Controller
                 decodeEnginePanel, decodePanel, frequenciesPanel, notificationsPanel, logbookSyncPanel, lookupPanel,
                 appearancePanel, stationOperatorPanel, profilesPanel
             };
+            AddOtherProgramsCategory(categoryPanels);   // output to other programs (OptionsDlg.OtherPrograms.cs)
             AddSupportCategories(categoryPanels);   // Support / Support Helper, when switched on (OptionsDlg.Support.cs)
             CategoryListNav.Wire(_categoryListBox, _categoryDetailHost, categoryPanels);
 
@@ -1123,6 +1124,7 @@ namespace WSJTX_Controller
         private void okButton_Click(object sender, EventArgs e)
         {
             if (!ValidateHotkeys()) return;
+            if (!ValidateOtherPrograms()) return;
             // Setup's Finish: an empty Operator callsign starts as the Station callsign (the
             // Station & Operator page in Options keeps them separate for a guest operator).
             if (InSetupMode && _stationOperatorCallTextBox != null && _engineMyCallTextBox != null
@@ -1150,6 +1152,7 @@ namespace WSJTX_Controller
             SaveSoundsTab();
             SaveLookupTab();
             SaveAppearanceTab();
+            SaveOtherPrograms();
             // Release-audit finding, 2026-08-20: commit these settings to disk NOW, not only on
             // the next clean app shutdown -- see SaveOptionsRelatedSettings's own comment
             // (Controller.cs). Every Save*Tab() above already applied its changes live to

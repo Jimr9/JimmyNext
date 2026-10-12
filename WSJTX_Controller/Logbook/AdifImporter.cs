@@ -28,7 +28,12 @@ namespace WSJTX_Controller
         // ", N not matched" / ", N held for review" for the status line, or "".
         public string UnmatchedText =>
             (Unmatched > 0 ? $", {Unmatched:N0} not matched to a logged contact" : "") +
-            (Held > 0 ? $", {Held:N0} held for review" : "");
+            (Held > 0 ? $", {Held:N0} held for review" : "") +
+            (Proposed > 0 ? $", {Proposed:N0} new proposed change{(Proposed == 1 ? "" : "s")} to review (Logbook, Sync, Review Downloaded Changes)" : "");
+
+        // New differences between this download and the logged contacts' own fields, kept for the
+        // operator to approve or decline (NexusDownloadedChanges). Nothing was changed for them.
+        public int    Proposed        { get; set; }
 
         public override string ToString() =>
             $"Processed {Processed}: {NewQsos} new, {NewlyConfirmed} newly confirmed, {Corrected} corrected, {Skipped} unchanged{UnmatchedText}" +

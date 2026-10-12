@@ -1215,6 +1215,41 @@ mod tests {
         rows(engine)["rows"][0].clone()
     }
 
+    // Output to other programs (2026-10-12): the logged-contact message (QSOLogged, then
+    // LoggedADIF) is sent by Nexus's radio loop from the queue `Engine::log_qso` fills. A contact
+    // Jimmy logs reaches that queue exactly once: its re-send (the same request after a lost
+    // answer, or the outbox replaying after a restart) is recognised and queues nothing, and a
+    // contact Nexus refuses as a duplicate queues nothing. An edit, a delete and an import do
+    // not queue either -- only a newly logged contact is announced.
+    #[test]
+    fn a_logged_contact_is_announced_to_other_programs_exactly_once() {
+        let d = TempDir::new("udp-once");
+        let (eng, host) = launch(&d.0);
+        assert!(lock(&eng).take_pending_udp_qsos().is_empty(), "nothing before a contact");
+
+        assert_eq!(log_qso(&host, &eng, args("u1", qso("W1AW", T0, "20m"))).state, "saved");
+        let queued = lock(&eng).take_pending_udp_qsos();
+        assert_eq!(queued.len(), 1, "one contact, one announcement");
+        assert_eq!(queued[0].call, "W1AW");
+
+        assert_eq!(log_qso(&host, &eng, args("u1", qso("W1AW", T0, "20m"))).state, "already");
+        assert!(lock(&eng).take_pending_udp_qsos().is_empty(), "the re-send announces nothing");
+
+        assert_eq!(log_qso(&host, &eng, args("u2", qso("W1AW", T0 + 120, "20m"))).state, "duplicate");
+        assert!(lock(&eng).take_pending_udp_qsos().is_empty(), "a refused duplicate announces nothing");
+
+        let row = first_row(&eng);
+        let mut edited: LoggedQso = serde_json::from_value(row.clone()).unwrap();
+        edited.name = Some("Hiram".into());
+        let r = log_edit(&host, &eng, LogEditArgs {
+            id: row["id"].as_str().unwrap().to_string(),
+            edit_key: row["editKey"].as_str().unwrap().to_string(),
+            qso: edited,
+        });
+        assert_eq!(r.state, "saved", "{r:?}");
+        assert!(lock(&eng).take_pending_udp_qsos().is_empty(), "an edit announces nothing");
+    }
+
     #[test]
     fn edit_delete_merge_and_stamp_are_durable_and_refuse_a_stale_edit() {
         let d = TempDir::new("writes");

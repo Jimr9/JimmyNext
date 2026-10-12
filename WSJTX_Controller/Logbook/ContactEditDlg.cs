@@ -13,12 +13,19 @@ namespace WSJTX_Controller
     //     nothing can change until "Allow editing" is checked -- off every time this opens.
     //     Saving asks "Save these changes?" naming the fields that changed.
     //   - Editable: the contact, the station worked, my station, comment and notes.
-    //   - Protected (DXCC, CQ/ITU zones, station callsign, operator, upload status): shown read
-    //     only until "Allow editing protected fields" is checked -- off every time this opens,
-    //     because a wrong value there quietly changes awards or uploads.
-    //   - Confirmations (LoTW, QRZ, eQSL, card) and credit: ALWAYS read only. The services own
-    //     them, and Nexus keeps them through any edit (a sync would put back what they know).
-    //   - Any other field the contact carries: listed, read only.
+    //   - Protected (DXCC, CQ/ITU zones, station callsign, operator, upload status, the TQSL
+    //     station location recorded with the contact, and every other field the contact
+    //     carries): shown read only until "Allow editing protected fields" is checked -- off
+    //     every time this opens, because a wrong value there quietly changes awards or uploads.
+    //     Since 2026-10-12 that is ALL of them (operator, 2026-10-09): nothing a contact holds
+    //     is stranded read only except what a service owns.
+    //   - The TQSL location has a "Choose TQSL Location" action, so a contact logged while the
+    //     location could not be recorded is repaired by picking the location it was made from
+    //     -- its details are shown first and filled in from TQSL, never typed by hand. Picking
+    //     one changes nothing until Save and its question; it never marks the contact uploaded.
+    //   - Confirmations (LoTW, QRZ, eQSL, card), credit, what a service reported, and the
+    //     record's own identity: ALWAYS read only. The services own them, and Nexus keeps them
+    //     through any edit (a sync would put back what they know).
     //
     // The dialog only builds the edited contact; onSave writes it (NexusLogbookService.SaveRecord)
     // and returns null, or an error to show -- a failed save leaves every field as typed.
@@ -38,6 +45,15 @@ namespace WSJTX_Controller
         private readonly Dictionary<Control, string> _shown = new Dictionary<Control, string>();
         private readonly HashSet<ComboBox> _lockedCombos = new HashSet<ComboBox>();
         private TextBox _dxcc, _cqz, _ituz, _stationCall, _operator;
+        private TextBox _tqslLocation, _tqslDetails, _tqslStatus, _otherFields;
+        private Button _chooseTqsl;
+        // Tests hand in TQSL's locations; null = read TQSL's own file.
+        internal static Func<Dictionary<string, TqslStationData.Location>> TestLocations;
+        private static Dictionary<string, TqslStationData.Location> Locations(out string error)
+        {
+            error = null;
+            return TestLocations != null ? TestLocations() : TqslStationData.Load(out error);
+        }
         private readonly Dictionary<string, CheckBox> _uploads = new Dictionary<string, CheckBox>();
         private TextBox _status;
 
@@ -145,11 +161,27 @@ namespace WSJTX_Controller
                 Add(t, cb, 2);
             }
 
+            // The TQSL station location recorded when the contact was logged, and whether TQSL
+            // still has it as it was -- the same judgement the LoTW upload makes.
+            _tqslStatus = Box(t, "TQSL location status", "", width: 420, span: 3, readOnly: true, lines: 2);
+            _tqslLocation = Box(t, "TQSL location", q.ExtraValue(TqslLocationTag));
+            _chooseTqsl = new Button { Text = "Choose TQSL Location...", AccessibleName = "Choose TQSL location", AutoSize = true };
+            _chooseTqsl.Click += (s, e) => ChooseTqslLocation();
+            Add(t, _chooseTqsl, 2);
+            _tqslDetails = Box(t, "TQSL location details", q.ExtraValue(TqslDetailsTag), width: 420, span: 3);
+            _tqslLocation.TextChanged += (s, e) => ShowTqslStatus();
+            _tqslDetails.TextChanged += (s, e) => ShowTqslStatus();
+            ShowTqslStatus();
+            string other = OtherFieldsText(q);
+            _otherFields = Box(t, "Other fields, one per line as NAME=value", other, width: 420, span: 3,
+                lines: Math.Min(8, Math.Max(2, other.Count(c => c == '\n') + 2)));
+            _otherFields.AcceptsReturn = true;
+
             t = Group("Read only");
             Box(t, "Confirmations", Confirmations(q), width: 420, span: 3, readOnly: true);
-            string other = OtherFields(q);
-            Box(t, "Other fields", other.Length == 0 ? "none" : other, width: 420, span: 3, readOnly: true,
-                lines: Math.Min(8, Math.Max(1, other.Count(c => c == '\n') + 1)));
+            string serviceText = ServiceFieldsText(q);
+            Box(t, "Service and record fields", serviceText.Length == 0 ? "none" : serviceText, width: 420, span: 3, readOnly: true,
+                lines: Math.Min(8, Math.Max(1, serviceText.Count(c => c == '\n') + 1)));
 
             // Buttons and status line.
             var bottom = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.LeftToRight, TabIndex = _groupTab++ };
@@ -177,7 +209,7 @@ namespace WSJTX_Controller
                 _power, _myRig, _myGrid, _myProgram, _myRef, _comment, _notes,
             });
             foreach (var cb in new[] { _mode, _theirProgram, _myProgram }) LockWhenReadOnly(cb);
-            foreach (var c in _normalFields.Concat(new Control[] { _dxcc, _cqz, _ituz, _stationCall, _operator })) _shown[c] = c.Text;
+            foreach (var c in _normalFields.Concat(ProtectedBoxes())) _shown[c] = c.Text;
             ApplyEditable();
             ClientSize = new Size(Math.Min(_flow.PreferredSize.Width + 30, 760),
                                   Math.Min(_flow.PreferredSize.Height + 12, Screen.FromControl(this).WorkingArea.Height - 80));
@@ -250,8 +282,124 @@ namespace WSJTX_Controller
                 if (c is TextBox tb) tb.ReadOnly = !edit;
                 else if (c is ComboBox cb) { if (edit) _lockedCombos.Remove(cb); else _lockedCombos.Add(cb); }
             }
-            foreach (var tb in new[] { _dxcc, _cqz, _ituz, _stationCall, _operator }) tb.ReadOnly = !prot;
+            foreach (var tb in ProtectedBoxes()) tb.ReadOnly = !prot;
             foreach (var cb in _uploads.Values) cb.AutoCheck = prot;
+            // Never disabled (a focused button that switches off drops the keyboard focus): it
+            // says why when protected editing is off.
+        }
+
+        private TextBox[] ProtectedBoxes() => new[] { _dxcc, _cqz, _ituz, _stationCall, _operator, _tqslLocation, _tqslDetails, _otherFields };
+
+        // ── The TQSL station location recorded with the contact ─────────────────────────────
+
+        internal const string TqslLocationTag = "APP_JIMMY_TQSL_LOCATION", TqslDetailsTag = "APP_JIMMY_TQSL_LOC_FP";
+
+        private void ShowTqslStatus()
+        {
+            var all = Locations(out _);
+            var judged = TqslStationData.Judge(_tqslLocation.Text, _tqslDetails.Text, _stationCall?.Text ?? _orig.StationCallsign, all);
+            string text = TqslStationData.StatusSentence(judged, _tqslLocation.Text);
+            if (_tqslStatus.Text != text) _tqslStatus.Text = text;
+        }
+
+        // What choosing `loc` for this contact would mean, and what does not fit: the location's
+        // details, then any difference from the contact worth a second look. `blocked` = it
+        // cannot be chosen at all (another station's location).
+        internal static string TqslChoiceReview(TqslStationData.Location loc, string stationCall, string myGrid, string myState, out bool blocked)
+        {
+            blocked = false;
+            var lines = new List<string> { $"Location '{loc.Name}': {TqslStationData.Describe(loc)}." };
+            string call = (stationCall ?? "").Trim();
+            if (loc.Call.Length > 0 && !string.Equals(loc.Call, call, StringComparison.OrdinalIgnoreCase))
+            {
+                blocked = true;
+                lines.Add($"It cannot be used: it is for {loc.Call}, and this contact's station callsign is {(call.Length == 0 ? "not set" : call)}.");
+                return string.Join(Environment.NewLine, lines);
+            }
+            string grid = (myGrid ?? "").Trim();
+            int n = Math.Min(grid.Length, loc.Grid.Length);
+            if (n >= 4 && !string.Equals(grid.Substring(0, n), loc.Grid.Substring(0, n), StringComparison.OrdinalIgnoreCase))
+                lines.Add($"Check: this contact's my grid is {grid}, the location's is {loc.Grid}.");
+            string state = (myState ?? "").Trim();
+            if (state.Length > 0 && loc.State.Length > 0 && !string.Equals(state, loc.State, StringComparison.OrdinalIgnoreCase))
+                lines.Add($"Check: this contact's my state is {state}, the location's is {loc.State}.");
+            lines.Add("Choosing it says this contact was made from this location. Nothing is saved until you press Save.");
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        private void ChooseTqslLocation()
+        {
+            if (!(_allowEdit.Checked && _allowProtected.Checked))
+            {
+                _status.Text = "Check Allow editing and Allow editing protected fields first.";
+                return;
+            }
+            var all = Locations(out string error);
+            if (all == null || all.Count == 0)
+            {
+                MessageBox.Show(this, all == null ? error : "TQSL has no station locations on this computer. Create one in TQSL first.",
+                    "Choose TQSL Location", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            var names = all.Values.Select(l => l.Name).OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList();
+            using (var dlg = new Form
+            {
+                Text = "Choose TQSL Location", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false, ClientSize = new Size(500, 230), Font = Font,
+            })
+            {
+                var list = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(10, 30), Width = 480, AccessibleName = "TQSL location", TabIndex = 0 };
+                foreach (string name in names) list.Items.Add(name);
+                var review = new TextBox
+                {
+                    ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, Location = new Point(10, 62), Size = new Size(480, 120),
+                    AccessibleName = "About this location", TabIndex = 1,
+                };
+                var ok = new Button { Text = "Use This Location", AccessibleName = "Use this location", Location = new Point(250, 194), Width = 150, TabIndex = 2 };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(410, 194), Width = 80, TabIndex = 3 };
+                bool blocked = true;
+                void Show()
+                {
+                    var loc = all[names[Math.Max(0, list.SelectedIndex)]];
+                    review.Text = TqslChoiceReview(loc, _stationCall.Text, _myGrid.Text, OwnStateOf(_orig), out blocked);
+                }
+                list.SelectedIndexChanged += (s, e) => Show();
+                int now = names.FindIndex(x => string.Equals(x, _tqslLocation.Text.Trim(), StringComparison.OrdinalIgnoreCase));
+                list.SelectedIndex = now >= 0 ? now : 0;
+                Show();
+                ok.Click += (s, e) =>
+                {
+                    if (blocked) { MessageBox.Show(dlg, "This location is for another callsign and cannot be used for this contact.", dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Information); list.Focus(); return; }
+                    dlg.DialogResult = DialogResult.OK;
+                };
+                dlg.Controls.Add(new Label { Text = "The TQSL station location this contact was made from:", Location = new Point(10, 10), AutoSize = true });
+                dlg.Controls.AddRange(new Control[] { list, review, ok, cancel });
+                dlg.CancelButton = cancel;
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                var chosen = all[names[Math.Max(0, list.SelectedIndex)]];
+                _tqslLocation.Text = chosen.Name;
+                _tqslDetails.Text = chosen.Fingerprint;
+                _status.Text = $"TQSL location '{chosen.Name}' chosen. Press Save to keep it.";
+            }
+        }
+
+        private static string OwnStateOf(NexusQso q) => q.ExtraValue("MY_STATE") ?? "";
+
+        // The TQSL boxes as they must be to save: null, or what is wrong. A named location must
+        // be one TQSL has, for this contact's station callsign, with ITS details -- so the
+        // details are never left not matching what is named.
+        internal static string TqslProblem(string location, string details, string stationCall, Dictionary<string, TqslStationData.Location> all, string loadError)
+        {
+            string rec = (location ?? "").Trim(), fp = (details ?? "").Trim();
+            if (rec.Length == 0) return fp.Length == 0 ? null : "TQSL location details are set, but no TQSL location is named. Use Choose TQSL Location, or clear the details.";
+            if (rec == Controller.TqslNoLocation) return null;
+            if (all == null) return "TQSL's station locations cannot be read, so the location cannot be checked: " + (loadError ?? "unknown reason");
+            if (!all.TryGetValue(rec, out var loc)) return $"TQSL has no station location named '{rec}'. Use Choose TQSL Location.";
+            if (loc.Call.Length > 0 && !string.Equals(loc.Call, (stationCall ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
+                return $"TQSL location '{rec}' is for {loc.Call}, not this contact's station callsign.";
+            if (!string.Equals(loc.Fingerprint, fp, StringComparison.Ordinal))
+                return $"The TQSL location details are not those of location '{rec}'. Use Choose TQSL Location to fill them in.";
+            return null;
         }
 
         // A ComboBox has no ReadOnly: while locked it keeps focus and its value is read, but keys,
@@ -308,19 +456,84 @@ namespace WSJTX_Controller
             return text;
         }
 
-        // Everything else the contact carries, one per line. Jimmy's own bookkeeping tags are left out.
-        private static string OtherFields(NexusQso q)
+        // What a service or the record itself owns: confirmations and their dates, what LoTW,
+        // QRZ and eQSL reported, upload stamps (changed with the Uploaded check boxes, never as
+        // raw text), and the record's identity. Always read only.
+        internal static bool IsServiceOrRecordTag(string tag)
+        {
+            string t = (tag ?? "").Trim().ToUpperInvariant();
+            if (t == "APP_NEXUS_ID" || t == "APP_JIMMY_REQ_ID" || t == "APP_JIMMY_SOURCE_QSO_ID" || t == "APP_JIMMY_IMPORTED_AT"
+                || t == "APP_JIMMY_MODIFIED_AT" || t == "APP_JIMMY_CONTEST_SESSION") return true;
+            if (t.StartsWith("APP_JIMMY_LOTW_") || t.StartsWith("APP_JIMMY_QRZ_") || t.StartsWith("APP_JIMMY_EQSL_")) return true;
+            if (t.StartsWith("QSL_RCVD") || t == "QSLRDATE" || t.StartsWith("LOTW_QSL") || t.StartsWith("EQSL_QSL") || t.StartsWith("QRZCOM_QSO_")
+                || t.StartsWith("CLUBLOG_QSO_UPLOAD") || t.StartsWith("HRDLOG_QSO_UPLOAD") || t.StartsWith("CREDIT_") || t == "QSL_SENT" || t == "QSLSDATE"
+                || t == "QSL_SENT_VIA") return true;
+            return false;
+        }
+
+        // Shown in a box of their own, so never in "Other fields".
+        private static bool HasOwnBox(string tag) =>
+            ShownTags.Contains(tag) || string.Equals(tag, TqslLocationTag, StringComparison.OrdinalIgnoreCase) || string.Equals(tag, TqslDetailsTag, StringComparison.OrdinalIgnoreCase);
+
+        // Every other field the contact carries, one per line as NAME=value -- the ADIF name, so
+        // a line can be changed, added or removed and read back exactly. Protected.
+        internal static string OtherFieldsText(NexusQso q)
         {
             var lines = new List<string>();
-            if (!string.IsNullOrEmpty(q.PropMode)) lines.Add(FieldName("PROP_MODE") + ": " + q.PropMode);
-            if (!string.IsNullOrEmpty(q.SatName)) lines.Add(FieldName("SAT_NAME") + ": " + q.SatName);
-            if (q.FreqRxMhz.HasValue) lines.Add(FieldName("FREQ_RX") + ": " + q.FreqRxMhz.Value.ToString("0.000000", CultureInfo.InvariantCulture));
+            if (!string.IsNullOrEmpty(q.PropMode)) lines.Add("PROP_MODE=" + q.PropMode);
+            if (!string.IsNullOrEmpty(q.SatName)) lines.Add("SAT_NAME=" + q.SatName);
+            if (q.FreqRxMhz.HasValue) lines.Add("FREQ_RX=" + q.FreqRxMhz.Value.ToString("0.000000", CultureInfo.InvariantCulture));
             foreach (var kv in q.Extra)
             {
-                if (kv.Count != 2 || ShownTags.Contains(kv[0]) || kv[0].StartsWith("APP_JIMMY_", StringComparison.OrdinalIgnoreCase)) continue;
-                lines.Add(FieldName(kv[0]) + ": " + kv[1]);
+                if (kv.Count != 2 || HasOwnBox(kv[0]) || IsServiceOrRecordTag(kv[0])) continue;
+                lines.Add(kv[0].ToUpperInvariant() + "=" + (kv[1] ?? "").Replace("\r", " ").Replace("\n", " "));
             }
             return string.Join(Environment.NewLine, lines);
+        }
+
+        internal static string ServiceFieldsText(NexusQso q)
+        {
+            var lines = new List<string>();
+            foreach (var kv in q.Extra)
+                if (kv.Count == 2 && !HasOwnBox(kv[0]) && IsServiceOrRecordTag(kv[0])) lines.Add(FieldName(kv[0]) + ": " + kv[1]);
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        // "Other fields" as typed, put on the contact: every line NAME=value, a name once, never
+        // one that has its own box or that a service owns. Returns null, or what is wrong (the
+        // contact is then not changed).
+        internal static string ApplyOtherFields(NexusQso q, string text)
+        {
+            var pairs = new List<KeyValuePair<string, string>>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string raw in (text ?? "").Split('\n'))
+            {
+                string line = raw.Trim();
+                if (line.Length == 0) continue;
+                int eq = line.IndexOf('=');
+                if (eq <= 0) return $"Other fields: '{line}' is not NAME=value.";
+                string tag = line.Substring(0, eq).Trim().ToUpperInvariant(), value = line.Substring(eq + 1).Trim();
+                if (tag.Length > 64 || !tag.All(c => c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_')) return $"Other fields: '{tag}' is not a field name (letters, digits and underscore).";
+                if (HasOwnBox(tag)) return $"Other fields: {tag} has its own box above; change it there.";
+                if (IsServiceOrRecordTag(tag)) return $"Other fields: {tag} belongs to a service or the record and cannot be changed here.";
+                if (!seen.Add(tag)) return $"Other fields: {tag} is there twice.";
+                if (value.Length == 0) continue;   // an empty value removes the field
+                pairs.Add(new KeyValuePair<string, string>(tag, value));
+            }
+            double? freqRx = null;
+            var rx = pairs.FirstOrDefault(kv => kv.Key == "FREQ_RX");
+            if (rx.Key != null)
+            {
+                if (!double.TryParse(rx.Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double f) || f <= 0) return "Other fields: FREQ_RX is not a number in MHz.";
+                freqRx = f;
+            }
+            q.PropMode = pairs.Where(kv => kv.Key == "PROP_MODE").Select(kv => kv.Value).FirstOrDefault();
+            q.SatName = pairs.Where(kv => kv.Key == "SAT_NAME").Select(kv => kv.Value).FirstOrDefault();
+            q.FreqRxMhz = freqRx;
+            q.Extra.RemoveAll(kv => kv.Count == 2 && !HasOwnBox(kv[0]) && !IsServiceOrRecordTag(kv[0]));
+            foreach (var kv in pairs)
+                if (kv.Key != "PROP_MODE" && kv.Key != "SAT_NAME" && kv.Key != "FREQ_RX") q.Extra.Add(new List<string> { kv.Key, kv.Value });
+            return null;
         }
 
         // Plain names for the standard ADIF fields; anything else keeps its ADIF tag.
@@ -429,6 +642,17 @@ namespace WSJTX_Controller
                 SetExtra(q, "ITUZ", _ituz.Text);
                 q.StationCallsign = Blank(_stationCall.Text.ToUpperInvariant());
                 q.Operator = Blank(_operator.Text.ToUpperInvariant());
+                // The TQSL location: checked against TQSL only when it was changed here, so a
+                // contact that is merely held can still have its other fields saved.
+                if (_tqslLocation.Text != _shown[_tqslLocation] || _tqslDetails.Text != _shown[_tqslDetails])
+                {
+                    var all = Locations(out string loadError);
+                    error = error ?? TqslProblem(_tqslLocation.Text, _tqslDetails.Text, _stationCall.Text, all, loadError);
+                    SetExtra(q, TqslLocationTag, _tqslLocation.Text);
+                    SetExtra(q, TqslDetailsTag, _tqslDetails.Text);
+                }
+                if (_otherFields.Text != _shown[_otherFields])
+                    error = error ?? ApplyOtherFields(q, _otherFields.Text);
                 foreach (var (service, _) in UploadServices)
                 {
                     bool sent = _uploads[service].Checked;

@@ -4172,10 +4172,26 @@ namespace WSJTX_Controller
                         f.Add(("APP_JIMMY_REVIEW", $"our location differs from TQSL location '{locName}': {string.Join(", ", diffs)}"));
                 }
                 else
+                {
                     f.Add(("APP_JIMMY_TQSL_LOC_FP", TqslLocationMissing));
+                    // Said when it happens, once per cause (2026-10-12): the contact is logged all
+                    // the same, but LoTW holds it until its location is reviewed, and the operator
+                    // used to learn that only at upload, as "changed after logging".
+                    string cause = all == null ? (err ?? "TQSL's station locations could not be read") : $"TQSL has no station location named '{locName}'";
+                    if (_tqslCaptureWarned != cause)
+                    {
+                        _tqslCaptureWarned = cause;
+                        wsjtxClient?.Notify?.Publish(new ErrorWarningEvent(ErrorSeverity.Warning, "TQSL station location",
+                            cause.TrimEnd('.') + ". Contacts are still logged, but LoTW upload will hold them until their location is reviewed. " +
+                            "Create the location in TQSL, or choose another in Options, Logbook Sync."));
+                    }
+                    return f;
+                }
+                _tqslCaptureWarned = null;   // captured again: a later failure is news
             }
             return f;
         }
+        private string _tqslCaptureWarned;
 
         internal const string TqslNoLocation = "(none)";
         internal const string TqslLocationMissing = "(not found)";
@@ -5355,6 +5371,7 @@ namespace WSJTX_Controller
             var workingFrequenciesSnapshot = WsjtxClient.BuildWorkingFrequencyEntries(Frequencies);
             bool pskReporterSnapshot = wsjtx != null && wsjtx.usePskReporter;
             string licenseClassSnapshot = Station.EngineLicenseClass;
+            string wsjtxOutSnapshot = OtherProgramsArg(jimmyPort);
 
             // Launch() (specifically Process.Start()) runs on a background thread -- Process.Start()
             // for a new, unsigned exe is well known to be able to block synchronously on real-time
@@ -5376,7 +5393,7 @@ namespace WSJTX_Controller
                     () => SafeBeginInvoke(() => OnNativeEngineUnexpectedExit(client)),
                     decodeSnapshot, pskReporterSnapshot,
                     dxClusterAddress, sessionToken, repeatLimitSnapshot, workingFrequenciesSnapshot,
-                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly, licenseClassSnapshot);
+                    NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, logbookOnly, licenseClassSnapshot, wsjtxOutSnapshot);
                 if (!ok && nativeEngineClient == client)
                 {
                     // Promoted from a raw ShowMessage (2026-08-19, notification-system-
@@ -5416,7 +5433,7 @@ namespace WSJTX_Controller
             string wanted = NativeEngineClient.BuildArgs(NativeEngine.MyCall, NativeEngine.MyGrid, NativeEngine.AudioInputDevice, jimmyPort,
                 NativeEngine.AudioOutputDevice, Radio, Decode, wsjtxClient != null && wsjtxClient.usePskReporter, dxClusterAddress, null,
                 (int)timeoutNumUpDown.Value, WsjtxClient.BuildWorkingFrequencyEntries(Frequencies),
-                NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, radioAndAudio: false, logbookOnly: !RadioSetUp, licenseClass: Station.EngineLicenseClass);
+                NativeEngine.TuneTimeoutSeconds, NativeEngine.ClockCheck, radioAndAudio: false, logbookOnly: !RadioSetUp, licenseClass: Station.EngineLicenseClass, wsjtxOut: OtherProgramsArg(jimmyPort));
             if (TestModeGuard.IsTestMode || !client.Running || client.LaunchKey != wanted)
             {
                 wsjtxClient?.DebugOutput("[NativeEngine] profile switch: engine settings differ -- restarting the engine");
@@ -5522,6 +5539,11 @@ namespace WSJTX_Controller
             wsjtxClient?.DebugOutput($"[NativeEngine] licence class '{Station.LicenseClass}' applied live (transmit stopped first, no restart)");
             return true;
         }
+
+        // Output to other programs, as the engine is started with it (OtherPrograms): on, to
+        // Jimmy's own port on this computer, unless the profile says otherwise.
+        private string OtherProgramsArg(int jimmyPort) =>
+            OtherPrograms.EngineArg(iniFile?.Read(OtherPrograms.EnabledKey) != "False", iniFile?.Read(OtherPrograms.TargetsKey), jimmyPort);
 
         public void ApplyRadioMasterAudioLevels()
         {

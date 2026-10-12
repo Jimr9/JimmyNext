@@ -1669,6 +1669,8 @@ static class JimmyTests
         LicenseClassTests();
         SupportReportDraftTests();
         SupportLocalChoiceTests();
+        DownloadedChangesTests();
+        OtherProgramsTests();
         SharedSettingsTests();
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
@@ -20040,6 +20042,71 @@ static class JimmyTests
         CheckStr("tqsl: deleted location held", Where("K5EE"), "held");
         CheckStr("tqsl: callsign mismatch held", Where("K6FF"), "held");
         CheckStr("tqsl: no location at logging held", Where("K7GG"), "held");
+
+        // Handoff 32 (2026-10-12): a location that could not be recorded at logging is not a
+        // "changed" location, the editor and the upload judge it the same way, and a repaired
+        // contact can be signed.
+        string Why(string call, List<TqslUploadClient.Batch> p) => p.First(x => x.Qsos.Any(q => q.Callsign == call)).HeldWhy ?? "";
+        var n0 = new List<LogbookDb.PendingUploadQso>
+        {
+            Q("N0BUZ", "Home", Controller.TqslLocationMissing),   // the location was not in TQSL when logged
+            Q("K8HH", "Home", ""),                                 // named, details never recorded
+            Q("K4DD", "Park", "old|fingerprint"),
+        };
+        var held = TqslUploadClient.PlanBatches(n0, "Home", locs, null);
+        Check("tqsl: a location not recorded at logging is held as NOT RECORDED, never as changed",
+            Why("N0BUZ", held).Contains("was not available in TQSL when these contacts were logged") && !Why("N0BUZ", held).Contains("changed"), true);
+        Check("tqsl: details never recorded say so", Why("K8HH", held).Contains("were not recorded"), true);
+        Check("tqsl: a real change still says changed", Why("K4DD", held).Contains("was changed in TQSL after"), true);
+        Check("tqsl: every hold says how to repair it", new[] { "N0BUZ", "K8HH", "K4DD" }.All(c => Why(c, held).Contains("Choose TQSL Location")), true);
+        Check("the editor's sentence for the same contact agrees",
+            TqslStationData.StatusSentence(TqslStationData.Judge("Home", Controller.TqslLocationMissing, "W0JR", locs), "Home").Contains("was not available when this contact was logged"), true);
+        Check("...and for a healthy one", TqslStationData.Judge("Home", locs["Home"].Fingerprint, "W0JR", locs) == TqslStationData.Recorded.Ok, true);
+
+        // Choosing the location in the editor: its details shown first, another station's refused,
+        // a different grid or state pointed out; then the two boxes must agree with TQSL to save.
+        bool blocked;
+        string review = ContactEditDlg.TqslChoiceReview(locs["Home"], "W0JR", "EN34RN", "MN", out blocked);
+        Check("choose: the location's details are read before anything is saved", !blocked && review.Contains("callsign W0JR, grid EN34, state MN") && review.Contains("Nothing is saved until you press Save"), true);
+        review = ContactEditDlg.TqslChoiceReview(locs["Park"], "W0JR", "EN34RN", "MN", out blocked);
+        Check("choose: a different grid is pointed out, not refused", !blocked && review.Contains("my grid is EN34RN, the location's is EN35"), true);
+        ContactEditDlg.TqslChoiceReview(locs["Home"], "K9OTHER", "EN34", "MN", out blocked);
+        Check("choose: a location for another callsign cannot be used", blocked, true);
+        Check("save: the chosen location with its own details is accepted", ContactEditDlg.TqslProblem("Home", locs["Home"].Fingerprint, "W0JR", locs, null) == null, true);
+        Check("save: a name with details that are not its own is refused", ContactEditDlg.TqslProblem("Home", "typed|by|hand", "W0JR", locs, null) != null, true);
+        Check("save: a name TQSL does not have is refused", ContactEditDlg.TqslProblem("Nowhere", "x", "W0JR", locs, null) != null, true);
+        Check("save: another station's location is refused", ContactEditDlg.TqslProblem("Home", locs["Home"].Fingerprint, "K9OTHER", locs, null) != null, true);
+        Check("save: both boxes empty (an older contact) is fine", ContactEditDlg.TqslProblem("", "", "W0JR", locs, null) == null, true);
+        var repaired = new List<LogbookDb.PendingUploadQso> { Q("N0BUZ", "Home", locs["Home"].Fingerprint), Q("K8HH", "Home", "") };
+        var after32 = TqslUploadClient.PlanBatches(repaired, "Home", locs, null);
+        Check("a repaired contact is signed with its location; the unrepaired one stays held", Why("N0BUZ", after32) == "" && Why("K8HH", after32) != "", true);
+
+        // Every other field the contact carries is editable under the protected opt-in; what a
+        // service owns is not, and is never lost by an edit.
+        var held32 = new NexusQso { Id = "9", Call = "N0BUZ", Band = "40m", Mode = "FT8", PropMode = "F2" };
+        held32.Extra.Add(new List<string> { "MY_STATE", "MN" });
+        held32.Extra.Add(new List<string> { "APP_JIMMY_TQSL_LOCATION", "QTH" });
+        held32.Extra.Add(new List<string> { "APP_JIMMY_TQSL_LOC_FP", "(not found)" });
+        held32.Extra.Add(new List<string> { "APP_JIMMY_LOTW_STATE", "MN" });
+        held32.Extra.Add(new List<string> { "APP_NEXUS_ID", "abc" });
+        held32.Extra.Add(new List<string> { "APP_JIMMY_REVIEW", "check the park" });
+        held32.Extra.Add(new List<string> { "CQZ", "4" });
+        string otherText = ContactEditDlg.OtherFieldsText(held32);
+        CheckStr("other fields: everything not shown elsewhere and not a service's, as NAME=value",
+            otherText.Replace("\r\n", "|"), "PROP_MODE=F2|MY_STATE=MN|APP_JIMMY_REVIEW=check the park");
+        Check("service and record fields are listed apart, read only",
+            ContactEditDlg.ServiceFieldsText(held32).Contains("APP_JIMMY_LOTW_STATE: MN") && ContactEditDlg.ServiceFieldsText(held32).Contains("Nexus record ID: abc"), true);
+        CheckStr("an edit: one changed, one removed, one added", ContactEditDlg.ApplyOtherFields(held32, "MY_STATE=WI\r\nMY_CITY=Hudson\r\nAPP_JIMMY_REVIEW=\r\n"), null);
+        Check("...lands on the contact, and the rest is untouched",
+            held32.ExtraValue("MY_STATE") == "WI" && held32.ExtraValue("MY_CITY") == "Hudson" && held32.ExtraValue("APP_JIMMY_REVIEW") == null && held32.PropMode == null
+            && held32.ExtraValue("APP_JIMMY_LOTW_STATE") == "MN" && held32.ExtraValue("APP_NEXUS_ID") == "abc" && held32.ExtraValue("CQZ") == "4"
+            && held32.ExtraValue("APP_JIMMY_TQSL_LOCATION") == "QTH", true);
+        var before32 = NexusLogClient.ToJson(held32);
+        Check("a line that is not NAME=value is refused", ContactEditDlg.ApplyOtherFields(held32, "just words") != null, true);
+        Check("a service's field cannot be written here", ContactEditDlg.ApplyOtherFields(held32, "LOTW_QSL_RCVD=Y") != null, true);
+        Check("a field with its own box is changed in that box", ContactEditDlg.ApplyOtherFields(held32, "CQZ=5") != null && ContactEditDlg.ApplyOtherFields(held32, "APP_JIMMY_TQSL_LOC_FP=x") != null, true);
+        Check("the same name twice is refused", ContactEditDlg.ApplyOtherFields(held32, "MY_CITY=A\r\nmy_city=B") != null, true);
+        Check("a refused edit changes nothing", NexusLogClient.ToJson(held32) == before32, true);
         // Their state (2026-10-05), border-aware, as grid.dat says: FN31 lies in CT and MA, DN43 in ID
         // and OR, EM29 in MO alone.
         try
@@ -21660,6 +21727,137 @@ static class JimmyTests
         }
         Check("sound devices still never travel in support settings",
             SupportPackage.Travels("nativeEngineAudioDevice") || SupportPackage.Travels("nativeEngineAudioOutputDevice"), false);
+    }
+
+    // Handoff 05 (2026-10-12): what a download says about a logged contact's own fields is kept
+    // for review and changes nothing until approved. The fixture is the operator's own case:
+    // OT9K logged with country NON-DXCC and DXCC 209, QRZ saying Belgium.
+    static void DownloadedChangesTests()
+    {
+        Console.WriteLine("\n── Review downloaded changes: proposals, decline, approve, conflicts ──");
+        string folder = Path.Combine(Path.GetTempPath(), "JimmyDownloadedChanges_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        string file = Path.Combine(folder, "downloaded-changes.json");
+        try
+        {
+            var now = new DateTime(2026, 10, 12, 15, 0, 0, DateTimeKind.Utc);
+            NexusQso Ot9k() => new NexusQso { Id = "id-ot9k", EditKey = "k1", Call = "OT9K", Band = "20m", Mode = "FT8", WhenUnix = 1791126000, Country = "NON-DXCC", Dxcc = 209, Grid = "JO20" };
+            var qrzRow = new Dictionary<string, string> { ["COUNTRY"] = "Belgium", ["DXCC"] = "209", ["GRIDSQUARE"] = "JO20fx", ["CQZ"] = "14" };
+
+            var list = new NexusDownloadedChanges();
+            var logged = Ot9k();
+            string before = NexusLogClient.ToJson(logged);
+            int added = list.Note("QRZ", logged, qrzRow, now);
+            Check("the download changes nothing on the contact", NexusLogClient.ToJson(logged) == before, true);
+            var country = list.Items.FirstOrDefault(p => p.Field == "Country");
+            Check("the country difference is proposed, and marked name only (same DXCC entity)", country != null && country.NameOnly && country.Logged == "NON-DXCC" && country.Proposed == "Belgium", true);
+            Check("DXCC already 209: no DXCC proposal; a more precise grid is not a difference", list.Items.Any(p => p.Field == "DXCC" || p.Field == "Grid"), false);
+            Check("a zone the log does not have is proposed as a fill", list.Items.Any(p => p.Field == "CQ zone" && p.Logged == "" && p.Proposed == "14"), true);
+            Check("the count is of new proposals", added == 2 && list.PendingCount == 2, true);
+            CheckStr("a proposal reads as one plain sentence", country.Sentence(),
+                "QRZ: OT9K 20m FT8 2026-10-04 15:00. Country NON-DXCC, QRZ says Belgium (name only, same DXCC entity).");
+
+            // The same download again: nothing grows.
+            Check("a repeated download adds nothing", list.Note("QRZ", Ot9k(), qrzRow, now.AddHours(1)) == 0 && list.Items.Count == 2, true);
+
+            // Decline, then close and come back (a restart).
+            country.Declined = true;
+            list.Save(file);
+            var reopened = NexusDownloadedChanges.Load(file);
+            Check("a declined proposal stays declined after a restart", reopened.Items.Count == 2 && reopened.PendingCount == 1 && reopened.Items.First(p => p.Field == "Country").Declined, true);
+            Check("...and is not offered again by the next download", reopened.Note("QRZ", Ot9k(), qrzRow, now.AddDays(1)) == 0 && reopened.PendingCount == 1, true);
+            var qrzNowSays = new Dictionary<string, string>(qrzRow) { ["COUNTRY"] = "Kingdom of Belgium" };
+            Check("...unless the service now says something else", reopened.Note("QRZ", Ot9k(), qrzNowSays, now.AddDays(2)) == 1 && !reopened.Items.First(p => p.Field == "Country").Declined, true);
+
+            // Approve: only what is chosen is written, through the guarded edit, and it leaves the list.
+            list = new NexusDownloadedChanges();
+            list.Note("QRZ", Ot9k(), qrzRow, now);
+            var log = new List<NexusQso> { Ot9k() };
+            log[0].QslRcvd.Qrz = true;   // the confirmation the same download merged
+            NexusQso saved = null;
+            var chosen = list.Items.Where(p => p.Field == "Country").ToList();
+            var r = list.Apply(chosen, log, q => { saved = q; return null; });
+            Check("approving one proposal writes that one field", r.Applied == 1 && r.Contacts == 1 && r.Unchanged == 0 && r.Failed == 0 && saved.Country == "Belgium", true);
+            Check("...the merged confirmation is still on the contact, and nothing else moved", saved.QslRcvd.Qrz && saved.Dxcc == 209 && saved.Grid == "JO20" && saved.ExtraValue("CQZ") == null, true);
+            Check("...the unchosen proposal is still waiting", list.Items.Count == 1 && list.Items[0].Field == "CQ zone", true);
+            CheckStr("the result says exactly what happened", r.Sentence(), "1 change applied to 1 contact.");
+            Check("a later download finds nothing more to propose for that field", list.Note("QRZ", saved, qrzRow, now.AddDays(3)) == 0 && !list.Items.Any(p => p.Field == "Country"), true);
+
+            // The contact was edited before the proposal was approved: it is left alone.
+            list = new NexusDownloadedChanges();
+            list.Note("QRZ", Ot9k(), qrzRow, now);
+            var edited = Ot9k(); edited.Country = "Belgium, corrected by hand";
+            bool wrote = false;
+            r = list.Apply(list.Items.Where(p => p.Field == "Country").ToList(), new List<NexusQso> { edited }, q => { wrote = true; return null; });
+            Check("a contact edited since is not overwritten, and the result says so", !wrote && r.Applied == 0 && r.Unchanged == 1 && r.Notes.Any(n => n.Contains("changed since it was proposed")), true);
+            Check("...and the stale proposal is gone", list.Items.Any(p => p.Field == "Country"), false);
+
+            // Nexus refuses the edit (the contact changed under it): nothing is counted as applied.
+            list = new NexusDownloadedChanges();
+            list.Note("QRZ", Ot9k(), qrzRow, now);
+            r = list.Apply(list.Items.ToList(), new List<NexusQso> { Ot9k() }, q => "That contact changed since it was shown -- refresh and try again.");
+            Check("a refused save is a failure, never a success, and the proposals remain", r.Applied == 0 && r.Failed == 2 && list.Items.Count == 2, true);
+
+            // The contact was deleted.
+            list = new NexusDownloadedChanges();
+            list.Note("QRZ", Ot9k(), qrzRow, now);
+            Check("proposals for a contact no longer in the log are dropped", list.Prune(new List<NexusQso>()) == 2 && list.Items.Count == 0, true);
+
+            // A blank state filled from LoTW, and values that only look different.
+            list = new NexusDownloadedChanges();
+            var w1 = new NexusQso { Id = "id-w1", Call = "W1AW", Band = "40m", Mode = "FT8", WhenUnix = 1791126000, State = null, Dxcc = 291 };
+            w1.Extra.Add(new List<string> { "CQZ", "5" });
+            list.Note("LOTW", w1, new Dictionary<string, string> { ["STATE"] = "CT", ["CQZ"] = "05", ["DXCC"] = "291", ["COUNTRY"] = "" }, now);
+            Check("a blank state is proposed as a fill; zone 05 against 5 is not a difference", list.Items.Count == 1 && list.Items[0].Sentence().Contains("State is blank, LoTW says CT"), true);
+            Check("a value the field cannot hold is refused, not written",
+                NexusDownloadedChanges.SetLoggedValue(w1, "DXCC", "Belgium") == false && w1.Dxcc == 291, true);
+            var res = new ImportResult { Proposed = 3 };
+            Check("the download's own message points to the review", res.UnmatchedText.Contains("3 new proposed changes to review (Logbook, Sync, Review Downloaded Changes)"), true);
+        }
+        finally { try { Directory.Delete(folder, true); } catch { } }
+    }
+
+    // Handoff 22 (2026-10-12): output to other programs -- the destination rules, what the
+    // engine is started with, and how its status is put into words. That nothing a program
+    // sends back reaches the radio is proven in EngineHost (wsjtx_out.rs tests).
+    static void OtherProgramsTests()
+    {
+        Console.WriteLine("\n── Other programs: destinations, engine argument, status wording ──");
+        var reserved = new[] { NativeEngineClient.ControlPort, 4532 };
+        var one = OtherPrograms.Validate("127.0.0.1:2237", reserved);
+        Check("the usual destination is accepted, with no warning", one.Error == null && one.Warning == null && one.Normalized == "127.0.0.1:2237", true);
+        var many = OtherPrograms.Validate(" 127.0.0.1:2237 ; 127.0.0.1:2333, 127.0.0.1:2237", reserved);
+        CheckStr("several are kept, the repeat once, as one argument with no spaces", many.Normalized, "127.0.0.1:2237,127.0.0.1:2333");
+        Check("no port is refused", OtherPrograms.Validate("127.0.0.1", reserved).Error != null, true);
+        Check("a computer name is refused, and it says to use the number", (OtherPrograms.Validate("localhost:2237", reserved).Error ?? "").Contains("number"), true);
+        Check("port 0 and a port too large are refused", OtherPrograms.Validate("127.0.0.1:0", reserved).Error != null && OtherPrograms.Validate("127.0.0.1:70000", reserved).Error != null, true);
+        Check("nothing at all is refused", OtherPrograms.Validate("  ", reserved).Error != null, true);
+        Check("Jimmy Next's own engine port is never a destination", (OtherPrograms.Validate("127.0.0.1:" + NativeEngineClient.ControlPort, reserved).Error ?? "").Contains("used by Jimmy Next itself"), true);
+        Check("...nor the radio's rigctld port", OtherPrograms.Validate("127.0.0.1:4532", reserved).Error != null, true);
+        var lan = OtherPrograms.Validate("192.168.1.20:2237", reserved);
+        Check("another computer is allowed only with a warning that data leaves this one", lan.Error == null && (lan.Warning ?? "").Contains("not on this computer"), true);
+
+        CheckStr("off is off", OtherPrograms.EngineArg(false, "127.0.0.1:2333", 2237), "off");
+        CheckStr("nothing saved: Jimmy's own port on this computer, as it always was", OtherPrograms.EngineArg(true, "", 2237), "127.0.0.1:2237");
+        CheckStr("a saved list goes to the engine as saved", OtherPrograms.EngineArg(true, "127.0.0.1:2333,127.0.0.1:2237", 2237), "127.0.0.1:2333,127.0.0.1:2237");
+        CheckStr("a damaged saved list falls back to the default, never to nonsense", OtherPrograms.EngineArg(true, "nonsense", 2237), "127.0.0.1:2237");
+
+        var radio = new RadioSettings { Mode = RadioControlMode.HamlibRigctld, RigModel = "2037", ComPort = "COM4", BaudRate = "115200" };
+        string Args(string outArg) =>
+            NativeEngineClient.BuildArgs("KB0UZT", "EN34", "Mic A", 2237, "Speakers", radio, null, false, null, "tok", 7, null, 60, false, radioAndAudio: false, wsjtxOut: outArg);
+        Check("the engine is started with the destinations", Args("127.0.0.1:2333").Contains("--wsjtx-out 127.0.0.1:2333"), true);
+        Check("...or with off", Args("off").Contains("--wsjtx-out off"), true);
+        Check("a change of destination is a change of engine", Args("127.0.0.1:2333") == Args("127.0.0.1:2237"), false);
+        Check("the setting belongs to this computer and does not travel in support settings",
+            SupportPackage.Travels(OtherPrograms.EnabledKey) || SupportPackage.Travels(OtherPrograms.TargetsKey), false);
+
+        string quiet = OtherPrograms.StatusText("{\"state\":\"on\",\"targets\":[{\"addr\":\"127.0.0.1:2237\",\"heardSecsAgo\":null}],\"sent\":412,\"sendErrors\":0,\"lastSendError\":null,\"ignoredInbound\":0}");
+        Check("sent is never called received or connected",
+            quiet.Contains("127.0.0.1:2237: sending") && quiet.Contains("Nothing has come back") && quiet.Contains("412 messages sent") && !quiet.ToLowerInvariant().Contains("connected"), true);
+        string heard = OtherPrograms.StatusText("{\"state\":\"on\",\"targets\":[{\"addr\":\"127.0.0.1:2237\",\"heardSecsAgo\":12}],\"sent\":9,\"sendErrors\":0,\"lastSendError\":null,\"ignoredInbound\":3}");
+        Check("an answer from the address is reported as that, and what it sent as ignored",
+            heard.Contains("answered from that address 12 seconds ago") && heard.Contains("3 messages from other programs ignored") && heard.Contains("cannot transmit"), true);
+        Check("off, and no answer, each say so", OtherPrograms.StatusText("{\"state\":\"off\"}").Contains("is off") && OtherPrograms.StatusText(null).Contains("did not answer"), true);
     }
 
     static void RadioPowerAndExportHeaderTests()

@@ -198,17 +198,11 @@ namespace WSJTX_Controller
                     Get(conf, conf.Length == 0 ? "TQSL Station Location is not configured (Options > Logbook Sync)" : null).Qsos.Add(q);
                     continue;
                 }
-                string why = null;
-                if (rec == Controller.TqslNoLocation)
-                    why = "logged with no TQSL station location set; choose one and edit the contact, or upload it from TQSL";
-                else if (locations == null)
-                    why = $"TQSL station data could not be read ({loadError?.TrimEnd('.')})";
-                else if (!locations.TryGetValue(rec, out var loc))
-                    why = $"TQSL station location '{rec}' it was logged with no longer exists";
-                else if (loc.Call.Length > 0 && !string.Equals(loc.Call, (q.StationCall ?? "").Trim(), StringComparison.OrdinalIgnoreCase))
-                    why = $"station callsign {q.StationCall} is not the callsign of TQSL location '{rec}' ({loc.Call})";
-                else if (!string.Equals(loc.Fingerprint, q.TqslLocFp ?? "", StringComparison.Ordinal))
-                    why = $"TQSL station location '{rec}' was changed after these contacts were logged";
+                // 2026-10-12: one judgement shared with the contact editor (TqslStationData.Judge).
+                // A location that was simply not there to record ("(not found)") is said as that,
+                // never as "changed after logging" -- nothing about where the contact was made changed.
+                var judged = TqslStationData.Judge(rec, q.TqslLocFp, q.StationCall, locations);
+                string why = TqslStationData.HeldWhy(judged, rec, q.StationCall, locations, loadError);
                 Get(rec, why).Qsos.Add(q);
             }
             return batches;

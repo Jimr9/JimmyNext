@@ -549,6 +549,20 @@ namespace WSJTX_Controller
             };
             _syncExportBtn.Click += (s, e) => ExportAdif(null);
             header.Controls.Add(_syncExportBtn);
+
+            // Differences a download found between a service and the logged contacts' own
+            // fields (2026-10-12): kept, nothing changed, until approved here.
+            _syncReviewBtn = new Button
+            {
+                Text           = "Review Downloaded Changes...",
+                AccessibleName = "Review downloaded changes",
+                Size           = new Size(200, 26),
+                Location       = new Point(134, y),
+                Font           = font,
+                TabIndex       = 9,
+            };
+            _syncReviewBtn.Click += (s, e) => ReviewDownloadedChanges();
+            header.Controls.Add(_syncReviewBtn);
             y += 34;
 
             AddSectionLabel(header, "QRZ Logbook", hfont, ref y);
@@ -1558,7 +1572,7 @@ namespace WSJTX_Controller
                 };
                 case PAGE_SYNC: return new Control[] {
                     _syncImportBtn, _syncQrzBtn, _syncLotwBtn, _syncLotwFullBtn, _syncClubLogBtn, _syncEqslBtn, _syncEqslFullBtn, _syncExportBtn,
-                    _srcHistoryLv,
+                    _syncReviewBtn, _srcHistoryLv,
                 };
                 default: return null;
             }
@@ -1631,8 +1645,42 @@ namespace WSJTX_Controller
                 : $"{s.PendingCount} pending, {synced}  (last sync: {last})";
         }
 
+        private Button _syncReviewBtn;
+
+        // The count on the button, so the Sync page says there is something to review. Read
+        // from the saved list only (no engine call); the review itself checks it against the log.
+        private void ShowDownloadedChangesCount()
+        {
+            if (_syncReviewBtn == null) return;
+            int n = 0;
+            try { n = NexusDownloadedChanges.Load().PendingCount; } catch { }
+            string name = n == 0 ? "Review downloaded changes, none waiting" : $"Review downloaded changes, {n} waiting";
+            string text = n == 0 ? "Review Downloaded Changes..." : $"Review Downloaded Changes ({n})...";
+            if (_syncReviewBtn.Text != text) _syncReviewBtn.Text = text;
+            if (_syncReviewBtn.AccessibleName != name) _syncReviewBtn.AccessibleName = name;
+        }
+
+        private void ReviewDownloadedChanges()
+        {
+            if (!(_db is NexusLogbookService nexus)) return;
+            NexusDownloadedChanges list;
+            try { list = nexus.DownloadedChanges(); }
+            catch (Exception ex) { SetStatus("The proposed changes could not be read: " + ex.Message); return; }
+            using (var dlg = new DownloadedChangesDlg(list, chosen => nexus.ApplyDownloadedChanges(list, chosen)) { Owner = this })
+                dlg.ShowDialog(this);
+            ShowDownloadedChangesCount();
+            if (DownloadedChangesDlg.LastApplied > 0)
+            {
+                // Awards and "worked before" follow the log, as after any import.
+                try { _onImportComplete?.Invoke(); } catch { }
+                if (_activePage == _myLogPanel) PopulateMyLog();
+                SetStatus(DownloadedChangesDlg.LastSummary);
+            }
+        }
+
         private void PopulateSync()
         {
+            ShowDownloadedChangesCount();
             if (_db == null) return;
             try
             {

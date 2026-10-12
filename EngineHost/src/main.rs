@@ -322,6 +322,7 @@ mod decode_semantics;
 mod external_data;
 mod live_feeds;
 mod logbook_host;
+mod wsjtx_out;
 
 use tempo_app::engine::Engine;
 use tempo_app::settings::Settings;
@@ -398,6 +399,11 @@ struct Args {
     /// Nexus's own transmit lockout for United States privileges (Settings.license_class,
     /// Engine::tx_allowed); anything else, or absent, is Nexus's Open -- no lockout.
     license_class: String,
+    /// WSJT-X-format output to other programs (2026-10-12): `Some("off")` = none;
+    /// `Some("addr:port, ...")` = those destinations; `None` (an older Jimmy that does not send
+    /// the argument) = `--jimmy-addr`, as before. Always through the receive-only relay
+    /// (wsjtx_out.rs): nothing another program sends back reaches the engine.
+    wsjtx_out: Option<String>,
     /// SO2R: separate serial port for RTS/DTR PTT when it differs from the CAT port -- sets
     /// Settings.ptt_serial_port. Empty (default) = key on the same port as CAT.
     ptt_serial_port: String,
@@ -554,6 +560,7 @@ fn parse_args() -> Args {
     let mut pskreporter = false;
     let mut dont_set_mode = false;
     let mut license_class = String::new();
+    let mut wsjtx_out: Option<String> = None;
     let mut ptt_serial_port = String::new();
     let mut split_mode = "none".to_string();
     let mut control_port: u16 = 58239;
@@ -613,6 +620,7 @@ fn parse_args() -> Args {
                     license_class = v;
                 }
             }
+            "--wsjtx-out" => wsjtx_out = it.next(),
             "--ptt-serial-port" => ptt_serial_port = it.next().unwrap_or(ptt_serial_port),
             "--split-mode" => split_mode = it.next().unwrap_or(split_mode),
             "--control-port" => {
@@ -701,6 +709,7 @@ fn parse_args() -> Args {
         pskreporter,
         dont_set_mode,
         license_class,
+        wsjtx_out,
         ptt_serial_port,
         split_mode,
         control_port,
@@ -1768,6 +1777,10 @@ fn handle_control_connection(
             let _ = writeln!(stream, "{}", grid_states_json());
         } else if line == "SOLAR_HISTORY" {
             let _ = writeln!(stream, "{}", external_cache.solar_history_json());
+        } else if line == "WSJTX_OUT_STATUS" {
+            // Output to other programs: where it goes, how many datagrams were sent, and
+            // whether anything has come back from each destination (which is dropped).
+            let _ = writeln!(stream, "{}", wsjtx_out_status());
         } else if line == "SOLAR_WIND" {
             let _ = writeln!(stream, "{}", external_cache.solar_wind_json());
         } else if line == "DXPEDITIONS" {
@@ -2241,6 +2254,17 @@ struct SetFrequencyArgs {
     mode: String,
 }
 
+/// The relay that carries WSJT-X-format output to other programs, for the whole run
+/// (`None` inside = output is off). Read by the WSJTX_OUT_STATUS command.
+static WSJTX_RELAY: std::sync::OnceLock<Option<wsjtx_out::Relay>> = std::sync::OnceLock::new();
+
+fn wsjtx_out_status() -> String {
+    match WSJTX_RELAY.get() {
+        Some(Some(relay)) => relay.status().to_string(),
+        _ => serde_json::json!({ "state": "off" }).to_string(),
+    }
+}
+
 fn main() {
     // As early as possible, matching crashlog's own "call once, as early as possible" contract
     // (its doc comment above) -- before arg parsing, before anything else, so nothing that
@@ -2381,8 +2405,31 @@ fn main() {
         working_frequencies: args.working_frequencies.clone(),
         ..Settings::default()
     };
-    settings.wsjtx_udp = true;
-    settings.wsjtx_udp_addr = args.jimmy_addr.clone();
+    // WSJT-X-format output to other programs, receive-only: Nexus sends to the relay's private
+    // loopback port, the relay sends on to the operator's destinations, and what comes back is
+    // dropped there (wsjtx_out.rs). No relay -- output off, no radio loop, or it could not be
+    // set up -- means NO output: Nexus is never pointed straight at another program, because
+    // it would then obey that program's Reply / FreeText / HaltTx datagrams.
+    let wsjtx_wanted = args.wsjtx_out.clone().unwrap_or_else(|| args.jimmy_addr.clone());
+    let wsjtx_relay: Option<wsjtx_out::Relay> = if args.no_radio || wsjtx_wanted.trim().eq_ignore_ascii_case("off") {
+        None
+    } else {
+        let (targets, problems) = wsjtx_out::parse_targets(&wsjtx_wanted);
+        for p in &problems {
+            log!("jimmy-engine-host: output to other programs: ignoring {p}");
+        }
+        match wsjtx_out::Relay::start(targets) {
+            Ok(r) => Some(r),
+            Err(e) => {
+                log!("jimmy-engine-host: output to other programs is off: {e}");
+                None
+            }
+        }
+    };
+    let wsjtx_nexus_addr = wsjtx_relay.as_ref().map(|r| r.nexus_addr.to_string()).unwrap_or_default();
+    settings.wsjtx_udp = wsjtx_relay.is_some();
+    settings.wsjtx_udp_addr = wsjtx_nexus_addr.clone();
+    let _ = WSJTX_RELAY.set(wsjtx_relay);
     // RFPOWER: Nexus's own protection since 1.16.0 (operator, 2026-10-04: try the upstream
     // approach; Jimmy's never-touch patch is retired). The power READ is never sent on the
     // models whose Hamlib read writes the radio's power (rigmodels::hamlib_never_send -- the
@@ -2546,8 +2593,8 @@ fn main() {
         rigctld_port: args.rigctld_port,
         dial_hz: args.dial_freq,
         mode: "USB".to_string(),
-        wsjtx_udp: true,
-        wsjtx_addr: args.jimmy_addr,
+        wsjtx_udp: !wsjtx_nexus_addr.is_empty(),
+        wsjtx_addr: wsjtx_nexus_addr,
         audio_in: args.device.unwrap_or_default(),
         audio_out: args.output_device.unwrap_or_default(),
         tx_audio_source: tx_audio_source(args.ptt_data_source),

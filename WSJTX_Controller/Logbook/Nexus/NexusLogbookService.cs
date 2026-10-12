@@ -272,7 +272,7 @@ namespace WSJTX_Controller
                 result.Skipped = Math.Max(0, result.Skipped + result.NewlyConfirmed - gained);
                 result.NewlyConfirmed = gained;
             }
-            if (string.IsNullOrEmpty(result.Errors)) KeepDownloadedLocations(prep, source, afterRows);
+            if (string.IsNullOrEmpty(result.Errors)) result.Proposed = KeepDownloadedLocations(prep, source, afterRows);
             if (string.IsNullOrEmpty(result.Errors) && source == "EQSL") KeepEqslAg(prep);
             result.Held = prep.Held;
             result.HeldDetails.AddRange(prep.HeldDetails);
@@ -355,8 +355,12 @@ namespace WSJTX_Controller
             ("DXCC", "APP_JIMMY_LOTW_DXCC"), ("CQZ", "APP_JIMMY_LOTW_CQZ"), ("ITUZ", "APP_JIMMY_LOTW_ITUZ"),
         };
 
-        private void KeepDownloadedLocations(NexusReportPairing.Result prep, string source, NexusLogRows afterRows)
+        // Returns how many differences are new for the operator to review (2026-10-12): each one
+        // is also kept as a proposal (NexusDownloadedChanges) that changes nothing until approved.
+        private int KeepDownloadedLocations(NexusReportPairing.Result prep, string source, NexusLogRows afterRows)
         {
+            var proposals = NexusDownloadedChanges.Load();
+            int proposed = 0;
             var after = afterRows?.Error == null && afterRows != null
                 ? afterRows.Rows.Where(q => q.Id != null).GroupBy(q => q.Id).ToDictionary(g => g.Key, g => g.First())
                 : new Dictionary<string, NexusQso>();
@@ -376,6 +380,9 @@ namespace WSJTX_Controller
                 Cmp("country", logged.Country, V("COUNTRY"));
                 if (logged.Dxcc.HasValue && logged.Dxcc.Value > 0) Cmp("DXCC", logged.Dxcc.Value.ToString(), V("DXCC"));
                 if (notes.Count > 0) differs.Add($"{label}: {string.Join("; ", notes)}");
+                // The same differences, and county, zones and grid, as proposals to review --
+                // judged against the contact as it is after the merge.
+                proposed += proposals.Note(source, logged.Id != null && after.TryGetValue(logged.Id, out var current) ? current : logged, loc, DateTime.UtcNow);
 
                 // Kept for each service that now confirms the contact (2026-10-05: QRZ and eQSL too,
                 // as APP_JIMMY_QRZ_* / APP_JIMMY_EQSL_*). Awards use LoTW's; the others are kept and
@@ -400,7 +407,37 @@ namespace WSJTX_Controller
             }
             NexusSyncDiagnostics.WriteList("location-" + source.ToLowerInvariant(),
                 $"{source} rows whose location differs from the logged contact -- the logged location was kept", differs);
+            try { proposals.Save(); } catch { proposed = 0; }   // not saved = not there to review; never fails the download
             if (changed) NexusLogbook.Refresh();
+            return proposed;
+        }
+
+        // Review Downloaded Changes: the proposals as they stand against the log now (those for
+        // contacts that are gone, or that the log already agrees with, are dropped first).
+        internal NexusDownloadedChanges DownloadedChanges()
+        {
+            var list = NexusDownloadedChanges.Load();
+            var rows = Client.Rows();
+            if (rows.Error == null && rows.Rows != null && list.Prune(rows.Rows) > 0)
+                try { list.Save(); } catch { }
+            return list;
+        }
+
+        // Applies the chosen proposals through Nexus's guarded edit, one edit per contact; what
+        // the services said (confirmations, upload stamps) stays, as with any edit.
+        internal NexusDownloadedChanges.ApplyResult ApplyDownloadedChanges(NexusDownloadedChanges list, IEnumerable<NexusDownloadedChanges.Proposal> chosen)
+        {
+            var rows = Client.Rows();
+            if (rows.Error != null || rows.Rows == null)
+                throw new InvalidOperationException("The logbook could not be read: " + rows.Error);
+            var result = list.Apply(chosen, rows.Rows, q =>
+            {
+                var reply = Client.Edit(q.Id, q.EditKey, q);
+                return reply.State == "saved" ? null : EditFailure(reply);
+            });
+            list.Save();
+            if (result.Applied > 0) NexusLogbook.Refresh();
+            return result;
         }
 
         public ImportResult ImportFile(string adifText, string source)

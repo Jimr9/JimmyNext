@@ -399,6 +399,9 @@ namespace WSJTX_Controller
         public SolarHistoryResult GetSolarHistory(out string error) => GetJson<SolarHistoryResult>("SOLAR_HISTORY", out error);
         public SolarWindResult GetSolarWind(out string error) => GetJson<SolarWindResult>("SOLAR_WIND", out error);
 
+        // Output to other programs: the engine's own account, as JSON, or null when it does not answer.
+        internal static string WsjtxOutStatus() => SendCommand("WSJTX_OUT_STATUS", 3000);
+
         // The calendar as EngineHost last read it (refreshed there every 15 minutes); refreshNow
         // reads the feed first (the Refresh Calendar button), which can take up to 20 seconds.
         public DxpeditionsResult GetDxpeditions(out string error) => GetJson<DxpeditionsResult>("DXPEDITIONS", out error);
