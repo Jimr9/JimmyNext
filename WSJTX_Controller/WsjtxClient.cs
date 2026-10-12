@@ -3248,6 +3248,7 @@ namespace WSJTX_Controller
                 // rstRecd can be null (RstRecd() found no report/roger-report to parse) -- never
                 // invented, stored/offered as "" per the field's own contract.
                 _loggedReports[call] = (rstSent ?? "", rstRecd ?? "");   // presentation only -- see field comment
+                PreparedSpotLogged(call);   // a station prepared from a spot is done with once it is logged
                 _sessionLogged.Add((call, CurrentBandStr, mode, rstSent ?? "", rstRecd ?? "", Country(call)));
                 ShowLogged();
                 loggedCall = call;

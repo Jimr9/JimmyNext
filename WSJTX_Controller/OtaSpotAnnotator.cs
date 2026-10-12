@@ -6,6 +6,8 @@ namespace WSJTX_Controller
     {
         public bool WorkedBefore;
         public int NeededForAwardCount;
+        // The award and wanted labels for the row (SpotRows.AwardLabels), when they were worked out.
+        public System.Collections.Generic.List<string> Labels;
     }
 
     // Applies Jimmy's own existing operator intelligence (worked-before, active-award matching)

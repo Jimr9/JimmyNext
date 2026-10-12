@@ -4255,17 +4255,41 @@ namespace WSJTX_Controller
                 return;
             }
 
+            // The one refresh: whatever a spot list worked out for other bands is stale too.
+            _awardTagsByBand.Clear();
+            _allBandAwardTags.Clear();
+            wsjtxClient.activeAwardTags = AwardTagsForBand(wsjtxClient.CurrentBandStr);
+            wsjtxClient.RefreshQueuedAwardTags();
+        }
+
+        // The checked awards as they stand for one band (2026-10-12) -- the radio's own band for
+        // the station lists (RefreshStillNeedCache), a spot's band for the spot lists, by the
+        // SAME rules: an award with no band restriction counts every band and is evaluated once
+        // for all of them; a band-restricted award is evaluated for that band, and is absent on
+        // a band that is not one of its own. Each evaluation is done once and kept until the
+        // next RefreshStillNeedCache (a contact logged, a download merged, an award checked or
+        // changed), so a list of hundreds of spots costs set look-ups, not log evaluations.
+        private readonly Dictionary<string, Dictionary<string, WsjtxClient.ActiveAwardTag>> _awardTagsByBand =
+            new Dictionary<string, Dictionary<string, WsjtxClient.ActiveAwardTag>>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, WsjtxClient.ActiveAwardTag> _allBandAwardTags = new Dictionary<string, WsjtxClient.ActiveAwardTag>();
+
+        public Dictionary<string, WsjtxClient.ActiveAwardTag> AwardTagsForBand(string band)
+        {
             var tags = new Dictionary<string, WsjtxClient.ActiveAwardTag>();
+            if (!NexusLogbook.LogReady) return tags;   // no log to judge against yet: no labels, never "not needed"
+            string key = band ?? "";
+            if (_awardTagsByBand.TryGetValue(key, out var kept)) return kept;
             foreach (string ruleId in activeAwardRuleIds)
             {
                 var def = RuleLibrary.Definitions.FirstOrDefault(d => d.Enabled && d.Id == ruleId);
                 if (!RuleEngine.SupportsLiveTag(def)) continue;
-                if (!BandAppliesToLiveTag(def.Bands, wsjtxClient.CurrentBandStr)) continue;
+                if (!BandAppliesToLiveTag(def.Bands, band)) continue;
 
                 try
                 {
-                    string band = def.Bands.Count > 0 ? wsjtxClient.CurrentBandStr : null;
-                    var result = RuleEngine.EvaluateBand(def, band);
+                    bool allBands = def.Bands.Count == 0;
+                    if (allBands && _allBandAwardTags.TryGetValue(ruleId, out var same)) { tags[ruleId] = same; continue; }
+                    var result = RuleEngine.EvaluateBand(def, allBands ? null : band);
                     if (result.EvaluationError != null) continue;   // e.g. universe unresolvable
 
                     // StillNeeded (Target=All only) drives "Needed"; WorkedUnconfirmed (any
@@ -4274,7 +4298,7 @@ namespace WSJTX_Controller
                     // alone is still worth an entry here -- this used to require StillNeeded !=
                     // null, which is exactly why DXCC could never retire the old hardcoded
                     // DXCC_UNCONFIRMED HRC category (see RuleEngineCountTargetStillNeededTests).
-                    tags[ruleId] = new WsjtxClient.ActiveAwardTag
+                    var tag = new WsjtxClient.ActiveAwardTag
                     {
                         RuleId         = ruleId,
                         RuleName       = def.Name,
@@ -4289,12 +4313,24 @@ namespace WSJTX_Controller
                             ? new HashSet<string>(result.WorkedUnconfirmed, StringComparer.OrdinalIgnoreCase)
                             : new HashSet<string>(StringComparer.OrdinalIgnoreCase),
                     };
+                    tags[ruleId] = tag;
+                    if (allBands) _allBandAwardTags[ruleId] = tag;
                 }
                 catch { /* skip this rule, keep the others */ }
             }
-            wsjtxClient.activeAwardTags = tags;
-            wsjtxClient.RefreshQueuedAwardTags();
+            _awardTagsByBand[key] = tags;
+            return tags;
         }
+
+        // Row order of the three spot lists (their Row Order buttons, 2026-10-12): which fields a
+        // row has and in what order. Saved per profile; an unknown or repeated name is dropped.
+        internal List<string> SpotRowOrder(string list)
+        {
+            var set = list == "dx" ? SpotRows.Dx : list == "heard" ? SpotRows.Heard : SpotRows.Pota;
+            return ParseRowOrder(iniFile?.Read(SpotRowOrderKey(list)), set.All) ?? new List<string>(set.Defaults);
+        }
+        internal void SaveSpotRowOrder(string list, List<string> fields) => iniFile?.Write(SpotRowOrderKey(list), string.Join(",", fields));
+        internal static string SpotRowOrderKey(string list) => list == "dx" ? "dxSpotsRowOrder" : list == "heard" ? "whoHearsMeRowOrder" : "potaSpotsRowOrder";
 
         public void RefreshLogbookWindowIfOpen()
         {
@@ -4367,7 +4403,17 @@ namespace WSJTX_Controller
             try
             {
                 _otaSpotsWindow = new OtaSpotsWindow(lookupManager,
-                    () => wsjtxClient?.activeAwardTags, () => wsjtxClient?.CurrentBandStr);
+                    () => wsjtxClient?.activeAwardTags, () => wsjtxClient?.CurrentBandStr,
+                    new OtaSpotsWindow.Host
+                    {
+                        AwardTagsForBand = band => AwardTagsForBand(band).Values,
+                        IsWanted = call => wsjtxClient != null && !string.IsNullOrEmpty(call) && wsjtxClient.wantedCalls.Contains(call),
+                        RowOrder = SpotRowOrder,
+                        SaveRowOrder = SaveSpotRowOrder,
+                        PlanSpot = (call, spotMode, freqKhz) => wsjtxClient?.PlanSpot(call, spotMode, freqKhz),
+                        PrepareWouldInterrupt = () => wsjtxClient?.PrepareWouldInterrupt(),
+                        PrepareSpot = plan => wsjtxClient == null ? "The radio is not available." : wsjtxClient.PrepareSpot(plan),
+                    });
                 // Deliberately no Owner assignment -- see the matching comment on
                 // _logbookWindow's Show() call above; Controller_FormClosing already closes
                 // this explicitly via _otaSpotsWindow?.Close().

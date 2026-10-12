@@ -405,9 +405,9 @@ impl SharedCache {
         let spots: Vec<SpotWire> = guard
             .spots
             .iter()
-            .map(|spot| SpotWire {
-                spot,
-                location: parks.get(&spot.reference).filter(|l| !l.is_empty()).map(String::as_str),
+            .map(|spot| {
+                let location = parks.get(&spot.reference).filter(|l| !l.is_empty()).map(String::as_str);
+                SpotWire { spot, location, states: spot_states(spot, location) }
             })
             .collect();
         let payload = SpotsPayload {
@@ -552,13 +552,28 @@ fn now_unix() -> i64 {
 }
 
 
-/// One spot as Jimmy receives it: Nexus's OtaSpot plus the park's location, when known.
+/// One spot as Jimmy receives it: Nexus's OtaSpot plus the park's location, when known, and
+/// (2026-10-12) the US states and Canadian provinces the activation is in, as "US-ID" / "CA-ON".
+/// Nexus works those out itself (a park from POTA's own location, a summit from SOTA's published
+/// associations and regions) but deliberately never serializes them, so they are written here
+/// under a key of Jimmy's own.
 #[derive(serde::Serialize)]
 struct SpotWire<'a> {
     #[serde(flatten)]
     spot: &'a OtaSpot,
     #[serde(skip_serializing_if = "Option::is_none")]
     location: Option<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    states: Vec<String>,
+}
+
+/// Where the activation is: Nexus's own answer for the spot; for a park it has none for, the
+/// park directory's location read by Nexus's own rule. Empty = not known, never a guess.
+fn spot_states(spot: &OtaSpot, park_location: Option<&str>) -> Vec<String> {
+    if !spot.states.is_empty() {
+        return spot.states.clone();
+    }
+    park_location.map(propagation::pota::location_states).unwrap_or_default()
 }
 
 #[derive(serde::Serialize)]
@@ -1236,3 +1251,28 @@ fn hamqth_login(username: &str, password: &str) -> Result<String, String> {
         .ok_or_else(|| "HamQTH: login failed -- check username/password".to_string())
 }
 
+
+#[cfg(test)]
+mod spot_state_tests {
+    use super::{spot_states, SpotWire};
+    use propagation::pota::OtaSpot;
+
+    // The activation's states reach Jimmy: Nexus's own for the spot first, else the park
+    // directory's, and nothing at all for a place that is no US state or Canadian province.
+    #[test]
+    fn a_spot_carries_the_states_of_its_activation() {
+        let mut spot: OtaSpot = serde_json::from_value(serde_json::json!({
+            "program": "POTA", "reference": "US-0003", "name": "", "activator": "K1ABC", "freqKhz": 14074.0, "mode": "FT8",
+            "spotter": null, "comment": null, "grid": null, "spotTimeUnix": null
+        }))
+        .unwrap();
+        assert!(spot_states(&spot, None).is_empty(), "not known: nothing");
+        assert_eq!(spot_states(&spot, Some("US-MT,US-ND")), ["US-MT", "US-ND"], "from the park directory");
+        assert!(spot_states(&spot, Some("FR-ARA")).is_empty(), "another country's region is not a state");
+        spot.states = vec!["US-ID".to_string()];
+        assert_eq!(spot_states(&spot, Some("US-MT")), ["US-ID"], "Nexus's own answer for the spot comes first");
+        let wire = serde_json::to_value(SpotWire { spot: &spot, location: None, states: spot_states(&spot, None) }).unwrap();
+        assert_eq!(wire["states"], serde_json::json!(["US-ID"]));
+        assert_eq!(propagation::pota::sota_state("W7M/MT-001"), Some("US-MT"), "a summit is placed by SOTA's own data");
+    }
+}

@@ -96,7 +96,7 @@ namespace WSJTX_Controller
         {
             "rawNewestFirst", "rawMaxRows", "callWaitingRowOrder", "rawDecodeRowOrder", "spotWatchRowOrder",
             "spotWatchSortKey", "listFontSize", "listBackColor", "listForeColor", "listAltRowColor", "showUsState",
-            "editLogRowOrder", "smartWindowRowOrder", "advCallLayout", "advShowTx1", "advShowTx2", "advShowRaw", "showSpotWatch",
+            "editLogRowOrder", "smartWindowRowOrder", "potaSpotsRowOrder", "dxSpotsRowOrder", "whoHearsMeRowOrder", "advCallLayout", "advShowTx1", "advShowTx2", "advShowRaw", "showSpotWatch",
             "keepTransmitListDuringTx", "keepListPositionDuringRefresh", "moveFocusToStatusOnCallSelect",
         };
         // Calls and operating: who to call and how -- never radio, audio, decoder, station,

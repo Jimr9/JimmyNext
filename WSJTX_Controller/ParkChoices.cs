@@ -40,18 +40,29 @@ namespace WSJTX_Controller
                 ? places[0].Substring(3).ToUpperInvariant() : null;
         }
 
-        internal static void Choose(string call, string reference, string parkLocation, DateTime? nowUtc = null)
+        // chosenState (2026-10-12): for a park in several states, the one the operator says the
+        // activator is in. It is taken only when it IS one of the park's states; otherwise, and
+        // when none is given, the state is the park's own only when the park lies in one.
+        internal static void Choose(string call, string reference, string parkLocation, DateTime? nowUtc = null, string chosenState = null)
         {
             string key = CallKey(call);
             if (key.Length == 0 || string.IsNullOrWhiteSpace(reference)) return;
+            string state = SingleUsState(parkLocation);
+            string chosen = (chosenState ?? "").Trim().ToUpperInvariant();
+            if (state == null && chosen.Length > 0 && UsStates(parkLocation).Contains(chosen)) state = chosen;
             lock (_lock)
                 _byCall[key] = new Choice
                 {
                     Reference = reference.Trim().ToUpperInvariant(),
-                    State = SingleUsState(parkLocation),
+                    State = state,
                     ChosenUtc = nowUtc ?? DateTime.UtcNow,
                 };
         }
+
+        // The US states of a park's location ("US-ID,US-WY" -> ID, WY).
+        internal static List<string> UsStates(string location) =>
+            (location ?? "").Split(',').Select(p => p.Trim().ToUpperInvariant())
+                .Where(p => p.StartsWith("US-", StringComparison.Ordinal) && p.Length > 3).Select(p => p.Substring(3)).Distinct().ToList();
 
         // The current choice for this station, without using it up.
         internal static Choice Peek(string call, DateTime? nowUtc = null)

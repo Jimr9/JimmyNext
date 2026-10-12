@@ -25,6 +25,10 @@ namespace WSJTX_Controller
         // The park's location in the POTA directory ("US-ID"; "US-ID,US-WY" for a park in two),
         // added by Jimmy's engine (EngineHost external_data.rs); null until it has looked it up.
         public string Location { get; set; }
+        // Where the activation is, as the engine worked it out (2026-10-12): US states and
+        // Canadian provinces as "US-ID" / "CA-ON"; several for a park on a state line; null or
+        // empty when it is not known. Never the activator's home address.
+        public List<string> States { get; set; }
     }
 
     public class OtaSpotsResult

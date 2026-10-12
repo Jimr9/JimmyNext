@@ -94,13 +94,35 @@ namespace WSJTX_Controller
         private ListBox _wxHistoryList;    // daily solar history
         private TextBox _wxStatusLabel;
 
+        // What the main window gives the spot lists (2026-10-12). Every member may be absent
+        // (tests, an older caller): the lists then show what the feed says and nothing more.
+        public sealed class Host
+        {
+            // The checked awards as they stand for a band -- the SPOT's band, not the radio's.
+            public Func<string, IEnumerable<WsjtxClient.ActiveAwardTag>> AwardTagsForBand;
+            public Func<string, bool> IsWanted;
+            // Row order of a list ("pota", "dx", "heard"): read, and saved.
+            public Func<string, List<string>> RowOrder;
+            public Action<string, List<string>> SaveRowOrder;
+            // Prepare this station: the plan for a spot (nothing is touched), what carrying it
+            // out would interrupt (null = nothing), and carrying it out (null = started).
+            public Func<string, string, double, WsjtxClient.SpotPlan> PlanSpot;
+            public Func<string> PrepareWouldInterrupt;
+            public Func<WsjtxClient.SpotPlan, string> PrepareSpot;
+        }
+        private readonly Host _host2;
+
         public OtaSpotsWindow(LookupManager lookupManager,
             Func<System.Collections.Generic.Dictionary<string, WsjtxClient.ActiveAwardTag>> activeAwardTags,
-            Func<string> currentBand)
+            Func<string> currentBand, Host host = null)
         {
             _lookupManager = lookupManager;
             _activeAwardTags = activeAwardTags;
             _currentBand = currentBand;
+            _host2 = host ?? new Host();
+            _potaFields = _host2.RowOrder?.Invoke("pota") ?? new List<string>(SpotRows.Pota.Defaults);
+            _dxFields = _host2.RowOrder?.Invoke("dx") ?? new List<string>(SpotRows.Dx.Defaults);
+            _heardFields = _host2.RowOrder?.Invoke("heard") ?? new List<string>(SpotRows.Heard.Defaults);
 
             // Shorter than the tab captions it sits above ("POTA / SOTA", "DX Spots", ...) --
             // the old title ("POTA / SOTA / DX Spots") repeated two of those captions verbatim,
@@ -309,15 +331,15 @@ namespace WSJTX_Controller
             {
                 // Rows that waited while the operator was elsewhere (SetRowsIfChanged) go in now,
                 // in place, as the list is entered.
-                if (_waitingRows.TryGetValue(lb, out var waiting)) { _waitingRows.Remove(lb); SetRowsIfChanged(lb, waiting); }
+                if (_waitingRows.TryGetValue(lb, out var waiting)) { _waitingRows.Remove(lb); SetRowsIfChanged(lb, waiting.Rows, waiting.Records, waiting.Identity); }
                 SelectFirstItemIfNoneSelectedYet(lb, lb.SelectedIndex >= 0);
             };
             return lb;
         }
 
         // A list's new rows held back while it is out of focus with a line still selected.
-        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, List<string>> _waitingRows =
-            new System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, List<string>>();
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, Waiting> _waitingRows =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, Waiting>();
 
         // Companion to MakeListBox's own comment: a ListBox's "current item" for keyboard/
         // screen-reader purposes is just SelectedIndex, but Items.Clear()+Add() (every Refresh
@@ -372,29 +394,189 @@ namespace WSJTX_Controller
             // credited to (SIG_INFO). Nothing is chosen for you, and logging never waits for it.
             var chooseBtn = new Button { Text = "Choose Park", AccessibleName = "Choose this park for the station", Size = new Size(100, 24), Dock = DockStyle.Right };
             chooseBtn.Click += (s, e) => ChooseSelectedPark();
+            var orderBtn = MakeRowOrderButton("pota", SpotRows.Pota, "POTA and SOTA Row Order", () => _potaFields, f => _potaFields = f, RefreshPotaSota);
+            var prepareBtn = MakePrepareButton(() =>
+            {
+                var spot = ShownRecord(_potaList, _potaList.SelectedIndex) as OtaSpot;
+                return spot == null ? ((string, string, double, string)?)null : (spot.Activator, spot.Mode, spot.FreqKhz, FormatAge(spot.SpotTimeUnix));
+            }, _potaStatusLabel);
             bottom.Controls.Add(_potaStatusLabel);
+            bottom.Controls.Add(orderBtn);
+            bottom.Controls.Add(prepareBtn);
             bottom.Controls.Add(chooseBtn);
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_potaList);
             page.Controls.Add(bottom);
-            _pageOrder[page] = new Control[] { _potaList, chooseBtn, refreshBtn, _potaStatusLabel };
+            _pageOrder[page] = new Control[] { _potaList, orderBtn, prepareBtn, chooseBtn, refreshBtn, _potaStatusLabel };
             return page;
+        }
+
+        // ── Prepare this station (2026-10-12) ───────────────────────────────────
+        // A button, pressed on purpose: selecting a spot, a refresh or an alert never moves the
+        // radio. It says what it will do and asks first; then the radio goes to the spot's band,
+        // mode and frequency with transmit OFF, and the callsign is remembered. The station is
+        // called only by the operator, from the station list, once it is actually decoded
+        // (WsjtxClient.Spots.cs). Enter on a spot does nothing here, as before.
+        private Button MakePrepareButton(Func<(string Call, string Mode, double FreqKhz, string Age)?> selected, TextBox status)
+        {
+            var btn = new Button { Text = "Prepare Station", AccessibleName = "Prepare this station", Size = new Size(110, 24), Dock = DockStyle.Right };
+            btn.AccessibleDescription = "Sets the radio to the spot's band, mode and frequency and leaves transmit off. The station is listed when it is heard; select it there and press Enter to call.";
+            btn.Click += (s, e) =>
+            {
+                var spot = selected();
+                if (spot == null) { status.Text = "Select a spot first."; return; }
+                if (_host2.PlanSpot == null || _host2.PrepareSpot == null) { status.Text = "The radio is not available."; return; }
+                var plan = _host2.PlanSpot(spot.Value.Call, spot.Value.Mode, spot.Value.FreqKhz);
+                if (plan == null || !plan.Ok) { status.Text = "Not prepared. " + (plan?.Reason ?? "The spot cannot be used."); return; }
+                string interrupts = _host2.PrepareWouldInterrupt?.Invoke();
+                string question = "Prepare the radio for " + plan.Sentence() + $" Spotted {spot.Value.Age}.\n\n" +
+                    (interrupts != null ? interrupts + "\n\n" : "") +
+                    "Transmit will be off. Nothing is sent. When the station is heard it is in the station list; select it there and press Enter to call it.";
+                if (MessageBox.Show(this, question, "Prepare Station", MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                        interrupts != null ? MessageBoxDefaultButton.Button2 : MessageBoxDefaultButton.Button1) != DialogResult.Yes)
+                {
+                    status.Text = "Not prepared. Nothing was changed.";
+                    return;
+                }
+                string problem = _host2.PrepareSpot(plan);
+                status.Text = problem != null ? "Not prepared. " + problem
+                    : $"Setting the radio for {plan.Call}: {plan.Tier}, {plan.Band.TrimEnd('m')} meters, {plan.DialKHz / 1000.0:0.000}. Transmit is off. It will be listed when it is heard.";
+            };
+            return btn;
+        }
+
+        // ── Row Order (2026-10-12) ───────────────────────────────────────────────
+        // Which fields a row has, and in what order -- the same checked list with Move Up,
+        // Move Down and Restore Default the station lists use (EditLogRowOrderDlg). It changes
+        // how a row reads, never which stations are listed or how they are sorted. Each of the
+        // three lists keeps its own. Cancel changes nothing; OK rebuilds the rows from what is
+        // already here (no new download) with the same station still selected.
+        private List<string> _potaFields, _dxFields, _heardFields;
+
+        private Button MakeRowOrderButton(string list, SpotRows.FieldSet set, string title, Func<List<string>> get, Action<List<string>> put, Action rebuild)
+        {
+            var btn = new Button { Text = "Row Order...", AccessibleName = "Row order", Size = new Size(100, 24), Dock = DockStyle.Right };
+            btn.Click += (s, e) =>
+            {
+                using (var dlg = new EditLogRowOrderDlg(get(), set.All, set.Labels, title, "Choose what each row says, and in what order:", "Row parts"))
+                {
+                    if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                    put(dlg.SelectedFields);
+                    _host2.SaveRowOrder?.Invoke(list, dlg.SelectedFields);
+                }
+                rebuild();
+            };
+            return btn;
         }
 
         private void ChooseSelectedPark()
         {
-            int i = _potaList.SelectedIndex;
-            if (i < 0 || i >= _potaSpots.Count) { _potaStatusLabel.Text = "Select a spot first."; return; }
-            var spot = _potaSpots[i];
+            // The spot behind the row as it is on screen (rows wait while the list is out of
+            // focus with a line selected, so this is never a newer list's row at that position).
+            var spot = ShownRecord(_potaList, _potaList.SelectedIndex) as OtaSpot;
+            if (spot == null) { _potaStatusLabel.Text = "Select a spot first."; return; }
             if (!string.Equals(spot.Program, "POTA", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(spot.Reference))
             {
                 _potaStatusLabel.Text = "Only a POTA park can be chosen.";
                 return;
             }
-            ParkChoices.Choose(spot.Activator, spot.Reference, spot.Location);
-            _potaStatusLabel.Text = $"Park {spot.Reference.Trim().ToUpperInvariant()} chosen for {spot.Activator}; it goes on that station's next logged contact.";
+            // A park in several states (2026-10-12): which one the activator is in can be said
+            // here, or left unsaid -- the contact then logs no state from the park, as before.
+            var states = SpotRows.Places(spot).Where(SpotRows.IsUsState).Select(SpotRows.PlaceCode).ToList();
+            string chosenState = null;
+            if (states.Count > 1)
+            {
+                var answer = AskParkState(spot, states);
+                if (answer == null) { _potaStatusLabel.Text = "No park was chosen."; return; }
+                chosenState = answer.Length == 0 ? null : answer;
+            }
+            string location = !string.IsNullOrWhiteSpace(spot.Location) ? spot.Location : string.Join(",", SpotRows.Places(spot));
+            ParkChoices.Choose(spot.Activator, spot.Reference, location, null, chosenState);
+            _potaStatusLabel.Text = $"Park {spot.Reference.Trim().ToUpperInvariant()} chosen for {spot.Activator}" +
+                (chosenState != null ? $", in {SpotRows.PlaceName("US-" + chosenState)}" : states.Count > 1 ? ", state not specified" : "") +
+                "; it goes on that station's next logged contact.";
+            RefreshPotaSota();
         }
+
+        // Null = cancelled; "" = not specified; else the state's code.
+        private string AskParkState(OtaSpot spot, List<string> states)
+        {
+            using (var dlg = new Form
+            {
+                Text = "Which State", FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false, ClientSize = new Size(420, 130), Font = Font,
+            })
+            {
+                var about = new Label
+                {
+                    Text = $"Park {spot.Reference.Trim().ToUpperInvariant()} is in {string.Join(" and ", states.Select(c => SpotRows.PlaceName("US-" + c)))}. Which state is {spot.Activator} in?",
+                    Location = new Point(10, 10), Size = new Size(400, 34),
+                };
+                var list = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(10, 50), Width = 400, AccessibleName = "State of the activation", TabIndex = 0 };
+                list.Items.Add("Not specified");
+                foreach (string c in states) list.Items.Add(SpotRows.PlaceName("US-" + c));
+                list.SelectedIndex = 0;
+                var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, Location = new Point(250, 92), Width = 75, TabIndex = 1 };
+                var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(335, 92), Width = 75, TabIndex = 2 };
+                dlg.Controls.AddRange(new Control[] { about, list, ok, cancel });
+                dlg.AcceptButton = ok;
+                dlg.CancelButton = cancel;
+                if (dlg.ShowDialog(this) != DialogResult.OK) return null;
+                return list.SelectedIndex <= 0 ? "" : states[list.SelectedIndex - 1];
+            }
+        }
+
+        // What Jimmy adds to a spot (SpotRows): worked before on the spot's band, where an
+        // activation is, and the award and wanted labels for that band. The log and callsign
+        // look-ups are remembered for a minute, so a list of hundreds of spots refreshed every
+        // 15 seconds asks each question once, not every time.
+        private readonly Dictionary<string, (bool Worked, LookupRecord Rec)> _spotMemo = new Dictionary<string, (bool, LookupRecord)>(StringComparer.OrdinalIgnoreCase);
+        private DateTime _spotMemoFrom = DateTime.MinValue;
+
+        private SpotRows.SpotNotes NotesFor(string call, double freqKhz, bool activation, IList<string> places, string chosenUsState)
+        {
+            var notes = new SpotRows.SpotNotes { LogReady = NexusLogbook.LogReady };
+            if (string.IsNullOrEmpty(call)) return notes;
+            if ((DateTime.UtcNow - _spotMemoFrom).TotalSeconds > 60 || _spotMemo.Count > 4000) { _spotMemo.Clear(); _spotMemoFrom = DateTime.UtcNow; }
+            string band = SpotRows.BandOfKhz(freqKhz);
+            string key = call + "|" + (band ?? "");
+            if (!_spotMemo.TryGetValue(key, out var memo))
+            {
+                memo = (band != null && _logbookDb != null && _logbookDb.HasWorkedBefore(call, band),
+                        _lookupManager != null && _lookupManager.Enabled ? _lookupManager.Build(call) : null);
+                _spotMemo[key] = memo;
+            }
+            notes.WorkedBefore = memo.Worked;
+            notes.Location = activation ? SpotRows.LocationText(places, chosenUsState) : "";
+            if (!notes.LogReady) return notes;   // no log to judge against: no labels, and the status says "log loading"
+            var facts = new SpotRows.Facts
+            {
+                Call = call, Band = band, Activation = activation, Places = places, ChosenUsState = chosenUsState,
+                HomeState = memo.Rec?.State, Continent = memo.Rec?.Continent, CqZone = memo.Rec?.CqZone ?? 0, Dxcc = memo.Rec?.Dxcc ?? 0,
+                Wanted = _host2.IsWanted?.Invoke(call) ?? false,
+            };
+            // An unknown band (a spot off the ham bands): no band, so no award is judged for it.
+            if (band != null) notes.Labels = SpotRows.AwardLabels(facts, _host2.AwardTagsForBand?.Invoke(band));
+            else if (facts.Wanted) notes.Labels = SpotRows.AwardLabels(facts, null);
+            return notes;
+        }
+
+        private SpotRows.SpotNotes NotesFor(OtaSpot spot)
+        {
+            var places = SpotRows.Places(spot);
+            // The operator's own choice for this park, while it stands.
+            var choice = ParkChoices.Peek(spot.Activator);
+            string chosen = choice != null && string.Equals(choice.Reference, (spot.Reference ?? "").Trim(), StringComparison.OrdinalIgnoreCase) ? choice.State : null;
+            return NotesFor(spot.Activator, spot.FreqKhz, activation: true, places, places.Count > 1 ? chosen : null);
+        }
+
+        // A spot's identity across refreshes: the same station on the same park and band stays
+        // selected when the list is rebuilt, whatever row it lands on.
+        private static string SpotId(object o) =>
+            o is OtaSpot s ? $"{s.Program}|{s.Reference}|{s.Activator}|{SpotRows.BandOfKhz(s.FreqKhz)}"
+            : o is DxSpot d ? $"{d.DxCall}|{SpotRows.BandOfKhz(d.FreqKhz)}|{d.Spotter}"
+            : o is HeardMe h ? $"{h.Call}|{h.Band}" : null;
 
         // Release-audit finding, 2026-08-20: this used to call _client.GetOtaSpots directly, ON
         // THE UI THREAD, justified as "cache-only local read on EngineHost's side, bounded ~3s
@@ -422,17 +604,24 @@ namespace WSJTX_Controller
                     if (IsDisposed) return;
 
                     var potaRows = new List<string>();
-                    _potaSpots.Clear();
+                    var spots = new List<OtaSpot>();
                     if (result?.Spots != null)
                     {
                         foreach (var spot in result.Spots)
                         {
-                            var annotation = OtaSpotAnnotator.Annotate(spot.Activator, band, _logbookDb, _lookupManager, tags);
-                            potaRows.Add(FormatPotaSotaRow(spot, annotation));
-                            _potaSpots.Add(spot);
+                            // Judged on the SPOT's band and the activation's own place (SpotRows),
+                            // never the radio's band or the activator's home state.
+                            potaRows.Add(SpotRows.PotaRow(spot, NotesFor(spot), _potaFields, FormatAge(spot.SpotTimeUnix)));
+                            spots.Add(spot);
                         }
                     }
-                    SetRowsIfChanged(_potaList, potaRows);
+                    // The spots behind the rows change only when the rows on screen do, and the
+                    // same spot stays selected (SetRowsIfChanged).
+                    if (SetRowsIfChanged(_potaList, potaRows, spots.Cast<object>().ToList(), SpotId))
+                    {
+                        _potaSpots.Clear();
+                        _potaSpots.AddRange(spots);
+                    }
 
                     if (error != null)
                         _potaStatusLabel.Text = $"{_potaList.Items.Count} spots (stale) -- {error}";
@@ -452,13 +641,13 @@ namespace WSJTX_Controller
         // internal (not private): JimmyTests exercises this directly (InternalsVisibleTo, see
         // AssemblyInfo.Testing.cs) to lock in the concise wording without needing a live
         // EngineHost connection or a real LogbookDb.
+        // 2026-10-12: a count ("needed for 2 awards") said nothing about WHICH awards; the row now
+        // has the awards' own labels beside this (SpotRows), and this says only worked or not.
         internal static string FormatStatus(OtaSpotAnnotation a)
         {
             if (a == null) return "";
             // Logbook migration: while the Nexus logbook is loading, worked-before is unknown.
             if (!NexusLogbook.LogReady) return "log loading";
-            if (a.NeededForAwardCount > 0)
-                return $"needed for {a.NeededForAwardCount} award{(a.NeededForAwardCount == 1 ? "" : "s")}";
             return a.WorkedBefore ? "worked" : "not worked";
         }
 
@@ -468,9 +657,13 @@ namespace WSJTX_Controller
         // directly, same convention as FormatStatus above.
         internal static string FormatPotaSotaRow(OtaSpot spot, OtaSpotAnnotation annotation)
         {
-            return $"{spot.Program}, Reference: {spot.Reference}, Activator: {spot.Activator}, " +
-                $"Freq/Mode: {spot.FreqKhz / 1000.0:0.000} {spot.Mode}, Age: {FormatAge(spot.SpotTimeUnix)}, " +
-                $"Status: {FormatStatus(annotation)}";
+            // The default row (SpotRows.Pota.Defaults), with what the annotation says.
+            var notes = annotation == null ? null : new SpotRows.SpotNotes
+            {
+                LogReady = NexusLogbook.LogReady, WorkedBefore = annotation.WorkedBefore,
+                Location = SpotRows.LocationText(SpotRows.Places(spot), null), Labels = annotation.Labels ?? new List<string>(),
+            };
+            return SpotRows.PotaRow(spot, notes, null, FormatAge(spot.SpotTimeUnix));
         }
 
         // ── Band Conditions tab ──────────────────────────────────────────────────
@@ -795,26 +988,22 @@ namespace WSJTX_Controller
             _heardStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshWhoHearsMe(), "Refresh who hears me now");
             refreshBtn.Dock = DockStyle.Right;
+            var orderBtn = MakeRowOrderButton("heard", SpotRows.Heard, "Who Hears Me Row Order", () => _heardFields, f => _heardFields = f, RefreshWhoHearsMe);
             bottom.Controls.Add(_heardStatusLabel);
+            bottom.Controls.Add(orderBtn);
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_heardList);
             page.Controls.Add(top);
             page.Controls.Add(bottom);
-            _pageOrder[page] = new Control[] { _heardSummaryBox, _heardWindowCb, _heardList, refreshBtn, _heardStatusLabel };
+            _pageOrder[page] = new Control[] { _heardSummaryBox, _heardWindowCb, _heardList, orderBtn, refreshBtn, _heardStatusLabel };
             return page;
         }
 
         // One line per receiving station, every field labeled where it isn't obvious. An SNR the
         // report didn't carry, and a distance without the station's grid, are said as unknown --
         // never shown as 0. internal: JimmyTests exercises it.
-        internal static string FormatHeardMeRow(HeardMe h)
-        {
-            string grid = string.IsNullOrEmpty(h.Grid) ? "" : $" {h.Grid}";
-            string snr = h.Snr.HasValue ? $"{h.Snr.Value:+0;-0;0} dB" : "SNR not reported";
-            string where = string.IsNullOrEmpty(h.Grid) ? "distance unknown" : $"{h.Km:N0} km {h.Octant}";
-            return $"{h.Call}{grid}, {h.Band}, {snr}, {where}, {FormatAgeSecs(h.AgeSecs)}";
-        }
+        internal static string FormatHeardMeRow(HeardMe h) => SpotRows.HeardRow(h, null, FormatAgeSecs(h.AgeSecs));
 
         internal static string FormatHeardMeSummary(GettingOutResult r)
         {
@@ -1012,8 +1201,9 @@ namespace WSJTX_Controller
                     _heardInFlight = false;
                     if (IsDisposed) return;
 
-                    SetRowsIfChanged(_heardList, error == null && result?.Reports != null
-                        ? result.Reports.Select(FormatHeardMeRow).ToList() : new List<string>());
+                    var heard = error == null && result?.Reports != null ? result.Reports.ToList() : new List<HeardMe>();
+                    SetRowsIfChanged(_heardList, heard.Select(h => SpotRows.HeardRow(h, _heardFields, FormatAgeSecs(h.AgeSecs))).ToList(),
+                        heard.Cast<object>().ToList(), SpotId);
 
                     if (error != null)
                     {
@@ -1048,24 +1238,30 @@ namespace WSJTX_Controller
             _dxStatusLabel = MakeStatusBox();
             var refreshBtn = MakeRefreshButton((s, e) => RefreshDxSpots(), "Refresh DX spots now");
             refreshBtn.Dock = DockStyle.Right;
+            var orderBtn = MakeRowOrderButton("dx", SpotRows.Dx, "DX Spots Row Order", () => _dxFields, f => _dxFields = f, RefreshDxSpots);
+            var prepareBtn = MakePrepareButton(() =>
+            {
+                // A reverse-beacon spot says its mode; a hand-typed cluster spot does not, and
+                // a mode is never guessed for it.
+                var spot = ShownRecord(_dxList, _dxList.SelectedIndex) as DxSpot;
+                return spot == null ? ((string, string, double, string)?)null : (spot.DxCall, spot.Rbn ? spot.SkimmerMode : "", spot.FreqKhz, FormatAgeSecs(spot.AgeSecs));
+            }, _dxStatusLabel);
             bottom.Controls.Add(_dxStatusLabel);
+            bottom.Controls.Add(orderBtn);
+            bottom.Controls.Add(prepareBtn);
             bottom.Controls.Add(refreshBtn);
 
             page.Controls.Add(_dxList);
             page.Controls.Add(bottom);
-            _pageOrder[page] = new Control[] { _dxList, refreshBtn, _dxStatusLabel };
+            _pageOrder[page] = new Control[] { _dxList, orderBtn, prepareBtn, refreshBtn, _dxStatusLabel };
             return page;
         }
+        private readonly List<DxSpot> _dxSpots = new List<DxSpot>();   // the spot behind each row
 
         // One line per spot, every field labeled -- see MakeListBox's own comment for why this
         // replaced a multi-column ListView. internal (not private): JimmyTests exercises this
         // directly.
-        internal static string FormatDxSpotRow(DxSpot s)
-        {
-            string mode = s.Rbn ? (s.SkimmerMode ?? "RBN") : "";
-            return $"DX Call: {s.DxCall}, Frequency: {s.FreqKhz / 1000.0:0.000} MHz, Mode: {mode}, " +
-                $"Spotter: {s.Spotter}, Age: {FormatAgeSecs(s.AgeSecs)}, Comment: {s.Comment}";
-        }
+        internal static string FormatDxSpotRow(DxSpot s) => SpotRows.DxRow(s, null, null, FormatAgeSecs(s.AgeSecs));
 
         // Release-audit finding, 2026-08-20: moved off the UI thread -- see RefreshPotaSota's
         // own comment for the full reasoning (identical shape/fix here).
@@ -1081,8 +1277,15 @@ namespace WSJTX_Controller
                     _dxInFlight = false;
                     if (IsDisposed) return;
 
-                    SetRowsIfChanged(_dxList, result?.Spots != null
-                        ? result.Spots.Select(FormatDxSpotRow).ToList() : new List<string>());
+                    // Worked before and the award labels are for the spot's own band; the state
+                    // of a DX spot is the station's home state (it is not an activation).
+                    var dxSpots = result?.Spots != null ? result.Spots.ToList() : new List<DxSpot>();
+                    var dxRows = dxSpots.Select(d => SpotRows.DxRow(d, NotesFor(d.DxCall, d.FreqKhz, false, null, null), _dxFields, FormatAgeSecs(d.AgeSecs))).ToList();
+                    if (SetRowsIfChanged(_dxList, dxRows, dxSpots.Cast<object>().ToList(), SpotId))
+                    {
+                        _dxSpots.Clear();
+                        _dxSpots.AddRange(dxSpots);
+                    }
 
                     if (error != null)
                     {
@@ -1207,17 +1410,30 @@ namespace WSJTX_Controller
         // it was read out while they were in another list (the Space Weather readings, heard from
         // the history list). Its new rows wait, silently, until the list is entered again.
         // internal: JimmyTests exercises it.
-        internal static void SetRowsIfChanged(ListBox list, List<string> rows)
+        // records/identity (2026-10-12): the record behind each row, and what makes a record the
+        // same one after a refresh. The line that was selected stays selected by WHAT it is, not
+        // by its position -- a refresh that puts a new spot above it no longer moves the
+        // selection to a different station. Returns true when the rows on screen are now `rows`
+        // (so the caller's own list of records is in step with them); false when they are
+        // waiting for the list to be entered, and the screen still shows the old ones.
+        internal static bool SetRowsIfChanged(ListBox list, List<string> rows, List<object> records = null, Func<object, string> identity = null)
         {
-            if (rows.SequenceEqual(list.Items.Cast<string>())) { _waitingRows.Remove(list); return; }
+            _shownRecords.TryGetValue(list, out var shown);
+            if (rows.SequenceEqual(list.Items.Cast<string>()))
+            {
+                _waitingRows.Remove(list);
+                if (records != null) _shownRecords.AddOrUpdate(list, records);
+                return true;
+            }
             bool focused = list.Focused;
             if (!focused && list.SelectedIndex >= 0)
             {
-                _waitingRows.AddOrUpdate(list, rows);
-                return;
+                _waitingRows.AddOrUpdate(list, new Waiting { Rows = rows, Records = records, Identity = identity });
+                return false;
             }
             _waitingRows.Remove(list);
             int keep = list.SelectedIndex;
+            string keepId = identity != null && shown != null && keep >= 0 && keep < shown.Count ? identity(shown[keep]) : null;
             list.BeginUpdate();
             try
             {
@@ -1225,8 +1441,21 @@ namespace WSJTX_Controller
                 foreach (var r in rows) list.Items.Add(r);
             }
             finally { list.EndUpdate(); }
-            if (focused && list.Items.Count > 0) list.SelectedIndex = keep >= 0 ? Math.Min(keep, list.Items.Count - 1) : 0;
+            if (records != null) _shownRecords.AddOrUpdate(list, records); else _shownRecords.Remove(list);
+            if (focused && list.Items.Count > 0)
+            {
+                int same = keepId != null && records != null ? records.FindIndex(r => identity(r) == keepId) : -1;
+                list.SelectedIndex = same >= 0 ? same : keep >= 0 ? Math.Min(keep, list.Items.Count - 1) : 0;
+            }
+            return true;
         }
+
+        private sealed class Waiting { public List<string> Rows; public List<object> Records; public Func<object, string> Identity; }
+        private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, List<object>> _shownRecords =
+            new System.Runtime.CompilerServices.ConditionalWeakTable<ListBox, List<object>>();
+        // The record behind a list's row as it is ON SCREEN now, or null.
+        internal static object ShownRecord(ListBox list, int index) =>
+            _shownRecords.TryGetValue(list, out var shown) && index >= 0 && index < shown.Count ? shown[index] : null;
 
         // "45 seconds ago", "5 minutes ago", "2 hours ago" -- words, not "5m ago" (read "5 meters").
         internal static string AgeWords(long secs)

@@ -195,7 +195,13 @@ namespace WSJTX_Controller
                 // and already bypass every other automatic filter below (see isAdmitted override),
                 // so this bypasses the same way. Never suppress the station we're actively working --
                 // SNR can dip on a final RR73/73 and we must not drop a QSO in progress.
-                if (emsg.AutoGen && ctrl.ignoreWeakSnrCheckBox.Checked
+                // A station prepared from a spot (WsjtxClient.Spots.cs), heard with transmit off:
+                // listed whatever the filters below say -- it was asked for by name. Only the
+                // weak-signal, unwanted-CQ, already-worked and category filters are passed over;
+                // a blocked call, the wrong time period and a call just logged still apply.
+                bool preparedSpot = IsPreparedSpot(deCall);
+                if (preparedSpot) DebugOutput($"{spacer}AddSelectedCall: '{deCall}' is the prepared station; list filters passed over (transmit is off)");
+                if (!preparedSpot && emsg.AutoGen && ctrl.ignoreWeakSnrCheckBox.Checked
                     && emsg.Snr <= (int)ctrl.minSnrNumUpDown.Value && deCall != callInProg)
                 {
                     if (debugDetail) DebugOutput($"{spacer}AddSelectedCall rejected, weak signal snr:{emsg.Snr} floor:{(int)ctrl.minSnrNumUpDown.Value}");
@@ -221,7 +227,7 @@ namespace WSJTX_Controller
                     // other directed-CQ keyword without a dedicated category (contest prefixes,
                     // niche/future award types) still needs the alert list as its only
                     // wanted/unwanted signal, so this exemption is scoped to POTA/SOTA only.
-                    if (isDirectedAlert || isAcceptableCq || isPota || isSota)      //acceptable CQ
+                    if (isDirectedAlert || isAcceptableCq || isPota || isSota || preparedSpot)      //acceptable CQ
                     {
                         if (unwantedCqList.Contains(deCall))
                         {
@@ -242,7 +248,7 @@ namespace WSJTX_Controller
                 }
                 else        //other than a CQ
                 {
-                    if (unwantedCqList.Contains(deCall))
+                    if (unwantedCqList.Contains(deCall) && !preparedSpot)
                     {
                         if (debugDetail) DebugOutput($"{spacer}AddSelectedCall rejected, call following unwanted directed CQ");
                         return;
@@ -285,7 +291,7 @@ namespace WSJTX_Controller
                 bool isStillNeededByActiveAward = _awardTagger.MatchedAwardRuleId(emsg) != null
                     || (Ranker.callingEnabled.Contains(CallCategory.STILL_UNCONFIRMED)
                         && _awardTagger.MatchedUnconfirmedAwardRuleId(emsg) != null);
-                if (AwardMatcher.ShouldRejectAlreadyWorked(
+                if (!preparedSpot && AwardMatcher.ShouldRejectAlreadyWorked(
                         admitNewOnBand, isPota, isNewDxccCategory, isStillNeededByActiveAward))
                 {
                     DebugOutput($"{spacer}AddSelectedCall: already worked '{deCall}'");
@@ -334,7 +340,7 @@ namespace WSJTX_Controller
                         isAdmitted = false;
                         break;
                 }
-                if (!emsg.AutoGen) isAdmitted = true;
+                if (!emsg.AutoGen || preparedSpot) isAdmitted = true;
 
                 if (isAdmitted)
                 {

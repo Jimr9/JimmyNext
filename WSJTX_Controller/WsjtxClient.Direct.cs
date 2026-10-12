@@ -1626,6 +1626,9 @@ namespace WSJTX_Controller
             // sending a second SetFrequency -- see RigctldClient's own new [RIG-CMD] logging for
             // that), but it is a real correctness bug on its own and worth fixing regardless.
             _pendingBandIdx = null;
+            // After the dial above is this status's own: a station prepared from a spot is
+            // judged against the band the radio is on now (WsjtxClient.Spots.cs).
+            PreparedSpotTick();
 
             // Fix, 2026-09-14: restore the last CONFIRMED TX tone level once at startup,
             // unconditionally -- same "always force it, no setting" policy the dial/tier restore
@@ -4114,6 +4117,7 @@ namespace WSJTX_Controller
         // directly -- a real snapshot reporting the engine's own txEnabled must update Jimmy's
         // local belief, not leave it stuck on whatever EnableTx()/DisableTx() last wrote.
         internal bool TestTxEnabled => txEnabled;
+        internal string TestCallInProg => callInProg;
         // internal (not private): T14 regression coverage sets txEnabled directly, isolating
         // DiscardCall()'s own two-clock-divergence logic without needing a full synthetic
         // snapshot round trip through DirectApplyStatus.

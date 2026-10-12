@@ -1653,8 +1653,9 @@ namespace WSJTX_Controller
         {
             if (_syncReviewBtn == null) return;
             int n = 0;
-            try { n = NexusDownloadedChanges.Load().PendingCount; } catch { }
-            string name = n == 0 ? "Review downloaded changes, none waiting" : $"Review downloaded changes, {n} waiting";
+            // (Not in a test run: the name must not depend on what this computer's own log holds.)
+            if (!TestModeGuard.IsTestMode) try { n = NexusDownloadedChanges.Load().PendingCount; } catch { }
+            string name = n == 0 ? "Review downloaded changes" : $"Review downloaded changes, {n} waiting";
             string text = n == 0 ? "Review Downloaded Changes..." : $"Review Downloaded Changes ({n})...";
             if (_syncReviewBtn.Text != text) _syncReviewBtn.Text = text;
             if (_syncReviewBtn.AccessibleName != name) _syncReviewBtn.AccessibleName = name;

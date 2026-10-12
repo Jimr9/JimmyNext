@@ -1671,6 +1671,8 @@ static class JimmyTests
         SupportLocalChoiceTests();
         DownloadedChangesTests();
         OtherProgramsTests();
+        SpotRowsTests();
+        SpotPrepareTests();
         SharedSettingsTests();
         AlertRegionsAndNewGridTests();
         QsoTimeOnIsStartOfContactTests();
@@ -8574,19 +8576,15 @@ static class JimmyTests
             Check("Worked before, not needed -> just 'worked'",
                 OtaSpotsWindow.FormatStatus(workedNotNeeded) == "worked", true);
 
-            var neededOne = new OtaSpotAnnotation { WorkedBefore = false, NeededForAwardCount = 1 };
-            Check("Needed for 1 award -> singular, replaces the worked clause entirely",
-                OtaSpotsWindow.FormatStatus(neededOne) == "needed for 1 award", true);
-
-            var neededTwo = new OtaSpotAnnotation { WorkedBefore = false, NeededForAwardCount = 2 };
-            Check("Needed for 2 awards -> plural",
-                OtaSpotsWindow.FormatStatus(neededTwo) == "needed for 2 awards", true);
-
-            // Needed always wins over worked-before, even if (unusually) both are true -- the
-            // "worth attention" fact should stand out, not get buried behind "worked".
-            var workedButStillNeeded = new OtaSpotAnnotation { WorkedBefore = true, NeededForAwardCount = 3 };
-            Check("Worked before AND needed -> needed wins (the actionable fact)",
-                OtaSpotsWindow.FormatStatus(workedButStillNeeded) == "needed for 3 awards", true);
+            // 2026-10-12: a count ("needed for 2 awards") did not say WHICH awards. The row now
+            // carries the awards' own labels beside the status (SpotRows), and the status says
+            // only worked or not -- so a station worked before but still needed says both.
+            var needed = new OtaSpotAnnotation { WorkedBefore = true, NeededForAwardCount = 2, Labels = new List<string> { "WAS Needed", "Zone Needed" } };
+            Check("the status itself says only worked or not", OtaSpotsWindow.FormatStatus(needed) == "worked", true);
+            var spotForRow = new OtaSpot { Program = "POTA", Reference = "US-1", Activator = "K1ABC", FreqKhz = 14074.0, Mode = "FT8", SpotTimeUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 5 };
+            Check("...and the row names each award, never just a count",
+                OtaSpotsWindow.FormatPotaSotaRow(spotForRow, needed).EndsWith("Status: worked, WAS Needed, Zone Needed")
+                && !OtaSpotsWindow.FormatPotaSotaRow(spotForRow, needed).Contains("needed for"), true);
         }
         catch (Exception ex)
         {
@@ -17812,12 +17810,12 @@ static class JimmyTests
                     CheckStr($"{label}: Shift+Tab is the mirror", string.Join(" -> ", backwardSeq),
                         string.Join(" -> ", expected.Take(expected.Length - 1).Prepend("Categories")));
                 }
-                CheckPage("POTA / SOTA", 0, new[] { "Spots list", "Choose this park for the station", "Refresh POTA and SOTA spots now", "Status", "Close" });
+                CheckPage("POTA / SOTA", 0, new[] { "Spots list", "Row order", "Prepare this station", "Choose this park for the station", "Refresh POTA and SOTA spots now", "Status", "Close" });
                 CheckPage("Contests", 1, new[] { "Contests list", "Open details", "Refresh calendar", "Check for rules updates", "Calendar status", "Close" });
                 CheckPage("Band Conditions", 2, new[] { "Headline", "Bands list", "Refresh band conditions now", "Status", "Close" });
-                CheckPage("DX Spots", 3, new[] { "Spots list", "Refresh DX spots now", "Status", "Close" });
+                CheckPage("DX Spots", 3, new[] { "Spots list", "Row order", "Prepare this station", "Refresh DX spots now", "Status", "Close" });
                 CheckPage("Space Weather", 4, new[] { "Readings", "Ionosondes, measured MUF", "Daily solar history, newest first", "Refresh space weather now", "Status", "Close" });
-                CheckPage("Who Hears Me", 5, new[] { "Summary", "Time window", "Stations list", "Refresh who hears me now", "Status", "Close" });
+                CheckPage("Who Hears Me", 5, new[] { "Summary", "Time window", "Stations list", "Row order", "Refresh who hears me now", "Status", "Close" });
                 CheckPage("DXpeditions", 6, new[] { "Show", "Needed only", "DXpeditions list", "Open website", "Refresh DXpeditions", "Status", "Close" });
                 w.Close();
             }
@@ -17940,7 +17938,7 @@ static class JimmyTests
                         "Import ADIF file", "Download from QRZ Logbook", "Sync from LoTW, new confirmations",
                         "Full LoTW download, all confirmations", "Download from Club Log",
                         "Sync from eQSL, new confirmations", "Full eQSL download, all confirmations",
-                        "Export all QSOs to ADIF file", "Import history", "Status", "Close",
+                        "Export all QSOs to ADIF file", "Review downloaded changes", "Import history", "Status", "Close",
                     });
 
                     // Logbook and Sync (2026-10-07): Tab reads the page as it sits on screen --
@@ -21858,6 +21856,234 @@ static class JimmyTests
         Check("an answer from the address is reported as that, and what it sent as ignored",
             heard.Contains("answered from that address 12 seconds ago") && heard.Contains("3 messages from other programs ignored") && heard.Contains("cannot transmit"), true);
         Check("off, and no answer, each say so", OtherPrograms.StatusText("{\"state\":\"off\"}").Contains("is off") && OtherPrograms.StatusText(null).Contains("did not answer"), true);
+    }
+
+    // Handoffs 20, 29, 30 (2026-10-12): where an activation is, which checked awards a spot
+    // counts for on its own band, and rows built from fields in the operator's order.
+    static void SpotRowsTests()
+    {
+        Console.WriteLine("\n── Spots: activation place, award labels on the spot's band, row order ──");
+        WsjtxClient.ActiveAwardTag Tag(string id, string shortName, RuleGroupBy by, string[] needed, string[] unconf = null) => new WsjtxClient.ActiveAwardTag
+        {
+            RuleId = id, RuleName = id + " award", ShortName = shortName, GroupBy = by, ShowInStatus = false, StatusName = "status only",
+            Set = new HashSet<string>(needed, StringComparer.OrdinalIgnoreCase),
+            UnconfirmedSet = new HashSet<string>(unconf ?? new string[0], StringComparer.OrdinalIgnoreCase),
+        };
+        var was = Tag("WAS", "", RuleGroupBy.State, new[] { "ID", "ND" }, new[] { "MT" });
+        var zone = Tag("WAZ", "", RuleGroupBy.CqZone, new[] { "3" });
+        var dxcc = Tag("DXCC", "", RuleGroupBy.Dxcc, new string[0], new[] { "291" });
+        var mine = Tag("MY_AWARD", "Parks 100", RuleGroupBy.Callsign, new[] { "K1ABC" });
+        var all = new[] { was, zone, dxcc, mine };
+
+        // Places.
+        CheckStr("one state is said by name", SpotRows.LocationText(SpotRows.Places(new OtaSpot { States = new List<string> { "US-ID" } }), null), "Idaho");
+        CheckStr("a park in two states says both, not one", SpotRows.LocationText(SpotRows.Places(new OtaSpot { Location = "US-ID,US-WY" }), null), "Idaho or Wyoming");
+        CheckStr("...and the operator's choice when one was made", SpotRows.LocationText(SpotRows.Places(new OtaSpot { Location = "US-ID,US-WY" }), "WY"), "Wyoming, chosen");
+        CheckStr("a Canadian province is a province", SpotRows.LocationText(SpotRows.Places(new OtaSpot { States = new List<string> { "CA-ON" } }), null), "Ontario");
+        CheckStr("another country's region is not a state (AU-WA is not Washington)", SpotRows.LocationText(SpotRows.Places(new OtaSpot { Location = "AU-WA" }), null), "");
+        CheckStr("nothing known stays nothing", SpotRows.LocationText(SpotRows.Places(new OtaSpot()), null), "");
+        Check("a choice that is not one of the park's states is not used", SpotRows.LocationText(new List<string> { "US-ID", "US-WY" }, "TX") == "Idaho or Wyoming", true);
+
+        // Labels: the activation's place, never the home state.
+        var idaho = new SpotRows.Facts { Call = "K1ABC", Band = "20m", Activation = true, Places = new List<string> { "US-ID" }, HomeState = "TX", CqZone = 3, Dxcc = 291 };
+        CheckStr("every checked award that applies is named, in order, with the list's own words",
+            string.Join("; ", SpotRows.AwardLabels(idaho, all)), "WAS Needed; Zone Needed; DXCC Unconf; Parks 100 Needed");
+        var texasHome = new SpotRows.Facts { Call = "W5XYZ", Band = "20m", Activation = true, Places = new List<string> { "US-TX" }, HomeState = "ID" };
+        Check("an activator whose HOME state is needed, activating one that is not, is not labeled", SpotRows.AwardLabels(texasHome, new[] { was }).Count == 0, true);
+        var unknown = new SpotRows.Facts { Call = "W5XYZ", Band = "20m", Activation = true, Places = new List<string>(), HomeState = "ID" };
+        Check("an activation with no known place gets no state label at all", SpotRows.AwardLabels(unknown, new[] { was }).Count == 0, true);
+        var twoStates = new SpotRows.Facts { Call = "W5XYZ", Band = "20m", Activation = true, Places = new List<string> { "US-ID", "US-WY" } };
+        CheckStr("a park in a needed and a not-needed state is only possibly needed", string.Join("; ", SpotRows.AwardLabels(twoStates, new[] { was })), "possibly WAS Needed");
+        twoStates.ChosenUsState = "WY";
+        Check("...and with the operator's choice of the other state, not needed", SpotRows.AwardLabels(twoStates, new[] { was }).Count == 0, true);
+        var bothNeeded = new SpotRows.Facts { Call = "W5XYZ", Band = "20m", Activation = true, Places = new List<string> { "US-ID", "US-ND" } };
+        CheckStr("a park in two states that are both needed is plainly needed", string.Join("; ", SpotRows.AwardLabels(bothNeeded, new[] { was })), "WAS Needed");
+        var home = new SpotRows.Facts { Call = "W7AAA", Band = "20m", Activation = false, HomeState = "MT" };
+        CheckStr("a DX spot uses the station's home state: worked but not confirmed", string.Join("; ", SpotRows.AwardLabels(home, new[] { was })), "WAS Unconf");
+        var border = new SpotRows.Facts { Call = "W0AAA", Band = "20m", Activation = false, HomeState = "MN-ND" };
+        CheckStr("a border-straddling home value matches when either state is needed, as for a decode", string.Join("; ", SpotRows.AwardLabels(border, new[] { was })), "WAS Needed");
+        var wanted = new SpotRows.Facts { Call = "K1ABC", Band = "20m", Activation = false, Wanted = true };
+        CheckStr("a wanted call says Wanted, and its award labels too", string.Join("; ", SpotRows.AwardLabels(wanted, new[] { mine })), "Wanted; Parks 100 Needed");
+        Check("no awards checked, or none loaded: no labels, never a guess", SpotRows.AwardLabels(idaho, null).Count == 0 && SpotRows.AwardLabels(idaho, new WsjtxClient.ActiveAwardTag[0]).Count == 0, true);
+        CheckStr("the same label a decode gets (AwardTagger.AwardLabel), short name or the old WAS/Zone/DXCC words",
+            AwardTagger.AwardLabel("WAS", "", "Worked All States", true) + "|" + AwardTagger.AwardLabel("X", "Parks 100", "Long name", false) + "|" + AwardTagger.AwardLabel("X", "", "Long name", true),
+            "WAS Needed|Parks 100 Unconf|Long name Needed");
+        CheckStr("the status-only name and 'show in status' do not change a spot's label", SpotRows.AwardLabels(wanted, new[] { mine }).Last(), "Parks 100 Needed");
+
+        // Bands.
+        CheckStr("a spot's band comes from its own frequency", SpotRows.BandOfKhz(14074) + " " + SpotRows.BandOfKhz(7074) + " " + SpotRows.BandOfKhz(50313), "20m 40m 6m");
+        Check("a frequency on no ham band has no band", SpotRows.BandOfKhz(13000) == null, true);
+
+        // Rows.
+        var spot = new OtaSpot { Program = "POTA", Reference = "US-1234", Activator = "K1ABC", FreqKhz = 14074.0, Mode = "FT8", Name = "Big Park" };
+        var notes = new SpotRows.SpotNotes { WorkedBefore = false, Location = "Idaho", Labels = new List<string> { "WAS Needed" } };
+        CheckStr("the default POTA row keeps its old start and adds the place and the labels",
+            SpotRows.PotaRow(spot, notes, null, "4m ago"),
+            "POTA, Reference: US-1234, Activator: K1ABC, Location: Idaho, Freq/Mode: 14.074 FT8, Age: 4m ago, Status: not worked, WAS Needed");
+        CheckStr("the operator's own order and choice of fields", SpotRows.PotaRow(spot, notes, new List<string> { "callsign", "awards", "band", "location" }, "4m ago"),
+            "Activator: K1ABC, WAS Needed, 20m, Location: Idaho");
+        CheckStr("a field with nothing to say is left out, not read as empty",
+            SpotRows.PotaRow(spot, new SpotRows.SpotNotes(), new List<string> { "callsign", "location", "awards", "status" }, "4m ago"), "Activator: K1ABC, Status: not worked");
+        Check("while the log is loading the status says so, and no award is claimed",
+            SpotRows.PotaRow(spot, new SpotRows.SpotNotes { LogReady = false }, null, "4m ago").EndsWith("Status: log loading"), true);
+        var dx = new DxSpot { DxCall = "K1ABC", FreqKhz = 14074.0, Spotter = "W2XYZ", Comment = "FT8 CQ", Rbn = true, SkimmerMode = "FT8", AgeSecs = 42 };
+        CheckStr("the default DX row adds worked status and labels after what it always said",
+            SpotRows.DxRow(dx, notes, null, "42s ago"),
+            "DX Call: K1ABC, Frequency: 14.074 MHz, Mode: FT8, Spotter: W2XYZ, Age: 42s ago, Comment: FT8 CQ, Status: not worked, WAS Needed");
+        var heard = new HeardMe { Call = "VK3AA", Grid = "QF22", Band = "20m", Snr = -14, Km = 16021, Octant = "W", AgeSecs = 120 };
+        CheckStr("the default Who Hears Me row is unchanged", SpotRows.HeardRow(heard, null, "2m ago"), "VK3AA QF22, 20m, -14 dB, 16,021 km W, 2m ago");
+        CheckStr("...and its fields can be separated and reordered", SpotRows.HeardRow(heard, new List<string> { "distance", "callsign", "direction", "snr" }, "2m ago"), "16,021 km, VK3AA, W, -14 dB");
+        CheckStr("a missing grid and report are said as unknown, never as zero",
+            SpotRows.HeardRow(new HeardMe { Call = "DL1AA", Band = "40m", Km = 0, AgeSecs = 30 }, null, "30s ago"), "DL1AA, 40m, SNR not reported, distance unknown, 30s ago");
+
+        // Saved orders: bad names dropped, repeats once, nothing usable = the default.
+        CheckStr("a saved order with an unknown and a repeated name is cleaned", string.Join(",", Controller.ParseRowOrder("callsign,nonsense,awards,callsign", SpotRows.Pota.All)), "callsign,awards");
+        Check("an order with nothing usable falls back to the default", Controller.ParseRowOrder("nonsense,,", SpotRows.Pota.All) == null, true);
+        Check("the three lists keep separate saved orders", new[] { "pota", "dx", "heard" }.Select(Controller.SpotRowOrderKey).Distinct().Count() == 3, true);
+        Check("every default field is a known field with a name for the Row Order window",
+            new[] { SpotRows.Pota, SpotRows.Dx, SpotRows.Heard }.All(f => f.Defaults.All(d => f.All.Contains(d)) && f.All.All(a => f.Labels.ContainsKey(a))), true);
+
+        // The selected line stays the same STATION when the list is rebuilt around it.
+        using (var form = new System.Windows.Forms.Form { ShowInTaskbar = false, Opacity = 0, StartPosition = System.Windows.Forms.FormStartPosition.Manual, Location = new System.Drawing.Point(-3000, -3000) })
+        using (var lb = new System.Windows.Forms.ListBox())
+        {
+            form.Controls.Add(lb);
+            form.Show();
+            lb.Focus();
+            var a = new OtaSpot { Program = "POTA", Reference = "US-1", Activator = "K1AAA", FreqKhz = 14074 };
+            var b2 = new OtaSpot { Program = "POTA", Reference = "US-2", Activator = "K2BBB", FreqKhz = 14074 };
+            var c = new OtaSpot { Program = "POTA", Reference = "US-3", Activator = "K3CCC", FreqKhz = 14074 };
+            Func<object, string> id = o => ((OtaSpot)o).Activator;
+            OtaSpotsWindow.SetRowsIfChanged(lb, new List<string> { "a", "b" }, new List<object> { a, b2 }, id);
+            lb.SelectedIndex = 1;
+            bool focused = lb.Focused;
+            OtaSpotsWindow.SetRowsIfChanged(lb, new List<string> { "c", "a", "b now reads differently" }, new List<object> { c, a, b2 }, id);
+            Check("a new spot above the selected one does not move the selection to another station",
+                !focused || (lb.SelectedIndex == 2 && ReferenceEquals(OtaSpotsWindow.ShownRecord(lb, lb.SelectedIndex), b2)), true);
+            if (!focused) Skip("selection by identity", "the hidden test window could not take the focus on this desktop");
+            form.Close();
+        }
+
+        // A park choice with a state for a park in several.
+        var t0 = new DateTime(2026, 10, 12, 12, 0, 0, DateTimeKind.Utc);
+        ParkChoices.ClearAll();
+        ParkChoices.Choose("K7TWO", "US-9000", "US-ID,US-WY", t0, "WY");
+        CheckStr("a chosen state that is one of the park's is kept for the next contact", ParkChoices.Peek("K7TWO", t0).State, "WY");
+        ParkChoices.Choose("K7TWO", "US-9000", "US-ID,US-WY", t0, "TX");
+        Check("one that is not the park's is not", ParkChoices.Peek("K7TWO", t0).State == null, true);
+        ParkChoices.Choose("K7TWO", "US-9000", "US-ID,US-WY", t0);
+        Check("none given: no state, as before", ParkChoices.Peek("K7TWO", t0).State == null, true);
+        ParkChoices.ClearAll();
+    }
+
+    // Handoff 21 (2026-10-12): Prepare this station. The plan for a spot (what would be set, or
+    // why not), and -- through the real decode pipeline -- that a prepared station is listed when
+    // heard even where a filter would hide it, while transmit stays off and nothing is called.
+    static void SpotPrepareTests()
+    {
+        Console.WriteLine("\n── Prepare this station: the plan, the listing, and transmit staying off ──");
+        var bandsMeters = new List<int> { 160, 80, 60, 40, 30, 20, 17, 15, 12, 10, 6 };
+        IEnumerable<int> Dials(int idx, string tier) =>
+            bandsMeters[idx] == 20 ? (tier == "FT8" ? new[] { 14074 } : new[] { 14080 })
+            : bandsMeters[idx] == 40 ? (tier == "FT8" ? new[] { 7074 } : new[] { 7047 }) : new int[0];
+        WsjtxClient.SpotPlan Plan(string mode, double khz) => WsjtxClient.PlanSpot("k1abc", mode, khz, bandsMeters, Dials);
+
+        var p = Plan("FT8", 14074.0);
+        Check("an FT8 spot on the usual frequency: that band, mode and dial", p.Ok && p.Tier == "FT8" && p.Band == "20m" && p.DialKHz == 14074 && !p.OffUsual && p.Call == "K1ABC", true);
+        p = Plan("ft8", 14075.3);
+        Check("a spot that gives the signal's own frequency, a little above the dial: the dial", p.Ok && p.DialKHz == 14074 && !p.OffUsual, true);
+        p = Plan("FT4", 7047.5);
+        Check("an FT4 spot uses the FT4 dial, not the FT8 one", p.Ok && p.Tier == "FT4" && p.Band == "40m" && p.DialKHz == 7047, true);
+        p = Plan("FT8", 14090.0);
+        Check("an unusual frequency is used as spotted, never moved to the usual one, and it says so",
+            p.Ok && p.DialKHz == 14090 && p.OffUsual && p.Sentence().Contains("not a usual FT8 frequency"), true);
+        CheckStr("the plan reads as one sentence", Plan("FT8", 14074.0).Sentence(), "K1ABC, FT8 on 20 meters, dial 14.074 megahertz.");
+        foreach (var (mode, why) in new[] { ("SSB", "The spot is SSB."), ("DIGI", "The spot is DIGI."), ("CW", "The spot is CW."), ("", "does not say which mode") })
+        {
+            p = Plan(mode, 14074.0);
+            Check($"a spot that is '{mode}' is refused with the reason, never taken as FT8", !p.Ok && p.Reason.Contains(why), true);
+        }
+        Check("a frequency on no amateur band is refused", !Plan("FT8", 13000).Ok && Plan("FT8", 13000).Reason.Contains("not on an amateur band"), true);
+        Check("a band Jimmy Next does not operate is refused", !Plan("FT8", 144174).Ok && Plan("FT8", 144174).Reason.Contains("2 meters"), true);
+        Check("no frequency, or no callsign, is refused", !Plan("FT8", 0).Ok && !WsjtxClient.PlanSpot("", "FT8", 14074, bandsMeters, Dials).Ok, true);
+
+        string tmpDb = Path.Combine(Path.GetTempPath(), "JimmyTest_Prepare_" + Guid.NewGuid().ToString("N") + ".db");
+        string prevTestDbPath = Environment.GetEnvironmentVariable("JIMMY_TEST_DB_PATH");
+        Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", tmpDb);
+        try
+        {
+            // W9OLD is already worked on 20m: the list would normally leave it out.
+            using (var db = new LogbookDb(tmpDb))
+            {
+                InsertQso(db, "W9OLD", "", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
+                InsertQso(db, "K4YT", "", dxcc: 291, zone: 5, band: "20m", lotwRcvd: "Y");
+            }
+            WsjtxClient MakeClient()
+            {
+                var ctrl = NewMinimalCtrl();
+                ctrl.anyMsgRadioButton.Checked = true;
+                ctrl.replyDxCheckBox.Checked = true;
+                ctrl.replyLocalCheckBox.Checked = true;
+                var lookupManager = new LookupManager();
+                lookupManager.RegisterProviderFirst(new TestFixtureLookupProvider());
+                lookupManager.Initialize(useLookupData: true, qrzEnabled: false, qrzUser: null, qrzPass: null, qrzCacheDays: 1,
+                    lotwEnabled: true, lotwDays: 1, clubLogAppKey: null, clubLogDays: 1, fccUlsEnabled: false);
+                var wc = new WsjtxClient(ctrl, 2237, false, false, WsjtxClient.TxModes.LISTEN);
+                wc.lookupManager = lookupManager;
+                wc.TestSetMode("FT8");   // as on a live connection
+                return wc;
+            }
+            int slot = 4000;
+            bool Hear(WsjtxClient wc, string call, string message = null)
+            {
+                slot += 2;
+                wc.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                    ""radio"": { ""dialMhz"": 14.074, ""transmitting"": false, ""slot"": " + slot + @" },
+                    ""recentDecodes"": [ { ""from"": """ + call + @""", ""snr"": -10, ""dtSec"": 0.1, ""freqHz"": 1500.0, ""message"": """ + (message ?? "CQ " + call + " EM63") + @""" } ] }"));
+                return wc.TestCallQueueString.Contains(call);
+            }
+
+            var plain = MakeClient();
+            Check("premise: a station already worked on this band is not listed", Hear(plain, "W9OLD"), false);
+
+            var wc1 = MakeClient();
+            wc1.TestSetPreparedSpot("W9OLD", "20m", "FT8", settled: true);
+            Check("prepared and heard: it is in the station list, though worked before", Hear(wc1, "W9OLD"), true);
+            Check("...and hearing it did not turn transmit on", wc1.TestTxEnabled, false);
+            Hear(wc1, "W9OLD", "K1ZZZ W9OLD -05");   // now busy with someone else
+            Hear(wc1, "W9OLD");                         // and free again
+            Hear(wc1, "W9OLD");
+            Check("heard again, busy and free again: transmit is still off, and nothing was called", !wc1.TestTxEnabled && string.IsNullOrEmpty(wc1.TestCallInProg), true);
+            Check("another station is not let past the filters by it", Hear(wc1, "K4YT"), false);
+            CheckStr("it stays prepared while the radio stays on that band and mode", wc1.PreparedSpotCall, "W9OLD");
+            wc1.TestApplyDirectSnapshot("KB0UZT", "FN42", ParseDirectSnapshot(@"{ ""mycall"": ""KB0UZT"", ""mygrid"": ""FN42"",
+                ""radio"": { ""dialMhz"": 7.074, ""transmitting"": false, ""slot"": 5000 }, ""recentDecodes"": [] }"));
+            Check("the radio moved to another band: it is no longer prepared", wc1.PreparedSpotCall == null, true);
+
+            var wc2 = MakeClient();
+            wc2.TestSetPreparedSpot("W9OLD", "40m", "FT8", settled: false);   // the radio is still on 20m
+            Check("not yet on the band: nothing is passed over", Hear(wc2, "W9OLD"), false);
+
+            var wc3 = MakeClient();
+            wc3.TestSetPreparedSpot("W9OLD", "20m", "FT8", settled: true);
+            wc3.TestSetTxEnabled(true);
+            Check("with transmit on, only the operator's own filters decide what may be called", wc3.TestIsPreparedSpot("W9OLD"), false);
+
+            var wc4 = MakeClient();
+            Check("with no engine connected, preparing does nothing and says why",
+                (wc4.PrepareSpot(Plan("FT8", 14074.0)) ?? "").Contains("not connected") && wc4.PreparedSpotCall == null && !wc4.TestTxEnabled, true);
+            Check("a refused plan is not carried out", wc4.PrepareSpot(Plan("SSB", 14074.0)) != null && wc4.PreparedSpotCall == null, true);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  FAIL  SpotPrepareTests threw: {ex.GetType().Name}: {ex.Message}{Environment.NewLine}{ex.StackTrace}");
+            failed++;
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("JIMMY_TEST_DB_PATH", prevTestDbPath);
+            try { File.Delete(tmpDb); } catch { }
+        }
     }
 
     static void RadioPowerAndExportHeaderTests()

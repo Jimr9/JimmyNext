@@ -250,14 +250,23 @@ namespace WSJTX_Controller
         private string AwardTag(EnqueueDecodeMessage d, string ownName)
         {
             bool needed = d.Category == WsjtxClient.CallCategory.STILL_NEEDED;
+            return AwardLabel(d.MatchedAwardRuleId, ownName, AwardDisplayName(d), needed);
+        }
+
+        // The label itself, from what names the award (2026-10-12): the same words for a decode
+        // in the station lists and for a spot (SpotRows.AwardLabels), from the same wording
+        // file. ownName: the award's own short name, when it has one. fallbackName: its full
+        // name, used when it has no short name and is not WAS, WAZ or DXCC.
+        internal static string AwardLabel(string ruleId, string ownName, string fallbackName, bool needed)
+        {
             if (string.IsNullOrWhiteSpace(ownName))
             {
-                if (needed && d.MatchedAwardRuleId == "WAS") return Wording.Get("Tag.WasNeeded");
-                if (needed && d.MatchedAwardRuleId == "WAZ") return Wording.Get("Tag.ZoneNeeded");
-                if (!needed && d.MatchedAwardRuleId == "WAS") return Wording.Get("Tag.WasUnconf");
-                if (!needed && d.MatchedAwardRuleId == "DXCC") return Wording.Get("Tag.DxccUnconf");
+                if (needed && ruleId == "WAS") return Wording.Get("Tag.WasNeeded");
+                if (needed && ruleId == "WAZ") return Wording.Get("Tag.ZoneNeeded");
+                if (!needed && ruleId == "WAS") return Wording.Get("Tag.WasUnconf");
+                if (!needed && ruleId == "DXCC") return Wording.Get("Tag.DxccUnconf");
             }
-            string award = string.IsNullOrWhiteSpace(ownName) ? AwardDisplayName(d) : ownName.Trim();
+            string award = string.IsNullOrWhiteSpace(ownName) ? (fallbackName ?? "").Trim() : ownName.Trim();
             return Wording.Fill(needed ? "Tag.AwardNeeded" : "Tag.AwardUnconf", ("Award", award));
         }
 
